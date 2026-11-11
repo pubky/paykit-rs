@@ -238,6 +238,7 @@ fn repeatable(w: &World) {
         history: false,
         history_retention_ms: None,
         history_survives_restore: false,
+        longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
     });
 }
 
@@ -427,14 +428,23 @@ async fn test_final_check_first_dispatch_payee_copy_aged_during_the_own_read_not
         &slow,
     )
     .await;
-    let outcome = wallet
+    // A read that long also takes the attempt past its pre-dispatch budget: nothing is
+    // paid, and the attempt is written `failed`.
+    let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
-        .unwrap();
-    let PayOutcome::Pending { attempt_id } = outcome else {
-        panic!("{outcome:?}");
-    };
-    assert_eq!(w.rail.pay_calls(&attempt_id), 0);
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::AttemptFailed(inner))
+                if matches!(&**inner, paykit_sdk::Refusal::NotNow(why) if why.contains("budget"))
+        ),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    let payment = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(w.rail.pay_calls(&payment.attempt_id), 0);
 }
 
 #[tokio::test]
@@ -495,6 +505,7 @@ async fn test_final_check_repeat_retention_ending_during_the_lookup_not_paid() {
         history: false,
         history_retention_ms: None,
         history_survives_restore: false,
+        longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
     });
     let (store, app_id, request) = with_a_request(&w).await;
     let journaled = w.clock.now_ms();
@@ -693,6 +704,7 @@ fn blind(w: &World) {
         history: false,
         history_retention_ms: None,
         history_survives_restore: false,
+        longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
     });
 }
 
@@ -919,4 +931,83 @@ async fn test_fence_stop_lost_to_a_crash_stays_paying_and_uncertain() {
         }]
     );
     assert_eq!(w.rail.pay_calls(&payment.attempt_id), 0);
+}
+
+// ---------------------------------------------------------------------------------------
+// The pre-dispatch budget and the floor of `orphan_after`
+
+#[tokio::test]
+async fn test_fence_attempt_past_its_pre_dispatch_budget_not_paid() {
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    // The journal write of `Paying` takes the attempt past its budget.
+    let clock = Arc::clone(&w.clock);
+    store.on_paying(Box::new(move || {
+        clock.advance_ms(paykit_sdk::PRE_DISPATCH_BUDGET_MS);
+    }));
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::AttemptFailed(inner))
+                if matches!(&**inner, paykit_sdk::Refusal::NotNow(why) if why.contains("budget"))
+        ),
+        "{refused:?}"
+    );
+    // Nothing was submitted, and the attempt is written `failed`: a new payment is a new
+    // decision.
+    assert!(w.rail.all_executions().is_empty());
+    let payment = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Finished);
+    assert_eq!(w.rail.pay_calls(&payment.attempt_id), 0);
+}
+
+#[tokio::test]
+async fn test_orphan_after_below_the_floor_refused() {
+    let w = World::new();
+    let floor = paykit_sdk::orphan_floor_s(&paykit_sdk::Rail::declaration(&*w.rail));
+    assert_eq!(
+        floor,
+        (paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS + paykit_sdk::PRE_DISPATCH_BUDGET_MS) / 1000
+    );
+    let scopes = paykit_sdk::AppScopes::new().pay().build().unwrap();
+    let config = PaykitConfig {
+        orphan_after_s: floor - 1,
+        ..PaykitConfig::default()
+    };
+    let refused = Paykit::join(
+        w.env(&w.alice, crate::common::store()),
+        config,
+        w.approve(&w.alice, "wallet", &scopes),
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(
+        matches!(
+            refused,
+            paykit_sdk::PaykitError::Lib(paykit_lib::Error::Validation(_))
+        ),
+        "{refused:?}"
+    );
+    // At the floor, another app joins.
+    let config = PaykitConfig {
+        orphan_after_s: floor,
+        ..PaykitConfig::default()
+    };
+    w.join_with(&w.alice, "phone", scopes, config, crate::common::store())
+        .await;
 }

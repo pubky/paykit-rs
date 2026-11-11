@@ -32,7 +32,7 @@ use serde_json::{Map, Value};
 mod fake;
 
 #[cfg(feature = "test-support")]
-pub use fake::{Behaviour, FakeRail};
+pub use fake::{Behaviour, FakeRail, FAKE_LONGEST_COMPLETION_MS};
 
 /// A failure of the payment method's call (Paykit spec 7.2). [`RailError::Unavailable`] is
 /// ambiguous: a payment may have been submitted, so it means nothing yet and the attempt
@@ -69,6 +69,11 @@ pub struct RailDeclaration {
     /// The history lives with the account, not only on the paying device, so a restored
     /// device sees every dispatch made after its backup.
     pub history_survives_restore: bool,
+    /// The longest a dispatch takes to complete or fail, in milliseconds: a day for an
+    /// ordinary Lightning payment (Switch spec 10.2). An attempt's `orphan_after` is at
+    /// least this plus [`crate::PRE_DISPATCH_BUDGET_MS`], so no other own app can resolve it
+    /// while its payment may still run.
+    pub longest_completion_ms: u64,
 }
 
 /// What the method would transfer to a destination, reported before any write (Paykit spec

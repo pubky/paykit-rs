@@ -52,6 +52,7 @@ async fn test_recovery_clock_gone_back_empty_history_stays_uncertain() {
         history: true,
         history_retention_ms: Some(DAY_MS),
         history_survives_restore: true,
+        longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
     });
     w.rail.forget_history(&attempt_id);
     let mut wallet = w
@@ -85,6 +86,7 @@ async fn test_recovery_clock_gone_back_idempotent_rail_not_dispatched_again() {
         history: false,
         history_retention_ms: None,
         history_survives_restore: false,
+        longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
     });
     let mut wallet = w
         .load_on_clock(&w.alice, Arc::clone(&base), app_id, clock_gone_back(&w))
@@ -105,6 +107,7 @@ async fn test_recovery_within_retention_idempotent_rail_asked_again() {
         history: false,
         history_retention_ms: None,
         history_survives_restore: false,
+        longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
     });
     // The clock moved on, within the day: the method still remembers the key, and every
     // check before paying passes again.
@@ -172,6 +175,7 @@ fn idempotent_without_history() -> RailDeclaration {
         history: false,
         history_retention_ms: None,
         history_survives_restore: false,
+        longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
     }
 }
 
@@ -595,6 +599,7 @@ async fn test_recovery_failure_past_the_history_window_not_asked_again() {
         history: true,
         history_retention_ms: Some(DAY_MS),
         history_survives_restore: true,
+        longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
     });
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -711,6 +716,7 @@ async fn test_recovery_empty_history_proves_nothing_from_the_retention_end() {
             history: true,
             history_retention_ms: Some(RETENTION_MS),
             history_survives_restore: true,
+            longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
         });
         w.rail.forget_history(&attempt_id);
         let mut wallet = w
@@ -752,6 +758,7 @@ async fn test_recovery_repeat_only_before_the_idempotency_retention_end() {
             history: false,
             history_retention_ms: None,
             history_survives_restore: false,
+            longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
         });
         w.clock.set_ms(journaled + age);
         let mut wallet = w
@@ -793,6 +800,7 @@ async fn test_recovery_failure_asked_about_only_before_the_history_retention_end
             history: true,
             history_retention_ms: Some(RETENTION_MS),
             history_survives_restore: true,
+            longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
         });
         let journaled = w.clock.now_ms();
         w.rail.next(Behaviour::Fail);

@@ -25,13 +25,50 @@ use pubky_switch_client::clock::Clock;
 use crate::destination::KeptLookup;
 use crate::error::{Refusal, Result};
 use crate::protocol::PaykitProtocol;
-use crate::rail::Rail;
+use crate::rail::{Rail, RailDeclaration};
 use crate::state::{key, Tx};
 use crate::timer::Timer;
 
 /// The default `orphan_after` of an attempt: a day, the longest a payment method is expected
-/// to take (Switch spec 10.2).
+/// to take (Switch spec 10.2). It must be at least the floor [`orphan_floor_s`] gives for
+/// the app's rail.
 pub const DEFAULT_ORPHAN_AFTER_S: u64 = 86_400;
+
+/// The longest a first dispatch may take from its attempt's answer to the payment method's
+/// call: 10 minutes. Between them come the destination and identity checks, the
+/// acceptance's queueing, the final payment check and the journal write of `Paying`: a few
+/// requests in sequence, each bounded by the client's request timeout (40 s, with 10 s to
+/// connect), so a few minutes at worst. The fence judges the attempt's age with the clock
+/// tolerance (5 minutes) added, so a dispatch goes only within 5 minutes of its answer,
+/// and the budget, added to the rail's longest time in the floor of `orphan_after`, keeps
+/// the attempt from being orphaned while its payment may still run (Switch spec 10.2).
+pub const PRE_DISPATCH_BUDGET_MS: u64 = 10 * 60_000;
+
+/// The least `orphan_after`, in seconds, for an app paying through a rail that declares
+/// `declaration`: the rail's longest time to complete or fail, plus
+/// [`PRE_DISPATCH_BUDGET_MS`], rounded up (Switch spec 10.2: the attempting app sets
+/// `orphan_after` to the longest its method can take). Below it, another own app could
+/// resolve an attempt as orphaned while its dispatch was still to come or still running.
+pub fn orphan_floor_s(declaration: &RailDeclaration) -> u64 {
+    declaration
+        .longest_completion_ms
+        .saturating_add(PRE_DISPATCH_BUDGET_MS)
+        .div_ceil(1000)
+}
+
+/// Refuse a `config` whose `orphan_after_s` is below the floor its rail needs.
+pub(crate) fn check_orphan_window(config: &PaykitConfig, rail: &dyn Rail) -> Result<()> {
+    let floor = orphan_floor_s(&rail.declaration());
+    if config.orphan_after_s < floor {
+        return Err(paykit_lib::Error::Validation(format!(
+            "Switch spec 10.2: orphan_after_s {} is below the rail's floor of {floor} s, its \
+             longest completion plus the pre-dispatch budget",
+            config.orphan_after_s
+        ))
+        .into());
+    }
+    Ok(())
+}
 
 /// The default number of messages re-sent to one requester identity a day (Paykit spec 9).
 pub const DEFAULT_RESEND_BUDGET: u64 = 500;
@@ -42,7 +79,8 @@ pub struct PaykitConfig {
     /// The client's choices.
     pub app: AppConfig,
     /// Seconds after which an open attempt of this app is orphaned: the longest its payment
-    /// method takes (Switch spec 10.2).
+    /// method takes (Switch spec 10.2), and never below [`orphan_floor_s`] for the app's
+    /// rail, which `join`, `load`, `restore` and every attempt refuse.
     pub orphan_after_s: u64,
     /// The largest fee the payee can influence through its destination that the app pays
     /// automatically (Paykit spec 7.2 step 1); `None` accepts no such fee.
@@ -172,7 +210,9 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// The client's errors; [`crate::PaykitError::Lib`] for a certificate Paykit refuses.
+    /// The client's errors; [`crate::PaykitError::Lib`] for a certificate Paykit refuses,
+    /// and `Validation` for an `orphan_after_s` below the rail's floor ([`orphan_floor_s`]),
+    /// before anything is written.
     pub async fn join(
         env: AppEnv,
         config: PaykitConfig,
@@ -180,6 +220,7 @@ impl Paykit {
         rail: Arc<dyn Rail>,
         timer: Arc<dyn Timer>,
     ) -> Result<Self> {
+        check_orphan_window(&config, rail.as_ref())?;
         let protocol = Self::new_protocol();
         let app = App::join(env.clone(), protocol.clone(), config.app.clone(), request).await?;
         Self::assemble(app, env, protocol, config, rail, timer)
@@ -190,7 +231,8 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// The client's errors.
+    /// The client's errors; [`crate::PaykitError::Lib`] `Validation` for an
+    /// `orphan_after_s` below the rail's floor ([`orphan_floor_s`]).
     pub async fn load(
         env: AppEnv,
         config: PaykitConfig,
@@ -198,6 +240,7 @@ impl Paykit {
         rail: Arc<dyn Rail>,
         timer: Arc<dyn Timer>,
     ) -> Result<Self> {
+        check_orphan_window(&config, rail.as_ref())?;
         let protocol = Self::new_protocol();
         let app = App::load(env.clone(), protocol.clone(), config.app.clone(), app_id).await?;
         Self::assemble(app, env, protocol, config, rail, timer)
@@ -213,7 +256,9 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// The client's errors: `InvalidData` for a backup without Paykit's layer, one another
+    /// [`crate::PaykitError::Lib`] `Validation` for an `orphan_after_s` below the rail's floor
+    /// ([`orphan_floor_s`]), before anything is written. The client's errors: `InvalidData`
+    /// for a backup without Paykit's layer, one another
     /// protocol made, or a journal with a malformed entry or two open entries for one
     /// obligation; a store failure.
     pub async fn restore(
@@ -226,6 +271,7 @@ impl Paykit {
         // The client checks its state, then Paykit's layer checks the whole journal
         // (`PaykitProtocol::restore_layer`), before anything is written; then both go in
         // one commit: on an error, neither is in the store.
+        check_orphan_window(&config, rail.as_ref())?;
         let protocol = Self::new_protocol();
         let app = App::restore(
             env.clone(),

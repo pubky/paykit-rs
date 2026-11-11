@@ -37,6 +37,7 @@ use pubky_switch_core::claims::{Basis, ClaimStatus, ClaimView, Outcome};
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::message::MessagePlaintext;
 use pubky_switch_core::ops::{Condition, OpKind};
+use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
 
 use crate::activity::{self, ActivityTarget, Role};
 use crate::destination::{Carrier, Need};
@@ -208,11 +209,36 @@ enum OutcomeRecord {
     Held,
 }
 
+/// When a first dispatch's attempt was answered: its service time, and the device's wall
+/// and monotonic clocks at the answer, for its age at the final payment check and the fence.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Answered {
+    /// The attempt's `opened_at`, the service time its verified proof shows.
+    pub(crate) opened_at_ms: u64,
+    /// The device clock at the answer.
+    pub(crate) wall_ms: u64,
+    /// The monotonic clock at the answer.
+    pub(crate) at: std::time::Instant,
+}
+
+impl Answered {
+    /// The attempt's age, in milliseconds, at device time `now`: the longer of the device
+    /// clock's and the monotonic clock's elapsed time, so a clock set back can't hide time
+    /// that passed, and the time a test clock moves counts.
+    pub(crate) fn age_ms(&self, now: u64) -> u64 {
+        let monotonic = u64::try_from(self.at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        now.saturating_sub(self.wall_ms).max(monotonic)
+    }
+}
+
 /// Which dispatch [`Paykit::final_payment_check`] judges.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Dispatch {
     /// The first: nothing was submitted before.
-    First,
+    First {
+        /// When its attempt was answered.
+        answered: Answered,
+    },
     /// A repeat under the same idempotency key, harmless only within the method's
     /// idempotency retention (Paykit spec 7.2).
     Repeat {
@@ -762,6 +788,9 @@ impl Paykit {
             unconfirmed,
         } = plan;
         let attempt_id = entry.attempt()?;
+        // The attempt's `orphan_after` covers the rail's longest time and the pre-dispatch
+        // budget, as the rail declares it now (Switch spec 10.2).
+        crate::paykit::check_orphan_window(&self.config, self.rail.as_ref())?;
         // The carrier is journaled with the entry, for the checks before any repeat.
         entry.keep_carrier(&carrier);
         // The own identity.json, read again and confirmed, before any write: no attempt
@@ -838,7 +867,11 @@ impl Paykit {
         batch = batch.local(state::local_put(&key::journal(&attempt_id), &attempted)?);
         // The client checks the attempt's proof: only one that shows this app's own open
         // attempt lets money move (Paykit spec 7.2; Switch wire 6.5 "Binding").
-        let submitted = match self.app.submit_batch(batch).await {
+        let submitted = self.app.submit_batch(batch).await;
+        // The answer's time, on both device clocks, for the attempt's age before its
+        // dispatch (the pre-dispatch budget, [`crate::PRE_DISPATCH_BUDGET_MS`]).
+        let (answered_wall_ms, answered_at) = (self.now(), std::time::Instant::now());
+        let submitted = match submitted {
             Ok(submitted) => submitted,
             Err(error) if error.code() == Some(ErrorCode::Conflict) => {
                 self.set_stage(&mut entry, Stage::Abandoned).await?;
@@ -884,6 +917,22 @@ impl Paykit {
                 .fail_attempt(&mut entry, Refusal::NotNow("no attempt proof".into()))
                 .await;
         };
+        let Some(opened_at_ms) = claim
+            .attempt(&attempt_id.to_bytes())
+            .map(|attempt| attempt.opened_at)
+        else {
+            return self
+                .fail_attempt(
+                    &mut entry,
+                    Refusal::NotNow("no attempt in its proof".into()),
+                )
+                .await;
+        };
+        let answered = Answered {
+            opened_at_ms,
+            wall_ms: answered_wall_ms,
+            at: answered_at,
+        };
         let doc = match self
             .pay_gate(&entry, &carrier, &claim, by, unconfirmed, false)
             .await?
@@ -898,7 +947,7 @@ impl Paykit {
         // the attempt `failed` rather than taking it as possibly dispatched. `Paying` is
         // journaled just before the payment method's call ([`Paykit::dispatch`]).
         self.queue_owed_acceptance(&mut entry).await?;
-        self.dispatch(entry, doc, by, unconfirmed, Dispatch::First)
+        self.dispatch(entry, doc, by, unconfirmed, Dispatch::First { answered })
             .await
     }
 
@@ -1046,7 +1095,7 @@ impl Paykit {
             // a dispatch that paid, so it stays "may be paid", for a receipt or the user.
             FinalCheck::Refused(refusal) => {
                 return match kind {
-                    Dispatch::First => self.fail_attempt(&mut entry, refusal).await,
+                    Dispatch::First { .. } => self.fail_attempt(&mut entry, refusal).await,
                     Dispatch::Repeat { .. } => Ok(PayOutcome::Uncertain { attempt_id }),
                 }
             }
@@ -1054,7 +1103,7 @@ impl Paykit {
         // Starting to pay is journaled just before the payment begins (Paykit spec 7.2): from
         // here on it may be paid. A repeat's entry is `Paying` already, and nothing awaits
         // between its final check and its call.
-        if matches!(kind, Dispatch::First) {
+        if matches!(kind, Dispatch::First { .. }) {
             self.set_stage(&mut entry, Stage::Paying).await?;
             // The commit was an await: the fence judges every gate again, and nothing awaits
             // after it before the call.
@@ -1075,7 +1124,7 @@ impl Paykit {
             // first dispatch is definitively not paid, written `failed`, and may be replaced
             // (Paykit spec 7.2). A repeat's refusal says nothing of the dispatch before it,
             // which may have paid: the attempt stays open.
-            Err(RailError::Refused(why)) if matches!(kind, Dispatch::First) => {
+            Err(RailError::Refused(why)) if matches!(kind, Dispatch::First { .. }) => {
                 self.set_stage(&mut entry, Stage::RailFailed).await?;
                 self.report(&mut entry).await.map(|outcome| match outcome {
                     PayOutcome::Failed { attempt_id, .. } => PayOutcome::Failed {
@@ -1682,8 +1731,43 @@ impl Paykit {
         self.final_gates(entry, payee, by, confirmed, kind)
     }
 
+    /// A first dispatch's attempt is still within the pre-dispatch budget
+    /// ([`crate::PRE_DISPATCH_BUDGET_MS`]): its age since the answer, by the device's wall
+    /// and monotonic clocks, with the clock tolerance added, is under the budget, and the
+    /// own certificate hasn't expired by the service time that makes. `orphan_after` is at
+    /// least the rail's longest time plus the budget ([`crate::orphan_floor_s`]), so within
+    /// it no other own app can resolve the attempt as orphaned before its payment has run
+    /// (Switch spec 10.2 rows 5 and 6). Past it nothing is submitted: the attempt is written
+    /// `failed`, and a payment made after is a new decision.
+    ///
+    /// Residual: without a read, nothing here can see the owner's own revocation within the
+    /// budget. An open attempt whose owner isn't current is orphaned at once, but rows 5 and
+    /// 6 need the user's confirmation and flag the next attempt `possibly_duplicate`, which
+    /// is never paid automatically (Paykit spec 7.3), and the signer warns before revoking
+    /// an app that owns open attempts.
+    fn within_budget(&self, answered: &Answered, now: u64) -> std::result::Result<(), Refusal> {
+        let age = answered.age_ms(now).saturating_add(CLOCK_TOLERANCE_MS);
+        if age >= crate::PRE_DISPATCH_BUDGET_MS {
+            return Err(Refusal::NotNow(
+                "Switch spec 10.2: the attempt is past its pre-dispatch budget".into(),
+            ));
+        }
+        if self
+            .app
+            .cert()
+            .expired_at(answered.opened_at_ms.saturating_add(age))
+        {
+            return Err(Refusal::NotNow(
+                "Switch spec 3.2: the app's certificate expires within the pre-dispatch budget"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Checks 2 to 6 of the final payment check, with no await, on the clock now and the
-    /// payee's copy `payee`.
+    /// payee's copy `payee`, and for a first dispatch the pre-dispatch budget
+    /// ([`Paykit::within_budget`]).
     fn final_gates(
         &self,
         entry: &JournalEntry,
@@ -1693,12 +1777,18 @@ impl Paykit {
         kind: Dispatch,
     ) -> Result<FinalCheck> {
         let now = self.now();
-        if let Dispatch::Repeat {
-            idempotency_retention_ms,
-        } = kind
-        {
-            if !retained(idempotency_retention_ms, entry.journaled_at_ms, now) {
-                return Ok(FinalCheck::Lapsed);
+        match kind {
+            Dispatch::Repeat {
+                idempotency_retention_ms,
+            } => {
+                if !retained(idempotency_retention_ms, entry.journaled_at_ms, now) {
+                    return Ok(FinalCheck::Lapsed);
+                }
+            }
+            Dispatch::First { answered } => {
+                if let Err(refusal) = self.within_budget(&answered, now) {
+                    return Ok(FinalCheck::Refused(refusal));
+                }
             }
         }
         let Some(carrier) = entry.kept_carrier(&self.identity())? else {

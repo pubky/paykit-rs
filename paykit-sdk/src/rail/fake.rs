@@ -16,6 +16,9 @@ use serde_json::{Map, Value};
 
 use super::{ProofCheck, Rail, RailDeclaration, RailError, RailOutcome, RailPayment, Transfer};
 
+/// The longest a fake dispatch takes to complete or fail, as its declaration says: an hour.
+pub const FAKE_LONGEST_COMPLETION_MS: u64 = 3_600_000;
+
 /// What the next new payment does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Behaviour {
@@ -222,6 +225,7 @@ impl Rail for FakeRail {
             history: true,
             history_retention_ms: None,
             history_survives_restore: true,
+            longest_completion_ms: FAKE_LONGEST_COMPLETION_MS,
         }
     }
 
