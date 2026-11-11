@@ -35,7 +35,7 @@ async fn monthly_to(w: &World, wallet: &mut Paykit, expires_at: u64) -> RequestR
     let summary = wallet.receive(None).await.unwrap();
     let held = wallet.requests().await.unwrap();
     assert_eq!(held.len(), 1, "{summary:?}");
-    held[0].request.clone()
+    held[0].request
 }
 
 #[tokio::test]
