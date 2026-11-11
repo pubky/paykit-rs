@@ -404,6 +404,75 @@ async fn test_resolve_public_payment_request_resolves_again_after_unblock() {
 }
 
 #[tokio::test]
+async fn test_resolve_public_payment_request_refuses_only_exact_blocked_peer_state() {
+    let mut baseline = None;
+    for state in [
+        None,
+        Some(LinkedPeerState::NotLinked),
+        Some(LinkedPeerState::Linking),
+        Some(LinkedPeerState::Linked),
+        Some(LinkedPeerState::RecoveryRequired),
+        Some(LinkedPeerState::Blocked),
+    ] {
+        let (storage, counterparty, request_id) = bound_payment_request_fixture().await;
+        if let Some(state) = state.clone() {
+            storage
+                .transaction(|tx| {
+                    let mut peer = default_linked_peer(counterparty.clone());
+                    peer.state = state;
+                    tx.save_linked_peer(peer);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        let sdk = PaykitSdk::with_clock(
+            storage,
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::new("test-app").unwrap(),
+            FixedClock,
+        );
+
+        let result = sdk
+            .resolve_public_payment_request(counterparty, &request_id)
+            .await;
+
+        match state {
+            None => {
+                let resolution = result.unwrap();
+                assert_eq!(resolution.status, PublicPaymentResolutionStatus::NoEndpoint);
+                baseline = Some(resolution);
+            }
+            Some(LinkedPeerState::Blocked) => assert!(
+                matches!(result, Err(PaykitSdkError::Policy { ref context, .. }) if context.contains("is blocked")),
+                "unexpected result: {:?}",
+                result.map_err(|error| error.to_string())
+            ),
+            // A RecoveryRequired peer marks its open Payment Requests
+            // RecoveryRequired, which resolution already refuses by request
+            // state rather than by the blocked-peer rule.
+            Some(LinkedPeerState::RecoveryRequired) => {
+                let expected = format!(
+                    "cannot resolve Payment Request {request_id} in state {:?}",
+                    PaymentRequestLifecycleState::RecoveryRequired
+                );
+                assert!(
+                    matches!(result, Err(PaykitSdkError::Policy { ref context, .. }) if *context == expected),
+                    "unexpected result: {:?}",
+                    result.map_err(|error| error.to_string())
+                );
+            }
+            Some(other) => assert_eq!(
+                result.map_err(|error| error.to_string()),
+                Ok(baseline.clone().expect("baseline runs first")),
+                "Linked Peer state {other:?}"
+            ),
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_resolve_private_payment_request_enforces_request_constraints() {
     let storage = registered_test_storage();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
