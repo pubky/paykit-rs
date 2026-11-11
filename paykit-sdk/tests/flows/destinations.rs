@@ -318,3 +318,76 @@ async fn test_destinations_check_after_the_attempt_writes_failed_and_says_so() {
         pubky_switch_core::claims::Outcome::Failed
     );
 }
+
+#[tokio::test]
+async fn test_destinations_list_of_a_removed_app_shadows_no_current_one() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let mut shop = w.shop().await;
+    // The till's list, then the shop's at a higher version.
+    till.app_mut().invite(&w.alice_id()).await.unwrap();
+    let mut endpoints = std::collections::BTreeMap::new();
+    endpoints.insert(
+        crate::common::endpoint("btc-lightning-bolt12"),
+        paykit_lib::bodies::ListEndpoint {
+            payload: paykit_lib::PaymentEndpointPayload::new("lno1till").unwrap(),
+            single_use: false,
+        },
+    );
+    let body = paykit_lib::bodies::PrivatePaymentList {
+        version: w.clock.now_ms(),
+        payment_endpoints: endpoints,
+        expires_at: w.clock.now_ms() + 30 * 24 * crate::common::HOUR_MS,
+    }
+    .to_body()
+    .unwrap();
+    w.inject(
+        &w.bob,
+        "till",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.private_payment_list",
+        Vec::new(),
+        body,
+    );
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms() + 1000)
+        .await;
+    wallet.receive(None).await.unwrap();
+    // Bob's signer removes the shop: its newer list doesn't hide the till's.
+    let shop_id = shop.app_id();
+    let now = w.clock.now_ms();
+    w.bob
+        .next_doc(|body| {
+            body.apps.retain(|a| a.app_id != shop_id);
+            body.removed.push(RemovedApp {
+                app_id: shop_id,
+                distrust_from: now,
+            });
+        })
+        .unwrap();
+    w.clock.advance_ms(11 * 60_000);
+    let outcome = wallet
+        .pay_without_request(paykit_sdk::UnrequestedPayment {
+            payee: w.bob_id(),
+            amount: crate::common::btc("0.0015"),
+            options: PayOptions {
+                endpoint: Some(crate::common::endpoint("btc-lightning-bolt12")),
+                ..PayOptions::default()
+            },
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+        "{outcome:?}"
+    );
+    till.receive(None).await.unwrap();
+    assert_eq!(till.payee_activity().await.unwrap().len(), 1);
+}

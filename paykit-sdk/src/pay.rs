@@ -127,6 +127,14 @@ pub enum PayOutcome {
         /// The attempt.
         attempt_id: AttemptId,
     },
+    /// Paid by the method, but the outcome's batch didn't go through (the switch didn't
+    /// answer, or the write failed otherwise). The journal keeps the proof and the attempt
+    /// stays open, so nothing pays again; a resume ([`Paykit::resume_payments`]) writes the
+    /// outcome and sends the proof (Paykit spec 7.2 steps 3 and 4).
+    PaidOutcomeUnwritten {
+        /// The attempt.
+        attempt_id: AttemptId,
+    },
     /// Paid by the method, but the outcome waits: the payer's activity record holds a value
     /// that doesn't read, and `done` never goes without its update (Paykit spec 7.2 step
     /// 3). Nothing was written; the attempt stays open, so nothing pays again, and the
@@ -744,6 +752,28 @@ impl Paykit {
         let now = self.now();
         let mut lists = self.lists_of(payee).await?;
         lists.retain(|l| app.is_none_or(|a| a == l.app_id));
+        // Only a current app's list counts (Paykit spec 8.4, 7.2): a removed app's list, of
+        // whatever version it chose, would shadow the current apps' and then be refused by
+        // the destination check. The payee's `identity.json` is the copy that check takes,
+        // so a fresh one is read once here.
+        if !lists.is_empty() {
+            let identity = match self
+                .payee_identity(
+                    payee,
+                    Need::FreshCopy,
+                    Initiator::User,
+                    options.unconfirmed_identity_confirmed,
+                )
+                .await?
+            {
+                Ok(identity) => identity,
+                Err(refusal) => return Err(refusal.into()),
+            };
+            lists.retain(|l| {
+                let carrier = Carrier::Message(Box::new(l.list.clone()));
+                crate::destination::current(&identity.doc, &l.app_id, &carrier, now).is_ok()
+            });
+        }
         lists.sort_by_key(|l| match l.list.body() {
             Body::PrivatePaymentList(list) => std::cmp::Reverse(list.version),
             _ => std::cmp::Reverse(0),
@@ -832,8 +862,11 @@ impl Paykit {
         for (app_id, held_version) in asks {
             let mark = key::list_ask(payee, app_id.as_ref());
             if let Some(asked) = self.local_get::<ListAsk>(&mark).await? {
+                // A mark ahead of the clock (restored, or the clock set back) is due, as a
+                // lists read is: it never holds the next request back for longer than a day.
                 if asked.held_version == held_version
-                    && now < asked.asked_at_ms.saturating_add(DAY_MS)
+                    && asked.asked_at_ms <= now
+                    && now - asked.asked_at_ms < DAY_MS
                 {
                     continue;
                 }
@@ -1436,7 +1469,13 @@ impl Paykit {
                 entry.failed_by_method = true;
                 self.set_stage(entry, Stage::RailFailed).await?;
             }
-            RailOutcome::Pending => return Ok(PayOutcome::Pending { attempt_id }),
+            RailOutcome::Pending => {
+                // The method shows the payment running, so its acceptance may go (Paykit spec
+                // 7.2 step 2); one the dispatch couldn't queue is queued now, best effort, at
+                // every resume that finds it still pending.
+                let _ = self.release_acceptance(entry, acceptance).await;
+                return Ok(PayOutcome::Pending { attempt_id });
+            }
         }
         self.report(entry).await
     }
@@ -1461,6 +1500,9 @@ impl Paykit {
                     }
                 });
             }
+            // Money moved: a failure to write it is never the payment's error (Paykit spec
+            // 7.2); the journal keeps the proof for a resume.
+            Err(_) if paid => return Ok(PayOutcome::PaidOutcomeUnwritten { attempt_id }),
             Err(error) => return Err(error),
         }
         if !paid {

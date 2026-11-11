@@ -62,8 +62,8 @@ use crate::state::{self, key, StateKey};
 /// a request, the payer's side of Private Payment Lists and re-sends. Recurring requests,
 /// Allowances and publishing Private Payment Lists come later. A
 /// `private_payment_list_request` this SDK receives is taken with no effect: it publishes no
-/// list to answer with, and the request is best effort (Paykit spec 8.4), so its payer asks
-/// again later.
+/// list at all yet, so the Publishing rule's answer to a request naming a used version
+/// (Paykit spec 8.4) comes with list publishing, with that rule's other triggers.
 pub const HANDLED_KINDS: [Kind; 9] = [
     Kind::PaymentRequest,
     Kind::PaymentRequestAcceptance,
@@ -355,8 +355,15 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::Missed { .. }
-            | StateKey::Peer(_)
+            StateKey::Missed { from_ms } => {
+                // The re-sends are asked from the value, so it must be the time its key names.
+                if state::decode::<u64>(&value).map_err(|_| unread())? != from_ms {
+                    return Err(unread());
+                }
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::Peer(_)
             | StateKey::Spam(_)
             | StateKey::Resent { .. }
             | StateKey::ResentDay { .. }

@@ -206,9 +206,9 @@ pub(crate) fn effect(
                 local(&key::answer(seq, &stored.message().msg_id), &queued)?,
             );
         }
-        // A publishing app answers with its current list (Paykit spec 8.4). This SDK
-        // publishes none, so the request is taken with no effect; it is best effort, and its
-        // payer asks again later.
+        // A publishing app answers a request naming a used version with its current list
+        // (Paykit spec 8.4, "Publishing"). This SDK publishes no list at all yet, so the
+        // request is taken with no effect; the answer comes with list publishing.
         Body::PrivatePaymentListRequest(_) => {}
         _ => {}
     }

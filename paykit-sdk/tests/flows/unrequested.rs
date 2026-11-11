@@ -670,3 +670,41 @@ async fn test_unrequested_with_the_own_switch_unavailable_refused_and_nothing_pa
     assert!(w.rail.all_executions().is_empty());
     assert!(wallet.payments().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn test_unrequested_paid_with_its_outcome_unwritten_is_no_error() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    // The attempt's batch goes through; the outcome's, after the method paid, can't connect.
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 1,
+        });
+    let outcome = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-lightning-bolt12"))
+        .await
+        .unwrap();
+    let PayOutcome::PaidOutcomeUnwritten { attempt_id } = outcome else {
+        panic!("money moved, so the call reports it paid: {outcome:?}");
+    };
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+    // A resume writes the outcome and sends the proof, paying nothing again.
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::RailPaid
+    );
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.payee_activity().await.unwrap().len(), 1);
+}

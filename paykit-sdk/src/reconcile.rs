@@ -30,6 +30,7 @@ use pubky_switch_core::ops::{Condition, OpKind};
 use crate::activity::{self, ActivityTarget};
 use crate::destination::Carrier;
 use crate::error::{Refusal, Result};
+use crate::hold::RestoreHold;
 use crate::journal::{Destination, JournalEntry, KeptAmount, Stage};
 use crate::pay::{own_deadline, PayOutcome, Written};
 use crate::paykit::Paykit;
@@ -537,13 +538,27 @@ impl Paykit {
     }
 
     /// Reconciliation finished (Switch spec 12.4 step 2.4): reconcile mode ends, and new
-    /// attempts may be made again.
+    /// attempts may be made again. After a restore, the re-send requests to the open
+    /// requests' counterparties are queued first if [`Paykit::reconcile`] didn't queue them
+    /// (Paykit spec 7.2), reading the records for them: a host that ends reconcile mode
+    /// without reconciling still asks once.
     ///
     /// # Errors
     ///
-    /// The client's errors, such as the restore question still open.
+    /// The client's errors, such as the restore question still open; nothing ends while the
+    /// asks can't be queued.
     pub async fn end_reconcile(&mut self, confirmed: UserConfirmed) -> Result<()> {
         self.refresh_own()?;
+        let asks_owed = self
+            .local_get::<RestoreHold>(key::RESTORE_HOLD)
+            .await?
+            .is_some_and(|hold| !hold.asks_queued);
+        if asks_owed {
+            self.app.list_collections().await?;
+            self.queue_restore_asks().await?;
+            // Queued: what isn't sent now goes at the next receive.
+            let _ = self.send_asks().await;
+        }
         self.app.end_reconcile(confirmed).await?;
         Ok(())
     }

@@ -230,7 +230,11 @@ impl Paykit {
     ///
     /// [`Refusal::ScopeMissing`] without `request` or a label; [`Refusal::Label`];
     /// [`PaykitError::Lib`] with `Validation` for a draft that breaks Paykit wire 4.5; the
-    /// client's errors.
+    /// client's errors. After a failure the client keeps a batch for (the network, `429`,
+    /// `503`), this request may still be recorded and sent, by the app's next write: the
+    /// error doesn't say whether the batch was kept, so a second call can send a second
+    /// request. A host that retries reads [`Paykit::payee_activity`] after its next write
+    /// first.
     pub async fn send_request(&mut self, to: [u8; 32], draft: RequestDraft) -> Result<SentRequest> {
         self.refresh_own()?;
         self.require_payee()?;
@@ -351,8 +355,10 @@ impl Paykit {
     ///
     /// # Errors
     ///
+    /// [`Refusal::CertificateRefused`] while the app's certificate fails Paykit's checks;
     /// [`Refusal::NotFound`] for a record without a proof; the rail's errors.
     pub async fn verify_payment(&mut self, record: &[u8; 32]) -> Result<Option<u64>> {
+        self.refresh_own()?;
         let (_, bound) = self.payee_record(record).await?;
         let proof_stored = bound.proof.as_ref().ok_or(Refusal::NotFound)?;
         let Body::PaymentProof(proof) = proof_stored.body() else {

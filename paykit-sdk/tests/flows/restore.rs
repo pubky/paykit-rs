@@ -1189,7 +1189,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
         )
     };
     let record_json = serde_json::to_value(record.signed()).unwrap();
-    let cases: [(&str, String, serde_json::Value); 13] = [
+    let cases: [(&str, String, serde_json::Value); 14] = [
         (
             "kept cancellation of another kind",
             key_of("kc/"),
@@ -1232,6 +1232,11 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
         ),
         ("unknown key", "zz/1".into(), kept(serde_json::json!(1))),
         (
+            "missed time other than its key's",
+            format!("missed/{:020}", 5),
+            kept(serde_json::json!(0)),
+        ),
+        (
             "seen records holding a certificate",
             seen_key(shop1.app_id_bytes()),
             kept(serde_json::json!({ "records": [request["cert"].clone()] })),
@@ -1267,6 +1272,11 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
     state.push((
         answer_key.into_bytes(),
         kept(answer(own_cert, good_body, uuid)),
+    ));
+    // A missed item holding the time its key names restores too.
+    state.push((
+        format!("missed/{:020}", 5).into_bytes(),
+        kept(serde_json::json!(5)),
     ));
     let backup = with_layer(&good, state);
     let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&backup).unwrap()).unwrap();

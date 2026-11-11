@@ -88,6 +88,33 @@ async fn test_restore_hold_cancellation_resent_after_the_restore_stops_for_good(
 }
 
 #[tokio::test]
+async fn test_restore_hold_asks_sent_when_reconcile_mode_ends_without_reconciling() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut app = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    // The host ends reconcile mode at once: the counterparty is still asked to re-send,
+    // once (Paykit spec 7.2).
+    app.end_reconcile(UserConfirmed::new()).await.unwrap();
+    let answered = shop.receive(None).await.unwrap();
+    assert!(answered.resends >= 1, "no re-send request reached bob");
+    app.receive(None).await.unwrap();
+    assert_eq!(shop.receive(None).await.unwrap().resends, 0);
+}
+
+#[tokio::test]
 async fn test_restore_hold_payee_silent_held_until_the_user_confirms() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
