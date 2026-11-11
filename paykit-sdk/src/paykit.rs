@@ -38,7 +38,7 @@ pub const DEFAULT_ORPHAN_AFTER_S: u64 = 86_400;
 
 /// The longest a first dispatch may take from its attempt's answer to the payment method's
 /// call: 10 minutes. Between them come the destination and identity checks, the
-/// acceptance's queueing, the final payment check and the journal write of `Paying`: a few
+/// acceptance's journaling, the final payment check and the journal write of `Paying`: a few
 /// requests in sequence, each bounded by the client's request timeout (40 s, with 10 s to
 /// connect), so a few minutes at worst. The fence judges the attempt's age with the clock
 /// tolerance (5 minutes) added, so a dispatch goes only within 5 minutes of its answer,

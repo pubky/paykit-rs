@@ -23,7 +23,8 @@ type Step = ([u8; 32], u64, Option<Hook>);
 
 /// A store that runs a hook once, right after it commits the journal entry that holds the
 /// signed acceptance: the last journal write before the final payment check. Armed, it
-/// fails the commit after that one, which queues the acceptance, applying nothing. It can
+/// fails the commit after that one, applying nothing. It records the `msg_id` of every
+/// acceptance journaled, to show the outbox never took one. It can
 /// also run a hook during the commit that journals `Paying`, after the final payment check
 /// and before the payment method's call, and then stop, as a process that died: every
 /// later commit fails, applying nothing.
@@ -36,6 +37,7 @@ struct HookedStore {
     paying_hook: Mutex<Option<Hook>>,
     stop_after_paying: std::sync::atomic::AtomicBool,
     stopped: std::sync::atomic::AtomicBool,
+    acceptances: Mutex<Vec<String>>,
 }
 
 impl HookedStore {
@@ -58,7 +60,12 @@ impl HookedStore {
             .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
-    fn fail_acceptance_queueing(&self) {
+    /// The `msg_id` of every acceptance a journal write held.
+    fn acceptances(&self) -> Vec<String> {
+        self.acceptances.lock().unwrap().clone()
+    }
+
+    fn fail_commit_after_acceptance(&self) {
         self.fail_queueing
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
@@ -92,6 +99,22 @@ impl StateStore for HookedStore {
         };
         let signed = journals(SIGNED);
         let paying = journals(PAYING);
+        for write in &batch.writes {
+            if let Write::Put { key, value, .. } = write {
+                if !key.starts_with(b"p/j/") {
+                    continue;
+                }
+                if let Some(at) = value.windows(SIGNED.len()).position(|w| w == SIGNED) {
+                    let rest = &value[at + SIGNED.len()..];
+                    let end = rest.iter().position(|b| *b == b'"').unwrap_or(rest.len());
+                    let id = String::from_utf8_lossy(&rest[..end]).into_owned();
+                    let mut seen = self.acceptances.lock().unwrap();
+                    if !seen.contains(&id) {
+                        seen.push(id);
+                    }
+                }
+            }
+        }
         if self.stopped.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(StoreError::Unavailable);
         }
@@ -312,8 +335,8 @@ async fn stopped_before_the_rail() -> (World, Arc<HookedStore>, [u8; 16], paykit
         if let [payment] = payments.as_slice() {
             if payment.stage == paykit_sdk::Stage::Paying {
                 let attempt_id = payment.attempt_id;
-                // The acceptance queued before the payment goes out meanwhile, as it would
-                // have with it, so the recovery's reads are its checks' alone.
+                // Whatever the outbox holds goes out meanwhile, so the recovery's reads are
+                // its checks' alone.
                 loaded.flush().await.unwrap();
                 drop(loaded);
                 return (w, store, app_id, attempt_id);
@@ -708,6 +731,20 @@ fn blind(w: &World) {
     });
 }
 
+/// After an explicit flush, no acceptance `store` journaled is known to the wallet's
+/// outbox: none was ever queued, so none could reach the payee (Paykit spec 7.2 step 2).
+async fn no_acceptance_queued(store: &HookedStore, wallet: &mut Paykit) {
+    wallet.flush().await.unwrap();
+    let journaled = store.acceptances();
+    assert!(!journaled.is_empty(), "no acceptance was journaled");
+    for msg_id in journaled {
+        assert!(
+            wallet.app().delivery(&msg_id).await.unwrap().is_none(),
+            "the acceptance {msg_id} was queued"
+        );
+    }
+}
+
 /// A resume of the wallet on `store`: the payment stopped before the rail is written
 /// `failed`, as known unsubmitted, and a replacement goes ahead.
 async fn resumed_failed(
@@ -738,11 +775,11 @@ async fn resumed_failed(
 }
 
 #[tokio::test]
-async fn test_final_check_acceptance_queueing_failure_leaves_the_payment_unsubmitted() {
+async fn test_final_check_commit_after_the_acceptance_failing_leaves_the_payment_unsubmitted() {
     let w = World::new();
     blind(&w);
     let (store, app_id, request) = with_a_request(&w).await;
-    store.fail_acceptance_queueing();
+    store.fail_commit_after_acceptance();
     let mut wallet = w
         .load_on_clock(
             &w.alice,
@@ -789,6 +826,8 @@ async fn test_final_check_held_first_dispatch_leaves_the_payment_unsubmitted() {
     assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
     let payment = wallet.payments().await.unwrap().remove(0);
     assert_eq!(payment.stage, paykit_sdk::Stage::Attempted);
+    // Held before the call: an explicit flush sends no acceptance.
+    no_acceptance_queued(&store, &mut wallet).await;
     drop(wallet);
     // Bob's shop is removed: the replacement can't pay it, but the held payment is still
     // written `failed` rather than left "may be paid".
@@ -810,6 +849,8 @@ async fn test_final_check_held_first_dispatch_leaves_the_payment_unsubmitted() {
         wallet.payments().await.unwrap()[0].stage,
         paykit_sdk::Stage::Finished
     );
+    // Nor after the restart and the resume.
+    no_acceptance_queued(&store, &mut wallet).await;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -859,6 +900,8 @@ async fn test_fence_removal_answered_during_paying_not_paid() {
     // the attempt `failed` rather than "may be paid".
     let payment = wallet.payments().await.unwrap().remove(0);
     assert_eq!(payment.stage, paykit_sdk::Stage::Attempted);
+    // `Paying` was journaled, and the fence stopped the call: no acceptance was queued.
+    no_acceptance_queued(&store, &mut wallet).await;
     drop(wallet);
     let mut wallet = w
         .load_on_clock(
@@ -874,12 +917,13 @@ async fn test_fence_removal_answered_during_paying_not_paid() {
         "{resumed:?}"
     );
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
+    no_acceptance_queued(&store, &mut wallet).await;
 }
 
 #[tokio::test]
 async fn test_fence_equivocation_answered_during_paying_refused() {
     let w = World::new();
-    let (_store, _app_id, request, mut wallet) = answered_during_paying(&w, equivocate).await;
+    let (store, _app_id, request, mut wallet) = answered_during_paying(&w, equivocate).await;
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
@@ -895,6 +939,7 @@ async fn test_fence_equivocation_answered_during_paying_refused() {
     let payment = wallet.payments().await.unwrap().remove(0);
     assert_eq!(payment.stage, paykit_sdk::Stage::Finished);
     assert_eq!(w.rail.pay_calls(&payment.attempt_id), 0);
+    no_acceptance_queued(&store, &mut wallet).await;
 }
 
 #[tokio::test]
@@ -931,6 +976,37 @@ async fn test_fence_stop_lost_to_a_crash_stays_paying_and_uncertain() {
         }]
     );
     assert_eq!(w.rail.pay_calls(&payment.attempt_id), 0);
+    // "May be paid" isn't a payment the method's history shows: no acceptance goes out.
+    no_acceptance_queued(&store, &mut wallet).await;
+}
+
+#[tokio::test]
+async fn test_acceptance_queued_once_the_call_is_made() {
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    // The control for `no_acceptance_queued`: the call was made, and the outbox holds the
+    // one acceptance journaled.
+    let journaled = store.acceptances();
+    assert_eq!(journaled.len(), 1);
+    assert!(wallet
+        .app()
+        .delivery(&journaled[0])
+        .await
+        .unwrap()
+        .is_some());
 }
 
 // ---------------------------------------------------------------------------------------

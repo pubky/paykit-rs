@@ -209,6 +209,11 @@ pub(crate) struct JournalEntry {
     /// the outcome's batch writes (Paykit spec 7.2 step 3).
     #[serde(default, with = "serde_b64_opt")]
     pub(crate) acceptance_plaintext: Option<Vec<u8>>,
+    /// The acceptance went into the outbox, sendable: only once the payment method's call
+    /// was made, or a resume found the payment in the method's history (Paykit spec 7.2
+    /// step 2). Until then it is journaled only, never sent and never placed in a record.
+    #[serde(default)]
+    pub(crate) acceptance_released: bool,
     /// The rail's proof, once paid.
     pub(crate) rail_proof: Option<Map<String, Value>>,
     pub(crate) paid_at_ms: Option<u64>,
@@ -322,6 +327,7 @@ impl JournalEntry {
         }
         if self.acceptance_msg_id.is_some() != self.acceptance_plaintext.is_some()
             || (self.acceptance_msg_id.is_some() && !self.acceptance_owed)
+            || (self.acceptance_released && self.acceptance_msg_id.is_none())
         {
             return bad();
         }

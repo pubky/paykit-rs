@@ -349,6 +349,7 @@ impl Paykit {
             acceptance_owed: false,
             acceptance_msg_id: None,
             acceptance_plaintext: None,
+            acceptance_released: false,
             rail_proof: None,
             paid_at_ms: None,
             proof_msg_id: None,

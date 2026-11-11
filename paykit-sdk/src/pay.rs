@@ -10,8 +10,9 @@
 //!    showing this app's own open attempt lets money move.
 //! 2. **Check, then pay.** The own `identity.json` is still confirmed and the destination checked
 //!    ([`crate::destination`]); a failure writes `failed` instead of paying. The start of the
-//!    payment is journaled, then the rail pays with the attempt ID as its idempotency key,
-//!    and a one-time request's acceptance goes out at the same time.
+//!    payment is journaled, then the rail pays with the attempt ID as its idempotency key.
+//!    A one-time request's acceptance, signed and journaled before, goes into the outbox
+//!    only once that call is made, so a payee never sees one for a payment that never ran.
 //! 3. **Outcome.** `done` (basis `owner`) or `failed` on the claim and the payer's activity
 //!    record, with the acceptance and the proof, in one batch, which also queues the proof
 //!    and finishes the journal entry once applied.
@@ -416,6 +417,7 @@ impl Paykit {
             acceptance_owed: record.response.is_none(),
             acceptance_msg_id: None,
             acceptance_plaintext: None,
+            acceptance_released: false,
             rail_proof: None,
             paid_at_ms: None,
             proof_msg_id: None,
@@ -488,6 +490,7 @@ impl Paykit {
             acceptance_owed: false,
             acceptance_msg_id: None,
             acceptance_plaintext: None,
+            acceptance_released: false,
             rail_proof: None,
             paid_at_ms: None,
             proof_msg_id: None,
@@ -953,13 +956,21 @@ impl Paykit {
             Err(refusal @ Refusal::NotCurrent(_)) => return Err(refusal.into()),
             Err(refusal) => return self.fail_attempt(&mut entry, refusal).await,
         };
-        // The entry stays `Attempted`, known unsubmitted, through the acceptance's queueing
+        // The entry stays `Attempted`, known unsubmitted, through the acceptance's journaling
         // and the final payment check: either can stop the payment, and a resume then writes
         // the attempt `failed` rather than taking it as possibly dispatched. `Paying` is
-        // journaled just before the payment method's call ([`Paykit::dispatch`]).
-        self.queue_owed_acceptance(&mut entry).await?;
-        self.dispatch(entry, doc, by, unconfirmed, Dispatch::First { answered })
-            .await
+        // journaled just before the payment method's call ([`Paykit::dispatch`]). The
+        // acceptance is signed and journaled now, and sendable only once that call is made.
+        let acceptance = self.journal_acceptance(&mut entry).await?;
+        self.dispatch(
+            entry,
+            doc,
+            by,
+            unconfirmed,
+            Dispatch::First { answered },
+            acceptance,
+        )
+        .await
     }
 
     /// The own `identity.json` revalidated in the last [`REVALIDATION_MS`] (Paykit spec 4,
@@ -1046,17 +1057,26 @@ impl Paykit {
     /// The acceptance of a one-time request, sent with its payment (Paykit spec 7.2 step 2,
     /// Paykit wire 4.6): signed and journaled, then queued, so a crash between the two signs
     /// it again and never queues two.
-    async fn queue_owed_acceptance(&mut self, entry: &mut JournalEntry) -> Result<()> {
-        if !entry.acceptance_owed {
-            return Ok(());
+    /// The acceptance owed with the payment, signed and journaled, not queued: nothing can
+    /// send it yet (Paykit spec 7.2 step 2). `None` when none is owed or it went out already.
+    async fn journal_acceptance(
+        &mut self,
+        entry: &mut JournalEntry,
+    ) -> Result<Option<SignedMessage>> {
+        if !entry.acceptance_owed || entry.acceptance_released {
+            return Ok(None);
         }
-        if let Some(msg_id) = &entry.acceptance_msg_id {
-            if self.app.delivery(msg_id).await?.is_some() {
-                return Ok(());
-            }
-        }
+        let Some(signed) = self.sign_acceptance(entry)? else {
+            return Ok(None);
+        };
+        self.save(entry).await?;
+        Ok(Some(signed))
+    }
+
+    /// A new acceptance of `entry`'s request, set in the entry, not saved.
+    fn sign_acceptance(&self, entry: &mut JournalEntry) -> Result<Option<SignedMessage>> {
         let Some(request_hash) = entry.request_hash()? else {
-            return Ok(());
+            return Ok(None);
         };
         let label = entry.label()?;
         let signed = self.sign(
@@ -1067,8 +1087,48 @@ impl Paykit {
         )?;
         entry.acceptance_msg_id = Some(signed.msg_id().to_owned());
         entry.acceptance_plaintext = Some(signed.plaintext().encode());
+        Ok(Some(signed))
+    }
+
+    /// Step 2 (Paykit spec 7.2): the acceptance goes into the outbox, sendable, and out
+    /// while the payment runs. Called only once the payment method's call was made, or once
+    /// a resume finds the payment in the method's history, never before: a payee never sees
+    /// an acceptance of a payment the payer knows never ran. `signed` is the acceptance
+    /// journaled for this dispatch; without it (a resume, a repeat) the journaled one is
+    /// used if the outbox holds it already, and otherwise a new one is signed, the journaled
+    /// one never having left this app.
+    async fn release_acceptance(
+        &mut self,
+        entry: &mut JournalEntry,
+        signed: Option<SignedMessage>,
+    ) -> Result<()> {
+        if !entry.acceptance_owed || entry.acceptance_released {
+            return Ok(());
+        }
+        let queued = match &entry.acceptance_msg_id {
+            Some(msg_id) if signed.is_none() => self.app.delivery(msg_id).await?.is_some(),
+            _ => false,
+        };
+        if !queued {
+            let signed = match signed {
+                Some(signed) => signed,
+                None => match self.sign_acceptance(entry)? {
+                    Some(signed) => signed,
+                    None => return Ok(()),
+                },
+            };
+            // Journaled, queued, then marked: a crash before the mark leaves it journaled and
+            // queued, and the outbox shows it at the next release, so it is never signed
+            // twice once it can be sent.
+            self.save(entry).await?;
+            self.app.queue_signed(signed).await?;
+        }
+        entry.acceptance_released = true;
         self.save(entry).await?;
-        self.app.queue_signed(signed).await?;
+        if let Some(msg_id) = entry.acceptance_msg_id.clone() {
+            // Not awaited for paying: a delivery failure leaves it queued.
+            let _ = self.app.flush_message(&msg_id).await;
+        }
         Ok(())
     }
 
@@ -1080,6 +1140,7 @@ impl Paykit {
         by: Initiator,
         confirmed: Option<UserConfirmed>,
         kind: Dispatch,
+        acceptance: Option<SignedMessage>,
     ) -> Result<PayOutcome> {
         let attempt_id = entry.attempt()?;
         let payment = RailPayment {
@@ -1124,10 +1185,15 @@ impl Paykit {
             }
         }
         let outcome = self.rail.pay(payment).await;
-        // The acceptance goes out while the payment runs, not awaited (Paykit spec 7.2 step
-        // 2); a delivery failure leaves it queued.
-        if let Some(msg_id) = entry.acceptance_msg_id.clone() {
-            let _ = self.app.flush_message(&msg_id).await;
+        // The call was made: unless the method refused it or reports the payment failed, a
+        // payment may be running, and only now may the payee hear it was accepted (Paykit
+        // spec 7.2 step 2). A failure to queue it decides nothing about paying: the outcome
+        // or a resume releases it once the payment shows.
+        if !matches!(
+            outcome,
+            Err(RailError::Refused(_)) | Ok(RailOutcome::Failed)
+        ) {
+            let _ = self.release_acceptance(&mut entry, acceptance).await;
         }
         match outcome {
             Ok(outcome) => self.take_outcome(&mut entry, outcome).await,
@@ -1188,6 +1254,9 @@ impl Paykit {
         let attempt_id = entry.attempt()?;
         match outcome {
             RailOutcome::Paid { proof, paid_at_ms } => {
+                // The payment shows: its acceptance is sendable, if it isn't yet, before
+                // the outcome's batch places it in the record (Paykit spec 7.2 steps 2, 3).
+                self.release_acceptance(entry, None).await?;
                 entry.rail_proof = Some(proof);
                 entry.paid_at_ms = paid_at_ms;
                 self.set_stage(entry, Stage::RailPaid).await?;
@@ -1439,7 +1508,13 @@ impl Paykit {
         record: &mut ActivityRecord,
         entry: &JournalEntry,
     ) -> Result<bool> {
-        let Some(bytes) = &entry.acceptance_plaintext else {
+        // Only an acceptance that went out: one journaled for a payment that never ran
+        // isn't the payer's (Paykit spec 7.2 step 2).
+        let Some(bytes) = entry
+            .acceptance_plaintext
+            .as_ref()
+            .filter(|_| entry.acceptance_released)
+        else {
             return Ok(false);
         };
         let own = self.identity();
@@ -1559,7 +1634,6 @@ impl Paykit {
                     None => self.set_stage(&mut entry, Stage::Abandoned).await?,
                 },
                 Stage::Paying => {
-                    self.queue_owed_acceptance(&mut entry).await?;
                     out.extend(self.resolve_dispatched(entry).await?);
                 }
                 Stage::RailPaid | Stage::RailFailed => {
@@ -1684,7 +1758,7 @@ impl Paykit {
                 longest_completion_ms: declaration.longest_completion_ms,
             };
             return self
-                .dispatch(entry, doc, Initiator::Automatic, None, repeat)
+                .dispatch(entry, doc, Initiator::Automatic, None, repeat, None)
                 .await
                 .map(Some);
         }
