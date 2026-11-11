@@ -1399,3 +1399,108 @@ async fn test_restore_cursor_time_ahead_of_the_backup_is_clamped() {
         "{hold}"
     );
 }
+
+/// Bob's shop's record of `request`.
+fn payee_record(request: &paykit_sdk::RequestRef) -> pubky_switch_client::app::RecordTarget {
+    use paykit_lib::collections::Collection;
+    let collection = Collection::PayeeActivity;
+    pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(collection.name(), collection.policy(None)),
+        &paykit_lib::derive::natural_key::request_record(&request.payee, &request.request_hash),
+    )
+}
+
+/// The value of the record at `target`, as `app` reads it.
+async fn value_of(
+    app: &mut Paykit,
+    target: &pubky_switch_client::app::RecordTarget,
+) -> serde_json::Value {
+    let held = app.app_mut().read_record(target).await.unwrap().unwrap();
+    serde_json::from_slice(held.content.value().unwrap()).unwrap()
+}
+
+/// How many acceptances `shop` takes at its next receive.
+async fn acceptances_taken(shop: &mut Paykit) -> usize {
+    let got = shop.receive(None).await.unwrap();
+    got.report
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(e, pubky_switch_client::app::AppEvent::MessageReceived { kind, .. }
+                if kind == "paykit.payment_request_acceptance")
+        })
+        .count()
+}
+
+/// Alice's wallet pays bob's request, which stays in flight, its acceptance released; the
+/// wallet's backup is taken then, the device is lost, and a restore reconciles.
+/// `delivered` says whether the acceptance reached bob before the backup.
+async fn restored_with_a_released_acceptance(
+    delivered: bool,
+) -> (World, Paykit, Paykit, paykit_sdk::RequestRef) {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    if !delivered {
+        // Bob's switch doesn't answer the delivery: the acceptance stays in the outbox.
+        w.bob
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/inbox".into(),
+                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                current: serde_json::Value::Null,
+            });
+    }
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
+    assert_eq!(
+        acceptances_taken(&mut shop).await,
+        usize::from(delivered),
+        "before the backup"
+    );
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut app = restored(&w, &backup).await;
+    app.reconcile().await.unwrap();
+    (w, app, shop, request)
+}
+
+#[tokio::test]
+async fn test_restore_released_acceptance_never_delivered_is_sent_once() {
+    let (w, mut app, mut shop, request) = restored_with_a_released_acceptance(false).await;
+    // The restored client didn't know it, and the record holds none: a new one went.
+    assert_eq!(acceptances_taken(&mut shop).await, 1);
+    let record = value_of(&mut shop, &payee_record(&request)).await;
+    assert!(!record["response"].is_null(), "{record}");
+    // A second resume finds the new one known to the client and sends nothing.
+    app.resume_payments().await.unwrap();
+    assert_eq!(acceptances_taken(&mut shop).await, 0);
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_restore_released_acceptance_delivered_before_the_backup_changes_only_msg_ids() {
+    // The first acceptance reached bob before the backup: his record holds it.
+    let (w, mut app, mut shop, request) = restored_with_a_released_acceptance(true).await;
+    // The restored client can't tell, so a second acceptance went with a new `msg_id`.
+    // Bob keeps his first acceptance and his status; his record notes the second `msg_id`:
+    // one record write.
+    let before = shop.payee_activity().await.unwrap()[0].status.clone();
+    // The record as bob holds it before taking the second acceptance.
+    let response_before = value_of(&mut shop, &payee_record(&request)).await;
+    assert_eq!(acceptances_taken(&mut shop).await, 1);
+    let after = value_of(&mut shop, &payee_record(&request)).await;
+    assert_eq!(after["response"], response_before["response"], "{after}");
+    let ids = |v: &serde_json::Value| v["msg_ids"].as_array().map_or(0, Vec::len);
+    assert_eq!(ids(&after), ids(&response_before) + 1, "{after}");
+    assert_eq!(shop.payee_activity().await.unwrap()[0].status, before);
+    app.resume_payments().await.unwrap();
+    assert_eq!(acceptances_taken(&mut shop).await, 0);
+    assert_eq!(w.rail.all_executions().len(), 1);
+}

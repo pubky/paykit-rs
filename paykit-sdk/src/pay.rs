@@ -1244,6 +1244,33 @@ impl Paykit {
         Ok(Some(signed))
     }
 
+    /// Whether a restored entry's released acceptance was lost with the restore: the client's
+    /// backup carries no outbox or sent messages, so a restored client that doesn't know its
+    /// `msg_id` never sent it from this store, and it may never have left the old one. It is
+    /// sent again only while the payer's record holds no acceptance: once placed, the record
+    /// is what the payee's apps read. A non-restored entry's client always knows its own
+    /// queued or sent message; an unreadable record leaves it for a later resume.
+    async fn restored_acceptance_lost(&self, entry: &JournalEntry) -> Result<bool> {
+        if !entry.restored {
+            return Ok(false);
+        }
+        if let Some(msg_id) = &entry.acceptance_msg_id {
+            if self.app.delivery(msg_id).await?.is_some() {
+                return Ok(false);
+            }
+        }
+        let target = ActivityTarget::payer(entry.natural_key.clone());
+        let held = self.app.shared_record(&self.activity_key(&target)?).await?;
+        Ok(match held.as_ref().map(|r| &r.content) {
+            Some(RecordContent::Value(value)) => {
+                activity::read(Some(value), &self.identity(), ActivitySide::Payer)
+                    .is_some_and(|record| record.response.is_none())
+            }
+            Some(RecordContent::Unreadable) => false,
+            None | Some(RecordContent::Deleted) => true,
+        })
+    }
+
     /// A new acceptance of `entry`'s request, set in the entry, not saved.
     fn sign_acceptance(&self, entry: &mut JournalEntry) -> Result<Option<SignedMessage>> {
         let Some(request_hash) = entry.request_hash()? else {
@@ -1271,10 +1298,23 @@ impl Paykit {
     pub(crate) async fn release_acceptance(
         &mut self,
         entry: &mut JournalEntry,
-        signed: Option<SignedMessage>,
+        mut signed: Option<SignedMessage>,
     ) -> Result<()> {
-        if !entry.acceptance_owed || entry.acceptance_released {
+        if !entry.acceptance_owed {
             return Ok(());
+        }
+        if entry.acceptance_released {
+            if !self.restored_acceptance_lost(entry).await? {
+                return Ok(());
+            }
+            // Lost with the restore: a new acceptance is signed, journaled in place of the
+            // old one, queued, then marked, as a first release is below, so only it is ever
+            // queued; a payee that got the old one before the backup keeps that one and notes
+            // this `msg_id` in its record (Paykit spec 7.2 step 2).
+            entry.acceptance_released = false;
+            entry.acceptance_msg_id = None;
+            entry.acceptance_plaintext = None;
+            signed = None;
         }
         let queued = match &entry.acceptance_msg_id {
             Some(msg_id) if signed.is_none() => self.app.delivery(msg_id).await?.is_some(),
