@@ -1520,3 +1520,202 @@ async fn test_acceptance_owed_sent_when_another_app_resolves_the_payment_done() 
     assert_eq!(queued_acceptances(&store, &wallet).await, 1);
     assert_eq!(w.rail.executions(&attempt_id), 1);
 }
+
+/// Alice's wallet, its payment of `request` stopped at `Attempted`, known unsubmitted, with
+/// its acceptance signed and journaled: the commit after it failed.
+async fn stopped_unsubmitted(w: &World) -> (Arc<HookedStore>, Paykit, paykit_lib::AttemptId) {
+    blind(w);
+    let (store, app_id, request) = with_a_request(w).await;
+    store.fail_commit_after_acceptance();
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    assert!(wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .is_err());
+    let payment = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Attempted);
+    assert_eq!(store.acceptances().len(), 1);
+    (store, wallet, payment.attempt_id)
+}
+
+#[tokio::test]
+async fn test_acceptance_never_sent_for_an_unsubmitted_payment_another_app_resolves_done() {
+    let w = World::new();
+    let (store, mut wallet, attempt_id) = stopped_unsubmitted(&w).await;
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    // Past the attempt's orphan window, the user marks it paid from the phone.
+    w.clock.advance_ms(4201 * 1000);
+    let mut phone = w.wallet("phone").await;
+    phone
+        .resolve_attempt(
+            &obligation,
+            attempt_id,
+            paykit_sdk::Resolution::Done,
+            pubky_switch_client::app::UserConfirmed::new(),
+        )
+        .await
+        .unwrap();
+    // This app never called the method: its entry finishes, and the payee never sees an
+    // acceptance of a payment that never ran (Paykit spec 7.2 step 2).
+    wallet.receive(None).await.unwrap();
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
+    assert_eq!(queued_acceptances(&store, &wallet).await, 0);
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_acceptance_never_sent_for_an_unsubmitted_payment_the_user_resolves_done() {
+    let w = World::new();
+    let (store, mut wallet, attempt_id) = stopped_unsubmitted(&w).await;
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    wallet
+        .resolve_attempt(
+            &obligation,
+            attempt_id,
+            paykit_sdk::Resolution::Done,
+            pubky_switch_client::app::UserConfirmed::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
+    assert_eq!(queued_acceptances(&store, &wallet).await, 0);
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(queued_acceptances(&store, &wallet).await, 0);
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_resume_an_owed_acceptance_that_fails_stops_no_later_entry() {
+    // The journal is in attempt-ID order, which is random: worlds are made until the owed
+    // entry comes first, so the resume meets its failure before the other entry.
+    for _ in 0..40 {
+        let w = World::new();
+        let store = Arc::new(HookedStore::default());
+        let mut wallet = w
+            .wallet_on("wallet", Arc::clone(&store) as Arc<dyn StateStore>)
+            .await;
+        let mut shop = w.shop().await;
+        let first = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        let second = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        // The first is paid with its acceptance owed; the second is left in flight.
+        store.refuse_acceptances(true);
+        let paid = wallet
+            .pay_request(&first, PayOptions::default())
+            .await
+            .unwrap();
+        assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+        w.rail.next(Behaviour::Hang);
+        let PayOutcome::Pending { attempt_id } = wallet
+            .pay_request(&second, PayOptions::default())
+            .await
+            .unwrap()
+        else {
+            panic!("the second payment is in flight");
+        };
+        let order = wallet.payments().await.unwrap();
+        if order[0].attempt_id == attempt_id {
+            continue;
+        }
+        assert_eq!(order[0].stage, paykit_sdk::Stage::AcceptanceOwed);
+        // The method shows the second paid; the first's acceptance still can't be queued.
+        w.rail.settle(&attempt_id, true);
+        wallet.resume_payments().await.unwrap();
+        let second = wallet
+            .payments()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|p| p.attempt_id == attempt_id)
+            .unwrap();
+        assert!(
+            matches!(
+                second.stage,
+                paykit_sdk::Stage::RailPaid | paykit_sdk::Stage::AcceptanceOwed
+            ),
+            "{:?}",
+            second.stage
+        );
+        assert_eq!(w.rail.executions(&attempt_id), 1);
+        return;
+    }
+    panic!("no world put the owed entry first");
+}
+
+#[tokio::test]
+async fn test_acceptance_sent_earlier_is_placed_when_another_app_resolves_the_payment_done() {
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    // In flight: the call is made and the acceptance is queued.
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("in flight");
+    };
+    assert_eq!(queued_acceptances(&store, &wallet).await, 1);
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    w.rail.forget_history(&attempt_id);
+    let mut declaration = paykit_sdk::Rail::declaration(&*w.rail);
+    declaration.history = false;
+    declaration.idempotent = true;
+    declaration.idempotency_retention_ms = Some(7 * 24 * crate::common::HOUR_MS);
+    w.rail.set_declaration(declaration);
+    w.clock.advance_ms(4201 * 1000);
+    let mut phone = w.wallet("phone").await;
+    phone
+        .resolve_attempt(
+            &obligation,
+            attempt_id,
+            paykit_sdk::Resolution::Done,
+            pubky_switch_client::app::UserConfirmed::new(),
+        )
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    // The wallet's write placing the acceptance meets a conflict: the entry waits.
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::Conflict,
+            current: serde_json::Value::Null,
+        });
+    wallet.resume_payments().await.unwrap();
+    // The next resume places the acceptance queued before, and finishes.
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
+    let value = crate::outcome_record::record_value(&mut wallet, &request)
+        .await
+        .unwrap();
+    assert!(!value["response"].is_null(), "{value}");
+    assert_eq!(queued_acceptances(&store, &wallet).await, 1);
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}

@@ -222,6 +222,45 @@ async fn test_restore_paid_attempt_after_the_backup_writes_and_sends_its_proof()
 }
 
 #[tokio::test]
+async fn test_restore_paid_attempt_whose_outcome_write_fails_is_written_at_a_resume() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let (attempt_id, backup) =
+        paid_after_the_backup(&w, &mut wallet, &request, PayOptions::default()).await;
+    drop(wallet);
+    let mut app = restored(&w, &backup).await;
+    // The rebuilt payment's outcome batch can't connect.
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    let report = app.reconcile().await.unwrap();
+    assert!(
+        matches!(
+            report.resolved.as_slice(),
+            [PayOutcome::PaidOutcomeUnwritten { .. }]
+        ),
+        "{report:?}"
+    );
+    // The journal keeps it paid, with its proof, and a resume writes the outcome.
+    let payments = app.payments().await.unwrap();
+    assert_eq!(payments.len(), 1);
+    assert_eq!(payments[0].stage, paykit_sdk::Stage::RailPaid);
+    app.resume_payments().await.unwrap();
+    assert_eq!(
+        app.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
+    assert!(record_holds_proof(&app, &request).await);
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}
+
+#[tokio::test]
 async fn test_restore_paid_attempt_to_a_single_use_list_endpoint_sends_its_proof() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;

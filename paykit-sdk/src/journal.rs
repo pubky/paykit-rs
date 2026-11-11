@@ -486,6 +486,12 @@ impl JournalEntry {
         )
     }
 
+    /// The request's acceptance is this entry's to send and place: owed, queued or not yet
+    /// (Paykit spec 7.2 step 2). Placing a released one again is a no-op.
+    pub(crate) fn may_place_acceptance(&self) -> Result<bool> {
+        Ok(self.acceptance_owed && self.request_hash()?.is_some())
+    }
+
     /// Whether the entry owes an acceptance it hasn't released yet: a one-time request's,
     /// for a payment made.
     pub(crate) fn owes_acceptance(&self) -> Result<bool> {

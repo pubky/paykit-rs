@@ -22,7 +22,7 @@ use crate::common::{draft, request_from, World};
 const INVALID: &[u8] = b"{\"not\":\"an activity record\"}";
 
 /// Alice's payer record of bob's request `request`.
-fn payer_record(request: &RequestRef) -> RecordTarget {
+pub(crate) fn payer_record(request: &RequestRef) -> RecordTarget {
     let collection = Collection::PayerActivity;
     RecordTarget::new(
         SwitchCollection::new(collection.name(), collection.policy(None)),
@@ -134,7 +134,10 @@ async fn claim_outcome(wallet: &mut Paykit, attempt_id: &AttemptId) -> Outcome {
 }
 
 /// The payer record the switch holds, as JSON, read again from the switch.
-async fn record_value(wallet: &mut Paykit, request: &RequestRef) -> Option<serde_json::Value> {
+pub(crate) async fn record_value(
+    wallet: &mut Paykit,
+    request: &RequestRef,
+) -> Option<serde_json::Value> {
     let held = wallet
         .app_mut()
         .read_record(&payer_record(request))
