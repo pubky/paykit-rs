@@ -530,3 +530,191 @@ async fn test_certificate_issued_ahead_of_the_apps_clock_keeps_its_acceptance_ba
         paykit_sdk::Stage::Finished
     );
 }
+
+#[tokio::test]
+async fn test_certificate_restored_lost_acceptance_not_signed_again_without_pay() {
+    // In flight, its acceptance released, the payment is backed up while the app holds
+    // `pay`; the app is then renewed to `contacts`. A restore of that backup on a fresh
+    // store, with no outbox, finds the payment paid and its acceptance unknown to the
+    // client, so lost: no new one is signed under a certificate without `pay`, and the
+    // entry waits, backed up and restored as it is. Renewed to `pay` again, the outcome is
+    // written once, with the acceptance and the proof.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let me = wallet.app_id();
+    let mut shop = w.shop().await;
+    let request = crate::common::request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::common::draft("1", w.clock.now_ms()),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let paykit_sdk::PayOutcome::Pending { attempt_id } = wallet
+        .pay_request(&request, paykit_sdk::PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("in flight");
+    };
+    let backup = wallet.backup().await.unwrap();
+    let first = wallet.app().cert().clone();
+    let reduced = renew(&w, me, &AppScopes::new().contacts().build().unwrap(), 1_000);
+    let _ = wallet.receive(None).await;
+    list(&w, me, &first, &reduced);
+    wallet.receive(None).await.unwrap();
+    drop(wallet);
+    w.rail.settle(&attempt_id, true);
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    restored.receive(None).await.unwrap();
+    assert_eq!(restored.app().cert().hash(), reduced.hash());
+    let waiting = vec![paykit_sdk::PayOutcome::PaidOutcomeUnwritten { attempt_id }];
+    assert_eq!(restored.resume_payments().await.unwrap(), waiting);
+    assert_eq!(restored.resume_payments().await.unwrap(), waiting);
+    assert_eq!(
+        restored.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::RailPaid
+    );
+    // The backup still takes the entry, and a restore of it reads.
+    let again = restored.backup().await.unwrap();
+    let copy = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &again,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        copy.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::RailPaid
+    );
+    drop(copy);
+    let regranted = renew(&w, me, &AppScopes::new().pay().build().unwrap(), 2_000);
+    let _ = restored.receive(None).await;
+    list(&w, me, &reduced, &regranted);
+    restored.receive(None).await.unwrap();
+    assert_eq!(restored.app().cert().hash(), regranted.hash());
+    let paid = restored.resume_payments().await.unwrap();
+    assert!(
+        matches!(paid.as_slice(), [paykit_sdk::PayOutcome::Paid { .. }]),
+        "{paid:?}"
+    );
+    let record = restored.request(&request).await.unwrap().record;
+    let held = restored
+        .app()
+        .shared_record(&record)
+        .await
+        .unwrap()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    assert!(!value["response"].is_null(), "{value}");
+    assert!(!value["proof"].is_null(), "{value}");
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_certificate_acceptance_kept_under_an_expired_certificate_backs_up() {
+    // Paid under the first certificate; renewed (still `pay`); the clock passes the first
+    // certificate's expiry. The acceptance kept under the expired one still backs up.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let me = wallet.app_id();
+    let mut shop = w.shop().await;
+    let request = crate::common::request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::common::draft("1", w.clock.now_ms()),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_request(&request, paykit_sdk::PayOptions::default())
+        .await
+        .unwrap();
+    assert!(
+        matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
+        "{paid:?}"
+    );
+    let old = wallet.app().cert().clone();
+    let renewed = renew(&w, me, &AppScopes::new().pay().build().unwrap(), 1_000);
+    let _ = wallet.receive(None).await;
+    list(&w, me, &old, &renewed);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().cert().hash(), renewed.hash());
+    let past = old.expires_at() - w.clock.now_ms() + 1;
+    assert!(renewed.expires_at() > old.expires_at() + 1);
+    w.clock.advance_ms(past);
+    assert!(old.expired_at(w.clock.now_ms()) && !renewed.expired_at(w.clock.now_ms()));
+    let backup = wallet.backup().await.unwrap();
+    let restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        restored.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
+}
+
+#[tokio::test]
+async fn test_certificate_renewal_dropping_pay_makes_no_rail_call() {
+    // A dispatch's answer is lost, so a resume would repeat it on an idempotent method. The
+    // app is renewed to `contacts` first: no path calls the payment method again, the
+    // attempt stays open, and nothing moves.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let me = wallet.app_id();
+    let mut shop = w.shop().await;
+    let request = crate::common::request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::common::draft("1", w.clock.now_ms()),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    let mut declaration = Rail::declaration(&*w.rail);
+    declaration.history = false;
+    declaration.idempotent = true;
+    declaration.idempotency_retention_ms = Some(7 * 24 * crate::common::HOUR_MS);
+    w.rail.set_declaration(declaration);
+    w.rail.next(paykit_sdk::rail::Behaviour::LoseAnswer);
+    let outcome = wallet
+        .pay_request(&request, paykit_sdk::PayOptions::default())
+        .await;
+    let attempt_id = wallet.payments().await.unwrap()[0].attempt_id;
+    assert!(
+        !matches!(outcome, Ok(paykit_sdk::PayOutcome::Paid { .. })),
+        "{outcome:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    let old = wallet.app().cert().clone();
+    let reduced = renew(&w, me, &AppScopes::new().contacts().build().unwrap(), 1_000);
+    let _ = wallet.receive(None).await;
+    list(&w, me, &old, &reduced);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().cert().hash(), reduced.hash());
+    let _ = wallet.resume_payments().await;
+    let _ = wallet.reconcile().await;
+    let _ = wallet.resume_payments().await;
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1, "a rail call without pay");
+    assert_ne!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
+}

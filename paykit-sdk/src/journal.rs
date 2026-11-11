@@ -415,8 +415,10 @@ impl JournalEntry {
     ///   sender the payee, its hash the request hash the entry pays, a `payment_request`,
     ///   and its amount, payment reference and label the entry's.
     /// - The destination's carrier: the list message or app record, verified again.
-    /// - The acceptance this app signed: read as its own message, under `own_cert`, to the
-    ///   payee, an acceptance of that request with the `msg_id` the entry keeps.
+    /// - The acceptance this app signed: read as its own message to the payee, under the
+    ///   certificate it was signed under ([`JournalEntry::acceptance_message`]), `own_cert`
+    ///   only for an entry that kept none, an acceptance of that request with the `msg_id`
+    ///   the entry keeps.
     ///
     /// A corrupt store for any mismatch.
     pub(crate) fn check_restored(
