@@ -143,7 +143,7 @@ impl Paykit {
     /// The client's errors; the rail's errors.
     pub async fn reconcile(&mut self) -> Result<ReconcileReport> {
         self.refresh_own()?;
-        self.app.list_collections().await?;
+        self.list_records().await?;
         // After a restore, the counterparties of the open requests the records now show are
         // asked to re-send from the backup's cursor time, once (`hold.rs`, Paykit spec 7.2);
         // what isn't sent now goes at the next receive.
@@ -406,6 +406,7 @@ impl Paykit {
         _confirmed: UserConfirmed,
     ) -> Result<()> {
         self.refresh_own()?;
+        self.records_known().await?;
         let read = self
             .app
             .read_claim(obligation)
@@ -572,7 +573,7 @@ impl Paykit {
             .await?
             .is_some_and(|hold| !hold.asks_queued);
         if asks_owed {
-            self.app.list_collections().await?;
+            self.list_records().await?;
             self.queue_restore_asks().await?;
             // Queued: what isn't sent now goes at the next receive.
             let _ = self.send_asks().await;

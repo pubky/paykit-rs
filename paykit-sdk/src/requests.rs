@@ -333,6 +333,7 @@ impl Paykit {
     ///
     /// A store failure, also one reading a single record: the list is never partial.
     pub async fn payee_activity(&self) -> Result<Vec<PayeeActivity>> {
+        self.refuse_while_unlisted().await?;
         let mut out = Vec::new();
         for held in self
             .app
@@ -359,6 +360,7 @@ impl Paykit {
     /// [`Refusal::NotFound`] for a record without a proof; the rail's errors.
     pub async fn verify_payment(&mut self, record: &[u8; 32]) -> Result<Option<u64>> {
         self.refresh_own()?;
+        self.records_known().await?;
         let (_, bound) = self.payee_record(record).await?;
         let proof_stored = bound.proof.as_ref().ok_or(Refusal::NotFound)?;
         let Body::PaymentProof(proof) = proof_stored.body() else {
@@ -395,6 +397,7 @@ impl Paykit {
     /// As [`Paykit::verify_payment`]; the client's errors.
     pub async fn confirm_payment(&mut self, record: &[u8; 32]) -> Result<Option<String>> {
         self.refresh_own()?;
+        self.records_known().await?;
         if self.verify_payment(record).await?.is_none() {
             return Ok(None);
         }
@@ -451,6 +454,7 @@ impl Paykit {
         reason: Option<String>,
     ) -> Result<String> {
         self.refresh_own()?;
+        self.records_known().await?;
         self.require_payee()?;
         let mut tries = 0;
         let msg_id = loop {
@@ -612,6 +616,7 @@ impl Paykit {
     ///
     /// A store failure.
     pub async fn requests(&self) -> Result<Vec<RequestView>> {
+        self.refuse_while_unlisted().await?;
         let own = self.identity();
         let mut out = Vec::new();
         for held in self
@@ -646,6 +651,7 @@ impl Paykit {
     ///
     /// [`Refusal::NotFound`]; a store failure.
     pub async fn request(&self, request: &RequestRef) -> Result<RequestView> {
+        self.refuse_while_unlisted().await?;
         let target = ActivityTarget::payer(natural_key::request_record(
             &request.payee,
             &request.request_hash,
@@ -767,6 +773,7 @@ impl Paykit {
         reason: Option<String>,
     ) -> Result<String> {
         self.refresh_own()?;
+        self.records_known().await?;
         self.answer_request(request, false, reason).await
     }
 
@@ -782,6 +789,7 @@ impl Paykit {
         reason: Option<String>,
     ) -> Result<String> {
         self.refresh_own()?;
+        self.records_known().await?;
         self.answer_request(request, true, reason).await
     }
 

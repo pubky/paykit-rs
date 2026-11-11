@@ -24,7 +24,7 @@ use paykit_lib::records::ActivityRecord;
 use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{Refusal, Result};
 use crate::paykit::Paykit;
 use crate::protocol::QueuedAsk;
 use crate::requests::{cancelled, rejected, RequestStatus};
@@ -105,6 +105,53 @@ impl Paykit {
         self.local_commit(tx).await
     }
 
+    /// The shared records known, not an empty copy: after a restore the client's copy is
+    /// empty until they are listed again (Switch spec 12.4 step 2.1), so while the restore's
+    /// mark is set they are listed first. A listing that fails refuses the call as not now:
+    /// a record's absence then decides nothing, never "gone".
+    pub(crate) async fn records_known(&mut self) -> Result<()> {
+        if self
+            .local_get::<bool>(key::RECORDS_UNLISTED)
+            .await?
+            .is_none()
+        {
+            return Ok(());
+        }
+        self.list_records().await.map_err(|_| unlisted())
+    }
+
+    /// List every collection the app reads, and clear the restore's mark.
+    pub(crate) async fn list_records(&mut self) -> Result<()> {
+        self.app.list_collections().await?;
+        self.records_listed().await
+    }
+
+    /// The shared records were listed (by [`Paykit::list_records`], or the client's own
+    /// listing at a receive): the restore's mark goes.
+    pub(crate) async fn records_listed(&mut self) -> Result<()> {
+        if self
+            .local_get::<bool>(key::RECORDS_UNLISTED)
+            .await?
+            .is_some()
+        {
+            self.local_delete(key::RECORDS_UNLISTED).await?;
+        }
+        Ok(())
+    }
+
+    /// For a call that only reads: refused as not now while the records aren't listed since
+    /// a restore, rather than showing the empty copy as the records.
+    pub(crate) async fn refuse_while_unlisted(&self) -> Result<()> {
+        if self
+            .local_get::<bool>(key::RECORDS_UNLISTED)
+            .await?
+            .is_some()
+        {
+            return Err(unlisted());
+        }
+        Ok(())
+    }
+
     /// Queue, once after a restore, a `resend_request` to every counterparty with an open
     /// request, from the restore's re-send time; [`Paykit::receive`] sends them.
     pub(crate) async fn queue_restore_asks(&mut self) -> Result<()> {
@@ -142,4 +189,12 @@ impl Paykit {
         tx.put(key::RESTORE_HOLD, &hold)?;
         self.local_commit(tx).await
     }
+}
+
+/// The refusal while the shared records aren't listed since a restore.
+fn unlisted() -> crate::error::PaykitError {
+    Refusal::NotNow(
+        "Switch spec 12.4 step 2.1: the shared records aren't listed since the restore".into(),
+    )
+    .into()
 }

@@ -335,7 +335,10 @@ pub(crate) fn restore_paykit_layer(
         let attempt = match family {
             // A hold, or a user's confirmation of one, belongs to a restore before: this one
             // sets its own (`hold.rs`).
-            StateKey::RestoreHold | StateKey::HoldConfirmed(_) => continue,
+            // So does the mark of records not yet listed: this restore sets its own.
+            StateKey::RestoreHold | StateKey::HoldConfirmed(_) | StateKey::RecordsUnlisted => {
+                continue
+            }
             StateKey::Journal(attempt) => attempt,
             StateKey::CursorTime => {
                 cursor_time_ms = state::decode::<u64>(&value).map_err(|_| unread())?;
@@ -428,6 +431,11 @@ pub(crate) fn restore_paykit_layer(
     let hold = state::local_put(key::RESTORE_HOLD, &RestoreHold::of(cursor_time_ms))
         .map_err(|_| String::from("the restore's hold can't be written"))?;
     writes.push(hold);
+    // The client's copy of the shared records is empty until they are listed again: until
+    // then a record's absence means nothing (`Paykit::records_known`).
+    let unlisted = state::local_put(key::RECORDS_UNLISTED, &true)
+        .map_err(|_| String::from("the restore's records mark can't be written"))?;
+    writes.push(unlisted);
     Ok(writes)
 }
 

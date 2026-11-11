@@ -830,6 +830,7 @@ impl Paykit {
         _confirmed: pubky_switch_client::app::UserConfirmed,
     ) -> crate::error::Result<()> {
         self.refresh_own()?;
+        self.records_known().await?;
         let own = self.identity();
         let target = list_target(payee, app_id);
         let record_key = self.app.record_key(&target)?;

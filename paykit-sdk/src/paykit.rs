@@ -279,7 +279,14 @@ impl Paykit {
         check_orphan_window(&config, rail.as_ref())?;
         let protocol = Self::new_protocol(&rail);
         let app = App::load(env.clone(), protocol.clone(), config.app.clone(), app_id).await?;
-        Self::assemble(app, env, protocol, config, rail, timer)
+        let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
+        // A restore clamps its cursor time after its commit: a crash between the two leaves
+        // it for the next load (`Paykit::bound_restored_cursor_time`, idempotent). Nothing is
+        // written under a certificate Paykit refuses.
+        if paykit.certificate_refused().is_none() {
+            paykit.bound_restored_cursor_time().await?;
+        }
+        Ok(paykit)
     }
 
     /// Restore from a backup (Switch spec 12.4): the client's restore, which installs
@@ -477,6 +484,9 @@ impl Paykit {
             });
         }
         self.refresh_own()?;
+        // The client lists the shared records at its read when a listing is owed, a
+        // restore's included: the restore's mark goes (`Paykit::records_known`).
+        self.records_listed().await?;
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1).
         self.place_kept_cancellations().await?;

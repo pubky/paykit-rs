@@ -1504,3 +1504,131 @@ async fn test_restore_released_acceptance_delivered_before_the_backup_changes_on
     assert_eq!(acceptances_taken(&mut shop).await, 0);
     assert_eq!(w.rail.all_executions().len(), 1);
 }
+
+#[tokio::test]
+async fn test_restore_records_listed_before_any_call_reads_them() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.requests().await.unwrap().len(), 1);
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut app = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    // The client's copy is empty until the records are listed: a view of them is not now,
+    // rather than empty.
+    let refused = app.requests().await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{refused:?}"
+    );
+    // A resume lists them first.
+    app.resume_payments().await.unwrap();
+    assert_eq!(app.requests().await.unwrap().len(), 1);
+}
+
+/// Alice's wallet restored bare from `backup`: nothing read or listed yet.
+async fn restored_bare(w: &World, backup: &paykit_sdk::PaykitBackup) -> Paykit {
+    Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_restore_bare_then_resume_sends_no_acceptance_the_record_holds() {
+    // The backup is taken while the payment is in flight; the lost device then finishes it,
+    // the record holding the acceptance and the proof. A bare restore that resumes first
+    // lists the records, finds the acceptance placed, and sends no other.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("in flight");
+    };
+    assert_eq!(acceptances_taken(&mut shop).await, 1);
+    let backup = wallet.backup().await.unwrap();
+    w.rail.settle(&attempt_id, true);
+    wallet.resume_payments().await.unwrap();
+    assert!(record_holds_proof(&wallet, &request).await);
+    drop(wallet);
+    let mut app = restored_bare(&w, &backup).await;
+    app.resume_payments().await.unwrap();
+    assert_eq!(acceptances_taken(&mut shop).await, 0);
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_restore_cursor_time_left_unclamped_by_a_crash_is_clamped_at_load() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let base = store();
+    let mut app = Paykit::restore(
+        w.env(&w.alice, Arc::clone(&base)),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    let app_id = app.app_id();
+    // As a crash after the restore's commit and before its clamp would leave it: the cursor
+    // time and the hold's re-send time a year ahead.
+    let ahead = w.clock.now_ms() + 365 * 24 * crate::common::HOUR_MS;
+    let hold = app.app().protocol_get(b"rh").await.unwrap().unwrap();
+    let mut hold: serde_json::Value = serde_json::from_slice(&hold).unwrap();
+    hold["d"]["resend_from_ms"] = serde_json::json!(ahead);
+    app.app_mut()
+        .protocol_commit(&[
+            pubky_switch_client::app::LocalWrite::Put {
+                key: b"ct".to_vec(),
+                value: serde_json::to_vec(&kept(serde_json::json!(ahead))).unwrap(),
+            },
+            pubky_switch_client::app::LocalWrite::Put {
+                key: b"rh".to_vec(),
+                value: serde_json::to_vec(&hold).unwrap(),
+            },
+        ])
+        .await
+        .unwrap();
+    drop(app);
+    let app = w
+        .load_on_clock(&w.alice, Arc::clone(&base), app_id, Arc::clone(&w.clock))
+        .await;
+    let read = |bytes: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
+    let bound = w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+    let cursor = read(app.app().protocol_get(b"ct").await.unwrap().unwrap());
+    assert!(cursor["d"].as_u64().unwrap() <= bound, "{cursor}");
+    let hold = read(app.app().protocol_get(b"rh").await.unwrap().unwrap());
+    assert!(
+        hold["d"]["resend_from_ms"].as_u64().unwrap() <= w.clock.now_ms(),
+        "{hold}"
+    );
+}

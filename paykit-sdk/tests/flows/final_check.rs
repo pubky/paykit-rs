@@ -1878,3 +1878,41 @@ async fn test_crash_finishing_an_owed_acceptance_queues_it_once() {
 async fn test_crash_in_a_users_done_on_a_pending_payment_queues_its_acceptance_once() {
     crash_at_every_commit(true).await;
 }
+
+#[tokio::test]
+async fn test_acceptance_owed_restored_bare_is_placed_at_the_first_resume() {
+    // Paid with the acceptance owed, then backed up; a bare restore resumes first. The
+    // records are listed before the owed acceptance is placed: it goes into the record the
+    // switch holds, and only then does the entry finish.
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    let mut wallet = reload(&w, &store, app_id).await;
+    store.refuse_acceptances(true);
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    store.refuse_acceptances(false);
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut app = Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    app.resume_payments().await.unwrap();
+    assert_eq!(
+        app.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
+    let value = crate::outcome_record::record_value(&mut app, &request)
+        .await
+        .unwrap();
+    assert!(!value["response"].is_null(), "{value}");
+    assert!(!value["proof"].is_null(), "{value}");
+}
