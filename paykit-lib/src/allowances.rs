@@ -24,6 +24,7 @@ use crate::error::{ensure, invalid, Error, Result};
 use crate::identifiers::{AllowanceId, AttemptId, PaymentEndpointIdentifier};
 use crate::json::{bad, check_v1, parse_object, Obj};
 use crate::periods::{AnchoredRule, Unit};
+use crate::records::{Member, Shape, UnknownMembers};
 
 /// The window an executor batch is dated in: its entry's `at` and at most 60 s after
 /// (Paykit spec 8.3).
@@ -607,6 +608,23 @@ pub struct CompactedFailed {
     pub value: Decimal,
 }
 
+/// The most items a ledger's `totals.v01` holds (Paykit wire 5.5).
+pub const MAX_V01_USAGE: usize = 64;
+
+/// An item of a ledger's `totals.v01` (Paykit spec 16, Paykit wire 5.5): `count` payments
+/// v0.1 made under the Allowance, totalling `spent`, made at `at`. It counts as `count` `done`
+/// entries of `spent` in all at `at`, in every limit. Only the migration from v0.1 writes
+/// it, once, and never an executor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct V01Usage {
+    /// When the payments were made, in Unix milliseconds.
+    pub at: u64,
+    /// The amount they total, in the terms' asset.
+    pub spent: Decimal,
+    /// How many payments.
+    pub count: u64,
+}
+
 /// An `allowance_ledgers` record value (Paykit wire 5.5).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ledger {
@@ -623,7 +641,68 @@ pub struct Ledger {
     pub count: u64,
     /// `totals.failed`: compacted `failed` entries.
     pub failed: Vec<CompactedFailed>,
+    /// `totals.v01`: v0.1 usage under the Allowance, at most 64 items; empty when absent.
+    pub v01: Vec<V01Usage>,
+    /// The members the writer doesn't know, kept as read (Paykit wire 5).
+    pub unknown: UnknownMembers,
 }
+
+static ENTRY_SHAPE: Shape = Shape {
+    name: "ledger entry",
+    id: &["attempt_id"],
+    members: &[
+        ("obligation", Member::Leaf),
+        ("attempt_id", Member::Leaf),
+        ("value", Member::Leaf),
+        ("asset", Member::Leaf),
+        ("at", Member::Leaf),
+        ("outcome", Member::Leaf),
+    ],
+};
+
+static FAILED_SHAPE: Shape = Shape {
+    name: "totals.failed item",
+    id: &["attempt_id"],
+    members: &[
+        ("obligation", Member::Leaf),
+        ("attempt_id", Member::Leaf),
+        ("value", Member::Leaf),
+    ],
+};
+
+static V01_SHAPE: Shape = Shape {
+    name: "totals.v01 item",
+    id: &["at", "spent", "count"],
+    members: &[
+        ("at", Member::Leaf),
+        ("spent", Member::Leaf),
+        ("count", Member::Leaf),
+    ],
+};
+
+static TOTALS_SHAPE: Shape = Shape {
+    name: "totals",
+    id: &[],
+    members: &[
+        ("spent", Member::Leaf),
+        ("count", Member::Leaf),
+        ("failed", Member::Array(&FAILED_SHAPE)),
+        ("v01", Member::Array(&V01_SHAPE)),
+    ],
+};
+
+/// A ledger value (Paykit wire 5.5).
+static LEDGER_SHAPE: Shape = Shape {
+    name: "allowance_ledgers",
+    id: &[],
+    members: &[
+        ("v", Member::Leaf),
+        ("counterparty", Member::Leaf),
+        ("allowance_id", Member::Leaf),
+        ("entries", Member::Array(&ENTRY_SHAPE)),
+        ("totals", Member::Object(&TOTALS_SHAPE)),
+    ],
+};
 
 const LEDGER: &str = "Paykit wire 5.5: allowance_ledgers";
 
@@ -652,6 +731,15 @@ struct TotalsOut {
     count: u64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     failed: Vec<FailedOut>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    v01: Vec<V01Out>,
+}
+
+#[derive(Serialize)]
+struct V01Out {
+    at: String,
+    count: u64,
+    spent: String,
 }
 
 #[derive(Serialize)]
@@ -672,6 +760,8 @@ impl Ledger {
             spent: None,
             count: 0,
             failed: Vec::new(),
+            v01: Vec::new(),
+            unknown: UnknownMembers::default(),
         }
     }
 
@@ -712,8 +802,8 @@ impl Ledger {
                 outcome,
             });
         }
-        let (spent, count, failed) = match obj.opt_obj("totals")? {
-            None => (None, 0, Vec::new()),
+        let (spent, count, failed, v01) = match obj.opt_obj("totals")? {
+            None => (None, 0, Vec::new(), Vec::new()),
             Some(t) => {
                 let spent = match t.req_str("spent")? {
                     "" => None,
@@ -728,7 +818,21 @@ impl Ledger {
                         value: Decimal::parse(f.req_str("value")?)?,
                     });
                 }
-                (spent, t.req_int("count")?, failed)
+                let items = t.opt_arr("v01")?.map_or(&[][..], Vec::as_slice);
+                ensure(
+                    items.len() <= MAX_V01_USAGE,
+                    "Paykit wire 5.5: totals.v01 holds at most 64 items",
+                )?;
+                let mut v01 = Vec::with_capacity(items.len());
+                for item in items {
+                    let u = Obj::of(item, LEDGER, "totals.v01")?;
+                    v01.push(V01Usage {
+                        at: u.req_time("at")?,
+                        spent: Decimal::parse(u.req_str("spent")?)?,
+                        count: u.req_int("count")?,
+                    });
+                }
+                (spent, t.req_int("count")?, failed, v01)
             }
         };
         let ledger = Self {
@@ -738,6 +842,8 @@ impl Ledger {
             spent,
             count,
             failed,
+            v01,
+            unknown: UnknownMembers::read(map, &LEDGER_SHAPE),
         };
         ledger.check_attempts_once()?;
         Ok(ledger)
@@ -766,10 +872,12 @@ impl Ledger {
         Ok(())
     }
 
-    /// Write the ledger value: every entry with its `outcome` (`null` while unknown), and
+    /// Write the ledger value: every entry with its `outcome` (`null` while unknown);
     /// `totals` with `spent` `""` for a ledger never compacted, else in the normalized
-    /// spelling of a computed amount (Paykit wire 1.2), and `failed` left out when empty. The value is read back by [`Ledger::from_json`] before it is handed out, so
-    /// the writer never writes a ledger its readers refuse.
+    /// spelling of a computed amount (Paykit wire 1.2), and `failed` and `v01` left out when
+    /// empty; and the members it doesn't know as it read them (Paykit wire 5). The value is
+    /// read back by [`Ledger::from_json`] before it is handed out, so the writer never writes
+    /// a ledger its readers refuse.
     ///
     /// # Errors
     ///
@@ -780,8 +888,14 @@ impl Ledger {
         let json = self.json_unchecked()?;
         let back = Self::from_json(&json).map_err(Error::into_validation)?;
         // The value, and the bytes: the wire fixes the spelling of a computed amount, which a
-        // comparison of values alone, by scaled amount, wouldn't see.
-        if &back != self || back.json_unchecked()? != json {
+        // comparison of values alone, by scaled amount, wouldn't see. The unknown members are
+        // compared as written: those of an object the ledger no longer holds, such as a
+        // compacted entry, are left out with it.
+        let known = |l: &Ledger| Ledger {
+            unknown: UnknownMembers::default(),
+            ..l.clone()
+        };
+        if known(&back) != known(self) || back.json_unchecked()? != json {
             return Err(Error::Validation(format!(
                 "{LEDGER}: the ledger doesn't write as itself"
             )));
@@ -821,14 +935,26 @@ impl Ledger {
                         value: f.value.as_str().into(),
                     })
                     .collect(),
+                v01: self
+                    .v01
+                    .iter()
+                    .map(|u| V01Out {
+                        at: rfc3339(u.at),
+                        count: u.count,
+                        spent: u.spent.as_str().into(),
+                    })
+                    .collect(),
             },
         };
-        serde_json::to_vec(&out).map_err(|_| Error::Invalid(format!("{LEDGER}: can't be written")))
+        let json = serde_json::to_vec(&out)
+            .map_err(|_| Error::Invalid(format!("{LEDGER}: can't be written")))?;
+        self.unknown.write_into(json, &LEDGER_SHAPE)
     }
 
     /// "A valid ledger" against the terms (Paykit wire 5.5): the terms are valid (Paykit wire
     /// 4.15), every entry's asset is the terms' asset and its `at` a time the grammar writes,
-    /// and each attempt appears once among the entries and `totals.failed`.
+    /// `totals.v01` holds at most 64 items, each `at` a time the grammar writes, and each
+    /// attempt appears once among the entries and `totals.failed`.
     /// Usage, compaction and the check of a newer version refuse a ledger that isn't valid,
     /// a typed one included, so they never count an attempt twice.
     ///
@@ -847,6 +973,14 @@ impl Ledger {
         ensure(
             self.entries.iter().all(|e| e.at <= MAX_TIME_MS),
             "Paykit wire 5.5: a ledger entry's at past the last time Switch wire 1.6 writes",
+        )?;
+        ensure(
+            self.v01.len() <= MAX_V01_USAGE,
+            "Paykit wire 5.5: totals.v01 holds at most 64 items",
+        )?;
+        ensure(
+            self.v01.iter().all(|u| u.at <= MAX_TIME_MS),
+            "Paykit wire 5.5: a totals.v01 item's at past the last time Switch wire 1.6 writes",
         )?;
         self.check_attempts_once()
     }
@@ -993,7 +1127,8 @@ fn in_limit(period: &LimitPeriod, entry_at: u64, t: u64) -> Result<bool> {
 /// Usage at time `t` (Paykit spec 8.3, Paykit wire 5.5): every entry counted by
 /// [`counts`] with its attempt's claim from `claims`, for every period limit and the lifetime
 /// amount. A `totals.failed` item counts like an entry's own `failed`, in the lifetime amount
-/// only: it adds its value while its claim shows `done`.
+/// only: it adds its value while its claim shows `done`. A `totals.v01` item counts as
+/// `count` `done` entries of `spent` in all at its `at`, in every limit.
 ///
 /// # Errors
 ///
@@ -1026,6 +1161,15 @@ pub fn usage(
     for item in &ledger.failed {
         if claims.get(&item.attempt_id) == Some(&ClaimState::Done) {
             lifetime = add(lifetime, item.value.scaled())?;
+        }
+    }
+    for item in &ledger.v01 {
+        lifetime = add(lifetime, item.spent.scaled())?;
+        for (limit, usage) in terms.period_limits.iter().zip(periods.iter_mut()) {
+            if in_limit(&limit.period, item.at, t)? {
+                usage.0 = add(usage.0, item.spent.scaled())?;
+                usage.1 = usage.1.checked_add(item.count).ok_or_else(overflow)?;
+            }
         }
     }
     for entry in &ledger.entries {
@@ -1211,6 +1355,8 @@ pub fn compact(terms: &AllowanceTerms, ledger: &Ledger, now: u64) -> Result<Opti
         spent: Some(Decimal::from_scaled(spent)),
         count,
         failed,
+        v01: ledger.v01.clone(),
+        unknown: ledger.unknown.clone(),
     }))
 }
 
@@ -1222,8 +1368,8 @@ pub fn compact(terms: &AllowanceTerms, ledger: &Ledger, now: u64) -> Result<Opti
 /// `done`; or it was compacted, old enough at `newer_time`: a `done` one into the totals, and
 /// one without an outcome or `failed` into `totals.failed` with the same obligation and
 /// value, or into the totals. Every held `totals.failed` item is still there unchanged or left
-/// into the totals, and `spent` and `count` grew by at least what left into them. New
-/// entries are allowed.
+/// into the totals, every held `totals.v01` item is still there unchanged, and `spent` and
+/// `count` grew by at least what left into them. New entries are allowed.
 ///
 /// # Errors
 ///
@@ -1306,6 +1452,14 @@ pub fn check_successor(
         }
         into_spent = add(into_spent, item.value.scaled())?;
         into_count = into_count.checked_add(1).ok_or_else(overflow)?;
+    }
+    // Each held totals.v01 item, as many times as held: only the migration writes them, and
+    // none leaves.
+    for item in &held.v01 {
+        let times = |l: &Ledger| l.v01.iter().filter(|u| *u == item).count();
+        if times(newer) < times(held) {
+            return refuse("changes or drops a totals.v01 item");
+        }
     }
     let spent_needed = add(held.spent_scaled(), into_spent)?;
     let count_needed = held.count.checked_add(into_count).ok_or_else(overflow)?;
@@ -1959,6 +2113,130 @@ mod tests {
         let mut back = before.clone();
         back.entries[0].outcome = Some(EntryOutcome::Failed);
         assert!(check_successor(&terms, &before, &back, now).is_err());
+    }
+
+    fn v01(at: &str, spent: &str, count: u64) -> V01Usage {
+        V01Usage {
+            at: t(at),
+            spent: Decimal::parse(spent).unwrap(),
+            count,
+        }
+    }
+
+    #[test]
+    fn test_ledger_v01_counts_in_every_limit() {
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let mut l = ledger(Vec::new());
+        // In the period of the evaluation time, and one before it.
+        l.v01 = vec![
+            v01("2026-01-15T00:00:00.000Z", "0.05", 1),
+            v01("2026-02-01T00:00:00.000Z", "0.02", 2),
+        ];
+        let u = usage(&terms, &l, &HashMap::new(), t("2026-02-10T00:00:00.000Z")).unwrap();
+        assert_eq!(u.lifetime().as_str(), "0.07");
+        assert_eq!(u.periods()[0].amount().as_str(), "0.02");
+        assert_eq!(u.periods()[0].count(), 2);
+        check_limits(&terms, &u, &Decimal::parse("0.01").unwrap()).unwrap();
+        // Without the items, nothing counts.
+        let empty = usage(
+            &terms,
+            &ledger(Vec::new()),
+            &HashMap::new(),
+            t("2026-02-10T00:00:00.000Z"),
+        )
+        .unwrap();
+        assert_eq!(empty.lifetime().as_str(), "0");
+        // Count: a third v0.1 payment fills the period's count limit.
+        l.v01[1].count = 3;
+        let u = usage(&terms, &l, &HashMap::new(), t("2026-02-10T00:00:00.000Z")).unwrap();
+        assert_eq!(
+            check_limits(&terms, &u, &Decimal::parse("0.001").unwrap()),
+            Err(LimitKind::PeriodCount)
+        );
+    }
+
+    #[test]
+    fn test_ledger_v01_reads_writes_and_bounds() {
+        let mut l = ledger(Vec::new());
+        l.v01 = vec![v01("2026-01-15T00:00:00Z", "0.05", 1)];
+        let json = l.to_json().unwrap();
+        let back = Ledger::from_json(&json).unwrap();
+        assert_eq!(back, l);
+        let value: Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(
+            value["totals"]["v01"],
+            json!([{ "at": "2026-01-15T00:00:00.000Z", "count": 1, "spent": "0.05" }])
+        );
+        // Left out when empty.
+        let plain: Value = serde_json::from_slice(&ledger(Vec::new()).to_json().unwrap()).unwrap();
+        assert!(plain["totals"].get("v01").is_none());
+        // At most 64 items; each at and spent parse.
+        let mut many = value.clone();
+        many["totals"]["v01"] = Value::Array(vec![value["totals"]["v01"][0].clone(); 65]);
+        assert!(Ledger::from_map(many.as_object().unwrap()).is_err());
+        let mut at_64 = value.clone();
+        at_64["totals"]["v01"] = Value::Array(vec![value["totals"]["v01"][0].clone(); 64]);
+        Ledger::from_map(at_64.as_object().unwrap()).unwrap();
+        let mut bad = value;
+        bad["totals"]["v01"][0]["spent"] = json!("-1");
+        assert!(Ledger::from_map(bad.as_object().unwrap()).is_err());
+    }
+
+    #[test]
+    fn test_ledger_v01_kept_by_compaction_and_successors() {
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let mut before = ledger(vec![entry(
+            1,
+            "0.01",
+            "2026-01-05T00:00:00.000Z",
+            Some(EntryOutcome::Done),
+        )]);
+        before.v01 = vec![v01("2025-12-01T00:00:00.000Z", "0.02", 2)];
+        let now = t("2026-03-10T00:00:00.000Z");
+        let after = compact(&terms, &before, now).unwrap().unwrap();
+        assert_eq!(after.v01, before.v01);
+        check_successor(&terms, &before, &after, now).unwrap();
+        let mut dropped = after.clone();
+        dropped.v01.clear();
+        let error = check_successor(&terms, &before, &dropped, now)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("totals.v01"), "{error}");
+        let mut changed = after;
+        changed.v01[0].count = 1;
+        assert!(check_successor(&terms, &before, &changed, now).is_err());
+    }
+
+    #[test]
+    fn test_ledger_keeps_unknown_members() {
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let held = ledger(vec![
+            entry(
+                1,
+                "0.01",
+                "2026-01-05T00:00:00.000Z",
+                Some(EntryOutcome::Done),
+            ),
+            entry(2, "0.01", "2026-03-05T00:00:00.000Z", None),
+        ]);
+        let mut value: Value = serde_json::from_slice(&held.to_json().unwrap()).unwrap();
+        value["note"] = json!({ "by": "a later version" });
+        value["totals"]["carried"] = json!("0.03");
+        value["entries"][0]["rail"] = json!("lightning");
+        value["entries"][1]["rail"] = json!("on-chain");
+        let read = Ledger::from_map(value.as_object().unwrap()).unwrap();
+        assert!(!read.unknown.is_empty());
+        let out: Value = serde_json::from_slice(&read.to_json().unwrap()).unwrap();
+        assert_eq!(out, value);
+        // Compaction drops the first entry and its members; the others stay.
+        let now = t("2026-03-10T00:00:00.000Z");
+        let compacted = compact(&terms, &read, now).unwrap().unwrap();
+        let out: Value = serde_json::from_slice(&compacted.to_json().unwrap()).unwrap();
+        assert_eq!(out["note"], value["note"]);
+        assert_eq!(out["totals"]["carried"], "0.03");
+        assert_eq!(out["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(out["entries"][0]["rail"], "on-chain");
+        assert!(!out.to_string().contains("lightning"));
     }
 
     #[test]

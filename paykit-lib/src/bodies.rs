@@ -708,8 +708,9 @@ pub struct PeriodDetails {
     pub payment_endpoints: Option<PaymentEndpoints>,
     /// The period's rates, cross-asset only.
     pub rates: Option<Vec<Rate>>,
-    /// The payer uses only unexpired details; their rates apply to a payment verified at or
-    /// before it.
+    /// The payer uses only unexpired details; their rates apply to a payment verified from
+    /// their start, the message's `created_at` cut to whole seconds, through it
+    /// ([`crate::periods::rates_apply`]).
     pub expires_at: u64,
 }
 
@@ -1030,13 +1031,20 @@ pub struct PaymentReceipt {
     pub attempt_id: AttemptId,
     /// The proof's Billing Period, for a recurring request.
     pub billing_period: Option<PeriodRef>,
+    /// The payee's opaque metadata, as v0.1 `Receipt.metadata`.
+    pub metadata: Option<Map<String, Value>>,
+    /// For a payment without a request: the payee's reference for it. A receipt of a request
+    /// carries none; the request's reference applies.
+    pub payment_reference: Option<PaymentReference>,
 }
 
 const RECEIPT: &str = "Paykit wire 4.11: payment_receipt";
 
 impl PaymentReceipt {
     /// Read the body of a receipt with `refs` references (Paykit wire 4.11): with the proof
-    /// hash alone, it confirms a payment without a request, so it names no Billing Period.
+    /// hash alone, it confirms a payment without a request, so it names no Billing Period;
+    /// with a request hash too, it carries no `payment_reference`, since the request's
+    /// applies.
     ///
     /// # Errors
     ///
@@ -1049,12 +1057,31 @@ impl PaymentReceipt {
                 .opt("billing_period")
                 .map(|p| PeriodRef::from_json(p, RECEIPT))
                 .transpose()?,
+            metadata: obj
+                .opt("metadata")
+                .map(|m| {
+                    m.as_object()
+                        .cloned()
+                        .ok_or_else(|| bad(RECEIPT, "metadata", "not an object"))
+                })
+                .transpose()?,
+            payment_reference: obj
+                .opt_str("payment_reference")?
+                .map(PaymentReference::parse)
+                .transpose()?,
         };
         if refs < 2 && receipt.billing_period.is_some() {
             return Err(bad(
                 RECEIPT,
                 "billing_period",
                 "only in a receipt of a recurring request, whose refs name it",
+            ));
+        }
+        if refs >= 2 && receipt.payment_reference.is_some() {
+            return Err(bad(
+                RECEIPT,
+                "payment_reference",
+                "only in a receipt of a payment without a request; a request's reference applies",
             ));
         }
         Ok(receipt)
@@ -1080,6 +1107,12 @@ impl PaymentReceipt {
         );
         if let Some(p) = &self.billing_period {
             map.insert("billing_period".into(), p.to_json());
+        }
+        if let Some(metadata) = &self.metadata {
+            map.insert("metadata".into(), Value::Object(metadata.clone()));
+        }
+        if let Some(r) = &self.payment_reference {
+            map.insert("payment_reference".into(), Value::String(r.as_str().into()));
         }
         map
     }
@@ -2443,6 +2476,38 @@ mod tests {
         let mut missing = l;
         missing.as_object_mut().unwrap().remove("expires_at");
         assert!(PrivatePaymentList::from_body(&body(missing)).is_err());
+    }
+
+    #[test]
+    fn test_receipt_metadata_and_payment_reference() {
+        let r = json!({ "attempt_id": "mAFdg5_0tVNjmrgiTUZW4g",
+            "metadata": { "note": "thanks" }, "payment_reference": "invoice-77" });
+        // A receipt of a payment without a request carries both, and writes them back.
+        let receipt = PaymentReceipt::from_body(&body(r.clone()), 1).unwrap();
+        assert_eq!(
+            receipt
+                .payment_reference
+                .as_ref()
+                .map(PaymentReference::as_str),
+            Some("invoice-77")
+        );
+        assert_eq!(Value::Object(receipt.to_body(1).unwrap()), r);
+        // A receipt of a request carries metadata, but no reference: the request's applies.
+        assert!(PaymentReceipt::from_body(&body(r.clone()), 2).is_err());
+        assert!(receipt.to_body(2).is_err());
+        let mut of_request = r.clone();
+        of_request
+            .as_object_mut()
+            .unwrap()
+            .remove("payment_reference");
+        PaymentReceipt::from_body(&body(of_request), 2).unwrap();
+        // metadata is an object, and the reference follows Paykit wire 4.5.
+        let mut text = r.clone();
+        text["metadata"] = json!("thanks");
+        assert!(PaymentReceipt::from_body(&body(text), 1).is_err());
+        let mut long = r;
+        long["payment_reference"] = json!("a".repeat(257));
+        assert!(PaymentReceipt::from_body(&body(long), 1).is_err());
     }
 
     #[test]

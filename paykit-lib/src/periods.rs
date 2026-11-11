@@ -473,19 +473,37 @@ impl Recurrence {
     }
 }
 
+/// The start of period details' rates (Paykit spec 8.2, Paykit wire 4.9): their signed
+/// `created_at`, in Unix milliseconds, cut to whole seconds, which is v0.1's `valid_from`.
+/// `2026-02-28T00:00:00.999Z` starts at `2026-02-28T00:00:00.000Z`.
+pub fn rates_start(created_at: u64) -> u64 {
+    created_at - created_at % 1000
+}
+
 /// Whether the rates of period details apply to a payment (Paykit wire 4.9): its verified
-/// payment time, from the payment method's evidence, is at or before the details'
-/// `expires_at`, both at millisecond precision. Both sides apply it; a payment to an
-/// endpoint of the requested asset is paid 1:1 and isn't bound by it.
-pub fn rates_apply(expires_at: u64, verified_payment_time: u64) -> bool {
-    verified_payment_time <= expires_at
+/// payment time, from the payment method's evidence, is at or after their start
+/// ([`rates_start`] of the details' `created_at`) and at or before their `expires_at`, all at
+/// millisecond precision. Both sides apply it; a payment to an endpoint of the requested
+/// asset is paid 1:1 and isn't bound by it. Each details stays valid until its own
+/// `expires_at`, so later details replace none.
+pub fn rates_apply(created_at: u64, expires_at: u64, verified_payment_time: u64) -> bool {
+    rates_start(created_at) <= verified_payment_time && verified_payment_time <= expires_at
 }
 
 /// Whether a payer may pay by the rates of period details (Paykit wire 4.9): only while its
-/// device clock and its highest verified service time are both before `expires_at`, at
-/// planning and again before money moves.
-pub fn payer_may_use_rates(expires_at: u64, device_time: u64, service_time: u64) -> bool {
-    device_time < expires_at && service_time < expires_at
+/// device clock and its highest verified service time are both at or after their start
+/// ([`rates_start`] of the details' `created_at`) and before `expires_at`, at planning and
+/// again before money moves.
+pub fn payer_may_use_rates(
+    created_at: u64,
+    expires_at: u64,
+    device_time: u64,
+    service_time: u64,
+) -> bool {
+    let start = rates_start(created_at);
+    [device_time, service_time]
+        .iter()
+        .all(|t| start <= *t && *t < expires_at)
 }
 
 /// An evidence time in whole Unix seconds, such as a block timestamp, read as `.000`
@@ -666,16 +684,33 @@ mod tests {
     #[test]
     fn test_periods_rates_rule() {
         let exp = t("2026-03-01T00:00:00.500Z");
-        assert!(rates_apply(exp, exp));
-        assert!(!rates_apply(exp, exp + 1));
-        assert!(payer_may_use_rates(exp, exp - 1, exp - 1));
-        assert!(!payer_may_use_rates(exp, exp, exp - 1));
-        assert!(!payer_may_use_rates(exp, exp - 1, exp));
+        let created = t("2026-02-28T00:00:00.999Z");
+        let start = t("2026-02-28T00:00:00.000Z");
+        assert_eq!(rates_start(created), start);
+        assert!(rates_apply(created, exp, exp));
+        assert!(!rates_apply(created, exp, exp + 1));
+        assert!(payer_may_use_rates(created, exp, exp - 1, exp - 1));
+        assert!(!payer_may_use_rates(created, exp, exp, exp - 1));
+        assert!(!payer_may_use_rates(created, exp, exp - 1, exp));
         assert_eq!(
             evidence_seconds(1_772_323_200),
             Some(t("2026-03-01T00:00:00Z"))
         );
         assert_eq!(evidence_seconds(u64::MAX), None);
+    }
+
+    #[test]
+    fn test_periods_rates_apply_from_created_at_cut_to_seconds() {
+        let exp = t("2026-03-01T00:00:00.500Z");
+        let created = t("2026-02-28T00:00:00.999Z");
+        let start = t("2026-02-28T00:00:00.000Z");
+        // From the start, before created_at's own instant: v0.1's valid_from.
+        assert!(rates_apply(created, exp, start));
+        assert!(!rates_apply(created, exp, start - 1));
+        // The payer's two clocks are both held to the start too.
+        assert!(payer_may_use_rates(created, exp, start, start));
+        assert!(!payer_may_use_rates(created, exp, start - 1, start));
+        assert!(!payer_may_use_rates(created, exp, start, start - 1));
     }
 
     #[test]

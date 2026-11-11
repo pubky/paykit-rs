@@ -26,6 +26,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::allowances::Ledger;
+use crate::amount::PaymentAmount;
 use crate::bodies::{check_body, Body, ProposerRole};
 use crate::collections::Collection;
 use crate::derive::{natural_key, request_obligation, terms_hash};
@@ -46,6 +47,22 @@ pub const RECENT_MSG_IDS: usize = 16;
 /// The most Billing Periods `attempted_periods` lists (Paykit spec 8.2, Paykit wire 5.3).
 pub const MAX_ATTEMPTED_PERIODS: usize = 16;
 
+/// The most period details a Billing Period has (Paykit spec 8.2, Paykit wire 4.9): the
+/// payee sends no more, and a period record holds them all, in `period_details` and
+/// `earlier_details`.
+pub const MAX_PERIOD_DETAILS: usize = 8;
+
+/// The most entries a request record's `reassociations` lists (Paykit wire 5.3).
+pub const MAX_REASSOCIATIONS: usize = 16;
+
+/// The most ranges a request record's `v01_paid` lists (Paykit wire 5.3).
+pub const MAX_V01_PAID: usize = 16;
+
+/// The most conditions a Paykit `record.put` carries (Paykit wire 5.3 "Conditions per
+/// operation"): a `claim_step` for each of the at most 16 listed periods, the
+/// `record_version`, and the `server_time_in` of a write that adds a reassociation.
+pub const MAX_RECORD_PUT_CONDITIONS: usize = MAX_ATTEMPTED_PERIODS + 2;
+
 /// The canonical `msg_ids` (Paykit wire 5.3): the IDs of the messages the record stores,
 /// then the 16 newest distinct IDs of the others it reflects (`others`, oldest first), each
 /// ID once. Duplicates are dropped in order, each ID kept at its first place, before the 16
@@ -64,6 +81,354 @@ pub fn bounded_msg_ids(stored: &[String], others: &[String]) -> Vec<String> {
     out.extend(rest.into_iter().skip(skip).cloned());
     out
 }
+
+/// The members a writer of a shared record value doesn't know, kept as it read them (Paykit
+/// wire 5): in the value, and in each object of it the writer keeps, so a member a later
+/// version adds survives an older writer.
+///
+/// A reader collects them when it reads a value; the writer puts each back into the object
+/// it was read in when it writes the value again. An object is found again by where it sits,
+/// below the nearest object that has an identity of its own: a stored message by its
+/// signature, a ledger entry by its attempt, an entry of a list by the members that name it.
+/// So a stored message moved to another role keeps its members, and those of an object the
+/// writer no longer holds, such as a compacted ledger entry, are dropped with it. An empty
+/// set, as a value built in code has, writes nothing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UnknownMembers {
+    held: Vec<HeldMembers>,
+}
+
+/// The unknown members of one object, and where the object sits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HeldMembers {
+    /// The nearest object with an identity at or above it, by its shape and identity; `None`
+    /// for the value itself.
+    anchor: Option<(&'static str, Value)>,
+    /// The members from there down to the object.
+    path: Vec<&'static str>,
+    /// The members.
+    members: Map<String, Value>,
+}
+
+/// The members a writer knows in one object of a shared record value (Paykit wire 5).
+pub(crate) struct Shape {
+    /// The shape's name, which tells apart identities of different objects.
+    pub(crate) name: &'static str,
+    /// The members, dotted for nested ones, that name the object wherever it sits; empty for
+    /// an object found by where it sits.
+    pub(crate) id: &'static [&'static str],
+    /// The members it knows, each with what it holds.
+    pub(crate) members: &'static [(&'static str, Member)],
+}
+
+/// What a known member holds, for [`UnknownMembers`].
+pub(crate) enum Member {
+    /// A value whose inside the writer keeps as a whole, or doesn't keep: a string, a number,
+    /// an array of them, or an object it writes again in full.
+    Leaf,
+    /// An object of the shape.
+    Object(&'static Shape),
+    /// An array of objects of the shape, each found by its identity.
+    Array(&'static Shape),
+}
+
+/// The identity of an object of `shape`, `None` for one found by where it sits.
+fn identity(obj: &Map<String, Value>, shape: &Shape) -> Option<Value> {
+    if shape.id.is_empty() {
+        return None;
+    }
+    let parts = shape
+        .id
+        .iter()
+        .map(|dotted| {
+            let mut at: Option<&Value> = None;
+            for (i, step) in dotted.split('.').enumerate() {
+                at = if i == 0 {
+                    obj.get(step)
+                } else {
+                    at.and_then(|v| v.get(step))
+                };
+            }
+            at.cloned().unwrap_or(Value::Null)
+        })
+        .collect();
+    Some(Value::Array(parts))
+}
+
+impl UnknownMembers {
+    /// The unknown members of `value`, read as `shape`.
+    pub(crate) fn read(value: &Map<String, Value>, shape: &'static Shape) -> Self {
+        let mut held = Vec::new();
+        collect(value, shape, None, Vec::new(), &mut held);
+        Self { held }
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.held.is_empty()
+    }
+
+    /// The value `json` a writer wrote, as `shape`, with the unknown members put back into the
+    /// objects it keeps. Without unknown members, `json` as it is.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] if the value can't be written.
+    pub(crate) fn write_into(&self, json: Vec<u8>, shape: &'static Shape) -> Result<Vec<u8>> {
+        if self.held.is_empty() {
+            return Ok(json);
+        }
+        let cant = || Error::Invalid(format!("Paykit wire 5: {}: can't be written", shape.name));
+        let mut value: Value = serde_json::from_slice(&json).map_err(|_| cant())?;
+        let Value::Object(map) = &mut value else {
+            return Err(cant());
+        };
+        self.apply(map, shape, None, Vec::new());
+        serde_json::to_vec(&value).map_err(|_| cant())
+    }
+
+    fn apply(
+        &self,
+        obj: &mut Map<String, Value>,
+        shape: &'static Shape,
+        anchor: Option<(&'static str, Value)>,
+        path: Vec<&'static str>,
+    ) {
+        let (anchor, path) = match identity(obj, shape) {
+            Some(id) => (Some((shape.name, id)), Vec::new()),
+            None => (anchor, path),
+        };
+        if let Some(held) = self
+            .held
+            .iter()
+            .find(|h| h.anchor == anchor && h.path == path)
+        {
+            for (name, value) in &held.members {
+                obj.entry(name.clone()).or_insert_with(|| value.clone());
+            }
+        }
+        for (name, member) in shape.members {
+            let mut below = path.clone();
+            below.push(name);
+            match (member, obj.get_mut(*name)) {
+                (Member::Object(s), Some(Value::Object(child))) => {
+                    self.apply(child, s, anchor.clone(), below);
+                }
+                (Member::Array(s), Some(Value::Array(items))) if !s.id.is_empty() => {
+                    for item in items {
+                        if let Value::Object(child) = item {
+                            self.apply(child, s, anchor.clone(), below.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn collect(
+    obj: &Map<String, Value>,
+    shape: &'static Shape,
+    anchor: Option<(&'static str, Value)>,
+    path: Vec<&'static str>,
+    out: &mut Vec<HeldMembers>,
+) {
+    let (anchor, path) = match identity(obj, shape) {
+        Some(id) => (Some((shape.name, id)), Vec::new()),
+        None => (anchor, path),
+    };
+    let members: Map<String, Value> = obj
+        .iter()
+        .filter(|(name, _)| !shape.members.iter().any(|(known, _)| known == name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    if !members.is_empty() {
+        out.push(HeldMembers {
+            anchor: anchor.clone(),
+            path: path.clone(),
+            members,
+        });
+    }
+    for (name, member) in shape.members {
+        let mut below = path.clone();
+        below.push(name);
+        match (member, obj.get(*name)) {
+            (Member::Object(s), Some(Value::Object(child))) => {
+                collect(child, s, anchor.clone(), below, out);
+            }
+            (Member::Array(s), Some(Value::Array(items))) if !s.id.is_empty() => {
+                for item in items {
+                    if let Value::Object(child) = item {
+                        collect(child, s, anchor.clone(), below.clone(), out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+static SIGNED_DOC: Shape = Shape {
+    name: "signed",
+    id: &[],
+    members: &[("body", Member::Leaf), ("sig", Member::Leaf)],
+};
+
+static PLAINTEXT: Shape = Shape {
+    name: "plaintext",
+    id: &[],
+    members: &[
+        ("sender_app", Member::Leaf),
+        ("signature", Member::Leaf),
+        ("json", Member::Leaf),
+    ],
+};
+
+/// A stored message (Paykit wire 5.2), found by its signature wherever it sits.
+static STORED: Shape = Shape {
+    name: "stored message",
+    id: &["plaintext.signature"],
+    members: &[
+        ("sender", Member::Leaf),
+        ("cert", Member::Object(&SIGNED_DOC)),
+        ("plaintext", Member::Object(&PLAINTEXT)),
+        ("accepted_at", Member::Leaf),
+    ],
+};
+
+static BILLING_PERIOD: Shape = Shape {
+    name: "billing_period",
+    id: &[],
+    members: &[("starts_at", Member::Leaf), ("ends_at", Member::Leaf)],
+};
+
+static AMOUNT: Shape = Shape {
+    name: "amount",
+    id: &[],
+    members: &[("asset", Member::Leaf), ("value", Member::Leaf)],
+};
+
+static UNREQUESTED: Shape = Shape {
+    name: "unrequested",
+    id: &[],
+    members: &[
+        ("app_id", Member::Leaf),
+        ("endpoint_id", Member::Leaf),
+        ("payload", Member::Leaf),
+        ("source", Member::Leaf),
+        ("list_version", Member::Leaf),
+        ("single_use", Member::Leaf),
+        ("amount", Member::Object(&AMOUNT)),
+    ],
+};
+
+static REASSOCIATION: Shape = Shape {
+    name: "reassociation",
+    id: &["allowance_id", "from_period"],
+    members: &[
+        ("allowance_id", Member::Leaf),
+        ("from_period", Member::Leaf),
+    ],
+};
+
+static V01_PAID: Shape = Shape {
+    name: "v01_paid",
+    id: &["from", "to"],
+    members: &[("from", Member::Leaf), ("to", Member::Leaf)],
+};
+
+/// An activity record value (Paykit wire 5.3).
+static ACTIVITY_SHAPE: Shape = Shape {
+    name: "activity record",
+    id: &[],
+    members: &[
+        ("v", Member::Leaf),
+        ("counterparty", Member::Leaf),
+        ("request", Member::Object(&STORED)),
+        ("response", Member::Object(&STORED)),
+        ("cancellation", Member::Object(&STORED)),
+        ("proof", Member::Object(&STORED)),
+        ("receipt", Member::Object(&STORED)),
+        ("period_details", Member::Object(&STORED)),
+        ("earlier_details", Member::Array(&STORED)),
+        ("request_hash", Member::Leaf),
+        ("billing_period", Member::Object(&BILLING_PERIOD)),
+        ("attempt_id", Member::Leaf),
+        ("unrequested", Member::Object(&UNREQUESTED)),
+        ("msg_ids", Member::Leaf),
+        ("status", Member::Leaf),
+        ("allowance_id", Member::Leaf),
+        ("attempted_periods", Member::Leaf),
+        ("reassociations", Member::Array(&REASSOCIATION)),
+        ("manual_only", Member::Leaf),
+        ("v01_paid", Member::Array(&V01_PAID)),
+    ],
+};
+
+static USED: Shape = Shape {
+    name: "used",
+    id: &["version", "endpoint", "attempt_id"],
+    members: &[
+        ("version", Member::Leaf),
+        ("endpoint", Member::Leaf),
+        ("attempt_id", Member::Leaf),
+    ],
+};
+
+/// A `payment_lists` record value (Paykit wire 5.4).
+static LIST_SHAPE: Shape = Shape {
+    name: "payment_lists",
+    id: &[],
+    members: &[
+        ("v", Member::Leaf),
+        ("payee", Member::Leaf),
+        ("app_id", Member::Leaf),
+        ("list", Member::Object(&STORED)),
+        ("used", Member::Array(&USED)),
+        ("msg_ids", Member::Leaf),
+    ],
+};
+
+/// An executor grant (Paykit wire 3.3), found by its signature.
+static GRANT: Shape = Shape {
+    name: "grant",
+    id: &["sig"],
+    members: &[
+        ("app_id", Member::Leaf),
+        ("cert", Member::Object(&SIGNED_DOC)),
+        ("confirmed_generation", Member::Leaf),
+        ("sig", Member::Leaf),
+        ("terms_hash", Member::Leaf),
+    ],
+};
+
+static GRANT_ENTRY: Shape = Shape {
+    name: "grant history entry",
+    id: &["generation", "version"],
+    members: &[
+        ("generation", Member::Leaf),
+        ("version", Member::Leaf),
+        ("grant", Member::Object(&GRANT)),
+    ],
+};
+
+/// An `allowances` record value (Paykit wire 5.4).
+static ALLOWANCE_SHAPE: Shape = Shape {
+    name: "allowances",
+    id: &[],
+    members: &[
+        ("v", Member::Leaf),
+        ("counterparty", Member::Leaf),
+        ("allowance_id", Member::Leaf),
+        ("proposal", Member::Object(&STORED)),
+        ("response", Member::Object(&STORED)),
+        ("end", Member::Object(&STORED)),
+        ("grant", Member::Object(&GRANT)),
+        ("grants", Member::Array(&GRANT_ENTRY)),
+        ("msg_ids", Member::Leaf),
+    ],
+};
 
 /// A verified copy of one message (Paykit wire 5.2, Switch spec 8.2).
 #[derive(Clone, Debug)]
@@ -305,6 +670,39 @@ pub struct UnrequestedDestination {
     pub list_version: Option<u64>,
     /// Whether the endpoint was single-use.
     pub single_use: bool,
+    /// The asset and amount being paid, written with the `attempt`; `None` in a record whose
+    /// writer doesn't know the member, until the proof is stored.
+    pub amount: Option<PaymentAmount>,
+}
+
+/// An entry of a payer's request record's `reassociations` (Paykit spec 8.3, Paykit wire
+/// 5.3): the Allowance the user moved the request's Billing Periods to, from `from_period`
+/// on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reassociation {
+    /// The Allowance the periods are moved to.
+    pub allowance_id: AllowanceId,
+    /// The start, in Unix seconds as in `attempted_periods`, of the first Billing Period it
+    /// covers.
+    pub from_period: u64,
+}
+
+/// An entry of a payer's request record's `v01_paid` (Paykit spec 16, Paykit wire 5.3): the
+/// Billing Periods v0.1 paid, by their starts in Unix seconds, `from` to `to` inclusive;
+/// `{ 0, 0 }` for a one-time request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct V01PaidRange {
+    /// The start of the first period paid.
+    pub from: u64,
+    /// The start of the last period paid.
+    pub to: u64,
+}
+
+impl V01PaidRange {
+    /// Whether the range holds the period starting at `start`.
+    pub fn contains(&self, start: u64) -> bool {
+        self.from <= start && start <= self.to
+    }
 }
 
 /// What an activity record is, by its messages' signed fields (Paykit wire 5.3 "Binding").
@@ -363,6 +761,20 @@ pub struct ActivityRecord {
     /// A payer's request record of a recurring request: the start, in Unix seconds, of every
     /// Billing Period that may have an open attempt; empty when absent.
     pub attempted_periods: Vec<u64>,
+    /// A period record: every other period details held for the period, in the order of
+    /// Paykit wire 4.9, at most 7; empty when absent.
+    pub earlier_details: Vec<StoredMessage>,
+    /// A payer's request record of a recurring request, beside `allowance_id`: the Allowances
+    /// the user moved later Billing Periods to, by ascending `from_period`; empty when absent.
+    pub reassociations: Vec<Reassociation>,
+    /// A payer's request record of a one-time request, or a payer's period record: no
+    /// executor pays the occurrence automatically. Never lifted once set.
+    pub manual_only: bool,
+    /// A payer's request record: what v0.1 paid, ascending and not overlapping, at most 16;
+    /// empty when absent. Only the migration from v0.1 writes it.
+    pub v01_paid: Vec<V01PaidRange>,
+    /// The members the writer doesn't know, kept as read (Paykit wire 5).
+    pub unknown: UnknownMembers,
 }
 
 const ACTIVITY: &str = "Paykit wire 5.3: activity record";
@@ -400,6 +812,14 @@ const ROLES: [(&str, &[Kind], Sends); 6] = [
     ),
 ];
 
+/// The member of a period record that holds the other period details of its period (Paykit
+/// wire 5.3), each read as `period_details` is.
+const EARLIER_DETAILS: (&str, &[Kind], Sends) = (
+    "earlier_details",
+    &[Kind::PaymentPeriodDetails],
+    Sends::Payee,
+);
+
 #[derive(Serialize)]
 struct ActivityOut<'a> {
     v: u64,
@@ -420,6 +840,26 @@ struct ActivityOut<'a> {
     allowance_id: Option<&'a str>,
     #[serde(skip_serializing_if = "<[u64]>::is_empty")]
     attempted_periods: &'a [u64],
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    earlier_details: Vec<StoredOut>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    reassociations: Vec<ReassociationOut<'a>>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    manual_only: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    v01_paid: Vec<V01PaidOut>,
+}
+
+#[derive(Serialize)]
+struct ReassociationOut<'a> {
+    allowance_id: &'a str,
+    from_period: u64,
+}
+
+#[derive(Serialize)]
+struct V01PaidOut {
+    from: u64,
+    to: u64,
 }
 
 /// Read `msg_ids` (Paykit wire 5.3), each a lower-case UUID v4, as its canonical list for a
@@ -525,7 +965,82 @@ fn read_unrequested(value: &Value) -> Result<UnrequestedDestination> {
         single_use: u
             .opt_bool("single_use")?
             .ok_or_else(|| bad(ACTIVITY, "unrequested.single_use", "missing"))?,
+        amount: u
+            .opt("amount")
+            .map(|a| crate::bodies::read_amount(a, ACTIVITY, "unrequested.amount"))
+            .transpose()?,
     })
+}
+
+fn read_reassociations(obj: &Obj<'_>) -> Result<Vec<Reassociation>> {
+    let mut out = Vec::new();
+    for item in obj.opt_arr("reassociations")?.into_iter().flatten() {
+        let entry = Obj::of(item, ACTIVITY, "reassociations")?;
+        out.push(Reassociation {
+            allowance_id: AllowanceId::parse(entry.req_str("allowance_id")?)?,
+            from_period: entry.req_int("from_period")?,
+        });
+    }
+    Ok(out)
+}
+
+fn read_v01_paid(obj: &Obj<'_>) -> Result<Vec<V01PaidRange>> {
+    let mut out = Vec::new();
+    for item in obj.opt_arr("v01_paid")?.into_iter().flatten() {
+        let range = Obj::of(item, ACTIVITY, "v01_paid")?;
+        out.push(V01PaidRange {
+            from: range.req_int("from")?,
+            to: range.req_int("to")?,
+        });
+    }
+    Ok(out)
+}
+
+/// The shape of `reassociations` (Paykit wire 5.3): at most 16, `from_period` strictly
+/// ascending, the first naming another Allowance than `allowance_id`, each another than the
+/// entry before it.
+fn check_reassociations(
+    entries: &[Reassociation],
+    allowance_id: Option<&AllowanceId>,
+) -> Result<()> {
+    ensure(
+        entries.len() <= MAX_REASSOCIATIONS,
+        "Paykit wire 5.3: reassociations lists at most 16 entries",
+    )?;
+    ensure(
+        entries
+            .windows(2)
+            .all(|w| matches!(w, [a, b] if a.from_period < b.from_period)),
+        "Paykit wire 5.3: reassociations is strictly ascending by from_period",
+    )?;
+    let mut before = allowance_id;
+    for entry in entries {
+        ensure(
+            before.is_none_or(|b| b != &entry.allowance_id),
+            "Paykit wire 5.3: a reassociation names the Allowance before it, allowance_id for the first",
+        )?;
+        before = Some(&entry.allowance_id);
+    }
+    Ok(())
+}
+
+/// The shape of `v01_paid` (Paykit wire 5.3): at most 16 ranges, each `from` at or before
+/// its `to`, ascending and not overlapping.
+fn check_v01_paid(ranges: &[V01PaidRange]) -> Result<()> {
+    ensure(
+        ranges.len() <= MAX_V01_PAID,
+        "Paykit wire 5.3: v01_paid lists at most 16 ranges",
+    )?;
+    ensure(
+        ranges.iter().all(|r| r.from <= r.to),
+        "Paykit wire 5.3: a v01_paid range ends before it starts",
+    )?;
+    ensure(
+        ranges
+            .windows(2)
+            .all(|w| matches!(w, [a, b] if a.to < b.from)),
+        "Paykit wire 5.3: v01_paid is ascending and not overlapping",
+    )
 }
 
 fn unrequested_json(u: &UnrequestedDestination) -> Value {
@@ -546,6 +1061,9 @@ fn unrequested_json(u: &UnrequestedDestination) -> Value {
         DestinationSource::Public => "public",
     };
     map.insert("source".into(), Value::String(source.into()));
+    if let Some(amount) = &u.amount {
+        map.insert("amount".into(), crate::bodies::amount_json(amount));
+    }
     Value::Object(map)
 }
 
@@ -563,7 +1081,36 @@ fn named_request(role: &str, stored: &StoredMessage) -> Option<[u8; 32]> {
 type NamedBinding<'a> = (&'a str, Option<[u8; 32]>, Option<PeriodRef>);
 
 impl ActivityRecord {
-    /// The stored messages, by role.
+    /// An empty record of `side` with `counterparty`, which a writer fills before it writes
+    /// it.
+    pub fn new(side: ActivitySide, counterparty: [u8; 32]) -> Self {
+        Self {
+            side,
+            counterparty,
+            request: None,
+            response: None,
+            cancellation: None,
+            proof: None,
+            receipt: None,
+            period_details: None,
+            request_hash: None,
+            billing_period: None,
+            attempt_id: None,
+            unrequested: None,
+            msg_ids: Vec::new(),
+            status: None,
+            allowance_id: None,
+            attempted_periods: Vec::new(),
+            earlier_details: Vec::new(),
+            reassociations: Vec::new(),
+            manual_only: false,
+            v01_paid: Vec::new(),
+            unknown: UnknownMembers::default(),
+        }
+    }
+
+    /// The stored messages, by role: the members of Paykit wire 5.3 in order, then each of
+    /// `earlier_details`.
     pub fn stored(&self) -> Vec<(&'static str, &StoredMessage)> {
         let members = [
             ("request", &self.request),
@@ -576,6 +1123,16 @@ impl ActivityRecord {
         members
             .into_iter()
             .filter_map(|(role, s)| s.as_ref().map(|s| (role, s)))
+            .chain(self.earlier_details.iter().map(|s| (EARLIER_DETAILS.0, s)))
+            .collect()
+    }
+
+    /// Every period details the record holds, `period_details` first, then
+    /// `earlier_details`.
+    pub fn details(&self) -> Vec<&StoredMessage> {
+        self.period_details
+            .iter()
+            .chain(self.earlier_details.iter())
             .collect()
     }
 
@@ -641,6 +1198,28 @@ impl ActivityRecord {
         >; 6] = roles
             .try_into()
             .map_err(|_| Error::Invalid(format!("{ACTIVITY}: roles")))?;
+        let earlier = obj
+            .opt_arr(EARLIER_DETAILS.0)?
+            .map_or(&[][..], Vec::as_slice);
+        let mut earlier_details = Vec::with_capacity(earlier.len());
+        for value in earlier {
+            let sender = Obj::of(value, ACTIVITY, EARLIER_DETAILS.0)?.req_pubky("sender")?;
+            ensure(
+                sender == payee,
+                "Paykit wire 5.3: a stored message from the wrong side",
+            )?;
+            let stored = StoredMessage::read(value, &payer)?;
+            ensure(
+                EARLIER_DETAILS.1.contains(&stored.body.kind()),
+                "Paykit wire 5.3: a member holds another kind",
+            )?;
+            earlier_details.push(stored);
+        }
+        let manual_only = match obj.opt_bool("manual_only")? {
+            None => false,
+            Some(true) => true,
+            Some(false) => return Err(bad(ACTIVITY, "manual_only", "is true or absent")),
+        };
         let record = Self {
             side,
             counterparty,
@@ -664,6 +1243,11 @@ impl ActivityRecord {
                 .map(AllowanceId::parse)
                 .transpose()?,
             attempted_periods: read_attempted_periods(&obj)?,
+            earlier_details,
+            reassociations: read_reassociations(&obj)?,
+            manual_only,
+            v01_paid: read_v01_paid(&obj)?,
+            unknown: UnknownMembers::read(&map, &ACTIVITY_SHAPE),
         };
         let mut record = record;
         record.msg_ids = read_msg_ids(&obj, &record.stored_msg_ids())?;
@@ -675,8 +1259,13 @@ impl ActivityRecord {
     /// stored messages are between the counterparty and one other identity, each of its
     /// role's kind, from the side that sends it and addressed to the other; the members'
     /// shapes; the binding; the members only some records carry; the `refs` that tie the
-    /// messages together; `attempt_id`, the stored proof's; and `attempted_periods`, only in a
-    /// payer's request record of a recurring request, ascending, each once, at most 16.
+    /// messages together; `attempt_id`, and `unrequested.amount` when present, the stored
+    /// proof's; `attempted_periods`, only in a payer's request record of a recurring request,
+    /// ascending, each once, at most 16; `reassociations`, there too, beside `allowance_id`;
+    /// `v01_paid`, `[{ 0, 0 }]` for a one-time request; `manual_only`, only in a payer's
+    /// request record of a one-time request or a payer's period record; and the period
+    /// details ([`ActivityRecord::details`]), at most 8, `period_details` the latest unless a
+    /// proof names it.
     ///
     /// # Errors
     ///
@@ -686,6 +1275,7 @@ impl ActivityRecord {
         for (role, stored) in self.stored() {
             let (kinds, sends) = ROLES
                 .iter()
+                .chain(std::iter::once(&EARLIER_DETAILS))
                 .find(|(r, _, _)| *r == role)
                 .map(|(_, k, s)| (*k, *s))
                 .ok_or_else(|| Error::Invalid(format!("{ACTIVITY}: roles")))?;
@@ -730,6 +1320,8 @@ impl ActivityRecord {
             )?;
         }
         check_attempted_periods(&self.attempted_periods)?;
+        check_reassociations(&self.reassociations, self.allowance_id.as_ref())?;
+        check_v01_paid(&self.v01_paid)?;
         // Paykit wire 4.11: a receipt confirms the proof's attempt, of the proof's Billing
         // Period; in the record of a payment without a request, the record's attempt. Checked
         // before the binding, which would refuse a receipt of another period only as a
@@ -748,6 +1340,7 @@ impl ActivityRecord {
         }
         let binding = self.binding()?;
         self.check_members(&binding)?;
+        self.check_details()?;
         self.check_refs(&binding)?;
         if let (RecordBinding::Unrequested, Some(a), Some(Body::PaymentProof(p))) = (
             binding,
@@ -778,14 +1371,91 @@ impl ActivityRecord {
                 "Paykit wire 4.11: the receipt isn't of the record's attempt_id",
             )?;
         }
+        // Paykit wire 5.3: the destination's amount is the stored proof's.
+        if let (RecordBinding::Unrequested, Some(amount), Some(Body::PaymentProof(p))) = (
+            binding,
+            self.unrequested.as_ref().and_then(|u| u.amount.as_ref()),
+            self.proof.as_ref().map(StoredMessage::body),
+        ) {
+            ensure(
+                p.amount.as_ref() == Some(amount),
+                "Paykit wire 5.3: unrequested.amount isn't the stored proof's",
+            )?;
+        }
+        let recurring_request = matches!(
+            self.request.as_ref().map(StoredMessage::body),
+            Some(Body::PaymentRequest(r)) if r.is_recurring()
+        );
         if !self.attempted_periods.is_empty() {
-            let recurring_request = matches!(
-                self.request.as_ref().map(StoredMessage::body),
-                Some(Body::PaymentRequest(r)) if r.is_recurring()
-            );
             ensure(
                 self.side == ActivitySide::Payer && recurring_request,
                 "Paykit wire 5.3: attempted_periods only in a payer's request record of a recurring request",
+            )?;
+        }
+        if !self.reassociations.is_empty() {
+            ensure(
+                self.side == ActivitySide::Payer
+                    && recurring_request
+                    && self.allowance_id.is_some(),
+                "Paykit wire 5.3: reassociations only in a payer's request record of a recurring request, beside allowance_id",
+            )?;
+        }
+        if matches!(binding, RecordBinding::Request { .. }) && !recurring_request {
+            ensure(
+                self.v01_paid.is_empty() || self.v01_paid == [V01PaidRange { from: 0, to: 0 }],
+                "Paykit wire 5.3: v01_paid of a one-time request is [{ from: 0, to: 0 }]",
+            )?;
+        }
+        if self.manual_only {
+            let one_time_request =
+                matches!(binding, RecordBinding::Request { .. }) && !recurring_request;
+            let period = matches!(binding, RecordBinding::Period { .. });
+            ensure(
+                self.side == ActivitySide::Payer && (one_time_request || period),
+                "Paykit wire 5.3: manual_only only in a payer's request record of a one-time request, or a payer's period record",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The period details a period record holds (Paykit wire 4.9, 5.3): at most 8 in all,
+    /// `earlier_details` in order, no two as late as each other, and `period_details` the
+    /// latest of them, or, once the record holds a proof that names details, those.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] naming the rule: the record is invalid.
+    fn check_details(&self) -> Result<()> {
+        use std::cmp::Ordering;
+        if self.earlier_details.is_empty() {
+            return Ok(());
+        }
+        ensure(
+            self.earlier_details.len() < MAX_PERIOD_DETAILS,
+            "Paykit wire 5.3: earlier_details holds at most 7 details",
+        )?;
+        let Some(current) = &self.period_details else {
+            return invalid("Paykit wire 5.3: earlier_details without period_details");
+        };
+        ensure(
+            self.earlier_details.windows(2).all(|w| {
+                matches!(w, [a, b] if crate::bodies::period_details_order(&a.message, &b.message) == Ordering::Less)
+            }),
+            "Paykit wire 5.3: earlier_details isn't in the order of Paykit wire 4.9, each as late as no other",
+        )?;
+        let named = self
+            .proof
+            .as_ref()
+            .and_then(|p| p.message.refs.get(1).copied());
+        for earlier in &self.earlier_details {
+            let order = crate::bodies::period_details_order(&current.message, &earlier.message);
+            ensure(
+                order != Ordering::Equal,
+                "Paykit wire 4.9: a period record holds two details as late as each other",
+            )?;
+            ensure(
+                named.is_some() || order == Ordering::Greater,
+                "Paykit wire 5.3: period_details isn't the latest details held, and no proof names it",
             )?;
         }
         Ok(())
@@ -856,10 +1526,12 @@ impl ActivityRecord {
     }
 
     /// The members only some records carry (Paykit wire 5.3), against the record's binding
-    /// and side: `request_hash` and `billing_period` only in a period record, `attempt_id`
-    /// and `unrequested` only in that of a payment without a request, and `allowance_id`
-    /// only in a payer's request record. `attempted_periods` is checked with the request it
-    /// fences.
+    /// and side: `request_hash` and `billing_period` only in a period record (as
+    /// `earlier_details`, whose details each name their period, so the binding refuses them
+    /// anywhere else), `attempt_id` and `unrequested` only in that of a payment without a request,
+    /// and `allowance_id`, `reassociations` and `v01_paid` only in a payer's request record.
+    /// `attempted_periods`, `reassociations` and `manual_only` are checked with the request
+    /// they concern.
     ///
     /// Security: these members are unsigned. A record that carries one where its messages
     /// don't put it is invalid, so a writer can't make a record that reads as two kinds at
@@ -892,6 +1564,14 @@ impl ActivityRecord {
         ensure(
             payer_request || self.allowance_id.is_none(),
             "Paykit wire 5.3: allowance_id only in a payer's request record",
+        )?;
+        ensure(
+            payer_request || self.reassociations.is_empty(),
+            "Paykit wire 5.3: reassociations only in a payer's request record",
+        )?;
+        ensure(
+            payer_request || self.v01_paid.is_empty(),
+            "Paykit wire 5.3: v01_paid only in a payer's request record",
         )
     }
 
@@ -907,7 +1587,7 @@ impl ActivityRecord {
         for (role, stored) in self.stored() {
             let refs = &stored.message.refs;
             match role {
-                "response" | "cancellation" | "period_details" | "proof"
+                "response" | "cancellation" | "period_details" | "earlier_details" | "proof"
                     if request_hash.is_some() =>
                 {
                     ensure(
@@ -1083,60 +1763,125 @@ impl ActivityRecord {
             || self.msg_ids.iter().any(|x| x == msg_id)
     }
 
-    /// Whether the record carries the proof of a payment: then no app attempts its
-    /// obligation, whatever the claim shows (Paykit spec 7.2).
+    /// Whether the record carries the proof of a payment, or is the request record of a
+    /// one-time request v0.1 paid (`v01_paid`): then no app attempts its obligation, whatever
+    /// the claim shows (Paykit spec 7.2, 16).
     pub fn shows_paid(&self) -> bool {
-        self.proof.is_some()
+        let one_time_request = matches!(
+            self.request.as_ref().map(StoredMessage::body),
+            Some(Body::PaymentRequest(r)) if !r.is_recurring()
+        );
+        self.proof.is_some() || (one_time_request && self.v01_paid_covers(0))
     }
 
-    /// "Seen roles" and "Seen Allowance" (Paykit wire 5.3, Switch spec 8.2): a reader that
-    /// holds `self` ignores, and shows with its writer, a later write of the same record
-    /// that drops or replaces a message in a role it saw, holds older period details than
-    /// those it saw (by `created_at`, then `msg_id`), other details as late as them, or
-    /// none, or changes or drops the `allowance_id` it saw.
+    /// Whether the request record's `v01_paid` lists the Billing Period starting at `start`,
+    /// in Unix seconds, or, with `0`, the one-time request: a payer treats it as paid and never
+    /// attempts it (Paykit spec 16).
+    pub fn v01_paid_covers(&self, start: u64) -> bool {
+        self.v01_paid.iter().any(|r| r.contains(start))
+    }
+
+    /// The Allowance a payer's request record names for the Billing Period starting at
+    /// `start`, in Unix seconds (Paykit spec 8.3, Paykit wire 5.3): that of the last entry of
+    /// `reassociations` starting at or before it, else `allowance_id`. An attempt on the
+    /// period counts under it, whether made early or not.
+    pub fn allowance_for(&self, start: u64) -> Option<&AllowanceId> {
+        self.reassociations
+            .iter()
+            .rev()
+            .find(|r| r.from_period <= start)
+            .map(|r| &r.allowance_id)
+            .or(self.allowance_id.as_ref())
+    }
+
+    /// "Seen roles", "Seen Allowance" and "Seen marks" (Paykit wire 5.3, Switch spec 8.2): a
+    /// reader that holds `self` ignores, and shows with its writer, a later write of the same
+    /// record that drops or replaces a message in a role it saw; that drops period details it
+    /// saw, in `period_details` or `earlier_details`, or holds other details as late with
+    /// another hash; that changes or
+    /// drops the `allowance_id` or an entry of `reassociations` it saw, or adds an entry not
+    /// after the last it saw, or at or before a period of the `attempted_periods` it holds;
+    /// that drops a `manual_only` it saw; or that changes or drops the
+    /// `v01_paid` it saw. A later write moves `period_details` only to later details, or, when
+    /// it stores the proof, to the details the proof names: both records are valid, and the
+    /// later keeps every details seen.
     ///
     /// # Errors
     ///
     /// [`Error::Invalid`] naming the rule `later` breaks.
     pub fn check_later_write(&self, later: &ActivityRecord) -> Result<()> {
+        use std::cmp::Ordering;
         // Records built in code are held to the reader's rules first (Paykit wire 5.3).
         self.check()?;
         later.check()?;
         self.check_same_record(later)?;
         let later_roles = later.stored();
         for (role, seen) in self.stored() {
+            if role == "period_details" || role == EARLIER_DETAILS.0 {
+                continue;
+            }
             let now = later_roles
                 .iter()
                 .find(|(r, _)| *r == role)
                 .map(|(_, s)| *s);
-            if role == "period_details" {
-                // Paykit wire 4.9: only later details replace those seen. Details as late as
-                // those seen are the same message only by hash; others are an equivocation,
-                // which never replaces what is held.
-                ensure(
-                    now.is_some_and(|n| {
-                        match crate::bodies::period_details_order(&n.message, &seen.message) {
-                            std::cmp::Ordering::Greater => true,
-                            std::cmp::Ordering::Equal => n.hash() == seen.hash(),
-                            std::cmp::Ordering::Less => false,
-                        }
-                    }),
-                    "Paykit wire 5.3: a later write holds older period details than seen, other details as late, or none",
-                )?;
-            } else {
-                ensure(
-                    now.is_some_and(|n| n.hash() == seen.hash()),
-                    "Paykit wire 5.3: a later write drops or replaces a message in a role seen",
-                )?;
-            }
+            ensure(
+                now.is_some_and(|n| n.hash() == seen.hash()),
+                "Paykit wire 5.3: a later write drops or replaces a message in a role seen",
+            )?;
         }
+        // Paykit wire 4.9: each details stays valid until its own expiry, so none replaces
+        // another; details as late as those seen are the same message only by hash, and
+        // others as late are an equivocation, which the record never stores.
+        let (seen, now) = (self.details(), later.details());
+        ensure(
+            seen.iter()
+                .all(|s| now.iter().any(|n| n.hash() == s.hash())),
+            "Paykit wire 5.3: a later write drops period details seen",
+        )?;
+        ensure(
+            now.iter().all(|n| {
+                seen.iter().all(|s| {
+                    s.hash() == n.hash()
+                        || crate::bodies::period_details_order(&n.message, &s.message)
+                            != Ordering::Equal
+                })
+            }),
+            "Paykit wire 5.3: a later write holds other period details as late as those seen",
+        )?;
+        // Where period_details may move follows: a valid record holds the latest details in
+        // it unless its proof names others, and a later write keeps every details seen, so
+        // only the write that stores a proof naming earlier details moves it back.
         if let Some(seen) = &self.allowance_id {
             ensure(
                 later.allowance_id.as_ref() == Some(seen),
                 "Paykit wire 5.3: a later write changes or drops the allowance_id seen",
             )?;
         }
-        Ok(())
+        // Entries only follow those seen: the list is strictly ascending, so an entry added
+        // after them is after the last one seen.
+        ensure(
+            later.reassociations.starts_with(&self.reassociations),
+            "Paykit wire 5.3: a later write changes or drops a reassociation seen",
+        )?;
+        // A period attempted early stays under the Allowance it was attempted under (Paykit
+        // spec 8.2, 8.3): a new entry starts after every period the version built on lists.
+        let added = later.reassociations.get(self.reassociations.len()..);
+        ensure(
+            added.into_iter().flatten().all(|entry| {
+                self.attempted_periods
+                    .iter()
+                    .all(|start| entry.from_period > *start)
+            }),
+            "Paykit wire 5.3: a later write adds a reassociation at or before an attempted period",
+        )?;
+        ensure(
+            !self.manual_only || later.manual_only,
+            "Paykit wire 5.3: a later write drops the manual_only seen",
+        )?;
+        ensure(
+            self.v01_paid.is_empty() || later.v01_paid == self.v01_paid,
+            "Paykit wire 5.3: a later write changes or drops the v01_paid seen",
+        )
     }
 
     /// Two versions of one activity record (Paykit wire 5.3): the same collection and
@@ -1198,8 +1943,10 @@ impl ActivityRecord {
     }
 
     /// Write the record value: every member, `null` for absent, but `allowance_id` when
-    /// absent and `attempted_periods` when empty, which are left out, and `msg_ids` as its
-    /// canonical list, [`bounded_msg_ids`] of the stored messages and `msg_ids` (Paykit wire
+    /// absent, `manual_only` when false, and `attempted_periods`, `earlier_details`,
+    /// `reassociations` and `v01_paid` when empty, which are left out; `msg_ids` as its
+    /// canonical list, [`bounded_msg_ids`] of the stored messages and `msg_ids`; and the
+    /// members it doesn't know as it read them, [`ActivityRecord::unknown`] (Paykit wire 5,
     /// 5.3). The record's rules are checked first, as a reader checks them, so the writer
     /// never writes a record its readers refuse.
     ///
@@ -1239,10 +1986,55 @@ impl ActivityRecord {
             billing_period: self.billing_period.map(|p| p.to_json()),
             allowance_id: self.allowance_id.as_ref().map(AllowanceId::as_str),
             attempted_periods: &self.attempted_periods,
+            earlier_details: self
+                .earlier_details
+                .iter()
+                .map(StoredMessage::out)
+                .collect(),
+            reassociations: self
+                .reassociations
+                .iter()
+                .map(|r| ReassociationOut {
+                    allowance_id: r.allowance_id.as_str(),
+                    from_period: r.from_period,
+                })
+                .collect(),
+            manual_only: self.manual_only,
+            v01_paid: self
+                .v01_paid
+                .iter()
+                .map(|r| V01PaidOut {
+                    from: r.from,
+                    to: r.to,
+                })
+                .collect(),
         };
-        serde_json::to_vec(&out)
-            .map_err(|_| Error::Invalid(format!("{ACTIVITY}: can't be written")))
+        let json = serde_json::to_vec(&out)
+            .map_err(|_| Error::Invalid(format!("{ACTIVITY}: can't be written")))?;
+        self.unknown.write_into(json, &ACTIVITY_SHAPE)
     }
+}
+
+/// The condition the `record.put` adding a reassociation for the Billing Period starting at
+/// `from_period`, in Unix seconds, carries (Paykit wire 5.3 "Seen Allowance"):
+/// `server_time_in(null, from_period)`, so the period hasn't started on the service's clock.
+///
+/// # Errors
+///
+/// [`Error::Validation`] for a start past the last time Switch wire 1.6 writes.
+pub fn reassociation_condition(from_period: u64) -> Result<Condition> {
+    let end = from_period
+        .checked_mul(1000)
+        .filter(|ms| *ms <= pubky_switch_core::time::MAX_TIME_MS)
+        .ok_or_else(|| {
+            Error::Validation(
+                "Paykit wire 5.3: from_period past the last time Switch wire 1.6 writes".into(),
+            )
+        })?;
+    Ok(Condition::ServerTimeIn {
+        start: None,
+        end: Some(end),
+    })
 }
 
 /// A single-use endpoint used, in a `payment_lists` record (Paykit wire 5.4).
@@ -1270,6 +2062,8 @@ pub struct PaymentListRecord {
     pub used: Vec<UsedEndpoint>,
     /// The `msg_id`s the record reflects.
     pub msg_ids: Vec<String>,
+    /// The members the writer doesn't know, kept as read (Paykit wire 5).
+    pub unknown: UnknownMembers,
 }
 
 const LISTS: &str = "Paykit wire 5.4: payment_lists";
@@ -1321,6 +2115,7 @@ impl PaymentListRecord {
             list,
             used,
             msg_ids,
+            unknown: UnknownMembers::read(&map, &LIST_SHAPE),
         };
         record.check()?;
         Ok(record)
@@ -1419,8 +2214,8 @@ impl PaymentListRecord {
     }
 
     /// Write the record value, `msg_ids` as its canonical list, [`bounded_msg_ids`] of the
-    /// stored list and `msg_ids` (Paykit wire 5.3, 5.4), after the record's rules, as a reader
-    /// checks them.
+    /// stored list and `msg_ids`, and the members it doesn't know as it read them (Paykit wire
+    /// 5, 5.3, 5.4), after the record's rules, as a reader checks them.
     ///
     /// # Errors
     ///
@@ -1445,7 +2240,9 @@ impl PaymentListRecord {
                 .collect(),
             msg_ids: &msg_ids,
         };
-        serde_json::to_vec(&out).map_err(|_| Error::Invalid(format!("{LISTS}: can't be written")))
+        let json = serde_json::to_vec(&out)
+            .map_err(|_| Error::Invalid(format!("{LISTS}: can't be written")))?;
+        self.unknown.write_into(json, &LIST_SHAPE)
     }
 }
 
@@ -1478,6 +2275,8 @@ pub struct AllowanceRecord {
     pub grants: Vec<GrantEntry>,
     /// The `msg_id`s the record reflects.
     pub msg_ids: Vec<String>,
+    /// The members the writer doesn't know, kept as read (Paykit wire 5).
+    pub unknown: UnknownMembers,
 }
 
 const ALLOWANCES: &str = "Paykit wire 5.4: allowances";
@@ -1625,6 +2424,7 @@ impl AllowanceRecord {
             msg_ids,
             grant: obj.opt("grant").map(ExecutorGrant::from_json).transpose()?,
             grants,
+            unknown: UnknownMembers::read(&map, &ALLOWANCE_SHAPE),
         };
         record.check()?;
         Ok(record)
@@ -1885,9 +2685,10 @@ impl AllowanceRecord {
         )
     }
 
-    /// Write the record value: every member, `null` for absent, `grants` always, and
-    /// `msg_ids` as its canonical list, [`bounded_msg_ids`] of the stored messages and
-    /// `msg_ids` (Paykit wire 5.3, 5.4), after the record's rules, as a reader checks them.
+    /// Write the record value: every member, `null` for absent, `grants` always, `msg_ids` as
+    /// its canonical list, [`bounded_msg_ids`] of the stored messages and `msg_ids`, and the
+    /// members it doesn't know as it read them (Paykit wire 5, 5.3, 5.4), after the record's
+    /// rules, as a reader checks them.
     ///
     /// # Errors
     ///
@@ -1932,8 +2733,9 @@ impl AllowanceRecord {
                 .collect(),
             msg_ids: &msg_ids,
         };
-        serde_json::to_vec(&out)
-            .map_err(|_| Error::Invalid(format!("{ALLOWANCES}: can't be written")))
+        let json = serde_json::to_vec(&out)
+            .map_err(|_| Error::Invalid(format!("{ALLOWANCES}: can't be written")))?;
+        self.unknown.write_into(json, &ALLOWANCE_SHAPE)
     }
 }
 
@@ -2071,6 +2873,100 @@ mod tests {
         let me = pubky_id(&own);
         let self_record = format!(r#"{{"v":1,"counterparty":"{me}"}}"#);
         assert!(ActivityRecord::read(self_record.as_bytes(), &own, ActivitySide::Payer).is_err());
+    }
+
+    #[test]
+    fn test_reassociation_condition_ends_at_the_period_start() {
+        assert_eq!(
+            reassociation_condition(1_772_236_800).unwrap(),
+            Condition::ServerTimeIn {
+                start: None,
+                end: Some(1_772_236_800_000),
+            }
+        );
+        assert!(reassociation_condition(u64::MAX / 1000).is_err());
+        // The most conditions of a record.put: a claim_step per listed period, the
+        // record_version and that server_time_in.
+        assert_eq!(MAX_RECORD_PUT_CONDITIONS, 18);
+    }
+
+    #[test]
+    fn test_reassociations_and_v01_paid_shapes() {
+        let a = AllowanceId::parse("d0efffb7-191b-4709-b6c7-e343af5500b4").unwrap();
+        let b = AllowanceId::parse("55de1f16-1a9e-4504-bc9c-57efc3a2b38c").unwrap();
+        let entry = |id: &AllowanceId, from_period| Reassociation {
+            allowance_id: id.clone(),
+            from_period,
+        };
+        check_reassociations(&[entry(&b, 10), entry(&a, 20)], Some(&a)).unwrap();
+        assert!(check_reassociations(&[entry(&a, 10)], Some(&a)).is_err());
+        assert!(check_reassociations(&[entry(&b, 10), entry(&b, 20)], Some(&a)).is_err());
+        assert!(check_reassociations(&[entry(&b, 20), entry(&a, 10)], Some(&a)).is_err());
+        let many: Vec<Reassociation> = (0..17)
+            .map(|i| entry(if i % 2 == 0 { &b } else { &a }, i))
+            .collect();
+        assert!(check_reassociations(&many, Some(&a)).is_err());
+        assert!(check_reassociations(&many[..16], Some(&a)).is_ok());
+        let range = |from, to| V01PaidRange { from, to };
+        check_v01_paid(&[range(1, 2), range(3, 3)]).unwrap();
+        assert!(check_v01_paid(&[range(2, 1)]).is_err());
+        assert!(check_v01_paid(&[range(1, 3), range(3, 4)]).is_err());
+        assert!(check_v01_paid(&[range(5, 6), range(1, 2)]).is_err());
+        let ranges: Vec<V01PaidRange> = (0..17).map(|i| range(i * 2, i * 2)).collect();
+        assert!(check_v01_paid(&ranges).is_err());
+        assert!(check_v01_paid(&ranges[..16]).is_ok());
+    }
+
+    #[test]
+    fn test_unrequested_amount_is_optional() {
+        let mut v = serde_json::json!({ "app_id": "brrz3m6g5rci6iqnzke44q4djc",
+            "endpoint_id": "btc-bitcoin-p2wpkh", "payload": "bc1q", "source": "public",
+            "single_use": false });
+        assert_eq!(read_unrequested(&v).unwrap().amount, None);
+        v["amount"] = serde_json::json!({ "asset": "btc", "value": "0.0015" });
+        let read = read_unrequested(&v).unwrap();
+        assert_eq!(
+            read.amount.as_ref().map(|a| a.value.as_str()),
+            Some("0.0015")
+        );
+        assert_eq!(unrequested_json(&read), v);
+        v["amount"] = serde_json::json!("0.0015");
+        assert!(read_unrequested(&v).is_err());
+    }
+
+    #[test]
+    fn test_unknown_members_by_shape() {
+        static INNER: Shape = Shape {
+            name: "inner",
+            id: &["id"],
+            members: &[("id", Member::Leaf)],
+        };
+        static OUTER: Shape = Shape {
+            name: "outer",
+            id: &[],
+            members: &[("items", Member::Array(&INNER)), ("v", Member::Leaf)],
+        };
+        let read = serde_json::json!({ "v": 1, "x": 2,
+            "items": [{ "id": 1, "a": "one" }, { "id": 2, "a": "two" }] });
+        let unknown = UnknownMembers::read(read.as_object().unwrap(), &OUTER);
+        // The items reordered and one dropped: the kept one keeps its member.
+        let written = serde_json::json!({ "v": 1, "items": [{ "id": 3 }, { "id": 2 }] });
+        let out: Value = serde_json::from_slice(
+            &unknown
+                .write_into(serde_json::to_vec(&written).unwrap(), &OUTER)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            serde_json::json!({ "v": 1, "x": 2, "items": [{ "id": 3 }, { "id": 2, "a": "two" }] })
+        );
+        // None: the bytes as written.
+        let none = UnknownMembers::default();
+        assert_eq!(
+            none.write_into(b"{\"v\":1}".to_vec(), &OUTER).unwrap(),
+            b"{\"v\":1}"
+        );
     }
 
     #[test]
