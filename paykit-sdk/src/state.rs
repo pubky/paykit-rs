@@ -39,6 +39,7 @@
 //! | `rs/<pubky>/<msg_id>` | when a message was last re-sent to a requester | |
 //! | `rsd/<pubky>/<day>` | how many messages were re-sent to a requester that day | |
 //! | `nl` | set by a restore: the shared records aren't listed since, so the client's copy is empty and a record's absence means nothing yet; cleared once they are listed; never restored | |
+//! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 
 use paykit_lib::AttemptId;
@@ -191,6 +192,7 @@ pub(crate) mod key {
     pub(crate) const LISTS_READ: &str = "lr";
     pub(crate) const HELD_LISTS: &str = "lh/";
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
+    pub(crate) const PAYER_PASS_OWED: &str = "pp";
 
     pub(crate) fn ask(sender: &[u8; 32], from: u64) -> String {
         format!("{ASKS}{}/{}", b64(sender), num(from))
@@ -277,6 +279,8 @@ pub(crate) enum StateKey {
     RestoreHold,
     /// `nl`: the shared records aren't listed since a restore.
     RecordsUnlisted,
+    /// `pp`: no reconcile ran the payer pass since a restore.
+    PayerPassOwed,
     /// `hc/<record key>`: the user's confirmation of a held request.
     HoldConfirmed([u8; 32]),
     /// `lr`: when the lists were last read.
@@ -330,6 +334,7 @@ impl StateKey {
             "ct" => Self::CursorTime,
             "rh" => Self::RestoreHold,
             "nl" => Self::RecordsUnlisted,
+            "pp" => Self::PayerPassOwed,
             "lr" => Self::ListsRead,
             _ => {
                 let (family, rest) = text.split_once('/')?;
@@ -477,6 +482,7 @@ mod tests {
             (key::CURSOR_TIME.into(), StateKey::CursorTime),
             (key::RESTORE_HOLD.into(), StateKey::RestoreHold),
             (key::RECORDS_UNLISTED.into(), StateKey::RecordsUnlisted),
+            (key::PAYER_PASS_OWED.into(), StateKey::PayerPassOwed),
             (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),
             (key::LISTS_READ.into(), StateKey::ListsRead),
             (key::held_list(&pubky), StateKey::HeldList(pubky)),

@@ -335,10 +335,12 @@ pub(crate) fn restore_paykit_layer(
         let attempt = match family {
             // A hold, or a user's confirmation of one, belongs to a restore before: this one
             // sets its own (`hold.rs`).
-            // So does the mark of records not yet listed: this restore sets its own.
-            StateKey::RestoreHold | StateKey::HoldConfirmed(_) | StateKey::RecordsUnlisted => {
-                continue
-            }
+            // So do the marks of records not yet listed and of the payer pass owed: this
+            // restore sets its own.
+            StateKey::RestoreHold
+            | StateKey::HoldConfirmed(_)
+            | StateKey::RecordsUnlisted
+            | StateKey::PayerPassOwed => continue,
             StateKey::Journal(attempt) => attempt,
             StateKey::CursorTime => {
                 cursor_time_ms = state::decode::<u64>(&value).map_err(|_| unread())?;
@@ -436,6 +438,11 @@ pub(crate) fn restore_paykit_layer(
     let unlisted = state::local_put(key::RECORDS_UNLISTED, &true)
         .map_err(|_| String::from("the restore's records mark can't be written"))?;
     writes.push(unlisted);
+    // No new attempt until a reconcile has run the payer pass, under `pay`: the backup
+    // doesn't hold the attempts made after it (`Paykit::payer_pass_owed`).
+    let owed = state::local_put(key::PAYER_PASS_OWED, &true)
+        .map_err(|_| String::from("the restore's payer pass mark can't be written"))?;
+    writes.push(owed);
     Ok(writes)
 }
 

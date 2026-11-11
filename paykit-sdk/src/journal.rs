@@ -216,6 +216,12 @@ pub(crate) struct JournalEntry {
     /// the outcome's batch writes (Paykit spec 7.2 step 3).
     #[serde(default, with = "serde_b64_opt")]
     pub(crate) acceptance_plaintext: Option<Vec<u8>>,
+    /// The app's own certificate the acceptance was signed under, kept with it: the
+    /// acceptance is checked and placed under it, never under a later renewal, which may no
+    /// longer hold `pay` (Paykit spec 3.2, Switch wire 3.8). `None` for an entry written
+    /// before it was kept, checked under the current certificate as then.
+    #[serde(default)]
+    pub(crate) acceptance_cert: Option<SignedDoc>,
     /// The acceptance went into the outbox, sendable: only once the payment method's call
     /// was made, or a resume found the payment in the method's history (Paykit spec 7.2
     /// step 2). Until then it is journaled only, never sent and never placed in a record.
@@ -341,6 +347,9 @@ impl JournalEntry {
         if let Some(bytes) = &self.acceptance_plaintext {
             MessagePlaintext::decode(bytes).map_err(|_| PaykitError::corrupt())?;
         }
+        if self.acceptance_cert.is_some() && self.acceptance_plaintext.is_none() {
+            return bad();
+        }
         let paid_members = self.paid_at_ms.is_some() || self.proof_msg_id.is_some();
         if (self.stage == Stage::RailPaid || paid_members) && self.rail_proof.is_none() {
             return bad();
@@ -407,8 +416,10 @@ impl JournalEntry {
     ///   sender the payee, its hash the request hash the entry pays, a `payment_request`,
     ///   and its amount, payment reference and label the entry's.
     /// - The destination's carrier: the list message or app record, verified again.
-    /// - The acceptance this app signed: read as its own message, under `own_cert`, to the
-    ///   payee, an acceptance of that request with the `msg_id` the entry keeps.
+    /// - The acceptance this app signed: read as its own message to the payee, under the
+    ///   certificate it was signed under ([`JournalEntry::acceptance_message`]), `own_cert`
+    ///   only for an entry that kept none, an acceptance of that request with the `msg_id`
+    ///   the entry keeps.
     ///
     /// A corrupt store for any mismatch.
     pub(crate) fn check_restored(
@@ -444,14 +455,13 @@ impl JournalEntry {
             }
         }
         self.kept_carrier(own)?;
-        if let Some(bytes) = &self.acceptance_plaintext {
+        if let Some(acceptance) = self
+            .acceptance_message(own, own_cert)
+            .map_err(|_| PaykitError::corrupt())?
+        {
             let Some(hash) = request_hash else {
                 return corrupt();
             };
-            let plaintext = MessagePlaintext::decode(bytes).map_err(|_| PaykitError::corrupt())?;
-            let acceptance =
-                StoredMessage::new(*own, own_cert.signed(), plaintext, None, &self.payee)
-                    .map_err(|_| PaykitError::corrupt())?;
             if !matches!(acceptance.body(), Body::PaymentRequestAcceptance(_))
                 || acceptance.message().refs != [hash]
                 || self.acceptance_msg_id.as_deref() != Some(acceptance.message().msg_id.as_str())
@@ -460,6 +470,34 @@ impl JournalEntry {
             }
         }
         Ok(())
+    }
+
+    /// The acceptance this app signed, as its own message to the payee, under the certificate
+    /// it was signed under ([`JournalEntry::acceptance_cert`]), or `current` for an entry
+    /// that kept none. It is read as any reader reads a stored message
+    /// ([`StoredMessage::new`], Paykit wire 5.2: the certificate verified for this identity,
+    /// its App ID the plaintext's, the signature, and the sender's scopes); a kept
+    /// certificate must also be this app's own. So a later renewal, revocation of a scope or
+    /// key-preserving change never refuses an acceptance its certificate authorized, and one
+    /// no certificate of this app authorized is still refused. `None` when the entry keeps
+    /// no acceptance.
+    pub(crate) fn acceptance_message(
+        &self,
+        own: &[u8; 32],
+        current: &AppCert,
+    ) -> Result<Option<StoredMessage>> {
+        let Some(bytes) = &self.acceptance_plaintext else {
+            return Ok(None);
+        };
+        let plaintext = MessagePlaintext::decode(bytes).map_err(|_| PaykitError::corrupt())?;
+        let cert = self.acceptance_cert.as_ref().unwrap_or(current.signed());
+        let stored = StoredMessage::new(*own, cert, plaintext, None, &self.payee)?;
+        // Not another own app's acceptance: the plaintext names the certificate's App ID,
+        // which must be this app's.
+        if stored.message().from.app_id != current.app_id() {
+            return Err(PaykitError::corrupt());
+        }
+        Ok(Some(stored))
     }
 
     /// Keep the destination's carrier in the entry.
