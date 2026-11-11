@@ -211,6 +211,8 @@ Every payment follows these steps, whether it pays a one-time request, a Billing
    - revalidate the app's own `identity.json` if needed (Pubky Switch spec, Section 4.3).
 
    All three must succeed before any money moves. If any of them fails, the app writes `failed` instead of paying. An executor checks its Allowance again at this point (Section 8.3), and a payment priced by period details' rates checks that they are still usable (Section 8.2). An automatic payment isn't attempted at all while the device clock and the service's differ by more than the clock tolerance (Pubky Switch spec, Section 10.1, Clock bound).
+
+   **Dispatch window.** The owner sets the attempt's `orphan_after` to at least the longest its payment method can take to complete or fail, plus the time it allows itself between the `attempt` and the dispatch (Pubky Switch spec, Section 10.2). It dispatches only while that allowance hasn't passed since the service accepted the `attempt` and its own certificate hasn't expired, judged with no wait between the judgment and the dispatch; past it, it submits nothing and writes `failed`. It repeats an idempotent dispatch only while the method's longest time still fits before the orphan age. The owner's own revocation inside the allowance isn't seen without a read; the user's confirmation that Pubky Switch spec, Section 10.2 rows 5 and 6 require before another app resolves the attempt, and the `possibly_duplicate` flag (Section 7.3), cover it.
 2. **Pay.** For a one-time request, send the acceptance at the same time, without waiting for it.
 3. **Write `done`** (basis `owner`) and update the activity record, in one batch. If the payment failed, write `failed` instead.
 4. **Send the proof** to the payee.
