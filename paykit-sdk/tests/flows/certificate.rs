@@ -1429,7 +1429,14 @@ async fn test_certificate_wider_without_the_pay_key_writes_nothing_and_journals_
     wallet.receive(None).await.unwrap();
     let entries = w.bob.switch().entries_from(&w.alice_id());
     w.rail.settle(&attempt_id, true);
+    let before = w.router.log().len();
     let resumed = wallet.resume_payments().await.unwrap();
+    let writes: Vec<String> = w.router.log()[before..]
+        .iter()
+        .filter(|line| line.contains("/ops"))
+        .cloned()
+        .collect();
+    assert!(writes.is_empty(), "{writes:?}");
     assert!(
         matches!(
             resumed.as_slice(),
