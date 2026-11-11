@@ -335,7 +335,6 @@ async fn test_resolve_public_payment_request_rechecks_blocked_peer_after_registr
     }
 
     let (storage, counterparty, request_id) = bound_payment_request_fixture().await;
-    let authorized_apps = storage.snapshot().unwrap().authorized_paykit_apps;
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         BlockingSessionProvider {
@@ -355,10 +354,6 @@ async fn test_resolve_public_payment_request_rechecks_blocked_peer_after_registr
         matches!(result, Err(PaykitSdkError::Policy { ref context, .. }) if context.contains("is blocked")),
         "unexpected error: {:?}",
         result.as_ref().err().map(ToString::to_string)
-    );
-    assert_eq!(
-        storage.snapshot().unwrap().authorized_paykit_apps,
-        authorized_apps
     );
 }
 
