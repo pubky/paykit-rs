@@ -29,7 +29,7 @@ use pubky_switch_core::claims::{ClaimStatus, Outcome};
 use pubky_switch_core::http::ErrorCode;
 use serde_json::{Map, Value};
 
-use crate::activity::{self, ActivityTarget, Role, SideTag};
+use crate::activity::{self, ActivityTarget, KeptSide, Role, SideTag};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
 use crate::rail::ProofCheck;
@@ -473,7 +473,13 @@ impl Paykit {
             // The side it is sent from goes with it, for the label rule of senders (Paykit
             // spec 3.4).
             let mut tx = Tx::default();
-            tx.put(&key::side(signed.msg_id()), &SideTag::Payee)?;
+            tx.put(
+                &key::side(signed.msg_id()),
+                &KeptSide {
+                    msg_id: signed.msg_id().to_owned(),
+                    side: SideTag::Payee,
+                },
+            )?;
             match self
                 .send_with_record(
                     signed,
@@ -819,7 +825,13 @@ impl Paykit {
         )?;
         let mut tx = Tx::default();
         if cancel {
-            tx.put(&key::side(signed.msg_id()), &SideTag::Payer)?;
+            tx.put(
+                &key::side(signed.msg_id()),
+                &KeptSide {
+                    msg_id: signed.msg_id().to_owned(),
+                    side: SideTag::Payer,
+                },
+            )?;
         }
         // Recorded in the request record in the batch that queues it, conditioned on the
         // claim at the step read: an attempt meanwhile fails the batch, and the reply goes

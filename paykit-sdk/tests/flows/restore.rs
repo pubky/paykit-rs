@@ -1228,7 +1228,15 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
         )
     };
     let record_json = serde_json::to_value(record.signed()).unwrap();
-    let cases: [(&str, String, serde_json::Value); 14] = [
+    let list_ask = |payee: [u8; 32]| {
+        serde_json::json!({
+            "payee": pubky_switch_core::enc::b64(&payee),
+            "app_id": null,
+            "held_version": null,
+            "asked_at_ms": 1,
+        })
+    };
+    let cases: [(&str, String, serde_json::Value); 18] = [
         (
             "kept cancellation of another kind",
             key_of("kc/"),
@@ -1271,6 +1279,30 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
         ),
         ("unknown key", "zz/1".into(), kept(serde_json::json!(1))),
         (
+            "journal entry under another attempt's key",
+            format!("j/{}", paykit_lib::AttemptId::generate().unwrap().to_text()),
+            kept(entry.clone()),
+        ),
+        (
+            "queued ask under another sender's key",
+            format!("{}/{:020}", key_of("ask/"), 5),
+            kept(serde_json::json!({
+                "sender": pubky_switch_core::enc::b64(&w.bob_id()),
+                "from_ms": 5,
+                "until_ms": null,
+            })),
+        ),
+        (
+            "list ask under another payee's key",
+            key_of("lq/"),
+            kept(list_ask(w.bob_id())),
+        ),
+        (
+            "kept side under another message's key",
+            format!("side/{other_uuid}"),
+            kept(serde_json::json!({ "msg_id": uuid, "side": "payer" })),
+        ),
+        (
             "missed time other than its key's",
             format!("missed/{:020}", 5),
             kept(serde_json::json!(0)),
@@ -1311,6 +1343,15 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
     state.push((
         answer_key.into_bytes(),
         kept(answer(own_cert, good_body, uuid)),
+    ));
+    // So do a list ask and a kept side under their own keys.
+    state.push((
+        format!("lq/{}", pubky_switch_core::enc::b64(&w.bob_id())).into_bytes(),
+        kept(list_ask(w.bob_id())),
+    ));
+    state.push((
+        format!("side/{uuid}").into_bytes(),
+        kept(serde_json::json!({ "msg_id": uuid, "side": "payer" })),
     ));
     // A missed item holding the time its key names restores too.
     state.push((

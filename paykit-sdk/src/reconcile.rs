@@ -37,7 +37,7 @@ use crate::paykit::Paykit;
 use crate::rail::RailOutcome;
 use crate::records::KeptMessage;
 use crate::requests::request_of;
-use crate::state::{self, key};
+use crate::state::key;
 
 /// How the user resolves a doubtful attempt (Paykit spec 7.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -486,7 +486,7 @@ impl Paykit {
         }
         if let Some(mut entry) = entry.filter(JournalEntry::open) {
             entry.stage = Stage::Finished;
-            batch = batch.local(state::local_put(&journal_key, &entry)?);
+            batch = batch.local(crate::pay::journal_write(&entry)?);
         }
         self.app.submit_batch(batch).await?;
         Ok(())

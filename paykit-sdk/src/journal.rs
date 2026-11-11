@@ -77,8 +77,9 @@ pub enum Stage {
     /// The method reports a definitive failure.
     RailFailed,
     /// The outcome, the activity record and the proof were written in one batch, but the
-    /// acceptance the payment owes couldn't be queued: a resume queues it, places it in the
-    /// record, and finishes the entry (Paykit spec 7.2 steps 2, 3).
+    /// acceptance the payment owes isn't in the record yet: not queued, or queued
+    /// (`acceptance_released`) and not yet placed. A resume queues it if it isn't, places it
+    /// in the record, and finishes the entry (Paykit spec 7.2 steps 2, 3).
     AcceptanceOwed,
     /// Finished: the outcome, the activity record and, for a payment, the proof were written
     /// in one batch; or the failure was written before money could move.
@@ -355,8 +356,11 @@ impl JournalEntry {
         if self.record_held && self.rail_proof.is_none() {
             return bad();
         }
+        // Owed: a proof, and an acceptance to queue or to place. One queued and not yet
+        // placed is released and still owed here, as `finish_owed_acceptance` saves it
+        // between the queueing and the record's batch.
         if self.stage == Stage::AcceptanceOwed
-            && (self.rail_proof.is_none() || !self.acceptance_owed || self.acceptance_released)
+            && (self.rail_proof.is_none() || !self.acceptance_owed)
         {
             return bad();
         }

@@ -1719,3 +1719,162 @@ async fn test_acceptance_sent_earlier_is_placed_when_another_app_resolves_the_pa
     assert_eq!(queued_acceptances(&store, &wallet).await, 1);
     assert_eq!(w.rail.executions(&attempt_id), 1);
 }
+
+#[tokio::test]
+async fn test_acceptance_owed_queued_then_unplaced_finishes_after_a_restart() {
+    // The acceptance is queued and the entry saved released, still owed; then the record's
+    // batch fails, as a crash there would leave it. After a restart the journal still reads,
+    // and a resume places the acceptance without queueing it again, and finishes.
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    let mut wallet = reload(&w, &store, app_id).await;
+    store.refuse_acceptances(true);
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    let PayOutcome::Paid { attempt_id, .. } = outcome else {
+        panic!("{outcome:?}")
+    };
+    store.refuse_acceptances(false);
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::Conflict,
+            current: serde_json::Value::Null,
+        });
+    wallet.resume_payments().await.unwrap();
+    let payment = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::AcceptanceOwed);
+    assert_eq!(queued_acceptances(&store, &wallet).await, 1);
+    drop(wallet);
+    let mut wallet = reload(&w, &store, app_id).await;
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
+    assert_eq!(queued_acceptances(&store, &wallet).await, 1);
+    let value = crate::outcome_record::record_value(&mut wallet, &request)
+        .await
+        .unwrap();
+    assert!(!value["response"].is_null(), "{value}");
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}
+
+/// Alice's wallet `app_id` loaded again on `store`, as after a restart.
+async fn reload(w: &World, store: &Arc<HookedStore>, app_id: [u8; 16]) -> Paykit {
+    w.load_on_clock(
+        &w.alice,
+        Arc::clone(store) as Arc<dyn StateStore>,
+        app_id,
+        Arc::clone(&w.clock),
+    )
+    .await
+}
+
+/// After a crash at `fault` in `act`, the wallet reloads from what was committed: its journal
+/// reads, a resume (and, for a user's `done` cut short, the user asking again) finishes the
+/// payment, and its acceptance was queued exactly once and placed. Returns whether the fault
+/// was hit.
+async fn crash_owed_acceptance_path(
+    fault: pubky_switch_client::store::Fault,
+    users_done: bool,
+) -> bool {
+    use pubky_switch_client::store::FaultStore;
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    let mut wallet = reload(&w, &store, app_id).await;
+    // The acceptance can't be queued: a paid payment owes it, or a pending one does.
+    store.refuse_acceptances(true);
+    if users_done {
+        w.rail.next(Behaviour::Hang);
+    }
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    let attempt_id = match outcome {
+        PayOutcome::Paid { attempt_id, .. } | PayOutcome::Pending { attempt_id } => attempt_id,
+        other => panic!("{other:?}"),
+    };
+    store.refuse_acceptances(false);
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    drop(wallet);
+    let done = || paykit_sdk::Resolution::Done;
+    let faulty = Arc::new(FaultStore::new(
+        Arc::clone(&store) as Arc<dyn StateStore>,
+        fault,
+    ));
+    let mut crashing = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&faulty) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    let _ = if users_done {
+        crashing
+            .resolve_attempt(
+                &obligation,
+                attempt_id,
+                done(),
+                pubky_switch_client::app::UserConfirmed::new(),
+            )
+            .await
+    } else {
+        crashing.resume_payments().await.map(|_| ())
+    };
+    let hit = faulty.stopped();
+    drop(crashing);
+    let mut wallet = reload(&w, &store, app_id).await;
+    wallet.resume_payments().await.unwrap();
+    if users_done && wallet.payments().await.unwrap()[0].stage != paykit_sdk::Stage::Finished {
+        let _ = wallet
+            .resolve_attempt(
+                &obligation,
+                attempt_id,
+                done(),
+                pubky_switch_client::app::UserConfirmed::new(),
+            )
+            .await;
+        wallet.resume_payments().await.unwrap();
+    }
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished,
+        "{fault:?}"
+    );
+    assert_eq!(queued_acceptances(&store, &wallet).await, 1, "{fault:?}");
+    let value = crate::outcome_record::record_value(&mut wallet, &request)
+        .await
+        .unwrap();
+    assert!(!value["response"].is_null(), "{fault:?}: {value}");
+    assert_eq!(w.rail.executions(&attempt_id), 1, "{fault:?}");
+    hit
+}
+
+/// Every commit point of `users_done`'s path, stopping after and before each.
+async fn crash_at_every_commit(users_done: bool) {
+    use pubky_switch_client::store::Fault;
+    for stop in [Fault::StopAfter as fn(u64) -> Fault, Fault::StopBefore] {
+        let mut n = 1;
+        while crash_owed_acceptance_path(stop(n), users_done).await {
+            n += 1;
+            assert!(n < 64, "the path never finished");
+        }
+        assert!(n > 1, "the path commits");
+    }
+}
+
+#[tokio::test]
+async fn test_crash_finishing_an_owed_acceptance_queues_it_once() {
+    crash_at_every_commit(false).await;
+}
+
+#[tokio::test]
+async fn test_crash_in_a_users_done_on_a_pending_payment_queues_its_acceptance_once() {
+    crash_at_every_commit(true).await;
+}

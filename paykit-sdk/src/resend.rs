@@ -20,7 +20,7 @@ use pubky_switch_core::message::Message;
 use pubky_switch_core::records::DAY_MS;
 use pubky_switch_core::sig::SignedDoc;
 
-use crate::activity::SideTag;
+use crate::activity::{KeptSide, SideTag};
 use crate::error::{PaykitError, Result};
 use crate::paykit::Paykit;
 use crate::protocol::{body_label, holds_role, QueuedAsk};
@@ -181,7 +181,9 @@ impl Paykit {
             // The cooldown is judged, and stamped, on the clock now: the loop awaits the store
             // and the network between messages.
             let now = self.now();
-            if last.is_some_and(|at| now < at.saturating_add(RESEND_COOLDOWN_MS)) {
+            // A time ahead of the clock (restored, or the clock set back) is due: it never
+            // holds a re-send back for longer than the hour.
+            if last.is_some_and(|at| at <= now && now - at < RESEND_COOLDOWN_MS) {
                 continue;
             }
             // The limits are counted before the re-send goes out (Paykit spec 9): a crash
@@ -215,10 +217,10 @@ impl Paykit {
             // The side is kept with every cancellation this app sends. One without it isn't
             // re-sent: taking either side would guess which apps may get it (Paykit spec
             // 3.4).
-            match self
-                .local_get::<SideTag>(&key::side(&message.msg_id))
-                .await?
-            {
+            let kept = self
+                .local_get::<KeptSide>(&key::side(&message.msg_id))
+                .await?;
+            match KeptSide::of(kept, &message.msg_id) {
                 Some(SideTag::Payee) => Side::Payee,
                 Some(SideTag::Payer) => Side::Payer,
                 None => return Ok(false),

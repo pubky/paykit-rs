@@ -49,7 +49,7 @@ use pubky_switch_core::scopes as switch_scopes;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::activity::{self, ActivityTarget, SideTag};
+use crate::activity::{self, ActivityTarget, KeptSide, SideTag};
 use crate::hold::RestoreHold;
 use crate::journal::JournalEntry;
 use crate::pay::ListAsk;
@@ -372,8 +372,11 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::Side(_) => {
-                state::decode::<SideTag>(&value).map_err(|_| unread())?;
+            StateKey::Side(msg_id) => {
+                let kept = state::decode::<KeptSide>(&value).map_err(|_| unread())?;
+                if kept.msg_id != msg_id {
+                    return Err(unread());
+                }
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -387,8 +390,11 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::ListAsk { .. } => {
-                state::decode::<ListAsk>(&value).map_err(|_| unread())?;
+            StateKey::ListAsk { payee, app_id } => {
+                let asked = state::decode::<ListAsk>(&value).map_err(|_| unread())?;
+                if asked.payee != payee || asked.app_id != app_id {
+                    return Err(unread());
+                }
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -606,8 +612,10 @@ impl Protocol for PaykitProtocol {
     ) -> bool {
         // A kept side that can't be read sends to no one rather than guess (Paykit spec 3.4):
         // the message isn't sealed to this recipient.
-        match view_get::<SideTag>(view, &key::side(&message.msg_id)) {
-            Ok(kept) => self.narrows(message, recipient, kept),
+        // So does one that names another message than its key.
+        match view_get::<KeptSide>(view, &key::side(&message.msg_id)) {
+            Ok(Some(kept)) if kept.msg_id != message.msg_id => false,
+            Ok(kept) => self.narrows(message, recipient, KeptSide::of(kept, &message.msg_id)),
             Err(()) => false,
         }
     }

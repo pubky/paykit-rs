@@ -32,8 +32,9 @@ use paykit_lib::records::{
 };
 use paykit_lib::{AttemptId, Body, PaymentAmount, PaymentEndpointIdentifier};
 use pubky_switch_client::app::{
-    claim_conflict, AppError, ClaimOp, Initiator, ObligationDeadline, OpBatch, PeerIdentity,
-    RecordContent, Refusal as ClientRefusal, SignedMessage, UserConfirmed, REVALIDATION_MS,
+    claim_conflict, AppError, ClaimOp, Initiator, LocalWrite, ObligationDeadline, OpBatch,
+    PeerIdentity, RecordContent, Refusal as ClientRefusal, SignedMessage, UserConfirmed,
+    REVALIDATION_MS,
 };
 use pubky_switch_core::chain::TransitionProof;
 use pubky_switch_core::claims::{Basis, ClaimStatus, ClaimView, Outcome};
@@ -313,11 +314,24 @@ pub(crate) fn own_deadline(deadline: Option<u64>) -> ObligationDeadline {
 }
 
 /// A `private_payment_list_request` asked of a payee's app (`lq/<payee>[/<app>]`, Paykit
-/// spec 8.4): the version it named, and when it was asked.
+/// spec 8.4): whom it asked, the version it named, and when. The payee and app repeat the
+/// key's, so a restore binds the value to its key.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ListAsk {
+    #[serde(with = "pubky_switch_core::enc::serde_b64")]
+    pub(crate) payee: [u8; 32],
+    pub(crate) app_id: Option<[u8; 16]>,
     pub(crate) held_version: Option<u64>,
     pub(crate) asked_at_ms: u64,
+}
+
+/// The local write that journals `entry` in a batch. The entry is checked first
+/// ([`JournalEntry::check`]), the check a resume and a restore read it back with, so no path
+/// persists a state recovery would refuse: one that fails is a bug, refused as a corrupt
+/// store, with nothing written.
+pub(crate) fn journal_write(entry: &JournalEntry) -> Result<LocalWrite> {
+    entry.check()?;
+    state::local_put(&key::journal(&entry.attempt()?), entry)
 }
 
 impl Paykit {
@@ -636,7 +650,10 @@ impl Paykit {
         entry.check_bound(|payee, request_hash| self.obligation(payee, request_hash, 0))
     }
 
+    /// Journal `entry`, checked first as [`journal_write`] does: only a state a resume and a
+    /// restore read back is persisted.
     async fn save(&mut self, entry: &JournalEntry) -> Result<()> {
+        entry.check()?;
         self.local_put(&key::journal(&entry.attempt()?), entry)
             .await
     }
@@ -871,7 +888,10 @@ impl Paykit {
             if let Some(asked) = self.local_get::<ListAsk>(&mark).await? {
                 // A mark ahead of the clock (restored, or the clock set back) is due, as a
                 // lists read is: it never holds the next request back for longer than a day.
-                if asked.held_version == held_version
+                // One that names another payee or app than its key is no mark of this ask.
+                if asked.payee == *payee
+                    && asked.app_id == app_id
+                    && asked.held_version == held_version
                     && asked.asked_at_ms <= now
                     && now - asked.asked_at_ms < DAY_MS
                 {
@@ -888,6 +908,8 @@ impl Paykit {
             self.local_put(
                 &mark,
                 &ListAsk {
+                    payee: *payee,
+                    app_id,
                     held_version,
                     asked_at_ms: now,
                 },
@@ -1025,7 +1047,7 @@ impl Paykit {
         // The journal moves to `Attempted` with the batch's answer, never before.
         let mut attempted = entry.clone();
         attempted.stage = Stage::Attempted;
-        batch = batch.local(state::local_put(&key::journal(&attempt_id), &attempted)?);
+        batch = batch.local(journal_write(&attempted)?);
         // The attempt ID is journaled before the write (Paykit spec 7.2), once the batch is
         // built: a batch that can't be built leaves no open entry behind it.
         self.save(&entry).await?;
@@ -1293,7 +1315,6 @@ impl Paykit {
     /// The acceptance's queueing, or the store: the entry stays owed.
     pub(crate) async fn finish_owed_acceptance(&mut self, entry: &mut JournalEntry) -> Result<()> {
         self.release_acceptance(entry, None).await?;
-        let attempt_id = entry.attempt()?;
         let target = ActivityTarget::payer(entry.natural_key.clone());
         let own = self.identity();
         let key = self.activity_key(&target)?;
@@ -1322,9 +1343,7 @@ impl Paykit {
         finished.stage = Stage::Finished;
         match write {
             Some(write) => {
-                let batch = OpBatch::new()
-                    .entry(write)
-                    .local(state::local_put(&key::journal(&attempt_id), &finished)?);
+                let batch = OpBatch::new().entry(write).local(journal_write(&finished)?);
                 match self.app.submit_batch(batch).await {
                     Ok(_) => {}
                     Err(error) if error.code() == Some(ErrorCode::Conflict) => {
@@ -1630,7 +1649,7 @@ impl Paykit {
             };
             finished.record_held = false;
             finished.proof_msg_id = proof.as_ref().map(|p| p.msg_id().to_owned());
-            batch = batch.local(state::local_put(&key::journal(&attempt_id), &finished)?);
+            batch = batch.local(journal_write(&finished)?);
             if batch.is_empty() {
                 // Nothing to write at the switch: the proof is queued alone.
                 if let Some(proof) = proof {
