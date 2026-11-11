@@ -118,6 +118,11 @@ pub enum Refusal {
     /// Nothing was written.
     #[error("Paykit wire 3.1: the app's certificate fails Paykit's checks: {0}")]
     CertificateRefused(String),
+    /// The app's own switch doesn't answer. Paykit spec 8.4 lets a payment without a request
+    /// to a reusable public endpoint go ahead without it; this SDK doesn't make one, and pays
+    /// only attempt-first (Paykit spec 7.2). Nothing was written or paid.
+    #[error("Paykit spec 8.4: the own switch doesn't answer: {0}")]
+    SwitchUnavailable(String),
 }
 
 /// A failure of the SDK.

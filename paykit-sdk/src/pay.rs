@@ -463,11 +463,24 @@ impl Paykit {
             .await?;
         self.check_transfer(&destination, &payment.amount, &options)?;
         let attempt_id = AttemptId::generate()?;
+        // The own switch is asked first, before anything is written: Paykit spec 8.4 lets
+        // a payment to a reusable public endpoint go ahead while it doesn't answer, and this
+        // SDK doesn't make one, every payment being attempt-first (Paykit spec 7.2). So a
+        // switch that doesn't answer refuses the payment, nothing written or paid. The read
+        // also makes the service time current.
+        let obligation = payment_obligation(&attempt_id);
+        self.app
+            .read_claim(&obligation)
+            .await
+            .map_err(|error| match error {
+                AppError::Transport(why) => {
+                    PaykitError::from(Refusal::SwitchUnavailable(why.to_string()))
+                }
+                other => other.into(),
+            })?;
         // 10 minutes after the latest service time the app has seen (Paykit spec 8.4),
         // which a recent read makes current (Switch spec 10.1).
-        let seen = self
-            .recent_service_time(&payment_obligation(&attempt_id))
-            .await?;
+        let seen = self.recent_service_time(&obligation).await?;
         let own = self.identity();
         let natural = natural_key::payer_payment_record(&own, &attempt_id);
         let mut record = activity::empty(ActivitySide::Payer, payment.payee);
@@ -1054,9 +1067,6 @@ impl Paykit {
         Err(Refusal::AttemptFailed(Box::new(why)).into())
     }
 
-    /// The acceptance of a one-time request, sent with its payment (Paykit spec 7.2 step 2,
-    /// Paykit wire 4.6): signed and journaled, then queued, so a crash between the two signs
-    /// it again and never queues two.
     /// The acceptance owed with the payment, signed and journaled, not queued: nothing can
     /// send it yet (Paykit spec 7.2 step 2). `None` when none is owed or it went out already.
     async fn journal_acceptance(

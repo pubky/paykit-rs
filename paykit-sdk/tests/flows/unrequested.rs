@@ -515,3 +515,26 @@ async fn test_unrequested_list_after_a_delete_is_held_until_placed_without_marks
         .unwrap();
     assert!(matches!(again, PayOutcome::Paid { .. }), "{again:?}");
 }
+
+#[tokio::test]
+async fn test_unrequested_with_the_own_switch_down_refused_and_nothing_paid() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    // Alice's switch stops answering: the SDK makes no payment without it (Paykit spec 8.4
+    // allows one to a reusable public endpoint; this SDK pays attempt-first only).
+    w.router.remove(w.alice.origin());
+    let refused = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-lightning-bolt12"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::SwitchUnavailable(_))),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    assert!(wallet.payments().await.unwrap().is_empty());
+}
