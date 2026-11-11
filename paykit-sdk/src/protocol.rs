@@ -1284,11 +1284,16 @@ mod receive_tests {
         assert!(check_kept_reply(&value, &bob.id(), [9; 32], &msg_id, &fake_key).is_err());
         let other = "123e4567-e89b-42d3-a456-426614174000";
         assert!(check_kept_reply(&value, &bob.id(), record, other, &fake_key).is_err());
-        // A kind that isn't a payer's reply.
-        let request = bob.message(&alice, "paykit.payment_request", vec![], request_body());
-        let value = state::encode(&KeptMessage::of(&request)).unwrap();
-        let msg_id = request.message().msg_id.clone();
-        assert!(check_kept_reply(&value, &alice.id(), record, &msg_id, &fake_key).is_err());
+        // A kind that isn't a payer's reply, naming the same request.
+        let receipt = alice.message(
+            &bob,
+            "paykit.payment_receipt",
+            vec![[4; 32], [5; 32]],
+            object(json!({ "attempt_id": "DgCVYQKL1eyDacZvG6YhZg" })),
+        );
+        let value = state::encode(&KeptMessage::of(&receipt)).unwrap();
+        let msg_id = receipt.message().msg_id.clone();
+        assert!(check_kept_reply(&value, &bob.id(), record, &msg_id, &fake_key).is_err());
     }
 
     #[test]
