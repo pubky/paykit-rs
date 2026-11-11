@@ -355,6 +355,7 @@ impl Paykit {
         self.records_known().await?;
         self.require_pay()?;
         self.app.may_attempt(false).map_err(not_now)?;
+        self.refuse_while_payer_pass_owed().await?;
         let (target, record) = self.payer_request(request).await?;
         let (stored, body) = request_of(&record).ok_or(Refusal::NotFound)?;
         let (stored, body) = (stored.clone(), body.clone());
@@ -504,6 +505,7 @@ impl Paykit {
         self.records_known().await?;
         self.require_pay()?;
         self.app.may_attempt(false).map_err(not_now)?;
+        self.refuse_while_payer_pass_owed().await?;
         let options = payment.options;
         let (destination, carrier, reserve) = self
             .list_destination(&payment.payee, options.list_app, None, &options)
@@ -2399,8 +2401,9 @@ impl Paykit {
     /// 4, 7.2 step 1). In order:
     ///
     /// 1. the app may make an attempt now: no alarm, not left, no restore question, not in
-    ///    reconcile mode and, for an automatic payment, the clocks within the tolerance
-    ///    (Switch spec 10.1, 12.4);
+    ///    reconcile mode, no payer pass owed since a restore ([`Paykit::payer_pass_owed`])
+    ///    and, for an automatic payment, the clocks within the tolerance (Switch spec 10.1,
+    ///    12.4; Paykit spec 7.3);
     /// 2. `claim`, the view of a checked proof or of a claim read, shows the attempt open,
     ///    this app's and current (Paykit spec 7.2, "Only a verified answer lets money move");
     /// 3. the destination passes its checks against its carrier and the payee's
@@ -2426,6 +2429,9 @@ impl Paykit {
     ) -> Result<std::result::Result<PeerIdentity, Held>> {
         if let Err(refusal) = self.app.may_attempt(by == Initiator::Automatic) {
             return Ok(Err(Held::Check(Refusal::NotNow(refusal.to_string()))));
+        }
+        if self.payer_pass_owed().await? {
+            return Ok(Err(Held::Check(crate::hold::payer_pass_refusal())));
         }
         let attempt = entry.attempt()?.to_bytes();
         let me = self.app_id();

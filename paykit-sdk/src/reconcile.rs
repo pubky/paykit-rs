@@ -13,6 +13,11 @@
 //! the user: [`Paykit::resolve_attempt`] writes the user's choice (`done` basis
 //! `reconcile`, `unknown`, or `failed`). [`Paykit::end_reconcile`] ends the mode.
 //!
+//! The payer pass, the reading of the payer's obligations above, needs `pay`: without it the
+//! switch answers no claim read. After a restore, no new attempt is made and nothing is
+//! dispatched until a reconcile under `pay` has run it, even once reconcile mode has ended,
+//! since only it finds the attempts made after the backup ([`ReconcileReport::payer_skipped`]).
+//!
 //! Only the payee's yes counts: a receipt settles an attempt; nothing from the payee shows an
 //! attempt wasn't paid (Paykit spec 7.3).
 
@@ -70,6 +75,11 @@ pub struct ReconcileReport {
     pub resolved: Vec<PayOutcome>,
     /// What stays doubtful, for the user.
     pub doubtful: Vec<Doubtful>,
+    /// The payer pass was skipped, the certificate lacking `pay`: the payer's obligations
+    /// weren't read, so `doubtful` holds only the client's own doubtful claims. After a
+    /// restore, no new attempt is made until a reconcile under `pay` runs the pass, also
+    /// after [`Paykit::end_reconcile`].
+    pub payer_skipped: bool,
 }
 
 /// An obligation of the payer's records.
@@ -149,9 +159,11 @@ impl Paykit {
         // what isn't sent now goes at the next receive.
         self.queue_restore_asks().await?;
         let _ = self.send_asks().await;
+        let payer_pass = self.holds("pay");
         let mut report = ReconcileReport {
             resolved: self.resume_payments().await?,
             doubtful: Vec::new(),
+            payer_skipped: !payer_pass,
         };
         let journaled: Vec<[u8; 16]> = self
             .journal()
@@ -163,7 +175,7 @@ impl Paykit {
         // Without `pay` the app reads no claim (the service refuses it without
         // `claims.read`): the payer records' obligations wait for an app holding it, and
         // the client's own doubtful claims below are still reported.
-        let records = if self.holds("pay") {
+        let records = if payer_pass {
             self.payer_records().await?
         } else {
             Vec::new()
@@ -245,6 +257,11 @@ impl Paykit {
                 payee: None,
                 request_hash: None,
             });
+        }
+        // Every own attempt on the payer's obligations was read: new attempts may follow
+        // once reconcile mode ends (`Paykit::payer_pass_owed`).
+        if payer_pass {
+            self.payer_pass_ran().await?;
         }
         Ok(report)
     }
@@ -568,7 +585,9 @@ impl Paykit {
     /// attempts may be made again. After a restore, the re-send requests to the open
     /// requests' counterparties are queued first if [`Paykit::reconcile`] didn't queue them
     /// (Paykit spec 7.2), reading the records for them: a host that ends reconcile mode
-    /// without reconciling still asks once.
+    /// without reconciling still asks once. After a restore, payments still wait for a
+    /// reconcile under `pay` that runs the payer pass, if none has yet; the payee's side
+    /// works at once.
     ///
     /// # Errors
     ///

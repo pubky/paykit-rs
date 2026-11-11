@@ -191,6 +191,7 @@ pub(crate) mod key {
     pub(crate) const LISTS_READ: &str = "lr";
     pub(crate) const HELD_LISTS: &str = "lh/";
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
+    pub(crate) const PAYER_PASS_OWED: &str = "pp";
 
     pub(crate) fn ask(sender: &[u8; 32], from: u64) -> String {
         format!("{ASKS}{}/{}", b64(sender), num(from))
@@ -277,6 +278,8 @@ pub(crate) enum StateKey {
     RestoreHold,
     /// `nl`: the shared records aren't listed since a restore.
     RecordsUnlisted,
+    /// `pp`: no reconcile ran the payer pass since a restore.
+    PayerPassOwed,
     /// `hc/<record key>`: the user's confirmation of a held request.
     HoldConfirmed([u8; 32]),
     /// `lr`: when the lists were last read.
@@ -330,6 +333,7 @@ impl StateKey {
             "ct" => Self::CursorTime,
             "rh" => Self::RestoreHold,
             "nl" => Self::RecordsUnlisted,
+            "pp" => Self::PayerPassOwed,
             "lr" => Self::ListsRead,
             _ => {
                 let (family, rest) = text.split_once('/')?;
@@ -477,6 +481,7 @@ mod tests {
             (key::CURSOR_TIME.into(), StateKey::CursorTime),
             (key::RESTORE_HOLD.into(), StateKey::RestoreHold),
             (key::RECORDS_UNLISTED.into(), StateKey::RecordsUnlisted),
+            (key::PAYER_PASS_OWED.into(), StateKey::PayerPassOwed),
             (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),
             (key::LISTS_READ.into(), StateKey::ListsRead),
             (key::held_list(&pubky), StateKey::HeldList(pubky)),
