@@ -331,10 +331,14 @@ impl Paykit {
         }
     }
 
-    /// The certificate may have been renewed: the protocol follows it.
-    pub(crate) fn refresh_own(&self) {
+    /// The certificate may have been renewed: the protocol follows it, once it passes
+    /// Paykit's verifiers' checks as at load (Paykit wire 3.1). A renewed certificate they
+    /// refuse, which the Switch took, is an error, and the protocol keeps the one before.
+    pub(crate) fn refresh_own(&self) -> Result<()> {
+        check_certificate(self.app.cert())?;
         self.protocol
             .set_own(self.app.identity(), self.app.cert().clone());
+        Ok(())
     }
 
     /// Note a counterparty with Paykit activity, for re-sends after a `missed` item or a
@@ -361,7 +365,7 @@ impl Paykit {
         // minutes, for the spam rule (Paykit wire 4.1).
         self.refresh_lists_when_due().await?;
         let report = self.app.receive(wait).await?;
-        self.refresh_own();
+        self.refresh_own()?;
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1).
         self.place_kept_cancellations().await?;

@@ -9,6 +9,7 @@ use pubky_switch_core::records::{
     AppCert, AppCertBody, AppRecord, AppRecordBody, IdentityBody, IdentityDoc, IdentityPolicy,
     Inbox, ListedApp, DEFAULT_CERT_LIFETIME_MS,
 };
+use pubky_switch_core::scopes::Permission;
 use serde_json::{Map, Value};
 
 /// 2026-01-01T00:00:00Z.
@@ -27,6 +28,18 @@ pub(crate) struct Party {
 
 impl Party {
     pub(crate) fn new(name: &str, app: &str, scopes: &[&str]) -> Self {
+        let owned: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
+        Self::with_permissions(name, app, scopes, &permissions_for(&owned))
+    }
+
+    /// As [`Party::new`], its certificate granting `permissions`, which the Switch takes
+    /// even when they aren't what its Paykit scopes need.
+    pub(crate) fn with_permissions(
+        name: &str,
+        app: &str,
+        scopes: &[&str],
+        permissions: &[Permission],
+    ) -> Self {
         let key = IdentityKey::from_secret(seed(&format!("{name}/identity")));
         let keys = AppKeys::from_secrets(
             seed(&format!("{name}/{app}/signing")),
@@ -40,7 +53,7 @@ impl Party {
                 keys.signing_public(),
                 keys.bundle_public(),
                 scopes.clone(),
-                &permissions_for(&scopes),
+                permissions,
                 NOW,
                 NOW + DEFAULT_CERT_LIFETIME_MS,
             ),

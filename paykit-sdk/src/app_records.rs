@@ -433,6 +433,25 @@ mod tests {
     }
 
     #[test]
+    fn test_app_records_record_with_wrong_permissions_ignored() {
+        use pubky_switch_core::scopes::Permission;
+        // The Switch takes both certificates; Paykit's verifiers refuse them (Paykit wire
+        // 3.1): `request` needs exactly `conversation.add`.
+        let missing = Party::with_permissions("bob", "shop", &["request"], &[]);
+        let extra = Party::with_permissions(
+            "bob",
+            "shop",
+            &["request"],
+            &[Permission::ListsRead, Permission::ConversationAdd],
+        );
+        for app in [&missing, &extra] {
+            let doc = app.doc(&[app]);
+            let bytes = record_bytes(app, tip_jar(), NOW, Some(NOW + DAY_MS));
+            assert!(usable_bytes(&app.id(), &app.app_id(), &bytes, &doc, NOW + 1).is_none());
+        }
+    }
+
+    #[test]
     fn test_app_records_record_of_an_app_not_current_ignored() {
         let bob = Party::new("bob", "shop", &["request"]);
         let bytes = record_bytes(&bob, tip_jar(), NOW, Some(NOW + DAY_MS));

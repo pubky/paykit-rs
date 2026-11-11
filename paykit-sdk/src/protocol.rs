@@ -30,7 +30,7 @@ use paykit_lib::collections::Collection;
 use paykit_lib::derive::request_obligation_blinded;
 use paykit_lib::kinds::{targets_app, Kind, Role as KindRole, Side, OPAQUE_MEMBERS};
 use paykit_lib::records::{ActivitySide, PaymentListRecord, StoredMessage};
-use paykit_lib::scopes::{acts_as_payee, PaykitScope, ScopeName};
+use paykit_lib::scopes::{acts_as_payee, check_certificate, PaykitScope, ScopeName};
 use paykit_lib::{Label, PaykitKindRules};
 use pubky_switch_client::app::{
     decode_local_state, Collection as SwitchCollection, Effect, LocalView, LocalWrite, LossActions,
@@ -348,8 +348,13 @@ impl Protocol for PaykitProtocol {
             .map_err(|error| error.to_string())
     }
 
-    /// The kinds this SDK handles that the certificate's scopes receive (Switch spec 3.4).
+    /// The kinds this SDK handles that the certificate's scopes receive (Switch spec 3.4):
+    /// none for a certificate Paykit's verifiers refuse (Paykit wire 3.1), such as a
+    /// renewal's that the Switch took.
     fn accepts(&self, cert: &AppCert) -> Vec<String> {
+        if check_certificate(cert).is_err() {
+            return Vec::new();
+        }
         HANDLED_KINDS
             .iter()
             .filter(|kind| holds_role(cert.scopes(), kind.recipients()))
@@ -358,9 +363,13 @@ impl Protocol for PaykitProtocol {
     }
 
     /// Whether another app's scopes receive `kind` by Paykit's table (Paykit spec 3.3), which
-    /// a sender checks before it wraps the kind to that app.
+    /// a sender checks before it wraps the kind to that app, and before
+    /// [`Protocol::sends_to`] narrows by its scopes. An app whose certificate Paykit's
+    /// verifiers refuse (Paykit wire 3.1) receives none: the Switch takes such a
+    /// certificate, Paykit doesn't.
     fn receives(&self, kind: &str, cert: &AppCert) -> bool {
-        Kind::from_kind(kind).is_some_and(|k| holds_role(cert.scopes(), k.recipients()))
+        check_certificate(cert).is_ok()
+            && Kind::from_kind(kind).is_some_and(|k| holds_role(cert.scopes(), k.recipients()))
     }
 
     /// The label narrowing of Paykit spec 3.4: a payer's acceptance, rejection,
@@ -726,6 +735,28 @@ mod receive_tests {
         // Another app's scopes receive by Paykit's table, handled here or not.
         assert!(p.receives("paykit.allowance_proposal", &wallet.cert));
         assert!(!p.receives("paykit.payment_proof", &wallet.cert));
+    }
+
+    #[test]
+    fn test_protocol_cert_paykit_refuses_receives_and_accepts_nothing() {
+        use pubky_switch_core::scopes::Permission;
+        let p = protocol_of(&Party::new("alice", "wallet", &["pay"]));
+        // `request` needs exactly `conversation.add` (Paykit wire 3.1): one without it, or
+        // with `lists.read` beside it, is a certificate the Switch takes and Paykit refuses.
+        let missing = Party::with_permissions("bob", "shop", &["request"], &[]);
+        let extra = Party::with_permissions(
+            "bob",
+            "shop",
+            &["request"],
+            &[Permission::ListsRead, Permission::ConversationAdd],
+        );
+        for app in [&missing, &extra] {
+            assert!(!p.receives("paykit.payment_proof", &app.cert));
+            assert!(p.accepts(&app.cert).is_empty());
+        }
+        let valid = Party::new("bob", "shop", &["request"]);
+        assert!(p.receives("paykit.payment_proof", &valid.cert));
+        assert!(!p.accepts(&valid.cert).is_empty());
     }
 
     #[test]

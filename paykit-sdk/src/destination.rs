@@ -47,7 +47,7 @@
 use paykit_lib::app_record::PaykitMember;
 use paykit_lib::bodies::RequestDestination;
 use paykit_lib::records::{DestinationSource, StoredMessage};
-use paykit_lib::scopes::acts_as_payee;
+use paykit_lib::scopes::{acts_as_payee, check_certificate};
 use paykit_lib::Body;
 use pubky_switch_client::app::{
     Initiator, MayAct, PeerIdentity, SwitchAnswer, SwitchLookup, UserConfirmed, DOC_CACHE_MS,
@@ -530,8 +530,11 @@ fn record_carries(
 }
 
 /// The app `app_id` that sent the carrier, or whose record it is, is current in the payee's
-/// `identity.json`, with a certificate that allows `request` and, when listed, hasn't
-/// expired; a record is also within the identity's record age limit (Paykit spec 4).
+/// `identity.json`, with a certificate that passes Paykit's verifiers' checks (Paykit wire
+/// 3.1: its scope rules, and permissions with none missing and, without another protocol's
+/// scope, no other), allows `request` and, when listed, hasn't expired; a record is also
+/// within the identity's record age limit (Paykit spec 4). The Switch takes a certificate
+/// Paykit's verifiers refuse, so a record's, which nothing else checks, is checked here.
 pub(crate) fn current(
     doc: &IdentityDoc,
     app_id: &[u8; 16],
@@ -539,6 +542,7 @@ pub(crate) fn current(
     now: u64,
 ) -> std::result::Result<(), String> {
     let cert = carrier.cert();
+    check_certificate(cert).map_err(|error| error.to_string())?;
     if !acts_as_payee(cert.scopes()) {
         return Err("Paykit spec 4: the sending app's certificate doesn't allow request".into());
     }
@@ -752,6 +756,31 @@ mod tests {
             NOW
         )
         .is_err());
+    }
+
+    #[test]
+    fn test_destination_record_carrier_with_wrong_permissions_refused() {
+        use pubky_switch_core::scopes::Permission;
+        // A public record's certificate is checked in full before it carries a destination
+        // (Paykit wire 3.1): permissions missing one `request` needs, or holding another.
+        let missing = Party::with_permissions("bob", "shop", &["request"], &[]);
+        let extra = Party::with_permissions(
+            "bob",
+            "shop",
+            &["request"],
+            &[Permission::ListsRead, Permission::ConversationAdd],
+        );
+        for app in [&missing, &extra] {
+            let carrier = Carrier::Record(Box::new(app.record(&["paykit.payment_request"])));
+            let refused = current(&app.doc(&[app]), &app.app_id(), &carrier, NOW).unwrap_err();
+            assert!(refused.contains("permissions"), "{refused}");
+        }
+        let valid = Party::new("bob", "shop", &["request"]);
+        let carrier = Carrier::Record(Box::new(valid.record(&["paykit.payment_request"])));
+        assert_eq!(
+            current(&valid.doc(&[&valid]), &valid.app_id(), &carrier, NOW),
+            Ok(())
+        );
     }
 
     #[test]
