@@ -1632,3 +1632,84 @@ async fn test_restore_cursor_time_left_unclamped_by_a_crash_is_clamped_at_load()
         "{hold}"
     );
 }
+
+#[tokio::test]
+async fn test_restore_records_mark_kept_by_a_stopped_read() {
+    // The wallet is removed after its backup. Restored, its reads stop (the client returns
+    // before, or without finishing, its listing): the mark stays, and a call that decides
+    // from a record lists first and fails rather than read the empty copy as "gone".
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let wallet_id = wallet.app_id();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let now = w.clock.now_ms();
+    w.alice
+        .next_doc(|body| {
+            body.apps.retain(|a| a.app_id != wallet_id);
+            body.removed.push(pubky_switch_core::records::RemovedApp {
+                app_id: wallet_id,
+                distrust_from: now,
+            });
+        })
+        .unwrap();
+    w.clock.advance_ms(1000);
+    let mut app = restored_bare(&w, &backup).await;
+    for _ in 0..2 {
+        let read = app.receive(None).await.unwrap();
+        assert!(read.report.stopped, "{:?}", read.report);
+    }
+    assert!(app.app().protocol_get(b"nl").await.unwrap().is_some());
+    assert!(app.resume_payments().await.is_err());
+    let refused = app.requests().await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_restore_asks_start_bounded_where_they_are_queued() {
+    // The hold's re-send start is a year ahead, as a load under a refused certificate,
+    // then a renewal, would leave it unclamped: the asks queued still start no later than
+    // the verified time.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut app = restored_bare(&w, &backup).await;
+    let ahead = w.clock.now_ms() + 365 * 24 * crate::common::HOUR_MS;
+    let hold = app.app().protocol_get(b"rh").await.unwrap().unwrap();
+    let mut hold: serde_json::Value = serde_json::from_slice(&hold).unwrap();
+    hold["d"]["resend_from_ms"] = serde_json::json!(ahead);
+    app.app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: b"rh".to_vec(),
+            value: serde_json::to_vec(&hold).unwrap(),
+        }])
+        .await
+        .unwrap();
+    // Queued, not yet sent: bob's switch doesn't answer.
+    for _ in 0..4 {
+        w.bob
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/inbox".into(),
+                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                current: serde_json::Value::Null,
+            });
+    }
+    app.reconcile().await.unwrap();
+    let hold = app.app().protocol_get(b"rh").await.unwrap().unwrap();
+    let hold: serde_json::Value = serde_json::from_slice(&hold).unwrap();
+    assert!(
+        hold["d"]["resend_from_ms"].as_u64().unwrap() <= w.clock.now_ms(),
+        "{hold}"
+    );
+}

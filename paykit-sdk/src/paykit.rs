@@ -485,8 +485,12 @@ impl Paykit {
         }
         self.refresh_own()?;
         // The client lists the shared records at its read when a listing is owed, a
-        // restore's included: the restore's mark goes (`Paykit::records_known`).
-        self.records_listed().await?;
+        // restore's included, before the read itself: a read that wasn't stopped got past
+        // that listing, so the restore's mark goes (`Paykit::records_known`). A stopped one
+        // (the app removed here, a provider change followed) may have returned before it.
+        if !report.stopped {
+            self.records_listed().await?;
+        }
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1).
         self.place_kept_cancellations().await?;

@@ -21,10 +21,12 @@
 //! and placed as any other.
 
 use paykit_lib::records::ActivityRecord;
+use pubky_switch_client::app::AppError;
+use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Refusal, Result};
+use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
 use crate::protocol::QueuedAsk;
 use crate::requests::{cancelled, rejected, RequestStatus};
@@ -107,8 +109,10 @@ impl Paykit {
 
     /// The shared records known, not an empty copy: after a restore the client's copy is
     /// empty until they are listed again (Switch spec 12.4 step 2.1), so while the restore's
-    /// mark is set they are listed first. A listing that fails refuses the call as not now:
-    /// a record's absence then decides nothing, never "gone".
+    /// mark is set they are listed first. A listing the network or the switch couldn't
+    /// answer now refuses the call as not now: a record's absence then decides nothing,
+    /// never "gone". Any other failure (a store failure, an alarm, the switch's refusal for
+    /// good) is that error: the call is refused all the same.
     pub(crate) async fn records_known(&mut self) -> Result<()> {
         if self
             .local_get::<bool>(key::RECORDS_UNLISTED)
@@ -117,7 +121,18 @@ impl Paykit {
         {
             return Ok(());
         }
-        self.list_records().await.map_err(|_| unlisted())
+        self.list_records().await.map_err(|error| {
+            let unanswered = matches!(error, PaykitError::Client(AppError::Transport(_)))
+                || matches!(
+                    error.code(),
+                    Some(ErrorCode::Unavailable | ErrorCode::RateLimited)
+                );
+            if unanswered {
+                unlisted()
+            } else {
+                error
+            }
+        })
     }
 
     /// List every collection the app reads, and clear the restore's mark.
@@ -153,11 +168,20 @@ impl Paykit {
     }
 
     /// Queue, once after a restore, a `resend_request` to every counterparty with an open
-    /// request, from the restore's re-send time; [`Paykit::receive`] sends them.
+    /// request, from the restore's re-send time; [`Paykit::receive`] sends them. The start is
+    /// bounded where it is used as well as at the restore and the load: no ordering of a
+    /// load, a renewal and a crash leaves the re-sends starting in the future.
     pub(crate) async fn queue_restore_asks(&mut self) -> Result<()> {
         let Some(mut hold) = self.local_get::<RestoreHold>(key::RESTORE_HOLD).await? else {
             return Ok(());
         };
+        let bound = self
+            .service_time()
+            .unwrap_or_else(|| self.now())
+            .saturating_add(CLOCK_TOLERANCE_MS);
+        hold.resend_from_ms = hold
+            .resend_from_ms
+            .min(RestoreHold::of(bound).resend_from_ms);
         if hold.asks_queued {
             return Ok(());
         }
