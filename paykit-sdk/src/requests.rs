@@ -24,7 +24,9 @@ use paykit_lib::scopes::{PaykitScope, ScopeName};
 use paykit_lib::{
     AttemptId, Body, Label, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
 };
-use pubky_switch_client::app::{claim_conflict, Delivery, OpBatch, RecordContent};
+use pubky_switch_client::app::{
+    claim_conflict, Delivery, OpBatch, RecordContent, UndeliverableReason,
+};
 use pubky_switch_core::claims::{ClaimStatus, Outcome};
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::ops::Condition;
@@ -145,6 +147,83 @@ impl RequestDraft {
     }
 }
 
+/// Where a message this app sent is, such as a request, a proof or an acceptance, as the
+/// user sees it (Switch spec 11).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MessageDelivery {
+    /// In the outbox, to be tried again.
+    Queued {
+        /// How many times it was tried.
+        tries: u64,
+        /// The last failure, without content.
+        last_error: Option<String>,
+    },
+    /// "Waiting for them to admit you": the recipient's switch answered `403 not_admitted`,
+    /// first at `since_ms` (app clock), as a payee's does to a payer it doesn't admit yet,
+    /// or a payer's to a payee it hasn't invited. The message stays queued, and goes once
+    /// the recipient adds this identity as a contact or invites it (Switch spec 7), or is
+    /// given up after [`pubky_switch_client::app::UNDELIVERABLE_MS`] (Switch spec 11).
+    WaitingForAdmission {
+        /// The first such answer, app clock, in Unix milliseconds.
+        since_ms: u64,
+        /// How many times it was tried.
+        tries: u64,
+    },
+    /// This app's own certificate isn't current: a delivery was answered `403 not_current`,
+    /// first at `since_ms` (app clock). Nothing about the recipient: the message stays
+    /// queued until a renewal makes the certificate current again (Switch wire 3.8), or is given up
+    /// after [`pubky_switch_client::app::UNDELIVERABLE_MS`] (Switch spec 11).
+    CertificateNotCurrent {
+        /// The first such answer, app clock, in Unix milliseconds.
+        since_ms: u64,
+        /// How many times it was tried.
+        tries: u64,
+    },
+    /// The recipient's inbox accepted it.
+    Accepted {
+        /// The acceptance time.
+        accepted_at_ms: u64,
+    },
+    /// Refused for good, or given up.
+    Failed {
+        /// Why, without content.
+        reason: String,
+    },
+}
+
+impl MessageDelivery {
+    /// The client's [`Delivery`] as the user sees it. The last answer that made a delivery
+    /// wait names which wait it is: the payee not admitting this identity, or this app's
+    /// certificate not current.
+    pub(crate) fn of(delivery: Delivery) -> Self {
+        match delivery {
+            Delivery::Queued {
+                tries,
+                last_error,
+                undeliverable_since_ms,
+                undeliverable_reason,
+                ..
+            } => match (undeliverable_since_ms, undeliverable_reason) {
+                (Some(since_ms), Some(UndeliverableReason::NotAdmitted)) => {
+                    Self::WaitingForAdmission { since_ms, tries }
+                }
+                (Some(since_ms), Some(UndeliverableReason::NotCurrent)) => {
+                    Self::CertificateNotCurrent { since_ms, tries }
+                }
+                _ => Self::Queued { tries, last_error },
+            },
+            Delivery::Accepted { accepted_at_ms, .. } => Self::Accepted { accepted_at_ms },
+            Delivery::Failed { reason, .. } => Self::Failed { reason },
+            // A state a later client adds: still queued as far as this SDK can tell.
+            _ => Self::Queued {
+                tries: 0,
+                last_error: None,
+            },
+        }
+    }
+}
+
 /// A request this app sent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -152,7 +231,7 @@ pub struct SentRequest {
     /// The message ID.
     pub msg_id: String,
     /// Where the message is.
-    pub delivery: Delivery,
+    pub delivery: MessageDelivery,
     /// The request: its record is written in the batch that queues it, so it is known once
     /// the call returns.
     pub request: Option<RequestRef>,
@@ -390,12 +469,24 @@ impl Paykit {
         };
         Ok(SentRequest {
             msg_id,
-            delivery,
+            delivery: MessageDelivery::of(delivery),
             request: Some(RequestRef {
                 payee: own,
                 request_hash: hash,
             }),
         })
+    }
+
+    /// Where the message this app sent as `msg_id` is now, such as a request after the
+    /// flushes since [`Paykit::send_request`], or a payment's proof: for example "waiting for
+    /// them to admit you" ([`MessageDelivery::WaitingForAdmission`]). `None` for a message
+    /// the outbox doesn't hold, such as one delivered and past its retention.
+    ///
+    /// # Errors
+    ///
+    /// A store failure.
+    pub async fn message_delivery(&self, msg_id: &str) -> Result<Option<MessageDelivery>> {
+        Ok(self.app.delivery(msg_id).await?.map(MessageDelivery::of))
     }
 
     /// The payee's record at `record`, bound under its policy, with its target.
@@ -1193,6 +1284,44 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    fn queued(since: Option<u64>, reason: Option<UndeliverableReason>) -> Delivery {
+        Delivery::Queued {
+            tries: 2,
+            last_error: Some("403".into()),
+            undeliverable_since_ms: since,
+            undeliverable_reason: reason,
+        }
+    }
+
+    #[test]
+    fn test_message_delivery_names_the_wait_for_admission() {
+        assert_eq!(
+            MessageDelivery::of(queued(Some(7), Some(UndeliverableReason::NotAdmitted))),
+            MessageDelivery::WaitingForAdmission {
+                since_ms: 7,
+                tries: 2
+            }
+        );
+    }
+
+    #[test]
+    fn test_message_delivery_keeps_a_certificate_not_current_apart() {
+        assert_eq!(
+            MessageDelivery::of(queued(Some(7), Some(UndeliverableReason::NotCurrent))),
+            MessageDelivery::CertificateNotCurrent {
+                since_ms: 7,
+                tries: 2
+            }
+        );
+        assert_eq!(
+            MessageDelivery::of(queued(None, None)),
+            MessageDelivery::Queued {
+                tries: 2,
+                last_error: Some("403".into())
+            }
+        );
+    }
 
     fn view(state: &str, outcome: &str) -> ClaimView {
         let attempt = json!({ "attempt_id": "1OjeFqsP4dPATeMe9xu5-Q", "duplicate": false,

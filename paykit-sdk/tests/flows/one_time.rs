@@ -2,7 +2,7 @@
 //! receipted; rejected and cancelled from each side.
 
 use paykit_sdk::rail::Behaviour;
-use paykit_sdk::{PayOptions, PayOutcome, PayeeStatus, Refusal, RequestStatus};
+use paykit_sdk::{MessageDelivery, PayOptions, PayOutcome, PayeeStatus, Refusal, RequestStatus};
 use pubky_switch_client::clock::Clock;
 
 use crate::common::{draft, request_from, FailingRecordReads, World, HOUR_MS};
@@ -614,4 +614,48 @@ async fn test_one_time_kept_stop_refuses_a_payment_after_a_restore() {
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
     assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_one_time_request_waits_for_the_payer_to_admit_the_payee() {
+    // Alice's wallet hasn't invited bob: her switch doesn't admit his request, which waits
+    // for her, not for the shop's certificate. Once she invites him, it goes.
+    let w = World::new();
+    let mut wallet = w
+        .join(
+            &w.alice,
+            "wallet",
+            paykit_sdk::AppScopes::new().pay().build().unwrap(),
+        )
+        .await;
+    let mut shop = w.shop().await;
+    let sent = shop
+        .send_request(w.alice_id(), draft("1", w.clock.now_ms()))
+        .await
+        .unwrap();
+    let since = w.clock.now_ms();
+    assert!(
+        matches!(
+            sent.delivery,
+            MessageDelivery::WaitingForAdmission { since_ms, tries: 1 } if since_ms == since
+        ),
+        "{:?}",
+        sent.delivery
+    );
+    assert_eq!(
+        shop.message_delivery(&sent.msg_id).await.unwrap(),
+        Some(sent.delivery.clone())
+    );
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    shop.flush().await.unwrap();
+    assert!(
+        matches!(
+            shop.message_delivery(&sent.msg_id).await.unwrap(),
+            Some(MessageDelivery::Accepted { .. })
+        ),
+        "{:?}",
+        shop.message_delivery(&sent.msg_id).await
+    );
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.requests().await.unwrap().len(), 1);
 }

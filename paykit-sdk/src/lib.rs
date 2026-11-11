@@ -78,7 +78,8 @@ pub use rail::{
 pub use receive::{HeldList, LISTS_REFRESH_MS};
 pub use reconcile::{Doubtful, ReconcileReport, Resolution};
 pub use requests::{
-    PayeeActivity, PayeeStatus, RequestDraft, RequestRef, RequestStatus, RequestView, SentRequest,
+    MessageDelivery, PayeeActivity, PayeeStatus, RequestDraft, RequestRef, RequestStatus,
+    RequestView, SentRequest,
 };
 pub use resend::{ResendSelection, RESEND_COOLDOWN_MS};
 pub use timer::Timer;
