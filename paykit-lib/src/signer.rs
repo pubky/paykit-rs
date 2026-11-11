@@ -228,6 +228,8 @@ mod tests {
         for scopes in [
             &["pay", "request", "contacts", "manage_contacts"][..],
             &["pay", "allowance", "allowance_execute", "contacts"],
+            &["pay", "allowance", "contacts"],
+            &["pay", "contacts"],
             &["request:shop1", "request:shop2"],
             &["contacts"],
             &["ext:paykit-cap", "request"],
@@ -262,11 +264,13 @@ mod tests {
             names(&["allowance_execute", "allowance"]),
             names(&["allowance_execute", "pay"]),
             names(&["allowance_execute", "allowance", "pay"]),
+            names(&["pay"]),
+            names(&["pay", "allowance"]),
             names(&["manage_contacts"]),
             names(&["ext:cap"]),
             names(&["ext:paykit"]),
             names(&["pay:x"]),
-            names(&["pay", "ext"]),
+            names(&["pay", "contacts", "ext"]),
             extensions,
             labels,
         ] {
@@ -295,7 +299,7 @@ mod tests {
     #[test]
     fn test_signer_protocol_another_protocols_scope_unknown_without_it() {
         assert!(matches!(
-            refusal(&paykit(), &["pay", "chat"]),
+            refusal(&paykit(), &["pay", "contacts", "chat"]),
             Refusal::UnknownScopes { scopes } if scopes == ["chat"]
         ));
     }
@@ -313,5 +317,39 @@ mod tests {
             .grant_paths(&[3; 16], &names(&["chat"]))
             .unwrap()
             .is_empty());
+        // A paying app's request holds the `contacts` that `pay` requires, and is offered
+        // the Paykit Profile too.
+        let wallet = names(&["pay", "contacts"]);
+        protocols.terms(&wallet).unwrap();
+        let paths = protocols.grant_paths(&[3; 16], &wallet).unwrap();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0].path, "/pub/paykit/profile.json");
+    }
+
+    #[test]
+    fn test_signer_protocol_pay_request_without_contacts_refused() {
+        let protocols = paykit();
+        for scopes in [&["pay"][..], &["pay", "allowance"], &["pay", "request"]] {
+            match refusal(&protocols, scopes) {
+                Refusal::ProtocolRule { protocol, reason } => {
+                    assert_eq!(protocol, "paykit");
+                    assert!(reason.contains("pay requires contacts"), "{reason}");
+                }
+                other => panic!("{scopes:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_signer_protocol_pay_request_with_contacts_reads_the_lists() {
+        let protocols = paykit();
+        for scopes in [&["pay", "contacts"][..], &["pay", "allowance", "contacts"]] {
+            let terms = terms(&protocols, scopes);
+            assert!(
+                terms.permissions.contains(&Permission::ListsRead),
+                "{scopes:?}"
+            );
+            check_certificate(&certificate(scopes, &terms)).unwrap();
+        }
     }
 }
