@@ -48,9 +48,18 @@ pub enum Refusal {
     /// The obligation may already be paid: an `unknown` or orphaned attempt, a next attempt
     /// that would be flagged `possibly_duplicate`, a pinned deadline other than the app's own,
     /// or an attempt a restore left unresolved. Only a user who has seen "may already be
-    /// paid" pays it (Paykit spec 7.1, 7.2).
-    #[error("may already be paid: {0}")]
-    MayBePaid(String),
+    /// paid" pays it (Paykit spec 7.1, 7.2). `doubt`, when there is one, is what the user
+    /// is shown and may pay over: paying anyway carries it back
+    /// ([`crate::PayOptions::with_may_be_paid_confirmed`]), and only that same doubt is
+    /// passed. `None` for a reason no confirmation passes, such as a pinned deadline other
+    /// than the app's own, or a claim that doesn't show this app's attempt open.
+    #[error("may already be paid: {reason}")]
+    MayBePaid {
+        /// The rule that makes it doubtful.
+        reason: String,
+        /// What the user may pay over.
+        doubt: Option<Box<crate::PaymentDoubt>>,
+    },
     /// The attempt's deadline has passed, or the request's proposal expired (Paykit spec 7.1).
     #[error("Paykit spec 7.1: the deadline has passed")]
     DeadlinePassed,

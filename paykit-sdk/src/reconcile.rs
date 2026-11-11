@@ -397,6 +397,7 @@ impl Paykit {
             failed_by_method: false,
             request: Some(KeptMessage::of(stored)),
             record_held: false,
+            transfer_bound: None,
         };
         entry.keep_carrier(&carrier);
         Ok(Some(entry))

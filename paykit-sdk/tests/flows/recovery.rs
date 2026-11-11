@@ -839,3 +839,191 @@ async fn test_recovery_failure_asked_about_only_before_the_history_retention_end
         }
     }
 }
+
+/// How many payment proofs `shop` receives at its next read.
+async fn proofs_received(shop: &mut paykit_sdk::Paykit) -> usize {
+    let got = shop.receive(None).await.unwrap();
+    got.report
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                pubky_switch_client::app::AppEvent::MessageReceived { kind, .. }
+                    if kind == "paykit.payment_proof"
+            )
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn test_recovery_repeat_of_a_request_cancelled_since_withheld_and_paid_once() {
+    // The payment is in flight, and the method keeps no history: a resume would repeat it.
+    // Bob cancels the request meanwhile, and the wallet places his cancellation. The repeat
+    // is withheld: the first dispatch may have paid, so the attempt stays open, nothing
+    // written. The method's history then shows the payment made: it ends paid, once, its
+    // outcome written and its proof sent once.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    w.rail.set_declaration(idempotent_without_history());
+    shop.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    shop.cancel_sent_request(&record, None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    let payment = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, Stage::Paying);
+    let obligation = payment.obligation;
+    let claim = wallet
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap()
+        .view;
+    assert_eq!(claim.status, ClaimStatus::Attempting);
+    // The method's history now shows the payment made.
+    w.rail.settle(&attempt_id, true);
+    w.rail.set_declaration(
+        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true)
+            .with_history(true),
+    );
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Paid { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+    let claim = wallet
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap()
+        .view;
+    assert_eq!(claim.status, ClaimStatus::Settled);
+    assert_eq!(proofs_received(&mut shop).await, 1);
+    assert!(wallet.resume_payments().await.unwrap().is_empty());
+    assert_eq!(proofs_received(&mut shop).await, 0);
+}
+
+#[tokio::test]
+async fn test_recovery_repeat_with_a_fee_grown_since_the_first_dispatch_not_made() {
+    // The payment is in flight with no fee, and the method keeps no history; it now
+    // charges a fee of 5. The repeat would transfer more than the first dispatch was
+    // allowed to: it isn't made, and the attempt stays "may be paid".
+    let w = World::new();
+    let base = store();
+    let (attempt_id, app_id) = in_flight(&w, &base).await;
+    w.rail.set_declaration(idempotent_without_history());
+    w.rail
+        .set_max_fee(Some(paykit_lib::Decimal::new("5").unwrap()));
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&base),
+            app_id,
+            Arc::new(TestClock::new(w.clock.now_ms())),
+        )
+        .await;
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Paying);
+}
+
+#[tokio::test]
+async fn test_recovery_repeat_withheld_by_a_kept_stop_it_couldnt_place() {
+    // As above, but the wallet couldn't place bob's cancellation in the record, at its read
+    // or at the resume: the cancellation it keeps withholds the repeat all the same.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    w.rail.set_declaration(idempotent_without_history());
+    shop.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    shop.cancel_sent_request(&record, None).await.unwrap();
+    let refuse_next_batch = || {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/ops".into(),
+                code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+                current: serde_json::Value::Null,
+            });
+    };
+    refuse_next_batch();
+    wallet.receive(None).await.unwrap();
+    refuse_next_batch();
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    let key = wallet.request(&request).await.unwrap().record;
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    assert!(value["cancellation"].is_null(), "{value}");
+}
+
+#[tokio::test]
+async fn test_recovery_repeat_withheld_when_the_request_record_is_gone() {
+    // The phone deleted the request record while the payment was in flight: nothing shows
+    // the request still open, so the repeat is withheld, the attempt left "may be paid".
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    w.rail.set_declaration(idempotent_without_history());
+    phone.receive(None).await.unwrap();
+    crate::outcome_record::phone_writes(&mut phone, &request, None).await;
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}

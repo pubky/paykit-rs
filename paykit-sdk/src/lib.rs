@@ -63,7 +63,8 @@ pub use destination::IDENTITY_GRACE_MS;
 pub use error::{PaykitError, Refusal, Result};
 pub use journal::{PaymentView, Stage};
 pub use pay::{
-    PayOptions, PayOutcome, PaymentMode, TransferQuote, UnrequestedPayment, UNREQUESTED_DEADLINE_MS,
+    PayOptions, PayOutcome, PaymentDoubt, PaymentMode, TransferQuote, UnrequestedPayment,
+    UNREQUESTED_DEADLINE_MS,
 };
 pub use paykit::{
     orphan_floor_s, Paykit, PaykitBackup, PaykitConfig, ReceiveSummary, DEFAULT_RESEND_BUDGET,

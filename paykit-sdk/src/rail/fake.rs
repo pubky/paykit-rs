@@ -71,6 +71,7 @@ struct Inner {
     endpoints: Option<Vec<PaymentEndpointIdentifier>>,
     choice: Option<Choice>,
     max_fee: Option<paykit_lib::Decimal>,
+    next_fees: VecDeque<Option<paykit_lib::Decimal>>,
     selections: Vec<(Vec<PaymentEndpointCandidate>, Option<PaymentAmount>)>,
 }
 
@@ -159,6 +160,12 @@ impl FakeRail {
     /// Report `max_fee` as the largest fee of every transfer from now on, instead of none.
     pub fn set_max_fee(&self, max_fee: Option<paykit_lib::Decimal>) {
         self.lock().max_fee = max_fee;
+    }
+
+    /// Report `fees` as the largest fee of the next transfers, one each, in order, then the
+    /// one [`FakeRail::set_max_fee`] set: a fee estimate that changes between calls.
+    pub fn next_max_fees(&self, fees: Vec<Option<paykit_lib::Decimal>>) {
+        self.lock().next_fees.extend(fees);
     }
 
     /// Every set of candidates [`Rail::select_endpoints`] was handed, with its amount, in
@@ -338,9 +345,14 @@ impl Rail for FakeRail {
         payload: &PaymentEndpointPayload,
         amount: &PaymentAmount,
     ) -> Transfer {
+        let fee = {
+            let mut inner = self.lock();
+            let max_fee = inner.max_fee.clone();
+            inner.next_fees.pop_front().unwrap_or(max_fee)
+        };
         Transfer::new(
             Self::fixed_amount(payload.as_str(), amount).unwrap_or(Some(amount.clone())),
-            self.lock().max_fee.clone(),
+            fee,
         )
     }
 

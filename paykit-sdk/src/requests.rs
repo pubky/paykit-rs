@@ -713,6 +713,12 @@ impl Paykit {
     /// Every request the payer's apps received, from the `payer_activity` records this app
     /// holds, with what the user sees for each (Paykit spec 8.1 step 2, 8.5).
     ///
+    /// The status is as of the app's last read: it comes from the records and the claim
+    /// views this app holds and the highest service time it verified, with no network
+    /// read. In order: paid, by the record or a SETTLED claim; rejected or cancelled, by the
+    /// record; then the claim's open attempt or doubt; then the expiry. [`Paykit::receive`]
+    /// brings it up to date.
+    ///
     /// # Errors
     ///
     /// A store failure.
@@ -901,8 +907,27 @@ impl Paykit {
             return Ok(RequestStatus::Paid);
         }
         let obligation = self.obligation(payee, hash, 0);
-        if let Some(evidence) = self.app.claim_evidence(&obligation).await? {
-            let view = evidence.view;
+        let view = self
+            .app
+            .claim_evidence(&obligation)
+            .await?
+            .map(|evidence| evidence.view);
+        // A payment made counts, a cancellation it crossed included (Paykit spec 8.1).
+        if view
+            .as_ref()
+            .is_some_and(|view| view.status == ClaimStatus::Settled)
+        {
+            return Ok(RequestStatus::Paid);
+        }
+        // The record's answers come before the claim's open attempt: a claim view kept from
+        // before can still show an attempt the record's rejection or cancellation followed.
+        if rejected(record) {
+            return Ok(RequestStatus::Rejected);
+        }
+        if cancelled(record) {
+            return Ok(RequestStatus::Cancelled);
+        }
+        if let Some(view) = view {
             match view.status {
                 ClaimStatus::Settled => return Ok(RequestStatus::Paid),
                 ClaimStatus::Attempting => {
@@ -924,12 +949,6 @@ impl Paykit {
                     }
                 }
             }
-        }
-        if rejected(record) {
-            return Ok(RequestStatus::Rejected);
-        }
-        if cancelled(record) {
-            return Ok(RequestStatus::Cancelled);
         }
         // Expired once the deadline is at or before the highest service time verified (Paykit
         // spec 7.1): a one-time request's attempt deadline, or a recurring request's
@@ -1118,7 +1137,11 @@ fn refuse_on_claim(view: &pubky_switch_core::claims::ClaimView) -> Result<()> {
         ClaimStatus::Attempting => Err(Refusal::PaymentInProgress.into()),
         ClaimStatus::Free => {
             if view.attempts.iter().any(|a| a.outcome == Outcome::Unknown) {
-                Err(Refusal::MayBePaid("an attempt's outcome is unknown".into()).into())
+                Err(Refusal::MayBePaid {
+                    reason: "an attempt's outcome is unknown".into(),
+                    doubt: None,
+                }
+                .into())
             } else {
                 Ok(())
             }
@@ -1207,7 +1230,7 @@ mod tests {
         assert_eq!(refusal(view("SETTLED", "done")), Some(Refusal::AlreadyPaid));
         assert!(matches!(
             refusal(view("FREE", "unknown")),
-            Some(Refusal::MayBePaid(_))
+            Some(Refusal::MayBePaid { .. })
         ));
     }
 }

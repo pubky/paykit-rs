@@ -384,6 +384,143 @@ async fn test_wallets_payment_past_the_deadline_over_a_record_gone_or_unreadable
     }
 }
 
+/// The doubt a refusal "may already be paid" shows the user.
+fn doubt_of(refused: &paykit_sdk::PaykitError) -> paykit_sdk::PaymentDoubt {
+    match refused.refusal() {
+        Some(Refusal::MayBePaid {
+            doubt: Some(doubt), ..
+        }) => (**doubt).clone(),
+        _ => panic!("not a doubt the user may pay over: {refused:?}"),
+    }
+}
+
+/// The time after which an attempt opened now is orphaned, with a second to spare.
+const PAST_ORPHAN_MS: u64 = 4201 * 1000;
+
+#[tokio::test]
+async fn test_wallets_confirmed_doubt_changed_since_refused_again() {
+    // The phone's attempt turned `unknown`: the wallet's payment may already be paid, and
+    // the user confirms that doubt. Before the wallet pays, the tablet makes an attempt
+    // over the same doubt, which turns `unknown` too: the confirmed doubt isn't this one,
+    // so the wallet is refused again with the new one, nothing paid. Confirmed in turn, it
+    // pays.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut tablet = w.wallet("tablet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    for app in [&mut wallet, &mut phone, &mut tablet] {
+        app.receive(None).await.unwrap();
+    }
+    w.rail.next(Behaviour::Hang);
+    let first = phone
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+        .attempt_id();
+    let obligation = phone.payments().await.unwrap()[0].obligation;
+    w.clock.advance_ms(PAST_ORPHAN_MS);
+    let confirmed = pubky_switch_client::app::UserConfirmed::new();
+    wallet
+        .resolve_attempt(
+            &obligation,
+            first,
+            paykit_sdk::Resolution::Unknown,
+            confirmed,
+        )
+        .await
+        .unwrap();
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    let seen = doubt_of(&refused);
+    assert_eq!(seen.obligation, obligation);
+    assert_eq!(seen.unknown, [first]);
+    // The tablet pays over the same doubt; its attempt turns `unknown` too.
+    tablet.receive(None).await.unwrap();
+    let tablet_doubt = doubt_of(
+        &tablet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap_err(),
+    );
+    w.rail.next(Behaviour::Hang);
+    let second = tablet
+        .pay_request(
+            &request,
+            PayOptions::default().with_may_be_paid_confirmed(tablet_doubt),
+        )
+        .await
+        .unwrap()
+        .attempt_id();
+    w.clock.advance_ms(PAST_ORPHAN_MS);
+    wallet.receive(None).await.unwrap();
+    wallet
+        .resolve_attempt(
+            &obligation,
+            second,
+            paykit_sdk::Resolution::Unknown,
+            confirmed,
+        )
+        .await
+        .unwrap();
+    let again = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_may_be_paid_confirmed(seen.clone()),
+        )
+        .await
+        .unwrap_err();
+    let now = doubt_of(&again);
+    assert_ne!(now, seen);
+    let mut both = vec![first, second];
+    both.sort();
+    assert_eq!(now.unknown, both);
+    assert!(wallet.payments().await.unwrap().is_empty());
+    let outcome = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_may_be_paid_confirmed(now),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+}
+
+#[tokio::test]
+async fn test_wallets_status_shows_the_records_cancellation_over_a_kept_open_attempt() {
+    // The wallet keeps the claim with the phone's attempt open; bob then cancels the
+    // request, and the wallet reads his cancellation. The request shows cancelled, as its
+    // record says, not as being handled by the other wallet.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    phone
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::BeingHandledByOtherWallet
+    );
+    shop.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    shop.cancel_sent_request(&record, None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+}
+
 #[tokio::test]
 async fn test_wallets_receipt_settles_a_claim_the_app_never_read() {
     let w = World::new();
