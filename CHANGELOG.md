@@ -169,6 +169,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Security
 
+- Update `rustls` from 0.23.45 to 0.23.46 for upstream TLS security fixes.
+  Swift, Kotlin and React Native apps need a release rebuilt with this version;
+  Rust integrators must update `rustls` in their own `Cargo.lock`.
 - Update `webpki-roots`, `webpki-root-certs` and `rustls-webpki` so the Pubky HTTP
   client no longer trusts the distrusted emSign G3 certificate paths
   (RUSTSEC-2026-0381, RUSTSEC-2026-0382, RUSTSEC-2026-0383). Requests that use
