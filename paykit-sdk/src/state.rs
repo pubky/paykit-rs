@@ -45,8 +45,8 @@
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
 //! | `dl` | the deny list as the app last read it, for the views (Paykit spec 8.1) | |
+//! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply to a request the app holds no record of yet, kept until it does (`receive.rs`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing but may send a `resend_request` twice | |
-//! | `pr/<record key>/<msg_id>` | a payer's reply to a request the app holds no record of yet, kept until it does (`receive.rs`) | |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
 
 use paykit_lib::AttemptId;
@@ -214,9 +214,14 @@ pub(crate) mod key {
     pub(crate) const KEPT_REPLIES: &str = "pr/";
     pub(crate) const DENIED: &str = "dl";
 
-    /// A payer's reply `msg_id` kept for the payee's record `record_key`.
-    pub(crate) fn kept_reply(record_key: &[u8; 32], msg_id: &str) -> String {
-        format!("{KEPT_REPLIES}{}/{msg_id}", b64(record_key))
+    /// A payer's reply `msg_id` from `sender`, kept for the payee's record `record_key`.
+    pub(crate) fn kept_reply(sender: &[u8; 32], record_key: &[u8; 32], msg_id: &str) -> String {
+        format!("{}{}/{msg_id}", kept_replies_of(sender), b64(record_key))
+    }
+
+    /// The prefix of the replies kept from `sender`.
+    pub(crate) fn kept_replies_of(sender: &[u8; 32]) -> String {
+        format!("{KEPT_REPLIES}{}/", b64(sender))
     }
 
     /// The note of a stored entry's message `msg_id` from `sender`.
@@ -355,7 +360,11 @@ pub(crate) enum StateKey {
     /// `dt/<event ID>`: a duty event taken.
     Taken(String),
     /// `pr/<record key>/<msg_id>`: a payer's reply kept for its record.
-    KeptReply { record: [u8; 32], msg_id: String },
+    KeptReply {
+        sender: [u8; 32],
+        record: [u8; 32],
+        msg_id: String,
+    },
     /// `se/<sender>/<msg_id>`: a stored entry's message to write later.
     StoredNote { sender: [u8; 32], msg_id: String },
     /// `nt/<sender>/<msg_id>`: a notice for the host about a message given up.
@@ -468,8 +477,10 @@ impl StateKey {
                         (id.to_string() == rest).then(|| Self::Taken(rest.to_owned()))?
                     }
                     "pr" => {
+                        let (sender, rest) = rest.split_once('/')?;
                         let (record, id) = rest.split_once('/')?;
                         Self::KeptReply {
+                            sender: b64_32(sender)?,
                             record: b64_32(record)?,
                             msg_id: msg_id(id)?,
                         }
@@ -630,8 +641,9 @@ mod tests {
                 },
             ),
             (
-                key::kept_reply(&pubky, id),
+                key::kept_reply(&pubky, &pubky, id),
                 StateKey::KeptReply {
+                    sender: pubky,
                     record: pubky,
                     msg_id: id.into(),
                 },

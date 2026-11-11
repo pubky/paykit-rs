@@ -458,8 +458,12 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::KeptReply { record, msg_id } => {
-                check_kept_reply(&value, &own, record, &msg_id, &record_key)?;
+            StateKey::KeptReply {
+                sender,
+                record,
+                msg_id,
+            } => {
+                check_kept_reply(&value, &own, (sender, record), &msg_id, &record_key)?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -566,14 +570,14 @@ fn check_kept_cancellation(
     Ok(())
 }
 
-/// A payer's reply kept for a request record the app didn't hold yet (`pr/<record
+/// A payer's reply kept for a request record the app didn't hold yet (`pr/<sender>/<record
 /// key>/<msg_id>`, Switch spec 8.2): it verifies for `own`, is an acceptance, rejection,
-/// cancellation or proof with the `msg_id` its key names, and is kept under the record key of
-/// the payee's record of the request it names, under its label.
+/// cancellation or proof from the sender and with the `msg_id` its key names, and is kept
+/// under the record key of the payee's record of the request it names, under its label.
 fn check_kept_reply(
     value: &[u8],
     own: &[u8; 32],
-    record: [u8; 32],
+    (sender, record): ([u8; 32], [u8; 32]),
     msg_id: &str,
     record_key: &impl Fn(&RecordTarget) -> Result<[u8; 32], String>,
 ) -> Result<(), String> {
@@ -593,6 +597,7 @@ fn check_kept_reply(
         reply.body().label(),
     );
     if !replies
+        || reply.sender() != sender
         || reply.message().msg_id != msg_id
         || record_key(&target.record_target())? != record
     {
@@ -1269,7 +1274,9 @@ mod receive_tests {
         let target = ActivityTarget::payee(natural_key::request_record(&bob.id(), &[4; 32]), None);
         let record = fake_key(&target.record_target()).unwrap();
         let msg_id = reply.message().msg_id.clone();
-        assert!(check_kept_reply(&value, &bob.id(), record, &msg_id, &fake_key).is_ok());
+        assert!(
+            check_kept_reply(&value, &bob.id(), (alice.id(), record), &msg_id, &fake_key).is_ok()
+        );
     }
 
     #[test]
@@ -1286,9 +1293,16 @@ mod receive_tests {
         let target = ActivityTarget::payee(natural_key::request_record(&bob.id(), &[4; 32]), None);
         let record = fake_key(&target.record_target()).unwrap();
         let msg_id = reply.message().msg_id.clone();
-        assert!(check_kept_reply(&value, &bob.id(), [9; 32], &msg_id, &fake_key).is_err());
+        assert!(
+            check_kept_reply(&value, &bob.id(), (alice.id(), [9; 32]), &msg_id, &fake_key).is_err()
+        );
         let other = "123e4567-e89b-42d3-a456-426614174000";
-        assert!(check_kept_reply(&value, &bob.id(), record, other, &fake_key).is_err());
+        assert!(
+            check_kept_reply(&value, &bob.id(), (alice.id(), record), other, &fake_key).is_err()
+        );
+        assert!(
+            check_kept_reply(&value, &bob.id(), ([8; 32], record), &msg_id, &fake_key).is_err()
+        );
         // A kind that isn't a payer's reply, naming the same request.
         let carol = Party::new("carol", "shop", &["request"]);
         let receipt = carol.message(
@@ -1299,7 +1313,9 @@ mod receive_tests {
         );
         let value = state::encode(&KeptMessage::of(&receipt)).unwrap();
         let msg_id = receipt.message().msg_id.clone();
-        assert!(check_kept_reply(&value, &bob.id(), record, &msg_id, &fake_key).is_err());
+        assert!(
+            check_kept_reply(&value, &bob.id(), (carol.id(), record), &msg_id, &fake_key).is_err()
+        );
     }
 
     #[test]

@@ -18,6 +18,16 @@ use crate::common::{store, World};
 /// another of bob's apps would before this one holds the record. Alice pays it: her
 /// acceptance and proof reach the shop. Returns the request.
 async fn paid_before_recorded(w: &World, wallet: &mut Paykit, shop: &mut Paykit) -> SignedMessage {
+    paid_before_recorded_then(w, wallet, shop, async |_| {}).await
+}
+
+/// [`paid_before_recorded`], with `before` run before the shop reads the replies.
+async fn paid_before_recorded_then(
+    w: &World,
+    wallet: &mut Paykit,
+    shop: &mut Paykit,
+    before: impl AsyncFnOnce(&mut Paykit),
+) -> SignedMessage {
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     let body = json!({
         "amount": { "asset": "btc", "value": "1" },
@@ -45,6 +55,7 @@ async fn paid_before_recorded(w: &World, wallet: &mut Paykit, shop: &mut Paykit)
         .await
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    before(shop).await;
     shop.receive(None).await.unwrap();
     assert!(shop.payee_activity().await.unwrap().is_empty());
     signed
@@ -122,4 +133,77 @@ async fn test_replies_kept_no_longer_than_their_sender_keeps_them() {
     let sales = shop.payee_activity().await.unwrap();
     assert_eq!(sales.len(), 1);
     assert_eq!(sales[0].status, PayeeStatus::Requested);
+}
+
+#[tokio::test]
+async fn test_replies_from_a_blocked_payer_not_kept() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    let alice = w.alice_id();
+    let request = paid_before_recorded_then(&w, &mut wallet, &mut shop, async |shop| {
+        shop.app_mut().deny(&alice).await.unwrap();
+    })
+    .await;
+    record_request(&w, &mut shop, &request).await;
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        PayeeStatus::Requested
+    );
+}
+
+/// Alice's wallet sends bob's shop `n` acceptances of requests bob never sent.
+fn unmatched_replies(w: &World, shop: &Paykit, n: usize) {
+    for i in 0..n {
+        let refs = vec![[u8::try_from(i).unwrap(); 32]];
+        w.inject(
+            &w.alice,
+            "wallet",
+            &w.bob,
+            &[shop.app_id()],
+            "paykit.payment_request_acceptance",
+            refs,
+            serde_json::Map::new(),
+        );
+    }
+}
+
+/// The shop's status of a request paid before it was recorded, `n` unmatched replies from
+/// the payer kept first.
+async fn status_after_unmatched(n: usize) -> PayeeStatus {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    unmatched_replies(&w, &shop, n);
+    shop.receive(None).await.unwrap();
+    let request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    record_request(&w, &mut shop, &request).await;
+    shop.receive(None).await.unwrap();
+    shop.payee_activity().await.unwrap()[0].status.clone()
+}
+
+#[tokio::test]
+async fn test_replies_kept_up_to_the_bound_per_sender() {
+    // With room for one more, the acceptance is kept and the proof after it refused.
+    let status = status_after_unmatched(paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER - 1).await;
+    assert_eq!(status, PayeeStatus::Accepted);
+}
+
+#[tokio::test]
+async fn test_replies_past_the_bound_per_sender_refused() {
+    let status = status_after_unmatched(paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER).await;
+    assert_eq!(status, PayeeStatus::Requested);
 }

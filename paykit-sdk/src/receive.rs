@@ -398,14 +398,19 @@ fn payer_reply(
             // A reply to a request this app holds no record of yet, such as one another own
             // app sent whose record this app hasn't taken yet, is kept until the record is
             // held, then placed (`Paykit::place_kept_replies`). It is new state, which the
-            // spam rule gates.
+            // spam rule gates, within the bounds on kept replies ([`kept_reply_room`]).
             if held_value(cx, &target)?.is_none() {
                 if admits_new_state(cx, &sender, scopes)? {
                     let kept = key::kept_reply(
+                        &sender,
                         &cx.record_key(&target.record_target())?,
                         &stored.message().msg_id,
                     );
-                    if cx.local_get(kept.as_bytes())?.is_none() {
+                    let from = cx
+                        .local_scan(key::kept_replies_of(&sender).as_bytes())?
+                        .len();
+                    let all = cx.local_scan(key::KEPT_REPLIES.as_bytes())?.len();
+                    if cx.local_get(kept.as_bytes())?.is_none() && kept_reply_room(from, all) {
                         keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
                     }
                 }
@@ -731,6 +736,20 @@ fn hold_list(
     }
     keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
     Ok(())
+}
+
+/// How many payer's replies to requests this app holds no record of it keeps from one
+/// sender identity, as Switch spec 8.2 bounds the entries of an unverified sender: past it,
+/// the newest is refused, and its sender, who keeps it, may send it again (Paykit spec 9).
+pub const MAX_KEPT_REPLIES_PER_SENDER: usize = 64;
+
+/// How many such replies it keeps in all, refused past it the same way.
+pub const MAX_KEPT_REPLIES: usize = 128;
+
+/// Whether another reply may be kept, with `from_sender` kept from its sender and `all` in
+/// all.
+pub(crate) fn kept_reply_room(from_sender: usize, all: usize) -> bool {
+    from_sender < MAX_KEPT_REPLIES_PER_SENDER && all < MAX_KEPT_REPLIES
 }
 
 /// How long a message kept to be written into its record later is tried: 30 days from its
@@ -1081,4 +1100,24 @@ pub(crate) fn unrequested_of(
         single_use: destination.single_use,
         amount: Some(amount.clone()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_kept_reply_room_within_both_bounds() {
+        assert!(kept_reply_room(0, 0));
+        assert!(kept_reply_room(
+            MAX_KEPT_REPLIES_PER_SENDER - 1,
+            MAX_KEPT_REPLIES - 1
+        ));
+    }
+
+    #[test]
+    fn test_kept_reply_room_refused_past_either_bound() {
+        assert!(!kept_reply_room(MAX_KEPT_REPLIES_PER_SENDER, 0));
+        assert!(!kept_reply_room(0, MAX_KEPT_REPLIES));
+    }
 }
