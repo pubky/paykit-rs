@@ -431,6 +431,8 @@ The payee's details for one Billing Period of a recurring request (spec 8.2).
 
 `refs`: the request hash, then the hash of the period details the payment used, if any. A proof of a payment without a request has no `refs`; the payee records it by its settlement (Switch wire 1.5), so the same evidence sent again under a new `msg_id` is a replay. A proof with `refs` carries no `amount`; one without carries no `billing_period`, `label`, `payment_reference` or `allowance_id`, which name a request's context (an automatic payment under an Allowance pays a request, spec 8.3); and one that names the period details it used carries their `billing_period`. Recipients drop a proof that breaks this (vectors: `messages.json` `proof_members`).
 
+The `amount` of a proof without a request is the asset and amount paid, which the payment method transferred exactly (spec 7.2 step 1). The payer's record of the payment and the payee's keep it as the stored proof gives it (5.3); a receipt carries none and confirms the proof whose hash it names (4.11); and the payee checks the payment by its own method (spec 8.1). Until the payer writes `done` with the proof, its record of the payment holds the destination (`unrequested`, 5.3) but no amount.
+
 ```json
 {
   "v": 1,
@@ -795,6 +797,7 @@ In a request record these must name its request, and none may name a Billing Per
 - **An attempt on a listed period** doesn't write the request record; its `record_version` condition is enough.
 - **Any other write** of the request record may drop listed periods the same way, each with its `claim_step` condition; one that doesn't drop keeps the list as it read it.
 - **A payer's cancellation** (4.8) is a `record.put` of the request record at its next version, with a `claim_step` condition for the claim of every listed period, at the step read, none of which had an open attempt.
+- **Conditions per operation:** these `record.put`s are the Paykit operations with the most conditions: at most 17, one `claim_step` for each of the at most 16 listed periods and, where one is carried, a `record_version`; every other Paykit operation carries at most two (4.5, 5.5). So Paykit stays within 32 conditions per operation, a limit the Switch plans and doesn't set yet, as well as without one.
 
 A reader that holds the version a write was built on (its `expected_version`) checks every listed period the write drops: the `record.put` must carry a `claim_step` condition on that period's claim. One that doesn't is ignored and flagged, like a dropped role (Seen roles, below), and the reader keeps the period listed. The reader checks only that the condition is there: the service enforced it against the claim as it stood when it applied the write, and it enforced a cancellation's conditions the same way, so readers don't check those. Readers check the list's shape: ascending, each start once, at most 16. A start that names no Billing Period of the request fences nothing. An empty list is the same as none, and writers leave it out. `status` never comes from the list (Switch spec 8.2).
 
