@@ -486,6 +486,11 @@ impl JournalEntry {
         )
     }
 
+    /// Whether the payment method's call may have been made for this entry ([`dispatched`]).
+    pub(crate) fn may_have_dispatched(&self) -> bool {
+        dispatched(self.stage, self.restored)
+    }
+
     /// The request's acceptance is this entry's to send and place: owed, queued or not yet
     /// (Paykit spec 7.2 step 2). Placing a released one again is a no-op.
     pub(crate) fn may_place_acceptance(&self) -> Result<bool> {
@@ -542,9 +547,45 @@ impl JournalEntry {
     }
 }
 
+/// Whether the payment method's call may have been made, as the acceptance's release reads
+/// it (Paykit spec 7.2 step 2): at `Paying`, journaled just before the call, or for a
+/// restored entry not yet past it, whose dispatch the backup can't tell. Before `Paying` the
+/// call is known not made; at `RailPaid` the method's history spoke (its paid branch releases
+/// the acceptance), and at `RailFailed` it reported a definitive failure, so a later user's
+/// `done` releases none.
+pub(crate) fn dispatched(stage: Stage, restored: bool) -> bool {
+    match stage {
+        Stage::Paying => true,
+        Stage::Recorded | Stage::Attempted => restored,
+        Stage::RailPaid
+        | Stage::RailFailed
+        | Stage::AcceptanceOwed
+        | Stage::Finished
+        | Stage::Abandoned => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_journal_dispatched_only_at_paying_or_restored_before_an_outcome() {
+        let stages = [
+            (Stage::Recorded, false, true),
+            (Stage::Attempted, false, true),
+            (Stage::Paying, true, true),
+            (Stage::RailPaid, false, false),
+            (Stage::RailFailed, false, false),
+            (Stage::AcceptanceOwed, false, false),
+            (Stage::Finished, false, false),
+            (Stage::Abandoned, false, false),
+        ];
+        for (stage, fresh, restored) in stages {
+            assert_eq!(dispatched(stage, false), fresh, "{stage:?}");
+            assert_eq!(dispatched(stage, true), restored, "{stage:?} restored");
+        }
+    }
 
     #[test]
     fn test_journal_destination_debug_hides_the_payload() {

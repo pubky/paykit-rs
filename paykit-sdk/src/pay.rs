@@ -1868,9 +1868,7 @@ impl Paykit {
                             out.extend(self.resolve_dispatched(entry).await?);
                         }
                         // Restored, it may have been dispatched (Paykit spec 7.2).
-                        Some((_, outcome)) => {
-                            self.finish_resolved(&mut entry, outcome, true).await?
-                        }
+                        Some((_, outcome)) => self.finish_resolved(&mut entry, outcome).await?,
                         None => self.set_stage(&mut entry, Stage::Abandoned).await?,
                     }
                 }
@@ -1885,7 +1883,7 @@ impl Paykit {
                         });
                     }
                     // Known unsubmitted: this app never called the method.
-                    Some((_, outcome)) => self.finish_resolved(&mut entry, outcome, false).await?,
+                    Some((_, outcome)) => self.finish_resolved(&mut entry, outcome).await?,
                     None => self.set_stage(&mut entry, Stage::Abandoned).await?,
                 },
                 Stage::Paying => {
@@ -1905,19 +1903,17 @@ impl Paykit {
 
     /// An own attempt the claim shows resolved already, by the user in another app or by
     /// evidence. The acceptance goes only for a payment this app may have dispatched
-    /// (`dispatched`: at `Paying`, or restored): `done` then says it was made, the user's word
+    /// ([`JournalEntry::may_have_dispatched`]): `done` then says it was made, the user's word
     /// standing where the method's history would, so an acceptance owed is queued and placed
     /// ([`Paykit::finish_owed_acceptance`], Paykit spec 7.2 step 2), one queued earlier and
     /// not yet placed included; one that can't be now leaves the entry for the next resume.
     /// An entry known unsubmitted, or `failed`, finishes with none: a payee never sees an
     /// acceptance of a payment that never ran.
-    async fn finish_resolved(
-        &mut self,
-        entry: &mut JournalEntry,
-        outcome: Outcome,
-        dispatched: bool,
-    ) -> Result<()> {
-        if dispatched && outcome == Outcome::Done && entry.may_place_acceptance()? {
+    async fn finish_resolved(&mut self, entry: &mut JournalEntry, outcome: Outcome) -> Result<()> {
+        if entry.may_have_dispatched()
+            && outcome == Outcome::Done
+            && entry.may_place_acceptance()?
+        {
             let _ = self.finish_owed_acceptance(entry).await;
             return Ok(());
         }
@@ -2019,7 +2015,7 @@ impl Paykit {
             match held.map(|a| a.outcome) {
                 Some(Outcome::Open) => entry.step = Some(claim.step),
                 Some(outcome @ (Outcome::Done | Outcome::Failed)) => {
-                    self.finish_resolved(&mut entry, outcome, true).await?;
+                    self.finish_resolved(&mut entry, outcome).await?;
                     return Ok(None);
                 }
                 Some(Outcome::Unknown) | None => {

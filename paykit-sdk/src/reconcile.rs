@@ -458,16 +458,15 @@ impl Paykit {
                 };
             }
         }
-        // The user's `done` on a payment this app may have dispatched (at `Paying`, or
-        // restored) says it was made: the user's word stands where the method's history
-        // would, so an acceptance the entry still owes goes first, and the record places it
-        // (Paykit spec 7.2 step 2). One that can't be queued now refuses the call with
-        // nothing written; the user tries again. The entry can't wait in `AcceptanceOwed`:
-        // that stage holds a proof. An entry known unsubmitted sends none.
+        // The user's `done` on a payment this app may have dispatched
+        // ([`JournalEntry::may_have_dispatched`]) says it was made: the user's word stands
+        // where the method's history would, so an acceptance the entry still owes goes
+        // first, and the record places it (Paykit spec 7.2 step 2). One that can't be queued
+        // now refuses the call with nothing written; the user tries again. The entry can't
+        // wait in `AcceptanceOwed`: that stage holds a proof. An entry known unsubmitted, or
+        // one the method reported failed, sends none.
         if resolution == Resolution::Done && basis == Basis::Owner {
-            let dispatched =
-                |e: &JournalEntry| e.open() && (e.restored || e.stage == Stage::Paying);
-            if let Some(owed) = entry.as_mut().filter(|e| dispatched(e)) {
+            if let Some(owed) = entry.as_mut().filter(|e| e.may_have_dispatched()) {
                 if owed.owes_acceptance()? {
                     self.release_acceptance(owed, None).await?;
                 }
