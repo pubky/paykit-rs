@@ -55,9 +55,6 @@ pub const MAX_PERIOD_DETAILS: usize = 8;
 /// The most entries a request record's `reassociations` lists (Paykit wire 5.3).
 pub const MAX_REASSOCIATIONS: usize = 16;
 
-/// The most ranges a request record's `v01_paid` lists (Paykit wire 5.3).
-pub const MAX_V01_PAID: usize = 16;
-
 /// The most conditions a Paykit `record.put` carries (Paykit wire 5.3 "Conditions per
 /// operation"): a `claim_step` for each of the at most 16 listed periods, the
 /// `record_version`, and the `server_time_in` of a write that adds a reassociation.
@@ -87,29 +84,62 @@ pub fn bounded_msg_ids(stored: &[String], others: &[String]) -> Vec<String> {
 /// version adds survives an older writer.
 ///
 /// A reader collects them when it reads a value; the writer puts each back into the object
-/// it was read in when it writes the value again. An object is found again by where it sits,
-/// below the nearest object that has an identity of its own: a stored message by its
-/// signature, a ledger entry by its attempt, an entry of a list by the members that name it.
-/// So a stored message moved to another role keeps its members, and those of an object the
-/// writer no longer holds, such as a compacted ledger entry, are dropped with it.
+/// it was read in when it writes the value again.
 ///
-/// Members attach to an occurrence: objects of one shape with equal identities, such as the
-/// current `grant` and the last grant of the history, two equal `used` entries or two equal
-/// `totals.v01` items, are told apart by their order in the value, so each keeps its own. A
-/// writer that drops one of them may leave its members to the next. Identities compare in
-/// the spelling writers write, so a time read as `...00Z` is the one written as `...00.000Z`.
-/// An empty set, as a value built in code has, writes nothing.
+/// - Objects of the kinds that may validly sit beside an equal one carry their own
+///   [`Origin`], where they were read: the current grant and the grants of the history, the
+///   grant history entries and the `used` entries. Their members travel with the element in
+///   memory, so removing, reordering or inserting elements moves no members between them, a
+///   copy keeps its original's, and a new element has none.
+/// - Any other object is found again by where it sits, below the nearest object that has an
+///   identity of its own, which the record's rules make unique: a stored message by its
+///   signature, a ledger entry or `totals.failed` item by its attempt, a reassociation by its
+///   members. So a stored message moved to another role keeps its members.
+///
+/// The members of an object the writer no longer holds, such as a compacted ledger entry, are
+/// dropped with it. An empty set, as a value built in code has, writes nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UnknownMembers {
     held: Vec<HeldMembers>,
 }
 
+/// Where an element of a shared record value was read, so the members its writer doesn't know
+/// go back into it alone ([`UnknownMembers`]). An element built in code has none.
+///
+/// It isn't part of the element's value: two origins always compare equal, so two elements
+/// equal in every member are equal wherever they were read.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Origin(Option<u32>);
+
+impl PartialEq for Origin {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Origin {}
+
+/// The origins of the elements of one value as read, by JSON pointer.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Origins(Vec<(String, u32)>);
+
+impl Origins {
+    /// The origin of the element read at `pointer`.
+    pub(crate) fn at(&self, pointer: &str) -> Origin {
+        Origin(
+            self.0
+                .iter()
+                .find(|(p, _)| p == pointer)
+                .map(|(_, seq)| *seq),
+        )
+    }
+}
+
 /// The unknown members of one object, and where the object sits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HeldMembers {
-    /// The nearest object with an identity at or above it: its shape, its identity and its
-    /// occurrence, how many objects of that shape and identity come before it in the value;
-    /// `None` for the value itself.
+    /// The nearest object at or above it that is found by itself; `None` for the value
+    /// itself.
     anchor: Option<Anchor>,
     /// The members from there down to the object.
     path: Vec<&'static str>,
@@ -117,32 +147,29 @@ struct HeldMembers {
     members: Map<String, Value>,
 }
 
-/// An object with an identity, by its shape's name, its identity and its occurrence.
-type Anchor = (&'static str, Value, usize);
+/// How an object is found by itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Anchor {
+    /// By its shape's name and its identity.
+    Identity(&'static str, Value),
+    /// By the origin its element carries.
+    Origin(u32),
+    /// An element without an origin, built in code: nothing of what was read goes into it.
+    New,
+}
 
 /// The members a writer knows in one object of a shared record value (Paykit wire 5).
 pub(crate) struct Shape {
     /// The shape's name, which tells apart identities of different objects.
     pub(crate) name: &'static str,
-    /// The members, dotted for nested ones, that name the object wherever it sits, each with
-    /// how its spelling is compared; empty for an object found by where it sits.
-    pub(crate) id: &'static [(&'static str, Spelling)],
+    /// The members, dotted for nested ones, that name the object wherever it sits; empty for
+    /// an object found by where it sits.
+    pub(crate) id: &'static [&'static str],
+    /// Whether its elements carry their [`Origin`] in memory: for objects an equal one may
+    /// validly sit beside.
+    pub(crate) carried: bool,
     /// The members it knows, each with what it holds.
     pub(crate) members: &'static [(&'static str, Member)],
-}
-
-/// How a member of an identity is compared: as its writer writes it, so a value read in
-/// another spelling the wire allows is the same object once written again.
-#[derive(Clone, Copy)]
-pub(crate) enum Spelling {
-    /// As written: a member whose readers take one spelling only, such as an integer,
-    /// base64url without padding (Switch wire 1.2), a lower-case UUID (Paykit wire 1.3), a
-    /// Payment Endpoint Identifier (Paykit wire 1.4), or an amount, which writers write in
-    /// the spelling read.
-    Exact,
-    /// A time (Switch wire 1.6), in the spelling writers write: `2026-01-01T00:00:00Z` is
-    /// `2026-01-01T00:00:00.000Z`.
-    Time,
 }
 
 /// What a known member holds, for [`UnknownMembers`].
@@ -152,8 +179,15 @@ pub(crate) enum Member {
     Leaf,
     /// An object of the shape.
     Object(&'static Shape),
-    /// An array of objects of the shape, each found by its identity.
+    /// An array of objects of the shape, each found by its identity or its origin.
     Array(&'static Shape),
+}
+
+impl Shape {
+    /// Whether the objects of an array of this shape are found by themselves.
+    fn found_alone(&self) -> bool {
+        self.carried || !self.id.is_empty()
+    }
 }
 
 /// The identity of an object of `shape`, `None` for one found by where it sits.
@@ -164,7 +198,7 @@ fn identity(obj: &Map<String, Value>, shape: &Shape) -> Option<Value> {
     let parts = shape
         .id
         .iter()
-        .map(|(dotted, spelling)| {
+        .map(|dotted| {
             let mut at: Option<&Value> = None;
             for (i, step) in dotted.split('.').enumerate() {
                 at = if i == 0 {
@@ -173,69 +207,20 @@ fn identity(obj: &Map<String, Value>, shape: &Shape) -> Option<Value> {
                     at.and_then(|v| v.get(step))
                 };
             }
-            let value = at.cloned().unwrap_or(Value::Null);
-            match (spelling, &value) {
-                (Spelling::Time, Value::String(text)) => {
-                    pubky_switch_core::time::parse_rfc3339(text)
-                        .map_or(value.clone(), |ms| Value::String(rfc3339(ms)))
-                }
-                _ => value,
-            }
+            at.cloned().unwrap_or(Value::Null)
         })
         .collect();
     Some(Value::Array(parts))
 }
 
-/// A walk over a value as `shape`, which counts the occurrences of each identity in the order
-/// the shape and the arrays give, the same for the value read and the value written.
-#[derive(Default)]
-struct Walk {
-    seen: Vec<(&'static str, Value, usize)>,
-}
-
-impl Walk {
-    /// Where `obj` sits: its anchor and path, a new anchor when it has an identity.
-    fn place(
-        &mut self,
-        obj: &Map<String, Value>,
-        shape: &'static Shape,
-        anchor: Option<Anchor>,
-        path: Vec<&'static str>,
-    ) -> (Option<Anchor>, Vec<&'static str>) {
-        let Some(id) = identity(obj, shape) else {
-            return (anchor, path);
-        };
-        let occurrence = match self
-            .seen
-            .iter_mut()
-            .find(|(name, held, _)| *name == shape.name && *held == id)
-        {
-            Some((_, _, count)) => {
-                *count += 1;
-                *count
-            }
-            None => {
-                self.seen.push((shape.name, id.clone(), 0));
-                0
-            }
-        };
-        (Some((shape.name, id, occurrence)), Vec::new())
-    }
-}
-
 impl UnknownMembers {
-    /// The unknown members of `value`, read as `shape`.
-    pub(crate) fn read(value: &Map<String, Value>, shape: &'static Shape) -> Self {
+    /// The unknown members of `value`, read as `shape`, and the origins of its carried
+    /// elements, which the reader gives the elements it builds.
+    pub(crate) fn read(value: &Map<String, Value>, shape: &'static Shape) -> (Self, Origins) {
         let mut held = Vec::new();
-        collect(
-            value,
-            shape,
-            None,
-            Vec::new(),
-            &mut Walk::default(),
-            &mut held,
-        );
-        Self { held }
+        let mut origins = Origins::default();
+        collect(value, shape, None, Vec::new(), "", &mut origins, &mut held);
+        (Self { held }, origins)
     }
 
     /// Whether there are none.
@@ -244,12 +229,18 @@ impl UnknownMembers {
     }
 
     /// The value `json` a writer wrote, as `shape`, with the unknown members put back into the
-    /// objects it keeps. Without unknown members, `json` as it is.
+    /// objects it keeps; `origins` names the origin of each carried element written, by its
+    /// JSON pointer in `json`. Without unknown members, `json` as it is.
     ///
     /// # Errors
     ///
     /// [`Error::Invalid`] if the value can't be written.
-    pub(crate) fn write_into(&self, json: Vec<u8>, shape: &'static Shape) -> Result<Vec<u8>> {
+    pub(crate) fn write_into(
+        &self,
+        json: Vec<u8>,
+        shape: &'static Shape,
+        origins: &[(String, Origin)],
+    ) -> Result<Vec<u8>> {
         if self.held.is_empty() {
             return Ok(json);
         }
@@ -258,7 +249,7 @@ impl UnknownMembers {
         let Value::Object(map) = &mut value else {
             return Err(cant());
         };
-        self.apply(map, shape, None, Vec::new(), &mut Walk::default());
+        self.apply(map, shape, None, Vec::new(), "", origins);
         serde_json::to_vec(&value).map_err(|_| cant())
     }
 
@@ -268,9 +259,21 @@ impl UnknownMembers {
         shape: &'static Shape,
         anchor: Option<Anchor>,
         path: Vec<&'static str>,
-        walk: &mut Walk,
+        pointer: &str,
+        origins: &[(String, Origin)],
     ) {
-        let (anchor, path) = walk.place(obj, shape, anchor, path);
+        let (anchor, path) = if shape.carried {
+            let origin = origins
+                .iter()
+                .find(|(p, _)| p == pointer)
+                .and_then(|(_, o)| o.0);
+            (Some(origin.map_or(Anchor::New, Anchor::Origin)), Vec::new())
+        } else {
+            match identity(obj, shape) {
+                Some(id) => (Some(Anchor::Identity(shape.name, id)), Vec::new()),
+                None => (anchor, path),
+            }
+        };
         if let Some(held) = self
             .held
             .iter()
@@ -283,14 +286,16 @@ impl UnknownMembers {
         for (name, member) in shape.members {
             let mut below = path.clone();
             below.push(name);
+            let at = format!("{pointer}/{name}");
             match (member, obj.get_mut(*name)) {
                 (Member::Object(s), Some(Value::Object(child))) => {
-                    self.apply(child, s, anchor.clone(), below, walk);
+                    self.apply(child, s, anchor.clone(), below, &at, origins);
                 }
-                (Member::Array(s), Some(Value::Array(items))) if !s.id.is_empty() => {
-                    for item in items {
+                (Member::Array(s), Some(Value::Array(items))) if s.found_alone() => {
+                    for (i, item) in items.iter_mut().enumerate() {
                         if let Value::Object(child) = item {
-                            self.apply(child, s, anchor.clone(), below.clone(), walk);
+                            let at = format!("{at}/{i}");
+                            self.apply(child, s, anchor.clone(), below.clone(), &at, origins);
                         }
                     }
                 }
@@ -305,10 +310,20 @@ fn collect(
     shape: &'static Shape,
     anchor: Option<Anchor>,
     path: Vec<&'static str>,
-    walk: &mut Walk,
+    pointer: &str,
+    origins: &mut Origins,
     out: &mut Vec<HeldMembers>,
 ) {
-    let (anchor, path) = walk.place(obj, shape, anchor, path);
+    let (anchor, path) = if shape.carried {
+        let seq = u32::try_from(origins.0.len()).unwrap_or(u32::MAX);
+        origins.0.push((pointer.to_owned(), seq));
+        (Some(Anchor::Origin(seq)), Vec::new())
+    } else {
+        match identity(obj, shape) {
+            Some(id) => (Some(Anchor::Identity(shape.name, id)), Vec::new()),
+            None => (anchor, path),
+        }
+    };
     let members: Map<String, Value> = obj
         .iter()
         .filter(|(name, _)| !shape.members.iter().any(|(known, _)| known == name))
@@ -324,14 +339,16 @@ fn collect(
     for (name, member) in shape.members {
         let mut below = path.clone();
         below.push(name);
+        let at = format!("{pointer}/{name}");
         match (member, obj.get(*name)) {
             (Member::Object(s), Some(Value::Object(child))) => {
-                collect(child, s, anchor.clone(), below, walk, out);
+                collect(child, s, anchor.clone(), below, &at, origins, out);
             }
-            (Member::Array(s), Some(Value::Array(items))) if !s.id.is_empty() => {
-                for item in items {
+            (Member::Array(s), Some(Value::Array(items))) if s.found_alone() => {
+                for (i, item) in items.iter().enumerate() {
                     if let Value::Object(child) = item {
-                        collect(child, s, anchor.clone(), below.clone(), walk, out);
+                        let at = format!("{at}/{i}");
+                        collect(child, s, anchor.clone(), below.clone(), &at, origins, out);
                     }
                 }
             }
@@ -343,12 +360,14 @@ fn collect(
 static SIGNED_DOC: Shape = Shape {
     name: "signed",
     id: &[],
+    carried: false,
     members: &[("body", Member::Leaf), ("sig", Member::Leaf)],
 };
 
 static PLAINTEXT: Shape = Shape {
     name: "plaintext",
     id: &[],
+    carried: false,
     members: &[
         ("sender_app", Member::Leaf),
         ("signature", Member::Leaf),
@@ -359,7 +378,8 @@ static PLAINTEXT: Shape = Shape {
 /// A stored message (Paykit wire 5.2), found by its signature wherever it sits.
 static STORED: Shape = Shape {
     name: "stored message",
-    id: &[("plaintext.signature", Spelling::Exact)],
+    id: &["plaintext.signature"],
+    carried: false,
     members: &[
         ("sender", Member::Leaf),
         ("cert", Member::Object(&SIGNED_DOC)),
@@ -371,18 +391,21 @@ static STORED: Shape = Shape {
 static BILLING_PERIOD: Shape = Shape {
     name: "billing_period",
     id: &[],
+    carried: false,
     members: &[("starts_at", Member::Leaf), ("ends_at", Member::Leaf)],
 };
 
 static AMOUNT: Shape = Shape {
     name: "amount",
     id: &[],
+    carried: false,
     members: &[("asset", Member::Leaf), ("value", Member::Leaf)],
 };
 
 static UNREQUESTED: Shape = Shape {
     name: "unrequested",
     id: &[],
+    carried: false,
     members: &[
         ("app_id", Member::Leaf),
         ("endpoint_id", Member::Leaf),
@@ -396,26 +419,19 @@ static UNREQUESTED: Shape = Shape {
 
 static REASSOCIATION: Shape = Shape {
     name: "reassociation",
-    id: &[
-        ("allowance_id", Spelling::Exact),
-        ("from_period", Spelling::Exact),
-    ],
+    id: &["allowance_id", "from_period"],
+    carried: false,
     members: &[
         ("allowance_id", Member::Leaf),
         ("from_period", Member::Leaf),
     ],
 };
 
-static V01_PAID: Shape = Shape {
-    name: "v01_paid",
-    id: &[("from", Spelling::Exact), ("to", Spelling::Exact)],
-    members: &[("from", Member::Leaf), ("to", Member::Leaf)],
-};
-
 /// An activity record value (Paykit wire 5.3).
 static ACTIVITY_SHAPE: Shape = Shape {
     name: "activity record",
     id: &[],
+    carried: false,
     members: &[
         ("v", Member::Leaf),
         ("counterparty", Member::Leaf),
@@ -436,17 +452,13 @@ static ACTIVITY_SHAPE: Shape = Shape {
         ("attempted_periods", Member::Leaf),
         ("reassociations", Member::Array(&REASSOCIATION)),
         ("manual_only", Member::Leaf),
-        ("v01_paid", Member::Array(&V01_PAID)),
     ],
 };
 
 static USED: Shape = Shape {
     name: "used",
-    id: &[
-        ("version", Spelling::Exact),
-        ("endpoint", Spelling::Exact),
-        ("attempt_id", Spelling::Exact),
-    ],
+    id: &[],
+    carried: true,
     members: &[
         ("version", Member::Leaf),
         ("endpoint", Member::Leaf),
@@ -458,6 +470,7 @@ static USED: Shape = Shape {
 static LIST_SHAPE: Shape = Shape {
     name: "payment_lists",
     id: &[],
+    carried: false,
     members: &[
         ("v", Member::Leaf),
         ("payee", Member::Leaf),
@@ -468,10 +481,11 @@ static LIST_SHAPE: Shape = Shape {
     ],
 };
 
-/// An executor grant (Paykit wire 3.3), found by its signature.
+/// An executor grant (Paykit wire 3.3), found by the origin it carries.
 static GRANT: Shape = Shape {
     name: "grant",
-    id: &[("sig", Spelling::Exact)],
+    id: &[],
+    carried: true,
     members: &[
         ("app_id", Member::Leaf),
         ("cert", Member::Object(&SIGNED_DOC)),
@@ -483,10 +497,8 @@ static GRANT: Shape = Shape {
 
 static GRANT_ENTRY: Shape = Shape {
     name: "grant history entry",
-    id: &[
-        ("generation", Spelling::Exact),
-        ("version", Spelling::Exact),
-    ],
+    id: &[],
+    carried: true,
     members: &[
         ("generation", Member::Leaf),
         ("version", Member::Leaf),
@@ -498,6 +510,7 @@ static GRANT_ENTRY: Shape = Shape {
 static ALLOWANCE_SHAPE: Shape = Shape {
     name: "allowances",
     id: &[],
+    carried: false,
     members: &[
         ("v", Member::Leaf),
         ("counterparty", Member::Leaf),
@@ -768,24 +781,6 @@ pub struct Reassociation {
     pub from_period: u64,
 }
 
-/// An entry of a payer's request record's `v01_paid` (Paykit spec 16, Paykit wire 5.3): the
-/// Billing Periods v0.1 paid, by their starts in Unix seconds, `from` to `to` inclusive;
-/// `{ 0, 0 }` for a one-time request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct V01PaidRange {
-    /// The start of the first period paid.
-    pub from: u64,
-    /// The start of the last period paid.
-    pub to: u64,
-}
-
-impl V01PaidRange {
-    /// Whether the range holds the period starting at `start`.
-    pub fn contains(&self, start: u64) -> bool {
-        self.from <= start && start <= self.to
-    }
-}
-
 /// What an activity record is, by its messages' signed fields (Paykit wire 5.3 "Binding").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecordBinding {
@@ -851,9 +846,6 @@ pub struct ActivityRecord {
     /// A payer's request record of a one-time request, or a payer's period record: no
     /// executor pays the occurrence automatically. Never lifted once set.
     pub manual_only: bool,
-    /// A payer's request record: what v0.1 paid, ascending and not overlapping, at most 16;
-    /// empty when absent. Only the migration from v0.1 writes it.
-    pub v01_paid: Vec<V01PaidRange>,
     /// The members the writer doesn't know, kept as read (Paykit wire 5).
     pub unknown: UnknownMembers,
 }
@@ -927,20 +919,12 @@ struct ActivityOut<'a> {
     reassociations: Vec<ReassociationOut<'a>>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     manual_only: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    v01_paid: Vec<V01PaidOut>,
 }
 
 #[derive(Serialize)]
 struct ReassociationOut<'a> {
     allowance_id: &'a str,
     from_period: u64,
-}
-
-#[derive(Serialize)]
-struct V01PaidOut {
-    from: u64,
-    to: u64,
 }
 
 /// Read `msg_ids` (Paykit wire 5.3), each a lower-case UUID v4, as its canonical list for a
@@ -1065,18 +1049,6 @@ fn read_reassociations(obj: &Obj<'_>) -> Result<Vec<Reassociation>> {
     Ok(out)
 }
 
-fn read_v01_paid(obj: &Obj<'_>) -> Result<Vec<V01PaidRange>> {
-    let mut out = Vec::new();
-    for item in obj.opt_arr("v01_paid")?.into_iter().flatten() {
-        let range = Obj::of(item, ACTIVITY, "v01_paid")?;
-        out.push(V01PaidRange {
-            from: range.req_int("from")?,
-            to: range.req_int("to")?,
-        });
-    }
-    Ok(out)
-}
-
 /// The shape of `reassociations` (Paykit wire 5.3): at most 16, `from_period` strictly
 /// ascending, the first naming another Allowance than `allowance_id`, each another than the
 /// entry before it.
@@ -1106,37 +1078,24 @@ fn check_reassociations(
 }
 
 /// Whether `start`, in Unix seconds, is the start of one of `recurrence`'s Billing Periods,
-/// from the first through the last (Paykit spec 8.2, Paykit wire 4.4).
+/// from the first through the last, in the unit the wire names periods by: the period's
+/// `start_secs`, its `starts_at` cut to whole seconds (Paykit spec 8.2, Paykit wire 1.5,
+/// 4.4). A period starting at `...00.500Z` is named by its second, `...00Z`, so the period
+/// starting within that second is looked up.
 fn is_period_start(recurrence: &Recurrence, start: u64) -> bool {
-    start
-        .checked_mul(1000)
-        .and_then(|ms| {
+    let Some(first) = start.checked_mul(1000) else {
+        return false;
+    };
+    [Some(first), first.checked_add(999)]
+        .into_iter()
+        .flatten()
+        .any(|ms| {
             recurrence
                 .lookup(ms)
                 .ok()
                 .flatten()
-                .map(|p| p.starts_at == ms)
+                .is_some_and(|p| p.start_secs() == start)
         })
-        .unwrap_or(false)
-}
-
-/// The shape of `v01_paid` (Paykit wire 5.3): at most 16 ranges, each `from` at or before
-/// its `to`, ascending and not overlapping.
-fn check_v01_paid(ranges: &[V01PaidRange]) -> Result<()> {
-    ensure(
-        ranges.len() <= MAX_V01_PAID,
-        "Paykit wire 5.3: v01_paid lists at most 16 ranges",
-    )?;
-    ensure(
-        ranges.iter().all(|r| r.from <= r.to),
-        "Paykit wire 5.3: a v01_paid range ends before it starts",
-    )?;
-    ensure(
-        ranges
-            .windows(2)
-            .all(|w| matches!(w, [a, b] if a.to < b.from)),
-        "Paykit wire 5.3: v01_paid is ascending and not overlapping",
-    )
 }
 
 fn unrequested_json(u: &UnrequestedDestination) -> Value {
@@ -1200,7 +1159,6 @@ impl ActivityRecord {
             earlier_details: Vec::new(),
             reassociations: Vec::new(),
             manual_only: false,
-            v01_paid: Vec::new(),
             unknown: UnknownMembers::default(),
         }
     }
@@ -1342,8 +1300,7 @@ impl ActivityRecord {
             earlier_details,
             reassociations: read_reassociations(&obj)?,
             manual_only,
-            v01_paid: read_v01_paid(&obj)?,
-            unknown: UnknownMembers::read(&map, &ACTIVITY_SHAPE),
+            unknown: UnknownMembers::read(&map, &ACTIVITY_SHAPE).0,
         };
         let mut record = record;
         record.msg_ids = read_msg_ids(&obj, &record.stored_msg_ids())?;
@@ -1357,8 +1314,8 @@ impl ActivityRecord {
     /// shapes; the binding; the members only some records carry; the `refs` that tie the
     /// messages together; `attempt_id`, and `unrequested.amount` when present, the stored
     /// proof's; `attempted_periods`, only in a payer's request record of a recurring request,
-    /// ascending, each once, at most 16; `reassociations`, there too, beside `allowance_id`;
-    /// `v01_paid`, `[{ 0, 0 }]` for a one-time request; `manual_only`, only in a payer's
+    /// ascending, each once, at most 16; `reassociations`, there too, beside `allowance_id`,
+    /// each from a Billing Period start of the request; `manual_only`, only in a payer's
     /// request record of a one-time request or a payer's period record; and the period
     /// details ([`ActivityRecord::details`]), at most 8, `period_details` the latest unless a
     /// proof names it.
@@ -1417,7 +1374,6 @@ impl ActivityRecord {
         }
         check_attempted_periods(&self.attempted_periods)?;
         check_reassociations(&self.reassociations, self.allowance_id.as_ref())?;
-        check_v01_paid(&self.v01_paid)?;
         // Paykit wire 4.11: a receipt confirms the proof's attempt, of the proof's Billing
         // Period; in the record of a payment without a request, the record's attempt. Checked
         // before the binding, which would refuse a receipt of another period only as a
@@ -1496,15 +1452,8 @@ impl ActivityRecord {
                 "Paykit wire 5.3: reassociations only in a payer's request record of a recurring request, beside allowance_id",
             )?;
         }
-        if matches!(binding, RecordBinding::Request { .. }) && !recurring_request {
-            ensure(
-                self.v01_paid.is_empty() || self.v01_paid == [V01PaidRange { from: 0, to: 0 }],
-                "Paykit wire 5.3: v01_paid of a one-time request is [{ from: 0, to: 0 }]",
-            )?;
-        }
-        // Paykit wire 5.3: each from_period and each end of a recurring request's v01_paid
-        // ranges is a Billing Period start of the stored request, so neither moves nor marks
-        // paid a time that names no period.
+        // Paykit wire 5.3: each from_period is a Billing Period start of the stored request,
+        // so no entry moves a time that names no period.
         if let Some(Body::PaymentRequest(PaymentRequest {
             recurrence: Some(recurrence),
             ..
@@ -1515,12 +1464,6 @@ impl ActivityRecord {
                     .iter()
                     .all(|r| is_period_start(recurrence, r.from_period)),
                 "Paykit wire 5.3: a reassociation's from_period isn't a Billing Period start of the request",
-            )?;
-            ensure(
-                self.v01_paid.iter().all(|r| {
-                    is_period_start(recurrence, r.from) && is_period_start(recurrence, r.to)
-                }),
-                "Paykit wire 5.3: a v01_paid range doesn't run between Billing Period starts of the request",
             )?;
         }
         if self.manual_only {
@@ -1646,7 +1589,7 @@ impl ActivityRecord {
     /// and side: `request_hash` and `billing_period` only in a period record (as
     /// `earlier_details`, whose details each name their period, so the binding refuses them
     /// anywhere else), `attempt_id` and `unrequested` only in that of a payment without a request,
-    /// and `allowance_id`, `reassociations` and `v01_paid` only in a payer's request record.
+    /// and `allowance_id` and `reassociations` only in a payer's request record.
     /// `attempted_periods`, `reassociations` and `manual_only` are checked with the request
     /// they concern.
     ///
@@ -1685,10 +1628,6 @@ impl ActivityRecord {
         ensure(
             payer_request || self.reassociations.is_empty(),
             "Paykit wire 5.3: reassociations only in a payer's request record",
-        )?;
-        ensure(
-            payer_request || self.v01_paid.is_empty(),
-            "Paykit wire 5.3: v01_paid only in a payer's request record",
         )
     }
 
@@ -1880,22 +1819,10 @@ impl ActivityRecord {
             || self.msg_ids.iter().any(|x| x == msg_id)
     }
 
-    /// Whether the record carries the proof of a payment, or is the request record of a
-    /// one-time request v0.1 paid (`v01_paid`): then no app attempts its obligation, whatever
-    /// the claim shows (Paykit spec 7.2, 16).
+    /// Whether the record carries the proof of a payment: then no app attempts its
+    /// obligation, whatever the claim shows (Paykit spec 7.2).
     pub fn shows_paid(&self) -> bool {
-        let one_time_request = matches!(
-            self.request.as_ref().map(StoredMessage::body),
-            Some(Body::PaymentRequest(r)) if !r.is_recurring()
-        );
-        self.proof.is_some() || (one_time_request && self.v01_paid_covers(0))
-    }
-
-    /// Whether the request record's `v01_paid` lists the Billing Period starting at `start`,
-    /// in Unix seconds, or, with `0`, the one-time request: a payer treats it as paid and never
-    /// attempts it (Paykit spec 16).
-    pub fn v01_paid_covers(&self, start: u64) -> bool {
-        self.v01_paid.iter().any(|r| r.contains(start))
+        self.proof.is_some()
     }
 
     /// The Allowance a payer's request record names for the Billing Period starting at
@@ -1916,8 +1843,8 @@ impl ActivityRecord {
     /// record that drops or replaces a message in a role it saw; that drops period details it
     /// saw, in `period_details` or `earlier_details`; that changes or drops the
     /// `allowance_id` or an entry of `reassociations` it saw, or adds an entry not after the
-    /// last it saw; that drops a `manual_only` it saw; or that changes or drops the
-    /// `v01_paid` it saw. These hold whatever version the write builds on, so they apply to
+    /// last it saw; or that drops a `manual_only` it saw. These hold whatever version the
+    /// write builds on, so they apply to
     /// a reader that holds an older one too. A later write moves `period_details` only to
     /// later details, or, when it stores the proof, to the details the proof names: both
     /// records are valid, and the later keeps every details seen.
@@ -1974,10 +1901,6 @@ impl ActivityRecord {
         ensure(
             !self.manual_only || later.manual_only,
             "Paykit wire 5.3: a later write drops the manual_only seen",
-        )?;
-        ensure(
-            self.v01_paid.is_empty() || later.v01_paid == self.v01_paid,
-            "Paykit wire 5.3: a later write changes or drops the v01_paid seen",
         )
     }
 
@@ -2068,7 +1991,7 @@ impl ActivityRecord {
 
     /// Write the record value: every member, `null` for absent, but `allowance_id` when
     /// absent, `manual_only` when false, and `attempted_periods`, `earlier_details`,
-    /// `reassociations` and `v01_paid` when empty, which are left out; `msg_ids` as its
+    /// and `reassociations` when empty, which are left out; `msg_ids` as its
     /// canonical list, [`bounded_msg_ids`] of the stored messages and `msg_ids`; and the
     /// members it doesn't know as it read them, [`ActivityRecord::unknown`] (Paykit wire 5,
     /// 5.3). The record's rules are checked first, as a reader checks them, so the writer
@@ -2124,24 +2047,19 @@ impl ActivityRecord {
                 })
                 .collect(),
             manual_only: self.manual_only,
-            v01_paid: self
-                .v01_paid
-                .iter()
-                .map(|r| V01PaidOut {
-                    from: r.from,
-                    to: r.to,
-                })
-                .collect(),
         };
         let json = serde_json::to_vec(&out)
             .map_err(|_| Error::Invalid(format!("{ACTIVITY}: can't be written")))?;
-        self.unknown.write_into(json, &ACTIVITY_SHAPE)
+        self.unknown.write_into(json, &ACTIVITY_SHAPE, &[])
     }
 }
 
 /// The condition the `record.put` adding a reassociation for the Billing Period starting at
 /// `from_period`, in Unix seconds, carries (Paykit wire 5.3 "Seen Allowance"):
 /// `server_time_in(null, from_period)`, so the period hasn't started on the service's clock.
+/// The bound is the period's second, `from_period` seconds: a period starting within that
+/// second, such as at `...00.500Z`, starts at or after it, so the write never applies once
+/// the period has started.
 ///
 /// # Errors
 ///
@@ -2170,6 +2088,8 @@ pub struct UsedEndpoint {
     pub endpoint: PaymentEndpointIdentifier,
     /// The attempt whose batch reserved it.
     pub attempt_id: AttemptId,
+    /// Where it was read, for the members its writer doesn't know (Paykit wire 5).
+    pub origin: Origin,
 }
 
 /// A `payment_lists` record value (Paykit wire 5.4): the latest Private Payment List of one
@@ -2224,13 +2144,15 @@ impl PaymentListRecord {
         let app_id = obj.req_app_id("app_id")?;
         let list = StoredMessage::read(obj.req("list")?, own)?;
         let msg_ids = read_msg_ids(&obj, &msg_ids_of([&list]))?;
+        let (unknown, origins) = UnknownMembers::read(&map, &LIST_SHAPE);
         let mut used = Vec::new();
-        for item in obj.opt_arr("used")?.into_iter().flatten() {
+        for (i, item) in obj.opt_arr("used")?.into_iter().flatten().enumerate() {
             let u = Obj::of(item, LISTS, "used")?;
             used.push(UsedEndpoint {
                 version: u.req_int("version")?,
                 endpoint: PaymentEndpointIdentifier::parse(u.req_str("endpoint")?)?,
                 attempt_id: AttemptId::from_bytes(u.req_b64::<16>("attempt_id")?),
+                origin: origins.at(&format!("/used/{i}")),
             });
         }
         let record = Self {
@@ -2239,7 +2161,7 @@ impl PaymentListRecord {
             list,
             used,
             msg_ids,
-            unknown: UnknownMembers::read(&map, &LIST_SHAPE),
+            unknown,
         };
         record.check()?;
         Ok(record)
@@ -2366,7 +2288,13 @@ impl PaymentListRecord {
         };
         let json = serde_json::to_vec(&out)
             .map_err(|_| Error::Invalid(format!("{LISTS}: can't be written")))?;
-        self.unknown.write_into(json, &LIST_SHAPE)
+        let origins: Vec<(String, Origin)> = self
+            .used
+            .iter()
+            .enumerate()
+            .map(|(i, u)| (format!("/used/{i}"), u.origin))
+            .collect();
+        self.unknown.write_into(json, &LIST_SHAPE, &origins)
     }
 }
 
@@ -2378,6 +2306,8 @@ pub struct GrantEntry {
     pub built_on: RecordVersion,
     /// The grant.
     pub grant: ExecutorGrant,
+    /// Where it was read, for the members its writer doesn't know (Paykit wire 5).
+    pub origin: Origin,
 }
 
 /// An `allowances` record value (Paykit wire 5.4), on either side of an Allowance.
@@ -2528,17 +2458,30 @@ impl AllowanceRecord {
             &obj,
             &msg_ids_of(std::iter::once(&proposal).chain(&response).chain(&end)),
         )?;
+        let (unknown, origins) = UnknownMembers::read(&map, &ALLOWANCE_SHAPE);
         let mut grants = Vec::new();
-        for item in obj.opt_arr("grants")?.into_iter().flatten() {
+        for (i, item) in obj.opt_arr("grants")?.into_iter().flatten().enumerate() {
             let entry = Obj::of(item, ALLOWANCES, "grants")?;
             grants.push(GrantEntry {
                 built_on: RecordVersion {
                     generation: entry.req_int("generation")?,
                     version: entry.req_int("version")?,
                 },
-                grant: ExecutorGrant::from_json(entry.req("grant")?)?,
+                grant: ExecutorGrant {
+                    origin: origins.at(&format!("/grants/{i}/grant")),
+                    ..ExecutorGrant::from_json(entry.req("grant")?)?
+                },
+                origin: origins.at(&format!("/grants/{i}")),
             });
         }
+        let grant = obj
+            .opt("grant")
+            .map(ExecutorGrant::from_json)
+            .transpose()?
+            .map(|g| ExecutorGrant {
+                origin: origins.at("/grant"),
+                ..g
+            });
         let record = Self {
             counterparty,
             allowance_id,
@@ -2546,9 +2489,9 @@ impl AllowanceRecord {
             response,
             end,
             msg_ids,
-            grant: obj.opt("grant").map(ExecutorGrant::from_json).transpose()?,
+            grant,
             grants,
-            unknown: UnknownMembers::read(&map, &ALLOWANCE_SHAPE),
+            unknown,
         };
         record.check()?;
         Ok(record)
@@ -2859,7 +2802,15 @@ impl AllowanceRecord {
         };
         let json = serde_json::to_vec(&out)
             .map_err(|_| Error::Invalid(format!("{ALLOWANCES}: can't be written")))?;
-        self.unknown.write_into(json, &ALLOWANCE_SHAPE)
+        let mut origins: Vec<(String, Origin)> = Vec::new();
+        if let Some(grant) = &self.grant {
+            origins.push(("/grant".into(), grant.origin));
+        }
+        for (i, entry) in self.grants.iter().enumerate() {
+            origins.push((format!("/grants/{i}"), entry.origin));
+            origins.push((format!("/grants/{i}/grant"), entry.grant.origin));
+        }
+        self.unknown.write_into(json, &ALLOWANCE_SHAPE, &origins)
     }
 }
 
@@ -3015,7 +2966,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reassociations_and_v01_paid_shapes() {
+    fn test_reassociations_shape() {
         let a = AllowanceId::parse("d0efffb7-191b-4709-b6c7-e343af5500b4").unwrap();
         let b = AllowanceId::parse("55de1f16-1a9e-4504-bc9c-57efc3a2b38c").unwrap();
         let entry = |id: &AllowanceId, from_period| Reassociation {
@@ -3031,14 +2982,6 @@ mod tests {
             .collect();
         assert!(check_reassociations(&many, Some(&a)).is_err());
         assert!(check_reassociations(&many[..16], Some(&a)).is_ok());
-        let range = |from, to| V01PaidRange { from, to };
-        check_v01_paid(&[range(1, 2), range(3, 3)]).unwrap();
-        assert!(check_v01_paid(&[range(2, 1)]).is_err());
-        assert!(check_v01_paid(&[range(1, 3), range(3, 4)]).is_err());
-        assert!(check_v01_paid(&[range(5, 6), range(1, 2)]).is_err());
-        let ranges: Vec<V01PaidRange> = (0..17).map(|i| range(i * 2, i * 2)).collect();
-        assert!(check_v01_paid(&ranges).is_err());
-        assert!(check_v01_paid(&ranges[..16]).is_ok());
     }
 
     #[test]
@@ -3062,33 +3005,58 @@ mod tests {
     fn test_unknown_members_by_shape() {
         static INNER: Shape = Shape {
             name: "inner",
-            id: &[("id", Spelling::Exact)],
+            id: &["id"],
+            carried: false,
             members: &[("id", Member::Leaf)],
+        };
+        static ELEMENT: Shape = Shape {
+            name: "element",
+            id: &[],
+            carried: true,
+            members: &[("k", Member::Leaf)],
         };
         static OUTER: Shape = Shape {
             name: "outer",
             id: &[],
-            members: &[("items", Member::Array(&INNER)), ("v", Member::Leaf)],
+            carried: false,
+            members: &[
+                ("items", Member::Array(&INNER)),
+                ("carried", Member::Array(&ELEMENT)),
+                ("v", Member::Leaf),
+            ],
         };
         let read = serde_json::json!({ "v": 1, "x": 2,
-            "items": [{ "id": 1, "a": "one" }, { "id": 2, "a": "two" }] });
-        let unknown = UnknownMembers::read(read.as_object().unwrap(), &OUTER);
-        // The items reordered and one dropped: the kept one keeps its member.
-        let written = serde_json::json!({ "v": 1, "items": [{ "id": 3 }, { "id": 2 }] });
+            "items": [{ "id": 1, "a": "one" }, { "id": 2, "a": "two" }],
+            "carried": [{ "k": 1, "b": "first" }, { "k": 1, "b": "second" }] });
+        let (unknown, origins) = UnknownMembers::read(read.as_object().unwrap(), &OUTER);
+        let (first, second) = (origins.at("/carried/0"), origins.at("/carried/1"));
+        // The items reordered and one dropped: the kept one keeps its member. The carried
+        // elements, the first dropped and a new one put before the second: each has its own.
+        let written = serde_json::json!({ "v": 1, "items": [{ "id": 3 }, { "id": 2 }],
+            "carried": [{ "k": 1 }, { "k": 1 }] });
         let out: Value = serde_json::from_slice(
             &unknown
-                .write_into(serde_json::to_vec(&written).unwrap(), &OUTER)
+                .write_into(
+                    serde_json::to_vec(&written).unwrap(),
+                    &OUTER,
+                    &[
+                        ("/carried/0".into(), Origin::default()),
+                        ("/carried/1".into(), second),
+                    ],
+                )
                 .unwrap(),
         )
         .unwrap();
         assert_eq!(
             out,
-            serde_json::json!({ "v": 1, "x": 2, "items": [{ "id": 3 }, { "id": 2, "a": "two" }] })
+            serde_json::json!({ "v": 1, "x": 2, "items": [{ "id": 3 }, { "id": 2, "a": "two" }],
+                "carried": [{ "k": 1 }, { "k": 1, "b": "second" }] })
         );
+        assert_eq!(first, second, "an origin isn't part of the value");
         // None: the bytes as written.
         let none = UnknownMembers::default();
         assert_eq!(
-            none.write_into(b"{\"v\":1}".to_vec(), &OUTER).unwrap(),
+            none.write_into(b"{\"v\":1}".to_vec(), &OUTER, &[]).unwrap(),
             b"{\"v\":1}"
         );
     }

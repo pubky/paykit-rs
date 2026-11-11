@@ -63,6 +63,7 @@ fn check_executor_grant(keys: &Keys, d: &Value) {
     let history = GrantEntry {
         built_on,
         grant: grant.clone(),
+        origin: Default::default(),
     };
     let executor = keys.app("executor");
     let c = grant

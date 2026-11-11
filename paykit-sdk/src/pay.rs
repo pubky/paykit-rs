@@ -1032,6 +1032,7 @@ impl Paykit {
                     .ok_or_else(PaykitError::corrupt)?,
                 endpoint: entry.destination.endpoint_id()?,
                 attempt_id,
+                origin: paykit_lib::records::Origin::default(),
             });
             let value = list.to_json()?;
             batch = batch.entry(

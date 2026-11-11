@@ -52,7 +52,7 @@ fn test_vectors_allowance_usage() {
     generate();
     let v = paykit("allowance_usage.json");
     let cases = arr(&v, "cases");
-    assert_eq!(cases.len(), 9 + v01_cases().len());
+    assert_eq!(cases.len(), 9);
     for case in cases {
         let name = st(case, "name");
         let terms = AllowanceTerms::from_json(&case["terms"]).unwrap();
@@ -140,9 +140,7 @@ claim is gone spends. Candidates are checked against every limit; refused_by nam
 first limit that refuses. A totals.failed item counts like an entry's own failed, in the \
 lifetime amount only: it adds its value while its attempt's claim is done, until the \
 executor moves it into spent and count. Compaction keeps each compacted failed entry's \
-attempt, obligation and value in totals.failed. The last cases hold v0.1 usage in totals.v01 \
-(spec 16): each item counts as count done entries of spent in all at its at, in every period \
-limit whose window contains at, and in the lifetime limit always. period_limit_spellings holds terms whose \
+attempt, obligation and value in totals.failed. period_limit_spellings holds terms whose \
 period limits are, or aren't, duplicates by their wire spelling (wire 4.15); \
 period_limit_members holds terms whose period limit leaves out one of its limits.";
 
@@ -224,103 +222,20 @@ fn generate() {
             json!({ "name": name, "reason": quoted(&error.to_string()), "terms": terms })
         })
         .collect();
-    let mut cases = vec![(Place::Member("/description"), json!(DESCRIPTION))];
-    cases.extend(
-        v01_cases()
-            .into_iter()
-            .map(|case| (Place::Case("/cases"), case)),
-    );
-    cases.extend([
-
+    generated(
+        "allowance_usage.json",
+        &[
+            (Place::Member("/description"), json!(DESCRIPTION)),
             (
                 Place::Member("/period_limit_spellings"),
                 json!({ "accepted": accepted, "description": SPELLINGS_DESCRIPTION, "refused": refused }),
             ),
-        (
-            Place::Member("/period_limit_members"),
-            period_limit_members(),
-        ),
-    ]);
-    generated("allowance_usage.json", &cases);
-}
-
-/// The cases on `totals.v01` (Paykit spec 16, Paykit wire 5.5), with the first case's terms:
-/// usage counted as paykit-lib counts it, and checked against the figures the rule gives.
-fn v01_cases() -> Vec<Value> {
-    let terms_json = paykit("allowance_usage.json")["cases"][0]["terms"].clone();
-    let terms = AllowanceTerms::from_json(&terms_json).unwrap();
-    let ledger_json = |entries: Value, v01: Value| {
-        json!({ "allowance_id": crate::common::ALLOWANCE_ID, "counterparty": BOB,
-            "entries": entries, "totals": { "count": 0, "spent": "", "v01": v01 }, "v": 1 })
-    };
-    let entry = json!({ "asset": "btc", "at": "2026-02-05T00:00:00.000Z",
-        "attempt_id": "AQEBAQEBAQEBAQEBAQEBAQ", "obligation": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
-        "outcome": "done", "value": "0.005" });
-    let cases = [
-        (
-            "totals.v01: v0.1 usage counts at its at in the period limit, with an entry",
-            ledger_json(
-                json!([entry]),
-                json!([
-                    { "at": "2026-01-15T00:00:00.000Z", "count": 1, "spent": "0.05" },
-                    { "at": "2026-02-01T00:00:00.000Z", "count": 2, "spent": "0.02" }
-                ]),
+            (
+                Place::Member("/period_limit_members"),
+                period_limit_members(),
             ),
-            ("0.075", "0.025", 3),
-            vec![
-                ("0.001", Some("period_count")),
-                ("0.01", Some("period_amount")),
-            ],
-        ),
-        (
-            "totals.v01: v0.1 usage of an earlier period counts in the lifetime limit only",
-            ledger_json(
-                json!([]),
-                json!([{ "at": "2025-06-01T00:00:00.000Z", "count": 9, "spent": "0.095" }]),
-            ),
-            ("0.095", "0", 0),
-            vec![("0.005", None), ("0.0051", Some("lifetime"))],
-        ),
-    ];
-    let t = "2026-02-10T00:00:00.000Z";
-    cases
-        .into_iter()
-        .map(
-            |(name, ledger_value, (lifetime, amount, count), candidates)| {
-                let l = ledger(&ledger_value);
-                let u = usage(&terms, &l, &HashMap::new(), time(t)).unwrap();
-                assert_eq!(u.lifetime().as_str(), lifetime, "{name}");
-                assert_eq!(u.periods()[0].amount().as_str(), amount, "{name}");
-                assert_eq!(u.periods()[0].count(), count, "{name}");
-                let candidates: Vec<Value> = candidates
-                    .into_iter()
-                    .map(|(amount, refused_by)| {
-                        let result = check_limits(&terms, &u, &Decimal::parse(amount).unwrap());
-                        assert_eq!(
-                            result.err().map(|k| k.as_str()),
-                            refused_by,
-                            "{name}: {amount}"
-                        );
-                        match refused_by {
-                            None => json!({ "allowed": true, "amount": amount }),
-                            Some(by) => {
-                                json!({ "allowed": false, "amount": amount, "refused_by": by })
-                            }
-                        }
-                    })
-                    .collect();
-                json!({
-                    "candidates": candidates,
-                    "claims": [],
-                    "ledger": ledger_value,
-                    "name": name,
-                    "t": t,
-                    "terms": terms_json,
-                    "usage": usage_json(&u),
-                })
-            },
-        )
-        .collect()
+        ],
+    );
 }
 
 const MEMBERS_DESCRIPTION: &str = "Wire 4.15, specs/allowances.md: the terms of the first \

@@ -1,12 +1,11 @@
 //! Records written by apps of other versions (Paykit wire 5, 5.3): a writer keeps every member
-//! it doesn't know as it read it, reads `unrequested` without `amount`, and takes a request
-//! record's `v01_paid` as paid.
+//! it doesn't know as it read it, and reads `unrequested` without `amount`.
 
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
 use paykit_lib::AttemptId;
 use paykit_sdk::rail::Behaviour;
-use paykit_sdk::{PayOptions, PayOutcome, Paykit, Refusal, RequestRef, UnrequestedPayment};
+use paykit_sdk::{PayOptions, PayOutcome, Paykit, RequestRef, UnrequestedPayment};
 use pubky_switch_client::app::{Collection as SwitchCollection, OpBatch, RecordTarget};
 use pubky_switch_client::clock::Clock;
 use pubky_switch_client::store::StateStore;
@@ -99,25 +98,6 @@ async fn test_mixed_versions_payment_keeps_members_its_writer_does_not_know() {
     assert_eq!(value["future_member"], note, "{value}");
     assert_eq!(value["request"]["relayed_by"], "bob's relay", "{value}");
     assert_eq!(value["manual_only"], true, "{value}");
-}
-
-#[tokio::test]
-async fn test_mixed_versions_v01_paid_request_is_never_attempted() {
-    let w = World::new();
-    let (mut wallet, mut phone, request) = requested(&w).await;
-    // The migration from v0.1 marks the request paid.
-    let target = payer_record(&request);
-    phone_rewrites(&mut phone, &target, |v| {
-        v["v01_paid"] = json!([{ "from": 0, "to": 0 }]);
-    })
-    .await;
-    wallet.app_mut().read_record(&target).await.unwrap();
-    let refused = wallet
-        .pay_request(&request, PayOptions::default())
-        .await
-        .unwrap_err();
-    assert_eq!(refused.refusal(), Some(&Refusal::AlreadyPaid));
-    assert!(wallet.payments().await.unwrap().is_empty());
 }
 
 #[tokio::test]
