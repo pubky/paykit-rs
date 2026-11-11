@@ -542,3 +542,28 @@ async fn test_public_conflict_kept_past_the_history_bound_and_a_reload() {
     );
     assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
 }
+
+#[tokio::test]
+async fn test_public_endpoint_the_payment_method_doesnt_pay_refused() {
+    // Bob's public endpoint is Lightning; alice's method pays only on-chain: refused as
+    // unsupported, nothing paid.
+    let w = World::new();
+    w.rail
+        .set_endpoint_identifiers(vec![endpoint("btc-bitcoin-p2wpkh")]);
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    publish(&w, tip_jar(), Some(w.clock.now_ms() + 30 * DAY_MS));
+    let refused = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::UnsupportedEndpoint(_))
+        ),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
