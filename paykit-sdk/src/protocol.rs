@@ -1245,6 +1245,52 @@ mod receive_tests {
             .is_some());
     }
 
+    /// A stand-in for the record key a restore derives: the natural key, padded.
+    fn fake_key(target: &RecordTarget) -> Result<[u8; 32], String> {
+        Ok(pubky_switch_core::enc::hash(&target.natural_key))
+    }
+
+    #[test]
+    fn test_protocol_restore_takes_a_kept_reply_at_its_record() {
+        let alice = Party::new("alice", "wallet", &["pay"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let reply = alice.message(
+            &bob,
+            "paykit.payment_request_acceptance",
+            vec![[4; 32]],
+            object(json!({})),
+        );
+        let value = state::encode(&KeptMessage::of(&reply)).unwrap();
+        let target = ActivityTarget::payee(natural_key::request_record(&bob.id(), &[4; 32]), None);
+        let record = fake_key(&target.record_target()).unwrap();
+        let msg_id = reply.message().msg_id.clone();
+        assert!(check_kept_reply(&value, &bob.id(), record, &msg_id, &fake_key).is_ok());
+    }
+
+    #[test]
+    fn test_protocol_restore_refuses_a_kept_reply_at_another_key() {
+        let alice = Party::new("alice", "wallet", &["pay"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let reply = alice.message(
+            &bob,
+            "paykit.payment_request_acceptance",
+            vec![[4; 32]],
+            object(json!({})),
+        );
+        let value = state::encode(&KeptMessage::of(&reply)).unwrap();
+        let target = ActivityTarget::payee(natural_key::request_record(&bob.id(), &[4; 32]), None);
+        let record = fake_key(&target.record_target()).unwrap();
+        let msg_id = reply.message().msg_id.clone();
+        assert!(check_kept_reply(&value, &bob.id(), [9; 32], &msg_id, &fake_key).is_err());
+        let other = "123e4567-e89b-42d3-a456-426614174000";
+        assert!(check_kept_reply(&value, &bob.id(), record, other, &fake_key).is_err());
+        // A kind that isn't a payer's reply.
+        let request = bob.message(&alice, "paykit.payment_request", vec![], request_body());
+        let value = state::encode(&KeptMessage::of(&request)).unwrap();
+        let msg_id = request.message().msg_id.clone();
+        assert!(check_kept_reply(&value, &alice.id(), record, &msg_id, &fake_key).is_err());
+    }
+
     #[test]
     fn test_protocol_record_regression_on_a_dropped_role() {
         let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
