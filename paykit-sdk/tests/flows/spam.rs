@@ -201,10 +201,7 @@ async fn test_spam_blocked_sender_list_cancellation_and_resend_only_counted() {
     );
     shop.request_resend(
         w.alice_id(),
-        ResendSelection {
-            request_hashes: vec![[9; 32]],
-            ..ResendSelection::default()
-        },
+        ResendSelection::default().with_request_hashes(vec![[9; 32]]),
     )
     .await
     .unwrap();
@@ -215,14 +212,11 @@ async fn test_spam_blocked_sender_list_cancellation_and_resend_only_counted() {
     assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 3);
     // No list was kept: a payment to bob's list endpoints finds none.
     let refused = wallet
-        .pay_without_request(UnrequestedPayment {
-            payee: w.bob_id(),
-            amount: btc("0.001"),
-            options: PayOptions {
-                endpoint: Some(endpoint("btc-lightning-bolt12")),
-                ..PayOptions::default()
-            },
-        })
+        .pay_without_request(
+            UnrequestedPayment::new(w.bob_id(), btc("0.001")).with_options(
+                PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")),
+            ),
+        )
         .await;
     assert!(refused.is_err(), "{refused:?}");
     assert!(w.rail.all_executions().is_empty());
@@ -248,14 +242,11 @@ async fn test_spam_blocked_payer_unrequested_proof_only_counted() {
     w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
     wallet.receive(None).await.unwrap();
     let outcome = wallet
-        .pay_without_request(UnrequestedPayment {
-            payee: w.bob_id(),
-            amount: btc("0.001"),
-            options: PayOptions {
-                endpoint: Some(endpoint("btc-lightning-bolt12")),
-                ..PayOptions::default()
-            },
-        })
+        .pay_without_request(
+            UnrequestedPayment::new(w.bob_id(), btc("0.001")).with_options(
+                PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")),
+            ),
+        )
         .await
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");

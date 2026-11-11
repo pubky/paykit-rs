@@ -48,9 +48,18 @@ pub enum Refusal {
     /// The obligation may already be paid: an `unknown` or orphaned attempt, a next attempt
     /// that would be flagged `possibly_duplicate`, a pinned deadline other than the app's own,
     /// or an attempt a restore left unresolved. Only a user who has seen "may already be
-    /// paid" pays it (Paykit spec 7.1, 7.2).
-    #[error("may already be paid: {0}")]
-    MayBePaid(String),
+    /// paid" pays it (Paykit spec 7.1, 7.2). `doubt`, when there is one, is what the user
+    /// is shown and may pay over: paying anyway carries it back
+    /// ([`crate::PayOptions::with_may_be_paid_confirmed`]), and only that same doubt is
+    /// passed. `None` for a reason no confirmation passes, such as a pinned deadline other
+    /// than the app's own, or a claim that doesn't show this app's attempt open.
+    #[error("may already be paid: {reason}")]
+    MayBePaid {
+        /// The rule that makes it doubtful.
+        reason: String,
+        /// What the user may pay over.
+        doubt: Option<Box<crate::PaymentDoubt>>,
+    },
     /// The attempt's deadline has passed, or the request's proposal expired (Paykit spec 7.1).
     #[error("Paykit spec 7.1: the deadline has passed")]
     DeadlinePassed,
@@ -73,6 +82,12 @@ pub enum Refusal {
     /// usable public endpoint, or none the caller named (Paykit spec 4, 8.1, 8.4).
     #[error("no usable destination: {0}")]
     NoDestination(String),
+    /// The destination offers endpoints the payment may use, but the payment method pays
+    /// none of them ([`crate::Rail::select_endpoints`]), or the caller named one it doesn't
+    /// pay. Nothing was written. Another list or request from the payee, or another payment
+    /// method, may serve.
+    #[error("no endpoint the payment method pays: {0}")]
+    UnsupportedEndpoint(String),
     /// No usable Private Payment List from the payee: none held, or each one expired or its
     /// single-use endpoints the payment would use already used (Paykit spec 8.4, "No usable
     /// list"). The app asked the payee for its current list with a
@@ -84,8 +99,15 @@ pub enum Refusal {
     WaitingForList,
     /// The payment method would transfer another amount or asset, an amount it can't tell, or
     /// a fee above the app's cap, and the user didn't choose it (Paykit spec 7.2 step 1).
-    #[error("Paykit spec 7.2 step 1: {0}")]
-    Transfer(String),
+    /// `quote` is what it would transfer, to show the user; paying it anyway carries it back
+    /// ([`crate::PayOptions::with_transfer_confirmed`]).
+    #[error("Paykit spec 7.2 step 1: {reason}")]
+    Transfer {
+        /// Which rule the transfer breaks.
+        reason: String,
+        /// The destination and what it would transfer.
+        quote: Box<crate::TransferQuote>,
+    },
     /// The payee's `identity.json` couldn't be read, or the app's own couldn't be revalidated,
     /// before money moves (Paykit spec 4, 7.2).
     #[error("Paykit spec 7.2: {0}")]

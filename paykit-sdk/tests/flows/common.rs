@@ -264,10 +264,7 @@ impl World {
 /// dispatch hours after it: the default for the fake rail, its hour plus the pre-dispatch
 /// budget, would have them orphaned by then.
 pub fn day_window() -> PaykitConfig {
-    PaykitConfig {
-        orphan_after_s: Some(86_400),
-        ..PaykitConfig::default()
-    }
+    PaykitConfig::default().with_orphan_after_s(86_400)
 }
 
 pub fn store() -> Arc<dyn StateStore> {
@@ -448,15 +445,12 @@ pub fn draft(value: &str, now: u64) -> RequestDraft {
         endpoint("btc-lightning-bolt11"),
         PaymentEndpointPayload::new("lnbc1invoice").unwrap(),
     );
-    RequestDraft {
-        amount: btc(value),
-        payment_reference: PaymentReference::new("order-1").unwrap(),
-        proposal_expires_at_ms: Some(now + 24 * HOUR_MS),
-        payment_deadline_ms: None,
-        destination: RequestDestination::Endpoints(endpoints),
-        accepted_endpoint_identifiers: None,
-        metadata: None,
-    }
+    RequestDraft::new(
+        btc(value),
+        PaymentReference::new("order-1").unwrap(),
+        RequestDestination::Endpoints(endpoints),
+    )
+    .with_proposal_expires_at_ms(now + 24 * HOUR_MS)
 }
 
 /// Bob sends alice a request from `shop`; alice's `wallets` receive it. Returns the request.

@@ -222,7 +222,7 @@ async fn crash_receiving_a_receipt(fault: Fault) -> bool {
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()

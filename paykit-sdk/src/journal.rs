@@ -65,6 +65,7 @@ mod serde_b64_opt {
 /// Where a payment stands in the paying order (Paykit spec 7.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Stage {
     /// Recorded before the attempt write.
     Recorded,
@@ -161,6 +162,30 @@ impl Destination {
         }
         Ok(())
     }
+}
+
+/// The transfer an attempt may make (Paykit spec 7.2 step 1), as its planning allowed it:
+/// the rule the final payment check holds the method's transfer to again, just before each
+/// call, a repeat's included, so no call transfers more than the first was allowed to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum TransferBound {
+    /// What the user asked for: exactly the amount paid, with a fee of nothing or at most
+    /// `cap`, the app's cap for the asset at planning.
+    Asked {
+        /// The cap, as a decimal; `None` for none.
+        cap: Option<String>,
+    },
+    /// The transfer the user confirmed: this amount and this largest fee, or what the user
+    /// asked for.
+    Confirmed {
+        /// The cap at planning, for a transfer that is what the user asked for.
+        cap: Option<String>,
+        /// The amount confirmed; `None` for one the method couldn't tell.
+        amount: Option<KeptAmount>,
+        /// The largest fee confirmed, as a decimal; `None` for none.
+        max_fee: Option<String>,
+    },
 }
 
 /// An amount as kept.
@@ -266,6 +291,10 @@ pub(crate) struct JournalEntry {
     /// [`crate::Paykit::repair_activity_record`] writes it again.
     #[serde(default)]
     pub(crate) record_held: bool,
+    /// The transfer the attempt may make, as its planning allowed it. `None` in an entry
+    /// kept before it was journaled, held to the app's cap now.
+    #[serde(default)]
+    pub(crate) transfer_bound: Option<TransferBound>,
 }
 
 impl std::fmt::Debug for JournalEntry {
@@ -548,6 +577,7 @@ impl JournalEntry {
 
 /// A payment in the journal, as the host sees it.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PaymentView {
     /// The attempt ID, the payment method's idempotency key.
     pub attempt_id: AttemptId,

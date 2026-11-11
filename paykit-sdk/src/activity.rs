@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 /// A message's role in an activity record (Paykit wire 5.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Role {
     /// The `payment_request`.
     Request,
