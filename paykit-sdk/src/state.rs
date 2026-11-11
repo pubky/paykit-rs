@@ -43,7 +43,7 @@
 //! | `kb/<batch_id>` | a batch of the app's the client keeps to send again, and what it carries: a request's `msg_id` or an attempt's ID, and the switch's refusal once it dropped it; never restored | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
-//! | `nt/<attempt_id>/<kind>` | a notice for the host about a payment, until acknowledged (`notices.rs`) | |
+//! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored, since a restore's events have other IDs | |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
 
@@ -214,6 +214,11 @@ pub(crate) mod key {
         format!("{STORED_NOTES}{}/{msg_id}", b64(sender))
     }
 
+    /// The notice that `sender`'s message `msg_id` was given up.
+    pub(crate) fn message_notice(sender: &[u8; 32], msg_id: &str) -> String {
+        format!("{NOTICES}{}/{msg_id}", b64(sender))
+    }
+
     /// The notice of `kind` about `attempt`.
     pub(crate) fn notice(attempt: &AttemptId, kind: crate::notices::NoticeKind) -> String {
         format!("{NOTICES}{}", crate::notices::notice_id(attempt, kind))
@@ -339,6 +344,8 @@ pub(crate) enum StateKey {
     Taken(String),
     /// `se/<sender>/<msg_id>`: a stored entry's message to write later.
     StoredNote { sender: [u8; 32], msg_id: String },
+    /// `nt/<sender>/<msg_id>`: a notice for the host about a message given up.
+    MessageNotice { sender: [u8; 32], msg_id: String },
     /// `nt/<attempt_id>/<kind>`: a notice for the host.
     Notice {
         attempt: AttemptId,
@@ -454,6 +461,12 @@ impl StateKey {
                     }
                     "nt" => {
                         let (attempt, tag) = rest.split_once('/')?;
+                        if let Some(sender) = b64_32(attempt) {
+                            return Some(Self::MessageNotice {
+                                sender,
+                                msg_id: msg_id(tag)?,
+                            });
+                        }
                         let parsed = AttemptId::parse(attempt).ok()?;
                         (parsed.to_text() == attempt).then_some(())?;
                         Self::Notice {
@@ -605,6 +618,13 @@ mod tests {
                 StateKey::Notice {
                     attempt,
                     kind: crate::notices::NoticeKind::PaidAfterFailed,
+                },
+            ),
+            (
+                key::message_notice(&pubky, id),
+                StateKey::MessageNotice {
+                    sender: pubky,
+                    msg_id: id.into(),
                 },
             ),
             (

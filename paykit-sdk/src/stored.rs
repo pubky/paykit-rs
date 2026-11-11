@@ -14,7 +14,8 @@
 //!   at the switch (`kc/`, Paykit spec 8.1). Once written, the stored entry is forgotten,
 //!   its message staying processed. One not written within [`crate::KEPT_REPLY_MS`] of its
 //!   acceptance, such as a receipt naming a proof the record doesn't hold, is given up: its
-//!   note goes, and its entry stays stored, for the host.
+//!   note goes, its entry stays stored, and the host is told
+//!   ([`crate::NoticeKind::MessageGivenUp`]).
 //! - **An effect of unknown fate** (`EffectUncertain`, or `Parked` as `Uncertain`): the same
 //!   write compensates for it, since placing a message a record already holds writes
 //!   nothing. A copy of the entry the host released after that is declined, its message
@@ -44,6 +45,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::activity::{ActivityTarget, Role};
 use crate::error::Result;
+use crate::notices::KeptNotice;
 use crate::paykit::Paykit;
 use crate::protocol::QueuedAsk;
 use crate::records::{list_target, KeptMessage};
@@ -61,6 +63,17 @@ pub(crate) struct StoredNote {
     pub(crate) message: KeptMessage,
     /// The effect is in place: written by the app, or found in the record already.
     pub(crate) placed: bool,
+}
+
+/// The request `stored` is, or names: a request's own hash, the first of a payer's reply's
+/// `refs`, the second of a receipt's.
+fn named_request(stored: &StoredMessage) -> Option<[u8; 32]> {
+    let refs = &stored.message().refs;
+    match stored.body() {
+        Body::PaymentRequest(_) => Some(stored.hash()),
+        Body::PaymentReceipt(_) => refs.get(1).copied(),
+        _ => refs.first().copied(),
+    }
 }
 
 /// Whether a released entry with `note` kept for its message is declined: only once the app
@@ -334,7 +347,7 @@ impl Paykit {
             if !note.placed {
                 let stored = note.message.stored(&own)?;
                 let accepted_at = stored.accepted_at();
-                note.placed = match self.place_of(&stored).await? {
+                note.placed = match self.place_of(&stored.clone()).await? {
                     Some(Place::List(hold)) => {
                         if let Some((held, kept)) = hold {
                             self.local_put(&held, &kept).await?;
@@ -346,7 +359,7 @@ impl Paykit {
                         role,
                         creates,
                     }) => self
-                        .place_note(&target, role, creates, stored)
+                        .place_note(&target, role, creates, stored.clone())
                         .await
                         .unwrap_or(false),
                     None => false,
@@ -357,7 +370,21 @@ impl Paykit {
                             .is_some_and(|t| at.saturating_add(crate::receive::KEPT_REPLY_MS) <= t)
                     });
                     if stale {
-                        self.local_delete(&note_key).await?;
+                        // Given up: the host is told, in the commit that drops the note.
+                        let mut tx = Tx::default();
+                        tx.delete(&note_key);
+                        let notice = key::message_notice(&note.sender, &note.msg_id);
+                        if self.local_get::<KeptNotice>(&notice).await?.is_none() {
+                            let at = self.service_time().unwrap_or(0);
+                            let given_up = KeptNotice::given_up(
+                                note.sender,
+                                &note.msg_id,
+                                named_request(&stored),
+                                at,
+                            );
+                            tx.put(&notice, &given_up)?;
+                        }
+                        self.local_commit(tx).await?;
                     }
                     continue;
                 }

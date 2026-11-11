@@ -60,8 +60,8 @@ async fn test_notices_late_receipt_of_a_payment_written_failed_raises_one() {
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, NoticeKind::PaidAfterFailed);
-    assert_eq!(notices[0].attempt_id, attempt_id);
-    assert_eq!(notices[0].payee, w.bob_id());
+    assert_eq!(notices[0].attempt_id, Some(attempt_id));
+    assert_eq!(notices[0].counterparty, w.bob_id());
     // The receipt is in the activity record.
     let key = wallet.payments().await.unwrap()[0].request_hash.unwrap();
     let view = wallet

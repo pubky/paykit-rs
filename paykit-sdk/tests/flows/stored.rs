@@ -410,9 +410,19 @@ async fn test_stored_refused_note_given_up_past_its_window() {
     assert_eq!(kept(&wallet, "se/").await.len(), 1);
     w.clock.advance_ms(paykit_sdk::KEPT_REPLY_MS);
     wallet.receive(None).await.unwrap();
-    // Given up: its note goes, its entry stays stored for the host.
+    // Given up: its note goes, its entry stays stored for the host, who is told.
     assert!(kept(&wallet, "se/").await.is_empty());
-    assert_eq!(wallet.app_mut().parked_entries().await.unwrap().len(), 1);
+    let parked = wallet.app_mut().parked_entries().await.unwrap();
+    assert_eq!(parked.len(), 1);
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].request_hash, Some(request.request_hash));
+    assert!(notices[0].msg_id.is_some());
+    // Acknowledged, it goes at once: nothing raises it again.
+    wallet.acknowledge_notice(&notices[0].id).await.unwrap();
+    assert!(kept(&wallet, "nt/").await.is_empty());
 }
 
 #[tokio::test]

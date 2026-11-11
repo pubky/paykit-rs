@@ -1,8 +1,9 @@
-//! Notices: facts about this app's payments that the user must be told and that no call's
-//! result carries, kept in Paykit's local state (`p/nt/<attempt_id>/<kind>`) until the host
+//! Notices: facts about this app's payments and messages that the user must be told and that
+//! no call's result carries, kept in Paykit's local state (`p/nt/`) until the host
 //! acknowledges them, and carried in the app's backups (Paykit spec 7.2).
 //!
-//! A notice is raised once per attempt and kind: raising it again, as a re-sent receipt or a
+//! A notice is raised once per attempt and kind, or per message given up: raising it again,
+//! as a re-sent receipt or a
 //! later resume would, changes nothing, and an acknowledged one stays acknowledged.
 
 use paykit_lib::AttemptId;
@@ -30,6 +31,12 @@ pub enum NoticeKind {
     /// [`crate::PayOutcome::Pending`] or [`crate::PayOutcome::PaidOutcomeUnwritten`]
     /// meanwhile.
     HeldWithoutPay,
+    /// A message whose effect the switch refused for good, kept to write into its record
+    /// later, wasn't written within [`crate::KEPT_REPLY_MS`] of its acceptance: the SDK gave
+    /// it up (Switch spec 8.2). Its entry stays stored, for the host
+    /// ([`pubky_switch_client::app::App::parked_entries`]), and a request it was no longer
+    /// shows as [`crate::RequestStatus::Unrecorded`].
+    MessageGivenUp,
 }
 
 impl NoticeKind {
@@ -38,6 +45,7 @@ impl NoticeKind {
         match self {
             Self::PaidAfterFailed => "paid_after_failed",
             Self::HeldWithoutPay => "held_without_pay",
+            Self::MessageGivenUp => "given_up",
         }
     }
 
@@ -46,6 +54,7 @@ impl NoticeKind {
         match tag {
             "paid_after_failed" => Some(Self::PaidAfterFailed),
             "held_without_pay" => Some(Self::HeldWithoutPay),
+            "given_up" => Some(Self::MessageGivenUp),
             _ => None,
         }
     }
@@ -59,25 +68,28 @@ pub struct Notice {
     pub id: String,
     /// What it tells.
     pub kind: NoticeKind,
-    /// The attempt it is about.
-    pub attempt_id: AttemptId,
-    /// The payee.
-    pub payee: [u8; 32],
-    /// The request paid, `None` for a payment without one.
+    /// The attempt it is about; `None` for a notice about a message.
+    pub attempt_id: Option<AttemptId>,
+    /// The message it is about, by its `msg_id`; `None` for a notice about an attempt.
+    pub msg_id: Option<String>,
+    /// The counterparty: the payee of an attempt, or the message's sender.
+    pub counterparty: [u8; 32],
+    /// The request paid or named, `None` for none.
     pub request_hash: Option<[u8; 32]>,
     /// When it was raised, in Unix milliseconds: the highest service time the app had
     /// verified then, 0 before any.
     pub raised_at_ms: u64,
 }
 
-/// A notice as kept (`p/nt/<attempt_id>/<kind>`): its attempt and kind repeat the key's, so
-/// a restore binds the value to its key.
+/// A notice as kept (`p/nt/<attempt_id>/<kind>`, or `p/nt/<sender>/<msg_id>` for a message
+/// given up): what its key names repeats in it, so a restore binds the value to its key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct KeptNotice {
     pub(crate) kind: NoticeKind,
-    pub(crate) attempt_id: String,
+    pub(crate) attempt_id: Option<String>,
+    pub(crate) msg_id: Option<String>,
     #[serde(with = "serde_b64")]
-    pub(crate) payee: [u8; 32],
+    pub(crate) counterparty: [u8; 32],
     pub(crate) request_hash: Option<String>,
     pub(crate) raised_at_ms: u64,
     pub(crate) acknowledged: bool,
@@ -88,9 +100,28 @@ impl KeptNotice {
     pub(crate) fn of(kind: NoticeKind, entry: &JournalEntry, at: u64) -> Self {
         Self {
             kind,
-            attempt_id: entry.attempt_id.clone(),
-            payee: entry.payee,
+            attempt_id: Some(entry.attempt_id.clone()),
+            msg_id: None,
+            counterparty: entry.payee,
             request_hash: entry.request_hash.clone(),
+            raised_at_ms: at,
+            acknowledged: false,
+        }
+    }
+
+    /// The notice that message `stored` from `sender` was given up, raised at `at`.
+    pub(crate) fn given_up(
+        sender: [u8; 32],
+        msg_id: &str,
+        request_hash: Option<[u8; 32]>,
+        at: u64,
+    ) -> Self {
+        Self {
+            kind: NoticeKind::MessageGivenUp,
+            attempt_id: None,
+            msg_id: Some(msg_id.to_owned()),
+            counterparty: sender,
+            request_hash: request_hash.map(|hash| pubky_switch_core::enc::b64(&hash)),
             raised_at_ms: at,
             acknowledged: false,
         }
@@ -99,15 +130,36 @@ impl KeptNotice {
     /// The notice read whole, at the attempt and kind its key names: one that doesn't is a
     /// corrupt store.
     pub(crate) fn check(&self, attempt: &AttemptId, kind: NoticeKind) -> Result<()> {
-        let request = self
-            .request_hash
-            .as_deref()
-            .map(unb64_array::<32>)
-            .transpose();
-        if self.kind != kind || self.attempt_id != attempt.to_text() || request.is_err() {
+        if self.kind != kind
+            || kind == NoticeKind::MessageGivenUp
+            || self.attempt_id.as_deref() != Some(attempt.to_text().as_str())
+            || self.msg_id.is_some()
+        {
             return Err(PaykitError::corrupt());
         }
-        Ok(())
+        self.check_hash()
+    }
+
+    /// The notice of a message given up read whole, at the sender and `msg_id` its key
+    /// names: one that doesn't is a corrupt store.
+    pub(crate) fn check_message(&self, sender: &[u8; 32], msg_id: &str) -> Result<()> {
+        if self.kind != NoticeKind::MessageGivenUp
+            || self.attempt_id.is_some()
+            || self.msg_id.as_deref() != Some(msg_id)
+            || self.counterparty != *sender
+        {
+            return Err(PaykitError::corrupt());
+        }
+        self.check_hash()
+    }
+
+    fn check_hash(&self) -> Result<()> {
+        self.request_hash
+            .as_deref()
+            .map(unb64_array::<32>)
+            .transpose()
+            .map(|_| ())
+            .map_err(|_| PaykitError::corrupt())
     }
 
     fn view(&self, id: String) -> Result<Notice> {
@@ -120,8 +172,14 @@ impl KeptNotice {
         Ok(Notice {
             id,
             kind: self.kind,
-            attempt_id: AttemptId::parse(&self.attempt_id).map_err(|_| PaykitError::corrupt())?,
-            payee: self.payee,
+            attempt_id: self
+                .attempt_id
+                .as_deref()
+                .map(AttemptId::parse)
+                .transpose()
+                .map_err(|_| PaykitError::corrupt())?,
+            msg_id: self.msg_id.clone(),
+            counterparty: self.counterparty,
             request_hash,
             raised_at_ms: self.raised_at_ms,
         })
@@ -161,7 +219,7 @@ impl Paykit {
         let key = format!("{}{id}", key::NOTICES);
         if !matches!(
             StateKey::parse(key.as_bytes()),
-            Some(StateKey::Notice { .. })
+            Some(StateKey::Notice { .. } | StateKey::MessageNotice { .. })
         ) {
             return Err(Refusal::NotFound.into());
         }
@@ -173,13 +231,22 @@ impl Paykit {
             return Ok(());
         }
         // Kept acknowledged while the journal holds its payment, which could raise it again;
-        // dropped with it, or now when it is gone (`Paykit::prune_journal`).
-        let attempt = AttemptId::parse(&kept.attempt_id).map_err(|_| PaykitError::corrupt())?;
-        if self
-            .local_get::<JournalEntry>(&key::journal(&attempt))
-            .await?
-            .is_none()
-        {
+        // dropped with it, or now when it is gone (`Paykit::prune_journal`). A message given
+        // up is never raised again: its notice goes now.
+        let attempt = kept
+            .attempt_id
+            .as_deref()
+            .map(AttemptId::parse)
+            .transpose()
+            .map_err(|_| PaykitError::corrupt())?;
+        let held = match attempt {
+            Some(attempt) => self
+                .local_get::<JournalEntry>(&key::journal(&attempt))
+                .await?
+                .is_some(),
+            None => false,
+        };
+        if !held {
             return self.local_delete(&key).await;
         }
         kept.acknowledged = true;
@@ -209,8 +276,9 @@ mod tests {
     fn kept(attempt: &AttemptId) -> KeptNotice {
         KeptNotice {
             kind: NoticeKind::PaidAfterFailed,
-            attempt_id: attempt.to_text(),
-            payee: [1; 32],
+            attempt_id: Some(attempt.to_text()),
+            msg_id: None,
+            counterparty: [1; 32],
             request_hash: Some(pubky_switch_core::enc::b64(&[2; 32])),
             raised_at_ms: 3,
             acknowledged: false,
@@ -246,5 +314,19 @@ mod tests {
             ..notice
         };
         assert!(bad.check(&attempt, NoticeKind::PaidAfterFailed).is_err());
+    }
+
+    #[test]
+    fn test_notices_message_notice_bound_to_its_sender_and_message() {
+        let id = "123e4567-e89b-42d3-a456-426614174000";
+        let notice = KeptNotice::given_up([1; 32], id, Some([2; 32]), 3);
+        assert!(notice.check_message(&[1; 32], id).is_ok());
+        assert!(notice.check_message(&[9; 32], id).is_err());
+        assert!(notice
+            .check_message(&[1; 32], "223e4567-e89b-42d3-a456-426614174000")
+            .is_err());
+        assert!(notice
+            .check(&AttemptId::from_bytes([5; 16]), NoticeKind::MessageGivenUp)
+            .is_err());
     }
 }

@@ -443,7 +443,7 @@ async fn test_certificate_renewal_dropping_pay_raises_a_notice_for_a_held_paymen
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::HeldWithoutPay);
-    assert_eq!(notices[0].attempt_id, attempt_id);
+    assert_eq!(notices[0].attempt_id, Some(attempt_id));
     assert_eq!(notices[0].request_hash, Some(request.request_hash));
     wallet.resume_payments().await.unwrap();
     assert_eq!(wallet.notices().await.unwrap(), notices);

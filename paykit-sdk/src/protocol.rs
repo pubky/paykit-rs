@@ -443,6 +443,13 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            StateKey::MessageNotice { sender, msg_id } => {
+                state::decode::<KeptNotice>(&value)
+                    .and_then(|notice| notice.check_message(&sender, &msg_id))
+                    .map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
             StateKey::Notice { attempt, kind } => {
                 state::decode::<KeptNotice>(&value)
                     .and_then(|notice| notice.check(&attempt, kind))
