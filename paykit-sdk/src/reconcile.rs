@@ -30,6 +30,7 @@ use crate::journal::{Destination, JournalEntry, KeptAmount, Stage};
 use crate::pay::{own_deadline, PayOutcome};
 use crate::paykit::Paykit;
 use crate::rail::RailOutcome;
+use crate::records::KeptMessage;
 use crate::requests::request_of;
 use crate::state::{self, key};
 
@@ -352,6 +353,8 @@ impl Paykit {
             carrier_record: None,
             attempt_proof: None,
             failed_by_method: false,
+            request: Some(KeptMessage::of(stored)),
+            record_held: false,
         };
         entry.keep_carrier(&carrier);
         Ok(Some(entry))

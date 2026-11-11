@@ -10,6 +10,7 @@ mod destinations;
 mod final_check;
 mod labels;
 mod one_time;
+mod outcome_record;
 mod protocols;
 mod public;
 mod receive_faults;

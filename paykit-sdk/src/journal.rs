@@ -235,6 +235,20 @@ pub(crate) struct JournalEntry {
     /// (Paykit spec 4, "Fresh before paying"). An entry without one is never dispatched again.
     #[serde(default)]
     pub(crate) attempt_proof: Option<SignedDoc>,
+    /// The request paid, as the payer's request record stored it: with the acceptance and
+    /// the proof, what rebuilds that record should it be gone by the outcome, so `done`
+    /// never goes without it (Paykit spec 7.2 step 3). Absent in a payment without a
+    /// request, and in an entry kept before requests were journaled, whose record is then
+    /// never rebuilt: its outcome waits as for one that doesn't read.
+    #[serde(default)]
+    pub(crate) request: Option<KeptMessage>,
+    /// The outcome of a payment made waits: the payer's activity record holds a value that
+    /// doesn't read, which the SDK doesn't overwrite unasked, so neither `done` nor the
+    /// proof is written. The attempt stays open, and nothing pays again. A durable notice
+    /// for the host ([`PaymentView::record_held`]), until the record reads again or
+    /// [`crate::Paykit::repair_activity_record`] writes it again.
+    #[serde(default)]
+    pub(crate) record_held: bool,
 }
 
 impl std::fmt::Debug for JournalEntry {
@@ -279,7 +293,9 @@ impl JournalEntry {
     /// - an acceptance is kept with its plaintext, which reads, and only when owed;
     /// - the method's proof is kept from `RailPaid` on, and before any payment time or
     ///   proof message; a `Finished` entry marked failed by the method holds no proof;
-    /// - at most one carrier, which reads; the attempt's proof, when kept, reads.
+    /// - at most one carrier, which reads; the attempt's proof, when kept, reads;
+    /// - a kept request only in a payment of a request, and it reads; an outcome held for
+    ///   its record only once paid by the method.
     pub(crate) fn check(&self) -> Result<()> {
         let bad = || Err(PaykitError::corrupt());
         let attempt = self.attempt()?;
@@ -317,6 +333,15 @@ impl JournalEntry {
             return bad();
         }
         if self.failed_by_method && self.rail_proof.is_some() {
+            return bad();
+        }
+        if let Some(kept) = &self.request {
+            if request_hash.is_none() {
+                return bad();
+            }
+            kept.check_shape()?;
+        }
+        if self.record_held && self.rail_proof.is_none() {
             return bad();
         }
         match (&self.carrier, &self.carrier_record) {
@@ -398,6 +423,12 @@ pub struct PaymentView {
     pub stage: Stage,
     /// The entry came back from a backup.
     pub restored: bool,
+    /// Paid by the method, its outcome waits: the payer's activity record holds a value that
+    /// doesn't read, so `done` and the proof aren't written, and the attempt stays open
+    /// (Paykit spec 7.2 step 3). It settles once the record reads again, at
+    /// [`crate::Paykit::resume_payments`], or when the user has the record written again
+    /// with [`crate::Paykit::repair_activity_record`].
+    pub record_held: bool,
 }
 
 impl JournalEntry {
@@ -411,6 +442,7 @@ impl JournalEntry {
             endpoint_id: self.destination.endpoint_id()?,
             stage: self.stage,
             restored: self.restored,
+            record_held: self.record_held,
         })
     }
 }
