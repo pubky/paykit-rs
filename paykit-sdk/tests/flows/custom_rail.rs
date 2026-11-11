@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use paykit_lib::bodies::PaymentProof;
 use paykit_lib::{AttemptId, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload};
 use paykit_sdk::rail::{
-    FakeRail, ProofCheck, RailDeclaration, RailError, RailOutcome, RailPayment, Transfer,
+    EndpointSelection, FakeRail, PaymentEndpointCandidate, ProofCheck, RailDeclaration, RailError,
+    RailOutcome, RailPayment, Transfer,
 };
 use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, Paykit, PaykitConfig, Rail, RequestedScopes,
@@ -46,10 +47,10 @@ fn to_fake(proof: &Map<String, Value>) -> Map<String, Value> {
 impl LedgerRail {
     fn outcome(&self, outcome: RailOutcome) -> RailOutcome {
         match outcome {
-            RailOutcome::Paid { proof, paid_at_ms } => {
-                let proof = to_ledger(&proof);
-                *self.last.lock().unwrap() = Some(proof.clone());
-                RailOutcome::Paid { proof, paid_at_ms }
+            RailOutcome::Paid(mut paid) => {
+                paid.proof = to_ledger(&paid.proof);
+                *self.last.lock().unwrap() = Some(paid.proof.clone());
+                RailOutcome::Paid(paid)
             }
             other => other,
         }
@@ -61,16 +62,28 @@ impl Rail for LedgerRail {
         self.fake.declaration()
     }
 
+    fn select_endpoints(
+        &self,
+        candidates: &[PaymentEndpointCandidate],
+        amount: Option<&PaymentAmount>,
+    ) -> Result<EndpointSelection, RailError> {
+        self.fake.select_endpoints(candidates, amount)
+    }
+
+    fn endpoint_identifiers(&self) -> Vec<PaymentEndpointIdentifier> {
+        self.fake.endpoint_identifiers()
+    }
+
     fn transfer(
         &self,
         endpoint_id: &PaymentEndpointIdentifier,
         payload: &PaymentEndpointPayload,
         amount: &PaymentAmount,
     ) -> Transfer {
-        Transfer {
-            max_fee: self.fee.clone(),
-            ..self.fake.transfer(endpoint_id, payload, amount)
-        }
+        Transfer::new(
+            self.fake.transfer(endpoint_id, payload, amount).amount,
+            self.fee.clone(),
+        )
     }
 
     fn pay(&self, payment: RailPayment) -> BoxFuture<'_, Result<RailOutcome, RailError>> {
@@ -91,10 +104,8 @@ impl Rail for LedgerRail {
     }
 
     fn verify(&self, check: ProofCheck) -> BoxFuture<'_, Result<Option<u64>, RailError>> {
-        let check = ProofCheck {
-            proof: to_fake(&check.proof),
-            ..check
-        };
+        let mut check = check;
+        check.proof = to_fake(&check.proof);
         Box::pin(async move { self.fake.verify(check).await })
     }
 
@@ -113,9 +124,21 @@ async fn joined(
     scopes: RequestedScopes,
     rail: &Arc<LedgerRail>,
 ) -> Paykit {
+    joined_with(w, signer, name, scopes, rail, PaykitConfig::default()).await
+}
+
+/// [`joined`], with `config`.
+async fn joined_with(
+    w: &World,
+    signer: &TestSigner,
+    name: &str,
+    scopes: RequestedScopes,
+    rail: &Arc<LedgerRail>,
+    config: PaykitConfig,
+) -> Paykit {
     let mut app = Paykit::join(
         w.env(signer, store()),
-        PaykitConfig::default(),
+        config,
         w.approve(signer, name, &scopes),
         Arc::clone(rail) as Arc<dyn Rail>,
         w.timer(),
@@ -174,14 +197,11 @@ async fn test_custom_rail_proof_credited_once_per_settlement() {
         .await;
     wallet.receive(None).await.unwrap();
     let outcome = wallet
-        .pay_without_request(UnrequestedPayment {
-            payee: w.bob_id(),
-            amount: btc("0.0015"),
-            options: PayOptions {
-                endpoint: Some(endpoint("btc-lightning-bolt12")),
-                ..PayOptions::default()
-            },
-        })
+        .pay_without_request(
+            UnrequestedPayment::new(w.bob_id(), btc("0.0015")).with_options(
+                PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")),
+            ),
+        )
         .await
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
@@ -228,12 +248,22 @@ async fn test_custom_rail_proof_credited_once_per_settlement() {
 /// Alice's wallet and bob's shop on `rail`, the wallet holding the shop's list, and the
 /// outcome of paying the list's reusable endpoint.
 async fn pay_through(w: &World, rail: &Arc<LedgerRail>) -> paykit_sdk::Result<PayOutcome> {
-    let mut wallet = joined(
+    pay_through_with(w, rail, PaykitConfig::default()).await
+}
+
+/// [`pay_through`], the wallet with `config`.
+async fn pay_through_with(
+    w: &World,
+    rail: &Arc<LedgerRail>,
+    config: PaykitConfig,
+) -> paykit_sdk::Result<PayOutcome> {
+    let mut wallet = joined_with(
         w,
         &w.alice,
         "wallet",
         AppScopes::new().pay().build().unwrap(),
         rail,
+        config,
     )
     .await;
     wallet.app_mut().invite(&w.bob_id()).await.unwrap();
@@ -249,14 +279,11 @@ async fn pay_through(w: &World, rail: &Arc<LedgerRail>) -> paykit_sdk::Result<Pa
         .await;
     wallet.receive(None).await.unwrap();
     wallet
-        .pay_without_request(UnrequestedPayment {
-            payee: w.bob_id(),
-            amount: btc("0.0015"),
-            options: PayOptions {
-                endpoint: Some(endpoint("btc-lightning-bolt12")),
-                ..PayOptions::default()
-            },
-        })
+        .pay_without_request(
+            UnrequestedPayment::new(w.bob_id(), btc("0.0015")).with_options(
+                PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")),
+            ),
+        )
         .await
 }
 
@@ -280,7 +307,55 @@ async fn test_custom_rail_zero_fee_needs_no_cap() {
     });
     let refused = pay_through(&w, &rail).await.unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(paykit_sdk::Refusal::Transfer(_))),
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::Transfer { .. })
+        ),
         "{refused:?}"
     );
+}
+
+#[tokio::test]
+async fn test_custom_rail_fee_cap_is_per_asset() {
+    // A fee of 0.00000010 BTC: paid under a BTC cap at least that, refused under one below
+    // it, and refused under a cap of another asset only.
+    let fee = || Some(paykit_lib::Decimal::parse("0.0000001").unwrap());
+    let btc = || paykit_lib::Asset::new("btc").unwrap();
+    let cap = |value: &str| paykit_lib::Decimal::parse(value).unwrap();
+    for (config, pays) in [
+        (
+            PaykitConfig::default().with_fee_cap(btc(), cap("0.0000001")),
+            true,
+        ),
+        (
+            PaykitConfig::default().with_fee_cap(btc(), cap("0.00000009")),
+            false,
+        ),
+        (
+            PaykitConfig::default().with_fee_cap(paykit_lib::Asset::new("usd").unwrap(), cap("1")),
+            false,
+        ),
+    ] {
+        let w = World::new();
+        let rail = Arc::new(LedgerRail {
+            fake: Arc::clone(&w.rail),
+            last: Mutex::new(None),
+            fee: fee(),
+        });
+        let outcome = pay_through_with(&w, &rail, config).await;
+        if pays {
+            assert!(
+                matches!(outcome, Ok(PayOutcome::Paid { .. })),
+                "{outcome:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    outcome.as_ref().map_err(|e| e.refusal()),
+                    Err(Some(paykit_sdk::Refusal::Transfer { .. }))
+                ),
+                "{outcome:?}"
+            );
+        }
+    }
 }

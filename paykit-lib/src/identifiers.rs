@@ -220,9 +220,16 @@ impl std::fmt::Display for AllowanceId {
 pub const MAX_PAYMENT_REFERENCE_CHARS: usize = 256;
 
 /// A request's payment reference (Paykit wire 4.5): 1 to 256 characters, without control
-/// characters, copied into the payment where the method allows it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// characters, copied into the payment where the method allows it. It may name an invoice or
+/// an order: its `Debug` shows only its length.
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct PaymentReference(String);
+
+impl std::fmt::Debug for PaymentReference {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PaymentReference({} chars)", self.0.chars().count())
+    }
+}
 
 impl PaymentReference {
     /// Read a payment reference from a document (Paykit wire 4.5).

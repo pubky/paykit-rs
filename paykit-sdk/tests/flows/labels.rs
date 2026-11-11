@@ -55,10 +55,7 @@ async fn test_labels_labelled_app_needs_its_label() {
                 .request_label(&Label::parse("shop1").unwrap())
                 .build()
                 .unwrap(),
-            PaykitConfig {
-                selling_label: Some(Label::parse("shop2").unwrap()),
-                ..PaykitConfig::default()
-            },
+            PaykitConfig::default().with_selling_label(Label::parse("shop2").unwrap()),
             store(),
         )
         .await;

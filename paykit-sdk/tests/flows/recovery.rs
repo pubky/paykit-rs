@@ -26,7 +26,7 @@ async fn in_flight(
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()
@@ -48,20 +48,22 @@ async fn test_recovery_clock_gone_back_empty_history_stays_uncertain() {
     let (attempt_id, app_id) = in_flight(&w, &base).await;
     // A history kept for a day: empty, it shows a dispatch never started only within that
     // day of the journaling, which a clock now behind it can't tell.
-    w.rail.set_declaration(RailDeclaration {
-        idempotent: false,
-        idempotency_retention_ms: None,
-        history: true,
-        history_retention_ms: Some(DAY_MS),
-        history_survives_restore: true,
-        longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
-    });
+    w.rail.set_declaration(
+        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_history(true)
+            .with_history_retention_ms(DAY_MS)
+            .with_history_survives_restore(true),
+    );
     w.rail.forget_history(&attempt_id);
     let mut wallet = w
         .load_on_clock(&w.alice, Arc::clone(&base), app_id, clock_gone_back(&w))
         .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     // Nothing was written `failed`: the attempt stays open, "may be paid".
     let payment = wallet.payments().await.unwrap().remove(0);
     assert_eq!(payment.stage, Stage::Paying);
@@ -82,19 +84,20 @@ async fn test_recovery_clock_gone_back_idempotent_rail_not_dispatched_again() {
     let (attempt_id, app_id) = in_flight(&w, &base).await;
     // Idempotent for a day, without a history: a repeat is harmless only while the method
     // still remembers the key, which a clock now behind the journaling can't tell.
-    w.rail.set_declaration(RailDeclaration {
-        idempotent: true,
-        idempotency_retention_ms: Some(DAY_MS),
-        history: false,
-        history_retention_ms: None,
-        history_survives_restore: false,
-        longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
-    });
+    w.rail.set_declaration(
+        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true)
+            .with_idempotency_retention_ms(DAY_MS),
+    );
     let mut wallet = w
         .load_on_clock(&w.alice, Arc::clone(&base), app_id, clock_gone_back(&w))
         .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
 
@@ -103,14 +106,11 @@ async fn test_recovery_within_retention_idempotent_rail_asked_again() {
     let w = World::new();
     let base = store();
     let (attempt_id, app_id) = in_flight(&w, &base).await;
-    w.rail.set_declaration(RailDeclaration {
-        idempotent: true,
-        idempotency_retention_ms: Some(DAY_MS),
-        history: false,
-        history_retention_ms: None,
-        history_survives_restore: false,
-        longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
-    });
+    w.rail.set_declaration(
+        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true)
+            .with_idempotency_retention_ms(DAY_MS),
+    );
     // The clock moved on, within the day: the method still remembers the key, and every
     // check before paying passes again.
     w.clock.advance_ms(HOUR_MS);
@@ -123,7 +123,11 @@ async fn test_recovery_within_retention_idempotent_rail_asked_again() {
         )
         .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Pending { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Pending { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 2);
     assert_eq!(w.rail.executions(&attempt_id), 1);
 }
@@ -171,14 +175,7 @@ async fn test_recovery_clock_gone_back_own_identity_read_again() {
 /// An idempotent rail without a history, remembering keys for good: only the claim can tell
 /// a resume that an attempt was resolved.
 fn idempotent_without_history() -> RailDeclaration {
-    RailDeclaration {
-        idempotent: true,
-        idempotency_retention_ms: None,
-        history: false,
-        history_retention_ms: None,
-        history_survives_restore: false,
-        longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
-    }
+    RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS).with_idempotent(true)
 }
 
 #[tokio::test]
@@ -189,7 +186,7 @@ async fn test_recovery_attempt_resolved_failed_may_be_paid_again() {
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()
@@ -229,7 +226,7 @@ async fn test_recovery_attempt_resolved_done_never_dispatched_again() {
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()
@@ -359,7 +356,11 @@ async fn test_recovery_repeat_to_a_revoked_payee_app_held() {
         .await;
     // Not repeated, and not written `failed`: the first dispatch may have paid.
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
     assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Paying);
 }
@@ -478,7 +479,11 @@ async fn resume_after_provider_change(change: impl FnOnce(&World)) {
     // nothing is paid on it, and it stays "may be paid" until the move rules resolve it
     // (Paykit spec 4, 7.2; Switch spec 12.5, 12.6).
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
     assert!(w.rail.all_executions().is_empty());
     assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Paying);
@@ -532,7 +537,11 @@ async fn test_recovery_not_paid_once_the_own_app_is_unlisted() {
         .load_on_clock(&w.alice, Arc::clone(&base), app_id, Arc::clone(&w.clock))
         .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
 }
 
@@ -595,14 +604,13 @@ async fn test_recovery_failure_that_completed_after_all_sends_its_proof() {
 #[tokio::test]
 async fn test_recovery_failure_past_the_history_window_not_asked_again() {
     let w = World::new();
-    w.rail.set_declaration(RailDeclaration {
-        idempotent: true,
-        idempotency_retention_ms: None,
-        history: true,
-        history_retention_ms: Some(DAY_MS),
-        history_survives_restore: true,
-        longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
-    });
+    w.rail.set_declaration(
+        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true)
+            .with_history(true)
+            .with_history_retention_ms(DAY_MS)
+            .with_history_survives_restore(true),
+    );
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
@@ -661,12 +669,11 @@ async fn test_recovery_list_expiring_during_the_own_identity_read_not_paid() {
     );
     wallet.receive(None).await.unwrap();
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
-        .pay_without_request(paykit_sdk::UnrequestedPayment {
-            payee: w.bob_id(),
-            amount: crate::common::btc("0.001"),
-            options: PayOptions::default(),
-        })
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_without_request(paykit_sdk::UnrequestedPayment::new(
+            w.bob_id(),
+            crate::common::btc("0.001"),
+        ))
         .await
         .unwrap()
     else {
@@ -690,7 +697,11 @@ async fn test_recovery_list_expiring_during_the_own_identity_read_not_paid() {
         )
         .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
 
@@ -712,14 +723,12 @@ async fn test_recovery_empty_history_proves_nothing_from_the_retention_end() {
         let base = store();
         let journaled = w.clock.now_ms();
         let (attempt_id, app_id) = in_flight(&w, &base).await;
-        w.rail.set_declaration(RailDeclaration {
-            idempotent: false,
-            idempotency_retention_ms: None,
-            history: true,
-            history_retention_ms: Some(RETENTION_MS),
-            history_survives_restore: true,
-            longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
-        });
+        w.rail.set_declaration(
+            RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+                .with_history(true)
+                .with_history_retention_ms(RETENTION_MS)
+                .with_history_survives_restore(true),
+        );
         w.rail.forget_history(&attempt_id);
         let mut wallet = w
             .load_on_clock(
@@ -738,11 +747,11 @@ async fn test_recovery_empty_history_proves_nothing_from_the_retention_end() {
                 "age {age}: {resumed:?}"
             );
         } else {
-            assert_eq!(
-                resumed,
-                vec![PayOutcome::Uncertain { attempt_id }],
-                "age {age}"
+            assert!(
+                matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+                "age {age}: {resumed:?}"
             );
+            assert_eq!(resumed[0].attempt_id(), attempt_id);
         }
     }
 }
@@ -754,14 +763,11 @@ async fn test_recovery_repeat_only_before_the_idempotency_retention_end() {
         let base = store();
         let journaled = w.clock.now_ms();
         let (attempt_id, app_id) = in_flight(&w, &base).await;
-        w.rail.set_declaration(RailDeclaration {
-            idempotent: true,
-            idempotency_retention_ms: Some(RETENTION_MS),
-            history: false,
-            history_retention_ms: None,
-            history_survives_restore: false,
-            longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
-        });
+        w.rail.set_declaration(
+            RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+                .with_idempotent(true)
+                .with_idempotency_retention_ms(RETENTION_MS),
+        );
         w.clock.set_ms(journaled + age);
         let mut wallet = w
             .load_on_clock(&w.alice, Arc::clone(&base), app_id, Arc::clone(&w.clock))
@@ -769,18 +775,18 @@ async fn test_recovery_repeat_only_before_the_idempotency_retention_end() {
         let resumed = wallet.resume_payments().await.unwrap();
         // At the retention's end the method may have forgotten the key: no repeat.
         if kept {
-            assert_eq!(
-                resumed,
-                vec![PayOutcome::Pending { attempt_id }],
-                "age {age}"
+            assert!(
+                matches!(resumed.as_slice(), [PayOutcome::Pending { .. }]),
+                "age {age}: {resumed:?}"
             );
+            assert_eq!(resumed[0].attempt_id(), attempt_id);
             assert_eq!(w.rail.pay_calls(&attempt_id), 2, "age {age}");
         } else {
-            assert_eq!(
-                resumed,
-                vec![PayOutcome::Uncertain { attempt_id }],
-                "age {age}"
+            assert!(
+                matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+                "age {age}: {resumed:?}"
             );
+            assert_eq!(resumed[0].attempt_id(), attempt_id);
             assert_eq!(w.rail.pay_calls(&attempt_id), 1, "age {age}");
         }
     }
@@ -796,14 +802,13 @@ async fn test_recovery_failure_asked_about_only_before_the_history_retention_end
         let mut shop = w.shop().await;
         let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
         wallet.receive(None).await.unwrap();
-        w.rail.set_declaration(RailDeclaration {
-            idempotent: true,
-            idempotency_retention_ms: None,
-            history: true,
-            history_retention_ms: Some(RETENTION_MS),
-            history_survives_restore: true,
-            longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
-        });
+        w.rail.set_declaration(
+            RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+                .with_idempotent(true)
+                .with_history(true)
+                .with_history_retention_ms(RETENTION_MS)
+                .with_history_survives_restore(true),
+        );
         let journaled = w.clock.now_ms();
         w.rail.next(Behaviour::Fail);
         let outcome = wallet
@@ -833,4 +838,192 @@ async fn test_recovery_failure_asked_about_only_before_the_history_retention_end
             assert!(resumed.is_empty(), "age {age}: {resumed:?}");
         }
     }
+}
+
+/// How many payment proofs `shop` receives at its next read.
+async fn proofs_received(shop: &mut paykit_sdk::Paykit) -> usize {
+    let got = shop.receive(None).await.unwrap();
+    got.report
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                pubky_switch_client::app::AppEvent::MessageReceived { kind, .. }
+                    if kind == "paykit.payment_proof"
+            )
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn test_recovery_repeat_of_a_request_cancelled_since_withheld_and_paid_once() {
+    // The payment is in flight, and the method keeps no history: a resume would repeat it.
+    // Bob cancels the request meanwhile, and the wallet places his cancellation. The repeat
+    // is withheld: the first dispatch may have paid, so the attempt stays open, nothing
+    // written. The method's history then shows the payment made: it ends paid, once, its
+    // outcome written and its proof sent once.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    w.rail.set_declaration(idempotent_without_history());
+    shop.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    shop.cancel_sent_request(&record, None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    let payment = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, Stage::Paying);
+    let obligation = payment.obligation;
+    let claim = wallet
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap()
+        .view;
+    assert_eq!(claim.status, ClaimStatus::Attempting);
+    // The method's history now shows the payment made.
+    w.rail.settle(&attempt_id, true);
+    w.rail.set_declaration(
+        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true)
+            .with_history(true),
+    );
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Paid { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+    let claim = wallet
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap()
+        .view;
+    assert_eq!(claim.status, ClaimStatus::Settled);
+    assert_eq!(proofs_received(&mut shop).await, 1);
+    assert!(wallet.resume_payments().await.unwrap().is_empty());
+    assert_eq!(proofs_received(&mut shop).await, 0);
+}
+
+#[tokio::test]
+async fn test_recovery_repeat_with_a_fee_grown_since_the_first_dispatch_not_made() {
+    // The payment is in flight with no fee, and the method keeps no history; it now
+    // charges a fee of 5. The repeat would transfer more than the first dispatch was
+    // allowed to: it isn't made, and the attempt stays "may be paid".
+    let w = World::new();
+    let base = store();
+    let (attempt_id, app_id) = in_flight(&w, &base).await;
+    w.rail.set_declaration(idempotent_without_history());
+    w.rail
+        .set_max_fee(Some(paykit_lib::Decimal::new("5").unwrap()));
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&base),
+            app_id,
+            Arc::new(TestClock::new(w.clock.now_ms())),
+        )
+        .await;
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Paying);
+}
+
+#[tokio::test]
+async fn test_recovery_repeat_withheld_by_a_kept_stop_it_couldnt_place() {
+    // As above, but the wallet couldn't place bob's cancellation in the record, at its read
+    // or at the resume: the cancellation it keeps withholds the repeat all the same.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    w.rail.set_declaration(idempotent_without_history());
+    shop.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    shop.cancel_sent_request(&record, None).await.unwrap();
+    let refuse_next_batch = || {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/ops".into(),
+                code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+                current: serde_json::Value::Null,
+            });
+    };
+    refuse_next_batch();
+    wallet.receive(None).await.unwrap();
+    refuse_next_batch();
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    let key = wallet.request(&request).await.unwrap().record;
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    assert!(value["cancellation"].is_null(), "{value}");
+}
+
+#[tokio::test]
+async fn test_recovery_repeat_withheld_when_the_request_record_is_gone() {
+    // The phone deleted the request record while the payment was in flight: nothing shows
+    // the request still open, so the repeat is withheld, the attempt left "may be paid".
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    w.rail.set_declaration(idempotent_without_history());
+    phone.receive(None).await.unwrap();
+    crate::outcome_record::phone_writes(&mut phone, &request, None).await;
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }

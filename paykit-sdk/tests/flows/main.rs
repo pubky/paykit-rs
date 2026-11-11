@@ -18,6 +18,7 @@ mod protocols;
 mod public;
 mod receive_faults;
 mod recovery;
+mod recurring;
 mod resend;
 mod restore;
 mod restore_hold;

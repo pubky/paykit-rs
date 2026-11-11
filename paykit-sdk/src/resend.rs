@@ -31,6 +31,7 @@ pub const RESEND_COOLDOWN_MS: u64 = 3_600_000;
 
 /// What to ask a counterparty to re-send (Paykit wire 4.12).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResendSelection {
     /// Messages by `msg_id`.
     pub msg_ids: Vec<String>,
@@ -40,6 +41,36 @@ pub struct ResendSelection {
     pub accepted_until_ms: Option<u64>,
     /// Requests by hash, with every message that names one.
     pub request_hashes: Vec<[u8; 32]>,
+}
+
+impl ResendSelection {
+    /// Messages by `msg_id`.
+    #[must_use]
+    pub fn with_msg_ids(mut self, msg_ids: Vec<String>) -> Self {
+        self.msg_ids = msg_ids;
+        self
+    }
+
+    /// Messages the counterparty's inbox accepted at or after this time.
+    #[must_use]
+    pub fn with_accepted_from_ms(mut self, accepted_from_ms: u64) -> Self {
+        self.accepted_from_ms = Some(accepted_from_ms);
+        self
+    }
+
+    /// Messages the counterparty's inbox accepted at or before this time.
+    #[must_use]
+    pub fn with_accepted_until_ms(mut self, accepted_until_ms: u64) -> Self {
+        self.accepted_until_ms = Some(accepted_until_ms);
+        self
+    }
+
+    /// Requests by hash, with every message that names one.
+    #[must_use]
+    pub fn with_request_hashes(mut self, request_hashes: Vec<[u8; 32]>) -> Self {
+        self.request_hashes = request_hashes;
+        self
+    }
 }
 
 impl Paykit {

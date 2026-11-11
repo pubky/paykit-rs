@@ -143,15 +143,14 @@ async fn test_receive_faults_receipt_parked_on_a_corrupt_journal_then_settles() 
         .await;
     wallet.receive(None).await.unwrap();
     w.rail.next(paykit_sdk::rail::Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
-        .pay_without_request(paykit_sdk::UnrequestedPayment {
-            payee: w.bob_id(),
-            amount: crate::common::btc("0.001"),
-            options: PayOptions {
-                endpoint: Some(crate::common::endpoint("btc-lightning-bolt12")),
-                ..PayOptions::default()
-            },
-        })
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_without_request(
+            paykit_sdk::UnrequestedPayment::new(w.bob_id(), crate::common::btc("0.001"))
+                .with_options(
+                    PayOptions::default()
+                        .with_endpoint(crate::common::endpoint("btc-lightning-bolt12")),
+                ),
+        )
         .await
         .unwrap()
     else {

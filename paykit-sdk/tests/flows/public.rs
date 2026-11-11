@@ -20,7 +20,18 @@ fn publish(w: &World, member: Value, expires_at: Option<u64>) -> Vec<u8> {
 
 /// As [`publish`], made at `updated_at`. Returns the bytes served.
 fn publish_at(w: &World, member: Value, updated_at: u64, expires_at: Option<u64>) -> Vec<u8> {
-    let keys = w.bob.identity().app_keys("shop");
+    publish_app_at(w, "shop", member, updated_at, expires_at)
+}
+
+/// As [`publish_at`], for bob's app `app`.
+fn publish_app_at(
+    w: &World,
+    app: &str,
+    member: Value,
+    updated_at: u64,
+    expires_at: Option<u64>,
+) -> Vec<u8> {
+    let keys = w.bob.identity().app_keys(app);
     let app_id = keys.app_id_bytes();
     let held = w.bob.switch().app(&app_id).record.unwrap();
     let mut body = AppRecord::verify(&held, &w.bob_id())
@@ -35,7 +46,8 @@ fn publish_at(w: &World, member: Value, updated_at: u64, expires_at: Option<u64>
     body.expires_at = expires_at;
     let record = AppRecord::sign(&keys, body).unwrap();
     let bytes = serde_json::to_vec(record.signed()).unwrap();
-    serve(w, &bytes);
+    w.homeserver
+        .put(w.bob_id(), &app_record_path(&app_id), bytes.clone());
     bytes
 }
 
@@ -70,14 +82,8 @@ fn tip_jar() -> Value {
 }
 
 fn public_to_bob(w: &World) -> UnrequestedPayment {
-    UnrequestedPayment {
-        payee: w.bob_id(),
-        amount: btc("0.001"),
-        options: PayOptions {
-            mode: PaymentMode::Public(UserConfirmed::new()),
-            ..PayOptions::default()
-        },
-    }
+    UnrequestedPayment::new(w.bob_id(), btc("0.001"))
+        .with_options(PayOptions::default().with_mode(PaymentMode::Public(UserConfirmed::new())))
 }
 
 #[tokio::test]
@@ -375,13 +381,8 @@ async fn test_public_slow_switch_waited_on_only_through_its_grace() {
     let (mut wallet, slow, _) = beside_a_slow_switch(&w, &mut shop).await;
     // The switch doesn't answer within the grace after the Homeserver's reads: the user is
     // asked to confirm, and nothing is written (Paykit spec 4, 14; Switch spec 4.3).
-    let unconfirmed = UnrequestedPayment {
-        options: PayOptions {
-            mode: PaymentMode::Public(UserConfirmed::new()),
-            ..PayOptions::default()
-        },
-        ..public_to_bob(&w)
-    };
+    let unconfirmed = public_to_bob(&w)
+        .with_options(PayOptions::default().with_mode(PaymentMode::Public(UserConfirmed::new())));
     let refused = bounded(wallet.pay_without_request(unconfirmed.clone()))
         .await
         .unwrap_err();
@@ -552,4 +553,130 @@ async fn test_public_conflict_kept_past_the_history_bound_and_a_reload() {
         expiry,
     );
     assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+}
+
+#[tokio::test]
+async fn test_public_endpoint_the_payment_method_doesnt_pay_refused() {
+    // Bob's public endpoint is Lightning; alice's method pays only on-chain: refused as
+    // unsupported, nothing paid.
+    let w = World::new();
+    w.rail
+        .set_endpoint_identifiers(vec![endpoint("btc-bitcoin-p2wpkh")]);
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    publish(&w, tip_jar(), Some(w.clock.now_ms() + 30 * DAY_MS));
+    let refused = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::UnsupportedEndpoint(_))
+        ),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_public_endpoints_pay_the_payment_methods_first() {
+    // Bob publishes two Lightning endpoints; the method prefers the one that comes second
+    // by identifier.
+    let w = World::new();
+    w.rail.set_endpoint_identifiers(vec![
+        endpoint("btc-lightning-bolt12"),
+        endpoint("btc-lightning-bolt11"),
+    ]);
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    publish(
+        &w,
+        json!({ "public_endpoints": {
+            "btc-lightning-bolt11": "lnbc1pub",
+            "btc-lightning-bolt12": "lno1pub"
+        } }),
+        Some(w.clock.now_ms() + 30 * DAY_MS),
+    );
+    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
+        "btc-lightning-bolt12"
+    );
+}
+
+#[tokio::test]
+async fn test_public_endpoints_of_every_app_in_the_payment_methods_order() {
+    // Bob's public Payment List is both apps' endpoints together: the method's first choice
+    // is paid though only the later app, by App ID, offers it, and the earlier one offers
+    // its second.
+    let w = World::new();
+    w.rail.set_endpoint_identifiers(vec![
+        endpoint("btc-lightning-bolt12"),
+        endpoint("btc-lightning-bolt11"),
+    ]);
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    till.app_mut().invite(&w.alice_id()).await.unwrap();
+    let (earlier, later) = if shop.app_id() < till.app_id() {
+        ("shop", "till")
+    } else {
+        ("till", "shop")
+    };
+    let now = w.clock.now_ms();
+    let expires_at = Some(now + 30 * DAY_MS);
+    publish_app_at(
+        &w,
+        earlier,
+        one_endpoint("btc-lightning-bolt11", "lnbc1earlier"),
+        now,
+        expires_at,
+    );
+    publish_app_at(
+        &w,
+        later,
+        one_endpoint("btc-lightning-bolt12", "lno1later"),
+        now,
+        expires_at,
+    );
+    assert_eq!(
+        listed(&mut wallet, &w).await.len(),
+        2,
+        "both apps' endpoints are listed"
+    );
+    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    // Only the later app offers it.
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
+        "btc-lightning-bolt12"
+    );
+    // Both apps' endpoints were handed to the method at once, by App ID.
+    let handed: Vec<String> = w
+        .rail
+        .selections()
+        .last()
+        .unwrap()
+        .0
+        .iter()
+        .map(|c| format!("{} {} {}", c.id.get(), c.endpoint_id, c.payload.as_str()))
+        .collect();
+    assert_eq!(
+        handed,
+        [
+            "0 btc-lightning-bolt11 lnbc1earlier",
+            "1 btc-lightning-bolt12 lno1later"
+        ]
+    );
 }

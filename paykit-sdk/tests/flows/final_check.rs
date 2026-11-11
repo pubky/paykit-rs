@@ -310,14 +310,9 @@ fn revoke_shop_on_the_switch_only(w: &World) {
 
 /// An idempotent rail without a history: a resume repeats the dispatch, through the checks.
 fn repeatable(w: &World) {
-    w.rail.set_declaration(RailDeclaration {
-        idempotent: true,
-        idempotency_retention_ms: None,
-        history: false,
-        history_retention_ms: None,
-        history_survives_restore: false,
-        longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
-    });
+    w.rail.set_declaration(
+        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS).with_idempotent(true),
+    );
 }
 
 /// Alice's wallet on a hooked store, and bob's request it holds.
@@ -347,7 +342,7 @@ async fn in_flight(w: &World) -> (Arc<HookedStore>, [u8; 16], paykit_lib::Attemp
         )
         .await;
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()
@@ -435,7 +430,7 @@ async fn test_final_check_first_dispatch_late_answer_removing_the_app_not_paid()
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap();
-    let PayOutcome::Pending { attempt_id } = outcome else {
+    let PayOutcome::Pending { attempt_id, .. } = outcome else {
         panic!("{outcome:?}");
     };
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
@@ -462,7 +457,11 @@ async fn test_final_check_resume_late_answer_removing_the_app_not_paid() {
     )
     .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Pending { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Pending { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
 
@@ -484,7 +483,11 @@ async fn test_final_check_recovery_late_answer_removing_the_app_not_paid() {
     )
     .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Pending { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Pending { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
 }
 
@@ -552,7 +555,11 @@ async fn test_final_check_resume_payee_copy_aged_during_the_own_read_not_paid() 
     )
     .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Pending { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Pending { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
 
@@ -573,7 +580,11 @@ async fn test_final_check_recovery_payee_copy_aged_during_the_own_read_not_paid(
     )
     .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Pending { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Pending { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
 }
 
@@ -584,14 +595,11 @@ async fn test_final_check_recovery_payee_copy_aged_during_the_own_read_not_paid(
 async fn test_final_check_repeat_retention_ending_during_the_lookup_not_paid() {
     let w = World::new();
     const RETENTION_MS: u64 = 60 * 60_000;
-    w.rail.set_declaration(RailDeclaration {
-        idempotent: true,
-        idempotency_retention_ms: Some(RETENTION_MS),
-        history: false,
-        history_retention_ms: None,
-        history_survives_restore: false,
-        longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
-    });
+    w.rail.set_declaration(
+        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true)
+            .with_idempotency_retention_ms(RETENTION_MS),
+    );
     let (store, app_id, request) = with_a_request(&w).await;
     let journaled = w.clock.now_ms();
     let mut first = w
@@ -603,7 +611,7 @@ async fn test_final_check_repeat_retention_ending_during_the_lookup_not_paid() {
         )
         .await;
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = first
+    let PayOutcome::Pending { attempt_id, .. } = first
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()
@@ -629,7 +637,11 @@ async fn test_final_check_repeat_retention_ending_during_the_lookup_not_paid() {
     )
     .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
 
@@ -710,7 +722,11 @@ async fn test_final_check_resume_late_equivocation_not_paid() {
     .await;
     // A repeat may follow a dispatch that paid: it stays "may be paid".
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
 
@@ -732,7 +748,11 @@ async fn test_final_check_recovery_late_equivocation_not_paid() {
     )
     .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
 }
 
@@ -783,14 +803,9 @@ async fn test_final_check_repeat_on_an_own_identity_read_that_errs_refused() {
 /// A rail neither idempotent nor with a history: a dispatch it may have made can't be
 /// resolved, so only a journal that shows none started lets a resume write `failed`.
 fn blind(w: &World) {
-    w.rail.set_declaration(RailDeclaration {
-        idempotent: false,
-        idempotency_retention_ms: None,
-        history: false,
-        history_retention_ms: None,
-        history_survives_restore: false,
-        longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
-    });
+    w.rail.set_declaration(RailDeclaration::new(
+        paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+    ));
 }
 
 /// After an explicit flush, no acceptance `store` journaled is known to the wallet's
@@ -954,7 +969,7 @@ async fn test_fence_removal_answered_during_paying_not_paid() {
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap();
-    let PayOutcome::Pending { attempt_id } = outcome else {
+    let PayOutcome::Pending { attempt_id, .. } = outcome else {
         panic!("{outcome:?}");
     };
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
@@ -1031,12 +1046,11 @@ async fn test_fence_stop_lost_to_a_crash_stays_paying_and_uncertain() {
     // Read as possibly dispatched, the safe direction: on a rail that can't tell, it stays
     // "may be paid", and nothing is paid.
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(
-        resumed,
-        vec![PayOutcome::Uncertain {
-            attempt_id: payment.attempt_id
-        }]
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
     );
+    assert_eq!(resumed[0].attempt_id(), payment.attempt_id);
     assert_eq!(w.rail.pay_calls(&payment.attempt_id), 0);
     // "May be paid" isn't a payment the method's history shows: no acceptance goes out.
     no_acceptance_queued(&store, &mut wallet).await;
@@ -1120,10 +1134,7 @@ async fn test_orphan_after_below_the_floor_refused() {
         (paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS + paykit_sdk::PRE_DISPATCH_BUDGET_MS) / 1000
     );
     let scopes = paykit_sdk::AppScopes::new().pay().build().unwrap();
-    let config = PaykitConfig {
-        orphan_after_s: Some(floor - 1),
-        ..PaykitConfig::default()
-    };
+    let config = PaykitConfig::default().with_orphan_after_s(floor - 1);
     let refused = Paykit::join(
         w.env(&w.alice, crate::common::store()),
         config,
@@ -1142,10 +1153,7 @@ async fn test_orphan_after_below_the_floor_refused() {
         "{refused:?}"
     );
     // At the floor, another app joins.
-    let config = PaykitConfig {
-        orphan_after_s: Some(floor),
-        ..PaykitConfig::default()
-    };
+    let config = PaykitConfig::default().with_orphan_after_s(floor);
     w.join_with(&w.alice, "phone", scopes, config, crate::common::store())
         .await;
 }
@@ -1172,7 +1180,11 @@ async fn test_repeat_too_close_to_the_orphan_age_not_made() {
         )
         .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
 
@@ -1181,10 +1193,8 @@ async fn test_default_config_takes_a_one_day_rail() {
     // A rail that may take a day: the default config's `orphan_after` is that day plus the
     // pre-dispatch budget, so join, load and paying all take it.
     let w = World::new();
-    let declaration = RailDeclaration {
-        longest_completion_ms: 86_400_000,
-        ..paykit_sdk::Rail::declaration(&*w.rail)
-    };
+    let mut declaration = paykit_sdk::Rail::declaration(&*w.rail);
+    declaration.longest_completion_ms = 86_400_000;
     w.rail.set_declaration(declaration);
     assert_eq!(
         PaykitConfig::default().orphan_after_s_for(&declaration),
@@ -1413,7 +1423,7 @@ async fn test_acceptance_owed_sent_with_a_users_done_on_a_pending_payment() {
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap();
-    let PayOutcome::Pending { attempt_id } = outcome else {
+    let PayOutcome::Pending { attempt_id, .. } = outcome else {
         panic!("{outcome:?}")
     };
     store.refuse_acceptances(false);
@@ -1484,7 +1494,7 @@ async fn test_acceptance_owed_sent_when_another_app_resolves_the_payment_done() 
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap();
-    let PayOutcome::Pending { attempt_id } = outcome else {
+    let PayOutcome::Pending { attempt_id, .. } = outcome else {
         panic!("{outcome:?}")
     };
     store.refuse_acceptances(false);
@@ -1620,7 +1630,7 @@ async fn test_resume_an_owed_acceptance_that_fails_stops_no_later_entry() {
             .unwrap();
         assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
         w.rail.next(Behaviour::Hang);
-        let PayOutcome::Pending { attempt_id } = wallet
+        let PayOutcome::Pending { attempt_id, .. } = wallet
             .pay_request(&second, PayOptions::default())
             .await
             .unwrap()
@@ -1670,7 +1680,7 @@ async fn test_acceptance_sent_earlier_is_placed_when_another_app_resolves_the_pa
         .await;
     // In flight: the call is made and the acceptance is queued.
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()
@@ -1796,7 +1806,7 @@ async fn crash_owed_acceptance_path(
         .await
         .unwrap();
     let attempt_id = match outcome {
-        PayOutcome::Paid { attempt_id, .. } | PayOutcome::Pending { attempt_id } => attempt_id,
+        PayOutcome::Paid { attempt_id, .. } | PayOutcome::Pending { attempt_id, .. } => attempt_id,
         other => panic!("{other:?}"),
     };
     store.refuse_acceptances(false);

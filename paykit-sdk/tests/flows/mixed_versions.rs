@@ -69,7 +69,7 @@ async fn test_mixed_versions_payment_keeps_members_its_writer_does_not_know() {
     let w = World::new();
     let (mut wallet, mut phone, request) = requested(&w).await;
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()
@@ -115,15 +115,12 @@ async fn test_mixed_versions_unrequested_without_amount_reads() {
         .await;
     wallet.receive(None).await.unwrap();
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
-        .pay_without_request(UnrequestedPayment {
-            payee: w.bob_id(),
-            amount: btc("0.0015"),
-            options: PayOptions {
-                endpoint: Some(endpoint("btc-lightning-bolt12")),
-                ..PayOptions::default()
-            },
-        })
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_without_request(
+            UnrequestedPayment::new(w.bob_id(), btc("0.0015")).with_options(
+                PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")),
+            ),
+        )
         .await
         .unwrap()
     else {

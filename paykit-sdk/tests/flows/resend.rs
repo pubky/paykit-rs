@@ -23,10 +23,7 @@ async fn test_resend_request_answered_once_an_hour() {
     // Bob's apps read alice's identity.json again once their copy is older than 10 minutes,
     // and then take the phone's messages (Switch spec 4.3).
     w.clock.advance_ms(11 * 60_000);
-    let ask = ResendSelection {
-        request_hashes: vec![request.request_hash],
-        ..ResendSelection::default()
-    };
+    let ask = ResendSelection::default().with_request_hashes(vec![request.request_hash]);
     phone.request_resend(w.bob_id(), ask.clone()).await.unwrap();
     shop.receive(None).await.unwrap();
     let got = phone.receive(None).await.unwrap();
@@ -88,10 +85,7 @@ async fn test_resend_time_selector_matches_a_later_resend_acceptance() {
     phone
         .request_resend(
             w.bob_id(),
-            ResendSelection {
-                request_hashes: vec![request.request_hash],
-                ..ResendSelection::default()
-            },
+            ResendSelection::default().with_request_hashes(vec![request.request_hash]),
         )
         .await
         .unwrap();
@@ -113,11 +107,9 @@ async fn test_resend_time_selector_matches_a_later_resend_acceptance() {
     tablet
         .request_resend(
             w.bob_id(),
-            ResendSelection {
-                accepted_from_ms: Some(resent_at - 1),
-                accepted_until_ms: Some(resent_at + 1),
-                ..ResendSelection::default()
-            },
+            ResendSelection::default()
+                .with_accepted_from_ms(resent_at - 1)
+                .with_accepted_until_ms(resent_at + 1),
         )
         .await
         .unwrap();
