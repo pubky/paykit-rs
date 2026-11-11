@@ -39,7 +39,9 @@ use pubky_switch_client::app::{
     REVALIDATION_MS,
 };
 use pubky_switch_core::chain::TransitionProof;
-use pubky_switch_core::claims::{Basis, ClaimStatus, ClaimView, Outcome};
+use pubky_switch_core::claims::{
+    Basis, ClaimStatus, ClaimView, Outcome, MAX_CLAIM_AGE_MS, RECONCILIATION_MS,
+};
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::ops::{Condition, OpKind};
 use pubky_switch_core::records::{CLOCK_TOLERANCE_MS, DAY_MS};
@@ -2571,6 +2573,7 @@ impl Paykit {
         if self.holds("pay") {
             out.extend(self.recheck_failed().await?);
         }
+        self.prune_journal().await?;
         // Last, after every payment's own work: what can't be delivered now stays queued.
         let _ = self.app.flush_outbox().await;
         Ok(out)
@@ -2624,6 +2627,45 @@ impl Paykit {
         } else {
             PayOutcome::Pending { attempt_id }
         })
+    }
+
+    /// Drop the journal entries past their claim's reconciliation window (Paykit spec 7.1,
+    /// 7.2; Switch spec 6.3): `Finished` and `Abandoned` ones, from their deadline plus the
+    /// 30 days the switch keeps the claim's tombstone after it ([`RECONCILIATION_MS`]),
+    /// or, without a deadline, from 400 days after they were journaled, the time the switch
+    /// keeps a claim pinned to none after its last entry, which comes no earlier
+    /// ([`MAX_CLAIM_AGE_MS`]). By then the claim may be gone, and the payer's activity
+    /// record, not the journal, shows the payment (Paykit spec 6, 7.2).
+    ///
+    /// What a later reconcile, a restore's included, needs stays: every entry still open
+    /// or owing its acceptance, one whose dispatch the payment method reported failed while
+    /// its history may still show it paid, and one paid after `failed` was written, whose
+    /// receipt the user is told about. A bound passes only before the earlier of the
+    /// highest service time verified and the device clock plus 24 hours, so one far-future
+    /// signed time can't drop the journal; without a verified service time nothing goes.
+    async fn prune_journal(&mut self) -> Result<()> {
+        let Some(service) = self.service_time() else {
+            return Ok(());
+        };
+        let now = service.min(
+            self.now()
+                .saturating_add(pubky_switch_core::records::DAY_MS),
+        );
+        let mut tx = state::Tx::default();
+        for entry in self.journal().await? {
+            let done = matches!(entry.stage, Stage::Finished | Stage::Abandoned);
+            if !done || entry.failed_by_method || entry.failed_on_claim {
+                continue;
+            }
+            let bound = match entry.deadline {
+                Some(deadline) => deadline.saturating_add(RECONCILIATION_MS),
+                None => entry.journaled_at_ms.saturating_add(MAX_CLAIM_AGE_MS),
+            };
+            if bound < now {
+                tx.delete(&key::journal(&entry.attempt()?));
+            }
+        }
+        self.local_commit(tx).await
     }
 
     /// Ask the payment method's history again about the dispatches it reported failed, while

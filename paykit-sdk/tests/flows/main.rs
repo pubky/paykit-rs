@@ -17,6 +17,7 @@ mod notices;
 mod one_time;
 mod outcome_record;
 mod protocols;
+mod pruning;
 mod public;
 mod receive_faults;
 mod recovery;
