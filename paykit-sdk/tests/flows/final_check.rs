@@ -35,6 +35,7 @@ struct HookedStore {
     fail_queueing: std::sync::atomic::AtomicBool,
     queueing_next: std::sync::atomic::AtomicBool,
     paying_hook: Mutex<Option<Hook>>,
+    attempted_hook: Mutex<Option<Hook>>,
     stop_after_paying: std::sync::atomic::AtomicBool,
     stopped: std::sync::atomic::AtomicBool,
     acceptances: Mutex<Vec<String>>,
@@ -43,6 +44,12 @@ struct HookedStore {
 impl HookedStore {
     fn on_acceptance_journaled(&self, hook: Hook) {
         *self.hook.lock().unwrap() = Some(hook);
+    }
+
+    /// Run `hook` during the commit that journals `Attempted`: the local commit of the
+    /// attempt's answer.
+    fn on_attempted(&self, hook: Hook) {
+        *self.attempted_hook.lock().unwrap() = Some(hook);
     }
 
     fn on_paying(&self, hook: Hook) {
@@ -99,6 +106,7 @@ impl StateStore for HookedStore {
         };
         let signed = journals(SIGNED);
         let paying = journals(PAYING);
+        let attempted = journals(b"\"stage\":\"attempted\"");
         for write in &batch.writes {
             if let Write::Put { key, value, .. } = write {
                 if !key.starts_with(b"p/j/") {
@@ -135,6 +143,11 @@ impl StateStore for HookedStore {
         }
         if signed {
             if let Some(hook) = self.hook.lock().unwrap().take() {
+                hook();
+            }
+        }
+        if attempted {
+            if let Some(hook) = self.attempted_hook.lock().unwrap().take() {
                 hook();
             }
         }
@@ -1149,4 +1162,41 @@ async fn test_default_config_takes_a_one_day_rail() {
         .await
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+}
+
+#[tokio::test]
+async fn test_fence_answer_committed_past_the_budget_not_paid() {
+    // The attempt's answer is committed locally only once the pre-dispatch budget and the
+    // attempt's orphan age have passed, so another own app could have resolved it
+    // meanwhile: the age counts from before the attempt was sent, and nothing is paid.
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    let clock = Arc::clone(&w.clock);
+    let past = paykit_sdk::orphan_floor_s(&paykit_sdk::Rail::declaration(&*w.rail)) * 1000;
+    store.on_attempted(Box::new(move || clock.advance_ms(past + 60_000)));
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::AttemptFailed(inner))
+                if matches!(**inner, paykit_sdk::Refusal::NotNow(_))
+        ),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
 }

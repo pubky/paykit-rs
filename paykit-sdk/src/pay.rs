@@ -211,14 +211,16 @@ enum OutcomeRecord {
 }
 
 /// When a first dispatch's attempt was answered: its service time, and the device's wall
-/// and monotonic clocks at the answer, for its age at the final payment check and the fence.
+/// and monotonic clocks just before it was sent, for its age at the final payment check and
+/// the fence.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Answered {
     /// The attempt's `opened_at`, the service time its verified proof shows.
     pub(crate) opened_at_ms: u64,
-    /// The device clock at the answer.
+    /// The device clock just before the attempt was sent: earlier than the service's
+    /// acceptance, so the age counted from it is never short.
     pub(crate) wall_ms: u64,
-    /// The monotonic clock at the answer.
+    /// The monotonic clock just before the attempt was sent.
     pub(crate) at: std::time::Instant,
 }
 
@@ -894,12 +896,14 @@ impl Paykit {
         // The attempt ID is journaled before the write (Paykit spec 7.2), once the batch is
         // built: a batch that can't be built leaves no open entry behind it.
         self.save(&entry).await?;
+        // The attempt's age before its dispatch (the pre-dispatch budget,
+        // [`crate::PRE_DISPATCH_BUDGET_MS`]) counts from before it is sent, on both device
+        // clocks: the request, the answer and the answer's local commit are all in it, so
+        // the age is never less than the time since the service accepted the attempt.
+        let (answered_wall_ms, answered_at) = (self.now(), std::time::Instant::now());
         // The client checks the attempt's proof: only one that shows this app's own open
         // attempt lets money move (Paykit spec 7.2; Switch wire 6.5 "Binding").
         let submitted = self.app.submit_batch(batch).await;
-        // The answer's time, on both device clocks, for the attempt's age before its
-        // dispatch (the pre-dispatch budget, [`crate::PRE_DISPATCH_BUDGET_MS`]).
-        let (answered_wall_ms, answered_at) = (self.now(), std::time::Instant::now());
         let submitted = match submitted {
             Ok(submitted) => submitted,
             Err(error) if error.code() == Some(ErrorCode::Conflict) => {
@@ -1880,8 +1884,9 @@ impl Paykit {
     }
 
     /// A first dispatch's attempt is still within the pre-dispatch budget
-    /// ([`crate::PRE_DISPATCH_BUDGET_MS`]): its age since the answer, by the device's wall
-    /// and monotonic clocks, with the clock tolerance added, is under the budget, and the
+    /// ([`crate::PRE_DISPATCH_BUDGET_MS`]): its age since just before it was sent, by the
+    /// device's wall and monotonic clocks, with the clock tolerance added, is under the
+    /// budget, and the
     /// own certificate hasn't expired by the service time that makes. `orphan_after` is at
     /// least the rail's longest time plus the budget ([`crate::orphan_floor_s`]), so within
     /// it no other own app can resolve the attempt as orphaned before its payment has run
