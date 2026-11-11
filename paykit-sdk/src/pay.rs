@@ -1925,6 +1925,14 @@ impl Paykit {
                 continue;
             }
             let attempt_id = entry.attempt()?;
+            // Without `pay` the app reads and writes no claim and no payer record (the
+            // service refuses both, `403 permission_missing`), and makes no payment
+            // ([`Paykit::final_payment_check`]): every open entry waits for an app holding
+            // it, its proof kept if it has one, and the other entries go on.
+            if !self.holds("pay") {
+                out.push(self.held_without_pay(&mut entry).await?);
+                continue;
+            }
             match entry.stage {
                 Stage::Recorded | Stage::Attempted | Stage::Paying if entry.restored => {
                     match self.attempt_state(&entry).await? {
@@ -1961,7 +1969,9 @@ impl Paykit {
                 Stage::AcceptanceOwed | Stage::Finished | Stage::Abandoned => {}
             }
         }
-        out.extend(self.recheck_failed().await?);
+        if self.holds("pay") {
+            out.extend(self.recheck_failed().await?);
+        }
         // Last, after every payment's own work: what can't be delivered now stays queued.
         let _ = self.app.flush_outbox().await;
         Ok(out)
@@ -1984,6 +1994,33 @@ impl Paykit {
             return Ok(());
         }
         self.set_stage(entry, Stage::Finished).await
+    }
+
+    /// An open entry under a certificate without `pay`, which reads and writes no claim and
+    /// no payer record: a dispatch that may have been made asks the method's history alone,
+    /// so a payment made is journaled with its proof (`RailPaid`) and one that failed as such
+    /// (`RailFailed`), each for an app holding `pay` to report; nothing else is touched.
+    async fn held_without_pay(&mut self, entry: &mut JournalEntry) -> Result<PayOutcome> {
+        let attempt_id = entry.attempt()?;
+        if entry.stage == Stage::Paying || entry.restored && entry.may_have_dispatched() {
+            match self.rail.payment(attempt_id).await? {
+                Some(RailOutcome::Paid { proof, paid_at_ms }) => {
+                    entry.rail_proof = Some(proof);
+                    entry.paid_at_ms = paid_at_ms;
+                    self.set_stage(entry, Stage::RailPaid).await?;
+                }
+                Some(RailOutcome::Failed) => {
+                    entry.failed_by_method = true;
+                    self.set_stage(entry, Stage::RailFailed).await?;
+                }
+                Some(RailOutcome::Pending) | None => {}
+            }
+        }
+        Ok(if entry.rail_proof.is_some() {
+            PayOutcome::PaidOutcomeUnwritten { attempt_id }
+        } else {
+            PayOutcome::Pending { attempt_id }
+        })
     }
 
     /// Ask the payment method's history again about the dispatches it reported failed, while

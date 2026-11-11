@@ -160,7 +160,14 @@ impl Paykit {
             .filter(|e| e.open())
             .filter_map(|e| e.attempt().ok().map(AttemptId::to_bytes))
             .collect();
-        let records = self.payer_records().await?;
+        // Without `pay` the app reads no claim (the service refuses it without
+        // `claims.read`): the payer records' obligations wait for an app holding it, and
+        // the client's own doubtful claims below are still reported.
+        let records = if self.holds("pay") {
+            self.payer_records().await?
+        } else {
+            Vec::new()
+        };
         let me = self.app_id();
         for obligation in self.obligations(&records) {
             let Some(read) = self.app.read_claim(&obligation.claim_key).await? else {

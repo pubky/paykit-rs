@@ -718,3 +718,58 @@ async fn test_certificate_renewal_dropping_pay_makes_no_rail_call() {
         paykit_sdk::Stage::Finished
     );
 }
+
+#[tokio::test]
+async fn test_certificate_renewal_dropping_pay_resumes_without_reading_claims() {
+    // A payment in flight, then a renewal to `contacts`. The service refuses a claim read
+    // without `claims.read`, as the scripted switch is made to here: a resume, and a
+    // reconcile, read no claim and make no payment, and every entry waits.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let me = wallet.app_id();
+    let mut shop = w.shop().await;
+    let request = crate::common::request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::common::draft("1", w.clock.now_ms()),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let paykit_sdk::PayOutcome::Pending { attempt_id } = wallet
+        .pay_request(&request, paykit_sdk::PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("in flight");
+    };
+    let old = wallet.app().cert().clone();
+    let reduced = renew(&w, me, &AppScopes::new().contacts().build().unwrap(), 1_000);
+    let _ = wallet.receive(None).await;
+    list(&w, me, &old, &reduced);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().cert().hash(), reduced.hash());
+    // The method keeps no history of it and repeats idempotently: with `pay`, a resume
+    // would read the claim to judge a repeat.
+    w.rail.forget_history(&attempt_id);
+    let mut declaration = Rail::declaration(&*w.rail);
+    declaration.history = false;
+    declaration.idempotent = true;
+    declaration.idempotency_retention_ms = Some(7 * 24 * crate::common::HOUR_MS);
+    w.rail.set_declaration(declaration);
+    for _ in 0..8 {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/claims".into(),
+                code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+                current: serde_json::Value::Null,
+            });
+    }
+    assert_eq!(
+        wallet.resume_payments().await.unwrap(),
+        vec![paykit_sdk::PayOutcome::Pending { attempt_id }]
+    );
+    wallet.reconcile().await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
