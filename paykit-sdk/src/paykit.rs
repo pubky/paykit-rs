@@ -333,7 +333,9 @@ impl Paykit {
     }
 
     /// The client's app, mutable, for what Paykit doesn't wrap, such as contacts and invite
-    /// codes.
+    /// codes. Calls made through it bypass Paykit's gates, such as the refusal of every
+    /// Paykit action under a certificate Paykit refuses ([`Paykit::certificate_refused`]):
+    /// a host that flushes the client's outbox itself sends what is queued in it.
     pub fn app_mut(&mut self) -> &mut App {
         &mut self.app
     }
@@ -402,6 +404,17 @@ impl Paykit {
         } else {
             Err(Refusal::ScopeMissing("request or a labelled selling scope".into()).into())
         }
+    }
+
+    /// The refusal the app's current certificate meets by Paykit's checks (Paykit wire 3.1),
+    /// such as a renewal's the Switch took: `Some` while it fails them, read from the stored
+    /// certificate, so it holds across reloads until a certificate that passes replaces it.
+    /// The host shows it to the user: meanwhile the app sends nothing, pays nothing and
+    /// holds the entries it receives, unprocessed.
+    pub fn certificate_refused(&self) -> Option<Refusal> {
+        check_own_certificate(self.app.cert())
+            .err()
+            .and_then(|error| error.refusal().cloned())
     }
 
     /// The certificate may have been renewed: the protocol follows it, once it passes

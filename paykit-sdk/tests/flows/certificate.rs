@@ -145,6 +145,11 @@ async fn test_certificate_renewal_paykit_refuses_holds_entries_and_refuses_calls
     let error = wallet.receive(None).await.unwrap_err();
     assert!(is_cert_refused(&error), "{error:?}");
     assert_eq!(wallet.app().cert().hash(), refused.hash());
+    // The host has a notice to show while it lasts.
+    assert!(matches!(
+        wallet.certificate_refused(),
+        Some(Refusal::CertificateRefused(_))
+    ));
     // A request that arrives under it is held, not processed and not dropped.
     request_to(&w, me);
     let error = wallet.receive(None).await.unwrap_err();
@@ -174,6 +179,7 @@ async fn test_certificate_renewal_paykit_refuses_holds_entries_and_refuses_calls
         summary.report.events
     );
     assert_eq!(wallet.requests().await.unwrap().len(), 1);
+    assert_eq!(wallet.certificate_refused(), None);
 }
 
 #[tokio::test]
@@ -213,4 +219,5 @@ async fn test_certificate_restore_then_renewal_paykit_refuses_takes_no_action() 
     assert!(is_cert_refused(&error), "{error:?}");
     let error = restored.flush().await.unwrap_err();
     assert!(is_cert_refused(&error), "{error:?}");
+    assert!(restored.certificate_refused().is_some());
 }
