@@ -96,6 +96,11 @@ async fn test_notices_late_receipt_of_a_payment_written_failed_raises_one() {
     wallet.acknowledge_notice(&notices[0].id).await.unwrap();
     assert!(wallet.notices().await.unwrap().is_empty());
     assert!(wallet.acknowledge_notice("not-a-notice").await.is_err());
+    // Its receipt came: the entry goes past its window, its acknowledged notice with it.
+    wallet.resume_payments().await.unwrap();
+    assert!(wallet.payments().await.unwrap().is_empty());
+    let kept = wallet.app().protocol_scan(b"nt/").await.unwrap();
+    assert!(kept.is_empty());
 }
 
 #[tokio::test]
@@ -132,4 +137,35 @@ async fn test_notices_late_receipt_of_a_payment_written_done_raises_none() {
     receipt(&mut shop).await;
     wallet.receive(None).await.unwrap();
     assert!(wallet.notices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_notices_receipt_within_the_claim_lets_the_payment_be_pruned() {
+    let w = World::new();
+    let (mut wallet, mut shop, _) = paid_after_failed(&w).await;
+    receipt(&mut shop).await;
+    wallet.receive(None).await.unwrap();
+    // The receipt settled the claim: past the claim's window the entry goes, waiting for
+    // no receipt.
+    w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    wallet.receive(None).await.unwrap();
+    wallet.resume_payments().await.unwrap();
+    assert!(wallet.payments().await.unwrap().is_empty());
+    assert!(wallet.notices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_notices_acknowledged_once_its_payment_is_pruned_goes() {
+    let w = World::new();
+    let (mut wallet, mut shop, _) = paid_after_failed(&w).await;
+    w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    receipt(&mut shop).await;
+    wallet.receive(None).await.unwrap();
+    // The entry goes first; its notice stays until the host acknowledges it, then goes.
+    wallet.resume_payments().await.unwrap();
+    assert!(wallet.payments().await.unwrap().is_empty());
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1);
+    wallet.acknowledge_notice(&notices[0].id).await.unwrap();
+    assert!(wallet.app().protocol_scan(b"nt/").await.unwrap().is_empty());
 }

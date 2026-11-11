@@ -564,6 +564,16 @@ pub(crate) fn retained(retention: Option<u64>, journaled_at_ms: u64, now: u64) -
     retention.is_none_or(|r| now.checked_sub(journaled_at_ms).is_some_and(|age| age < r))
 }
 
+/// Whether `bound` has passed (Paykit spec 7.2, "Kept proofs"): it lies before the earlier
+/// of the highest service time verified, `service`, and the device clock `now` plus 24
+/// hours, so one far-future signed time can't pass it; without a verified service time
+/// none has.
+pub(crate) fn bound_passed(bound: u64, service: Option<u64>, now: u64) -> bool {
+    service.is_some_and(|service| {
+        bound < service.min(now.saturating_add(pubky_switch_core::records::DAY_MS))
+    })
+}
+
 /// How many times the outcome's batch is built again after `409 conflict`.
 const OUTCOME_TRIES: usize = 3;
 
@@ -2640,25 +2650,20 @@ impl Paykit {
     /// Drop the journal entries past their claim's reconciliation window (Paykit spec 7.1,
     /// 7.2; Switch spec 6.3): `Finished` and `Abandoned` ones, from their deadline plus the
     /// 30 days the switch keeps the claim's tombstone after it ([`RECONCILIATION_MS`]),
-    /// or, without a deadline, from 400 days after they were journaled, the time the switch
-    /// keeps a claim pinned to none after its last entry, which comes no earlier
-    /// ([`MAX_CLAIM_AGE_MS`]). By then the claim may be gone, and the payer's activity
-    /// record, not the journal, shows the payment (Paykit spec 6, 7.2).
+    /// or, without a deadline, from 400 days after they were journaled
+    /// ([`MAX_CLAIM_AGE_MS`]). A claim pinned to none is kept 400 days after its last entry,
+    /// which comes after the journaling, so it may outlive the entry: a finished entry
+    /// decides nothing then, since the payer's activity record, not the journal, shows the
+    /// payment and stops a second one (Paykit spec 6, 7.2, "The record shows it paid").
     ///
     /// What a later reconcile, a restore's included, needs stays: every entry still open
     /// or owing its acceptance, one whose dispatch the payment method reported failed while
     /// its history may still show it paid, and one paid after `failed` was written, whose
-    /// receipt the user is told about. A bound passes only before the earlier of the
-    /// highest service time verified and the device clock plus 24 hours, so one far-future
-    /// signed time can't drop the journal; without a verified service time nothing goes.
+    /// receipt the user is told about. A bound passes as [`bound_passed`] says. An entry's
+    /// acknowledged notices go with it.
     async fn prune_journal(&mut self) -> Result<()> {
-        let Some(service) = self.service_time() else {
-            return Ok(());
-        };
-        let now = service.min(
-            self.now()
-                .saturating_add(pubky_switch_core::records::DAY_MS),
-        );
+        let service = self.service_time();
+        let now = self.now();
         let mut tx = state::Tx::default();
         for entry in self.journal().await? {
             let done = matches!(entry.stage, Stage::Finished | Stage::Abandoned);
@@ -2669,8 +2674,21 @@ impl Paykit {
                 Some(deadline) => deadline.saturating_add(RECONCILIATION_MS),
                 None => entry.journaled_at_ms.saturating_add(MAX_CLAIM_AGE_MS),
             };
-            if bound < now {
-                tx.delete(&key::journal(&entry.attempt()?));
+            if bound_passed(bound, service, now) {
+                let attempt = entry.attempt()?;
+                tx.delete(&key::journal(&attempt));
+                // Its acknowledged notices go with it; one not acknowledged stays for the
+                // host, and goes when acknowledged.
+                for kind in [NoticeKind::PaidAfterFailed, NoticeKind::HeldWithoutPay] {
+                    let notice = key::notice(&attempt, kind);
+                    if self
+                        .local_get::<crate::notices::KeptNotice>(&notice)
+                        .await?
+                        .is_some_and(|kept| kept.acknowledged)
+                    {
+                        tx.delete(&notice);
+                    }
+                }
             }
         }
         self.local_commit(tx).await
@@ -3233,6 +3251,21 @@ mod tests {
 
     fn lost() -> AppError {
         AppError::Transport(TransportError::Connect("down".into()))
+    }
+
+    #[test]
+    fn test_prune_bound_passed_before_the_service_time() {
+        assert!(super::bound_passed(10, Some(11), 11));
+        assert!(!super::bound_passed(10, Some(10), 11));
+    }
+
+    #[test]
+    fn test_prune_bound_not_passed_by_a_far_service_time_or_without_one() {
+        let day = pubky_switch_core::records::DAY_MS;
+        // A service time far ahead of the device clock passes only up to a day after it.
+        assert!(!super::bound_passed(5 * day, Some(100 * day), day));
+        assert!(super::bound_passed(5 * day, Some(100 * day), 5 * day));
+        assert!(!super::bound_passed(0, None, 100 * day));
     }
 
     #[test]

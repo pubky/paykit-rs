@@ -533,8 +533,11 @@ fn receipt_effect(
     let Some(view) = view else {
         return Ok(());
     };
+    // A claim SETTLED, or settled by this receipt, holds the payment: an entry waiting for
+    // its receipt no longer waits, in the same batch.
+    let waiting = journaled.filter(|entry| entry.failed_on_claim);
     if view.status == ClaimStatus::Settled {
-        return Ok(());
+        return waiting.map_or(Ok(()), |entry| received_in_time(cx, entry));
     }
     let open = view.attempts.iter().any(|a| {
         a.attempt_id == attempt_id.to_bytes()
@@ -552,6 +555,9 @@ fn receipt_effect(
             Some(stored.hash()),
         )?;
         cx.claim(op, Vec::new(), deadline)?;
+        if let Some(entry) = waiting {
+            received_in_time(cx, entry)?;
+        }
     }
     Ok(())
 }
@@ -559,7 +565,7 @@ fn receipt_effect(
 /// The notice "marked failed, was paid" for the payment `entry` journals, raised with the
 /// cursor move once (Paykit spec 7.2), and the entry kept as no longer waiting for a
 /// receipt.
-fn late_receipt(cx: &mut ReceiveContext<'_>, mut entry: JournalEntry) -> Result<(), Fail> {
+fn late_receipt(cx: &mut ReceiveContext<'_>, entry: JournalEntry) -> Result<(), Fail> {
     let attempt = entry.attempt().map_err(|_| Fail::corrupt())?;
     let notice = key::notice(&attempt, NoticeKind::PaidAfterFailed);
     if cx.local_get(notice.as_bytes())?.is_none() {
@@ -572,6 +578,12 @@ fn late_receipt(cx: &mut ReceiveContext<'_>, mut entry: JournalEntry) -> Result<
             )?,
         );
     }
+    received_in_time(cx, entry)
+}
+
+/// The payment `entry` journals no longer waits for a receipt, kept with the cursor move.
+fn received_in_time(cx: &mut ReceiveContext<'_>, mut entry: JournalEntry) -> Result<(), Fail> {
+    let attempt = entry.attempt().map_err(|_| Fail::corrupt())?;
     entry.failed_on_claim = false;
     keep_local(cx, local(&key::journal(&attempt), &entry)?);
     Ok(())

@@ -66,7 +66,7 @@ pub struct Notice {
     /// The request paid, `None` for a payment without one.
     pub request_hash: Option<[u8; 32]>,
     /// When it was raised, in Unix milliseconds: the highest service time the app had
-    /// verified then, or its device clock before any.
+    /// verified then, 0 before any.
     pub raised_at_ms: u64,
 }
 
@@ -151,7 +151,8 @@ impl Paykit {
     }
 
     /// Acknowledge the notice `id`, once the user has seen it: it is no longer listed, and
-    /// raising it again changes nothing.
+    /// raising it again changes nothing. It is kept, acknowledged, only as long as the
+    /// journal holds its payment.
     ///
     /// # Errors
     ///
@@ -171,6 +172,16 @@ impl Paykit {
         if kept.acknowledged {
             return Ok(());
         }
+        // Kept acknowledged while the journal holds its payment, which could raise it again;
+        // dropped with it, or now when it is gone (`Paykit::prune_journal`).
+        let attempt = AttemptId::parse(&kept.attempt_id).map_err(|_| PaykitError::corrupt())?;
+        if self
+            .local_get::<JournalEntry>(&key::journal(&attempt))
+            .await?
+            .is_none()
+        {
+            return self.local_delete(&key).await;
+        }
         kept.acknowledged = true;
         self.local_put(&key, &kept).await
     }
@@ -186,7 +197,7 @@ impl Paykit {
         if self.local_get::<KeptNotice>(&key).await?.is_some() {
             return Ok(());
         }
-        let at = self.service_time().unwrap_or_else(|| self.now());
+        let at = self.service_time().unwrap_or(0);
         self.local_put(&key, &KeptNotice::of(kind, entry, at)).await
     }
 }

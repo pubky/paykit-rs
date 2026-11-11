@@ -556,3 +556,39 @@ async fn test_stored_event_taken_again_after_its_commit_failed() {
         RequestStatus::Open
     );
 }
+
+#[tokio::test]
+async fn test_stored_refused_request_never_written_over_a_value_that_doesnt_read() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    // Meanwhile a value that doesn't read is written at the request's record.
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            paykit_lib::collections::Collection::PayerActivity.name(),
+            paykit_lib::collections::Collection::PayerActivity.policy(None),
+        ),
+        &paykit_lib::derive::natural_key::request_record(&w.bob_id(), &request.request_hash),
+    );
+    let entry = wallet
+        .app_mut()
+        .record_op(&target, Some(b"{\"v\":1}"), Vec::new())
+        .await
+        .unwrap();
+    wallet
+        .app_mut()
+        .submit_batch(pubky_switch_client::app::OpBatch::new().entry(entry))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let key = wallet.app().record_key(&target).unwrap();
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    assert_eq!(held.content.value(), Some(&b"{\"v\":1}"[..]));
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Unrecorded
+    );
+}
