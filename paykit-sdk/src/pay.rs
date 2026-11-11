@@ -240,10 +240,17 @@ pub(crate) enum Dispatch {
         answered: Answered,
     },
     /// A repeat under the same idempotency key, harmless only within the method's
-    /// idempotency retention (Paykit spec 7.2).
+    /// idempotency retention (Paykit spec 7.2), and made only while it can complete before
+    /// its attempt is orphaned.
     Repeat {
         /// The retention the method declares; `None` for good.
         idempotency_retention_ms: Option<u64>,
+        /// The attempt's `opened_at`, service time, from the claim read before the repeat.
+        opened_at_ms: u64,
+        /// The attempt's `orphan_after`, in seconds, from the same read.
+        orphan_after_s: u64,
+        /// The longest the method takes to complete or fail, as it declares.
+        longest_completion_ms: u64,
     },
 }
 
@@ -254,7 +261,8 @@ pub(crate) enum FinalCheck {
     Pay,
     /// Not now: nothing is paid and the attempt stays open.
     Hold,
-    /// A repeat past the idempotency retention: never made.
+    /// A repeat past the idempotency retention, or one that might not complete before its
+    /// attempt is orphaned: never made.
     Lapsed,
     /// The client refused the payee's late switch answer, such as an equivocation (Switch
     /// wire 3.3): nothing is paid, and the refusal is the caller's.
@@ -1630,11 +1638,14 @@ impl Paykit {
             };
             let claim = claim.view;
             let me = self.app_id();
-            match claim
+            let held = claim
                 .attempt(&attempt_id.to_bytes())
-                .filter(|a| a.owner == me)
-                .map(|a| a.outcome)
-            {
+                .filter(|a| a.owner == me);
+            // The attempt's age and orphan window, for the bound on a repeat (Switch spec
+            // 10.2); unused unless the attempt is open.
+            let (opened_at_ms, orphan_after_s) =
+                held.map_or((0, 0), |a| (a.opened_at, a.orphan_after));
+            match held.map(|a| a.outcome) {
                 Some(Outcome::Open) => entry.step = Some(claim.step),
                 Some(Outcome::Done | Outcome::Failed) => {
                     self.set_stage(&mut entry, Stage::Finished).await?;
@@ -1652,6 +1663,9 @@ impl Paykit {
             // just before the call: the checks awaited the network meanwhile.
             let repeat = Dispatch::Repeat {
                 idempotency_retention_ms: declaration.idempotency_retention_ms,
+                opened_at_ms,
+                orphan_after_s,
+                longest_completion_ms: declaration.longest_completion_ms,
             };
             return self
                 .dispatch(entry, doc, Initiator::Automatic, None, repeat)
@@ -1676,8 +1690,9 @@ impl Paykit {
     ///    request's or a list's endpoint, by the switch's rules for a public endpoint;
     /// 4. the own `identity.json` is confirmed in the last 60 s, and lists this app at the
     ///    attempt's service and generation;
-    /// 5. for a repeat, the method's idempotency retention hasn't ended
-    ///    ([`FinalCheck::Lapsed`]);
+    /// 5. for a repeat, the method's idempotency retention hasn't ended, and the repeat can
+    ///    complete before its attempt is orphaned ([`FinalCheck::Lapsed`]); for a first
+    ///    dispatch, the attempt is within its pre-dispatch budget;
     /// 6. the app may still make the attempt: no alarm or restore question raised meanwhile,
     ///    and for an automatic payment the clocks within the tolerance.
     ///
@@ -1731,6 +1746,32 @@ impl Paykit {
         self.final_gates(entry, payee, by, confirmed, kind)
     }
 
+    /// Whether a repeat made now completes, at the method's longest, before its attempt is
+    /// orphaned (Switch spec 10.2): `now + longest_completion_ms < opened_at + orphan_after`,
+    /// on the service clock. Service time now is taken late: the later of the highest
+    /// service time verified and the device clock plus the clock tolerance. Past it another
+    /// own app may soon resolve the attempt, `unknown` or `failed` with the user's
+    /// confirmation (rows 5 and 6), while the repeat's payment could still run, so it isn't
+    /// made, and the attempt stays "may be paid" as past the idempotency retention.
+    ///
+    /// A repeat has no journal write between its final payment check and its call, so no
+    /// fence after it: this check, with the others, is the last before the call, and nothing
+    /// awaits between them.
+    fn repeat_completes_before_orphaned(
+        &self,
+        now: u64,
+        opened_at_ms: u64,
+        orphan_after_s: u64,
+        longest_completion_ms: u64,
+    ) -> bool {
+        let service_now = self
+            .service_time()
+            .unwrap_or(0)
+            .max(now.saturating_add(CLOCK_TOLERANCE_MS));
+        let orphaned_at = opened_at_ms.saturating_add(orphan_after_s.saturating_mul(1000));
+        service_now.saturating_add(longest_completion_ms) < orphaned_at
+    }
+
     /// A first dispatch's attempt is still within the pre-dispatch budget
     /// ([`crate::PRE_DISPATCH_BUDGET_MS`]): its age since the answer, by the device's wall
     /// and monotonic clocks, with the clock tolerance added, is under the budget, and the
@@ -1780,8 +1821,19 @@ impl Paykit {
         match kind {
             Dispatch::Repeat {
                 idempotency_retention_ms,
+                opened_at_ms,
+                orphan_after_s,
+                longest_completion_ms,
             } => {
                 if !retained(idempotency_retention_ms, entry.journaled_at_ms, now) {
+                    return Ok(FinalCheck::Lapsed);
+                }
+                if !self.repeat_completes_before_orphaned(
+                    now,
+                    opened_at_ms,
+                    orphan_after_s,
+                    longest_completion_ms,
+                ) {
                     return Ok(FinalCheck::Lapsed);
                 }
             }

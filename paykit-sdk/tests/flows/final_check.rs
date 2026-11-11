@@ -1011,3 +1011,28 @@ async fn test_orphan_after_below_the_floor_refused() {
     w.join_with(&w.alice, "phone", scopes, config, crate::common::store())
         .await;
 }
+
+#[tokio::test]
+async fn test_repeat_too_close_to_the_orphan_age_not_made() {
+    // A resume's repeat completes, at the method's longest, only after the attempt is
+    // orphaned, on the service clock taken late (the device clock plus the tolerance): it
+    // isn't made, and the attempt stays "may be paid".
+    let w = World::new();
+    let (store, app_id, attempt_id) = in_flight(&w).await;
+    w.clock.advance_ms(
+        paykit_sdk::DEFAULT_ORPHAN_AFTER_S * 1000
+            - paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS
+            - pubky_switch_core::records::CLOCK_TOLERANCE_MS,
+    );
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
