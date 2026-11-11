@@ -430,7 +430,7 @@ async fn test_certificate_renewal_dropping_pay_keeps_a_dispatched_payment() {
     .await;
     wallet.receive(None).await.unwrap();
     w.rail.next(paykit_sdk::rail::Behaviour::Hang);
-    let paykit_sdk::PayOutcome::Pending { attempt_id } = wallet
+    let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
         .unwrap()
@@ -445,10 +445,14 @@ async fn test_certificate_renewal_dropping_pay_keeps_a_dispatched_payment() {
     assert_eq!(wallet.app().cert().hash(), reduced.hash());
     w.rail.settle(&attempt_id, true);
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(
-        resumed,
-        vec![paykit_sdk::PayOutcome::PaidOutcomeUnwritten { attempt_id }]
+    assert!(
+        matches!(
+            resumed.as_slice(),
+            [paykit_sdk::PayOutcome::PaidOutcomeUnwritten { .. }]
+        ),
+        "{resumed:?}"
     );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     let backup = wallet.backup().await.unwrap();
     let restored = Paykit::restore(
         w.env(&w.alice, store()),
@@ -551,7 +555,7 @@ async fn test_certificate_restored_lost_acceptance_not_signed_again_without_pay(
     .await;
     wallet.receive(None).await.unwrap();
     w.rail.next(paykit_sdk::rail::Behaviour::Hang);
-    let paykit_sdk::PayOutcome::Pending { attempt_id } = wallet
+    let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
         .unwrap()
@@ -577,9 +581,17 @@ async fn test_certificate_restored_lost_acceptance_not_signed_again_without_pay(
     .unwrap();
     restored.receive(None).await.unwrap();
     assert_eq!(restored.app().cert().hash(), reduced.hash());
-    let waiting = vec![paykit_sdk::PayOutcome::PaidOutcomeUnwritten { attempt_id }];
-    assert_eq!(restored.resume_payments().await.unwrap(), waiting);
-    assert_eq!(restored.resume_payments().await.unwrap(), waiting);
+    for _ in 0..2 {
+        let resumed = restored.resume_payments().await.unwrap();
+        assert!(
+            matches!(
+                resumed.as_slice(),
+                [paykit_sdk::PayOutcome::PaidOutcomeUnwritten { .. }]
+            ),
+            "{resumed:?}"
+        );
+        assert_eq!(resumed[0].attempt_id(), attempt_id);
+    }
     assert_eq!(
         restored.payments().await.unwrap()[0].stage,
         paykit_sdk::Stage::RailPaid
@@ -736,7 +748,7 @@ async fn test_certificate_renewal_dropping_pay_resumes_without_reading_claims() 
     .await;
     wallet.receive(None).await.unwrap();
     w.rail.next(paykit_sdk::rail::Behaviour::Hang);
-    let paykit_sdk::PayOutcome::Pending { attempt_id } = wallet
+    let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, paykit_sdk::PayOptions::default())
         .await
         .unwrap()
@@ -766,10 +778,12 @@ async fn test_certificate_renewal_dropping_pay_resumes_without_reading_claims() 
                 current: serde_json::Value::Null,
             });
     }
-    assert_eq!(
-        wallet.resume_payments().await.unwrap(),
-        vec![paykit_sdk::PayOutcome::Pending { attempt_id }]
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [paykit_sdk::PayOutcome::Pending { .. }]),
+        "{resumed:?}"
     );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     wallet.reconcile().await.unwrap();
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
     // The method's "not found" decides nothing: the dispatch stays open in the journal, so
@@ -860,7 +874,7 @@ async fn test_certificate_restore_without_pay_attempts_nothing_until_a_reconcile
     wallet.receive(None).await.unwrap();
     let backup = wallet.backup().await.unwrap();
     w.rail.next(paykit_sdk::rail::Behaviour::Hang);
-    let paykit_sdk::PayOutcome::Pending { attempt_id } = wallet
+    let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&paid, paykit_sdk::PayOptions::default())
         .await
         .unwrap()
@@ -896,9 +910,9 @@ async fn test_certificate_restore_without_pay_attempts_nothing_until_a_reconcile
     list(&w, me, &reduced, &regranted);
     restored.receive(None).await.unwrap();
     assert_eq!(restored.app().cert().hash(), regranted.hash());
-    let confirmed = || paykit_sdk::PayOptions {
-        possibly_cancelled_confirmed: Some(pubky_switch_client::app::UserConfirmed::new()),
-        ..paykit_sdk::PayOptions::default()
+    let confirmed = || {
+        paykit_sdk::PayOptions::default()
+            .with_possibly_cancelled_confirmed(pubky_switch_client::app::UserConfirmed::new())
     };
     for request in [&paid, &other] {
         let refused = restored
@@ -956,9 +970,9 @@ async fn test_certificate_restore_ended_without_reconcile_pays_nothing_until_one
         .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
         .await
         .unwrap();
-    let confirmed = || paykit_sdk::PayOptions {
-        possibly_cancelled_confirmed: Some(pubky_switch_client::app::UserConfirmed::new()),
-        ..paykit_sdk::PayOptions::default()
+    let confirmed = || {
+        paykit_sdk::PayOptions::default()
+            .with_possibly_cancelled_confirmed(pubky_switch_client::app::UserConfirmed::new())
     };
     let refused = restored
         .pay_request(&request, confirmed())

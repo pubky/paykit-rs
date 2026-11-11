@@ -567,3 +567,31 @@ async fn test_public_endpoint_the_payment_method_doesnt_pay_refused() {
     );
     assert!(w.rail.all_executions().is_empty());
 }
+
+#[tokio::test]
+async fn test_public_endpoints_pay_the_payment_methods_first() {
+    // Bob publishes two Lightning endpoints; the method prefers the one that comes second
+    // by identifier.
+    let w = World::new();
+    w.rail.set_endpoint_identifiers(vec![
+        endpoint("btc-lightning-bolt12"),
+        endpoint("btc-lightning-bolt11"),
+    ]);
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    publish(
+        &w,
+        json!({ "public_endpoints": {
+            "btc-lightning-bolt11": "lnbc1pub",
+            "btc-lightning-bolt12": "lno1pub"
+        } }),
+        Some(w.clock.now_ms() + 30 * DAY_MS),
+    );
+    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
+        "btc-lightning-bolt12"
+    );
+}

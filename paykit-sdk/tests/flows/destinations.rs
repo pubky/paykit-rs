@@ -517,3 +517,114 @@ async fn test_destinations_list_without_an_endpoint_the_payment_method_pays_refu
     );
     assert!(w.rail.all_executions().is_empty());
 }
+
+#[tokio::test]
+async fn test_destinations_list_pays_the_payment_methods_first_endpoint() {
+    // Bob's list offers on-chain and Lightning; the method prefers Lightning, which comes
+    // second by identifier.
+    let w = World::new();
+    w.rail.set_endpoint_identifiers(vec![
+        crate::common::endpoint("btc-lightning-bolt12"),
+        crate::common::endpoint("btc-bitcoin-p2wpkh"),
+    ]);
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    let outcome = wallet
+        .pay_without_request(paykit_sdk::UnrequestedPayment::new(
+            w.bob_id(),
+            crate::common::btc("1"),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
+        "btc-lightning-bolt12"
+    );
+}
+
+#[tokio::test]
+async fn test_destinations_unsupported_live_list_beside_an_expired_one_asks_for_it() {
+    // Bob's till offered on-chain, which the method pays, but its list has expired; his
+    // shop's live list offers only Lightning, which it doesn't. The till may have a current
+    // list that serves, so it is asked for it, and alice waits for it.
+    let w = World::new();
+    w.rail
+        .set_endpoint_identifiers(vec![crate::common::endpoint("btc-bitcoin-p2wpkh")]);
+    let mut wallet = w.wallet("wallet").await;
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let mut shop = w.shop().await;
+    till.app_mut().invite(&w.alice_id()).await.unwrap();
+    let list = |id: &str, payload: &str, version: u64, expires_at: u64| {
+        let mut endpoints = std::collections::BTreeMap::new();
+        endpoints.insert(
+            crate::common::endpoint(id),
+            paykit_lib::bodies::ListEndpoint {
+                payload: paykit_lib::PaymentEndpointPayload::new(payload).unwrap(),
+                single_use: false,
+            },
+        );
+        (endpoints, version, expires_at)
+    };
+    let now = w.clock.now_ms();
+    let (endpoints, version, expires_at) = list(
+        "btc-bitcoin-p2wpkh",
+        "bc1qtill",
+        now,
+        now + crate::common::HOUR_MS,
+    );
+    let body = paykit_lib::bodies::PrivatePaymentList {
+        version,
+        payment_endpoints: endpoints,
+        expires_at,
+    }
+    .to_body()
+    .unwrap();
+    w.inject(
+        &w.bob,
+        "till",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.private_payment_list",
+        Vec::new(),
+        body,
+    );
+    let (endpoints, _, _) = list("btc-lightning-bolt12", "lno1shop", 0, 0);
+    w.list_to_alice_with(&mut shop, &[wallet.app_id()], now + 1, endpoints)
+        .await;
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(2 * crate::common::HOUR_MS);
+    let refused = wallet
+        .pay_without_request(paykit_sdk::UnrequestedPayment::new(
+            w.bob_id(),
+            crate::common::btc("1"),
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        "{refused:?}"
+    );
+    let got = till.receive(None).await.unwrap();
+    assert!(
+        got.report.events.iter().any(|e| matches!(
+            e,
+            pubky_switch_client::app::AppEvent::MessageReceived { kind, .. }
+                if kind == "paykit.private_payment_list_request"
+        )),
+        "{:?}",
+        got.report.events
+    );
+}

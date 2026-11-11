@@ -943,9 +943,11 @@ impl Paykit {
         // one is used: a list used up, not one without such an endpoint.
         let mut offered = false;
         let mut live = false;
-        // Whether a list in use offers an endpoint the payment may use, but only ones the
-        // payment method doesn't pay: a newer list needn't differ, so the payee isn't asked.
-        let mut unpaid = false;
+        // Whether a list in use offers an endpoint the payment may use that the payment
+        // method pays, and whether some app's list has expired, which its current one may
+        // replace.
+        let mut paid_offered = false;
+        let mut expired = false;
         let order = self.rail.endpoint_identifiers();
         let paid = |id: &PaymentEndpointIdentifier| order.contains(id);
         for record in lists {
@@ -957,16 +959,15 @@ impl Paykit {
             }
             let accepted = record.list.accepted_at().unwrap_or(0);
             if now >= list.usable_until(accepted) {
+                expired = true;
                 continue;
             }
             live = true;
-            let wanted_here = list.payment_endpoints.keys().any(&wanted);
-            let paid_here = list
+            offered |= list.payment_endpoints.keys().any(&wanted);
+            paid_offered |= list
                 .payment_endpoints
                 .keys()
                 .any(|id| wanted(id) && paid(id));
-            unpaid |= wanted_here && !paid_here;
-            offered |= paid_here;
             let used = |id: &PaymentEndpointIdentifier| {
                 record
                     .used
@@ -995,7 +996,9 @@ impl Paykit {
         }
         // A list still in use with no endpoint the payment may use isn't missing, expired or
         // used up: a newer one needn't differ, so the payee isn't asked.
-        if unpaid && !offered {
+        // Lists in use that offer only endpoints the method doesn't pay, and no app's list to
+        // ask again: a newer list needn't differ, so the payee isn't asked.
+        if offered && !paid_offered && !expired {
             return Err(unsupported("the payee's Private Payment List endpoints"));
         }
         if live && !offered {
@@ -2156,7 +2159,9 @@ impl Paykit {
         let attempt_id = entry.attempt()?;
         if entry.stage == Stage::Paying || entry.restored && entry.may_have_dispatched() {
             match self.rail.payment(attempt_id).await? {
-                Some(RailOutcome::Paid { proof, paid_at_ms }) => {
+                Some(RailOutcome::Paid(RailPaid {
+                    proof, paid_at_ms, ..
+                })) => {
                     entry.rail_proof = Some(proof);
                     entry.paid_at_ms = paid_at_ms;
                     self.set_stage(entry, Stage::RailPaid).await?;

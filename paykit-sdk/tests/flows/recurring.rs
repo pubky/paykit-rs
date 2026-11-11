@@ -72,20 +72,57 @@ async fn test_recurring_request_rejected_before_acceptance() {
     );
 }
 
+/// How many rejections bob's shop receives at its next read.
+async fn rejections_received(shop: &mut Paykit) -> usize {
+    let got = shop.receive(None).await.unwrap();
+    got.report
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                pubky_switch_client::app::AppEvent::MessageReceived { kind, .. }
+                    if kind == "paykit.payment_request_rejection"
+            )
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn test_recurring_request_rejected_at_its_expiry_millisecond() {
+    // The expiry is inclusive: its own millisecond still records and sends the rejection.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let mut wallet = w.wallet("wallet").await;
+    let expires_at = w.clock.now_ms() + HOUR_MS;
+    let request = monthly_to(&w, &mut wallet, expires_at).await;
+    w.clock.advance_ms(expires_at - w.clock.now_ms());
+    wallet.reject_request(&request, None).await.unwrap();
+    assert_eq!(rejections_received(&mut shop).await, 1);
+}
+
 #[tokio::test]
 async fn test_recurring_request_rejection_after_its_proposal_expired_refused() {
-    // Conditioned on the proposal's expiry, as an acceptance is: past it, nothing is
-    // recorded or sent.
+    // One millisecond past the expiry, nothing is recorded or sent: the refusal says the
+    // proposal expired, the same on every try, and the request shows expired.
     let w = World::new();
-    // Bob's shop signs the request.
-    let _shop = w.shop().await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
     let mut wallet = w.wallet("wallet").await;
-    let request = monthly_to(&w, &mut wallet, w.clock.now_ms() + HOUR_MS).await;
-    w.clock.advance_ms(2 * HOUR_MS);
-    let refused = wallet.reject_request(&request, None).await.unwrap_err();
-    assert_ne!(
+    let expires_at = w.clock.now_ms() + HOUR_MS;
+    let request = monthly_to(&w, &mut wallet, expires_at).await;
+    w.clock.advance_ms(expires_at + 1 - w.clock.now_ms());
+    for _ in 0..2 {
+        let refused = wallet.reject_request(&request, None).await.unwrap_err();
+        assert!(
+            matches!(refused.refusal(), Some(Refusal::DeadlinePassed)),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(
         wallet.request(&request).await.unwrap().status,
-        RequestStatus::Rejected,
-        "{refused:?}"
+        RequestStatus::Expired
     );
+    assert_eq!(rejections_received(&mut shop).await, 0);
 }

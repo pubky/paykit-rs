@@ -764,6 +764,11 @@ impl Paykit {
         }))
     }
 
+    /// Whether the highest service time verified is at or past `deadline`.
+    fn reached(&self, deadline: Option<u64>) -> bool {
+        deadline.is_some_and(|deadline| self.service_time().is_some_and(|t| deadline <= t))
+    }
+
     async fn request_status(
         &self,
         record: &ActivityRecord,
@@ -806,13 +811,10 @@ impl Paykit {
             return Ok(RequestStatus::Cancelled);
         }
         // Expired once the deadline is at or before the highest service time verified (Paykit
-        // spec 7.1).
-        if request
-            .attempt_deadline(None)
-            .ok()
-            .flatten()
-            .is_some_and(|deadline| self.service_time().is_some_and(|t| deadline <= t))
-        {
+        // spec 7.1): a one-time request's attempt deadline, or a recurring request's
+        // proposal expiry while it isn't accepted (Paykit spec 8.2; v0.1's
+        // `proposal_expired`).
+        if self.reached(expiry_deadline(record, request)) {
             return Ok(RequestStatus::Expired);
         }
         Ok(RequestStatus::Open)
@@ -828,7 +830,8 @@ impl Paykit {
     ///
     /// [`Refusal::NotFound`]; [`Refusal::Rejected`], [`Refusal::Cancelled`],
     /// [`Refusal::AlreadyPaid`] or [`Refusal::PaymentInProgress`]; [`Refusal::Recurring`] for
-    /// a recurring request already accepted;
+    /// a recurring request already accepted; [`Refusal::DeadlinePassed`] for a recurring
+    /// request whose proposal expired;
     /// [`PaykitError::Conflict`] when the record changed meanwhile; the client's errors.
     pub async fn reject_request(
         &mut self,
@@ -881,6 +884,12 @@ impl Paykit {
         // cancellation and anything after its acceptance belong to the recurring flows.
         if recurring && (cancel || record.response.is_some()) {
             return Err(Refusal::Recurring.into());
+        }
+        // Past its proposal expiry, a recurring request is expired and can't be answered: the
+        // batch's time condition would refuse it on every try.
+        let expiry = expiry_deadline(&record, body);
+        if recurring && self.reached(expiry) {
+            return Err(Refusal::DeadlinePassed.into());
         }
         let obligation = self.obligation(&request.payee, &request.request_hash, 0);
         if !recurring {
@@ -938,12 +947,32 @@ impl Paykit {
                         refuse_on_claim(&view)?;
                     }
                 }
+                // The proposal expired at the service: the answer's verified time says so.
+                if recurring && self.reached(expiry) {
+                    return Err(Refusal::DeadlinePassed.into());
+                }
                 return Err(conflict(error));
             }
         };
         self.app.flush_message(&msg_id).await?;
         Ok(msg_id)
     }
+}
+
+/// The first service time at which `request` counts as expired: a one-time request's attempt
+/// deadline (Paykit spec 7.1), or, for a recurring request not yet accepted, the millisecond
+/// after its proposal expiry, which is inclusive (Paykit spec 8.2). `None` when it never
+/// expires as a whole: no deadline, or a recurring request accepted, whose periods have
+/// deadlines of their own.
+fn expiry_deadline(record: &ActivityRecord, request: &PaymentRequest) -> Option<u64> {
+    if request.is_recurring() {
+        return record
+            .response
+            .is_none()
+            .then_some(request.proposal_expires_at?)
+            .map(|expires_at| expires_at.saturating_add(1));
+    }
+    request.attempt_deadline(None).ok().flatten()
 }
 
 /// A rejection or cancellation is refused while the claim has an open or paid attempt
