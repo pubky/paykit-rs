@@ -12,7 +12,7 @@ use serde_json::{Map, Value};
 
 use crate::error::Result;
 use crate::paykit::Paykit;
-use crate::requests::RequestRef;
+use crate::requests::{request_of, RequestRef};
 
 /// What a payee's receipt carries beyond the proof it confirms (Paykit wire 4.11): its
 /// opaque `metadata`, and, for a payment without a request only, the payee's
@@ -79,7 +79,8 @@ pub struct ReceivedReceipt {
     pub accepted_at_ms: Option<u64>,
     /// The payee's opaque metadata.
     pub metadata: Option<Map<String, Value>>,
-    /// The payee's reference, for a payment without a request.
+    /// The Payment Reference: the request's for a receipt of a request, or, for a payment
+    /// without one, the payee's reference the receipt carries, if any.
     pub payment_reference: Option<String>,
 }
 
@@ -98,7 +99,7 @@ impl std::fmt::Debug for ReceivedReceipt {
 }
 
 /// Which receipts [`Paykit::receipts`] lists.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ReceiptsOf {
     /// Every receipt.
@@ -109,6 +110,9 @@ pub enum ReceiptsOf {
     Request(RequestRef),
     /// Those of this Billing Period of this request.
     Period(RequestRef, PeriodRef),
+    /// Those with this Payment Reference: their request's, or the payee's for a payment
+    /// without a request, as v0.1 indexed receipts by it.
+    Reference(PaymentReference),
 }
 
 impl ReceiptsOf {
@@ -121,6 +125,9 @@ impl ReceiptsOf {
             Self::Payee(payee) => receipt.payee == *payee,
             Self::Request(r) => request(r),
             Self::Period(r, period) => request(r) && receipt.billing_period == Some(*period),
+            Self::Reference(reference) => {
+                receipt.payment_reference.as_deref() == Some(reference.as_str())
+            }
         }
     }
 }
@@ -148,6 +155,7 @@ pub(crate) fn received_receipt(key: [u8; 32], record: &ActivityRecord) -> Option
         metadata: metadata.clone(),
         payment_reference: payment_reference
             .as_ref()
+            .or_else(|| request_of(record).map(|(_, request)| &request.payment_reference))
             .map(|reference| reference.as_str().to_owned()),
     })
 }

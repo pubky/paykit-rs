@@ -44,7 +44,8 @@ async fn test_receipts_carry_metadata_and_are_listed_by_payee_request_and_period
     assert_eq!(receipt.payee, w.bob_id());
     assert_eq!(receipt.request_hash, Some(request.request_hash));
     assert_eq!(receipt.metadata, Some(metadata()));
-    assert_eq!(receipt.payment_reference, None);
+    // The request's reference.
+    assert_eq!(receipt.payment_reference.as_deref(), Some("order-1"));
     assert_eq!(
         wallet.payments().await.unwrap()[0].receipt,
         Some(receipt.clone())
@@ -64,8 +65,17 @@ async fn test_receipts_carry_metadata_and_are_listed_by_payee_request_and_period
         (ReceiptsOf::Request(request), 1),
         (ReceiptsOf::Request(other), 0),
         (ReceiptsOf::Period(request, period), 0),
+        (
+            ReceiptsOf::Reference(PaymentReference::new("order-1").unwrap()),
+            1,
+        ),
+        (
+            ReceiptsOf::Reference(PaymentReference::new("order-2").unwrap()),
+            0,
+        ),
     ] {
-        assert_eq!(wallet.receipts(of).await.unwrap().len(), listed, "{of:?}");
+        let listed_now = wallet.receipts(of.clone()).await.unwrap().len();
+        assert_eq!(listed_now, listed, "{of:?}");
     }
 }
 
@@ -124,4 +134,11 @@ async fn test_receipts_of_a_payment_without_a_request_carry_the_payees_reference
     assert_eq!(receipts.len(), 1);
     assert_eq!(receipts[0].payment_reference.as_deref(), Some("inv-7"));
     assert_eq!(receipts[0].request_hash, None);
+    let by_reference = wallet
+        .receipts(ReceiptsOf::Reference(
+            PaymentReference::new("inv-7").unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(by_reference.len(), 1);
 }
