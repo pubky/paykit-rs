@@ -460,6 +460,31 @@ async fn outcome_written_again(
 }
 
 #[tokio::test]
+async fn test_outcome_record_batch_refused_when_sent_again_is_written_again() {
+    // The outcome's batch (`done`, the record and the proof) can't connect and is kept. The
+    // resume's last flush sends it again and the switch refuses it for good, so the client
+    // drops it with its local writes, the journal's move to `Finished` included, and reports
+    // it (`BatchRefused`).
+    let w = World::new();
+    let (mut wallet, _phone, request, attempt_id) = in_flight(&w).await;
+    let unreachable = pubky_switch_client::testing::Fault::Unreachable {
+        path: "/ops".into(),
+        after: 0,
+    };
+    outcome_refused_when_sent_again(&w, &mut wallet, &attempt_id, unreachable).await;
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(
+        summary
+            .report
+            .events
+            .iter()
+            .any(|e| matches!(e, pubky_switch_client::app::AppEvent::BatchRefused { .. })),
+        "{summary:?}"
+    );
+    outcome_written_again(&w, &mut wallet, &request, &attempt_id).await;
+}
+
+#[tokio::test]
 async fn test_outcome_record_kept_after_a_refusal_about_the_caller_stays_unwritten() {
     // The outcome's batch is signed and kept, and the service time read before its first
     // send is refused `403 not_current`. The batch still goes once the app is current, so
