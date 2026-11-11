@@ -125,6 +125,7 @@ fn test_vectors_messages() {
     check_cancellation_roles(&keys, &file);
     check_conversion_terms(&keys, &file);
     check_proof_members(&keys, &file);
+    check_receipt_members(&keys, &file);
 }
 
 /// `refs` name messages by hash, in each kind's order (Paykit wire 4.3).
@@ -404,7 +405,8 @@ multi_protocol_senders holds messages from apps whose certificates hold another 
 scopes; cancellation_roles holds a cancellation between certificates of each pair of roles; \
 conversion_terms holds the shop's period details and requests with their conversion terms \
 changed, which a payer takes or drops; proof_members holds alice's proofs with a member \
-outside the payment it proves, which a payee drops.";
+outside the payment it proves, which a payee drops; receipt_members holds bob's receipts \
+with the payee's metadata and reference, which a payer takes or drops.";
 
 const MULTI_PROTOCOL_DESCRIPTION: &str = "Wire 4.1 check 8, spec 3.2, 3.3, Switch wire 3.1 \
 \"Several protocols\": messages.json's payment_request and resend_request_ids, as the shop \
@@ -499,6 +501,7 @@ fn generate(keys: &Keys) {
             ),
             (Place::Member("/conversion_terms"), conversion_terms(keys)),
             (Place::Member("/proof_members"), proof_members(keys)),
+            (Place::Member("/receipt_members"), receipt_members(keys)),
         ],
     );
 }
@@ -968,5 +971,147 @@ fn check_proof_members(keys: &Keys, file: &Value) {
             .unwrap();
         let error = check_body(&message, &json).expect_err(name);
         assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
+    }
+}
+
+const RECEIPT_MEMBERS_DESCRIPTION: &str = "Wire 4.11: bob's receipts, payment_receipt as the \
+shop signs it, with members added and signed again by the shop. A receipt may carry the \
+payee's metadata, an object, as v0.1 Receipt.metadata; and a receipt of a payment without a \
+request, whose refs name its proof alone (here payment_proof_unrequested, with that proof's \
+attempt_id), may carry the payee's payment_reference for it. accepted are receipts a payer \
+takes at check 10: the request's receipt with metadata, and the receipt of the payment \
+without a request with metadata and a payment_reference. refused are receipts it drops \
+there: the request's receipt carrying a payment_reference, whose request's reference \
+applies, and one whose metadata isn't an object. reason is paykit-lib's wording.";
+
+/// A case of `receipt_members`: name, whether it confirms the payment without a request, and
+/// the members added.
+type ReceiptCase = (&'static str, bool, Vec<(&'static str, Value)>);
+
+/// The cases of `receipt_members`, accepted then refused.
+fn receipt_cases() -> (Vec<ReceiptCase>, Vec<ReceiptCase>) {
+    let metadata = json!({ "note": "thank you", "order": "1042" });
+    let accepted = vec![
+        (
+            "a request's receipt with metadata",
+            false,
+            vec![("metadata", metadata.clone())],
+        ),
+        (
+            "a receipt of a payment without a request with metadata and payment_reference",
+            true,
+            vec![
+                ("metadata", metadata),
+                ("payment_reference", json!("invoice-77")),
+            ],
+        ),
+    ];
+    let refused = vec![
+        (
+            "a request's receipt carrying payment_reference",
+            false,
+            vec![("payment_reference", json!("order-1042"))],
+        ),
+        (
+            "a receipt whose metadata isn't an object",
+            false,
+            vec![("metadata", json!("thank you"))],
+        ),
+    ];
+    (accepted, refused)
+}
+
+/// The receipt of a case, as the shop signs it.
+fn receipt_json((_, unrequested, members): &ReceiptCase) -> (Message, Vec<u8>) {
+    let mut m = Message::parse(&message_json("payment_receipt"), OPAQUE_MEMBERS).unwrap();
+    if *unrequested {
+        let proof =
+            Message::parse(&message_json("payment_proof_unrequested"), OPAQUE_MEMBERS).unwrap();
+        m.refs = vec![paykit_lib::derive::request_hash(&message_json(
+            "payment_proof_unrequested",
+        ))];
+        m.body
+            .insert("attempt_id".into(), proof.body["attempt_id"].clone());
+    }
+    for (member, value) in members {
+        m.body.insert((*member).into(), value.clone());
+    }
+    let json = m.to_json().unwrap();
+    (m, json)
+}
+
+/// `receipt_members`, as paykit-lib generates it.
+fn receipt_members(keys: &Keys) -> Value {
+    let shop = keys.app("shop");
+    let (accepted, refused) = receipt_cases();
+    let case = |c: &ReceiptCase, taken: bool| -> Value {
+        let (m, json) = receipt_json(c);
+        assert_eq!(m.from.app_id, shop.keys.app_id_bytes(), "{}", c.0);
+        let plaintext =
+            MessagePlaintext::sign_json(&shop.keys, json.clone(), OPAQUE_MEMBERS).unwrap();
+        let mut out = json!({
+            "json": String::from_utf8(json.clone()).unwrap(),
+            "name": c.0,
+            "sender_app": shop.app_id,
+            "signature": b64(&plaintext.signature()),
+        });
+        match check_body(&m, &json) {
+            Ok(_) => assert!(taken, "{}: taken", c.0),
+            Err(error) => {
+                assert!(!taken, "{}: {error}", c.0);
+                out["reason"] = json!(quoted(&error.to_string()));
+            }
+        }
+        out
+    };
+    json!({
+        "accepted": accepted.iter().map(|c| case(c, true)).collect::<Vec<_>>(),
+        "description": RECEIPT_MEMBERS_DESCRIPTION,
+        "refused": refused.iter().map(|c| case(c, false)).collect::<Vec<_>>(),
+    })
+}
+
+/// `receipt_members` (Paykit wire 4.11): the shop's signatures, and alice taking or dropping
+/// each at check 10; a receipt taken reads its members back.
+fn check_receipt_members(keys: &Keys, file: &Value) {
+    let shop = keys.app("shop");
+    let (accepted, refused) = receipt_cases();
+    let m = &file["receipt_members"];
+    assert_eq!(arr(m, "accepted").len(), accepted.len());
+    assert_eq!(arr(m, "refused").len(), refused.len());
+    for (list, taken) in [("accepted", true), ("refused", false)] {
+        for case in arr(m, list) {
+            let name = st(case, "name");
+            let json = st(case, "json").as_bytes().to_vec();
+            let plaintext =
+                MessagePlaintext::sign_json(&shop.keys, json.clone(), OPAQUE_MEMBERS).unwrap();
+            assert_eq!(b64(&plaintext.signature()), st(case, "signature"), "{name}");
+            let message = plaintext
+                .check(
+                    &pubky(ALICE),
+                    &shop.identity,
+                    &VerifiedSender::from_cert(&cert(shop)),
+                    OPAQUE_MEMBERS,
+                )
+                .unwrap();
+            match check_body(&message, &json) {
+                Ok(Body::PaymentReceipt(r)) => {
+                    assert!(taken, "{name}: taken");
+                    assert!(r.metadata.is_some(), "{name}");
+                    assert_eq!(
+                        r.payment_reference.is_some(),
+                        message.refs.len() == 1,
+                        "{name}"
+                    );
+                    let body = r.to_body(message.refs.len()).unwrap();
+                    assert_eq!(body, message.body, "{name}: writes back");
+                }
+                Ok(other) => panic!("{name}: {:?}", other.kind()),
+                Err(error) => {
+                    assert!(!taken, "{name}: {error}");
+                    assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
+                }
+            }
+        }
     }
 }

@@ -621,6 +621,7 @@ pub(crate) fn next_list_record(
             list: stored.clone(),
             used: Vec::new(),
             msg_ids: Vec::new(),
+            unknown: Default::default(),
         },
     };
     record.list = stored.clone();
@@ -890,9 +891,12 @@ impl Paykit {
     }
 }
 
-/// The `unrequested` member of a payer's record of a payment without a request.
+/// The `unrequested` member of a payer's record of a payment without a request: its
+/// destination, and the asset and amount being paid, which every app writes with the
+/// `attempt` and the stored proof carries the same (Paykit wire 5.3).
 pub(crate) fn unrequested_of(
     destination: &crate::journal::Destination,
+    amount: &paykit_lib::PaymentAmount,
 ) -> crate::error::Result<UnrequestedDestination> {
     Ok(UnrequestedDestination {
         app_id: destination.app_id,
@@ -901,5 +905,6 @@ pub(crate) fn unrequested_of(
         source: destination.source()?,
         list_version: destination.list_version,
         single_use: destination.single_use,
+        amount: Some(amount.clone()),
     })
 }

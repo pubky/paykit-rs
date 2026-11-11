@@ -24,6 +24,7 @@ use crate::error::{ensure, invalid, Error, Result};
 use crate::identifiers::{AllowanceId, AttemptId, PaymentEndpointIdentifier};
 use crate::json::{bad, check_v1, parse_object, Obj};
 use crate::periods::{AnchoredRule, Unit};
+use crate::records::{Member, Shape, UnknownMembers};
 
 /// The window an executor batch is dated in: its entry's `at` and at most 60 s after
 /// (Paykit spec 8.3).
@@ -623,7 +624,59 @@ pub struct Ledger {
     pub count: u64,
     /// `totals.failed`: compacted `failed` entries.
     pub failed: Vec<CompactedFailed>,
+    /// The members the writer doesn't know, kept as read (Paykit wire 5).
+    pub unknown: UnknownMembers,
 }
+
+static ENTRY_SHAPE: Shape = Shape {
+    name: "ledger entry",
+    id: &["attempt_id"],
+    carried: false,
+    members: &[
+        ("obligation", Member::Leaf),
+        ("attempt_id", Member::Leaf),
+        ("value", Member::Leaf),
+        ("asset", Member::Leaf),
+        ("at", Member::Leaf),
+        ("outcome", Member::Leaf),
+    ],
+};
+
+static FAILED_SHAPE: Shape = Shape {
+    name: "totals.failed item",
+    id: &["attempt_id"],
+    carried: false,
+    members: &[
+        ("obligation", Member::Leaf),
+        ("attempt_id", Member::Leaf),
+        ("value", Member::Leaf),
+    ],
+};
+
+static TOTALS_SHAPE: Shape = Shape {
+    name: "totals",
+    id: &[],
+    carried: false,
+    members: &[
+        ("spent", Member::Leaf),
+        ("count", Member::Leaf),
+        ("failed", Member::Array(&FAILED_SHAPE)),
+    ],
+};
+
+/// A ledger value (Paykit wire 5.5).
+static LEDGER_SHAPE: Shape = Shape {
+    name: "allowance_ledgers",
+    id: &[],
+    carried: false,
+    members: &[
+        ("v", Member::Leaf),
+        ("counterparty", Member::Leaf),
+        ("allowance_id", Member::Leaf),
+        ("entries", Member::Array(&ENTRY_SHAPE)),
+        ("totals", Member::Object(&TOTALS_SHAPE)),
+    ],
+};
 
 const LEDGER: &str = "Paykit wire 5.5: allowance_ledgers";
 
@@ -672,6 +725,7 @@ impl Ledger {
             spent: None,
             count: 0,
             failed: Vec::new(),
+            unknown: UnknownMembers::default(),
         }
     }
 
@@ -738,6 +792,7 @@ impl Ledger {
             spent,
             count,
             failed,
+            unknown: UnknownMembers::read(map, &LEDGER_SHAPE).0,
         };
         ledger.check_attempts_once()?;
         Ok(ledger)
@@ -766,10 +821,12 @@ impl Ledger {
         Ok(())
     }
 
-    /// Write the ledger value: every entry with its `outcome` (`null` while unknown), and
+    /// Write the ledger value: every entry with its `outcome` (`null` while unknown);
     /// `totals` with `spent` `""` for a ledger never compacted, else in the normalized
-    /// spelling of a computed amount (Paykit wire 1.2), and `failed` left out when empty. The value is read back by [`Ledger::from_json`] before it is handed out, so
-    /// the writer never writes a ledger its readers refuse.
+    /// spelling of a computed amount (Paykit wire 1.2), and `failed` left out when empty;
+    /// and the members it doesn't know as it read them (Paykit wire 5). The value is read
+    /// back by [`Ledger::from_json`] before it is handed out, so the writer never writes a
+    /// ledger its readers refuse.
     ///
     /// # Errors
     ///
@@ -780,8 +837,14 @@ impl Ledger {
         let json = self.json_unchecked()?;
         let back = Self::from_json(&json).map_err(Error::into_validation)?;
         // The value, and the bytes: the wire fixes the spelling of a computed amount, which a
-        // comparison of values alone, by scaled amount, wouldn't see.
-        if &back != self || back.json_unchecked()? != json {
+        // comparison of values alone, by scaled amount, wouldn't see. The unknown members are
+        // compared as written: those of an object the ledger no longer holds, such as a
+        // compacted entry, are left out with it.
+        let known = |l: &Ledger| Ledger {
+            unknown: UnknownMembers::default(),
+            ..l.clone()
+        };
+        if known(&back) != known(self) || back.json_unchecked()? != json {
             return Err(Error::Validation(format!(
                 "{LEDGER}: the ledger doesn't write as itself"
             )));
@@ -823,7 +886,9 @@ impl Ledger {
                     .collect(),
             },
         };
-        serde_json::to_vec(&out).map_err(|_| Error::Invalid(format!("{LEDGER}: can't be written")))
+        let json = serde_json::to_vec(&out)
+            .map_err(|_| Error::Invalid(format!("{LEDGER}: can't be written")))?;
+        self.unknown.write_into(json, &LEDGER_SHAPE, &[])
     }
 
     /// "A valid ledger" against the terms (Paykit wire 5.5): the terms are valid (Paykit wire
@@ -1211,6 +1276,7 @@ pub fn compact(terms: &AllowanceTerms, ledger: &Ledger, now: u64) -> Result<Opti
         spent: Some(Decimal::from_scaled(spent)),
         count,
         failed,
+        unknown: ledger.unknown.clone(),
     }))
 }
 
@@ -1959,6 +2025,38 @@ mod tests {
         let mut back = before.clone();
         back.entries[0].outcome = Some(EntryOutcome::Failed);
         assert!(check_successor(&terms, &before, &back, now).is_err());
+    }
+
+    #[test]
+    fn test_ledger_keeps_unknown_members() {
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let held = ledger(vec![
+            entry(
+                1,
+                "0.01",
+                "2026-01-05T00:00:00.000Z",
+                Some(EntryOutcome::Done),
+            ),
+            entry(2, "0.01", "2026-03-05T00:00:00.000Z", None),
+        ]);
+        let mut value: Value = serde_json::from_slice(&held.to_json().unwrap()).unwrap();
+        value["note"] = json!({ "by": "a later version" });
+        value["totals"]["carried"] = json!("0.03");
+        value["entries"][0]["rail"] = json!("lightning");
+        value["entries"][1]["rail"] = json!("on-chain");
+        let read = Ledger::from_map(value.as_object().unwrap()).unwrap();
+        assert!(!read.unknown.is_empty());
+        let out: Value = serde_json::from_slice(&read.to_json().unwrap()).unwrap();
+        assert_eq!(out, value);
+        // Compaction drops the first entry and its members; the others stay.
+        let now = t("2026-03-10T00:00:00.000Z");
+        let compacted = compact(&terms, &read, now).unwrap().unwrap();
+        let out: Value = serde_json::from_slice(&compacted.to_json().unwrap()).unwrap();
+        assert_eq!(out["note"], value["note"]);
+        assert_eq!(out["totals"]["carried"], "0.03");
+        assert_eq!(out["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(out["entries"][0]["rail"], "on-chain");
+        assert!(!out.to_string().contains("lightning"));
     }
 
     #[test]

@@ -63,6 +63,9 @@ pub struct ExecutorGrant {
     pub cert: SignedDoc,
     /// The signature.
     pub sig: [u8; 64],
+    /// Where it was read, for the members its writer doesn't know (Paykit wire 5); none for
+    /// a grant signed or built in code.
+    pub origin: crate::records::Origin,
 }
 
 impl ExecutorGrant {
@@ -97,6 +100,7 @@ impl ExecutorGrant {
             confirmed_generation,
             cert,
             sig: app.sign(EXECUTOR_GRANT_LABEL, &refs),
+            origin: crate::records::Origin::default(),
         }
     }
 
@@ -117,6 +121,7 @@ impl ExecutorGrant {
                 sig: cert.req_str("sig")?.to_owned(),
             },
             sig: obj.req_b64::<64>("sig")?,
+            origin: crate::records::Origin::default(),
         })
     }
 

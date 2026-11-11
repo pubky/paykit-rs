@@ -46,6 +46,11 @@ pub const PAYKIT_SCOPE_NAMES: [&str; 7] = [
 /// read and write, only when the user allows that app to edit the Paykit Profile.
 pub const PAYKIT_PROFILE_PATH: &str = "/pub/paykit/profile.json";
 
+/// The folder of the Paykit Profile's files on the Homeserver, such as an image its
+/// `image_uri` names, as in v0.1 (Paykit spec 3.4): an app's grant covers it, read and write,
+/// with the Paykit Profile.
+pub const PAYKIT_PROFILE_BLOBS_PATH: &str = "/pub/paykit/blobs/";
+
 /// A label of a labelled selling scope `request:<label>` (Paykit spec 3.1): 1 to 32
 /// characters of `a-z`, `0-9` and `-`, starting with a letter or digit, the syntax of the
 /// Switch's sub-scope. `paykit` is a label like any other.
@@ -151,7 +156,8 @@ pub enum PaykitScope {
     RequestLabel(Label),
     /// `allowance`: Allowance messages and records.
     Allowance,
-    /// `allowance_execute`: act as an Allowance executor; requires `allowance` and `pay`.
+    /// `allowance_execute`: act as an Allowance executor; requires `allowance`, `pay` and
+    /// `contacts`, so the executor reads the deny list.
     AllowanceExecute,
     /// `contacts`: read the contacts, conversation entries and deny list.
     Contacts,
@@ -274,8 +280,8 @@ pub fn holds_other_protocol(scopes: &[String]) -> bool {
 ///
 /// Paykit refuses a malformed `ext:` or `request:` name (such as `ext:paykit`), more than 8
 /// extension scopes, more than 8 labelled selling scopes, and a scope without the scopes it
-/// requires: `allowance_execute` without `allowance` and `pay`, `manage_contacts` without
-/// `contacts`. Its bounds count only its own scopes, whatever another protocol's scopes
+/// requires: `allowance_execute` without `allowance`, `pay` and `contacts`, `manage_contacts`
+/// without `contacts`. Its bounds count only its own scopes, whatever another protocol's scopes
 /// beside them (Switch wire 3.1 "Several protocols"). It ignores other names it doesn't
 /// know.
 ///
@@ -302,8 +308,10 @@ pub fn check_scopes(scopes: &[String]) -> Result<()> {
         return invalid("Paykit wire 3.1: more than 8 labelled selling scopes");
     }
     let has = |s: &str| scopes.iter().any(|x| x == s);
-    if has("allowance_execute") && !(has("allowance") && has("pay")) {
-        return invalid("Paykit spec 3.1: allowance_execute requires allowance and pay");
+    // Paykit spec 3.1: every executor reads the deny list, so it pauses automatic payment
+    // to a counterparty on it (Paykit spec 8.1).
+    if has("allowance_execute") && !(has("allowance") && has("pay") && has("contacts")) {
+        return invalid("Paykit spec 3.1: allowance_execute requires allowance, pay and contacts");
     }
     if has("manage_contacts") && !has("contacts") {
         return invalid("Paykit spec 3.1: manage_contacts requires contacts");
@@ -515,7 +523,13 @@ mod tests {
     #[test]
     fn test_scopes_accept_valid_certificates() {
         check_scopes(&owned(&["pay", "contacts", "manage_contacts"])).unwrap();
-        check_scopes(&owned(&["pay", "allowance", "allowance_execute"])).unwrap();
+        check_scopes(&owned(&[
+            "pay",
+            "allowance",
+            "allowance_execute",
+            "contacts",
+        ]))
+        .unwrap();
         let labels: Vec<String> = (1..=8).map(|i| format!("request:shop{i}")).collect();
         check_scopes(&labels).unwrap();
         let exts: Vec<String> = (1..=8).map(|i| format!("ext:e-{i}")).collect();
@@ -534,8 +548,16 @@ mod tests {
             (labels, "more than 8 labelled"),
             (exts, "more than 8 extension"),
             (
-                owned(&["allowance_execute", "pay"]),
-                "requires allowance and pay",
+                owned(&["allowance_execute", "pay", "contacts"]),
+                "requires allowance, pay and contacts",
+            ),
+            (
+                owned(&["allowance_execute", "allowance", "contacts"]),
+                "requires allowance, pay and contacts",
+            ),
+            (
+                owned(&["allowance_execute", "allowance", "pay"]),
+                "requires allowance, pay and contacts",
             ),
             (owned(&["manage_contacts"]), "requires contacts"),
         ] {
@@ -682,7 +704,11 @@ mod tests {
             (vec!["ext:cap", "chat"], "malformed"),
             (
                 vec!["allowance_execute", "allowance", "chat"],
-                "requires allowance and pay",
+                "requires allowance, pay and contacts",
+            ),
+            (
+                vec!["allowance_execute", "allowance", "pay", "chat"],
+                "requires allowance, pay and contacts",
             ),
             (vec!["manage_contacts", "chat"], "requires contacts"),
         ] {

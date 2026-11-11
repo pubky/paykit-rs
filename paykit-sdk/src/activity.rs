@@ -152,24 +152,7 @@ pub(crate) fn family(collection: Collection) -> SwitchCollection {
 
 /// An empty activity record of `side` with `counterparty`.
 pub(crate) fn empty(side: ActivitySide, counterparty: [u8; 32]) -> ActivityRecord {
-    ActivityRecord {
-        side,
-        counterparty,
-        request: None,
-        response: None,
-        cancellation: None,
-        proof: None,
-        receipt: None,
-        period_details: None,
-        request_hash: None,
-        billing_period: None,
-        attempt_id: None,
-        unrequested: None,
-        msg_ids: Vec::new(),
-        status: None,
-        allowance_id: None,
-        attempted_periods: Vec::new(),
-    }
+    ActivityRecord::new(side, counterparty)
 }
 
 fn stored_ids(record: &ActivityRecord) -> Vec<String> {

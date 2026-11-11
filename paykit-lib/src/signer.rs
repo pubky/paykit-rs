@@ -29,7 +29,7 @@ use pubky_switch_signer::{GrantPath, Protocol, ScopeDef};
 
 use crate::scopes::{
     check_requested_scopes, holds_paykit_scope, permissions_for, PAYKIT_PREFIX,
-    PAYKIT_PROFILE_PATH, PAYKIT_SCOPE_NAMES,
+    PAYKIT_PROFILE_BLOBS_PATH, PAYKIT_PROFILE_PATH, PAYKIT_SCOPE_NAMES,
 };
 
 /// Paykit's protocol on the Switch, for the signer's `Protocols` set.
@@ -42,6 +42,9 @@ const UNKEYED_ROOT: &str = "ext";
 
 /// What the host shows the user for the Paykit Profile's grant path.
 const PROFILE_PURPOSE: &str = "Edit the Paykit Profile, the identity's public payment profile";
+
+/// What the host shows the user for the grant path of the Paykit Profile's files.
+const BLOBS_PURPOSE: &str = "Store the Paykit Profile's files, such as its image";
 
 fn owned(scopes: &[&str]) -> Vec<String> {
     scopes.iter().map(|s| (*s).to_owned()).collect()
@@ -89,18 +92,24 @@ impl Protocol for PaykitProtocol {
         permissions_for(&owned(scopes))
     }
 
-    /// The Paykit Profile, `/pub/paykit/profile.json`, offered to every app holding a Paykit
-    /// scope: the user allows it or not at approval, and only an app the user allows edits it
-    /// (Paykit spec 3.4).
+    /// The Paykit Profile, `/pub/paykit/profile.json`, and its files, `/pub/paykit/blobs/`,
+    /// offered to every app holding a Paykit scope: the user allows them or not at approval,
+    /// and only an app the user allows edits them (Paykit spec 3.4).
     fn grant_paths(&self, app_id: &[u8; 16], scopes: &[&str]) -> Vec<GrantPath> {
         let _ = app_id;
         if !holds_paykit_scope(&owned(scopes)) {
             return Vec::new();
         }
-        vec![GrantPath {
-            path: PAYKIT_PROFILE_PATH.to_owned(),
-            purpose: PROFILE_PURPOSE.to_owned(),
-        }]
+        vec![
+            GrantPath {
+                path: PAYKIT_PROFILE_PATH.to_owned(),
+                purpose: PROFILE_PURPOSE.to_owned(),
+            },
+            GrantPath {
+                path: PAYKIT_PROFILE_BLOBS_PATH.to_owned(),
+                purpose: BLOBS_PURPOSE.to_owned(),
+            },
+        ]
     }
 }
 
@@ -218,7 +227,7 @@ mod tests {
         let protocols = paykit();
         for scopes in [
             &["pay", "request", "contacts", "manage_contacts"][..],
-            &["pay", "allowance", "allowance_execute"],
+            &["pay", "allowance", "allowance_execute", "contacts"],
             &["request:shop1", "request:shop2"],
             &["contacts"],
             &["ext:paykit-cap", "request"],
@@ -252,6 +261,7 @@ mod tests {
         for scopes in [
             names(&["allowance_execute", "allowance"]),
             names(&["allowance_execute", "pay"]),
+            names(&["allowance_execute", "allowance", "pay"]),
             names(&["manage_contacts"]),
             names(&["ext:cap"]),
             names(&["ext:paykit"]),
@@ -291,13 +301,14 @@ mod tests {
     }
 
     #[test]
-    fn test_signer_protocol_offers_the_paykit_profile() {
+    fn test_signer_protocol_offers_the_paykit_profile_and_its_files() {
         let protocols = Protocols::new(vec![Arc::new(PaykitProtocol), Arc::new(Chat)]).unwrap();
         let paths = protocols
             .grant_paths(&[3; 16], &names(&["request:shop1", "chat"]))
             .unwrap();
-        assert_eq!(paths.len(), 1);
+        assert_eq!(paths.len(), 2);
         assert_eq!(paths[0].path, "/pub/paykit/profile.json");
+        assert_eq!(paths[1].path, "/pub/paykit/blobs/");
         assert!(protocols
             .grant_paths(&[3; 16], &names(&["chat"]))
             .unwrap()

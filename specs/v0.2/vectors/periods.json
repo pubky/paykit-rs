@@ -1040,9 +1040,22 @@
       {
         "rates_apply": true,
         "verified_payment_time": "2026-03-01T00:00:00Z"
+      },
+      {
+        "rates_apply": true,
+        "verified_payment_time": "2026-02-28T00:00:00.000Z"
+      },
+      {
+        "rates_apply": false,
+        "verified_payment_time": "2026-02-27T23:59:59.999Z"
+      },
+      {
+        "rates_apply": false,
+        "verified_payment_time": "2026-02-27T23:59:59.9999Z"
       }
     ],
-    "description": "The rates of period details apply to a payment whose independently verified payment time, from the payment method's evidence, is at or before expires_at, both read at millisecond precision with further digits truncated (Switch wire 1.6, wire 4.9; spec 8.2). An evidence time in whole seconds reads as .000. The payee credits a payment at the rates only then; the payer pays by them only while its device clock and its highest verified service time are both before expires_at.",
+    "created_at": "2026-02-28T00:00:00.999Z",
+    "description": "The rates of period details apply to a payment whose independently verified payment time, from the payment method's evidence, is at or after their start, the details' created_at cut to whole seconds (v0.1's valid_from), and at or before expires_at, all read at millisecond precision with further digits truncated (Switch wire 1.6, wire 4.9; spec 8.2). An evidence time in whole seconds reads as .000. The payee credits a payment at the rates only then; the payer pays by them only while its device clock and its highest verified service time are both at or after their start and before expires_at.",
     "expires_at": "2026-03-01T00:00:00.500Z"
   }
 }

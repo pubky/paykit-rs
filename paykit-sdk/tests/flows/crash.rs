@@ -235,6 +235,8 @@ async fn crash_receiving_a_receipt(fault: Fault) -> bool {
     let body = PaymentReceipt {
         attempt_id,
         billing_period: None,
+        metadata: None,
+        payment_reference: None,
     }
     .to_body(2)
     .unwrap();

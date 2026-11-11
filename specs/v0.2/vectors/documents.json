@@ -600,12 +600,82 @@
     ],
     "description": "Wire 3.1: certificates whose permissions are well formed but aren't exactly the list Paykit's table derives from their scopes (paykit_permissions). Each is the wallet certificate of the Switch set's documents.json with scopes and permissions changed, signed by alice's identity key; the signatures verify. The switch takes them and enforces exactly that list (switch_accepts), while Paykit's verifiers, apps and payers, refuse them. The lists that aren't well formed, which every verifier refuses, are the Switch set's permission_rejections. reason is the prototype's wording at a Paykit verifier."
   },
-  "description": "Paykit's signed documents and Paykit's checks of the Switch's certificates and app records (wire 3): the executor grant, alone and as the Allowance record's grant history holds it, certificates that Paykit's verifiers refuse for their scopes or their permissions, certificates that hold another protocol's scopes beside Paykit's or instead of them, and app records as a Paykit reader reads their Paykit member. The certificates are the Switch set's documents.json certificates with scopes or permissions changed, and the app records its shop app record with its Paykit member changed.",
+  "description": "Paykit's signed documents and Paykit's checks of the Switch's certificates and app records (wire 3): the executor grant, alone and as the Allowance record's grant history holds it, with Paykit's own executor certificate, and the Switch set's, which Paykit's verifiers refuse; certificates that Paykit's verifiers refuse for their scopes or their permissions, certificates that hold another protocol's scopes beside Paykit's or instead of them, and app records as a Paykit reader reads their Paykit member. The certificates are the Switch set's documents.json certificates with scopes or permissions changed, and the app records its shop app record with its Paykit member changed.",
+  "executor_certificates": {
+    "accepted": [
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app_cert\",\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"cw5ahtdkixcafna9zh1y5y5o1w\",\"signing_key\":\"XnAJx2W5wcu3tEWuCMCvImc3bRFSxWP1-8lnRCsrzcY\",\"bundle_key\":\"cwXC5XttVtZcL2cgWbUuNxTMcu4nrFsJyzF1xs0_bwo\",\"scopes\":[\"pay\",\"allowance\",\"allowance_execute\",\"contacts\"],\"permissions\":[\"claims.read\",\"claims.write\",\"lists.read\",\"conversation.add\"],\"issued_at\":\"2025-12-01T00:00:00.000Z\",\"expires_at\":\"2026-12-01T00:00:00.000Z\"}",
+        "name": "Paykit's executor certificate, with contacts",
+        "paykit_permissions": [
+          "claims.read",
+          "claims.write",
+          "lists.read",
+          "conversation.add"
+        ],
+        "paykit_scopes": [
+          "pay",
+          "allowance",
+          "allowance_execute",
+          "contacts"
+        ],
+        "permissions": [
+          "claims.read",
+          "claims.write",
+          "lists.read",
+          "conversation.add"
+        ],
+        "scopes": [
+          "pay",
+          "allowance",
+          "allowance_execute",
+          "contacts"
+        ],
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoiY3c1YWh0ZGtpeGNhZm5hOXpoMXk1eTVvMXciLCJzaWduaW5nX2tleSI6IlhuQUp4Mlc1d2N1M3RFV3VDTUN2SW1jM2JSRlN4V1AxLThsblJDc3J6Y1kiLCJidW5kbGVfa2V5IjoiY3dYQzVYdHRWdFpjTDJjZ1diVXVOeFRNY3U0bnJGc0p5ekYxeHMwX2J3byIsInNjb3BlcyI6WyJwYXkiLCJhbGxvd2FuY2UiLCJhbGxvd2FuY2VfZXhlY3V0ZSIsImNvbnRhY3RzIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY2xhaW1zLndyaXRlIiwibGlzdHMucmVhZCIsImNvbnZlcnNhdGlvbi5hZGQiXSwiaXNzdWVkX2F0IjoiMjAyNS0xMi0wMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMTItMDFUMDA6MDA6MDAuMDAwWiJ9",
+          "sig": "wX8NrG-Xn5tfiN4Nhe9iON15nc3rgBO60ysBJnuvWGmT0WgAUaOXHKRiaMvqT0FArsXOJXWFeiVxni5Jq6ynAw"
+        },
+        "switch_accepts": true
+      }
+    ],
+    "description": "Spec 3.1, wire 3.1 and 3.3: the executor's certificate. allowance_execute requires allowance, pay and contacts, so that every executor reads the deny list. accepted is Paykit's own executor certificate, which the executor grant of this file carries: the Switch set's documents.json executor certificate with contacts added to its scopes and the permissions its scopes need, signed again by alice's identity key. refused is the Switch set's executor certificate as it is, which holds allowance_execute without contacts: the switch takes it (switch_accepts), and Paykit's verifiers refuse it. reason is paykit-lib's wording at a Paykit verifier.",
+    "refused": [
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app_cert\",\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"cw5ahtdkixcafna9zh1y5y5o1w\",\"signing_key\":\"XnAJx2W5wcu3tEWuCMCvImc3bRFSxWP1-8lnRCsrzcY\",\"bundle_key\":\"cwXC5XttVtZcL2cgWbUuNxTMcu4nrFsJyzF1xs0_bwo\",\"scopes\":[\"pay\",\"allowance\",\"allowance_execute\"],\"permissions\":[\"claims.read\",\"claims.write\",\"conversation.add\"],\"issued_at\":\"2025-12-01T00:00:00.000Z\",\"expires_at\":\"2026-12-01T00:00:00.000Z\"}",
+        "name": "allowance_execute without contacts",
+        "paykit_permissions": [
+          "claims.read",
+          "claims.write",
+          "conversation.add"
+        ],
+        "paykit_scopes": [
+          "pay",
+          "allowance",
+          "allowance_execute"
+        ],
+        "permissions": [
+          "claims.read",
+          "claims.write",
+          "conversation.add"
+        ],
+        "reason": "invalid: allowance_execute requires allowance, pay and contacts",
+        "scopes": [
+          "pay",
+          "allowance",
+          "allowance_execute"
+        ],
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoiY3c1YWh0ZGtpeGNhZm5hOXpoMXk1eTVvMXciLCJzaWduaW5nX2tleSI6IlhuQUp4Mlc1d2N1M3RFV3VDTUN2SW1jM2JSRlN4V1AxLThsblJDc3J6Y1kiLCJidW5kbGVfa2V5IjoiY3dYQzVYdHRWdFpjTDJjZ1diVXVOeFRNY3U0bnJGc0p5ekYxeHMwX2J3byIsInNjb3BlcyI6WyJwYXkiLCJhbGxvd2FuY2UiLCJhbGxvd2FuY2VfZXhlY3V0ZSJdLCJwZXJtaXNzaW9ucyI6WyJjbGFpbXMucmVhZCIsImNsYWltcy53cml0ZSIsImNvbnZlcnNhdGlvbi5hZGQiXSwiaXNzdWVkX2F0IjoiMjAyNS0xMi0wMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMTItMDFUMDA6MDA6MDAuMDAwWiJ9",
+          "sig": "NME2u7XfjKa1BildhigSTz3Yoq1YHgteEWWPSbVxva9DLho8TrNB9hy6b-2fQyArPR1IXlCzL9-jE1xHqcYDBQ"
+        },
+        "switch_accepts": true
+      }
+    ]
+  },
   "executor_grant": {
     "app_id": "cw5ahtdkixcafna9zh1y5y5o1w",
     "cert": {
-      "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoiY3c1YWh0ZGtpeGNhZm5hOXpoMXk1eTVvMXciLCJzaWduaW5nX2tleSI6IlhuQUp4Mlc1d2N1M3RFV3VDTUN2SW1jM2JSRlN4V1AxLThsblJDc3J6Y1kiLCJidW5kbGVfa2V5IjoiY3dYQzVYdHRWdFpjTDJjZ1diVXVOeFRNY3U0bnJGc0p5ekYxeHMwX2J3byIsInNjb3BlcyI6WyJwYXkiLCJhbGxvd2FuY2UiLCJhbGxvd2FuY2VfZXhlY3V0ZSJdLCJwZXJtaXNzaW9ucyI6WyJjbGFpbXMucmVhZCIsImNsYWltcy53cml0ZSIsImNvbnZlcnNhdGlvbi5hZGQiXSwiaXNzdWVkX2F0IjoiMjAyNS0xMi0wMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMTItMDFUMDA6MDA6MDAuMDAwWiJ9",
-      "sig": "NME2u7XfjKa1BildhigSTz3Yoq1YHgteEWWPSbVxva9DLho8TrNB9hy6b-2fQyArPR1IXlCzL9-jE1xHqcYDBQ"
+      "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoiY3c1YWh0ZGtpeGNhZm5hOXpoMXk1eTVvMXciLCJzaWduaW5nX2tleSI6IlhuQUp4Mlc1d2N1M3RFV3VDTUN2SW1jM2JSRlN4V1AxLThsblJDc3J6Y1kiLCJidW5kbGVfa2V5IjoiY3dYQzVYdHRWdFpjTDJjZ1diVXVOeFRNY3U0bnJGc0p5ekYxeHMwX2J3byIsInNjb3BlcyI6WyJwYXkiLCJhbGxvd2FuY2UiLCJhbGxvd2FuY2VfZXhlY3V0ZSIsImNvbnRhY3RzIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY2xhaW1zLndyaXRlIiwibGlzdHMucmVhZCIsImNvbnZlcnNhdGlvbi5hZGQiXSwiaXNzdWVkX2F0IjoiMjAyNS0xMi0wMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMTItMDFUMDA6MDA6MDAuMDAwWiJ9",
+      "sig": "wX8NrG-Xn5tfiN4Nhe9iON15nc3rgBO60ysBJnuvWGmT0WgAUaOXHKRiaMvqT0FArsXOJXWFeiVxni5Jq6ynAw"
     },
     "confirmed_generation": 1,
     "sig": "TwAuCSVx5eKgCkbbyAxeqddsr0xSL5QebVA794GsLihQO5VxA0O_qUCAk30KFH2TNuVgcWqpORJMNWNEaaLGDw",
@@ -617,8 +687,8 @@
     "grant": {
       "app_id": "cw5ahtdkixcafna9zh1y5y5o1w",
       "cert": {
-        "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoiY3c1YWh0ZGtpeGNhZm5hOXpoMXk1eTVvMXciLCJzaWduaW5nX2tleSI6IlhuQUp4Mlc1d2N1M3RFV3VDTUN2SW1jM2JSRlN4V1AxLThsblJDc3J6Y1kiLCJidW5kbGVfa2V5IjoiY3dYQzVYdHRWdFpjTDJjZ1diVXVOeFRNY3U0bnJGc0p5ekYxeHMwX2J3byIsInNjb3BlcyI6WyJwYXkiLCJhbGxvd2FuY2UiLCJhbGxvd2FuY2VfZXhlY3V0ZSJdLCJwZXJtaXNzaW9ucyI6WyJjbGFpbXMucmVhZCIsImNsYWltcy53cml0ZSIsImNvbnZlcnNhdGlvbi5hZGQiXSwiaXNzdWVkX2F0IjoiMjAyNS0xMi0wMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMTItMDFUMDA6MDA6MDAuMDAwWiJ9",
-        "sig": "NME2u7XfjKa1BildhigSTz3Yoq1YHgteEWWPSbVxva9DLho8TrNB9hy6b-2fQyArPR1IXlCzL9-jE1xHqcYDBQ"
+        "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoiY3c1YWh0ZGtpeGNhZm5hOXpoMXk1eTVvMXciLCJzaWduaW5nX2tleSI6IlhuQUp4Mlc1d2N1M3RFV3VDTUN2SW1jM2JSRlN4V1AxLThsblJDc3J6Y1kiLCJidW5kbGVfa2V5IjoiY3dYQzVYdHRWdFpjTDJjZ1diVXVOeFRNY3U0bnJGc0p5ekYxeHMwX2J3byIsInNjb3BlcyI6WyJwYXkiLCJhbGxvd2FuY2UiLCJhbGxvd2FuY2VfZXhlY3V0ZSIsImNvbnRhY3RzIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY2xhaW1zLndyaXRlIiwibGlzdHMucmVhZCIsImNvbnZlcnNhdGlvbi5hZGQiXSwiaXNzdWVkX2F0IjoiMjAyNS0xMi0wMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMTItMDFUMDA6MDA6MDAuMDAwWiJ9",
+        "sig": "wX8NrG-Xn5tfiN4Nhe9iON15nc3rgBO60ysBJnuvWGmT0WgAUaOXHKRiaMvqT0FArsXOJXWFeiVxni5Jq6ynAw"
       },
       "confirmed_generation": 1,
       "sig": "TwAuCSVx5eKgCkbbyAxeqddsr0xSL5QebVA794GsLihQO5VxA0O_qUCAk30KFH2TNuVgcWqpORJMNWNEaaLGDw",

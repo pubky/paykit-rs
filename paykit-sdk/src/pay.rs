@@ -808,7 +808,10 @@ impl Paykit {
         let natural = natural_key::payer_payment_record(&own, &attempt_id);
         let mut record = activity::empty(ActivitySide::Payer, payment.payee);
         record.attempt_id = Some(attempt_id);
-        record.unrequested = Some(crate::receive::unrequested_of(&destination)?);
+        record.unrequested = Some(crate::receive::unrequested_of(
+            &destination,
+            &payment.amount,
+        )?);
         record.status = Some("paying".into());
         let entry = JournalEntry {
             attempt_id: attempt_id.to_text(),
@@ -1586,6 +1589,7 @@ impl Paykit {
                     .ok_or_else(PaykitError::corrupt)?,
                 endpoint: entry.destination.endpoint_id()?,
                 attempt_id,
+                origin: paykit_lib::records::Origin::default(),
             });
             let value = list.to_json()?;
             batch = batch.entry(
@@ -2419,7 +2423,10 @@ impl Paykit {
             }
             None => {
                 record.attempt_id = Some(entry.attempt()?);
-                record.unrequested = Some(crate::receive::unrequested_of(&entry.destination)?);
+                record.unrequested = Some(crate::receive::unrequested_of(
+                    &entry.destination,
+                    &entry.amount.amount()?,
+                )?);
                 record.status = Some("paying".into());
             }
         }

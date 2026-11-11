@@ -2,8 +2,8 @@
 //! switch permissions `paykit-lib` derives for them, which the signer signs.
 //!
 //! A certificate lists every scope explicitly, including those another requires: asking for
-//! `allowance_execute` also asks for `allowance` and `pay`, and `manage_contacts` for
-//! `contacts`. A certificate holds `request` or labelled selling scopes, never both.
+//! `allowance_execute` also asks for `allowance`, `pay` and `contacts`, and `manage_contacts`
+//! for `contacts`. A certificate holds `request` or labelled selling scopes, never both.
 
 use paykit_lib::scopes::{check_requested_scopes, permissions_for, ExtensionPrefix};
 use paykit_lib::Label;
@@ -76,10 +76,14 @@ impl AppScopes {
         self.with("allowance")
     }
 
-    /// `allowance_execute`, with the `allowance` and `pay` it requires.
+    /// `allowance_execute`, with the `allowance`, `pay` and `contacts` it requires: every
+    /// executor reads the deny list (Paykit spec 3.1).
     #[must_use]
     pub fn allowance_execute(self) -> Self {
-        self.with("allowance").with("pay").with("allowance_execute")
+        self.with("allowance")
+            .with("pay")
+            .with("contacts")
+            .with("allowance_execute")
     }
 
     /// `contacts`: read the contacts.
@@ -139,6 +143,8 @@ mod tests {
         let executor = AppScopes::new().allowance_execute().build().unwrap();
         assert!(executor.scopes.contains(&"pay".to_owned()));
         assert!(executor.scopes.contains(&"allowance".to_owned()));
+        assert!(executor.scopes.contains(&"contacts".to_owned()));
+        assert!(executor.permissions.contains(&Permission::ListsRead));
         let contacts = AppScopes::new().manage_contacts().build().unwrap();
         assert_eq!(contacts.scopes, vec!["contacts", "manage_contacts"]);
     }
