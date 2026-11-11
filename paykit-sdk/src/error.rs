@@ -107,6 +107,11 @@ pub enum Refusal {
     /// A value the caller gave breaks a rule: the text names it.
     #[error("usage: {0}")]
     Usage(String),
+    /// `done` waits for the payer's activity record, which it never goes without (Paykit
+    /// spec 7.2 step 3): the record holds a value that doesn't read, with no copy this app
+    /// trusts, or is gone with nothing to rebuild it from. Nothing was written.
+    #[error("the payer's activity record can't be updated now: {0}")]
+    RecordHeld(String),
 }
 
 /// A failure of the SDK.

@@ -1247,7 +1247,7 @@ impl Paykit {
     /// `done` never goes without the record's update: an absent or deleted record is
     /// rebuilt from the journal ([`Paykit::outcome_record`]), and one whose value doesn't
     /// read holds the outcome ([`Written::Held`]) unless `overwrite`, the user's repair.
-    async fn write_outcome(
+    pub(crate) async fn write_outcome(
         &mut self,
         entry: &mut JournalEntry,
         paid: bool,
@@ -1406,12 +1406,7 @@ impl Paykit {
                 None => return Ok(OutcomeRecord::Held),
             },
         };
-        if let Some(bytes) = &entry.acceptance_plaintext {
-            let plaintext = MessagePlaintext::decode(bytes).map_err(|_| PaykitError::corrupt())?;
-            let stored =
-                StoredMessage::new(own, self.app.cert().signed(), plaintext, None, &entry.payee)?;
-            changed |= activity::place(&mut record, Role::Response, stored);
-        }
+        changed |= self.place_acceptance(&mut record, entry)?;
         if let Some(proof) = proof {
             changed |= activity::place(&mut record, Role::Proof, self.own_copy(proof)?);
         }
@@ -1434,7 +1429,24 @@ impl Paykit {
     /// its acceptance and proof, which the outcome places: the request kept with the entry,
     /// or a payment without a request's own members (Paykit wire 5.3). `None` when the entry
     /// keeps no request it can be rebuilt from.
-    fn rebuilt_record(&self, entry: &JournalEntry) -> Result<Option<ActivityRecord>> {
+    /// Place the acceptance `entry` journaled, sent with its payment, in `record`'s
+    /// response role (Paykit spec 7.2 step 3). Whether the record changed.
+    pub(crate) fn place_acceptance(
+        &self,
+        record: &mut ActivityRecord,
+        entry: &JournalEntry,
+    ) -> Result<bool> {
+        let Some(bytes) = &entry.acceptance_plaintext else {
+            return Ok(false);
+        };
+        let own = self.identity();
+        let plaintext = MessagePlaintext::decode(bytes).map_err(|_| PaykitError::corrupt())?;
+        let stored =
+            StoredMessage::new(own, self.app.cert().signed(), plaintext, None, &entry.payee)?;
+        Ok(activity::place(record, Role::Response, stored))
+    }
+
+    pub(crate) fn rebuilt_record(&self, entry: &JournalEntry) -> Result<Option<ActivityRecord>> {
         let own = self.identity();
         let mut record = activity::empty(ActivitySide::Payer, entry.payee);
         match entry.request_hash()? {

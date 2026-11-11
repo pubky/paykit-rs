@@ -21,13 +21,17 @@ use paykit_lib::collections::Collection;
 use paykit_lib::derive::{natural_key, payment_obligation};
 use paykit_lib::records::{ActivityRecord, ActivitySide, DestinationSource, RecordBinding};
 use paykit_lib::{AttemptId, Body};
-use pubky_switch_client::app::{ClaimOp, ObligationDeadline, OpBatch, UserConfirmed};
+use pubky_switch_client::app::{
+    ClaimOp, ObligationDeadline, OpBatch, RecordContent, UserConfirmed,
+};
 use pubky_switch_core::claims::{Basis, Outcome};
+use pubky_switch_core::ops::{Condition, OpKind};
 
+use crate::activity::{self, ActivityTarget};
 use crate::destination::Carrier;
 use crate::error::{Refusal, Result};
 use crate::journal::{Destination, JournalEntry, KeptAmount, Stage};
-use crate::pay::{own_deadline, PayOutcome};
+use crate::pay::{own_deadline, PayOutcome, Written};
 use crate::paykit::Paykit;
 use crate::rail::RailOutcome;
 use crate::records::KeptMessage;
@@ -367,10 +371,23 @@ impl Paykit {
     /// and 5). The user has seen "may already be paid". The attempt's journal entry, if this
     /// app holds one, is finished in the same batch.
     ///
+    /// `done`, whatever its basis, never goes without the payer's activity record's update in
+    /// its batch (Paykit spec 7.2 step 3), as at a payment's outcome:
+    ///
+    /// - an own attempt the method reported paid (`RailPaid`) is written as its outcome is,
+    ///   with the acceptance and the proof placed and the proof queued;
+    /// - otherwise the record gets the journaled acceptance, if any, and `status` `paid`,
+    ///   built on the version held; an absent or deleted record is rebuilt from the journal
+    ///   entry, and one that doesn't read, with no copy this app trusts, holds;
+    /// - a record this app can't find or rebuild holds too ([`Refusal::RecordHeld`]).
+    ///
+    /// `unknown` and `failed` move no money toward the payee and need no record update.
+    ///
     /// # Errors
     ///
-    /// [`Refusal::NotFound`] for a claim without the attempt; the switch's refusal, such as
-    /// `409 conflict`, for a resolution its rows don't allow now.
+    /// [`Refusal::NotFound`] for a claim without the attempt; [`Refusal::RecordHeld`] for a
+    /// `done` whose record can't be updated, with nothing written; the switch's refusal, such
+    /// as `409 conflict`, for a resolution its rows don't allow now.
     pub async fn resolve_attempt(
         &mut self,
         obligation: &[u8; 32],
@@ -402,18 +419,105 @@ impl Paykit {
         // resumed, and never dispatched again (Paykit spec 7.2, "No second execution").
         let journal_key = key::journal(&attempt);
         let entry = self.local_get::<JournalEntry>(&journal_key).await?;
+        if let Some(entry) = &entry {
+            self.check_entry(entry)?;
+        }
+        if resolution == Resolution::Done {
+            // An own payment the method reported paid: its outcome, with the proof.
+            if let Some(mut paid) = entry
+                .clone()
+                .filter(|e| basis == Basis::Owner && e.stage == Stage::RailPaid)
+            {
+                return match self.write_outcome(&mut paid, true, false).await? {
+                    Written::Done => Ok(()),
+                    Written::Held => Err(Refusal::RecordHeld(
+                        "the record holds a value that doesn't read".into(),
+                    )
+                    .into()),
+                };
+            }
+        }
         let deadline = entry
             .as_ref()
             .map_or(ObligationDeadline::NotKnown, |e| own_deadline(e.deadline));
         let mut batch = OpBatch::new()
             .op(op.kind())
             .obligation_deadline(*obligation, deadline);
+        if resolution == Resolution::Done {
+            let write = self
+                .done_record(obligation, &attempt, entry.as_ref())
+                .await?;
+            batch = batch.entry(write);
+        }
         if let Some(mut entry) = entry.filter(JournalEntry::open) {
             entry.stage = Stage::Finished;
             batch = batch.local(state::local_put(&journal_key, &entry)?);
         }
         self.app.submit_batch(batch).await?;
         Ok(())
+    }
+
+    /// The payer's activity record's update for a user's `done` without a proof (Paykit spec
+    /// 7.2 step 3, as [`Paykit::resolve_attempt`] says): the record of `obligation`, from the
+    /// journal entry, the attempt of a payment without a request, or the request records this
+    /// app holds; with the journaled acceptance placed and `status` `paid`, built on the
+    /// version held, so `done` and the update are applied together or not at all. An absent
+    /// or deleted record is rebuilt from `entry`; one that doesn't read, with no copy this app
+    /// trusts, or one that can't be found or rebuilt, holds.
+    async fn done_record(
+        &mut self,
+        obligation: &[u8; 32],
+        attempt: &AttemptId,
+        entry: Option<&JournalEntry>,
+    ) -> Result<(Vec<Condition>, OpKind)> {
+        let own = self.identity();
+        let held =
+            |why: &str| -> crate::error::PaykitError { Refusal::RecordHeld(why.into()).into() };
+        let natural = match entry {
+            Some(entry) => Some(entry.natural_key.clone()),
+            None if *obligation == payment_obligation(attempt) => {
+                Some(natural_key::payer_payment_record(&own, attempt))
+            }
+            None => {
+                let records = self.payer_records().await?;
+                self.obligations(&records)
+                    .into_iter()
+                    .find(|o| o.claim_key == *obligation)
+                    .and_then(|o| {
+                        o.request_hash
+                            .map(|h| natural_key::request_record(&o.payee, &h))
+                    })
+            }
+        };
+        let Some(natural) = natural else {
+            return Err(held("no payer record names the obligation"));
+        };
+        let target = ActivityTarget::payer(natural);
+        let key = self.activity_key(&target)?;
+        let current = self.app.shared_record(&key).await?;
+        let read = match current.as_ref().map(|r| &r.content) {
+            None | Some(RecordContent::Deleted) => None,
+            Some(content) => match activity::read(content.value(), &own, ActivitySide::Payer) {
+                Some(record) => Some(record),
+                None => return Err(held("the record holds a value that doesn't read")),
+            },
+        };
+        let mut record = match read {
+            Some(record) => record,
+            None => match entry.map(|e| self.rebuilt_record(e)).transpose()?.flatten() {
+                Some(record) => record,
+                None => return Err(held("the record is gone, with nothing to rebuild it from")),
+            },
+        };
+        if let Some(entry) = entry {
+            self.place_acceptance(&mut record, entry)?;
+        }
+        record.status = Some("paid".into());
+        let value = record.to_json()?;
+        Ok(self
+            .app
+            .record_op(&target.record_target(), Some(&value), Vec::new())
+            .await?)
     }
 
     /// Reconciliation finished (Switch spec 12.4 step 2.4): reconcile mode ends, and new

@@ -210,3 +210,85 @@ async fn test_outcome_record_invalid_value_holds_done_until_repaired() {
     assert!(!wallet.payments().await.unwrap()[0].record_held);
     assert_eq!(w.rail.executions(&attempt_id), 1);
 }
+
+// ---------------------------------------------------------------------------------------
+// The user's `done` (Paykit spec 7.3) goes with the record too
+
+/// The user resolves `attempt_id` as paid.
+async fn resolve_done(wallet: &mut Paykit, attempt_id: AttemptId) -> paykit_sdk::Result<()> {
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    wallet
+        .resolve_attempt(
+            &obligation,
+            attempt_id,
+            paykit_sdk::Resolution::Done,
+            pubky_switch_client::app::UserConfirmed::new(),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn test_outcome_record_user_done_with_the_record_deleted_rebuilds_it() {
+    let w = World::new();
+    let (mut wallet, mut phone, request, attempt_id) = in_flight(&w).await;
+    phone_writes(&mut phone, &request, None).await;
+    wallet.receive(None).await.unwrap();
+
+    resolve_done(&mut wallet, attempt_id).await.unwrap();
+    assert_eq!(claim_outcome(&mut wallet, &attempt_id).await, Outcome::Done);
+    let value = record_value(&mut wallet, &request).await.unwrap();
+    assert!(!value["request"].is_null(), "{value}");
+    assert_eq!(value["status"], "paid", "{value}");
+}
+
+#[tokio::test]
+async fn test_outcome_record_user_done_over_an_invalid_value_holds() {
+    let w = World::new();
+    let store = Arc::new(NoSeenMarks::default());
+    let (mut wallet, mut phone, request, attempt_id) =
+        in_flight_on(&w, Arc::clone(&store) as Arc<dyn StateStore>).await;
+    store.armed.store(true, Ordering::SeqCst);
+    phone_writes(&mut phone, &request, Some(INVALID)).await;
+    wallet.receive(None).await.unwrap();
+
+    let refused = resolve_done(&mut wallet, attempt_id).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(paykit_sdk::Refusal::RecordHeld(_))),
+        "{refused:?}"
+    );
+    // Nothing was written: the attempt stays open, and so does the journal entry.
+    assert_eq!(claim_outcome(&mut wallet, &attempt_id).await, Outcome::Open);
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Paying
+    );
+}
+
+#[tokio::test]
+async fn test_outcome_record_user_done_of_a_payment_made_places_its_proof() {
+    // The method reported the payment made, and its outcome waits on a record that doesn't
+    // read; the record is then deleted, and the user resolves it as paid: the outcome is
+    // written with the rebuilt record and the proof.
+    let w = World::new();
+    let store = Arc::new(NoSeenMarks::default());
+    let (mut wallet, mut phone, request, attempt_id) =
+        in_flight_on(&w, Arc::clone(&store) as Arc<dyn StateStore>).await;
+    store.armed.store(true, Ordering::SeqCst);
+    phone_writes(&mut phone, &request, Some(INVALID)).await;
+    w.rail.settle(&attempt_id, true);
+    assert_eq!(
+        wallet.resume_payments().await.unwrap(),
+        vec![PayOutcome::RecordHeld { attempt_id }]
+    );
+    phone.receive(None).await.unwrap();
+    phone_writes(&mut phone, &request, None).await;
+    wallet.receive(None).await.unwrap();
+
+    resolve_done(&mut wallet, attempt_id).await.unwrap();
+    assert_eq!(claim_outcome(&mut wallet, &attempt_id).await, Outcome::Done);
+    let value = record_value(&mut wallet, &request).await.unwrap();
+    assert!(!value["proof"].is_null(), "{value}");
+    let payment = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Finished);
+    assert!(!payment.record_held);
+}
