@@ -489,6 +489,11 @@ async fn test_publishing_withdrawn_counterparty_sent_an_empty_list_and_nothing_a
     w.clock.advance_ms(LIST_LIFETIME_MS / 2 + 30 * DAY_MS);
     shop.receive(None).await.unwrap();
     assert!(shop.published_lists().await.unwrap().is_empty());
+    let refused = shop.withdraw_list_from(&w.alice_id()).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotFound)),
+        "{refused:?}"
+    );
 }
 
 /// A store whose commits that put a key starting with `prefix` fail while it is set: with
@@ -691,6 +696,28 @@ async fn test_publishing_undelivered_version_decided_at_the_receive_that_reports
     let given_back = w.rail.released();
     assert_eq!(given_back.len(), 1, "{given_back:?}");
     assert_eq!(given_back[0].list_version, first.version);
+}
+
+#[tokio::test]
+async fn test_publishing_payloads_of_a_version_refused_for_good_released() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "inbox".into(),
+            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            current: serde_json::Value::Null,
+        });
+    let first = w.publish_to_alice(&mut shop).await;
+    assert!(matches!(
+        shop.message_delivery(&first.msg_id).await.unwrap(),
+        Some(paykit_sdk::MessageDelivery::Failed { .. })
+    ));
+    shop.receive(None).await.unwrap();
+    assert_eq!(released(&w), vec!["bc1qissued1".to_owned()]);
+    assert_eq!(lists_taken(&mut wallet).await, 0);
 }
 
 #[tokio::test]

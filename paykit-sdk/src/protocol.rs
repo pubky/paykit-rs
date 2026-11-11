@@ -61,11 +61,8 @@ use crate::records::{list_target, KeptMessage};
 use crate::state::{self, key, StateKey};
 
 /// The kinds this SDK handles (Paykit wire 4.3): the one-time request flow, payments without
-/// a request, the payer's side of Private Payment Lists and re-sends. Recurring requests,
-/// Allowances and publishing Private Payment Lists come later. A
-/// `private_payment_list_request` this SDK receives is taken with no effect: it publishes no
-/// list at all yet, so the Publishing rule's answer to a request naming a used version
-/// (Paykit spec 8.4) comes with list publishing, with that rule's other triggers.
+/// a request, both sides of Private Payment Lists and re-sends. Recurring requests and
+/// Allowances come later.
 pub const HANDLED_KINDS: [Kind; 9] = [
     Kind::PaymentRequest,
     Kind::PaymentRequestAcceptance,

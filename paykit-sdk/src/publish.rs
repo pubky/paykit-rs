@@ -302,28 +302,30 @@ pub(crate) fn note_proof(
     let Body::PaymentProof(proof) = stored.body() else {
         return Ok(());
     };
-    let Some(version) = proof.list_version else {
-        return Ok(());
-    };
     if proof.payment_app_id != cx.app_id() {
         return Ok(());
     }
     let Some(mut recipient) = read_recipient(cx, &stored.sender())? else {
         return Ok(());
     };
-    let newest = recipient.current().map(|o| o.version) == Some(version);
-    let Some(offered) = recipient.versions.iter_mut().find(|o| o.version == version) else {
+    let newest = recipient.current().map(|o| o.version) == proof.list_version;
+    let Some(offered) = recipient
+        .versions
+        .iter_mut()
+        .find(|o| Some(o.version) == proof.list_version)
+    else {
         return Ok(());
     };
     let single_use = offered
         .endpoints
         .get(proof.payment_endpoint_identifier.as_str())
         .is_some_and(|e| e.single_use);
-    if !single_use || offered.used {
+    if !single_use {
         return Ok(());
     }
+    // A second proof of one version names one no longer the newest once a newer one was
+    // sent. The newest version of a counterparty withdrawn from is empty: no proof names it.
     offered.used = true;
-    // The newest version of a counterparty withdrawn from is empty: no proof names it.
     recipient.owed |= newest;
     keep_recipient(cx, &recipient)
 }
@@ -342,12 +344,10 @@ pub(crate) fn note_list_request(
     if request.app_id.is_some_and(|app| app != cx.app_id()) {
         return Ok(());
     }
+    // A counterparty withdrawn from may owe a list here: none is sent to it.
     let Some(mut recipient) = read_recipient(cx, &stored.sender())? else {
         return Ok(());
     };
-    if !recipient.active {
-        return Ok(());
-    }
     let at = stored.accepted_at().unwrap_or(0);
     let unusable = request.held_version.is_none_or(|held| {
         recipient
