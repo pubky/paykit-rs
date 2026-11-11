@@ -164,9 +164,14 @@ impl PaykitProtocol {
     }
 
     /// Whether a certificate set since the last listing reads more than the one before
-    /// ([`PaykitProtocol::set_own`]).
-    pub(crate) fn reads_widened(&self) -> bool {
+    /// ([`PaykitProtocol::set_own`]), or `cert`, the one the app holds now and not yet set,
+    /// reads more than the one set: a read that took it and then failed returned before the
+    /// protocol followed it.
+    pub(crate) fn reads_widened(&self, cert: &AppCert) -> bool {
         self.reads_widened.load(Ordering::SeqCst)
+            || self
+                .own()
+                .is_some_and(|held| reads_more(&self.collections(), &held.cert, cert))
     }
 
     /// The records a widened certificate reads are listed, or the mark that waits for
@@ -899,13 +904,17 @@ mod tests {
     fn test_protocol_set_own_notes_a_certificate_that_reads_more() {
         let p = protocol();
         p.set_own([1; 32], cert(&["pay"]));
-        assert!(!p.reads_widened());
+        let paying = cert(&["pay"]);
+        assert!(!p.reads_widened(&paying));
         p.set_own([1; 32], cert(&["pay", "contacts"]));
-        assert!(!p.reads_widened());
-        p.set_own([1; 32], cert(&["pay", "request"]));
-        assert!(p.reads_widened());
+        assert!(!p.reads_widened(&paying));
+        // Held but not set yet, then set.
+        let wider = cert(&["pay", "request"]);
+        assert!(p.reads_widened(&wider));
+        p.set_own([1; 32], wider.clone());
+        assert!(p.reads_widened(&wider));
         p.clear_reads_widened();
-        assert!(!p.reads_widened());
+        assert!(!p.reads_widened(&wider));
     }
 
     #[test]

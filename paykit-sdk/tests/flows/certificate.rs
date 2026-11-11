@@ -1020,13 +1020,11 @@ async fn test_certificate_restored_payee_ends_reconcile_and_requests() {
     assert!(wallet.request(&request).await.is_ok());
 }
 
-#[tokio::test]
-async fn test_certificate_renewal_reading_more_lists_its_records_first() {
-    // Alice's till, holding `request`, sent bob a request: its `payee_activity` record is
-    // alice's. Her wallet holds `pay` only and reads none of them. Renewed to hold `request`
-    // too, the wallet's copy lacks that record until the collection is listed: a call that
-    // only reads is refused meanwhile, rather than show no requests sent, and a read lists it.
-    let w = World::new();
+/// Alice's till, holding `request`, sent bob a request: its `payee_activity` record is
+/// alice's. Her wallet holds `pay` only and reads none of them. Its certificate is then
+/// renewed to hold `request` too, with the scope keys it needs, and listed: the wallet's next
+/// read takes it. Returns the wallet and the renewed certificate.
+async fn renewed_to_read_more(w: &World) -> (Paykit, AppCert) {
     let mut wallet = w.wallet("wallet").await;
     let me = wallet.app_id();
     let mut till = w
@@ -1043,7 +1041,7 @@ async fn test_certificate_renewal_reading_more_lists_its_records_first() {
     assert!(wallet.payee_activity().await.unwrap().is_empty());
     let old = wallet.app().cert().clone();
     let wider = renew(
-        &w,
+        w,
         me,
         &AppScopes::new().pay().request().build().unwrap(),
         1_000,
@@ -1070,7 +1068,17 @@ async fn test_certificate_renewal_reading_more_lists_its_records_first() {
             .unwrap();
     }
     wallet.receive(None).await.unwrap();
-    list(&w, me, &old, &wider);
+    list(w, me, &old, &wider);
+    (wallet, wider)
+}
+
+#[tokio::test]
+async fn test_certificate_renewal_reading_more_lists_its_records_first() {
+    // The wallet's copy lacks the till's record until the collection is listed: a call that
+    // only reads is refused meanwhile, rather than show no requests sent, and a read lists
+    // it.
+    let w = World::new();
+    let (mut wallet, wider) = renewed_to_read_more(&w).await;
     // The read that takes the certificate can't list the collections now.
     w.alice
         .switch()
@@ -1086,6 +1094,30 @@ async fn test_certificate_renewal_reading_more_lists_its_records_first() {
         "{refused:?}"
     );
     // The next read lists them: the till's request shows.
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_certificate_renewal_reading_more_taken_by_a_failed_read_holds_reads() {
+    // The read takes the certificate, then fails delivering the record that carries it:
+    // the SDK hasn't followed the certificate yet, and a call that only reads is refused
+    // all the same.
+    let w = World::new();
+    let (mut wallet, wider) = renewed_to_read_more(&w).await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    assert!(wallet.receive(None).await.is_err());
+    assert_eq!(wallet.app().cert().hash(), wider.hash());
+    let refused = wallet.payee_activity().await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{refused:?}"
+    );
     wallet.receive(None).await.unwrap();
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
 }

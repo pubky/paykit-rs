@@ -89,7 +89,7 @@ impl Paykit {
     /// records it adds, so a record's absence there means nothing until they are listed.
     /// The mark is kept, in place of a restore's, which a listing covers as well.
     pub(crate) async fn keep_widened_mark(&mut self) -> Result<()> {
-        if !self.protocol.reads_widened() {
+        if !self.protocol.reads_widened(self.app.cert()) {
             return Ok(());
         }
         self.local_put(key::RECORDS_UNLISTED, &UNLISTED_CERTIFICATE)
@@ -213,7 +213,7 @@ impl Paykit {
     /// a restore, or since a certificate that reads more, rather than showing the copy that
     /// lacks them as the records.
     pub(crate) async fn refuse_while_unlisted(&self) -> Result<()> {
-        if self.protocol.reads_widened() || self.unlisted().await?.is_some() {
+        if self.protocol.reads_widened(self.app.cert()) || self.unlisted().await?.is_some() {
             return Err(unlisted());
         }
         Ok(())
