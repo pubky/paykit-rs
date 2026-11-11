@@ -79,13 +79,6 @@ impl Paykit {
             .is_none())
     }
 
-    /// The user has seen that the payee may have cancelled the request at `record_key`: its
-    /// hold ends.
-    pub(crate) async fn end_hold(&mut self, record_key: &[u8; 32]) -> Result<()> {
-        self.local_put(&key::hold_confirmed(record_key), &true)
-            .await
-    }
-
     /// Queue, once after a restore, a `resend_request` to every counterparty with an open
     /// request, from the restore's re-send time; [`Paykit::receive`] sends them.
     pub(crate) async fn queue_restore_asks(&mut self) -> Result<()> {

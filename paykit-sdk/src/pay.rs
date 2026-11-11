@@ -189,6 +189,9 @@ struct Plan {
     by: Initiator,
     /// The user's confirmation of a payee identity its switch couldn't confirm.
     unconfirmed: Option<UserConfirmed>,
+    /// The request record whose restore hold the user's confirmation ends, in the attempt's
+    /// batch: a call refused before it keeps the hold.
+    end_hold: Option<[u8; 32]>,
 }
 
 fn not_now(refusal: ClientRefusal) -> PaykitError {
@@ -358,12 +361,14 @@ impl Paykit {
         // Held after a restore: paid only once the user has seen the payee may have
         // cancelled it, which ends the hold (Paykit spec 7.2, "What a restore loses").
         let record_key = self.activity_key(&target)?;
-        if self.held(&record_key, &record).await? {
+        let end_hold = if self.held(&record_key, &record).await? {
             if options.possibly_cancelled_confirmed.is_none() {
                 return Err(Refusal::HeldAfterRestore.into());
             }
-            self.end_hold(&record_key).await?;
-        }
+            Some(record_key)
+        } else {
+            None
+        };
         let obligation = self.obligation(&request.payee, &request.request_hash, 0);
         let deadline = body.attempt_deadline(None)?;
         // No attempt once the deadline is at or before the highest service time verified
@@ -465,6 +470,7 @@ impl Paykit {
             on_record: true,
             by: Initiator::User,
             unconfirmed: options.unconfirmed_identity_confirmed,
+            end_hold,
         })
         .await
     }
@@ -549,6 +555,7 @@ impl Paykit {
             on_record: false,
             by: Initiator::User,
             unconfirmed: options.unconfirmed_identity_confirmed,
+            end_hold: None,
         })
         .await
     }
@@ -634,7 +641,7 @@ impl Paykit {
             .await
     }
 
-    async fn set_stage(&mut self, entry: &mut JournalEntry, stage: Stage) -> Result<()> {
+    pub(crate) async fn set_stage(&mut self, entry: &mut JournalEntry, stage: Stage) -> Result<()> {
         entry.stage = stage;
         self.save(entry).await
     }
@@ -936,6 +943,7 @@ impl Paykit {
             on_record,
             by,
             unconfirmed,
+            end_hold,
         } = plan;
         let attempt_id = entry.attempt()?;
         // The attempt's `orphan_after` covers the rail's longest time and the pre-dispatch
@@ -978,6 +986,11 @@ impl Paykit {
         let mut batch = OpBatch::new()
             .op_if(op.kind(), conditions)
             .obligation_deadline(entry.obligation, own_deadline(entry.deadline));
+        if let Some(record_key) = end_hold {
+            // The user saw the payee may have cancelled it (Paykit spec 7.2): the hold ends
+            // with the attempt, and stays when the attempt isn't made.
+            batch = batch.local(state::local_put(&key::hold_confirmed(&record_key), &true)?);
+        }
         if let Some(mut list) = reserve {
             // A single-use endpoint is marked used in the attempt's batch (Paykit spec 7.2
             // step 1, 8.4).
@@ -1233,7 +1246,7 @@ impl Paykit {
     /// journaled for this dispatch; without it (a resume, a repeat) the journaled one is
     /// used if the outbox holds it already, and otherwise a new one is signed, the journaled
     /// one never having left this app.
-    async fn release_acceptance(
+    pub(crate) async fn release_acceptance(
         &mut self,
         entry: &mut JournalEntry,
         signed: Option<SignedMessage>,
@@ -1836,8 +1849,10 @@ impl Paykit {
         let mut out = Vec::new();
         for mut entry in self.journal().await? {
             // An outcome written whose acceptance is still owed: queued and placed now.
+            // One that fails now stays owed for the next resume, and stops no other entry:
+            // those after it are still resolved from the method's history.
             if entry.stage == Stage::AcceptanceOwed {
-                self.finish_owed_acceptance(&mut entry).await?;
+                let _ = self.finish_owed_acceptance(&mut entry).await;
                 continue;
             }
             if !entry.open() {
@@ -1852,7 +1867,7 @@ impl Paykit {
                             entry.stage = Stage::Paying;
                             out.extend(self.resolve_dispatched(entry).await?);
                         }
-                        Some(_) => self.set_stage(&mut entry, Stage::Finished).await?,
+                        Some((_, outcome)) => self.finish_resolved(&mut entry, outcome).await?,
                         None => self.set_stage(&mut entry, Stage::Abandoned).await?,
                     }
                 }
@@ -1866,7 +1881,7 @@ impl Paykit {
                             reason: "Paykit spec 7.2: no payment started".into(),
                         });
                     }
-                    Some(_) => self.set_stage(&mut entry, Stage::Finished).await?,
+                    Some((_, outcome)) => self.finish_resolved(&mut entry, outcome).await?,
                     None => self.set_stage(&mut entry, Stage::Abandoned).await?,
                 },
                 Stage::Paying => {
@@ -1882,6 +1897,18 @@ impl Paykit {
         // Last, after every payment's own work: what can't be delivered now stays queued.
         let _ = self.app.flush_outbox().await;
         Ok(out)
+    }
+
+    /// An own attempt the claim shows resolved already, by the user in another app or by
+    /// evidence: `done` means the payment was made, so an acceptance the entry still owes is
+    /// queued and placed first ([`Paykit::finish_owed_acceptance`], Paykit spec 7.2 step 2);
+    /// one that can't be now leaves the entry for the next resume. `failed` releases none.
+    async fn finish_resolved(&mut self, entry: &mut JournalEntry, outcome: Outcome) -> Result<()> {
+        if outcome == Outcome::Done && entry.owes_acceptance()? {
+            let _ = self.finish_owed_acceptance(entry).await;
+            return Ok(());
+        }
+        self.set_stage(entry, Stage::Finished).await
     }
 
     /// Ask the payment method's history again about the dispatches it reported failed, while
@@ -1978,8 +2005,8 @@ impl Paykit {
                 held.map_or((0, 0), |a| (a.opened_at, a.orphan_after));
             match held.map(|a| a.outcome) {
                 Some(Outcome::Open) => entry.step = Some(claim.step),
-                Some(Outcome::Done | Outcome::Failed) => {
-                    self.set_stage(&mut entry, Stage::Finished).await?;
+                Some(outcome @ (Outcome::Done | Outcome::Failed)) => {
+                    self.finish_resolved(&mut entry, outcome).await?;
                     return Ok(None);
                 }
                 Some(Outcome::Unknown) | None => {

@@ -185,7 +185,9 @@ impl Paykit {
                             if let Some(mut entry) = self.rebuilt_entry(&obligation, id).await? {
                                 entry.rail_proof = Some(proof);
                                 entry.paid_at_ms = paid_at_ms;
-                                entry.stage = Stage::RailPaid;
+                                // Journaled first: a report whose write fails leaves it for a
+                                // resume, as [`PayOutcome::PaidOutcomeUnwritten`] says.
+                                self.set_stage(&mut entry, Stage::RailPaid).await?;
                                 report.resolved.push(self.report(&mut entry).await?);
                                 continue;
                             }
@@ -199,7 +201,9 @@ impl Paykit {
                             // attempt stays doubtful, for a receipt or the user.
                             if let Some(mut entry) = self.rebuilt_entry(&obligation, id).await? {
                                 entry.failed_by_method = true;
-                                entry.stage = Stage::RailFailed;
+                                // Journaled first: a report whose write fails leaves it for a
+                                // resume, as [`PayOutcome::PaidOutcomeUnwritten`] says.
+                                self.set_stage(&mut entry, Stage::RailFailed).await?;
                                 report.resolved.push(self.report(&mut entry).await?);
                                 continue;
                             }
@@ -425,7 +429,7 @@ impl Paykit {
         // the user decided, so it neither blocks another payment as one in progress nor is
         // resumed, and never dispatched again (Paykit spec 7.2, "No second execution").
         let journal_key = key::journal(&attempt);
-        let entry = self.local_get::<JournalEntry>(&journal_key).await?;
+        let mut entry = self.local_get::<JournalEntry>(&journal_key).await?;
         if let Some(entry) = &entry {
             self.check_entry(entry)?;
         }
@@ -452,6 +456,17 @@ impl Paykit {
                     )
                     .into()),
                 };
+            }
+        }
+        // The user's `done` says the payment was made: an acceptance the entry still owes
+        // goes first, so the record places it and the payee hears it (Paykit spec 7.2 step
+        // 2). One that can't be queued now refuses the call with nothing written; the user
+        // tries again. The entry can't wait in `AcceptanceOwed`: that stage holds a proof.
+        if resolution == Resolution::Done && basis == Basis::Owner {
+            if let Some(owed) = entry.as_mut().filter(|e| e.open()) {
+                if owed.owes_acceptance()? {
+                    self.release_acceptance(owed, None).await?;
+                }
             }
         }
         let deadline = entry

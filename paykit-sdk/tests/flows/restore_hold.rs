@@ -115,6 +115,40 @@ async fn test_restore_hold_asks_sent_when_reconcile_mode_ends_without_reconcilin
 }
 
 #[tokio::test]
+async fn test_restore_hold_kept_when_the_confirmed_payment_is_refused() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut app = restored(&w, &backup).await;
+    // The user confirms, but the payment is refused before any attempt: the request has no
+    // such endpoint. The confirmation ends nothing.
+    let refused = app
+        .pay_request(
+            &request,
+            PayOptions {
+                endpoint: Some(crate::common::endpoint("btc-no-such-endpoint")),
+                ..confirmed()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
+        "{refused:?}"
+    );
+    let refused = app
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::HeldAfterRestore));
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
 async fn test_restore_hold_payee_silent_held_until_the_user_confirms() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;

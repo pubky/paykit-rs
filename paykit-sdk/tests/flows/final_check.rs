@@ -1349,3 +1349,174 @@ async fn queued_acceptances(store: &HookedStore, wallet: &Paykit) -> usize {
     }
     n
 }
+
+#[tokio::test]
+async fn test_acceptance_owed_backs_up_and_restores() {
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    store.refuse_acceptances(true);
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::AcceptanceOwed
+    );
+    store.refuse_acceptances(false);
+    let backup = wallet
+        .backup()
+        .await
+        .expect("a backup with an AcceptanceOwed entry");
+    let backup = paykit_sdk::PaykitBackup::from_bytes(&backup.to_bytes().unwrap()).unwrap();
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .expect("restore of an AcceptanceOwed entry");
+    let _ = restored.resume_payments().await;
+    eprintln!(
+        "stage after restore+resume: {:?}",
+        restored.payments().await.unwrap()[0].stage
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_acceptance_owed_sent_with_a_users_done_on_a_pending_payment() {
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    store.refuse_acceptances(true);
+    w.rail.next(Behaviour::Hang);
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    let PayOutcome::Pending { attempt_id } = outcome else {
+        panic!("{outcome:?}")
+    };
+    store.refuse_acceptances(false);
+    assert_eq!(queued_acceptances(&store, &wallet).await, 0);
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    wallet
+        .resolve_attempt(
+            &obligation,
+            attempt_id,
+            paykit_sdk::Resolution::Done,
+            pubky_switch_client::app::UserConfirmed::new(),
+        )
+        .await
+        .unwrap();
+    // The user's `done` queues the acceptance it still owed, once.
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
+    assert_eq!(queued_acceptances(&store, &wallet).await, 1);
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(queued_acceptances(&store, &wallet).await, 1);
+}
+
+#[tokio::test]
+async fn test_acceptance_of_a_pending_payment_retried_at_resume() {
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    store.refuse_acceptances(true);
+    w.rail.next(Behaviour::Hang);
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
+    store.refuse_acceptances(false);
+    assert_eq!(queued_acceptances(&store, &wallet).await, 0);
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(queued_acceptances(&store, &wallet).await, 1);
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(queued_acceptances(&store, &wallet).await, 1);
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_acceptance_owed_sent_when_another_app_resolves_the_payment_done() {
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    store.refuse_acceptances(true);
+    w.rail.next(Behaviour::Hang);
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    let PayOutcome::Pending { attempt_id } = outcome else {
+        panic!("{outcome:?}")
+    };
+    store.refuse_acceptances(false);
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    // The method keeps no history of it, and the user marks it paid from the phone.
+    w.rail.forget_history(&attempt_id);
+    let mut declaration = paykit_sdk::Rail::declaration(&*w.rail);
+    declaration.history = false;
+    declaration.idempotent = true;
+    declaration.idempotency_retention_ms = Some(7 * 24 * crate::common::HOUR_MS);
+    w.rail.set_declaration(declaration);
+    // Past the attempt's orphan window, another own app may resolve it (Switch wire 6.8).
+    w.clock.advance_ms(4201 * 1000);
+    let mut phone = w.wallet("phone").await;
+    phone
+        .resolve_attempt(
+            &obligation,
+            attempt_id,
+            paykit_sdk::Resolution::Done,
+            pubky_switch_client::app::UserConfirmed::new(),
+        )
+        .await
+        .unwrap();
+    // The wallet finds its attempt `done`: the payment was made, so its acceptance goes.
+    wallet.receive(None).await.unwrap();
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
+    assert_eq!(queued_acceptances(&store, &wallet).await, 1);
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(queued_acceptances(&store, &wallet).await, 1);
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}

@@ -708,3 +708,28 @@ async fn test_unrequested_paid_with_its_outcome_unwritten_is_no_error() {
     shop.receive(None).await.unwrap();
     assert_eq!(shop.payee_activity().await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn test_review_list_ask_mark_backs_up_and_restores() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let refused = pay_lightning(&w, &mut wallet).await;
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        "{refused:?}"
+    );
+    let backup = wallet.backup().await.expect("a backup with an lq/ mark");
+    let backup = paykit_sdk::PaykitBackup::from_bytes(&backup.to_bytes().unwrap()).unwrap();
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .expect("restore of a backup with an lq/ mark");
+    let _ = restored.backup().await.expect("backup after restore");
+}
