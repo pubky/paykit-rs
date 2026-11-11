@@ -1201,13 +1201,15 @@ impl Paykit {
             }
         }
         let outcome = self.rail.pay(payment).await;
-        // The call was made: unless the method refused it or reports the payment failed, a
-        // payment may be running, and only now may the payee hear it was accepted (Paykit
-        // spec 7.2 step 2). A failure to queue it decides nothing about paying: the outcome
-        // or a resume releases it once the payment shows.
-        if !matches!(
+        // The call was made and the payment may be running, its outcome not known yet: only
+        // now may the payee hear it was accepted (Paykit spec 7.2 step 2). A payment the
+        // method reports made is journaled with its proof first, and its report releases the
+        // acceptance, so nothing sent ever runs ahead of the proof; a refused or failed one
+        // releases none. A failure to queue it decides nothing about paying: the outcome or
+        // a resume releases it once the payment shows.
+        if matches!(
             outcome,
-            Err(RailError::Refused(_)) | Ok(RailOutcome::Failed)
+            Ok(RailOutcome::Pending) | Err(RailError::Unavailable(_))
         ) {
             let _ = self.release_acceptance(&mut entry, acceptance).await;
         }

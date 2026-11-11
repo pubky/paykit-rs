@@ -36,6 +36,7 @@ struct HookedStore {
     queueing_next: std::sync::atomic::AtomicBool,
     paying_hook: Mutex<Option<Hook>>,
     attempted_hook: Mutex<Option<Hook>>,
+    stop_at_outbox: std::sync::atomic::AtomicBool,
     stop_after_paying: std::sync::atomic::AtomicBool,
     stopped: std::sync::atomic::AtomicBool,
     acceptances: Mutex<Vec<String>>,
@@ -58,6 +59,13 @@ impl HookedStore {
 
     fn stop_after_paying(&self) {
         self.stop_after_paying
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Stop, as a process that died, at the next commit that queues a message (the client's
+    /// `out/` items): that commit fails, applying nothing, and every later one too.
+    fn stop_at_outbox(&self) {
+        self.stop_at_outbox
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -124,6 +132,19 @@ impl StateStore for HookedStore {
             }
         }
         if self.stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(StoreError::Unavailable);
+        }
+        let queues = batch
+            .writes
+            .iter()
+            .any(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"out/")));
+        if queues
+            && self
+                .stop_at_outbox
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.stopped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             return Err(StoreError::Unavailable);
         }
         if self
@@ -1199,4 +1220,54 @@ async fn test_fence_answer_committed_past_the_budget_not_paid() {
         wallet.payments().await.unwrap()[0].stage,
         paykit_sdk::Stage::Finished
     );
+}
+
+#[tokio::test]
+async fn test_acceptance_after_a_paid_outcome_goes_only_once_its_proof_is_journaled() {
+    // The method reports the payment made; the process dies as the acceptance is queued.
+    // On a rail with no history, only the journal can tell it paid: the proof is there, and
+    // the resume reports the payment, sending its proof.
+    let w = World::new();
+    blind(&w);
+    let (store, app_id, request) = with_a_request(&w).await;
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    store.stop_at_outbox();
+    let _ = wallet.pay_request(&request, PayOptions::default()).await;
+    drop(wallet);
+    let attempt_id = {
+        store.restart();
+        let wallet = w
+            .load_on_clock(
+                &w.alice,
+                Arc::clone(&store) as Arc<dyn StateStore>,
+                app_id,
+                Arc::clone(&w.clock),
+            )
+            .await;
+        let payment = wallet.payments().await.unwrap().remove(0);
+        assert_eq!(payment.stage, paykit_sdk::Stage::RailPaid);
+        payment.attempt_id
+    };
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Paid { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
