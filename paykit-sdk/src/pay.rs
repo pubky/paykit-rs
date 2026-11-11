@@ -182,9 +182,9 @@ impl PayOptions {
     }
 }
 
-/// A request from a payee the identity's deny list holds, as a [`Refusal::Blocked`] shows it
-/// to the user (Paykit spec 8.1, "Blocked counterparties"): the payee, the request and the
-/// amount it asks. A payment the user then makes anyway carries it back
+/// A payment to a payee the identity's deny list holds, as a [`Refusal::Blocked`] shows it
+/// to the user (Paykit spec 8.1, "Blocked counterparties"): the payee, the request paid, if
+/// any, and the amount. A payment the user then makes anyway carries it back
 /// ([`PayOptions::with_blocked_confirmed`]): the SDK reads the deny list again and pays only
 /// when what it would show now is this, field for field.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -192,10 +192,22 @@ impl PayOptions {
 pub struct BlockedPayment {
     /// The blocked payee.
     pub payee: [u8; 32],
-    /// The request.
-    pub request: RequestRef,
-    /// The amount it asks.
+    /// The request paid, `None` for a payment without one.
+    pub request: Option<RequestRef>,
+    /// The amount paid.
     pub amount: PaymentAmount,
+}
+
+/// Refuse a payment the user starts to a payee the deny list holds, `blocked`, unless the
+/// user confirmed `shown`, the same payment (Paykit spec 8.1).
+fn refuse_blocked(blocked: bool, shown: BlockedPayment, options: &PayOptions) -> Result<()> {
+    if blocked && options.blocked_confirmed.as_ref() != Some(&shown) {
+        return Err(Refusal::Blocked {
+            payment: Box::new(shown),
+        }
+        .into());
+    }
+    Ok(())
 }
 
 /// Why a payment may already have been made, as a [`Refusal::MayBePaid`] shows it to the
@@ -688,19 +700,13 @@ impl Paykit {
             None
         };
         // A blocked payee's request is paid only once the user confirms it (Paykit spec 8.1).
-        if self.denied(&request.payee).await? {
-            let shown = BlockedPayment {
-                payee: request.payee,
-                request: *request,
-                amount: body.amount.clone(),
-            };
-            if options.blocked_confirmed.as_ref() != Some(&shown) {
-                return Err(Refusal::Blocked {
-                    payment: Box::new(shown),
-                }
-                .into());
-            }
-        }
+        let blocked = self.denied(&request.payee).await?;
+        let shown = BlockedPayment {
+            payee: request.payee,
+            request: Some(*request),
+            amount: body.amount.clone(),
+        };
+        refuse_blocked(blocked, shown, &options)?;
         let obligation = self.obligation(&request.payee, &request.request_hash, 0);
         let deadline = body.attempt_deadline(None)?;
         let restored = self.restored_attempts(&obligation).await?;
@@ -835,6 +841,15 @@ impl Paykit {
         self.app.may_attempt(false).map_err(not_now)?;
         self.refuse_while_payer_pass_owed().await?;
         let options = payment.options;
+        // A payment to a blocked payee is made only once the user confirms it (Paykit spec
+        // 8.1; v0.1 refused any payment to a blocked peer).
+        let blocked = self.denied(&payment.payee).await?;
+        let shown = BlockedPayment {
+            payee: payment.payee,
+            request: None,
+            amount: payment.amount.clone(),
+        };
+        refuse_blocked(blocked, shown, &options)?;
         let (destination, carrier, reserve, bound) = self
             .list_destination(
                 &payment.payee,
@@ -2878,12 +2893,19 @@ impl Paykit {
         Ok(Some(PayOutcome::Uncertain { attempt_id }))
     }
 
-    /// Whether a repeat of `entry`'s dispatch is withheld because its request may no longer
+    /// Whether a repeat of `entry`'s dispatch is withheld: its payee is blocked, or the deny
+    /// list can't be read (Paykit spec 8.1); or its request may no longer
     /// be paid (Paykit spec 8.1): this app keeps a stop for it, or the request record the
     /// switch holds, read again, shows it cancelled or rejected, or isn't there or doesn't
     /// read as the request, so nothing shows it still open. A payment without a request has
     /// nothing a payee cancels.
     async fn repeat_withheld(&mut self, entry: &JournalEntry) -> Result<bool> {
+        // No automatic payment to a blocked payee (Paykit spec 8.1): a repeat is one, the
+        // user's confirmation having been for the first dispatch. A deny list that can't be
+        // read withholds it too.
+        if self.denied(&entry.payee).await.unwrap_or(true) {
+            return Ok(true);
+        }
         if entry.request_hash()?.is_none() {
             return Ok(false);
         }
