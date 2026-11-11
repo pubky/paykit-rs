@@ -667,6 +667,7 @@ pub const LISTS_REFRESH_MS: u64 = 10 * 60_000;
 /// ([`Paykit::place_held_list_without_marks`]). No payment uses that payee app's list
 /// meanwhile.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HeldList {
     /// The payee.
     pub payee: [u8; 32],

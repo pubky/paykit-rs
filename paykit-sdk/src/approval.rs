@@ -20,11 +20,23 @@ pub struct AppScopes {
 /// The scopes an app's request names, with the switch permissions they need (Paykit spec
 /// 3.2), in the order a certificate lists them.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RequestedScopes {
     /// The scopes, required ones included.
     pub scopes: Vec<String>,
     /// The switch permissions the scopes need, each once, in the certificate's order.
     pub permissions: Vec<Permission>,
+}
+
+impl RequestedScopes {
+    /// `scopes` and their `permissions` as given, unchecked, such as for scopes of another
+    /// protocol on the Switch. [`AppScopes::build`] builds and checks Paykit's.
+    pub fn new(scopes: Vec<String>, permissions: Vec<Permission>) -> Self {
+        Self {
+            scopes,
+            permissions,
+        }
+    }
 }
 
 impl AppScopes {

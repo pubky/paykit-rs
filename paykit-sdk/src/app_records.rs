@@ -63,6 +63,7 @@ use paykit_lib::records::DestinationSource;
 
 /// A public endpoint of a payee app, from its app record (Paykit spec 4).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PublicEndpoint {
     /// The payee app that published it.
     pub app_id: [u8; 16],

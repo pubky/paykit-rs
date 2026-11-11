@@ -56,6 +56,7 @@ pub enum RailError {
 
 /// What a payment method declares (Paykit spec 7.2, "What a payment method declares").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RailDeclaration {
     /// A repeat under the same idempotency key returns the payment made, while the method
     /// remembers the key.
@@ -76,9 +77,63 @@ pub struct RailDeclaration {
     pub longest_completion_ms: u64,
 }
 
+impl RailDeclaration {
+    /// A method that takes at most `longest_completion_ms` to complete or fail, and declares
+    /// nothing else: not idempotent, and no history. Each `with_` setter declares one more
+    /// thing it does.
+    pub fn new(longest_completion_ms: u64) -> Self {
+        Self {
+            idempotent: false,
+            idempotency_retention_ms: None,
+            history: false,
+            history_retention_ms: None,
+            history_survives_restore: false,
+            longest_completion_ms,
+        }
+    }
+
+    /// A repeat under the same idempotency key returns the payment made, while the method
+    /// remembers the key.
+    #[must_use]
+    pub fn with_idempotent(mut self, idempotent: bool) -> Self {
+        self.idempotent = idempotent;
+        self
+    }
+
+    /// How long the method remembers an idempotency key; for good when not set.
+    #[must_use]
+    pub fn with_idempotency_retention_ms(mut self, retention_ms: u64) -> Self {
+        self.idempotency_retention_ms = Some(retention_ms);
+        self
+    }
+
+    /// The method's history can show the outcome of a dispatch.
+    #[must_use]
+    pub fn with_history(mut self, history: bool) -> Self {
+        self.history = history;
+        self
+    }
+
+    /// How long the history keeps a dispatch; for good when not set.
+    #[must_use]
+    pub fn with_history_retention_ms(mut self, retention_ms: u64) -> Self {
+        self.history_retention_ms = Some(retention_ms);
+        self
+    }
+
+    /// The history lives with the account, not only on the paying device, so a restored
+    /// device sees every dispatch made after its backup.
+    #[must_use]
+    pub fn with_history_survives_restore(mut self, survives: bool) -> Self {
+        self.history_survives_restore = survives;
+        self
+    }
+}
+
 /// What the method would transfer to a destination, reported before any write (Paykit spec
 /// 7.2 step 1).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Transfer {
     /// The amount and asset it would transfer; `None` when it can't tell before paying.
     pub amount: Option<PaymentAmount>,
@@ -87,9 +142,19 @@ pub struct Transfer {
     pub max_fee: Option<paykit_lib::Decimal>,
 }
 
+impl Transfer {
+    /// What the method would transfer: `amount`, `None` when it can't tell before paying,
+    /// and `max_fee`, the largest fee on top that the payee can influence through the
+    /// destination it chose, `None` for none.
+    pub fn new(amount: Option<PaymentAmount>, max_fee: Option<paykit_lib::Decimal>) -> Self {
+        Self { amount, max_fee }
+    }
+}
+
 /// One payment to make: the endpoint, the amount, and the attempt ID as the idempotency key
 /// (Paykit spec 7.2).
 #[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RailPayment {
     /// The Payment Endpoint Identifier paid.
     pub endpoint_id: PaymentEndpointIdentifier,
@@ -112,6 +177,7 @@ impl std::fmt::Debug for RailPayment {
 
 /// The outcome of a dispatch, as the method reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RailOutcome {
     /// Verified success.
     Paid {
@@ -129,6 +195,7 @@ pub enum RailOutcome {
 
 /// A proof a payee checks by its own method (Paykit spec 8.1 step 4).
 #[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ProofCheck {
     /// The Payment Endpoint Identifier the proof names.
     pub endpoint_id: PaymentEndpointIdentifier,

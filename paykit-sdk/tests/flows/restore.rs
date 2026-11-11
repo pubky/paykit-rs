@@ -272,10 +272,8 @@ async fn test_restore_paid_attempt_to_a_single_use_list_endpoint_sends_its_proof
     let request = request_from(&mut shop, w.alice_id(), any).await;
     wallet.receive(None).await.unwrap();
     // Its single-use mark names the attempt: the destination paid is known.
-    let options = PayOptions {
-        endpoint: Some(crate::common::endpoint("btc-bitcoin-p2wpkh")),
-        ..PayOptions::default()
-    };
+    let options =
+        PayOptions::default().with_endpoint(crate::common::endpoint("btc-bitcoin-p2wpkh"));
     let (attempt_id, backup) = paid_after_the_backup(&w, &mut wallet, &request, options).await;
     drop(wallet);
 
@@ -811,11 +809,9 @@ async fn reconcile_with_marks(
     let PayOutcome::Pending { attempt_id } = wallet
         .pay_request(
             &request,
-            PayOptions {
-                endpoint: Some(crate::common::endpoint(paid)),
-                list_app: Some(shop.app_id()),
-                ..PayOptions::default()
-            },
+            PayOptions::default()
+                .with_endpoint(crate::common::endpoint(paid))
+                .with_list_app(shop.app_id()),
         )
         .await
         .unwrap()

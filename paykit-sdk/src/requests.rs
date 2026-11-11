@@ -50,6 +50,7 @@ pub struct RequestRef {
 
 /// A one-time request to send (Paykit wire 4.5).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RequestDraft {
     /// The amount requested.
     pub amount: PaymentAmount,
@@ -67,8 +68,61 @@ pub struct RequestDraft {
     pub metadata: Option<Map<String, Value>>,
 }
 
+impl RequestDraft {
+    /// A request for `amount`, with the reference copied into the payment where the method
+    /// allows it, paid to `destination`. It has no expiry, no payment deadline, no limit on
+    /// the identifiers the payer may use and no metadata until a `with_` setter adds one.
+    pub fn new(
+        amount: PaymentAmount,
+        payment_reference: PaymentReference,
+        destination: RequestDestination,
+    ) -> Self {
+        Self {
+            amount,
+            payment_reference,
+            proposal_expires_at_ms: None,
+            payment_deadline_ms: None,
+            destination,
+            accepted_endpoint_identifiers: None,
+            metadata: None,
+        }
+    }
+
+    /// Until when the payer may pay it; no expiry when not set.
+    #[must_use]
+    pub fn with_proposal_expires_at_ms(mut self, expires_at_ms: u64) -> Self {
+        self.proposal_expires_at_ms = Some(expires_at_ms);
+        self
+    }
+
+    /// The payment deadline; none when not set.
+    #[must_use]
+    pub fn with_payment_deadline_ms(mut self, deadline_ms: u64) -> Self {
+        self.payment_deadline_ms = Some(deadline_ms);
+        self
+    }
+
+    /// The only identifiers the payer may use.
+    #[must_use]
+    pub fn with_accepted_endpoint_identifiers(
+        mut self,
+        identifiers: Vec<PaymentEndpointIdentifier>,
+    ) -> Self {
+        self.accepted_endpoint_identifiers = Some(identifiers);
+        self
+    }
+
+    /// Opaque metadata.
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: Map<String, Value>) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+}
+
 /// A request this app sent.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SentRequest {
     /// The message ID.
     pub msg_id: String,
@@ -81,6 +135,7 @@ pub struct SentRequest {
 
 /// What the payer sees for a request (Paykit spec 8.5).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RequestStatus {
     /// Nothing done yet.
     Open,
@@ -106,6 +161,7 @@ pub enum RequestStatus {
 
 /// A request the payer holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RequestView {
     /// The request.
     pub request: RequestRef,
@@ -127,6 +183,7 @@ pub struct RequestView {
 
 /// What the payee sees of a request it sent or a payment it received.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PayeeStatus {
     /// Sent; no answer yet.
     Requested,
@@ -145,6 +202,7 @@ pub enum PayeeStatus {
 /// A request this identity sent, or a payment without a request it received, as the payee
 /// sees it.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PayeeActivity {
     /// The record key of the payee's record.
     pub record: [u8; 32],

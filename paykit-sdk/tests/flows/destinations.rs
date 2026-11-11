@@ -79,10 +79,7 @@ async fn test_destinations_payee_identity_unreadable_refused() {
         .remove(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH);
     w.router.remove(crate::common::BOB_ORIGIN);
     w.clock.advance_ms(11 * 60_000);
-    let confirmed = PayOptions {
-        unconfirmed_identity_confirmed: Some(UserConfirmed::new()),
-        ..PayOptions::default()
-    };
+    let confirmed = PayOptions::default().with_unconfirmed_identity_confirmed(UserConfirmed::new());
     let stale = wallet.pay_request(&request, confirmed).await.unwrap_err();
     assert!(
         matches!(stale.refusal(), Some(Refusal::IdentityUnavailable(_))),
@@ -237,10 +234,7 @@ async fn test_destinations_list_paid_only_to_an_endpoint_the_request_allows() {
     let refused = wallet
         .pay_request(
             &request,
-            PayOptions {
-                endpoint: Some(crate::common::endpoint("btc-lightning-bolt12")),
-                ..PayOptions::default()
-            },
+            PayOptions::default().with_endpoint(crate::common::endpoint("btc-lightning-bolt12")),
         )
         .await
         .unwrap_err();
@@ -374,14 +368,13 @@ async fn test_destinations_list_of_a_removed_app_shadows_no_current_one() {
         .unwrap();
     w.clock.advance_ms(11 * 60_000);
     let outcome = wallet
-        .pay_without_request(paykit_sdk::UnrequestedPayment {
-            payee: w.bob_id(),
-            amount: crate::common::btc("0.0015"),
-            options: PayOptions {
-                endpoint: Some(crate::common::endpoint("btc-lightning-bolt12")),
-                ..PayOptions::default()
-            },
-        })
+        .pay_without_request(
+            paykit_sdk::UnrequestedPayment::new(w.bob_id(), crate::common::btc("0.0015"))
+                .with_options(
+                    PayOptions::default()
+                        .with_endpoint(crate::common::endpoint("btc-lightning-bolt12")),
+                ),
+        )
         .await
         .unwrap();
     assert!(

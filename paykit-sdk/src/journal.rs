@@ -65,6 +65,7 @@ mod serde_b64_opt {
 /// Where a payment stands in the paying order (Paykit spec 7.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Stage {
     /// Recorded before the attempt write.
     Recorded,
@@ -510,6 +511,7 @@ impl JournalEntry {
 
 /// A payment in the journal, as the host sees it.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PaymentView {
     /// The attempt ID, the payment method's idempotency key.
     pub attempt_id: AttemptId,

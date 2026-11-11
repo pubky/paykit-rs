@@ -30,10 +30,7 @@ async fn restored(w: &World, backup: &PaykitBackup) -> Paykit {
 }
 
 fn confirmed() -> PayOptions {
-    PayOptions {
-        possibly_cancelled_confirmed: Some(UserConfirmed::new()),
-        ..PayOptions::default()
-    }
+    PayOptions::default().with_possibly_cancelled_confirmed(UserConfirmed::new())
 }
 
 /// The record of bob's shop app the wallet holds for `request`.
@@ -129,10 +126,7 @@ async fn test_restore_hold_kept_when_the_confirmed_payment_is_refused() {
     let refused = app
         .pay_request(
             &request,
-            PayOptions {
-                endpoint: Some(crate::common::endpoint("btc-no-such-endpoint")),
-                ..confirmed()
-            },
+            confirmed().with_endpoint(crate::common::endpoint("btc-no-such-endpoint")),
         )
         .await
         .unwrap_err();

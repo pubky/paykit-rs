@@ -22,14 +22,8 @@ async fn list_requests(shop: &mut Paykit) -> usize {
 }
 
 fn to_bob(w: &World, value: &str, id: &str) -> UnrequestedPayment {
-    UnrequestedPayment {
-        payee: w.bob_id(),
-        amount: btc(value),
-        options: PayOptions {
-            endpoint: Some(endpoint(id)),
-            ..PayOptions::default()
-        },
-    }
+    UnrequestedPayment::new(w.bob_id(), btc(value))
+        .with_options(PayOptions::default().with_endpoint(endpoint(id)))
 }
 
 #[tokio::test]
@@ -153,15 +147,11 @@ async fn test_unrequested_without_a_list_refused() {
         "{refused:?}"
     );
     let public = wallet
-        .pay_without_request(UnrequestedPayment {
-            options: PayOptions {
-                mode: paykit_sdk::PaymentMode::Public(
-                    pubky_switch_client::app::UserConfirmed::new(),
-                ),
-                ..PayOptions::default()
-            },
-            ..to_bob(&w, "1", "btc-lightning-bolt12")
-        })
+        .pay_without_request(to_bob(&w, "1", "btc-lightning-bolt12").with_options(
+            PayOptions::default().with_mode(paykit_sdk::PaymentMode::Public(
+                pubky_switch_client::app::UserConfirmed::new(),
+            )),
+        ))
         .await
         .unwrap_err();
     // Nor can bob be paid publicly: he has no identity.json, so no current app (Paykit spec

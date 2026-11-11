@@ -310,14 +310,9 @@ fn revoke_shop_on_the_switch_only(w: &World) {
 
 /// An idempotent rail without a history: a resume repeats the dispatch, through the checks.
 fn repeatable(w: &World) {
-    w.rail.set_declaration(RailDeclaration {
-        idempotent: true,
-        idempotency_retention_ms: None,
-        history: false,
-        history_retention_ms: None,
-        history_survives_restore: false,
-        longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
-    });
+    w.rail.set_declaration(
+        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS).with_idempotent(true),
+    );
 }
 
 /// Alice's wallet on a hooked store, and bob's request it holds.
@@ -584,14 +579,11 @@ async fn test_final_check_recovery_payee_copy_aged_during_the_own_read_not_paid(
 async fn test_final_check_repeat_retention_ending_during_the_lookup_not_paid() {
     let w = World::new();
     const RETENTION_MS: u64 = 60 * 60_000;
-    w.rail.set_declaration(RailDeclaration {
-        idempotent: true,
-        idempotency_retention_ms: Some(RETENTION_MS),
-        history: false,
-        history_retention_ms: None,
-        history_survives_restore: false,
-        longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
-    });
+    w.rail.set_declaration(
+        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true)
+            .with_idempotency_retention_ms(RETENTION_MS),
+    );
     let (store, app_id, request) = with_a_request(&w).await;
     let journaled = w.clock.now_ms();
     let mut first = w
@@ -783,14 +775,9 @@ async fn test_final_check_repeat_on_an_own_identity_read_that_errs_refused() {
 /// A rail neither idempotent nor with a history: a dispatch it may have made can't be
 /// resolved, so only a journal that shows none started lets a resume write `failed`.
 fn blind(w: &World) {
-    w.rail.set_declaration(RailDeclaration {
-        idempotent: false,
-        idempotency_retention_ms: None,
-        history: false,
-        history_retention_ms: None,
-        history_survives_restore: false,
-        longest_completion_ms: paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
-    });
+    w.rail.set_declaration(RailDeclaration::new(
+        paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+    ));
 }
 
 /// After an explicit flush, no acceptance `store` journaled is known to the wallet's
@@ -1120,10 +1107,7 @@ async fn test_orphan_after_below_the_floor_refused() {
         (paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS + paykit_sdk::PRE_DISPATCH_BUDGET_MS) / 1000
     );
     let scopes = paykit_sdk::AppScopes::new().pay().build().unwrap();
-    let config = PaykitConfig {
-        orphan_after_s: Some(floor - 1),
-        ..PaykitConfig::default()
-    };
+    let config = PaykitConfig::default().with_orphan_after_s(floor - 1);
     let refused = Paykit::join(
         w.env(&w.alice, crate::common::store()),
         config,
@@ -1142,10 +1126,7 @@ async fn test_orphan_after_below_the_floor_refused() {
         "{refused:?}"
     );
     // At the floor, another app joins.
-    let config = PaykitConfig {
-        orphan_after_s: Some(floor),
-        ..PaykitConfig::default()
-    };
+    let config = PaykitConfig::default().with_orphan_after_s(floor);
     w.join_with(&w.alice, "phone", scopes, config, crate::common::store())
         .await;
 }
@@ -1181,10 +1162,8 @@ async fn test_default_config_takes_a_one_day_rail() {
     // A rail that may take a day: the default config's `orphan_after` is that day plus the
     // pre-dispatch budget, so join, load and paying all take it.
     let w = World::new();
-    let declaration = RailDeclaration {
-        longest_completion_ms: 86_400_000,
-        ..paykit_sdk::Rail::declaration(&*w.rail)
-    };
+    let mut declaration = paykit_sdk::Rail::declaration(&*w.rail);
+    declaration.longest_completion_ms = 86_400_000;
     w.rail.set_declaration(declaration);
     assert_eq!(
         PaykitConfig::default().orphan_after_s_for(&declaration),

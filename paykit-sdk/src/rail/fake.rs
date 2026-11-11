@@ -21,6 +21,7 @@ pub const FAKE_LONGEST_COMPLETION_MS: u64 = 3_600_000;
 
 /// What the next new payment does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Behaviour {
     /// Paid at once.
     Succeed,
@@ -219,14 +220,10 @@ impl Rail for FakeRail {
         if let Some(declared) = inner.declaration {
             return declared;
         }
-        RailDeclaration {
-            idempotent: inner.idempotent,
-            idempotency_retention_ms: None,
-            history: true,
-            history_retention_ms: None,
-            history_survives_restore: true,
-            longest_completion_ms: FAKE_LONGEST_COMPLETION_MS,
-        }
+        RailDeclaration::new(FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(inner.idempotent)
+            .with_history(true)
+            .with_history_survives_restore(true)
     }
 
     fn transfer(
@@ -235,10 +232,10 @@ impl Rail for FakeRail {
         payload: &PaymentEndpointPayload,
         amount: &PaymentAmount,
     ) -> Transfer {
-        Transfer {
-            amount: Self::fixed_amount(payload.as_str(), amount).unwrap_or(Some(amount.clone())),
-            max_fee: None,
-        }
+        Transfer::new(
+            Self::fixed_amount(payload.as_str(), amount).unwrap_or(Some(amount.clone())),
+            None,
+        )
     }
 
     fn pay(&self, payment: RailPayment) -> BoxFuture<'_, Result<RailOutcome, RailError>> {

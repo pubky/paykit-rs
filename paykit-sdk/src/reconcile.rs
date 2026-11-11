@@ -41,6 +41,7 @@ use crate::state::key;
 
 /// How the user resolves a doubtful attempt (Paykit spec 7.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Resolution {
     /// `done`, basis `reconcile`: the user confirms it was paid; the claim is SETTLED.
     Done,
@@ -52,6 +53,7 @@ pub enum Resolution {
 
 /// An obligation that may already be paid, shown to the user (Paykit spec 7.1, 7.3).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Doubtful {
     /// The claim key.
     pub obligation: [u8; 32],
@@ -65,6 +67,7 @@ pub struct Doubtful {
 
 /// What a reconciliation did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ReconcileReport {
     /// The outcomes of the payments it finished.
     pub resolved: Vec<PayOutcome>,

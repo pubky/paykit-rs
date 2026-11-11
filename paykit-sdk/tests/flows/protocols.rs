@@ -71,10 +71,7 @@ async fn test_protocols_chat_only_app_joins_but_takes_no_paykit_kind() {
     // Paykit's verifiers take a chat-only certificate as valid, so such an app joins with
     // Paykit as its protocol; its record accepts no Paykit kind.
     let w = World::new();
-    let scopes = paykit_sdk::RequestedScopes {
-        scopes: vec!["chat".into()],
-        permissions: vec![Permission::ListsRead],
-    };
+    let scopes = paykit_sdk::RequestedScopes::new(vec!["chat".into()], vec![Permission::ListsRead]);
     let app: Paykit = w
         .join_with(
             &w.alice,

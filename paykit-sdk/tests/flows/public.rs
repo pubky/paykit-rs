@@ -70,14 +70,8 @@ fn tip_jar() -> Value {
 }
 
 fn public_to_bob(w: &World) -> UnrequestedPayment {
-    UnrequestedPayment {
-        payee: w.bob_id(),
-        amount: btc("0.001"),
-        options: PayOptions {
-            mode: PaymentMode::Public(UserConfirmed::new()),
-            ..PayOptions::default()
-        },
-    }
+    UnrequestedPayment::new(w.bob_id(), btc("0.001"))
+        .with_options(PayOptions::default().with_mode(PaymentMode::Public(UserConfirmed::new())))
 }
 
 #[tokio::test]
@@ -375,13 +369,8 @@ async fn test_public_slow_switch_waited_on_only_through_its_grace() {
     let (mut wallet, slow, _) = beside_a_slow_switch(&w, &mut shop).await;
     // The switch doesn't answer within the grace after the Homeserver's reads: the user is
     // asked to confirm, and nothing is written (Paykit spec 4, 14; Switch spec 4.3).
-    let unconfirmed = UnrequestedPayment {
-        options: PayOptions {
-            mode: PaymentMode::Public(UserConfirmed::new()),
-            ..PayOptions::default()
-        },
-        ..public_to_bob(&w)
-    };
+    let unconfirmed = public_to_bob(&w)
+        .with_options(PayOptions::default().with_mode(PaymentMode::Public(UserConfirmed::new())));
     let refused = bounded(wallet.pay_without_request(unconfirmed.clone()))
         .await
         .unwrap_err();

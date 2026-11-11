@@ -71,6 +71,7 @@ pub const DEFAULT_RESEND_BUDGET: u64 = 500;
 
 /// The integrator's choices for one Paykit App.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PaykitConfig {
     /// The client's choices.
     pub app: AppConfig,
@@ -94,6 +95,50 @@ pub struct PaykitConfig {
 }
 
 impl PaykitConfig {
+    /// The client's choices.
+    #[must_use]
+    pub fn with_app(mut self, app: AppConfig) -> Self {
+        self.app = app;
+        self
+    }
+
+    /// Seconds after which an open attempt of this app is orphaned (Switch spec 10.2). When
+    /// not set it is [`orphan_floor_s`] for the app's rail: its declared longest time to
+    /// complete or fail plus [`PRE_DISPATCH_BUDGET_MS`], so a default config suits any rail.
+    /// A value set below that floor is refused by `join`, `load`, `restore` and every
+    /// attempt. An idempotent dispatch is repeated after a crash only while the rail's
+    /// longest time still fits before the orphan age (Paykit spec 7.2, "Dispatch window"):
+    /// at the floor that leaves only the pre-dispatch budget, less the clock tolerance, so
+    /// an app that wants later repeats sets a larger value.
+    #[must_use]
+    pub fn with_orphan_after_s(mut self, orphan_after_s: u64) -> Self {
+        self.orphan_after_s = Some(orphan_after_s);
+        self
+    }
+
+    /// The largest fee the payee can influence through its destination that the app pays
+    /// automatically (Paykit spec 7.2 step 1); when not set, the app accepts no such fee.
+    #[must_use]
+    pub fn with_fee_cap(mut self, fee_cap: Decimal) -> Self {
+        self.fee_cap = Some(fee_cap);
+        self
+    }
+
+    /// The label a payee app sends its requests under (Paykit spec 3.1, 8.1). An app holding
+    /// only labelled selling scopes needs one unless it holds exactly one label.
+    #[must_use]
+    pub fn with_selling_label(mut self, selling_label: Label) -> Self {
+        self.selling_label = Some(selling_label);
+        self
+    }
+
+    /// How many messages the app re-sends to one requester identity a day (Paykit spec 9).
+    #[must_use]
+    pub fn with_resend_budget(mut self, resend_budget: u64) -> Self {
+        self.resend_budget = resend_budget;
+        self
+    }
+
     /// The `orphan_after` the app's attempts carry for a rail that declares `declaration`:
     /// the value set, or else the rail's floor ([`orphan_floor_s`]).
     pub fn orphan_after_s_for(&self, declaration: &RailDeclaration) -> u64 {
@@ -153,6 +198,7 @@ impl PaykitBackup {
 
 /// What a [`Paykit::receive`] did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ReceiveSummary {
     /// The client's report of the feed read.
     pub report: ReceiveReport,

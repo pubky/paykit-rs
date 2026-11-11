@@ -67,10 +67,10 @@ impl Rail for LedgerRail {
         payload: &PaymentEndpointPayload,
         amount: &PaymentAmount,
     ) -> Transfer {
-        Transfer {
-            max_fee: self.fee.clone(),
-            ..self.fake.transfer(endpoint_id, payload, amount)
-        }
+        Transfer::new(
+            self.fake.transfer(endpoint_id, payload, amount).amount,
+            self.fee.clone(),
+        )
     }
 
     fn pay(&self, payment: RailPayment) -> BoxFuture<'_, Result<RailOutcome, RailError>> {
@@ -91,10 +91,8 @@ impl Rail for LedgerRail {
     }
 
     fn verify(&self, check: ProofCheck) -> BoxFuture<'_, Result<Option<u64>, RailError>> {
-        let check = ProofCheck {
-            proof: to_fake(&check.proof),
-            ..check
-        };
+        let mut check = check;
+        check.proof = to_fake(&check.proof);
         Box::pin(async move { self.fake.verify(check).await })
     }
 
@@ -174,14 +172,11 @@ async fn test_custom_rail_proof_credited_once_per_settlement() {
         .await;
     wallet.receive(None).await.unwrap();
     let outcome = wallet
-        .pay_without_request(UnrequestedPayment {
-            payee: w.bob_id(),
-            amount: btc("0.0015"),
-            options: PayOptions {
-                endpoint: Some(endpoint("btc-lightning-bolt12")),
-                ..PayOptions::default()
-            },
-        })
+        .pay_without_request(
+            UnrequestedPayment::new(w.bob_id(), btc("0.0015")).with_options(
+                PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")),
+            ),
+        )
         .await
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
@@ -249,14 +244,11 @@ async fn pay_through(w: &World, rail: &Arc<LedgerRail>) -> paykit_sdk::Result<Pa
         .await;
     wallet.receive(None).await.unwrap();
     wallet
-        .pay_without_request(UnrequestedPayment {
-            payee: w.bob_id(),
-            amount: btc("0.0015"),
-            options: PayOptions {
-                endpoint: Some(endpoint("btc-lightning-bolt12")),
-                ..PayOptions::default()
-            },
-        })
+        .pay_without_request(
+            UnrequestedPayment::new(w.bob_id(), btc("0.0015")).with_options(
+                PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")),
+            ),
+        )
         .await
 }
 

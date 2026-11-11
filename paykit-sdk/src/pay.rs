@@ -60,6 +60,7 @@ pub const UNREQUESTED_DEADLINE_MS: u64 = 10 * 60_000;
 /// Private or public payment, chosen explicitly (Paykit spec 8.4): a payer never changes from
 /// one to the other on its own.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PaymentMode {
     /// A Private Payment List endpoint.
     #[default]
@@ -70,6 +71,7 @@ pub enum PaymentMode {
 
 /// A manual payment's choices.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PayOptions {
     /// The Payment Endpoint Identifier to pay; the first usable one when `None`.
     pub endpoint: Option<PaymentEndpointIdentifier>,
@@ -93,8 +95,66 @@ pub struct PayOptions {
     pub possibly_cancelled_confirmed: Option<UserConfirmed>,
 }
 
+impl PayOptions {
+    /// The Payment Endpoint Identifier to pay; the first usable one when not set.
+    #[must_use]
+    pub fn with_endpoint(mut self, endpoint: PaymentEndpointIdentifier) -> Self {
+        self.endpoint = Some(endpoint);
+        self
+    }
+
+    /// The payee app whose Private Payment List to pay, for a destination that isn't the
+    /// request's own; any current one when not set.
+    #[must_use]
+    pub fn with_list_app(mut self, list_app: [u8; 16]) -> Self {
+        self.list_app = Some(list_app);
+        self
+    }
+
+    /// Private or public, for a destination that isn't the request's own.
+    #[must_use]
+    pub fn with_mode(mut self, mode: PaymentMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// The user has seen "may already be paid" (Paykit spec 7.1).
+    #[must_use]
+    pub fn with_may_be_paid_confirmed(mut self, confirmed: UserConfirmed) -> Self {
+        self.may_be_paid_confirmed = Some(confirmed);
+        self
+    }
+
+    /// The user has seen that the destination transfers another amount, or a fee above the
+    /// app's cap, and pays it anyway (Paykit spec 7.2 step 1).
+    #[must_use]
+    pub fn with_transfer_confirmed(mut self, confirmed: UserConfirmed) -> Self {
+        self.transfer_confirmed = Some(confirmed);
+        self
+    }
+
+    /// The user has seen that the payee's switch couldn't confirm the payee's apps, and pays
+    /// anyway ([`Refusal::IdentityUnconfirmed`]; Switch spec 4.3, Paykit spec 7.2).
+    #[must_use]
+    pub fn with_unconfirmed_identity_confirmed(mut self, confirmed: UserConfirmed) -> Self {
+        self.unconfirmed_identity_confirmed = Some(confirmed);
+        self
+    }
+
+    /// The user has seen that the payee may have cancelled this request since the backup the
+    /// app was restored from, and pays it anyway ([`Refusal::HeldAfterRestore`]; Paykit spec
+    /// 7.2, "What a restore loses"). It ends the request's hold; it never overrides a
+    /// cancellation the app holds.
+    #[must_use]
+    pub fn with_possibly_cancelled_confirmed(mut self, confirmed: UserConfirmed) -> Self {
+        self.possibly_cancelled_confirmed = Some(confirmed);
+        self
+    }
+}
+
 /// The result of a payment.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PayOutcome {
     /// Paid: `done` written, the proof queued.
     Paid {
@@ -149,6 +209,7 @@ pub enum PayOutcome {
 
 /// A payment without a request (Paykit spec 8.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UnrequestedPayment {
     /// The payee.
     pub payee: [u8; 32],
@@ -156,6 +217,24 @@ pub struct UnrequestedPayment {
     pub amount: PaymentAmount,
     /// The choices.
     pub options: PayOptions,
+}
+
+impl UnrequestedPayment {
+    /// A payment of `amount` to `payee`, with the default choices.
+    pub fn new(payee: [u8; 32], amount: PaymentAmount) -> Self {
+        Self {
+            payee,
+            amount,
+            options: PayOptions::default(),
+        }
+    }
+
+    /// The choices.
+    #[must_use]
+    pub fn with_options(mut self, options: PayOptions) -> Self {
+        self.options = options;
+        self
+    }
 }
 
 /// What held a payment back at [`Paykit::pay_gate`].
