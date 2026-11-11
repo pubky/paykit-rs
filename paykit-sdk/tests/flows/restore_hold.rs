@@ -177,39 +177,37 @@ async fn test_restore_hold_another_apps_record_write_stops_it() {
 }
 
 #[tokio::test]
-async fn test_restore_hold_spares_a_request_first_received_after_the_reconciliation() {
+async fn test_restore_hold_holds_a_request_first_seen_after_the_restore_until_confirmed() {
+    // No time the app can see proves a request new: one bob sends after the restore is held
+    // like the others, and a manual payment needs the user's confirmation (Paykit spec 7.2).
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    let before = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     let backup = wallet.backup().await.unwrap();
     drop(wallet);
     let mut app = restored(&w, &backup).await;
-    // A request bob sends once the restored app has reconciled can't have been cancelled
-    // before the backup: it isn't held, while the one from before still is.
     w.clock.advance_ms(60_000);
     let after = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
     app.receive(None).await.unwrap();
     assert_eq!(
         app.request(&after).await.unwrap().status,
-        RequestStatus::Open
-    );
-    assert_eq!(
-        app.request(&before).await.unwrap().status,
         RequestStatus::Held
     );
-    let paid = app
+    let refused = app
         .pay_request(&after, PayOptions::default())
         .await
-        .unwrap();
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::HeldAfterRestore));
+    let paid = app.pay_request(&after, confirmed()).await.unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
 }
 
 #[tokio::test]
 async fn test_restore_hold_keeps_a_request_created_before_and_resent_after() {
-    // A request bob made before the restore, which the lost device never placed, comes
-    // only after the reconciliation, as a re-send would: it is held.
+    // The adversarial re-send: a request bob made before the restore, which the lost device
+    // never placed, comes only after the reconciliation, with a later acceptance time: it
+    // is held.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let backup = wallet.backup().await.unwrap();

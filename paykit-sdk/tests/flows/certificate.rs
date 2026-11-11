@@ -357,7 +357,6 @@ impl StateStore for Recording {
                 pubky_switch_client::store::Write::Put { key, .. }
                 | pubky_switch_client::store::Write::Delete { key, .. } => key,
                 pubky_switch_client::store::Write::DeletePrefix { prefix, .. } => prefix,
-                _ => continue,
             };
             keys.push(String::from_utf8_lossy(key).into_owned());
         }
