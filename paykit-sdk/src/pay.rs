@@ -2893,19 +2893,12 @@ impl Paykit {
         Ok(Some(PayOutcome::Uncertain { attempt_id }))
     }
 
-    /// Whether a repeat of `entry`'s dispatch is withheld: its payee is blocked, or the deny
-    /// list can't be read (Paykit spec 8.1); or its request may no longer
+    /// Whether a repeat of `entry`'s dispatch is withheld because its request may no longer
     /// be paid (Paykit spec 8.1): this app keeps a stop for it, or the request record the
     /// switch holds, read again, shows it cancelled or rejected, or isn't there or doesn't
     /// read as the request, so nothing shows it still open. A payment without a request has
     /// nothing a payee cancels.
     async fn repeat_withheld(&mut self, entry: &JournalEntry) -> Result<bool> {
-        // No automatic payment to a blocked payee (Paykit spec 8.1): a repeat is one, the
-        // user's confirmation having been for the first dispatch. A deny list that can't be
-        // read withholds it too.
-        if self.denied(&entry.payee).await.unwrap_or(true) {
-            return Ok(true);
-        }
         if entry.request_hash()?.is_none() {
             return Ok(false);
         }
@@ -2923,6 +2916,8 @@ impl Paykit {
     /// path that reaches it, a first dispatch and a repeat at a resume or a recovery (Paykit
     /// spec 4, 7.2). In order:
     ///
+    /// 0. for an automatic payment, the deny list, read again: a blocked payee, or a list
+    ///    that can't be read, holds it ([`FinalCheck::Hold`], Paykit spec 8.1);
     /// 1. a switch lookup kept for the payee whose answer has come is taken, so a late
     ///    answer that removes the destination's app is acted on (Switch spec 4.3), and one
     ///    the client refuses, such as an equivocation, stops the payment
@@ -2957,6 +2952,14 @@ impl Paykit {
         confirmed: Option<UserConfirmed>,
         kind: Dispatch,
     ) -> Result<(FinalCheck, PeerIdentity)> {
+        // No automatic payment to a blocked payee (Paykit spec 8.1), on any automatic path,
+        // a resume's repeat included: the user's confirmation was for the first dispatch. A
+        // deny list that can't be read holds it too. Judged before the await below, after
+        // which nothing time-bound is: the list changes only by the user's or the switch's
+        // write, which a later check reads again.
+        if by == Initiator::Automatic && self.denied(&entry.payee).await.unwrap_or(true) {
+            return Ok((FinalCheck::Hold, payee));
+        }
         let payee = match self.take_kept_lookup(&entry.payee).await? {
             Ok(Some(answered)) => answered,
             Ok(None) => payee,
