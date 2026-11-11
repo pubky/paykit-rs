@@ -183,17 +183,39 @@ impl std::fmt::Debug for RailPayment {
 #[non_exhaustive]
 pub enum RailOutcome {
     /// Verified success.
-    Paid {
-        /// The opaque, method-specific proof (Paykit wire 4.10 `proof`).
-        proof: Map<String, Value>,
-        /// The independently verified payment time, in Unix milliseconds, when the method
-        /// has one (Paykit spec 8.2).
-        paid_at_ms: Option<u64>,
-    },
+    Paid(RailPaid),
     /// Definitive failure: no money moved, and none will.
     Failed,
     /// Nothing yet: in flight, or the method can't tell.
     Pending,
+}
+
+/// A verified success, as the method reports it ([`RailOutcome::Paid`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RailPaid {
+    /// The opaque, method-specific proof (Paykit wire 4.10 `proof`).
+    pub proof: Map<String, Value>,
+    /// The independently verified payment time, in Unix milliseconds, when the method has
+    /// one (Paykit spec 8.2).
+    pub paid_at_ms: Option<u64>,
+}
+
+impl RailPaid {
+    /// A success with `proof`, and no verified payment time.
+    pub fn new(proof: Map<String, Value>) -> Self {
+        Self {
+            proof,
+            paid_at_ms: None,
+        }
+    }
+
+    /// The independently verified payment time, in Unix milliseconds (Paykit spec 8.2).
+    #[must_use]
+    pub fn with_paid_at_ms(mut self, paid_at_ms: u64) -> Self {
+        self.paid_at_ms = Some(paid_at_ms);
+        self
+    }
 }
 
 /// A proof a payee checks by its own method (Paykit spec 8.1 step 4).

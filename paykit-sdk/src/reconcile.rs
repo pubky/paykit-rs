@@ -34,7 +34,7 @@ use crate::hold::RestoreHold;
 use crate::journal::{Destination, JournalEntry, KeptAmount, Stage};
 use crate::pay::{own_deadline, PayOutcome, Written};
 use crate::paykit::Paykit;
-use crate::rail::RailOutcome;
+use crate::rail::{RailOutcome, RailPaid};
 use crate::records::KeptMessage;
 use crate::requests::request_of;
 use crate::state::key;
@@ -184,7 +184,9 @@ impl Paykit {
                     // and 4). A payment whose destination the records can't tell stays
                     // doubtful: its proof can't be written.
                     match self.rail.payment(id).await? {
-                        Some(RailOutcome::Paid { proof, paid_at_ms }) => {
+                        Some(RailOutcome::Paid(RailPaid {
+                            proof, paid_at_ms, ..
+                        })) => {
                             if let Some(mut entry) = self.rebuilt_entry(&obligation, id).await? {
                                 entry.rail_proof = Some(proof);
                                 entry.paid_at_ms = paid_at_ms;

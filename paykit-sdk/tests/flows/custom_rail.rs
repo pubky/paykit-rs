@@ -46,10 +46,10 @@ fn to_fake(proof: &Map<String, Value>) -> Map<String, Value> {
 impl LedgerRail {
     fn outcome(&self, outcome: RailOutcome) -> RailOutcome {
         match outcome {
-            RailOutcome::Paid { proof, paid_at_ms } => {
-                let proof = to_ledger(&proof);
-                *self.last.lock().unwrap() = Some(proof.clone());
-                RailOutcome::Paid { proof, paid_at_ms }
+            RailOutcome::Paid(mut paid) => {
+                paid.proof = to_ledger(&paid.proof);
+                *self.last.lock().unwrap() = Some(paid.proof.clone());
+                RailOutcome::Paid(paid)
             }
             other => other,
         }

@@ -14,7 +14,9 @@ use pubky_switch_client::clock::Clock;
 use pubky_switch_client::transport::BoxFuture;
 use serde_json::{Map, Value};
 
-use super::{ProofCheck, Rail, RailDeclaration, RailError, RailOutcome, RailPayment, Transfer};
+use super::{
+    ProofCheck, Rail, RailDeclaration, RailError, RailOutcome, RailPaid, RailPayment, Transfer,
+};
 
 /// The longest a fake dispatch takes to complete or fail, as its declaration says: an hour.
 pub const FAKE_LONGEST_COMPLETION_MS: u64 = 3_600_000;
@@ -215,10 +217,11 @@ fn paid_outcome(key: &AttemptId, counter: u64, now: Option<u64>) -> RailOutcome 
     let mut proof = Map::new();
     proof.insert("type".into(), Value::String("bitcoin-txid".into()));
     proof.insert("txid".into(), Value::String(txid));
-    RailOutcome::Paid {
-        proof,
-        paid_at_ms: now,
-    }
+    let paid = RailPaid::new(proof);
+    RailOutcome::Paid(match now {
+        Some(ms) => paid.with_paid_at_ms(ms),
+        None => paid,
+    })
 }
 
 /// The Payment Endpoint Identifiers the fake rail pays by default, in the order it tries
@@ -338,7 +341,10 @@ impl Rail for FakeRail {
     fn verify(&self, check: ProofCheck) -> BoxFuture<'_, Result<Option<u64>, RailError>> {
         let inner = self.lock();
         let answer = inner.payments.get(&check.attempt_id).and_then(|paid| {
-            let RailOutcome::Paid { proof, paid_at_ms } = &paid.outcome else {
+            let RailOutcome::Paid(RailPaid {
+                proof, paid_at_ms, ..
+            }) = &paid.outcome
+            else {
                 return None;
             };
             let payload_ok = check
@@ -408,7 +414,7 @@ mod tests {
         );
         rail.settle(&AttemptId::from_bytes([4; 16]), true);
         let history = rail.payment(AttemptId::from_bytes([4; 16])).await.unwrap();
-        assert!(matches!(history, Some(RailOutcome::Paid { .. })));
+        assert!(matches!(history, Some(RailOutcome::Paid(_))));
     }
 
     #[tokio::test]
@@ -419,7 +425,7 @@ mod tests {
         let key = AttemptId::from_bytes([5; 16]);
         assert!(matches!(
             rail.payment(key).await.unwrap(),
-            Some(RailOutcome::Paid { .. })
+            Some(RailOutcome::Paid(_))
         ));
         rail.forget_history(&key);
         assert_eq!(rail.payment(key).await.unwrap(), None);
@@ -428,7 +434,8 @@ mod tests {
     #[tokio::test]
     async fn test_fake_rail_verifies_only_the_proof_it_made() {
         let rail = FakeRail::new();
-        let RailOutcome::Paid { proof, .. } = rail.pay(payment(6, "a")).await.unwrap() else {
+        let RailOutcome::Paid(RailPaid { proof, .. }) = rail.pay(payment(6, "a")).await.unwrap()
+        else {
             panic!("paid");
         };
         assert!(paykit_lib::derive::settlement_id(&proof).is_some());
