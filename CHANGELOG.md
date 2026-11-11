@@ -50,6 +50,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Changed
 
+- Update `rustls` to 0.23.46.
 - Before a send run first encrypts on an Encrypted Link, the SDK moves the
   link past write slots that already hold packets and stores the advance, so
   it never prepares a ciphertext for a used slot. That first send is published
