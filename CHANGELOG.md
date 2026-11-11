@@ -110,6 +110,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   reached the app as an internal panic error that included the platform error
   text, and a throw from `SdkStateBlobStore` left that SDK handle failing every
   later call with `state_transaction_lock_poisoned`.
+- `resolve_public_payment_request` in Rust and `resolvePublicPaymentRequest` in
+  Swift, Kotlin and React Native now fail with a policy error for a blocked
+  counterparty, before its App Registry is read, instead of resolving its
+  Payment Request.
 
 ### Integration
 
