@@ -44,6 +44,7 @@
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>` | a notice for the host about a payment, until acknowledged (`notices.rs`) | |
+//! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored, since a restore's events have other IDs | |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
 
 use paykit_lib::AttemptId;
@@ -201,6 +202,12 @@ pub(crate) mod key {
     pub(crate) const KEPT_BATCHES: &str = "kb/";
     pub(crate) const NOTICES: &str = "nt/";
     pub(crate) const STORED_NOTES: &str = "se/";
+    pub(crate) const TAKEN: &str = "dt/";
+
+    /// The mark of the duty event `id`, taken.
+    pub(crate) fn taken(id: &pubky_switch_client::app::EventId) -> String {
+        format!("{TAKEN}{id}")
+    }
 
     /// The note of a stored entry's message `msg_id` from `sender`.
     pub(crate) fn stored_note(sender: &[u8; 32], msg_id: &str) -> String {
@@ -328,6 +335,8 @@ pub(crate) enum StateKey {
         payee: [u8; 32],
         app_id: Option<[u8; 16]>,
     },
+    /// `dt/<event ID>`: a duty event taken.
+    Taken(String),
     /// `se/<sender>/<msg_id>`: a stored entry's message to write later.
     StoredNote { sender: [u8; 32], msg_id: String },
     /// `nt/<attempt_id>/<kind>`: a notice for the host.
@@ -432,6 +441,10 @@ impl StateKey {
                             app_id: None,
                         },
                     },
+                    "dt" => {
+                        let id = rest.parse::<pubky_switch_client::app::EventId>().ok()?;
+                        (id.to_string() == rest).then(|| Self::Taken(rest.to_owned()))?
+                    }
                     "se" => {
                         let (sender, id) = rest.split_once('/')?;
                         Self::StoredNote {
@@ -538,6 +551,10 @@ mod tests {
             (key::kept_batch(&app), StateKey::KeptBatch(app)),
             (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),
             (key::LISTS_READ.into(), StateKey::ListsRead),
+            (
+                format!("{}{}-7", key::TAKEN, "05".repeat(16)),
+                StateKey::Taken(format!("{}-7", "05".repeat(16))),
+            ),
             (key::held_list(&pubky), StateKey::HeldList(pubky)),
             (key::side(id), StateKey::Side(id.into())),
             (
@@ -618,6 +635,7 @@ mod tests {
             "lq/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM/not-an-app",
             "lq/",
             "nt/BQUFBQUFBQUFBQUFBQUFBQ/paid",
+            "dt/05-7",
             "nt/BQUFBQUFBQUFBQUFBQUFBQ",
         ] {
             assert_eq!(StateKey::parse(key.as_bytes()), None, "{key}");

@@ -366,14 +366,16 @@ pub(crate) fn restore_paykit_layer(
             // the restored one, which its listing covers. The client's kept batches are its
             // own; a restore keeps no note of them.
             // A stored entry's note is the client's entry's: the client tells of the entries it
-            // restores again, and the note is kept anew then (`stored.rs`).
+            // restores again, and the note is kept anew then (`stored.rs`). A taken event's
+            // mark names an event of this store, whose IDs a restore doesn't keep.
             StateKey::RestoreHold
             | StateKey::HoldConfirmed(_)
             | StateKey::RecordsUnlisted
             | StateKey::PayerPassOwed
             | StateKey::ListedCert
             | StateKey::KeptBatch(_)
-            | StateKey::StoredNote { .. } => continue,
+            | StateKey::StoredNote { .. }
+            | StateKey::Taken(_) => continue,
             StateKey::Journal(attempt) => attempt,
             StateKey::CursorTime => {
                 cursor_time_ms = state::decode::<u64>(&value).map_err(|_| unread())?;

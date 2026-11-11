@@ -1,16 +1,20 @@
 //! Entries the client stored locally for good, and what Paykit does with each (Switch spec
-//! 8.2; Paykit spec 8.1): the duty events that tell of them are taken at every receive,
-//! kept in Paykit's own state, and then acknowledged by the SDK, not left to the host.
+//! 8.2; Paykit spec 8.1): the duty events that tell of them are taken at every receive and
+//! kept in Paykit's own state.
 //!
 //! - **An effect refused for good** (`EffectRefused`, or a `Parked` duty event of any reason
 //!   but `Uncertain`), such as a record write the switch refused (`403
 //!   permission_missing`), or one over a quota: the message is kept (`p/se/<sender>/<msg_id>`)
 //!   and written into its record by a later write of the app's own, tried at every receive
-//!   until it lands, as room frees. Meanwhile a Private Payment List is held over its record
-//!   (`lh/`), and a request is shown unrecorded ([`crate::RequestStatus::Unrecorded`]). A
-//!   payee's cancellation needs nothing here: its stop is kept with the cursor move, with no
-//!   write at the switch (`kc/`, Paykit spec 8.1). Once written, the stored entry is
-//!   forgotten, its message staying processed.
+//!   until it lands, as room frees: a request, a payer's reply, a proof of a payment without
+//!   a request into the record of its settlement, a receipt beside the proof it names.
+//!   Meanwhile a Private Payment List is held over its record (`lh/`), the newer kept, and a
+//!   request is shown unrecorded ([`crate::RequestStatus::Unrecorded`]). A payee's
+//!   cancellation needs nothing here: its stop is kept with the cursor move, with no write
+//!   at the switch (`kc/`, Paykit spec 8.1). Once written, the stored entry is forgotten,
+//!   its message staying processed. One not written within [`crate::KEPT_REPLY_MS`] of its
+//!   acceptance, such as a receipt naming a proof the record doesn't hold, is given up: its
+//!   note goes, and its entry stays stored, for the host.
 //! - **An effect of unknown fate** (`EffectUncertain`, or `Parked` as `Uncertain`): the same
 //!   write compensates for it, since placing a message a record already holds writes
 //!   nothing. A copy of the entry the host released after that is declined, its message
@@ -20,20 +24,21 @@
 //!   messages its sender's inbox accepted in that millisecond is queued to the sender, who
 //!   may still keep it (Paykit spec 9).
 //!
-//! The SDK acknowledges these events in order, up to the first duty event it doesn't take,
-//! such as one about a kept batch or the account, which stays for the host: the client
-//! acknowledges every event up to an ID at once. A stored entry's event after such a one is
-//! kept again at each receive, which changes nothing, and an entry dropped unverified is
-//! asked for once the events before it are acknowledged. A host acknowledges only the
-//! events it takes itself, up to the last of them, so it never acknowledges these unseen.
-//!
-//! Kinds a record doesn't hold, a proof of a payment without a request and an entry that
-//! doesn't read as a message are left stored, for the host ([`pubky_switch_client::app::App::parked_entries`]).
+//! **Taken at first sight.** The SDK acts on each such event the first time a receive sees
+//! it, and keeps a mark of it (`p/dt/<event ID>`) in the same commit as what the event says,
+//! so a crash before that commit leaves the event to be taken again, and a later sight does
+//! nothing twice, whoever acknowledges it and whenever. A mark goes once its event is
+//! acknowledged. An event whose message the SDK can't keep, such as one whose entry is
+//! gone, is not taken, and stays for the host. So once [`Paykit::receive`] has returned,
+//! the host may acknowledge up to the last event its report showed. The SDK also
+//! acknowledges, in order, the events it has taken up to the first one it hasn't, so they
+//! don't pile up for a host that acknowledges only its own: housekeeping, which decides
+//! nothing.
 
 use paykit_lib::derive::natural_key;
 use paykit_lib::records::StoredMessage;
 use paykit_lib::Body;
-use pubky_switch_client::app::{AppEvent, OpBatch, ParkReason};
+use pubky_switch_client::app::{AppEvent, OpBatch, ParkReason, RecordContent};
 use pubky_switch_core::enc::serde_b64;
 use serde::{Deserialize, Serialize};
 
@@ -43,7 +48,7 @@ use crate::paykit::Paykit;
 use crate::protocol::QueuedAsk;
 use crate::records::{list_target, KeptMessage};
 use crate::requests::{RequestRef, RequestStatus, RequestView};
-use crate::state::key;
+use crate::state::{key, Tx};
 
 /// A stored entry's message Paykit writes into its record later (`p/se/<sender>/<msg_id>`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -65,12 +70,16 @@ pub(crate) fn declines(note: Option<&StoredNote>) -> bool {
     note.is_some_and(|note| note.placed)
 }
 
-/// Where a kept message goes: its record and role.
+/// Where a kept message goes.
 enum Place {
-    /// Into this record, in this role.
-    Record(ActivityTarget, Role),
-    /// Held elsewhere already: the kept stop or the held list.
-    Held,
+    /// Into this record, in this role; `creates` when the message may open the record.
+    Record {
+        target: ActivityTarget,
+        role: Role,
+        creates: bool,
+    },
+    /// A list, held over its record: the hold to keep, `None` when a list as new is held.
+    List(Option<(String, KeptMessage)>),
 }
 
 impl Paykit {
@@ -109,68 +118,91 @@ impl Paykit {
         Ok(out)
     }
 
-    /// Take the duty events about stored entries (module docs), and acknowledge those
-    /// taken, in order; then write the kept messages that can be written now.
+    /// Take the duty events about stored entries the client hasn't had acknowledged, each
+    /// at its first sight (module docs, "Taken at first sight"); acknowledge, in order, those
+    /// taken up to the first that isn't; drop the marks of events acknowledged; then write
+    /// the kept messages that can be written now.
     pub(crate) async fn take_stored_entries(&mut self) -> Result<()> {
         let events = self.app.unacknowledged_events().await?;
-        // Acknowledged up to the first event the SDK doesn't take; every one it takes is
-        // kept first, the later ones again at the next receive, which changes nothing.
-        let mut taken = None;
+        let mut listed = std::collections::BTreeSet::new();
         let mut prefix = true;
+        let mut through = None;
         for event in &events {
             let Some(id) = event.id() else {
                 continue;
             };
-            let ours = self.take_stored_event(event, prefix).await?;
-            prefix &= ours;
+            let mark = key::taken(&id);
+            let taken = match self.local_get::<bool>(&mark).await? {
+                Some(_) => true,
+                None => self.take_stored_event(event, &mark).await?,
+            };
+            listed.insert(mark);
+            prefix &= taken;
             if prefix {
-                taken = Some(id);
+                through = Some(id);
             }
         }
-        if let Some(id) = taken {
+        if let Some(id) = through {
             self.app.ack_events(id).await?;
         }
+        let mut gone = Tx::default();
+        for (rest, _) in self.local_scan::<bool>(key::TAKEN).await? {
+            let mark = format!("{}{rest}", key::TAKEN);
+            if !listed.contains(&mark) {
+                gone.delete(&mark);
+            }
+        }
+        self.local_commit(gone).await?;
         self.place_stored().await
     }
 
-    /// Keep what a duty event about a stored entry says (module docs). Whether it is one,
-    /// taken. An entry dropped unverified is asked for only with `acknowledged`, when its
-    /// event is acknowledged right after, so the request goes once.
-    async fn take_stored_event(&mut self, event: &AppEvent, acknowledged: bool) -> Result<bool> {
-        match event {
+    /// Keep what a duty event about a stored entry says, with its mark `mark`, in one
+    /// commit (module docs). Whether it was taken: `false` for an event of another kind, or
+    /// one whose message can't be kept, which stays for the host.
+    async fn take_stored_event(&mut self, event: &AppEvent, mark: &str) -> Result<bool> {
+        let mut tx = Tx::default();
+        let taken = match event {
             AppEvent::Parked {
                 stored_id, reason, ..
-            } if *reason != ParkReason::Released => self.note_stored(*stored_id).await?,
+            } if *reason != ParkReason::Released => self.note_stored(*stored_id, &mut tx).await?,
             AppEvent::EffectRefused { stored_id, .. }
-            | AppEvent::EffectUncertain { stored_id, .. } => self.note_stored(*stored_id).await?,
+            | AppEvent::EffectUncertain { stored_id, .. } => {
+                self.note_stored(*stored_id, &mut tx).await?
+            }
             AppEvent::ReleasedDuplicate { sender, msg_id, .. } => {
-                self.local_delete(&key::stored_note(sender, msg_id)).await?;
+                tx.delete(&key::stored_note(sender, msg_id));
+                true
             }
             AppEvent::StoredEntryDropped {
                 sender,
                 accepted_at_ms,
                 ..
-            } if acknowledged => {
+            } => {
                 let ask = QueuedAsk {
                     sender: *sender,
                     from_ms: *accepted_at_ms,
                     until_ms: Some(*accepted_at_ms),
                 };
-                self.local_put(&key::ask(sender, *accepted_at_ms), &ask)
-                    .await?;
+                tx.put(&key::ask(sender, *accepted_at_ms), &ask)?;
+                true
             }
-            _ => return Ok(false),
+            _ => false,
+        };
+        if taken {
+            tx.put(mark, &true)?;
+            self.local_commit(tx).await?;
         }
-        Ok(true)
+        Ok(taken)
     }
 
-    /// Keep the message of the entry stored at `stored_id` to write it later, once: an entry
-    /// forgotten already, one that doesn't read as a message that verifies for this app, and
-    /// a kind no record of this app's holds are left to the host.
-    async fn note_stored(&mut self, stored_id: u64) -> Result<()> {
+    /// Keep, in `tx`, the message of the entry stored at `stored_id` to write it later, and
+    /// a list's hold. Whether it is kept, or was already: `false` for an entry gone, one that
+    /// doesn't read as a message that verifies for this app, and a kind no record of this
+    /// app's holds.
+    async fn note_stored(&mut self, stored_id: u64, tx: &mut Tx) -> Result<bool> {
         let own = self.identity();
         let Some(entry) = self.app.parked_entry(stored_id).await? else {
-            return Ok(());
+            return Ok(false);
         };
         let Ok(stored) = StoredMessage::new(
             entry.sender,
@@ -179,13 +211,18 @@ impl Paykit {
             Some(entry.accepted_at_ms),
             &own,
         ) else {
-            return Ok(());
+            return Ok(false);
         };
         let note_key = key::stored_note(&entry.sender, &stored.message().msg_id);
-        if self.local_get::<StoredNote>(&note_key).await?.is_some()
-            || self.place_of(&stored).await?.is_none()
-        {
-            return Ok(());
+        if self.local_get::<StoredNote>(&note_key).await?.is_some() {
+            return Ok(true);
+        }
+        match self.place_of(&stored).await? {
+            None => return Ok(false),
+            Some(Place::List(Some((held, kept)))) => {
+                tx.put(&held, &kept)?;
+            }
+            Some(_) => {}
         }
         let note = StoredNote {
             stored_id,
@@ -194,24 +231,53 @@ impl Paykit {
             message: KeptMessage::of(&stored),
             placed: false,
         };
-        self.local_put(&note_key, &note).await
+        tx.put(&note_key, &note)?;
+        Ok(true)
     }
 
     /// Where `stored` goes for this app: a request into the payer's request record; a
     /// payer's reply into the payee's record of the request it names, under its label; a
-    /// receipt into the payer's record; a list held over its record, in the same step.
-    /// `None` for a kind no record of this app's holds, or one its scopes don't write.
-    async fn place_of(&mut self, stored: &StoredMessage) -> Result<Option<Place>> {
+    /// proof of a payment without a request into the payee's record of its settlement,
+    /// which it may open (Paykit spec 8.4); a receipt into the payer's record; a list held
+    /// over its record, unless a list as new is held. `None` for a kind no record of this
+    /// app's holds, or one its scopes don't write.
+    async fn place_of(&self, stored: &StoredMessage) -> Result<Option<Place>> {
         let own = self.identity();
         let sender = stored.sender();
         let scopes = self.scopes();
         let pay = self.holds("pay");
         let first = stored.message().refs.first().copied();
+        let record = |target, role, creates| {
+            Some(Place::Record {
+                target,
+                role,
+                creates,
+            })
+        };
         Ok(match stored.body() {
-            Body::PaymentRequest(_) if pay => Some(Place::Record(
+            Body::PaymentRequest(_) if pay => record(
                 ActivityTarget::payer(natural_key::request_record(&sender, &stored.hash())),
                 Role::Request,
-            )),
+                true,
+            ),
+            Body::PaymentProof(proof)
+                if first.is_none() && crate::protocol::writes_payee_label(&scopes, None) =>
+            {
+                let Some(settlement) = self.rail.settlement_id(&proof.proof) else {
+                    return Ok(None);
+                };
+                record(
+                    ActivityTarget::payee(
+                        natural_key::payee_payment_record(
+                            &proof.payment_endpoint_identifier,
+                            &settlement,
+                        ),
+                        None,
+                    ),
+                    Role::Proof,
+                    true,
+                )
+            }
             Body::PaymentRequestAcceptance(_)
             | Body::PaymentRequestRejection(_)
             | Body::PaymentRequestCancellation(_)
@@ -221,14 +287,14 @@ impl Paykit {
                     Some(request)
                         if crate::protocol::writes_payee_label(&scopes, label.as_ref()) =>
                     {
-                        let role = Role::of(stored.body()).unwrap_or(Role::Response);
-                        Some(Place::Record(
+                        record(
                             ActivityTarget::payee(
                                 natural_key::request_record(&own, &request),
                                 label.as_ref(),
                             ),
-                            role,
-                        ))
+                            Role::of(stored.body()).unwrap_or(Role::Response),
+                            false,
+                        )
                     }
                     _ => None,
                 }
@@ -238,15 +304,19 @@ impl Paykit {
                     Some(request) => natural_key::request_record(&sender, request),
                     None => natural_key::payer_payment_record(&own, &receipt.attempt_id),
                 };
-                Some(Place::Record(ActivityTarget::payer(target), Role::Receipt))
+                record(ActivityTarget::payer(target), Role::Receipt, false)
             }
             Body::PrivatePaymentList(_) if pay => {
                 let target = list_target(&sender, &stored.message().from.app_id);
                 let held = key::held_list(&self.app.record_key(&target)?);
-                if self.local_get::<KeptMessage>(&held).await?.is_none() {
-                    self.local_put(&held, &KeptMessage::of(stored)).await?;
-                }
-                Some(Place::Held)
+                let newer = match self.local_get::<KeptMessage>(&held).await? {
+                    None => true,
+                    Some(kept) => {
+                        crate::receive::list_version(&kept.stored(&own)?)
+                            < crate::receive::list_version(stored)
+                    }
+                };
+                Some(Place::List(newer.then(|| (held, KeptMessage::of(stored)))))
             }
             _ => None,
         })
@@ -254,24 +324,41 @@ impl Paykit {
 
     /// Write every kept message whose record can take it now, each as a later write of the
     /// app's own, built on the version held; then forget the stored entry of each one in
-    /// place. A write that fails now is tried again at the next receive. A receipt goes in
-    /// only beside the proof it names (Paykit wire 5.3), and a payer's reply only into a
-    /// record this app holds.
+    /// place, and drop its note. A write that fails now is tried again at the next receive;
+    /// a message not written within [`crate::KEPT_REPLY_MS`] of its acceptance, on the
+    /// highest service time verified, is given up, its entry left stored for the host.
     async fn place_stored(&mut self) -> Result<()> {
         let own = self.identity();
         for (rest, mut note) in self.local_scan::<StoredNote>(key::STORED_NOTES).await? {
             let note_key = format!("{}{rest}", key::STORED_NOTES);
             if !note.placed {
                 let stored = note.message.stored(&own)?;
+                let accepted_at = stored.accepted_at();
                 note.placed = match self.place_of(&stored).await? {
-                    Some(Place::Held) => true,
-                    Some(Place::Record(target, role)) => self
-                        .place_note(&target, role, stored)
+                    Some(Place::List(hold)) => {
+                        if let Some((held, kept)) = hold {
+                            self.local_put(&held, &kept).await?;
+                        }
+                        true
+                    }
+                    Some(Place::Record {
+                        target,
+                        role,
+                        creates,
+                    }) => self
+                        .place_note(&target, role, creates, stored)
                         .await
                         .unwrap_or(false),
                     None => false,
                 };
                 if !note.placed {
+                    let stale = accepted_at.is_none_or(|at| {
+                        self.service_time()
+                            .is_some_and(|t| at.saturating_add(crate::receive::KEPT_REPLY_MS) <= t)
+                    });
+                    if stale {
+                        self.local_delete(&note_key).await?;
+                    }
                     continue;
                 }
                 self.local_put(&note_key, &note).await?;
@@ -299,25 +386,42 @@ impl Paykit {
 
     /// Place `stored` in its `role` of the record at `target`, as a write of the app's own.
     /// Whether it is in place: written now, or reflected already.
+    ///
+    /// A record that is absent or deleted is opened only by a message that may open it
+    /// (`creates`), and a receipt goes only beside the proof it names (Paykit wire 5.3). A
+    /// record held as a value that doesn't read, or that the app can't open, is never
+    /// written over (Switch spec 8.2: a reader doesn't act on a record it can't read, and a
+    /// write over one that is only unopenable for now could drop what its writer stored).
+    /// This client can't yet tell a value unopenable for now from one that never will
+    /// open, so no such value is written over at all.
     async fn place_note(
         &mut self,
         target: &ActivityTarget,
         role: Role,
+        creates: bool,
         stored: StoredMessage,
     ) -> Result<bool> {
-        let Some(record) = self.held_activity(target).await? else {
-            // A request opens its record; a reply or a receipt waits for one.
-            if role != Role::Request {
-                return Ok(false);
+        let key = self.activity_key(target)?;
+        let content = self.app.shared_record(&key).await?.map(|held| held.content);
+        match content {
+            None | Some(RecordContent::Deleted) => {
+                if !creates {
+                    return Ok(false);
+                }
             }
-            return self.write_placed(target, stored).await;
-        };
-        let names_proof = record
-            .proof
-            .as_ref()
-            .is_some_and(|proof| stored.message().refs.first() == Some(&proof.hash()));
-        if role == Role::Receipt && !names_proof {
-            return Ok(false);
+            Some(RecordContent::Unreadable) => return Ok(false),
+            Some(RecordContent::Value(_)) => {
+                let Some(record) = self.held_activity(target).await? else {
+                    return Ok(false);
+                };
+                let names_proof = record
+                    .proof
+                    .as_ref()
+                    .is_some_and(|proof| stored.message().refs.first() == Some(&proof.hash()));
+                if role == Role::Receipt && !names_proof {
+                    return Ok(false);
+                }
+            }
         }
         self.write_placed(target, stored).await
     }
