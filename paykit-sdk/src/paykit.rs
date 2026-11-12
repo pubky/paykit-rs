@@ -654,3 +654,94 @@ impl Paykit {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use paykit_lib::AttemptId;
+    use pubky_switch_client::app::{AppEnv, JoinRequest, UserConfirmed};
+
+    use super::{Paykit, PaykitBackup, PaykitConfig};
+    use crate::pay::{PayOptions, UnrequestedPayment};
+    use crate::rail::Rail;
+    use crate::reconcile::Resolution;
+    use crate::requests::{RequestDraft, RequestRef};
+    use crate::resend::ResendSelection;
+    use crate::timer::Timer;
+
+    fn assert_send<T: Send>(_: &T) {}
+
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    /// Every public async call's future is `Send`, so a host on a multi-threaded runtime
+    /// can spawn it. Only compiled: the futures are made and dropped, never polled.
+    #[allow(clippy::too_many_arguments)]
+    fn public_futures_are_send(
+        wallet: &mut Paykit,
+        env: AppEnv,
+        config: PaykitConfig,
+        join: JoinRequest,
+        backup: &PaykitBackup,
+        rail: Arc<dyn Rail>,
+        timer: Arc<dyn Timer>,
+        confirmed: UserConfirmed,
+        attempt: AttemptId,
+        resolution: Resolution,
+        draft: RequestDraft,
+        payment: UnrequestedPayment,
+    ) {
+        let key = [0; 32];
+        let request = RequestRef {
+            payee: key,
+            request_hash: key,
+        };
+        assert_send(&Paykit::join(
+            env.clone(),
+            config.clone(),
+            join,
+            Arc::clone(&rail),
+            Arc::clone(&timer),
+        ));
+        assert_send(&Paykit::load(
+            env.clone(),
+            config.clone(),
+            [0; 16],
+            Arc::clone(&rail),
+            Arc::clone(&timer),
+        ));
+        assert_send(&Paykit::restore(env, config, backup, rail, timer));
+        assert_send(&wallet.backup());
+        assert_send(&wallet.receive(None));
+        assert_send(&wallet.flush());
+        assert_send(&wallet.public_endpoints(&key, Some(confirmed)));
+        assert_send(&wallet.reconcile());
+        assert_send(&wallet.resolve_attempt(&key, attempt, resolution, confirmed));
+        assert_send(&wallet.end_reconcile(confirmed));
+        assert_send(&wallet.request_resend(key, ResendSelection::default()));
+        assert_send(&wallet.held_lists());
+        assert_send(&wallet.spam_count(&key));
+        assert_send(&wallet.place_held_list_without_marks(&key, &[0; 16], confirmed));
+        assert_send(&wallet.send_request(key, draft));
+        assert_send(&wallet.message_delivery(""));
+        assert_send(&wallet.payee_activity());
+        assert_send(&wallet.verify_payment(&key));
+        assert_send(&wallet.confirm_payment(&key));
+        assert_send(&wallet.cancel_sent_request(&key, None));
+        assert_send(&wallet.requests());
+        assert_send(&wallet.request(&request));
+        assert_send(&wallet.reject_request(&request, None));
+        assert_send(&wallet.cancel_request(&request, None));
+        assert_send(&wallet.pay_request(&request, PayOptions::default()));
+        assert_send(&wallet.pay_without_request(payment));
+        assert_send(&wallet.payments());
+        assert_send(&wallet.repair_activity_record(&attempt));
+        assert_send(&wallet.resume_payments());
+    }
+
+    #[test]
+    fn test_paykit_futures_are_send() {
+        assert_send_sync::<Paykit>();
+        let _ = public_futures_are_send;
+    }
+}
