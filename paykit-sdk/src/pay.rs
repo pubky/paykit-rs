@@ -875,7 +875,8 @@ impl Paykit {
     }
 
     /// The payments in the journal, each with the payee's receipt of it, if the payer's
-    /// record holds one.
+    /// record holds one. A `Finished` or `Abandoned` payment leaves the journal once past its
+    /// claim's window ([`Paykit::resume_payments`], "Journal pruning").
     ///
     /// # Errors
     ///
@@ -2550,6 +2551,21 @@ impl Paykit {
     /// carried out again unless the method is idempotent on the attempt ID; a restored entry
     /// is resolved only from a history that survives a restore. A repeat on an idempotent
     /// method passes every check a first dispatch does.
+    ///
+    /// **Journal pruning** (Paykit spec 7.1, 7.2; Switch spec 6.3). After every payment's own
+    /// work, a resume drops the `Finished` and `Abandoned` entries past their claim's window:
+    /// one with a deadline from that deadline plus 30 days ([`RECONCILIATION_MS`]), the time
+    /// the switch keeps the claim's tombstone, and one without from 400 days after it was
+    /// journaled ([`MAX_CLAIM_AGE_MS`]). A bound passes only once it lies before the earlier
+    /// of the highest service time verified and the device clock plus 24 hours, so no
+    /// far-future signed time passes one early, and without a verified service time nothing
+    /// is dropped. What a later reconcile, a restore's included, needs is never dropped: an
+    /// entry still open or [`Stage::AcceptanceOwed`], one whose dispatch the payment method
+    /// reported failed while its history may still show it paid, and one paid after `failed`
+    /// was written, waiting for its receipt. A dropped payment leaves [`Paykit::payments`],
+    /// and its acknowledged notices go with it; the payer's activity record, not the
+    /// journal, shows it and stops a second one (Paykit spec 6, 7.2, "The record shows it
+    /// paid").
     ///
     /// # Errors
     ///
