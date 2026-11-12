@@ -392,6 +392,14 @@ pub(crate) fn request_of(record: &ActivityRecord) -> Option<(&StoredMessage, &Pa
     }
 }
 
+/// The record holds this identity's acceptance (Paykit spec 8.1).
+pub(crate) fn accepted(record: &ActivityRecord) -> bool {
+    matches!(
+        record.response.as_ref().map(StoredMessage::body),
+        Some(Body::PaymentRequestAcceptance(_))
+    )
+}
+
 /// The record holds this identity's rejection (Paykit spec 8.1). Status comes from the
 /// messages held, never from `status` (Paykit wire 5.3).
 pub(crate) fn rejected(record: &ActivityRecord) -> bool {
@@ -1074,6 +1082,11 @@ impl Paykit {
         if recurring && (cancel || record.response.is_some()) {
             return Err(Refusal::Recurring.into());
         }
+        // A one-time request accepted, by this app or another own app whose acceptance the
+        // record holds, is no longer proposed: it is cancelled, not rejected (Paykit spec 8.1).
+        if !cancel && accepted(record) {
+            return Err(Refusal::Usage("accepted; cancel instead".into()).into());
+        }
         Ok(())
     }
 
@@ -1216,8 +1229,9 @@ impl Paykit {
     /// a recurring request already accepted; [`Refusal::DeadlinePassed`] for a recurring
     /// request whose proposal expired, decided once the record the service holds shows it
     /// still unanswered: one another own app accepted meanwhile gives [`Refusal::Recurring`],
-    /// one rejected or cancelled gives that refusal; [`PaykitError::Conflict`] when the
-    /// record changed meanwhile; the client's errors.
+    /// one rejected or cancelled gives that refusal; [`Refusal::Usage`] for a one-time request
+    /// the record shows accepted, by this app or another own app, which is cancelled instead;
+    /// [`PaykitError::Conflict`] when the record changed meanwhile; the client's errors.
     pub async fn reject_request(
         &mut self,
         request: &RequestRef,
