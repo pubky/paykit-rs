@@ -2200,3 +2200,46 @@ async fn test_certificate_restore_taking_one_without_a_key_no_listing_needs_is_l
     assert!(restored.app().protocol_get(b"nl").await.unwrap().is_none());
     assert!(restored.requests().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn test_certificate_restore_taking_a_labelled_one_without_keys_keeps_the_mark() {
+    // As above, with a labelled selling scope: the client lists a member of
+    // `payee_activity` under it, so without its key the restore's listing waits and the
+    // mark stays, until the keys come and a read lists.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let me = wallet.app_id();
+    let backup = wallet.backup().await.unwrap();
+    let old = wallet.app().cert().clone();
+    let label = paykit_lib::Label::parse("shop").unwrap();
+    let wider = renew(
+        &w,
+        me,
+        &AppScopes::new()
+            .pay()
+            .request_label(&label)
+            .build()
+            .unwrap(),
+        1_000,
+    );
+    wallet.receive(None).await.unwrap();
+    list(&w, me, &old, &wider);
+    wallet.receive(None).await.unwrap();
+    drop(wallet);
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    restored.receive(None).await.unwrap();
+    assert_eq!(restored.app().cert().hash(), wider.hash());
+    assert!(restored.app().protocol_get(b"nl").await.unwrap().is_some());
+    store_bundle(&w, me, &wider);
+    restored.receive(None).await.unwrap();
+    restored.receive(None).await.unwrap();
+    assert!(restored.app().protocol_get(b"nl").await.unwrap().is_none());
+}
