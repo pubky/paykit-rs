@@ -658,13 +658,16 @@ async fn test_executor_pays_only_to_the_identifiers_the_terms_allow() {
         terms_with(json!({ "allowed_payment_endpoint_identifiers": ["btc-onchain"] })),
     )
     .await;
-    // The request offers a Lightning invoice only.
+    // The request offers a Lightning invoice only: no endpoint the payment may use.
     let request = request(&w, &mut shop, &mut wallet, "0.5").await;
     let refused = wallet
         .pay_under_allowance(&request, &record)
         .await
         .unwrap_err();
-    assert!(refused.refusal().is_some(), "{refused:?}");
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
+        "{refused:?}"
+    );
     assert!(w.rail.all_executions().is_empty());
 }
 
@@ -707,4 +710,32 @@ async fn test_executor_refuses_after_a_missed_item_until_confirmed_again() {
         .unwrap();
     let paid = wallet.pay_under_allowance(&request, &record).await.unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+}
+
+#[tokio::test]
+async fn test_executor_journal_entry_with_an_allowance_that_does_not_read_is_corrupt() {
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    let paid = wallet.pay_under_allowance(&request, &record).await.unwrap();
+    let key = format!("j/{}", paid.attempt_id().to_text());
+    let held = wallet
+        .app()
+        .protocol_get(key.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut value: Value = serde_json::from_slice(&held).unwrap();
+    assert!(value["d"]["allowance_id"].is_string());
+    value["d"]["allowance_id"] = json!("not-an-allowance");
+    wallet
+        .app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: key.into_bytes(),
+            value: serde_json::to_vec(&value).unwrap(),
+        }])
+        .await
+        .unwrap();
+    let refused = wallet.payments().await.unwrap_err();
+    assert!(refused.refusal().is_none(), "{refused:?}");
 }
