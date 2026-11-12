@@ -716,15 +716,11 @@ impl Paykit {
             self.local_commit(tx).await?;
             return Ok(true);
         };
-        if self
+        Ok(self
             .app
             .submit_batch(OpBatch::new().entry(entry).locals(tx.into_writes()))
             .await
-            .is_err()
-        {
-            return Ok(false);
-        }
-        Ok(true)
+            .is_ok())
     }
 }
 
