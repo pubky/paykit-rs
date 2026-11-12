@@ -119,6 +119,11 @@ impl Paykit {
     pub(crate) async fn send_asks(&mut self) -> Result<u64> {
         let mut sent = 0u64;
         for (rest, ask) in self.local_scan::<QueuedAsk>(key::ASKS).await? {
+            // A counterparty blocked is asked nothing (Paykit spec 8.1).
+            if self.denied_as_last_read(&ask.sender).await? {
+                self.local_delete(&format!("{}{rest}", key::ASKS)).await?;
+                continue;
+            }
             self.request_resend(
                 ask.sender,
                 ResendSelection {
@@ -157,8 +162,8 @@ impl Paykit {
         Ok(sent)
     }
 
-    /// Ask each of `counterparties` to send again what its inbox accepted from the earliest
-    /// time of `marks`, kept under `prefix`, then drop the marks. The client gives each mark's
+    /// Ask each of `counterparties` but those blocked to send again what its inbox accepted
+    /// from the earliest time of `marks`, kept under `prefix`, then drop the marks. The client gives each mark's
     /// time no earlier than the cursor's time less the clock tolerance (Paykit spec 9, "What
     /// an app asks for"). Returns how many requests went out.
     async fn ask_from_marks(
@@ -170,6 +175,10 @@ impl Paykit {
         let from = marks.iter().map(|(_, from)| *from).min().unwrap_or(0);
         let mut sent = 0u64;
         for counterparty in counterparties {
+            // A counterparty blocked is asked nothing (Paykit spec 8.1).
+            if self.denied_as_last_read(&counterparty).await? {
+                continue;
+            }
             self.request_resend(
                 counterparty,
                 ResendSelection {
