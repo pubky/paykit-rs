@@ -226,13 +226,20 @@ async fn test_certificate_restore_then_renewal_paykit_refuses_takes_no_action() 
     let me = wallet.app_id();
     let old = wallet.app().cert().clone();
     let backup = wallet.backup().await.unwrap();
-    // After the backup, the certificate is renewed for scopes Paykit refuses and listed:
-    // the backup's and the current certificate differ in their permissions. The wallet
-    // stops before it takes it, so its record never carries it, and the restored app reads
-    // its `cert.put`.
+    // After the backup, the certificate is renewed for scopes Paykit refuses, and the app
+    // takes it: the backup's and the current certificate differ in their permissions.
     let refused = renew(&w, me, &refused_scopes(), 1_000);
     wallet.receive(None).await.unwrap();
     list(&w, me, &old, &refused);
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(
+        matches!(
+            summary.certificate_refused,
+            Some(Refusal::CertificateRefused(_))
+        ),
+        "{summary:?}"
+    );
+    assert_eq!(wallet.app().cert().hash(), refused.hash());
     drop(wallet);
     // The restore checks the backup's certificate, which passes, and restores.
     let backup = PaykitBackup::from_bytes(&backup.to_bytes().unwrap()).unwrap();
@@ -559,9 +566,8 @@ async fn test_certificate_restored_lost_acceptance_not_signed_again_without_pay(
     let first = wallet.app().cert().clone();
     let reduced = renew(&w, me, &AppScopes::new().contacts().build().unwrap(), 1_000);
     let _ = wallet.receive(None).await;
-    // The renewal is listed and the wallet stops before it takes it: its record never
-    // carries it, so the restored app reads its `cert.put` and takes it.
     list(&w, me, &first, &reduced);
+    wallet.receive(None).await.unwrap();
     drop(wallet);
     w.rail.settle(&attempt_id, true);
     let mut restored = Paykit::restore(
@@ -879,9 +885,8 @@ async fn test_certificate_restore_without_pay_attempts_nothing_until_a_reconcile
     let first = wallet.app().cert().clone();
     let reduced = renew(&w, me, &AppScopes::new().contacts().build().unwrap(), 1_000);
     let _ = wallet.receive(None).await;
-    // The renewal is listed and the wallet stops before it takes it: its record never
-    // carries it, so the restored app reads its `cert.put` and takes it.
     list(&w, me, &first, &reduced);
+    wallet.receive(None).await.unwrap();
     drop(wallet);
     let mut restored = Paykit::restore(
         w.env(&w.alice, store()),
@@ -1100,13 +1105,24 @@ fn is_not_now(error: &PaykitError) -> bool {
     matches!(error.refusal(), Some(Refusal::NotNow(_)))
 }
 
+/// How many listing requests the client makes for `cert`: one per collection it reads,
+/// each of one page here.
+fn client_listing_requests(cert: &AppCert) -> usize {
+    use pubky_switch_client::app::Protocol as _;
+    paykit_sdk::PaykitProtocol::new()
+        .collections()
+        .iter()
+        .filter(|collection| collection.readable_by(cert))
+        .count()
+}
+
 #[tokio::test]
 async fn test_certificate_renewal_reading_more_lists_its_records_first() {
     // The wallet's copy lacks the till's record until the collection is listed: a call that
     // only reads is refused meanwhile, rather than show no requests sent. The read that
     // takes the certificate holds no scope key of it yet, so it doesn't list; the next one
-    // fetches the keys and lists, and one whose listing can't connect leaves the records
-    // unlisted for the one after.
+    // fetches the keys, and the client lists before it reads the feed. A read whose
+    // listing can't connect fails and leaves the records unlisted for the one after.
     let w = World::new();
     let (mut wallet, wider) = renewed_to_read_more(&w).await;
     wallet.receive(None).await.unwrap();
@@ -1118,6 +1134,17 @@ async fn test_certificate_renewal_reading_more_lists_its_records_first() {
         .fail_next(pubky_switch_client::testing::Fault::Unreachable {
             path: "/records".into(),
             after: 0,
+        });
+    assert!(wallet.receive(None).await.is_err());
+    let refused = wallet.payee_activity().await.unwrap_err();
+    assert!(is_not_now(&refused), "{refused:?}");
+    // The client's listing goes through and Paykit's own, after the read, can't connect:
+    // the read keeps its report, and says the records stay unlisted.
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/records".into(),
+            after: client_listing_requests(&wider),
         });
     let summary = wallet.receive(None).await.unwrap();
     assert!(summary.records_unlisted.is_some(), "{summary:?}");
@@ -1228,9 +1255,9 @@ async fn test_certificate_store_without_a_listed_certificate_takes_the_one_held(
 }
 
 #[tokio::test]
-async fn test_certificate_renewal_reading_more_listing_refused_keeps_the_receive() {
-    // The listing the wider certificate needs is refused for good: the read went through,
-    // so the receive keeps its report and says the records stay unlisted.
+async fn test_certificate_renewal_reading_more_listing_refused_holds_reads_until_listed() {
+    // The client's listing the wider certificate owes is refused for good: the read is
+    // refused, and the records stay unlisted until a later read lists them.
     let w = World::new();
     let (mut wallet, wider) = renewed_to_read_more(&w).await;
     wallet.receive(None).await.unwrap();
@@ -1241,9 +1268,13 @@ async fn test_certificate_renewal_reading_more_listing_refused_keeps_the_receive
             code: pubky_switch_core::http::ErrorCode::PermissionMissing,
             current: serde_json::Value::Null,
         });
-    let summary = wallet.receive(None).await.unwrap();
+    let error = wallet.receive(None).await.unwrap_err();
+    assert_eq!(
+        error.code(),
+        Some(pubky_switch_core::http::ErrorCode::PermissionMissing),
+        "{error:?}"
+    );
     assert_eq!(wallet.app().cert().hash(), wider.hash());
-    assert!(summary.records_unlisted.is_some(), "{summary:?}");
     let refused = wallet.payee_activity().await.unwrap_err();
     assert!(is_not_now(&refused), "{refused:?}");
     let summary = wallet.receive(None).await.unwrap();

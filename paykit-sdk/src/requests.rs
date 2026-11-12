@@ -193,10 +193,13 @@ pub enum MessageDelivery {
         /// The acceptance time.
         accepted_at_ms: u64,
     },
-    /// Refused for good, or given up.
+    /// Refused for good, given up, or never queued: the kept batch that would have queued
+    /// it was dropped.
     Failed {
         /// Why, without content.
         reason: String,
+        /// When, app clock: when it was refused or given up, or its batch dropped.
+        failed_at_ms: u64,
     },
     /// A state of the client's this version of the SDK doesn't name, as the client reports
     /// it.
@@ -225,7 +228,15 @@ impl MessageDelivery {
                 _ => Self::Queued { tries, last_error },
             },
             Delivery::Accepted { accepted_at_ms, .. } => Self::Accepted { accepted_at_ms },
-            Delivery::Failed { reason, .. } => Self::Failed { reason },
+            Delivery::Failed {
+                reason,
+                failed_at_ms,
+                ..
+            } => Self::Failed {
+                reason,
+                failed_at_ms,
+            },
+            Delivery::Kept { batch_id, .. } => Self::Kept { batch_id },
             // A state a later client adds, which this SDK doesn't name.
             other => Self::Other(other),
         }
@@ -524,6 +535,7 @@ impl Paykit {
             .map(|(batch_id, note)| match note.dropped {
                 Some(code) => MessageDelivery::Failed {
                     reason: format!("the batch that queues it was dropped unsent: {code}"),
+                    failed_at_ms: note.kept_at_ms,
                 },
                 None => MessageDelivery::Kept { batch_id },
             }))
@@ -988,7 +1000,7 @@ impl Paykit {
         let content = self.app.shared_record(&key).await?.map(|held| held.content);
         Ok(match content {
             None | Some(RecordContent::Deleted) => Fresh::Missing,
-            Some(RecordContent::Unreadable) => Fresh::Unreadable,
+            Some(RecordContent::Unreadable(_)) => Fresh::Unreadable,
             Some(RecordContent::Value(_)) => match self.held_activity(target).await? {
                 Some(record) => Fresh::Held(Box::new(record)),
                 None => Fresh::Unreadable,

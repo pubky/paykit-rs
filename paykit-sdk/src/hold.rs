@@ -73,8 +73,10 @@ pub(crate) enum Unlisted {
     /// before the feed (Switch spec 12.4 step 2.1).
     Restore,
     /// The certificate the app holds reads collections, or members of one, that the one
-    /// the records were last listed under (`p/lc`) didn't (Switch spec 8.3): the client owes
-    /// no listing for it, so only one Paykit makes ([`Paykit::list_records`]) covers it.
+    /// the records were last listed under (`p/lc`) didn't (Switch spec 8.3). The client
+    /// owes a listing for it too, made at the start of a later read once it holds the
+    /// scope keys, but tells no caller when it made it: a listing Paykit makes
+    /// ([`Paykit::list_records`]) ends this.
     Certificate,
 }
 

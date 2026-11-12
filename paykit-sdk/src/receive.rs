@@ -584,7 +584,7 @@ fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Result<()
             Ok(held) => Some(held),
             Err(_) => return hold_list(cx, &target, stored),
         },
-        Some(RecordContent::Deleted | RecordContent::Unreadable) => {
+        Some(RecordContent::Deleted | RecordContent::Unreadable(_)) => {
             return hold_list(cx, &target, stored)
         }
     };
@@ -748,7 +748,7 @@ impl Paykit {
                 Ok(held) => Some(held),
                 Err(_) => return Ok(()),
             },
-            Some(RecordContent::Deleted | RecordContent::Unreadable) => return Ok(()),
+            Some(RecordContent::Deleted | RecordContent::Unreadable(_)) => return Ok(()),
         };
         let mut tx = Tx::default();
         tx.delete(&key::held_list(&record_key));

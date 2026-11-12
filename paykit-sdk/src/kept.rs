@@ -94,7 +94,7 @@ impl Paykit {
     }
 
     /// Take the client's events about kept batches into the notes: a batch dropped is
-    /// marked, one signed again moves to its new ID, one applied at a move goes. Then the
+    /// marked, one applied at a move goes. Then the
     /// notes that no longer say anything go: a request the outbox holds, an attempt whose
     /// journal entry moved past `Recorded`, and a dropped request's note past the outbox's
     /// retention of sent messages.
@@ -126,16 +126,6 @@ impl Paykit {
                             note.dropped = Some("dropped unanswered".into());
                             tx.put(&key::kept_batch(id), note)?;
                         }
-                    }
-                }
-                AppEvent::KeptBatchSignedAgain {
-                    batch_id,
-                    new_batch_id,
-                } => {
-                    if let Some(note) = held.remove(batch_id) {
-                        tx.delete(&key::kept_batch(batch_id));
-                        tx.put(&key::kept_batch(new_batch_id), &note)?;
-                        held.insert(*new_batch_id, note);
                     }
                 }
                 AppEvent::KeptBatchApplied { batch_id } if held.remove(batch_id).is_some() => {

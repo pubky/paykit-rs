@@ -229,6 +229,7 @@ async fn attempt_answered_past_the_deadline(crossing: Crossing) -> paykit_sdk::P
                 deadline: None,
                 divergent: false,
                 next_possibly_duplicate: false,
+                rebuilt: false,
             };
             serde_json::json!({ "claim": view.to_value() })
         }

@@ -1854,7 +1854,7 @@ impl Paykit {
                 activity::read(Some(value), &self.identity(), ActivitySide::Payer)
                     .is_some_and(|record| record.response.is_none())
             }
-            Some(RecordContent::Unreadable) => false,
+            Some(RecordContent::Unreadable(_)) => false,
             None | Some(RecordContent::Deleted) => true,
         })
     }
@@ -1970,7 +1970,7 @@ impl Paykit {
                     None
                 }
             }
-            Some(RecordContent::Unreadable) => return Ok(()),
+            Some(RecordContent::Unreadable(_)) => return Ok(()),
             None | Some(RecordContent::Deleted) => None,
         };
         let mut finished = entry.clone();
