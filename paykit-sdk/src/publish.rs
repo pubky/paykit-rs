@@ -10,7 +10,10 @@
 //!   the app's lists;
 //! - when a proof names a single-use endpoint of the version it holds;
 //! - when its `private_payment_list_request` names a used version, an expired one, or none
-//!   (`held_version: null`);
+//!   (`held_version: null`); one naming the newest version counts as used by the payer's
+//!   word, at most once per version and [`crate::PaykitConfig::list_answers_per_day`]
+//!   times a day per counterparty; one naming an older version still unexpired gets the
+//!   newest sent again, nothing issued;
 //! - at a receive once less than half of its current version's lifetime remains (Renewal).
 //!
 //! **Blocked counterparties** (Paykit spec 8.1; v0.1 "Block A Peer"). At an app holding
@@ -118,6 +121,9 @@ pub struct ListNotSent {
 pub struct ListsPublished {
     /// The versions sent.
     pub sent: Vec<SentList>,
+    /// The newest versions sent again, the same message, to a counterparty whose request
+    /// named an older one still unexpired.
+    pub resent: Vec<SentList>,
     /// The counterparties a version wasn't sent to. A version owed is tried again at the next
     /// receive.
     pub not_sent: Vec<ListNotSent>,
@@ -191,6 +197,8 @@ pub(crate) struct Offered {
     pub(crate) endpoints: BTreeMap<String, OfferedPayload>,
     /// A proof named one of its single-use endpoints: the version is consumed.
     pub(crate) used: bool,
+    /// A list request named it and was answered: a later one naming it gets no answer.
+    pub(crate) asked: bool,
 }
 
 impl Offered {
@@ -214,6 +222,14 @@ pub(crate) struct Recipient {
     pub(crate) active: bool,
     /// A newer version is owed, set by the receive step.
     pub(crate) owed: bool,
+    /// A list request named the newest version as used, by the payer's word: a newer one
+    /// goes within the daily bound ([`crate::PaykitConfig::list_answers_per_day`]).
+    pub(crate) claimed: bool,
+    /// A list request named an older version still unexpired: the newest is sent again.
+    pub(crate) resend: bool,
+    /// When each newer version sent for the payer's word went, device clock, within the last
+    /// day.
+    pub(crate) answers: Vec<u64>,
     pub(crate) versions: Vec<Offered>,
 }
 
@@ -338,11 +354,16 @@ pub(crate) fn note_proof(
 }
 
 /// The receive step's part for a `private_payment_list_request` (Paykit spec 8.4, Paykit wire
-/// 4.14): from a counterparty that gets this app's lists, about this app or none, naming a
-/// version used, expired at the request's acceptance, or none, a newer version is owed. A
-/// version this app no longer tracks expired, or was lost by a restore: it is answered too.
-/// Any other request, such as one from a counterparty the app never sent a list, or naming
-/// the version the app holds as usable, changes nothing.
+/// 4.14), from a counterparty that gets this app's lists, about this app or none:
+///
+/// - naming none, a version a proof used, one expired at the request's acceptance, or one
+///   this app no longer tracks (expired, or lost by a restore): a newer version is owed;
+/// - naming the newest version, unused and unexpired: it counts as used by the payer's word,
+///   and a newer version goes within the daily bound ([`Recipient::claimed`]);
+/// - naming an older version still unexpired: the newest is sent again, nothing issued.
+///
+/// A version a request named is answered once: a later request naming it changes nothing.
+/// So does a request from a counterparty the app never sent a list.
 pub(crate) fn note_list_request(
     cx: &mut ReceiveContext<'_>,
     stored: &paykit_lib::records::StoredMessage,
@@ -356,18 +377,25 @@ pub(crate) fn note_list_request(
         return Ok(());
     };
     let at = stored.accepted_at().unwrap_or(0);
-    let unusable = request.held_version.is_none_or(|held| {
-        recipient
-            .versions
-            .iter()
-            .find(|o| o.version == held)
-            .is_none_or(|o| o.used || o.expires_at_ms <= at)
-    });
-    if unusable {
-        recipient.owed = true;
-        keep_recipient(cx, &recipient)?;
+    let newest = recipient.current().map(|o| o.version);
+    let held = request
+        .held_version
+        .and_then(|held| recipient.versions.iter_mut().find(|o| o.version == held));
+    match held {
+        None => recipient.owed = true,
+        Some(o) if o.asked => return Ok(()),
+        Some(o) => {
+            o.asked = true;
+            if o.used || o.expires_at_ms <= at {
+                recipient.owed = true;
+            } else if Some(o.version) == newest {
+                recipient.claimed = true;
+            } else {
+                recipient.resend = true;
+            }
+        }
     }
-    Ok(())
+    keep_recipient(cx, &recipient)
 }
 
 /// The `msg_id`s of messages the client gave up delivering, never accepted
@@ -672,6 +700,9 @@ impl Paykit {
                 counterparty,
                 active: true,
                 owed: false,
+                claimed: false,
+                resend: false,
+                answers: Vec::new(),
                 versions: Vec::new(),
             },
         };
@@ -716,9 +747,12 @@ impl Paykit {
                 })
                 .collect(),
             used: false,
+            asked: false,
         });
         recipient.active = !withdraw;
+        // A newer version answers every request owed, and supersedes a re-send.
         recipient.owed = false;
+        recipient.resend = false;
         let mut tx = Tx::default();
         tx.put(&rkey, &recipient)?
             .put(key::LAST_VERSION, &version)?;
@@ -870,9 +904,11 @@ impl Paykit {
     /// The publishing steps of a receive, after the read (module docs): with `removed`, the
     /// app was removed from its identity, and every single-use payload no proof used goes
     /// back. Otherwise each counterparty's versions are settled, and a newer version is sent
-    /// where one is owed or a renewal is due. The releases kept are asked of the payment
-    /// method last. `duties` are the duty events the receive listed after its read, which
-    /// tell the messages the client gave up ([`undelivered`]).
+    /// where one is owed, the payer's word claims one within the daily bound, or a renewal
+    /// is due; else the newest is sent again where a request named an older one. The
+    /// releases kept are asked of the payment method last.
+    /// `duties` are the duty events the receive listed after its read, which tell the
+    /// messages the client gave up ([`undelivered`]).
     pub(crate) async fn tend_lists(
         &mut self,
         removed: bool,
@@ -882,6 +918,7 @@ impl Paykit {
         // A certificate without a selling scope sends no list: its recipients would drop it.
         let payee = paykit_lib::scopes::acts_as_payee(self.app.cert().scopes());
         let mut owed = Vec::new();
+        let mut resend = Vec::new();
         let now = self.now();
         let mut tx = Tx::default();
         for (_, recipient) in self.local_scan::<Recipient>(key::LIST_RECIPIENTS).await? {
@@ -903,20 +940,55 @@ impl Paykit {
                 tx.delete(&key::list_recipient(&recipient.counterparty));
                 continue;
             }
-            let recipient = self.settled(recipient, Some(&undelivered)).await?;
+            let mut recipient = self.settled(recipient, Some(&undelivered)).await?;
+            if !payee || !recipient.active {
+                continue;
+            }
+            if recipient.claimed {
+                // The payer's word that the newest version is used: a newer one goes within
+                // the daily bound, and past it the request gets no answer.
+                recipient.claimed = false;
+                recipient
+                    .answers
+                    .retain(|at| *at <= now && now - *at < DAY_MS);
+                if (recipient.answers.len() as u64) < self.config.list_answers_per_day {
+                    recipient.answers.push(now);
+                    recipient.owed = true;
+                }
+                tx.put(&key::list_recipient(&recipient.counterparty), &recipient)?;
+            }
             let due = recipient.current().is_some_and(|o| renewal_due(o, now));
-            if payee && recipient.active && (recipient.owed || due) {
+            if recipient.owed || due {
                 owed.push(recipient.counterparty);
+            } else if let (true, Some(current)) = (recipient.resend, recipient.current()) {
+                resend.push((recipient.counterparty, current.clone()));
             }
         }
         self.local_commit(tx).await?;
-        if removed || owed.is_empty() {
+        if removed || (owed.is_empty() && resend.is_empty()) {
             self.run_releases().await?;
             return Ok(ListsPublished::default());
         }
         let paused = self.paused().await?;
-        self.publish_to(&owed, false, &paused, Some(&undelivered))
-            .await
+        let mut out = self
+            .publish_to(&owed, false, &paused, Some(&undelivered))
+            .await?;
+        for (counterparty, current) in resend {
+            if paused.holds(&counterparty) || self.app.resend(&current.msg_id).await.is_err() {
+                continue;
+            }
+            let rkey = key::list_recipient(&counterparty);
+            if let Some(mut recipient) = self.local_get::<Recipient>(&rkey).await? {
+                recipient.resend = false;
+                self.local_put(&rkey, &recipient).await?;
+            }
+            out.resent.push(SentList {
+                counterparty,
+                version: current.version,
+                msg_id: current.msg_id,
+            });
+        }
+        Ok(out)
     }
 
     /// Ask the payment method to take back every single-use payload kept to release
@@ -996,6 +1068,7 @@ mod tests {
             fate: Fate::Pending,
             endpoints: BTreeMap::new(),
             used: false,
+            asked: false,
         }
     }
 
@@ -1031,6 +1104,9 @@ mod tests {
             counterparty: [3; 32],
             active: true,
             owed: false,
+            claimed: false,
+            resend: false,
+            answers: Vec::new(),
             versions: vec![offered(1, 2)],
         };
         let value = state::encode(&recipient).unwrap();

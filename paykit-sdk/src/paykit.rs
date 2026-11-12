@@ -70,6 +70,10 @@ pub(crate) fn check_orphan_window(config: &PaykitConfig, rail: &dyn Rail) -> Res
 /// The default number of messages re-sent to one requester identity a day (Paykit spec 9).
 pub const DEFAULT_RESEND_BUDGET: u64 = 500;
 
+/// The default number of newer Private Payment List versions sent to one counterparty a day
+/// on its word that the version it holds is used (Paykit spec 8.4).
+pub const DEFAULT_LIST_ANSWERS_PER_DAY: u64 = 4;
+
 /// The integrator's choices for one Paykit App.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -94,6 +98,12 @@ pub struct PaykitConfig {
     pub selling_label: Option<Label>,
     /// How many messages the app re-sends to one requester identity a day (Paykit spec 9).
     pub resend_budget: u64,
+    /// How many newer versions of its Private Payment List the app sends one counterparty a
+    /// day on its word, a `private_payment_list_request` naming the newest version as used
+    /// (Paykit spec 8.4); each version is answered so once. Past it the request gets no
+    /// answer, and the counterparty waits for the renewal. [`DEFAULT_LIST_ANSWERS_PER_DAY`]
+    /// by default.
+    pub list_answers_per_day: u64,
 }
 
 impl PaykitConfig {
@@ -143,6 +153,14 @@ impl PaykitConfig {
         self
     }
 
+    /// How many newer list versions the app sends one counterparty a day on its word that
+    /// the newest is used (Paykit spec 8.4).
+    #[must_use]
+    pub fn with_list_answers_per_day(mut self, list_answers_per_day: u64) -> Self {
+        self.list_answers_per_day = list_answers_per_day;
+        self
+    }
+
     /// The `orphan_after` the app's attempts carry for a rail that declares `declaration`:
     /// the value set, or else the rail's floor ([`orphan_floor_s`]).
     pub fn orphan_after_s_for(&self, declaration: &RailDeclaration) -> u64 {
@@ -159,6 +177,7 @@ impl Default for PaykitConfig {
             fee_caps: BTreeMap::new(),
             selling_label: None,
             resend_budget: DEFAULT_RESEND_BUDGET,
+            list_answers_per_day: DEFAULT_LIST_ANSWERS_PER_DAY,
         }
     }
 }

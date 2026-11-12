@@ -395,21 +395,97 @@ async fn test_publishing_list_request_naming_none_answered() {
 }
 
 #[tokio::test]
-async fn test_publishing_list_request_naming_the_usable_version_not_answered() {
+async fn test_publishing_list_request_from_a_stranger_or_about_another_app_not_answered() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     // Asked before alice got a list: the shop doesn't publish to her.
     ask_for_the_list(&w, &shop, None, shop.app_id());
     assert!(shop.receive(None).await.unwrap().lists.sent.is_empty());
-    let sent = w.publish_to_alice(&mut shop).await;
+    w.publish_to_alice(&mut shop).await;
     wallet.receive(None).await.unwrap();
-    // The version she holds, unused and unexpired, or another app's.
-    ask_for_the_list(&w, &shop, Some(sent.version), shop.app_id());
     ask_for_the_list(&w, &shop, None, [7; 16]);
     let got = shop.receive(None).await.unwrap();
     assert!(got.lists.sent.is_empty(), "{:?}", got.lists);
     assert_eq!(lists_taken(&mut wallet).await, 0);
+}
+
+#[tokio::test]
+async fn test_publishing_list_request_naming_the_current_version_answered_once() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let current = w.publish_to_alice(&mut shop).await;
+    wallet.receive(None).await.unwrap();
+    // Used by her word: a newer version, with a fresh single-use payload.
+    ask_for_the_list(&w, &shop, Some(current.version), shop.app_id());
+    let got = shop.receive(None).await.unwrap();
+    assert_eq!(got.lists.sent.len(), 1, "{:?}", got.lists);
+    assert_eq!(w.rail.issued().len(), 2);
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    // Named again, it gets no second one, nor a re-send.
+    ask_for_the_list(&w, &shop, Some(current.version), shop.app_id());
+    let got = shop.receive(None).await.unwrap();
+    assert!(
+        got.lists.sent.is_empty() && got.lists.resent.is_empty(),
+        "{:?}",
+        got.lists
+    );
+    assert_eq!(w.rail.issued().len(), 2);
+}
+
+#[tokio::test]
+async fn test_publishing_list_requests_answered_within_the_daily_bound() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default().with_list_answers_per_day(2),
+            store(),
+        )
+        .await;
+    assert_eq!(PaykitConfig::default().list_answers_per_day, 4);
+    let mut current = w.publish_to_alice(&mut shop).await.version;
+    wallet.receive(None).await.unwrap();
+    for _ in 0..2 {
+        w.clock.advance_ms(1000);
+        ask_for_the_list(&w, &shop, Some(current), shop.app_id());
+        let got = shop.receive(None).await.unwrap();
+        assert_eq!(got.lists.sent.len(), 1, "{:?}", got.lists);
+        current = got.lists.sent[0].version;
+    }
+    // Past the bound: no answer, nothing issued, and that version isn't answered later.
+    ask_for_the_list(&w, &shop, Some(current), shop.app_id());
+    assert!(shop.receive(None).await.unwrap().lists.sent.is_empty());
+    assert_eq!(w.rail.issued().len(), 3);
+    // A day on, her word on a version not named before is taken again.
+    w.clock.advance_ms(24 * HOUR_MS);
+    let fresh = shop.publish_list_to(&[w.alice_id()]).await.unwrap().sent[0].version;
+    ask_for_the_list(&w, &shop, Some(fresh), shop.app_id());
+    assert_eq!(shop.receive(None).await.unwrap().lists.sent.len(), 1);
+}
+
+#[tokio::test]
+async fn test_publishing_list_request_naming_an_older_version_resends_the_current() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let older = w.publish_to_alice(&mut shop).await;
+    w.clock.advance_ms(1000);
+    let current = shop.publish_list_to(&[w.alice_id()]).await.unwrap().sent[0].clone();
+    wallet.receive(None).await.unwrap();
+    ask_for_the_list(&w, &shop, Some(older.version), shop.app_id());
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.lists.sent.is_empty(), "{:?}", got.lists);
+    assert_eq!(got.lists.resent, vec![current]);
+    assert_eq!(w.rail.issued().len(), 2);
+    // Named again, it is not sent again.
+    ask_for_the_list(&w, &shop, Some(older.version), shop.app_id());
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.lists.resent.is_empty(), "{:?}", got.lists);
 }
 
 #[tokio::test]
@@ -425,9 +501,32 @@ async fn test_publishing_list_request_naming_a_used_version_answered() {
     ask_for_the_list(&w, &shop, Some(used.version), shop.app_id());
     let got = shop.receive(None).await.unwrap();
     assert_eq!(got.lists.sent.len(), 1, "{:?}", got.lists);
-    // Naming the newer one, unused, she gets none.
-    ask_for_the_list(&w, &shop, Some(got.lists.sent[0].version), shop.app_id());
+    // Naming the used one again, she gets none.
+    ask_for_the_list(&w, &shop, Some(used.version), shop.app_id());
     assert!(shop.receive(None).await.unwrap().lists.sent.is_empty());
+}
+
+#[tokio::test]
+async fn test_publishing_newer_version_supersedes_a_resend() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let older = w.publish_to_alice(&mut shop).await;
+    w.clock.advance_ms(1000);
+    shop.publish_list_to(&[w.alice_id()]).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    // Asked about the older one as the newer one's renewal is due: the renewal answers it.
+    w.clock.advance_ms(LIST_LIFETIME_MS / 2);
+    ask_for_the_list(&w, &shop, Some(older.version), shop.app_id());
+    let got = shop.receive(None).await.unwrap();
+    assert_eq!(got.lists.sent.len(), 1, "{:?}", got.lists);
+    assert!(got.lists.resent.is_empty(), "{:?}", got.lists);
+    let got = shop.receive(None).await.unwrap();
+    assert!(
+        got.lists.sent.is_empty() && got.lists.resent.is_empty(),
+        "{:?}",
+        got.lists
+    );
 }
 
 #[tokio::test]
@@ -770,7 +869,15 @@ async fn test_publishing_blocked_counterparty_gets_no_renewal_answer_or_resend()
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = shop_reading_lists(&w, &mut wallet).await;
+    let older = shop.published_lists().await.unwrap()[0].version;
+    w.clock.advance_ms(1000);
+    shop.publish_list_to(&[w.alice_id()]).await.unwrap();
+    assert_eq!(lists_taken(&mut wallet).await, 1);
     shop.block(&w.alice_id()).await.unwrap();
+    // Asked about an older version, the newest isn't sent her again.
+    ask_for_the_list(&w, &shop, Some(older), shop.app_id());
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.lists.resent.is_empty(), "{:?}", got.lists);
     w.clock.advance_ms(LIST_LIFETIME_MS / 2);
     let got = shop.receive(None).await.unwrap();
     assert!(blocked_for_alice(&w, &got.lists), "{:?}", got.lists);
@@ -780,7 +887,7 @@ async fn test_publishing_blocked_counterparty_gets_no_renewal_answer_or_resend()
     let changed = shop.set_list_endpoints(list("lno1changed")).await.unwrap();
     assert!(blocked_for_alice(&w, &changed), "{changed:?}");
     assert_eq!(lists_taken(&mut wallet).await, 0);
-    assert_eq!(w.rail.issued().len(), 1);
+    assert_eq!(w.rail.issued().len(), 2);
 }
 
 #[tokio::test]

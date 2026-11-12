@@ -1475,6 +1475,9 @@ mod receive_tests {
             counterparty: [3; 32],
             active: true,
             owed: false,
+            claimed: false,
+            resend: false,
+            answers: Vec::new(),
             versions: Vec::new(),
         };
         let value = state::encode(&sent).unwrap();
