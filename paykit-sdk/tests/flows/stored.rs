@@ -15,7 +15,7 @@ use crate::common::{draft, request_from, store, World};
 
 /// The next `n` batches at `signer`'s switch are refused for good, `403 permission_missing`,
 /// as an effect the switch refuses whatever is sent again.
-fn refuse_writes(signer: &TestSigner, n: usize) {
+pub(crate) fn refuse_writes(signer: &TestSigner, n: usize) {
     for _ in 0..n {
         signer.switch().fail_next(Fault::Error {
             path: "/ops".into(),
@@ -78,7 +78,7 @@ async fn test_stored_refused_request_shown_unrecorded_then_written() {
 }
 
 /// The keys of Paykit's local state under `prefix`.
-async fn kept(app: &paykit_sdk::Paykit, prefix: &str) -> Vec<Vec<u8>> {
+pub(crate) async fn kept(app: &paykit_sdk::Paykit, prefix: &str) -> Vec<Vec<u8>> {
     app.app()
         .protocol_scan(prefix.as_bytes())
         .await
@@ -409,7 +409,7 @@ async fn test_stored_refused_receipt_from_before_a_joined_apps_first_listing_wri
 }
 
 /// Alice's wallet pays `request`, the dispatch left in flight. Returns the attempt.
-async fn pending(
+pub(crate) async fn pending(
     w: &World,
     wallet: &mut paykit_sdk::Paykit,
     request: &paykit_sdk::RequestRef,
@@ -427,7 +427,7 @@ async fn pending(
 }
 
 /// Bob's receipt for the open `attempt_id`, naming a proof the record doesn't hold.
-fn receipt_of_another_proof(
+pub(crate) fn receipt_of_another_proof(
     w: &World,
     wallet: &paykit_sdk::Paykit,
     request: &paykit_sdk::RequestRef,
@@ -600,7 +600,7 @@ async fn test_stored_given_up_notice_kept_while_its_entry_cant_be_forgotten() {
 
 /// Alice's wallet with a message given up: bob's receipt naming another proof, refused at
 /// its step and at each later write past its window. Returns the wallet and the notice.
-async fn given_up(w: &World) -> (paykit_sdk::Paykit, paykit_sdk::Notice) {
+pub(crate) async fn given_up(w: &World) -> (paykit_sdk::Paykit, paykit_sdk::Notice) {
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
