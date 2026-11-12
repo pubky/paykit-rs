@@ -198,9 +198,11 @@ homeserver cannot be resolved does not stop intake for other peers while its
 lookup fails: it reserves no stream, stays visible in health as `Stale`, and is
 retried on each topology refresh. When it later resolves, it is placed like any
 other topology change, so a result that exceeds capacity stops supervision as
-described below. An unresolved peer that already holds a handshake admission
-keeps it, so the capacity its pending handshake reserved stays reserved. A peer
-that already has a stream keeps its last resolved homeserver while a later
+described below. A topology refresh keeps the stored handshake admission of
+every peer that is still supervised but that the refresh did not place, such as
+a peer whose homeserver lookup failed or a handshake that became pending while
+the refresh was resolving, so reserved capacity stays reserved. A peer that
+already has a stream keeps its last resolved homeserver while a later
 lookup fails. Active supervisor capacity is identity-wide: new
 handshakes are rejected before becoming pending when their resolved homeserver
 would need another stream. A later topology move that no

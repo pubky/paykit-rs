@@ -1400,11 +1400,12 @@ fails or finds no homeserver record, reserves no stream and is reported
 stop intake for other peers, at startup or while the supervisor runs. When it
 later resolves, it is placed like any other topology change, so an
 over-capacity result marks the resolved topology stale and stops supervision.
-An unresolved peer that already holds a handshake admission keeps that
-admission across refreshes, so the capacity its pending handshake reserved
-stays reserved. A peer that already has a stream keeps its last resolved
-homeserver while a later lookup fails, because a missing record can be a
-temporary DHT miss.
+A topology refresh keeps the stored handshake admission of every peer that is
+still supervised but that the refresh did not place, such as a peer whose
+homeserver lookup failed or a handshake that became pending while the refresh
+was resolving, so reserved capacity stays reserved. A peer that already has a
+stream keeps its last resolved homeserver while a later lookup fails, because a
+missing record can be a temporary DHT miss.
 
 Durable intake is bounded to 64 packets per Linked Peer and 1,024 packets per
 identity, with equivalent exact ciphertext-byte bounds. A full peer is removed
