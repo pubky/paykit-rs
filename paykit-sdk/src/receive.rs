@@ -398,19 +398,13 @@ fn payer_reply(
             // A reply to a request this app holds no record of yet, such as one another own
             // app sent whose record this app hasn't taken yet, is kept until the record is
             // held, then placed (`Paykit::place_kept_replies`). It is new state, which the
-            // spam rule gates, within the bounds on kept replies ([`kept_reply_room`]).
+            // spam rule gates, within the bounds on kept replies ([`kept_reply_evicted`]).
             if held_value(cx, &target)?.is_none() {
                 if admits_new_state(cx, &sender, scopes)? {
-                    let kept = key::kept_reply(
-                        &sender,
-                        &cx.record_key(&target.record_target())?,
-                        &stored.message().msg_id,
-                    );
-                    let from = cx
-                        .local_scan(key::kept_replies_of(&sender).as_bytes())?
-                        .len();
-                    let all = cx.local_scan(key::KEPT_REPLIES.as_bytes())?.len();
-                    if cx.local_get(kept.as_bytes())?.is_none() && kept_reply_room(from, all) {
+                    let record = cx.record_key(&target.record_target())?;
+                    let kept = key::kept_reply(&sender, &record, &stored.message().msg_id);
+                    if cx.local_get(kept.as_bytes())?.is_none() {
+                        make_room_for_reply(cx, &sender)?;
                         keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
                     }
                 }
@@ -740,16 +734,80 @@ fn hold_list(
 
 /// How many payer's replies to requests this app holds no record of it keeps from one
 /// sender identity, as Switch spec 8.2 bounds the entries of an unverified sender: past it,
-/// the newest is refused, and its sender, who keeps it, may send it again (Paykit spec 9).
+/// that sender's earliest reply is dropped.
 pub const MAX_KEPT_REPLIES_PER_SENDER: usize = 64;
 
-/// How many such replies it keeps in all, refused past it the same way.
+/// How many such replies it keeps in all: past it, the earliest reply of the sender holding
+/// the most is dropped.
 pub const MAX_KEPT_REPLIES: usize = 128;
 
-/// Whether another reply may be kept, with `from_sender` kept from its sender and `all` in
-/// all.
-pub(crate) fn kept_reply_room(from_sender: usize, all: usize) -> bool {
-    from_sender < MAX_KEPT_REPLIES_PER_SENDER && all < MAX_KEPT_REPLIES
+/// A kept reply, as the bounds count it: its sender and its acceptance time.
+pub(crate) type CountedReply = ([u8; 32], u64);
+
+/// Which of `kept` goes for a new reply from `sender` to be kept (Switch spec 8.2's rule):
+/// past the sender's [`MAX_KEPT_REPLIES_PER_SENDER`], its reply accepted earliest; past
+/// [`MAX_KEPT_REPLIES`] in all, the one accepted earliest of the sender holding the most, a
+/// tie going against the sender whose newest reply is newest. `None` while there is room.
+pub(crate) fn kept_reply_evicted(kept: &[CountedReply], sender: &[u8; 32]) -> Option<usize> {
+    let earliest_of = |who: &[u8; 32]| {
+        kept.iter()
+            .enumerate()
+            .filter(|(_, (from, _))| from == who)
+            .min_by_key(|(_, (_, at))| *at)
+            .map(|(index, _)| index)
+    };
+    let held = |who: &[u8; 32]| kept.iter().filter(|(from, _)| from == who).count();
+    if held(sender) >= MAX_KEPT_REPLIES_PER_SENDER {
+        return earliest_of(sender);
+    }
+    if kept.len() < MAX_KEPT_REPLIES {
+        return None;
+    }
+    let newest = |who: &[u8; 32]| {
+        kept.iter()
+            .filter(|(from, _)| from == who)
+            .map(|(_, at)| *at)
+            .max()
+    };
+    let most = kept
+        .iter()
+        .map(|(from, _)| *from)
+        .max_by_key(|from| (held(from), newest(from)))?;
+    earliest_of(&most)
+}
+
+/// Make room for a new reply from `sender` among the kept replies, in the step: the one the
+/// bounds drop ([`kept_reply_evicted`]) goes, and its sender is noted for its record
+/// (`pd/<record key>/<sender>`, the earliest acceptance dropped), to be asked once to send
+/// again when the record is held ([`Paykit::place_kept_replies`]).
+fn make_room_for_reply(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<(), Fail> {
+    let mut kept = Vec::new();
+    let mut names = Vec::new();
+    for (bytes, value) in cx.local_scan(key::KEPT_REPLIES.as_bytes())? {
+        let Some(crate::state::StateKey::KeptReply { sender, record, .. }) =
+            crate::state::StateKey::parse(&bytes)
+        else {
+            return Err(Fail::corrupt());
+        };
+        let reply = state::decode::<KeptMessage>(&value).map_err(|_| Fail::corrupt())?;
+        kept.push((sender, reply.accepted_at().unwrap_or(0)));
+        names.push((bytes, record));
+    }
+    let Some(index) = kept_reply_evicted(&kept, sender) else {
+        return Ok(());
+    };
+    let (from, at) = kept[index];
+    let (bytes, record) = names.swap_remove(index);
+    keep_local(cx, LocalWrite::Delete { key: bytes });
+    let dropped = key::dropped_replies(&record, &from);
+    let since = match cx.local_get(dropped.as_bytes())? {
+        Some(held) => state::decode::<u64>(&held)
+            .map_err(|_| Fail::corrupt())?
+            .min(at),
+        None => at,
+    };
+    keep_local(cx, local(&dropped, &since)?);
+    Ok(())
 }
 
 /// How long a message kept to be written into its record later is tried: 30 days from its
@@ -867,13 +925,40 @@ impl Paykit {
         Ok(())
     }
 
-    /// Place the payer's replies kept for requests this app held no record of, each once
+    /// Ask the senders of replies dropped for the bounds, once their record is held; then
+    /// place the payer's replies kept for requests this app held no record of, each once
     /// the record is held, as a later write of its own with the kept copy dropped in its
     /// batch (Switch spec 8.2, Paykit spec 8.1). One whose record doesn't come within
     /// [`KEPT_REPLY_MS`] of its acceptance, on the highest service time verified, is
     /// dropped: the payer keeps what it sent that long, and may send it again (Paykit spec
     /// 9). A placement that fails now is tried again at the next receive.
     pub(crate) async fn place_kept_replies(&mut self) -> crate::error::Result<()> {
+        // Once a record is held, each sender whose replies naming it were dropped for the
+        // bounds is asked once to send again, from the earliest dropped (Paykit spec 9).
+        for (rest, since) in self.local_scan::<u64>(key::DROPPED_REPLIES).await? {
+            let mark = format!("{}{rest}", key::DROPPED_REPLIES);
+            let Some(crate::state::StateKey::DroppedReplies { record, sender }) =
+                crate::state::StateKey::parse(mark.as_bytes())
+            else {
+                return Err(crate::error::PaykitError::corrupt());
+            };
+            let held = self
+                .app
+                .shared_record(&record)
+                .await?
+                .is_some_and(|held| held.content.value().is_some());
+            if held {
+                let ask = crate::protocol::QueuedAsk {
+                    sender,
+                    from_ms: since,
+                    until_ms: None,
+                };
+                let mut tx = Tx::default();
+                tx.delete(&mark);
+                tx.put(&key::ask(&sender, since), &ask)?;
+                self.local_commit(tx).await?;
+            }
+        }
         let own = self.identity();
         for (rest, kept) in self.local_scan::<KeptMessage>(key::KEPT_REPLIES).await? {
             let kept_key = format!("{}{rest}", key::KEPT_REPLIES);
@@ -1168,18 +1253,49 @@ pub(crate) fn unrequested_of(
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_kept_reply_room_within_both_bounds() {
-        assert!(kept_reply_room(0, 0));
-        assert!(kept_reply_room(
-            MAX_KEPT_REPLIES_PER_SENDER - 1,
-            MAX_KEPT_REPLIES - 1
-        ));
+    /// `n` replies from `sender`, accepted from `from` on.
+    fn replies(sender: u8, n: usize, from: u64) -> Vec<CountedReply> {
+        (0..n)
+            .map(|i| ([sender; 32], from + u64::try_from(i).unwrap()))
+            .collect()
     }
 
     #[test]
-    fn test_kept_reply_room_refused_past_either_bound() {
-        assert!(!kept_reply_room(MAX_KEPT_REPLIES_PER_SENDER, 0));
-        assert!(!kept_reply_room(0, MAX_KEPT_REPLIES));
+    fn test_kept_reply_evicted_none_within_both_bounds() {
+        let kept = replies(1, MAX_KEPT_REPLIES_PER_SENDER - 1, 10);
+        assert_eq!(kept_reply_evicted(&kept, &[1; 32]), None);
+        let mut kept = replies(1, MAX_KEPT_REPLIES_PER_SENDER, 10);
+        kept.extend(replies(
+            2,
+            MAX_KEPT_REPLIES - MAX_KEPT_REPLIES_PER_SENDER - 1,
+            5,
+        ));
+        assert_eq!(kept_reply_evicted(&kept, &[3; 32]), None);
+    }
+
+    #[test]
+    fn test_kept_reply_evicted_past_a_senders_bound_its_earliest() {
+        let mut kept = replies(2, 3, 1);
+        kept.extend(replies(1, MAX_KEPT_REPLIES_PER_SENDER, 10));
+        assert_eq!(kept_reply_evicted(&kept, &[1; 32]), Some(3));
+    }
+
+    #[test]
+    fn test_kept_reply_evicted_past_the_total_the_earliest_of_the_largest() {
+        // Bob holds 64, alice 63 and carol 1: a reply from carol drops bob's earliest.
+        let mut kept = replies(1, MAX_KEPT_REPLIES_PER_SENDER - 1, 100);
+        kept.extend(replies(2, MAX_KEPT_REPLIES_PER_SENDER, 500));
+        kept.push(([3; 32], 7));
+        assert_eq!(
+            kept_reply_evicted(&kept, &[3; 32]),
+            Some(MAX_KEPT_REPLIES_PER_SENDER - 1)
+        );
+        // Tied, the one whose newest reply is newest gives.
+        let mut tied = replies(1, MAX_KEPT_REPLIES_PER_SENDER, 100);
+        tied.extend(replies(2, MAX_KEPT_REPLIES_PER_SENDER, 500));
+        assert_eq!(
+            kept_reply_evicted(&tied, &[3; 32]),
+            Some(MAX_KEPT_REPLIES_PER_SENDER)
+        );
     }
 }

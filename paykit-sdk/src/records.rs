@@ -57,6 +57,11 @@ impl KeptMessage {
         }
     }
 
+    /// When its inbox accepted it, service time.
+    pub(crate) fn accepted_at(&self) -> Option<u64> {
+        self.accepted_at
+    }
+
     /// Whether the kept plaintext reads, without the recipient a full check needs.
     pub(crate) fn check_shape(&self) -> Result<()> {
         MessagePlaintext::decode(&self.plaintext)

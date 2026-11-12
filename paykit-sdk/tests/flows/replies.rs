@@ -181,29 +181,52 @@ fn unmatched_replies(w: &World, shop: &Paykit, n: usize) {
     }
 }
 
-/// The shop's status of a request paid before it was recorded, `n` unmatched replies from
-/// the payer kept first.
-async fn status_after_unmatched(n: usize) -> PayeeStatus {
-    let w = World::new();
+/// Bob's shop holds the acceptance and the proof of a request paid before it was recorded,
+/// then `n` replies from alice naming records bob never sent. Then the record is written.
+/// Returns the shop and the record key.
+async fn recorded_after_unmatched(w: &World, n: usize) -> (Paykit, [u8; 32]) {
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    unmatched_replies(&w, &shop, n);
+    let request = paid_before_recorded(w, &mut wallet, &mut shop).await;
+    // Accepted after the paid request's replies.
+    w.clock.advance_ms(1);
+    unmatched_replies(w, &shop, n);
     shop.receive(None).await.unwrap();
-    let request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
-    record_request(&w, &mut shop, &request).await;
-    shop.receive(None).await.unwrap();
-    shop.payee_activity().await.unwrap()[0].status.clone()
+    record_request(w, &mut shop, &request).await;
+    let summary = shop.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    assert_eq!(
+        summary.resends,
+        u64::from(n + 2 > paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER),
+        "asked once only for a dropped reply"
+    );
+    (shop, record)
+}
+
+/// How many of the payer's acceptance and proof the shop's record at `record` holds.
+async fn replies_held(shop: &Paykit, record: &[u8; 32]) -> usize {
+    let held = shop.app().shared_record(record).await.unwrap().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    ["response", "proof"]
+        .iter()
+        .filter(|role| !value[**role].is_null())
+        .count()
 }
 
 #[tokio::test]
 async fn test_replies_kept_up_to_the_bound_per_sender() {
-    // With room for one more, the acceptance is kept and the proof after it refused.
-    let status = status_after_unmatched(paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER - 1).await;
-    assert_eq!(status, PayeeStatus::Accepted);
+    let (shop, record) =
+        recorded_after_unmatched(&World::new(), paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER - 2).await;
+    assert_eq!(replies_held(&shop, &record).await, 2);
 }
 
 #[tokio::test]
-async fn test_replies_past_the_bound_per_sender_refused() {
-    let status = status_after_unmatched(paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER).await;
-    assert_eq!(status, PayeeStatus::Requested);
+async fn test_replies_past_the_bound_per_sender_drop_the_earliest_and_ask_once() {
+    let w = World::new();
+    // One of the paid request's replies, alice's earliest kept, is dropped for the 65th.
+    let (mut shop, record) =
+        recorded_after_unmatched(&w, paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER - 1).await;
+    assert_eq!(replies_held(&shop, &record).await, 1);
+    // Asked once: a later read asks nothing more.
+    assert_eq!(shop.receive(None).await.unwrap().resends, 0);
 }

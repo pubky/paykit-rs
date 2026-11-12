@@ -407,6 +407,7 @@ pub(crate) fn restore_paykit_layer(
                 continue;
             }
             StateKey::Peer(_)
+            | StateKey::DroppedReplies { .. }
             | StateKey::Spam(_)
             | StateKey::Resent { .. }
             | StateKey::ResentDay { .. }
