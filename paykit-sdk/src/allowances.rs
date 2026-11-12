@@ -878,7 +878,7 @@ impl Paykit {
         if stores_unqueued(
             None,
             &record,
-            &[msg_id.clone()],
+            std::slice::from_ref(&msg_id),
             &self.identity(),
             self.app_id(),
         ) {

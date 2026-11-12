@@ -1505,6 +1505,23 @@ mod receive_tests {
     }
 
     #[test]
+    fn test_protocol_restore_takes_a_kept_conflict_and_refuses_one_elsewhere() {
+        let (alice, bob, proposal, end) = allowance_end();
+        let Body::AllowanceProposal(body) = proposal.body() else {
+            panic!("a proposal");
+        };
+        let record = fake_key(&allowance_target(&bob.id(), &body.allowance_id)).unwrap();
+        let at = key::conflict(&record);
+        let kept = state::encode(&KeptMessage::of(&proposal)).unwrap();
+        assert!(check_kept_end(at.as_bytes(), &kept, &alice.id(), &fake_key).is_ok());
+        // Under another record's key, or an end under a conflict's key: refused.
+        let other = key::conflict(&[9; 32]);
+        assert!(check_kept_end(other.as_bytes(), &kept, &alice.id(), &fake_key).is_err());
+        let end = state::encode(&KeptMessage::of(&end)).unwrap();
+        assert!(check_kept_end(at.as_bytes(), &end, &alice.id(), &fake_key).is_err());
+    }
+
+    #[test]
     fn test_protocol_record_regression_on_a_dropped_allowance_end() {
         let (alice, bob, proposal, end) = allowance_end();
         let p = protocol_of(&alice);

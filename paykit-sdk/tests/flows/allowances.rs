@@ -1175,6 +1175,16 @@ async fn test_allowances_stop_with_a_stored_message_never_dropped_for_the_bound(
 /// record read, so it holds the value that doesn't read. Then bob accepts. Returns the phone,
 /// the record key and the record's value as the wallet wrote it.
 async fn answer_over_a_record_that_doesnt_read(w: &World) -> (Paykit, [u8; 32], Vec<u8>) {
+    answer_after_a_value_that_doesnt_read(w, true).await
+}
+
+/// As [`answer_over_a_record_that_doesnt_read`]; with `phone_reads_first` false, the phone
+/// reads only once bob has accepted, so the acceptance comes in the read that first holds
+/// the record.
+async fn answer_after_a_value_that_doesnt_read(
+    w: &World,
+    phone_reads_first: bool,
+) -> (Paykit, [u8; 32], Vec<u8>) {
     let mut shop = shop(w).await;
     let mut wallet = wallet(w).await;
     let both = || AppScopes::new().pay().allowance().build().unwrap();
@@ -1206,17 +1216,19 @@ async fn answer_over_a_record_that_doesnt_read(w: &World) -> (Paykit, [u8; 32], 
         .submit_batch(OpBatch::new().entry(op))
         .await
         .unwrap();
-    phone.receive(None).await.unwrap();
-    let held = phone
-        .app()
-        .shared_record(&sent.record)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        held.content.value(),
-        Some(&b"{\"not\":\"an allowance record\"}"[..])
-    );
+    if phone_reads_first {
+        phone.receive(None).await.unwrap();
+        let held = phone
+            .app()
+            .shared_record(&sent.record)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            held.content.value(),
+            Some(&b"{\"not\":\"an allowance record\"}"[..])
+        );
+    }
     shop.receive(None).await.unwrap();
     let theirs = shop.allowances().await.unwrap()[0].record;
     shop.accept_allowance(&theirs).await.unwrap();
@@ -1856,4 +1868,200 @@ async fn test_allowances_end_from_a_blocked_sender_keeps_no_stop() {
     wallet.receive(None).await.unwrap();
     assert!(wallet.app().protocol_scan(b"ae/").await.unwrap().is_empty());
     assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn test_allowances_kept_answer_over_a_record_that_doesnt_read_given_up_with_a_notice() {
+    // The acceptance comes before the phone holds the record, so it is kept; the record then
+    // comes as a value that doesn't read. The answer is never written over it, and 30 days
+    // from its acceptance it is given up, the host told (Paykit spec 8.1).
+    let w = World::new();
+    let (mut phone, record, _) = answer_after_a_value_that_doesnt_read(&w, false).await;
+    phone.receive(None).await.unwrap();
+    assert_eq!(phone.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    phone.receive(None).await.unwrap();
+    assert_eq!(phone.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    assert!(phone.notices().await.unwrap().is_empty());
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+    phone.receive(None).await.unwrap();
+    assert!(phone.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert_eq!(
+        raw(&phone, &record).await,
+        b"{\"not\":\"an allowance record\"}"
+    );
+    let notices = phone.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+}
+
+/// A `missed` item, and Paykit's listing at the end of the next receive fails: the copy of
+/// the records counts as not listed until a listing of Paykit's own.
+fn missed_and_listing_fails(w: &World) {
+    missed(w);
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "records?collection".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: Value::Null,
+        });
+}
+
+#[tokio::test]
+async fn test_allowances_stop_past_30_days_kept_while_unlisted() {
+    // A stop for an Allowance the wallet holds no record of is past its 30 days when the copy
+    // of the records may lack records: the absence decides nothing, so it stays until a
+    // listing of Paykit's own, and goes then (Paykit spec 8.1).
+    let w = World::new();
+    let _shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    end_unknown(&w, &wallet, 0);
+    wallet.receive(None).await.unwrap();
+    assert!(keeps_end(&w, &wallet, 0).await);
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+    missed_and_listing_fails(&w);
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.records_unlisted.is_some(), "{got:?}");
+    assert!(keeps_end(&w, &wallet, 0).await);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(!keeps_end(&w, &wallet, 0).await);
+}
+
+#[tokio::test]
+async fn test_allowances_kept_answer_past_30_days_kept_while_unlisted() {
+    // The same for an answer kept before its record.
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let _wallet = wallet(&w).await;
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.allowance_acceptance",
+        vec![[7; 32]],
+        json!({ "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4" })
+            .as_object()
+            .cloned()
+            .unwrap(),
+    );
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let now = w.clock.now_ms();
+    w.bob.switch().push_missed(1, now - 1_000, now);
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "records?collection".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: Value::Null,
+        });
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.records_unlisted.is_some(), "{got:?}");
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_allowances_stored_proposal_neither_opened_nor_given_up_while_unlisted() {
+    // Bob's proposal is stored; past 30 days the copy may lack records: the proposal opens
+    // no record from that copy, and isn't given up, until a listing of Paykit's own.
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    shop.propose_allowance(w.alice_id(), AllowanceRole::Allowee, terms())
+        .await
+        .unwrap();
+    refuse_writes(&w, 2);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"se/").await.unwrap().len(), 1);
+    missed_and_listing_fails(&w);
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.records_unlisted.is_some(), "{got:?}");
+    assert_eq!(wallet.app().protocol_scan(b"se/").await.unwrap().len(), 1);
+    assert!(wallet.notices().await.unwrap().is_empty());
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.allowances().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_allowances_end_removes_the_consent_though_its_record_write_fails() {
+    // The phone takes bob's end and removes its consent entry for good in the commit that
+    // keeps the stop; its later write of the end into the record is refused, so the record
+    // doesn't show it yet, and the entry stays removed.
+    let w = World::new();
+    let (mut shop, _wallet, _exec, mut phone, theirs, mine) = executed(&w).await;
+    shop.receive(None).await.unwrap();
+    shop.end_allowance(&theirs).await.unwrap();
+    refuse_writes(&w, 1);
+    phone.receive(None).await.unwrap();
+    assert!(value(&phone, &mine).await["end"].is_null());
+    assert_eq!(
+        consent_entry(&phone, &mine).await,
+        Some(json!({ "removed": { "reason": "ended" } }))
+    );
+}
+
+#[tokio::test]
+async fn test_allowances_stop_under_another_record_key_is_corrupt() {
+    // A kept end read back under the key of another record than the one it names is
+    // corrupt state, never taken as a stop or as none (Paykit spec 8.3).
+    let w = World::new();
+    let _shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    end_unknown(&w, &wallet, 0);
+    wallet.receive(None).await.unwrap();
+    let (key, value) = wallet.app().protocol_scan(b"ae/").await.unwrap().remove(0);
+    let other = format!("ae/{}", pubky_switch_core::enc::b64(&[3; 32]));
+    wallet
+        .app_mut()
+        .protocol_commit(&[
+            LocalWrite::Delete { key },
+            LocalWrite::Put {
+                key: other.into_bytes(),
+                value,
+            },
+        ])
+        .await
+        .unwrap();
+    let error = wallet.receive(None).await.unwrap_err();
+    assert!(error.to_string().contains("corrupt"), "{error:?}");
+}
+
+#[tokio::test]
+async fn test_allowances_missed_mark_other_than_true_is_corrupt() {
+    let w = World::new();
+    let (_shop, _wallet, mut exec, _phone, _, mine) = executed(&w).await;
+    exec.app_mut()
+        .protocol_commit(&[LocalWrite::Put {
+            key: b"mc".to_vec(),
+            value: br#"{"v":1,"d":false}"#.to_vec(),
+        }])
+        .await
+        .unwrap();
+    let error = exec.allowance(&mine).await.unwrap_err();
+    assert!(error.to_string().contains("corrupt"), "{error:?}");
+}
+
+#[tokio::test]
+async fn test_allowances_consent_under_a_key_not_its_spelling_is_corrupt() {
+    let w = World::new();
+    let (_shop, _wallet, mut exec, _phone, _, _) = executed(&w).await;
+    exec.app_mut()
+        .protocol_commit(&[LocalWrite::Put {
+            key: b"ac/not-a-record-key".to_vec(),
+            value: br#"{"v":1,"d":{"held":{"confirm_again":false}}}"#.to_vec(),
+        }])
+        .await
+        .unwrap();
+    let error = exec.receive(None).await.unwrap_err();
+    assert!(error.to_string().contains("corrupt"), "{error:?}");
 }
