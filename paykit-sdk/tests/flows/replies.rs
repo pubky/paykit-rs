@@ -746,3 +746,57 @@ async fn test_replies_kept_past_30_days_stay_while_the_records_are_not_listed() 
     assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
     assert!(shop.notices().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn test_replies_kept_from_another_identity_never_placed_nor_stop_the_receive() {
+    // Carol cancels bob's request to alice before the shop holds its record: her reply is
+    // kept beside alice's. Once the record is held, alice's are placed and carol's isn't, as
+    // she isn't the record's counterparty; every receive goes on, and 30 days after its
+    // acceptance her reply is given up, the host told.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let _carol = w
+        .join(
+            &w.carol,
+            "wallet",
+            paykit_sdk::AppScopes::new().pay().build().unwrap(),
+        )
+        .await;
+    let request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    let body = paykit_lib::bodies::RequestReply {
+        reason: None,
+        label: None,
+    }
+    .to_body()
+    .unwrap();
+    w.inject(
+        &w.carol,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_request_cancellation",
+        vec![request.hash()],
+        body,
+    );
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 3);
+    record_request(&w, &mut shop, &request).await;
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let sales = shop.payee_activity().await.unwrap();
+    assert_eq!(sales[0].status, PayeeStatus::ProofReceived);
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    assert!(shop.notices().await.unwrap().is_empty());
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    let notices = shop.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+    assert_eq!(notices[0].counterparty, w.carol_id());
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        PayeeStatus::ProofReceived
+    );
+}
