@@ -215,13 +215,13 @@ pub struct ReceiveSummary {
     /// gives it: the read went on, holding Paykit's entries unprocessed, and none of the
     /// Paykit steps after it ran.
     pub certificate_refused: Option<Refusal>,
-    /// A certificate taken reads collections the one the records were last listed under
-    /// didn't, and the listing this read made for them failed: the text says why, without
-    /// content. The records stay unlisted, so the calls that only read are refused as not
-    /// now, and the next receive or write lists them again.
+    /// A certificate taken is another than the one the records were last listed under, and
+    /// the listing this read made under it failed: the text says why, without content. The
+    /// records stay unlisted, so the calls that only read are refused as not now, and the
+    /// next receive or write lists them again.
     pub records_unlisted: Option<String>,
-    /// A certificate taken reads collections the one the records were last listed under
-    /// didn't, and the app waits for its scope keys, which the signer stores when it is next
+    /// A certificate taken is another than the one the records were last listed under, and
+    /// the app waits for its scope keys, which the signer stores when it is next
     /// online (Switch spec 3.5). The client asks the signer for a full bundle once, and asks
     /// again only after a later bundle part leaves a key still missing, or after a restore;
     /// it doesn't ask at every read. Until the keys come the records the certificate adds
@@ -368,10 +368,9 @@ impl Paykit {
         if paykit.certificate_refused().is_none() {
             paykit.bound_restored_cursor_time().await?;
         }
-        // A load follows a narrowing only: with no certificate kept as listed under, as after
-        // a load under one Paykit refused or a store an earlier build wrote, the records
-        // count as unlisted until a listing (`Paykit::unlisted`).
-        paykit.follow_listed_cert().await?;
+        // A load keeps nothing as listed under: a certificate the client took since the last
+        // listing, a narrower one included, leaves the records unlisted until the next one
+        // (`hold::side_unlisted`).
         Ok(paykit)
     }
 
@@ -606,13 +605,10 @@ impl Paykit {
         if !report.stopped {
             self.records_listed(keys_held_before).await?;
         }
-        // A certificate the read took may read more than the one before: its records are
-        // listed now, or stay unlisted for the next receive or write (`Paykit::list_widened`).
-        let records_unlisted = self.list_widened().await?;
-        // A certificate the read took that reads no more than the one listed under, a
-        // narrowed one included, is followed; one that passes Paykit's checks only now, as
-        // after a refused one, too (`Paykit::follow_listed_cert`).
-        self.follow_listed_cert().await?;
+        // A certificate the read took, any other than the one the records were listed under,
+        // a narrower one included: they are listed now, or stay unlisted for the next
+        // receive or write (`Paykit::list_under_new_cert`).
+        let records_unlisted = self.list_under_new_cert().await?;
         let keys = self.scope_keys_awaited().await?;
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1), unless the payer's side waits for its scope keys:
