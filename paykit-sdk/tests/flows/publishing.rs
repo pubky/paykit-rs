@@ -981,7 +981,7 @@ async fn test_publishing_proof_of_an_offered_version_confirmed_against_its_paylo
 }
 
 #[tokio::test]
-async fn test_publishing_proof_checked_until_its_version_is_forgotten() {
+async fn test_publishing_late_proof_of_an_untracked_version_checked_by_the_rail_alone() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -994,18 +994,91 @@ async fn test_publishing_proof_checked_until_its_version_is_forgotten() {
         .unwrap();
     shop.receive(None).await.unwrap();
     let record = shop.payee_activity().await.unwrap()[0].record;
-    // Tracked until 30 days after it expired, renewals or not.
+    // Tracked until 30 days after it expired, renewals or not, and checked against the
+    // payload offered; past that, a late proof of the payment is still credited, by the
+    // payment method alone.
     let forgotten_at = start + LIST_LIFETIME_MS + 30 * DAY_MS;
     w.clock.advance_ms(forgotten_at - 1 - w.clock.now_ms());
     shop.receive(None).await.unwrap();
     assert!(shop.verify_payment(&record).await.unwrap().is_some());
     w.clock.advance_ms(1);
     shop.receive(None).await.unwrap();
+    assert!(shop.verify_payment(&record).await.unwrap().is_some());
+    assert!(shop.confirm_payment(&record).await.unwrap().is_some());
+}
+
+/// Alice's wallet holds a list signed with the shop's key at the version the shop then
+/// publishes, with `endpoints`: she keeps it, ignoring the shop's own of the same version,
+/// and pays its Lightning offer. Returns the shop and the payee's record of the payment.
+async fn paid_to_a_list_at_the_shops_version(
+    w: &World,
+    endpoints: std::collections::BTreeMap<
+        paykit_lib::PaymentEndpointIdentifier,
+        paykit_lib::bodies::ListEndpoint,
+    >,
+    id: &str,
+) -> (Paykit, [u8; 32]) {
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let version = w.clock.now_ms();
+    w.list_to_alice_with(&mut shop, &[wallet.app_id()], version, endpoints)
+        .await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(w.publish_to_alice(&mut shop).await.version, version);
+    wallet.receive(None).await.unwrap();
+    let paid = wallet.pay_without_request(to_bob(w, id)).await.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    shop.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    (shop, record)
+}
+
+fn offer(
+    id: &str,
+    payload: &str,
+) -> std::collections::BTreeMap<
+    paykit_lib::PaymentEndpointIdentifier,
+    paykit_lib::bodies::ListEndpoint,
+> {
+    let mut endpoints = std::collections::BTreeMap::new();
+    endpoints.insert(
+        endpoint(id),
+        paykit_lib::bodies::ListEndpoint {
+            payload: PaymentEndpointPayload::new(payload).unwrap(),
+            single_use: false,
+        },
+    );
+    endpoints
+}
+
+#[tokio::test]
+async fn test_publishing_proof_of_an_endpoint_the_tracked_version_lacks_not_offered() {
+    let w = World::new();
+    let (mut shop, record) = paid_to_a_list_at_the_shops_version(
+        &w,
+        offer("btc-lightning-bolt11", "lnbc1other"),
+        "btc-lightning-bolt11",
+    )
+    .await;
     let refused = shop.verify_payment(&record).await.unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::NotOffered)),
         "{refused:?}"
     );
+}
+
+#[tokio::test]
+async fn test_publishing_proof_of_another_payload_at_a_tracked_version_not_confirmed() {
+    let w = World::new();
+    let (mut shop, record) = paid_to_a_list_at_the_shops_version(
+        &w,
+        offer("btc-lightning-bolt12", "lno1other"),
+        "btc-lightning-bolt12",
+    )
+    .await;
+    // Checked against the payload the shop offered, the payment to another isn't confirmed.
+    assert_eq!(shop.verify_payment(&record).await.unwrap(), None);
+    assert_eq!(shop.confirm_payment(&record).await.unwrap(), None);
 }
 
 /// Bob's signer renews his shop's certificate for `scopes` and lists it in his next

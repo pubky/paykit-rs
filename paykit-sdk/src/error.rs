@@ -162,9 +162,10 @@ pub enum Refusal {
     #[error("Paykit spec 8.1: the counterparty is blocked; no list is sent to it")]
     CounterpartyBlocked,
     /// The proof names a version of this app's Private Payment List, or an endpoint in it,
-    /// that this app didn't offer the payer, or no longer tracks, [`crate::KEPT_MESSAGE_MS`]
-    /// after it expired (Paykit spec 8.4): the payment isn't confirmed, and no receipt is
-    /// sent. The proof stays in its record.
+    /// that this app didn't offer the payer (Paykit spec 8.4): the payment isn't confirmed,
+    /// and no receipt is sent. The proof stays in its record. A version past the time the app
+    /// tracks one, [`crate::KEPT_MESSAGE_MS`] after its lifetime, isn't refused: a late proof
+    /// of it is checked by the payment method alone (Paykit spec 7.2).
     #[error("Paykit spec 8.4: the proof names a list endpoint this app didn't offer the payer")]
     NotOffered,
     /// The identity's deny list holds the payee: what is open with it is paused, and its

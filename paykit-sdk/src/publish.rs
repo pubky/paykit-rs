@@ -26,7 +26,8 @@
 //! Per counterparty the app keeps what it sent (`lp/<counterparty>`): each version still
 //! tracked, its expiry, when the counterparty's inbox accepted it, the payloads it offered and
 //! whether a proof used it. The payee's check of a proof reads the payload it offered
-//! ([`Paykit::verify_payment`]). A version is tracked until [`KEPT_MESSAGE_MS`] after its expiry,
+//! ([`Paykit::verify_payment`]); a proof of a version no longer tracked is checked by the
+//! payment method alone. A version is tracked until [`KEPT_MESSAGE_MS`] after its expiry,
 //! the time a payer keeps a proof to send again (Paykit spec 9).
 //!
 //! **Releases.** A single-use payload goes back to the payment method
@@ -524,28 +525,39 @@ impl Paykit {
         Ok(out)
     }
 
-    /// The payload this app offered `payer` for `endpoint` in its list `version`, while it
-    /// tracks that version (Paykit spec 8.4).
+    /// What a proof naming this app's list `version` and `endpoint` is checked against
+    /// (Paykit spec 8.4): the payload this app offered `payer` there, while it tracks that
+    /// version. Past the time it would track a version published then, [`KEPT_MESSAGE_MS`]
+    /// after its lifetime, `None`: a late proof of a real payment (Paykit spec 7.2) is
+    /// checked by the payment method alone, and credited once by its settlement. Within it,
+    /// [`Refusal::NotOffered`] for a version or endpoint this app didn't offer the payer.
     pub(crate) async fn offered_payload(
         &self,
         payer: &[u8; 32],
         version: u64,
         endpoint: &PaymentEndpointIdentifier,
-    ) -> Result<Option<PaymentEndpointPayload>> {
-        let Some(recipient) = self
+    ) -> Result<std::result::Result<Option<PaymentEndpointPayload>, Refusal>> {
+        let held = self
             .local_get::<Recipient>(&key::list_recipient(payer))
-            .await?
-        else {
-            return Ok(None);
+            .await?;
+        let offered = held
+            .as_ref()
+            .and_then(|r| r.versions.iter().find(|o| o.version == version));
+        let Some(offered) = offered else {
+            let untracked = version
+                .saturating_add(LIST_LIFETIME_MS)
+                .saturating_add(KEPT_MESSAGE_MS)
+                <= self.now();
+            return Ok(if untracked {
+                Ok(None)
+            } else {
+                Err(Refusal::NotOffered)
+            });
         };
-        let offered = recipient
-            .versions
-            .iter()
-            .filter(|o| o.version == version)
-            .find_map(|o| o.endpoints.get(endpoint.as_str()));
-        offered
-            .map(|o| PaymentEndpointPayload::parse(&o.payload).map_err(PaykitError::from))
-            .transpose()
+        match offered.endpoints.get(endpoint.as_str()) {
+            Some(o) => Ok(Ok(Some(PaymentEndpointPayload::parse(&o.payload)?))),
+            None => Ok(Err(Refusal::NotOffered)),
+        }
     }
 
     /// The list `list` signed for `to`, refused when it doesn't fit one message.
