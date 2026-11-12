@@ -1610,10 +1610,10 @@ fn accepted_refusal(refused: &paykit_sdk::PaykitError) -> bool {
 }
 
 #[tokio::test]
-async fn test_one_time_rejection_after_the_apps_own_acceptance_refused() {
+async fn test_one_time_rejection_after_a_failed_payments_acceptance_refused_and_cancelled() {
     // The wallet's payment failed after its acceptance went: the request is open again, but
-    // no longer proposed, so a rejection is refused, the request cancelled instead (Paykit
-    // spec 8.1).
+    // after an acceptance the payer may only cancel (Paykit spec 8.1, "Rejecting and
+    // cancelling"), so a rejection is refused and the cancellation goes.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -1626,6 +1626,13 @@ async fn test_one_time_rejection_after_the_apps_own_acceptance_refused() {
     assert_eq!(
         shop.payee_activity().await.unwrap()[0].status,
         PayeeStatus::Accepted
+    );
+    wallet.cancel_request(&request, None).await.unwrap();
+    wallet.flush().await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        PayeeStatus::Cancelled
     );
 }
 

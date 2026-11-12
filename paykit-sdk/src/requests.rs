@@ -1187,8 +1187,12 @@ impl Paykit {
         if recurring && (cancel || record.response.is_some()) {
             return Err(Refusal::Recurring.into());
         }
-        // A one-time request accepted, by this app or another own app whose acceptance the
-        // record holds, is no longer proposed: it is cancelled, not rejected (Paykit spec 8.1).
+        // One response per request (Paykit spec 8.1, "Rejecting and cancelling"): after an
+        // acceptance the payer may cancel, after a rejection it neither accepts nor cancels,
+        // and after a cancellation it sends no response. A one-time request accepted, by this
+        // app or another own app whose acceptance the record holds, is cancelled, not
+        // rejected, the acceptance's payment having failed included: the claim then shows no
+        // open, `unknown` or paid attempt, so the cancellation goes.
         if !cancel && accepted(record) {
             return Err(Refusal::Usage("accepted; cancel instead".into()).into());
         }
@@ -1335,7 +1339,8 @@ impl Paykit {
     /// request whose proposal expired, decided once the record the service holds shows it
     /// still unanswered: one another own app accepted meanwhile gives [`Refusal::Recurring`],
     /// one rejected or cancelled gives that refusal; [`Refusal::Usage`] for a one-time request
-    /// the record shows accepted, by this app or another own app, which is cancelled instead;
+    /// the record shows accepted, by this app or another own app, which is cancelled instead,
+    /// also once the acceptance's payment failed (Paykit spec 8.1, one response per request);
     /// [`PaykitError::Conflict`] when the record changed meanwhile; the client's errors.
     pub async fn reject_request(
         &mut self,
