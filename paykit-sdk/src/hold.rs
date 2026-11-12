@@ -166,6 +166,15 @@ impl Paykit {
         }))
     }
 
+    /// Whether the payer's side waits ([`KeysAwaited`], `keys` as
+    /// [`Paykit::scope_keys_awaited`] gave it): the payer's records, claims or `pay` key
+    /// wait, or keys wait while a restore's copy isn't listed yet, which lacks every record.
+    /// Nothing built on the payer's records is written then, at a resume or a receive.
+    pub(crate) async fn payer_waits(&self, keys: Option<KeysAwaited>) -> Result<bool> {
+        Ok(keys == Some(KeysAwaited::PayerSide)
+            || (keys.is_some() && self.unlisted().await? == Some(Unlisted::Restore)))
+    }
+
     /// Whether the app holds the scope keys its certificate's scopes have, at the current
     /// data epoch: a certificate just taken that reads more gets them with the key bundle
     /// the next read fetches (Switch spec 3.5), and a listing before then keeps values it

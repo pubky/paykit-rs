@@ -612,7 +612,7 @@ impl Paykit {
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1), unless the payer's side waits for its scope keys:
         // they build on request records the copy may lack, and stay kept meanwhile.
-        if keys != Some(crate::hold::KeysAwaited::PayerSide) {
+        if !self.payer_waits(keys).await? {
             self.place_kept_cancellations().await?;
         }
         // Lists held over a `payment_lists` record that didn't read, once it reads.

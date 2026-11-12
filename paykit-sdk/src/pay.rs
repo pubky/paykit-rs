@@ -2535,8 +2535,7 @@ impl Paykit {
         // A restore's copy not listed yet lacks every record: while keys wait, which leaves it
         // unlisted, the payer's side waits too.
         let keys = self.scope_keys_awaited().await?;
-        let payer_waits = keys == Some(crate::hold::KeysAwaited::PayerSide)
-            || (keys.is_some() && self.unlisted().await? == Some(crate::hold::Unlisted::Restore));
+        let payer_waits = self.payer_waits(keys).await?;
         if keys.is_none() {
             self.records_known().await?;
         }
