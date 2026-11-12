@@ -1584,3 +1584,112 @@ async fn test_one_time_cancellation_of_a_request_not_held_kept_once_at_an_app_pa
     assert!(keeps_stop(&w, &till, hash).await);
     assert!(till.app().protocol_scan(b"pr/").await.unwrap().is_empty());
 }
+
+/// `app` pays `request`: the acceptance goes with the dispatch, then the method reports the
+/// payment failed, so the claim is free again and the record keeps the acceptance.
+async fn failed_after_acceptance(
+    w: &World,
+    app: &mut paykit_sdk::Paykit,
+    request: &paykit_sdk::RequestRef,
+) {
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = app
+        .pay_request(request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    w.rail.settle(&attempt_id, false);
+    app.resume_payments().await.unwrap();
+}
+
+/// Whether `refused` is the refusal of a rejection of a request accepted.
+fn accepted_refusal(refused: &paykit_sdk::PaykitError) -> bool {
+    matches!(refused.refusal(), Some(Refusal::Usage(text)) if text == "accepted; cancel instead")
+}
+
+#[tokio::test]
+async fn test_one_time_rejection_after_the_apps_own_acceptance_refused() {
+    // The wallet's payment failed after its acceptance went: the request is open again, but
+    // no longer proposed, so a rejection is refused, the request cancelled instead (Paykit
+    // spec 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    failed_after_acceptance(&w, &mut wallet, &request).await;
+    let refused = wallet.reject_request(&request, None).await.unwrap_err();
+    assert!(accepted_refusal(&refused), "{refused:?}");
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        PayeeStatus::Accepted
+    );
+}
+
+#[tokio::test]
+async fn test_one_time_rejection_after_another_own_apps_acceptance_refused() {
+    // The phone's acceptance went; the wallet holds the record with it.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    phone.receive(None).await.unwrap();
+    failed_after_acceptance(&w, &mut phone, &request).await;
+    wallet.receive(None).await.unwrap();
+    let refused = wallet.reject_request(&request, None).await.unwrap_err();
+    assert!(accepted_refusal(&refused), "{refused:?}");
+    // Cancelling is what the payer does instead.
+    wallet.cancel_request(&request, None).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_one_time_rejection_of_a_request_not_accepted_sent() {
+    // A request with no acceptance is rejected as before; then no payment accepts it.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet.reject_request(&request, None).await.unwrap();
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::Rejected));
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_one_time_rejection_while_the_records_are_not_listed_refused_as_not_now() {
+    // After a `missed` item whose listing fails, the copy may lack the acceptance another
+    // app recorded: no response is decided from it.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let now = w.clock.now_ms();
+    w.alice.switch().push_missed(1, now - 1_000, now);
+    let unlisted = || pubky_switch_client::testing::Fault::Error {
+        path: "records?collection".into(),
+        code: pubky_switch_core::http::ErrorCode::Unavailable,
+        current: serde_json::Value::Null,
+    };
+    w.alice.switch().fail_next(unlisted());
+    assert!(wallet
+        .receive(None)
+        .await
+        .unwrap()
+        .records_unlisted
+        .is_some());
+    w.alice.switch().fail_next(unlisted());
+    let refused = wallet.reject_request(&request, None).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{refused:?}"
+    );
+}
