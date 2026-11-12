@@ -1588,10 +1588,10 @@ of other apps' endpoints.
 `resolve_public_payment_request` reads the received Payment Request, so it
 fails with `Policy` while the counterparty is blocked, before App Registry
 access. It rechecks the block after each public storage provider call, before
-each App Registry or Payment List read, before payment adapter selection and
-target building, and before returning. A block that lands during a provider
-call or a read therefore returns `Policy`, even when that call failed.
-Requests inside a single App's Payment List read are not interrupted.
+each App Registry or Payment List read, after payment adapter selection, and
+after each payment target is built. A block that lands during any of those
+calls therefore returns `Policy`, even when that call failed. Requests inside a
+single App's Payment List read are not interrupted.
 `resolve_public_contact_payment` reads no Payment Request and is unaffected.
 
 ### Resolve Private Payment

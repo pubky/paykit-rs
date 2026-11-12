@@ -278,13 +278,30 @@ impl PaymentAdapter for UnreachablePublicPaymentAdapter {
 }
 
 /// Selects every public candidate and builds its target, blocking the
-/// counterparty during selection or during the first target build.
+/// counterparty during selection or during the first target build. With
+/// `fail_after_block`, the call that blocks then returns an adapter error.
 struct BlockingPublicPaymentAdapter {
     storage: InMemoryStorage,
     counterparty: PubkyPublicKey,
     block_during_selection: bool,
+    fail_after_block: bool,
     builds: std::sync::atomic::AtomicUsize,
 }
+
+impl BlockingPublicPaymentAdapter {
+    async fn block(&self) -> Result<()> {
+        block_counterparty(&self.storage, &self.counterparty).await;
+        if self.fail_after_block {
+            return Err(PaykitSdkError::PaymentAdapter {
+                context: BLOCKING_ADAPTER_FAILURE.into(),
+                source: None,
+            });
+        }
+        Ok(())
+    }
+}
+
+const BLOCKING_ADAPTER_FAILURE: &str = "adapter failed after block";
 
 #[async_trait]
 impl PaymentAdapter for BlockingPublicPaymentAdapter {
@@ -293,7 +310,7 @@ impl PaymentAdapter for BlockingPublicPaymentAdapter {
         request: &PublicPaymentEndpointSelectionRequest,
     ) -> Result<Vec<PublicPaymentEndpointCandidate>> {
         if self.block_during_selection {
-            block_counterparty(&self.storage, &self.counterparty).await;
+            self.block().await?;
         }
         Ok(request.candidates.clone())
     }
@@ -303,7 +320,7 @@ impl PaymentAdapter for BlockingPublicPaymentAdapter {
         endpoint: &PublicPaymentEndpointCandidate,
     ) -> Result<PaymentTarget> {
         if self.builds.fetch_add(1, Ordering::SeqCst) == 0 && !self.block_during_selection {
-            block_counterparty(&self.storage, &self.counterparty).await;
+            self.block().await?;
         }
         Ok(PaymentTarget {
             payload: endpoint.payload.clone(),
@@ -311,8 +328,27 @@ impl PaymentAdapter for BlockingPublicPaymentAdapter {
     }
 }
 
+/// A second payable candidate for the same counterparty and App.
+fn second_public_candidate(
+    candidate: &PublicPaymentEndpointCandidate,
+) -> PublicPaymentEndpointCandidate {
+    PublicPaymentEndpointCandidate {
+        payload: "ln-public-second".into(),
+        ..candidate.clone()
+    }
+}
+
+fn assert_blocking_adapter_error<T>(result: Result<T>) {
+    assert!(
+        matches!(result, Err(PaykitSdkError::PaymentAdapter { ref context, .. }) if context == BLOCKING_ADAPTER_FAILURE),
+        "unexpected result: {:?}",
+        result.err().map(|error| error.to_string())
+    );
+}
+
 fn blocking_adapter_sdk(
     block_during_selection: bool,
+    fail_after_block: bool,
 ) -> (
     PaykitSdk<InMemoryStorage, TestPubkySessionProvider, BlockingPublicPaymentAdapter, FixedClock>,
     PublicPaymentEndpointCandidate,
@@ -326,6 +362,7 @@ fn blocking_adapter_sdk(
             storage,
             counterparty: candidate.counterparty.clone(),
             block_during_selection,
+            fail_after_block,
             builds: 0.into(),
         },
         PaykitSdkConfig::new("test-app").unwrap(),
@@ -936,7 +973,19 @@ async fn test_contact_reads_return_provider_error_despite_block() {
 
 #[tokio::test]
 async fn test_request_candidate_batch_rechecks_blocked_peer_after_adapter_selection() {
-    let (sdk, candidate) = blocking_adapter_sdk(true);
+    let (sdk, candidate) = blocking_adapter_sdk(true, false);
+
+    let result = sdk
+        .resolve_public_candidate_batch(candidate.counterparty.clone(), None, vec![candidate], true)
+        .await;
+
+    assert_blocked_policy(result);
+    assert_eq!(sdk.payment.builds.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn test_request_candidate_batch_block_outranks_failed_adapter_selection() {
+    let (sdk, candidate) = blocking_adapter_sdk(true, true);
 
     let result = sdk
         .resolve_public_candidate_batch(candidate.counterparty.clone(), None, vec![candidate], true)
@@ -948,7 +997,38 @@ async fn test_request_candidate_batch_rechecks_blocked_peer_after_adapter_select
 
 #[tokio::test]
 async fn test_request_candidate_batch_rechecks_blocked_peer_after_target_building() {
-    let (sdk, candidate) = blocking_adapter_sdk(false);
+    let (sdk, candidate) = blocking_adapter_sdk(false, false);
+
+    let result = sdk
+        .resolve_public_candidate_batch(candidate.counterparty.clone(), None, vec![candidate], true)
+        .await;
+
+    assert_blocked_policy(result);
+    assert_eq!(sdk.payment.builds.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_request_candidate_batch_stops_target_building_once_blocked() {
+    let (sdk, candidate) = blocking_adapter_sdk(false, false);
+    let second = second_public_candidate(&candidate);
+
+    let result = sdk
+        .resolve_public_candidate_batch(
+            candidate.counterparty.clone(),
+            None,
+            vec![candidate, second],
+            true,
+        )
+        .await;
+
+    // The first build blocks the counterparty, so the second never starts.
+    assert_blocked_policy(result);
+    assert_eq!(sdk.payment.builds.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_request_candidate_batch_block_outranks_failed_target_build() {
+    let (sdk, candidate) = blocking_adapter_sdk(false, true);
 
     let result = sdk
         .resolve_public_candidate_batch(candidate.counterparty.clone(), None, vec![candidate], true)
@@ -961,21 +1041,47 @@ async fn test_request_candidate_batch_rechecks_blocked_peer_after_target_buildin
 #[tokio::test]
 async fn test_contact_candidate_batch_ignores_block_during_adapter_work() {
     for block_during_selection in [true, false] {
-        let (sdk, candidate) = blocking_adapter_sdk(block_during_selection);
+        let (sdk, candidate) = blocking_adapter_sdk(block_during_selection, false);
+        let second = second_public_candidate(&candidate);
 
         let result = sdk
             .resolve_public_candidate_batch(
                 candidate.counterparty.clone(),
                 None,
-                vec![candidate.clone()],
+                vec![candidate.clone(), second.clone()],
                 false,
             )
             .await
             .unwrap();
 
         assert_eq!(result.status, PublicPaymentResolutionStatus::Payable);
-        assert_eq!(result.payable_endpoints.len(), 1);
-        assert_eq!(result.payable_endpoints[0].endpoint, candidate);
+        assert_eq!(sdk.payment.builds.load(Ordering::SeqCst), 2);
+        let endpoints: Vec<_> = result
+            .payable_endpoints
+            .into_iter()
+            .map(|resolved| resolved.endpoint)
+            .collect();
+        assert_eq!(endpoints, vec![candidate, second]);
+    }
+}
+
+#[tokio::test]
+async fn test_contact_candidate_batch_returns_adapter_error_despite_block() {
+    for block_during_selection in [true, false] {
+        let (sdk, candidate) = blocking_adapter_sdk(block_during_selection, true);
+
+        let result = sdk
+            .resolve_public_candidate_batch(
+                candidate.counterparty.clone(),
+                None,
+                vec![candidate],
+                false,
+            )
+            .await;
+
+        // Contact resolution ignores Linked Peer state, so the adapter error
+        // is returned unchanged.
+        assert_blocking_adapter_error(result);
     }
 }
 

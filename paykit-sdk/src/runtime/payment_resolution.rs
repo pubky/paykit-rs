@@ -718,11 +718,10 @@ where
     /// Returns `Policy` while the counterparty is `Blocked`, before any App
     /// Registry or Payment Endpoint read. The block is rechecked after each
     /// Pubky public storage provider call, before each App Registry or
-    /// Payment List read, before payment adapter selection and target
-    /// building, and before the result is returned. A block that lands during
-    /// a provider call or a read therefore returns `Policy`, even when that
-    /// call failed. Requests inside a single App's Payment List read are not
-    /// interrupted.
+    /// Payment List read, after payment adapter selection, and after each
+    /// payment target is built. A block that lands during any of those calls
+    /// therefore returns `Policy`, even when that call failed. Requests inside
+    /// a single App's Payment List read are not interrupted.
     pub async fn resolve_public_payment_request(
         &self,
         counterparty: PubkyPublicKey,
@@ -1361,10 +1360,17 @@ where
     async fn build_public_payable_endpoints(
         &self,
         payable: Vec<PublicPaymentEndpointCandidate>,
+        refuse_blocked_counterparty: bool,
+        counterparty: &PubkyPublicKey,
     ) -> Result<Vec<ResolvedPublicPaymentEndpoint>> {
         let mut endpoints = Vec::with_capacity(payable.len());
         for endpoint in payable {
-            let target = self.payment.build_public_payment_target(&endpoint).await?;
+            let target = self.payment.build_public_payment_target(&endpoint).await;
+            // A block that lands during a target build outranks its error,
+            // and no further target build starts.
+            self.ensure_peer_not_blocked_if(refuse_blocked_counterparty, counterparty)
+                .await?;
+            let target = target?;
             endpoints.push(ResolvedPublicPaymentEndpoint { endpoint, target });
         }
         Ok(endpoints)
@@ -1410,22 +1416,23 @@ where
         loaded_app_count: usize,
         refuse_blocked_counterparty: bool,
     ) -> Result<PublicContactPaymentResolution> {
-        let payable = self
+        let selected = self
             .payment
             .select_public_payment_endpoints(&PublicPaymentEndpointSelectionRequest {
                 counterparty: counterparty.clone(),
                 amount,
                 candidates: candidates.clone(),
             })
-            .await?;
+            .await;
         // Adapter work already in flight cannot be recalled without
         // serializing against `block_peer`. Once a block is observed, no
-        // target is built and no result is returned.
+        // target is built and no result is returned, and the block outranks
+        // a selection error.
         self.ensure_peer_not_blocked_if(refuse_blocked_counterparty, &counterparty)
             .await?;
-        let payable = public_payable_from_batch(&payable, &candidates)?;
-        let payable_endpoints = self.build_public_payable_endpoints(payable).await?;
-        self.ensure_peer_not_blocked_if(refuse_blocked_counterparty, &counterparty)
+        let payable = public_payable_from_batch(&selected?, &candidates)?;
+        let payable_endpoints = self
+            .build_public_payable_endpoints(payable, refuse_blocked_counterparty, &counterparty)
             .await?;
         if payable_endpoints.is_empty() {
             return Ok(unresolved_public_resolution(
