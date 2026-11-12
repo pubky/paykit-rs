@@ -248,10 +248,7 @@ fn note_cursor_time(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Resu
     let Some(at) = stored.accepted_at() else {
         return Ok(());
     };
-    let held = match cx.local_get(key::CURSOR_TIME.as_bytes())? {
-        Some(bytes) => state::decode::<u64>(&bytes).map_err(|_| Fail::corrupt())?,
-        None => 0,
-    };
+    let held = state::cx_get::<u64>(cx, key::CURSOR_TIME)?.unwrap_or(0);
     if at > held {
         keep_local(cx, local(key::CURSOR_TIME, &at)?);
     }
@@ -278,7 +275,7 @@ fn admits_new_state(
         return Ok(true);
     }
     let unknown = || Fail::Store(StoreFailure::unavailable(StoreError::Unavailable));
-    if cx.local_get(key::LISTS_READ.as_bytes())?.is_none() {
+    if state::cx_get::<u64>(cx, key::LISTS_READ)?.is_none() {
         return Err(unknown());
     }
     let standing = cx.sender_disposition(sender)?;
@@ -289,10 +286,7 @@ fn admits_new_state(
         return Ok(true);
     }
     let kept = key::spam(sender);
-    let count = match cx.local_get(kept.as_bytes())? {
-        Some(bytes) => state::decode::<u64>(&bytes).map_err(|_| Fail::corrupt())?,
-        None => 0,
-    };
+    let count = state::cx_get::<u64>(cx, &kept)?.unwrap_or(0);
     keep_local(cx, local(&kept, &count.saturating_add(1))?);
     Ok(false)
 }
@@ -374,11 +368,10 @@ fn held_or_unlisted(
 /// too. The entry is held as for a store
 /// unavailable for now (Paykit spec 17, question 27), and read again at a later read.
 fn hold_while_unlisted(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<(), Fail> {
-    let restore = cx.local_get(key::RECORDS_UNLISTED.as_bytes())?.is_some();
-    let listed = match cx.local_get(key::LISTED_CERT.as_bytes())? {
+    let restore = state::cx_get::<bool>(cx, key::RECORDS_UNLISTED)?.is_some();
+    let listed = match state::cx_get::<SignedDoc>(cx, key::LISTED_CERT)? {
         None => None,
-        Some(bytes) => {
-            let signed: SignedDoc = state::decode(&bytes).map_err(|_| Fail::corrupt())?;
+        Some(signed) => {
             Some(AppCert::verify(&signed, &cx.identity()).map_err(|_| Fail::corrupt())?)
         }
     };
@@ -436,7 +429,7 @@ fn keep_cancellation(
     stored: &StoredMessage,
 ) -> Result<(), Fail> {
     let kept = key::kept_cancellation(&cx.record_key(&target.record_target())?);
-    if cx.local_get(kept.as_bytes())?.is_some() {
+    if state::cx_get::<KeptMessage>(cx, &kept)?.is_some() {
         return Ok(());
     }
     keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
@@ -533,33 +526,24 @@ fn receipt_effect(
     // request's deadline, and whether `failed` stands on the claim of a payment made. One
     // that doesn't read parks the receipt rather than settling the claim with no deadline,
     // or consuming it (Switch spec 8.2): the store is corrupt. It is read as
-    // `Paykit::journal_entry` reads it: checked, bound to its obligation and to its key.
-    let journaled = match cx.local_get(key::journal(&attempt_id).as_bytes())? {
-        Some(bytes) => {
-            let entry = state::decode::<JournalEntry>(&bytes).map_err(|_| Fail::corrupt())?;
-            entry
-                .check_bound(|payee, request| obligation(cx, payee, request, 0))
-                .map_err(|_| Fail::corrupt())?;
-            if entry.attempt().map_err(|_| Fail::corrupt())? != attempt_id {
-                return Err(Fail::corrupt());
-            }
-            Some(entry)
-        }
-        None => None,
-    };
+    // `Paykit::journal_entry_on` reads it: bound to its key, and to the claim the receipt
+    // settles, so an entry of the attempt on another claim parks the receipt too.
+    let claim = receipt_claim(stored, &attempt_id, |request| {
+        obligation(cx, &sender, request, 0)
+    });
+    let journaled = JournalEntry::on_claim(
+        state::cx_get::<JournalEntry>(cx, &key::journal(&attempt_id))?,
+        &claim,
+    )
+    .map_err(|_| Fail::corrupt())?;
     // A receipt reaches only an app holding `pay`, which carries `claims.write`, and an entry
     // that comes under a certificate without it is held unprocessed: this returns only for a
     // certificate Paykit's checks would refuse.
     if !cx.cert().has_permission(Permission::ClaimsWrite) {
         return Ok(());
     }
-    let (obligation, deadline) = receipt_obligation(
-        stored,
-        &record,
-        journaled.as_ref(),
-        &attempt_id,
-        |request| obligation(cx, &sender, request, 0),
-    );
+    let obligation = claim;
+    let deadline = receipt_deadline(stored, &record, journaled.as_ref());
     // A claim the app keeps no view of is read from the switch first, so the receipt
     // settles it in the cursor's batch (Switch spec 10.2 row 3).
     let read = cx.switch_claim(&obligation).map(|fetch| match fetch {
@@ -590,12 +574,8 @@ fn receipt_effect(
         let notice = key::notice(&attempt_id, NoticeKind::PaidAfterFailed);
         // A notice kept already is read whole and bound to its key, as `Paykit::kept_notice`
         // reads it.
-        match cx.local_get(notice.as_bytes())? {
-            None => keep_local(cx, local(&notice, &late)?),
-            Some(bytes) => {
-                let kept = state::decode::<KeptNotice>(&bytes).map_err(|_| Fail::corrupt())?;
-                crate::notices::bind_notice(&notice, &kept).map_err(|_| Fail::corrupt())?;
-            }
+        if state::cx_get::<KeptNotice>(cx, &notice)?.is_none() {
+            keep_local(cx, local(&notice, &late)?);
         }
     }
     if let Some(entry) = settles.received {
@@ -692,29 +672,34 @@ pub(crate) fn receipt_on_record(
     })
 }
 
-/// The claim a receipt settles, and its deadline: its request's obligation, blinded by
-/// `request_obligation`, at the request's attempt deadline; or, for a payment without a
-/// request, the attempt's own obligation at the deadline its journal entry kept.
-pub(crate) fn receipt_obligation(
+/// The claim a receipt settles: its request's obligation, blinded by `request_obligation`;
+/// or, for a payment without a request, the attempt's own obligation.
+pub(crate) fn receipt_claim(
+    stored: &StoredMessage,
+    attempt_id: &AttemptId,
+    request_obligation: impl FnOnce(&[u8; 32]) -> [u8; 32],
+) -> [u8; 32] {
+    match stored.message().refs.get(1) {
+        Some(request) => request_obligation(request),
+        None => paykit_lib::derive::payment_obligation(attempt_id),
+    }
+}
+
+/// The deadline of a receipt's claim: its request's attempt deadline; or, for a payment
+/// without a request, the deadline its journal entry kept, `journaled` read bound to the
+/// claim ([`JournalEntry::on_claim`]).
+pub(crate) fn receipt_deadline(
     stored: &StoredMessage,
     record: &ActivityRecord,
     journaled: Option<&JournalEntry>,
-    attempt_id: &AttemptId,
-    request_obligation: impl FnOnce(&[u8; 32]) -> [u8; 32],
-) -> ([u8; 32], ObligationDeadline) {
+) -> ObligationDeadline {
     match stored.message().refs.get(1) {
-        Some(request) => {
-            let deadline = crate::requests::request_of(record)
-                .and_then(|(_, body)| body.attempt_deadline(None).ok())
-                .map_or(ObligationDeadline::NotKnown, crate::pay::own_deadline);
-            (request_obligation(request), deadline)
-        }
-        None => (
-            paykit_lib::derive::payment_obligation(attempt_id),
-            journaled.map_or(ObligationDeadline::NotKnown, |entry| {
-                crate::pay::own_deadline(entry.deadline)
-            }),
-        ),
+        Some(_) => crate::requests::request_of(record)
+            .and_then(|(_, body)| body.attempt_deadline(None).ok())
+            .map_or(ObligationDeadline::NotKnown, crate::pay::own_deadline),
+        None => journaled.map_or(ObligationDeadline::NotKnown, |entry| {
+            crate::pay::own_deadline(entry.deadline)
+        }),
     }
 }
 
@@ -938,10 +923,8 @@ fn hold_list(
     stored: &StoredMessage,
 ) -> Result<(), Fail> {
     let kept = key::held_list(&cx.record_key(target)?);
-    if let Some(bytes) = cx.local_get(kept.as_bytes())? {
-        let held = state::decode::<KeptMessage>(&bytes)
-            .and_then(|k| k.stored(&cx.identity()))
-            .map_err(|_| Fail::corrupt())?;
+    if let Some(held) = state::cx_get::<KeptMessage>(cx, &kept)? {
+        let held = held.stored(&cx.identity()).map_err(|_| Fail::corrupt())?;
         if list_version(&held) >= list_version(stored) {
             return Ok(());
         }
