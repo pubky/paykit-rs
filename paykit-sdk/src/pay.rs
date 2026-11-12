@@ -1041,6 +1041,26 @@ impl Paykit {
         Ok(out)
     }
 
+    /// The journal entry of `attempt`, read back checked and bound to its obligation and its
+    /// key, as [`Paykit::journal`] reads each.
+    ///
+    /// # Errors
+    ///
+    /// A store failure, or an entry that doesn't read or isn't the attempt its key names.
+    pub(crate) async fn journal_entry(&self, attempt: &AttemptId) -> Result<Option<JournalEntry>> {
+        let Some(entry) = self
+            .local_get::<JournalEntry>(&key::journal(attempt))
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.check_entry(&entry)?;
+        if entry.attempt()? != *attempt {
+            return Err(PaykitError::corrupt());
+        }
+        Ok(Some(entry))
+    }
+
     /// A journal entry read back, checked and bound to its obligation through this app's
     /// naming key ([`JournalEntry::check_bound`]).
     pub(crate) fn check_entry(&self, entry: &JournalEntry) -> Result<()> {
@@ -2850,7 +2870,7 @@ impl Paykit {
                 for kind in [NoticeKind::PaidAfterFailed, NoticeKind::HeldWithoutPay] {
                     let notice = key::notice(&attempt, kind);
                     if self
-                        .local_get::<crate::notices::KeptNotice>(&notice)
+                        .kept_notice(&notice)
                         .await?
                         .is_some_and(|kept| kept.acknowledged)
                     {
