@@ -1754,3 +1754,158 @@ async fn test_one_time_restore_asks_wait_for_a_sealed_records_key() {
     }
     assert_eq!(crate::common::asked(&restored, &w.bob_id()).await.len(), 1);
 }
+
+/// The value Paykit keeps at `key` in `app`'s state.
+async fn state_value(app: &paykit_sdk::Paykit, key: &[u8]) -> Vec<u8> {
+    app.app()
+        .protocol_scan(key)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|(found, _)| found == key)
+        .unwrap()
+        .1
+}
+
+/// The stop key of bob's request `hash` at `wallet`.
+fn stop_key(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -> Vec<u8> {
+    let request = paykit_sdk::RequestRef {
+        payee: w.bob_id(),
+        request_hash: hash,
+    };
+    let key = wallet
+        .app()
+        .record_key(&crate::outcome_record::payer_record(&request))
+        .unwrap();
+    format!("kc/{}", pubky_switch_core::enc::b64(&key)).into_bytes()
+}
+
+#[tokio::test]
+async fn test_one_time_stop_naming_another_request_refused_as_corrupt() {
+    // The stop kept for one request is found at another request's key: a corrupt store. The
+    // receive fails rather than place it in the other request's record, and the request
+    // isn't shown cancelled by it (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let other = [7; 32];
+    cancel_to(&w, &[wallet.app_id()], other);
+    wallet.receive(None).await.unwrap();
+    let value = state_value(&wallet, &stop_key(&w, &wallet, other)).await;
+    let key = stop_key(&w, &wallet, request.request_hash);
+    wallet
+        .app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put { key, value }])
+        .await
+        .unwrap();
+    let failed = wallet.receive(None).await.unwrap_err();
+    assert!(crate::common::is_corrupt(&failed), "{failed:?}");
+    let failed = wallet.request(&request).await.unwrap_err();
+    assert!(crate::common::is_corrupt(&failed), "{failed:?}");
+    let value = crate::outcome_record::record_value(&mut wallet, &request)
+        .await
+        .unwrap();
+    assert!(value["cancellation"].is_null(), "{value}");
+}
+
+#[tokio::test]
+async fn test_one_time_stop_at_its_own_key_read_back() {
+    // The same stop at its own key reads back: the request it names shows cancelled.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let (request, hash) = unsent_request(&w);
+    cancel_to(&w, &[wallet.app_id()], hash);
+    wallet.receive(None).await.unwrap();
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &request);
+    wallet.receive(None).await.unwrap();
+    let request = paykit_sdk::RequestRef {
+        payee: w.bob_id(),
+        request_hash: hash,
+    };
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn test_one_time_no_response_after_the_payers_own_cancellation() {
+    // After the payer's cancellation, nothing more goes for the request: no rejection, no
+    // second cancellation, no payment (Paykit spec 8.1, one response per request).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet.cancel_request(&request, None).await.unwrap();
+    for refused in [
+        wallet.reject_request(&request, None).await.unwrap_err(),
+        wallet.cancel_request(&request, None).await.unwrap_err(),
+        wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap_err(),
+    ] {
+        assert_eq!(refused.refusal(), Some(&Refusal::Cancelled), "{refused:?}");
+    }
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_one_time_no_response_after_the_payees_cancellation() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    shop_cancels(&mut shop, &request).await;
+    wallet.receive(None).await.unwrap();
+    for refused in [
+        wallet.reject_request(&request, None).await.unwrap_err(),
+        wallet.cancel_request(&request, None).await.unwrap_err(),
+    ] {
+        assert_eq!(refused.refusal(), Some(&Refusal::Cancelled), "{refused:?}");
+    }
+}
+
+#[tokio::test]
+async fn test_one_time_no_cancellation_after_a_rejection() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet.reject_request(&request, None).await.unwrap();
+    let refused = wallet.cancel_request(&request, None).await.unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::Rejected), "{refused:?}");
+}
+
+#[tokio::test]
+async fn test_one_time_no_response_over_a_record_sealed_at_a_key_not_held() {
+    // The wallet holds the request's record sealed under a key it doesn't hold yet: it may
+    // hold a response or a cancellation, so no response and no payment is decided from it,
+    // refused as not now rather than as no request.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (requests, _) = sealed_requests(&w, &mut wallet, &mut phone, &mut shop, 1).await;
+    let request = requests[0];
+    for refused in [
+        wallet.reject_request(&request, None).await.unwrap_err(),
+        wallet.cancel_request(&request, None).await.unwrap_err(),
+        wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap_err(),
+    ] {
+        assert!(
+            matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+            "{refused:?}"
+        );
+    }
+    assert!(w.rail.all_executions().is_empty());
+}

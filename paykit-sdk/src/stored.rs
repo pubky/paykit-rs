@@ -118,19 +118,45 @@ fn given_up_notice(stored: &StoredMessage, at: u64) -> KeptNotice {
     )
 }
 
-/// Whether `note` keeps a message of `request` still to write: one not in its record yet,
-/// whether it waits for a write that failed or for a listing. A payee's cancellation of that
-/// request kept as a stop stays while one does ([`Paykit::place_kept_cancellations`]): the
-/// request's own entry may be among them, and written without the stop it would be payable.
+/// Whether the stored note `value` at `key` keeps a message of `request` still to write:
+/// one not in its record yet, whether it waits for a write that failed or for a listing. A
+/// payee's cancellation of that request kept as a stop stays while one does
+/// ([`Paykit::place_kept_cancellations`]): the request's own entry may be among them, and
+/// written without the stop it would be payable. The note is read bound to its key
+/// ([`note_at`]).
 pub(crate) fn writes_request(
-    note: &StoredNote,
+    key: &[u8],
+    value: &[u8],
     own: &[u8; 32],
     request: &[u8; 32],
 ) -> Result<bool> {
-    if note.placed {
-        return Ok(false);
+    let (note, stored) = note_at(key, value, own)?;
+    Ok(!note.placed && named_request(&stored) == Some(*request))
+}
+
+/// The stored note `value` read back at `key` (`se/<sender>/<msg_id>`), bound to it: its
+/// sender and `msg_id`, and those of the message it keeps, are the ones the key names. One
+/// that doesn't read, or names another key, is a corrupt store, never an absent note.
+pub(crate) fn note_at(
+    key: &[u8],
+    value: &[u8],
+    own: &[u8; 32],
+) -> Result<(StoredNote, StoredMessage)> {
+    let Some(crate::state::StateKey::StoredNote { sender, msg_id }) =
+        crate::state::StateKey::parse(key)
+    else {
+        return Err(crate::error::PaykitError::corrupt());
+    };
+    let note = crate::state::decode::<StoredNote>(value)?;
+    let stored = note.message.stored(own)?;
+    if note.sender != sender
+        || note.msg_id != msg_id
+        || stored.sender() != sender
+        || stored.message().msg_id != msg_id
+    {
+        return Err(crate::error::PaykitError::corrupt());
     }
-    Ok(named_request(&note.message.stored(own)?) == Some(*request))
+    Ok((note, stored))
 }
 
 /// The request `stored` is, or names: a request's own hash, the first of a payer's reply's

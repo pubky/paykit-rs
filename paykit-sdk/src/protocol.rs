@@ -397,10 +397,7 @@ pub(crate) fn restore_paykit_layer(
                 continue;
             }
             StateKey::Missed { from_ms } | StateKey::MissedItem { from_ms } => {
-                // The re-sends are asked from the value, so it must be the time its key names.
-                if state::decode::<u64>(&value).map_err(|_| unread())? != from_ms {
-                    return Err(unread());
-                }
+                missed_mark_at(from_ms, &value)?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -562,10 +559,26 @@ fn check_kept_cancellation(
     own: &[u8; 32],
     record_key: &impl Fn(&RecordTarget) -> Result<[u8; 32], String>,
 ) -> Result<(), String> {
-    let bad = || String::from("Paykit spec 8.1: a kept cancellation in the backup doesn't verify");
+    kept_cancellation_at(key, value, own, record_key).map(|_| ())
+}
+
+/// The payee's cancellation kept as the stop at `key` (`kc/<record key>`), checked as a
+/// restore checks it and bound to its key: a payee's cancellation, accepted by its inbox,
+/// kept at the record key of the payer's record of the request it names first. The one
+/// check for a restore and for every read of a stop at runtime, where a value that fails
+/// it is a corrupt store, never an absent stop.
+pub(crate) fn kept_cancellation_at(
+    key: &[u8],
+    value: &[u8],
+    own: &[u8; 32],
+    record_key: &impl Fn(&RecordTarget) -> Result<[u8; 32], String>,
+) -> Result<StoredMessage, String> {
+    let bad = || String::from("Paykit spec 8.1: a kept cancellation doesn't verify");
     let kept = state::decode::<KeptMessage>(value).map_err(|_| bad())?;
     let cancellation = kept.stored(own).map_err(|_| bad())?;
-    if !matches!(cancellation.body(), Body::PaymentRequestCancellation(_)) {
+    if !matches!(cancellation.body(), Body::PaymentRequestCancellation(_))
+        || cancellation.accepted_at().is_none()
+    {
         return Err(bad());
     }
     let request = cancellation.message().refs.first().ok_or_else(bad)?;
@@ -574,7 +587,7 @@ fn check_kept_cancellation(
     if key != key::kept_cancellation(&record_key(&target.record_target())?).as_bytes() {
         return Err(bad());
     }
-    Ok(())
+    Ok(cancellation)
 }
 
 /// A payer's reply kept for a request record the app didn't hold yet (`pr/<sender>/<record
@@ -584,11 +597,26 @@ fn check_kept_cancellation(
 fn check_kept_reply(
     value: &[u8],
     own: &[u8; 32],
-    (sender, record): ([u8; 32], [u8; 32]),
+    at: ([u8; 32], [u8; 32]),
     msg_id: &str,
     record_key: &impl Fn(&RecordTarget) -> Result<[u8; 32], String>,
 ) -> Result<(), String> {
-    let bad = || String::from("Switch spec 8.2: a kept payer's reply in the backup doesn't verify");
+    kept_reply_at(value, own, at, msg_id, record_key).map(|_| ())
+}
+
+/// The payer's reply kept at `pr/<sender>/<record>/<msg_id>`, checked as a restore checks
+/// it and bound to its key: an acceptance, rejection, cancellation or proof from `sender`,
+/// of `msg_id`, accepted by its inbox, naming first a request whose payee record is
+/// `record`. The one check for a restore and for every read of a kept reply at runtime,
+/// where a value that fails it is a corrupt store.
+pub(crate) fn kept_reply_at(
+    value: &[u8],
+    own: &[u8; 32],
+    (sender, record): ([u8; 32], [u8; 32]),
+    msg_id: &str,
+    record_key: &impl Fn(&RecordTarget) -> Result<[u8; 32], String>,
+) -> Result<StoredMessage, String> {
+    let bad = || String::from("Switch spec 8.2: a kept payer's reply doesn't verify");
     let kept = state::decode::<KeptMessage>(value).map_err(|_| bad())?;
     let reply = kept.stored(own).map_err(|_| bad())?;
     let replies = matches!(
@@ -606,11 +634,24 @@ fn check_kept_reply(
     if !replies
         || reply.sender() != sender
         || reply.message().msg_id != msg_id
+        || reply.accepted_at().is_none()
         || record_key(&target.record_target())? != record
     {
         return Err(bad());
     }
-    Ok(())
+    Ok(reply)
+}
+
+/// A `missed` item's or a provider loss's mark (`mi/<from>`, `missed/<from>`), bound to
+/// its key: the re-sends are asked from its value, so it must be the time its key names.
+/// The one check for a restore and for the asks at runtime.
+pub(crate) fn missed_mark_at(from_ms: u64, value: &[u8]) -> Result<u64, String> {
+    match state::decode::<u64>(value) {
+        Ok(from) if from == from_ms => Ok(from),
+        _ => Err(String::from(
+            "Paykit spec 9: a mark of missed entries doesn't name its own time",
+        )),
+    }
 }
 
 /// A list held over a record that didn't read (`lh/<record key>`, Paykit wire 5.4): it
@@ -1385,6 +1426,100 @@ mod receive_tests {
         assert!(
             check_kept_reply(&value, &bob.id(), (carol.id(), record), &msg_id, &fake_key).is_err()
         );
+    }
+
+    /// `value`, a kept message's encoded bytes, with its acceptance time removed.
+    fn without_acceptance(value: &[u8]) -> Vec<u8> {
+        let mut json: serde_json::Value = serde_json::from_slice(value).unwrap();
+        json["d"]["accepted_at"] = serde_json::Value::Null;
+        serde_json::to_vec(&json).unwrap()
+    }
+
+    #[test]
+    fn test_protocol_restore_refuses_a_kept_reply_without_its_acceptance_time() {
+        // A reply is kept only as its inbox accepted it: one without the time can't come
+        // from a valid run.
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let reply = alice.message(
+            &bob,
+            "paykit.payment_request_acceptance",
+            vec![[4; 32]],
+            object(json!({})),
+        );
+        let value = without_acceptance(&state::encode(&KeptMessage::of(&reply)).unwrap());
+        let target = ActivityTarget::payee(natural_key::request_record(&bob.id(), &[4; 32]), None);
+        let record = fake_key(&target.record_target()).unwrap();
+        let msg_id = reply.message().msg_id.clone();
+        assert!(
+            check_kept_reply(&value, &bob.id(), (alice.id(), record), &msg_id, &fake_key).is_err()
+        );
+    }
+
+    /// Bob's cancellation of his request `[4; 32]` to alice, kept, and the stop key of the
+    /// payer's record it names.
+    fn kept_cancellation(alice: &Party, bob: &Party) -> (Vec<u8>, Vec<u8>) {
+        let cancellation = bob.message(
+            alice,
+            "paykit.payment_request_cancellation",
+            vec![[4; 32]],
+            object(json!({})),
+        );
+        let value = state::encode(&KeptMessage::of(&cancellation)).unwrap();
+        let target = ActivityTarget::payer(natural_key::request_record(&bob.id(), &[4; 32]));
+        let record = fake_key(&target.record_target()).unwrap();
+        (key::kept_cancellation(&record).into_bytes(), value)
+    }
+
+    #[test]
+    fn test_protocol_restore_takes_a_kept_cancellation_at_its_record() {
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let (key, value) = kept_cancellation(&alice, &bob);
+        assert!(check_kept_cancellation(&key, &value, &alice.id(), &fake_key).is_ok());
+    }
+
+    #[test]
+    fn test_protocol_restore_refuses_a_kept_cancellation_at_another_key_or_without_its_time() {
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let (key, value) = kept_cancellation(&alice, &bob);
+        let other = key::kept_cancellation(&[9; 32]).into_bytes();
+        assert!(check_kept_cancellation(&other, &value, &alice.id(), &fake_key).is_err());
+        let untimed = without_acceptance(&value);
+        assert!(check_kept_cancellation(&key, &untimed, &alice.id(), &fake_key).is_err());
+    }
+
+    #[test]
+    fn test_protocol_missed_mark_bound_to_its_time() {
+        let value = state::encode(&5u64).unwrap();
+        assert_eq!(missed_mark_at(5, &value), Ok(5));
+        assert!(missed_mark_at(6, &value).is_err());
+        assert!(missed_mark_at(5, b"not a mark").is_err());
+    }
+
+    #[test]
+    fn test_protocol_stored_note_bound_to_its_key() {
+        // A note read back names the sender and `msg_id` its key does, and so does the
+        // message it keeps: one under another key is a corrupt store.
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let request = bob.message(&alice, "paykit.payment_request", vec![], request_body());
+        let msg_id = request.message().msg_id.clone();
+        let note = crate::stored::StoredNote {
+            stored_id: 1,
+            sender: bob.id(),
+            msg_id: msg_id.clone(),
+            message: KeptMessage::of(&request),
+            placed: false,
+        };
+        let value = state::encode(&note).unwrap();
+        let at = key::stored_note(&bob.id(), &msg_id);
+        assert!(crate::stored::note_at(at.as_bytes(), &value, &alice.id()).is_ok());
+        let other = key::stored_note(&bob.id(), "123e4567-e89b-42d3-a456-426614174000");
+        assert!(crate::stored::note_at(other.as_bytes(), &value, &alice.id()).is_err());
+        let by_other = key::stored_note(&[8; 32], &msg_id);
+        assert!(crate::stored::note_at(by_other.as_bytes(), &value, &alice.id()).is_err());
     }
 
     #[test]

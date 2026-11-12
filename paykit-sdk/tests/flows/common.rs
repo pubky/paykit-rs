@@ -867,3 +867,13 @@ pub fn refuse_writes(signer: &TestSigner, n: usize) {
             });
     }
 }
+
+/// Whether `error` is Paykit's corrupt-store error: state read back that doesn't verify.
+pub fn is_corrupt(error: &paykit_sdk::PaykitError) -> bool {
+    matches!(
+        error,
+        paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Store(
+            pubky_switch_client::error::StoreError::Corrupt
+        ))
+    )
+}

@@ -740,3 +740,28 @@ async fn test_restore_hold_missed_item_deleted_record_decides_nothing_until_the_
     assert!(got.applied.contains(&cancellation), "{got:?}");
     assert_eq!(wallet.app().protocol_scan(b"kc/").await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_mark_naming_another_time_refused_as_corrupt() {
+    // A `missed` item's mark whose value isn't the time its key names is a corrupt store:
+    // the receive fails rather than ask from the wrong time and drop the mark (Paykit spec 9).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let key = format!("mi/{:020}", 5);
+    let value = serde_json::to_vec(&serde_json::json!({ "v": 1, "d": 0 })).unwrap();
+    wallet
+        .app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: key.clone().into_bytes(),
+            value,
+        }])
+        .await
+        .unwrap();
+    let failed = wallet.receive(None).await.unwrap_err();
+    assert!(crate::common::is_corrupt(&failed), "{failed:?}");
+    assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
+    assert_eq!(wallet.app().protocol_scan(b"mi/").await.unwrap().len(), 1);
+}
