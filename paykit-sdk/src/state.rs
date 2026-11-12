@@ -223,6 +223,12 @@ pub(crate) mod key {
     }
 
     /// The consent list's entry of the Allowance whose record is `record_key`.
+    pub(crate) const KEPT_LEDGERS: &str = "lv/";
+
+    pub(crate) fn kept_ledger(record_key: &[u8; 32]) -> String {
+        format!("{KEPT_LEDGERS}{}", b64(record_key))
+    }
+
     pub(crate) fn consent(record_key: &[u8; 32]) -> String {
         format!("{CONSENTS}{}", b64(record_key))
     }
@@ -419,6 +425,8 @@ pub(crate) enum StateKey {
     Consent([u8; 32]),
     /// `en/<msg_id>`: the executor app an `executor_notice` is wrapped to.
     NoticeTarget(String),
+    /// `lv/<record key>`: the last ledger version an executor accepted.
+    KeptLedger([u8; 32]),
 }
 
 impl StateKey {
@@ -498,6 +506,7 @@ impl StateKey {
                     "ae" => Self::AllowanceEnd(b64_32(rest)?),
                     "ac" => Self::Consent(b64_32(rest)?),
                     "en" => Self::NoticeTarget(msg_id(rest)?),
+                    "lv" => Self::KeptLedger(b64_32(rest)?),
                     "rs" => {
                         let (requester, id) = rest.split_once('/')?;
                         Self::Resent {
@@ -745,6 +754,7 @@ mod tests {
             (key::allowance_end(&pubky), StateKey::AllowanceEnd(pubky)),
             (key::consent(&pubky), StateKey::Consent(pubky)),
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),
+            (key::kept_ledger(&pubky), StateKey::KeptLedger(pubky)),
         ];
         for (built, family) in cases {
             assert_eq!(StateKey::parse(built.as_bytes()), Some(family), "{built}");
@@ -771,6 +781,7 @@ mod tests {
             "ae/not-base64",
             "ac/",
             "en/not-a-uuid",
+            "lv/not-base64",
         ] {
             assert_eq!(StateKey::parse(key.as_bytes()), None, "{key}");
         }

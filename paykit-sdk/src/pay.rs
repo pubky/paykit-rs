@@ -419,6 +419,9 @@ struct Plan {
     /// The request record whose restore hold the user's confirmation ends, in the attempt's
     /// batch: a call refused before it keeps the hold.
     end_hold: Option<[u8; 32]>,
+    /// An executor's ledger and request record writes, in the attempt's batch (Paykit spec
+    /// 8.3 step 3).
+    executor: Option<crate::executor::ExecutorOps>,
 }
 
 /// A Payment Endpoint a payment may take: its identifier and payload, handed to the payment
@@ -676,6 +679,17 @@ impl Paykit {
         request: &RequestRef,
         options: PayOptions,
     ) -> Result<PayOutcome> {
+        self.pay_request_under(request, options, None).await
+    }
+
+    /// Pay a one-time request: by hand, or, `under` an Allowance, automatically as its
+    /// executor, with the executor's checks and batch (Paykit spec 8.3).
+    pub(crate) async fn pay_request_under(
+        &mut self,
+        request: &RequestRef,
+        options: PayOptions,
+        under: Option<crate::executor::Under>,
+    ) -> Result<PayOutcome> {
         self.refresh_own()?;
         self.records_known().await?;
         self.require_pay()?;
@@ -686,6 +700,10 @@ impl Paykit {
         let (stored, body) = (stored.clone(), body.clone());
         if body.is_recurring() {
             return Err(Refusal::Recurring.into());
+        }
+        if let Some(under) = &under {
+            self.request_under(under, request, &target, &record, &body)
+                .await?;
         }
         if record.shows_paid() {
             return Err(Refusal::AlreadyPaid.into());
@@ -702,6 +720,13 @@ impl Paykit {
         // cancelled it, which ends the hold (Paykit spec 7.2, "What a restore loses").
         let record_key = self.activity_key(&target)?;
         let end_hold = if self.held(&record_key, &record).await? {
+            // No automatic attempt on a request held (Paykit spec 8.3, "Executor").
+            if under.is_some() {
+                return Err(Refusal::NotAutomatic(
+                    "the request is held after a restore or a missed item".into(),
+                )
+                .into());
+            }
             if options.possibly_cancelled_confirmed.is_none() {
                 return Err(Refusal::HeldAfterRestore.into());
             }
@@ -709,8 +734,12 @@ impl Paykit {
         } else {
             None
         };
-        // A blocked payee's request is paid only once the user confirms it (Paykit spec 8.1).
-        let blocked = self.denied_for_user(&request.payee).await?;
+        // A blocked payee's request is paid only once the user confirms it (Paykit spec 8.1);
+        // an executor reads the deny list again and pays none (Paykit spec 8.3).
+        if under.is_some() && self.denied(&request.payee).await? {
+            return Err(Refusal::NotAutomatic("the payee is blocked".into()).into());
+        }
+        let blocked = under.is_none() && self.denied_for_user(&request.payee).await?;
         let shown = BlockedPayment {
             payee: request.payee,
             request: Some(*request),
@@ -730,12 +759,15 @@ impl Paykit {
         if self.deadline_passed(deadline) {
             return Err(self.past_deadline(&target, None).await?);
         }
+        // Under an Allowance whose terms list identifiers, only those (Paykit wire 4.15).
+        let accepted = crate::executor::accepted_ids(
+            body.accepted_payment_endpoint_identifiers.as_deref(),
+            under.as_ref(),
+        );
         let (destination, carrier, reserve, bound) = match &body.destination {
             RequestDestination::Endpoints(endpoints) => {
                 let allowed = |id: &PaymentEndpointIdentifier| {
-                    body.accepted_payment_endpoint_identifiers
-                        .as_ref()
-                        .is_none_or(|ids| ids.contains(id))
+                    accepted.as_ref().is_none_or(|ids| ids.contains(id))
                 };
                 // The request's endpoints the payment may use, by identifier.
                 let gathered: Vec<Choice> = endpoints
@@ -771,7 +803,7 @@ impl Paykit {
                 self.list_destination(
                     &request.payee,
                     Some(*app),
-                    body.accepted_payment_endpoint_identifiers.as_deref(),
+                    accepted.as_deref(),
                     &body.amount,
                     &options,
                 )
@@ -781,15 +813,31 @@ impl Paykit {
                 self.list_destination(
                     &request.payee,
                     options.list_app,
-                    body.accepted_payment_endpoint_identifiers.as_deref(),
+                    accepted.as_deref(),
                     &body.amount,
                     &options,
                 )
                 .await?
             }
         };
+        let attempt_id = AttemptId::generate()?;
+        let executor = match &under {
+            Some(under) => Some(
+                self.executor_ops(
+                    under,
+                    &target,
+                    &record,
+                    obligation,
+                    &attempt_id,
+                    &body.amount,
+                    &destination,
+                )
+                .await?,
+            ),
+            None => None,
+        };
         let entry = JournalEntry {
-            attempt_id: AttemptId::generate()?.to_text(),
+            attempt_id: attempt_id.to_text(),
             obligation,
             payee: request.payee,
             request_hash: Some(pubky_switch_core::enc::b64(&request.request_hash)),
@@ -819,6 +867,9 @@ impl Paykit {
             record_held: false,
             transfer_bound: Some(bound),
             failed_on_claim: false,
+            allowance_id: under
+                .as_ref()
+                .map(|u| u.allowance.allowance_id.as_str().to_owned()),
         };
         self.execute(Plan {
             entry,
@@ -828,9 +879,14 @@ impl Paykit {
             reserve,
             create: None,
             on_record: true,
-            by: Initiator::User,
+            by: if under.is_some() {
+                Initiator::Automatic
+            } else {
+                Initiator::User
+            },
             unconfirmed: options.unconfirmed_identity_confirmed,
             end_hold,
+            executor,
         })
         .await
     }
@@ -934,6 +990,7 @@ impl Paykit {
             record_held: false,
             transfer_bound: Some(bound),
             failed_on_claim: false,
+            allowance_id: None,
         };
         self.execute(Plan {
             entry,
@@ -946,6 +1003,7 @@ impl Paykit {
             by: Initiator::User,
             unconfirmed: options.unconfirmed_identity_confirmed,
             end_hold: None,
+            executor: None,
         })
         .await
     }
@@ -1637,6 +1695,7 @@ impl Paykit {
             by,
             unconfirmed,
             end_hold,
+            executor,
         } = plan;
         let attempt_id = entry.attempt()?;
         // The attempt's `orphan_after` covers the rail's longest time and the pre-dispatch
@@ -1716,6 +1775,15 @@ impl Paykit {
                     .await?,
             );
         }
+        let applied_ledger = match executor {
+            Some(ops) => {
+                for write in ops.entries {
+                    batch = batch.entry(write);
+                }
+                Some((ops.record_key, ops.ledger))
+            }
+            None => None,
+        };
         // The journal moves to `Attempted` with the batch's answer, never before.
         let mut attempted = entry.clone();
         attempted.stage = Stage::Attempted;
@@ -1773,6 +1841,9 @@ impl Paykit {
             // resume leaves the entry as it is ([`Paykit::attempt_still_kept`]).
             Err(error) => return Err(error.into()),
         };
+        if let Some((record, ledger)) = applied_ledger {
+            self.executor_applied(record, ledger).await;
+        }
         let proof = submitted.proofs.first();
         entry.step = proof.and_then(|proof| proof.body().step);
         entry.attempt_proof = proof.map(|proof| proof.signed().clone());
@@ -2550,6 +2621,8 @@ impl Paykit {
                     return Err(PaykitError::corrupt());
                 }
                 activity::place(&mut record, Role::Request, request);
+                // The Allowance the executor's batch named stays named (Paykit wire 5.3).
+                record.allowance_id = entry.allowance()?;
             }
             None => {
                 record.attempt_id = Some(entry.attempt()?);
@@ -2610,7 +2683,7 @@ impl Paykit {
                 .is_none()
                 .then(|| entry.amount.amount())
                 .transpose()?,
-            allowance_id: None,
+            allowance_id: entry.allowance()?,
             label: entry.label()?,
             payment_reference: None,
             proof: entry.rail_proof.clone().ok_or_else(PaykitError::corrupt)?,
@@ -3296,6 +3369,15 @@ impl Paykit {
         }
         if self.payer_pass_owed().await? {
             return Ok(Err(Held::Check(crate::hold::payer_pass_refusal())));
+        }
+        // An executor checks its Allowance again before money moves (Paykit spec 7.2 step 1,
+        // 8.3): one ended, rejected, handed off or off the consent list pays nothing.
+        if let Some(allowance_id) = entry.allowance()? {
+            let target = crate::allowances::allowance_target(&entry.payee, &allowance_id);
+            let record = self.app.record_key(&target)?;
+            if let Err(refusal) = self.allowance_gate(&record, false).await? {
+                return Ok(Err(Held::Check(refusal)));
+            }
         }
         let attempt = entry.attempt()?.to_bytes();
         let me = self.app_id();

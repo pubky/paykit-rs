@@ -173,6 +173,12 @@ pub enum Refusal {
         /// The payment the user is shown.
         payment: Box<crate::BlockedPayment>,
     },
+    /// The executor doesn't pay the request automatically under the Allowance, for the rule
+    /// named (Paykit spec 8.3, "Executor" and "Paying under an Allowance"). Nothing was
+    /// written or paid; the request may still be paid by hand, after the user's
+    /// confirmation.
+    #[error("Paykit spec 8.3: not paid automatically: {0}")]
+    NotAutomatic(String),
 }
 
 /// A failure of the SDK.

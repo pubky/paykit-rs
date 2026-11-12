@@ -302,6 +302,10 @@ pub(crate) struct JournalEntry {
     /// "What a payment method declares").
     #[serde(default)]
     pub(crate) failed_on_claim: bool,
+    /// The Allowance an executor pays the request under, which its proof names (Paykit spec
+    /// 8.3 step 4); `None` for a payment the user made.
+    #[serde(default)]
+    pub(crate) allowance_id: Option<String>,
 }
 
 impl std::fmt::Debug for JournalEntry {
@@ -313,6 +317,15 @@ impl std::fmt::Debug for JournalEntry {
 impl JournalEntry {
     pub(crate) fn attempt(&self) -> Result<AttemptId> {
         AttemptId::parse(&self.attempt_id).map_err(|_| PaykitError::corrupt())
+    }
+
+    /// The Allowance kept, read as written: one that doesn't read is a corrupt store.
+    pub(crate) fn allowance(&self) -> Result<Option<paykit_lib::AllowanceId>> {
+        self.allowance_id
+            .as_deref()
+            .map(paykit_lib::AllowanceId::parse)
+            .transpose()
+            .map_err(|_| PaykitError::corrupt())
     }
 
     pub(crate) fn request_hash(&self) -> Result<Option<[u8; 32]>> {
@@ -354,6 +367,10 @@ impl JournalEntry {
         let bad = || Err(PaykitError::corrupt());
         let attempt = self.attempt()?;
         let request_hash = self.request_hash()?;
+        // An executor pays a request under an Allowance, never a payment without one.
+        if self.allowance()?.is_some() && request_hash.is_none() {
+            return bad();
+        }
         self.amount.amount()?;
         self.destination.check()?;
         self.label()?;

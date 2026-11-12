@@ -408,6 +408,7 @@ impl Paykit {
             record_held: false,
             transfer_bound: None,
             failed_on_claim: false,
+            allowance_id: None,
         };
         entry.keep_carrier(&carrier);
         Ok(Some(entry))

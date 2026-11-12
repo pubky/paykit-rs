@@ -487,6 +487,15 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            StateKey::KeptLedger(record) => {
+                // The same check a runtime read makes: bound to its key's Allowance record,
+                // at a version a write gives, its content a ledger (`executor.rs`).
+                let kept =
+                    state::decode::<crate::executor::KeptLedger>(&value).map_err(|_| unread())?;
+                crate::executor::check_kept_ledger(&record, &kept).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
             StateKey::NoticeTarget(msg_id) => {
                 let kept = state::decode::<crate::allowances::NoticeTarget>(&value)
                     .map_err(|_| unread())?;
