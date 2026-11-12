@@ -423,14 +423,50 @@ async fn test_publishing_list_request_naming_the_current_version_answered_once()
     assert_eq!(got.lists.sent.len(), 1, "{:?}", got.lists);
     assert_eq!(w.rail.issued().len(), 2);
     assert_eq!(lists_taken(&mut wallet).await, 1);
-    // Named again, it gets no second one, nor a re-send.
+    let newer = got.lists.sent[0].clone();
+    // Named again, it gets no second one: the newest is sent again, nothing issued, so an
+    // answer lost on the way is answered.
     ask_for_the_list(&w, &shop, Some(current.version), shop.app_id());
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.lists.sent.is_empty(), "{:?}", got.lists);
+    assert_eq!(got.lists.resent, vec![newer]);
+    assert_eq!(w.rail.issued().len(), 2);
+    assert_eq!(lists_taken(&mut wallet).await, 0);
+}
+
+#[tokio::test]
+async fn test_publishing_newest_sent_again_at_most_once_an_hour() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let older = w.publish_to_alice(&mut shop).await;
+    w.clock.advance_ms(1000);
+    let current = shop.publish_list_to(&[w.alice_id()]).await.unwrap().sent[0].clone();
+    wallet.receive(None).await.unwrap();
+    ask_for_the_list(&w, &shop, Some(older.version), shop.app_id());
+    assert_eq!(
+        shop.receive(None).await.unwrap().lists.resent,
+        vec![current.clone()]
+    );
+    // Within the hour, a request naming it again gets nothing, and isn't answered later.
+    w.clock.advance_ms(HOUR_MS - 1);
+    ask_for_the_list(&w, &shop, Some(older.version), shop.app_id());
     let got = shop.receive(None).await.unwrap();
     assert!(
         got.lists.sent.is_empty() && got.lists.resent.is_empty(),
         "{:?}",
         got.lists
     );
+    w.clock.advance_ms(1);
+    assert!(shop.receive(None).await.unwrap().lists.resent.is_empty());
+    // An hour on, it is sent again, once: an hour later, unasked, it isn't.
+    ask_for_the_list(&w, &shop, Some(older.version), shop.app_id());
+    assert_eq!(
+        shop.receive(None).await.unwrap().lists.resent,
+        vec![current]
+    );
+    w.clock.advance_ms(HOUR_MS);
+    assert!(shop.receive(None).await.unwrap().lists.resent.is_empty());
     assert_eq!(w.rail.issued().len(), 2);
 }
 
@@ -457,14 +493,52 @@ async fn test_publishing_list_requests_answered_within_the_daily_bound() {
         assert_eq!(got.lists.sent.len(), 1, "{:?}", got.lists);
         current = got.lists.sent[0].version;
     }
-    // Past the bound: no answer, nothing issued, and that version isn't answered later.
+    // Past the bound: no answer and nothing issued, until 24 hours after the first answer.
+    ask_for_the_list(&w, &shop, Some(current), shop.app_id());
+    let got = shop.receive(None).await.unwrap();
+    assert!(
+        got.lists.sent.is_empty() && got.lists.resent.is_empty(),
+        "{:?}",
+        got.lists
+    );
+    assert_eq!(w.rail.issued().len(), 3);
+    w.clock.advance_ms(24 * HOUR_MS - 1000 - 1);
     ask_for_the_list(&w, &shop, Some(current), shop.app_id());
     assert!(shop.receive(None).await.unwrap().lists.sent.is_empty());
-    assert_eq!(w.rail.issued().len(), 3);
-    // A day on, her word on a version not named before is taken again.
-    w.clock.advance_ms(24 * HOUR_MS);
-    let fresh = shop.publish_list_to(&[w.alice_id()]).await.unwrap().sent[0].version;
-    ask_for_the_list(&w, &shop, Some(fresh), shop.app_id());
+    // The version named past the bound wasn't answered: named again then, it is.
+    w.clock.advance_ms(1);
+    ask_for_the_list(&w, &shop, Some(current), shop.app_id());
+    assert_eq!(shop.receive(None).await.unwrap().lists.sent.len(), 1);
+    assert_eq!(w.rail.issued().len(), 4);
+}
+
+#[tokio::test]
+async fn test_publishing_list_answers_bounded_in_any_24_hours_not_by_the_calendar_day() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default().with_list_answers_per_day(1),
+            store(),
+        )
+        .await;
+    w.publish_to_alice(&mut shop).await;
+    wallet.receive(None).await.unwrap();
+    // Answered a minute before a calendar day ends.
+    let midnight = (w.clock.now_ms() / DAY_MS + 1) * DAY_MS;
+    w.clock.advance_ms(midnight - 60_000 - w.clock.now_ms());
+    ask_for_the_list(&w, &shop, None, shop.app_id());
+    assert_eq!(shop.receive(None).await.unwrap().lists.sent.len(), 1);
+    // A minute into the next day, the bound still holds.
+    w.clock.advance_ms(2 * 60_000);
+    ask_for_the_list(&w, &shop, None, shop.app_id());
+    assert!(shop.receive(None).await.unwrap().lists.sent.is_empty());
+    // 24 hours after that answer, it is answered again.
+    w.clock.advance_ms(DAY_MS - 2 * 60_000);
+    ask_for_the_list(&w, &shop, None, shop.app_id());
     assert_eq!(shop.receive(None).await.unwrap().lists.sent.len(), 1);
 }
 
@@ -519,7 +593,7 @@ async fn test_publishing_list_request_naming_an_older_version_resends_the_curren
 }
 
 #[tokio::test]
-async fn test_publishing_list_request_naming_a_used_version_answered() {
+async fn test_publishing_list_request_naming_a_used_older_version_resends_the_newest() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -527,13 +601,13 @@ async fn test_publishing_list_request_naming_a_used_version_answered() {
     wallet.receive(None).await.unwrap();
     let newer = paid_single_use(&w, &mut wallet, &mut shop).await;
     assert_eq!(newer.sent.len(), 1);
-    // Asked while holding the version used, before the newer one came, she gets one more.
+    // Asked while holding the version used, before the newer one came: the newer one is
+    // sent again, nothing issued.
     ask_for_the_list(&w, &shop, Some(used.version), shop.app_id());
     let got = shop.receive(None).await.unwrap();
-    assert_eq!(got.lists.sent.len(), 1, "{:?}", got.lists);
-    // Naming the used one again, she gets none.
-    ask_for_the_list(&w, &shop, Some(used.version), shop.app_id());
-    assert!(shop.receive(None).await.unwrap().lists.sent.is_empty());
+    assert!(got.lists.sent.is_empty(), "{:?}", got.lists);
+    assert_eq!(got.lists.resent, newer.sent);
+    assert_eq!(w.rail.issued().len(), 2);
 }
 
 #[tokio::test]
@@ -576,6 +650,54 @@ async fn test_publishing_list_request_naming_an_expired_version_answered() {
     ask_for_the_list(&w, &shop, Some(first.version), shop.app_id());
     let got = shop.receive(None).await.unwrap();
     assert_eq!(got.lists.sent.len(), 1, "{:?}", got.lists);
+    // Named again, it is answered: the newest is sent again, nothing issued.
+    let issued = w.rail.issued().len();
+    ask_for_the_list(&w, &shop, Some(first.version), shop.app_id());
+    let again = shop.receive(None).await.unwrap();
+    assert!(again.lists.sent.is_empty(), "{:?}", again.lists);
+    assert_eq!(again.lists.resent, got.lists.sent);
+    assert_eq!(w.rail.issued().len(), issued);
+}
+
+#[tokio::test]
+async fn test_publishing_expired_version_named_past_the_bound_left_for_a_later_request() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default().with_list_answers_per_day(1),
+            store(),
+        )
+        .await;
+    let first = w.publish_to_alice(&mut shop).await;
+    wallet.receive(None).await.unwrap();
+    // Renewed at 16 days; at 30 days the first has expired.
+    w.clock.advance_ms(16 * DAY_MS);
+    assert_eq!(shop.receive(None).await.unwrap().lists.sent.len(), 1);
+    w.clock.advance_ms(14 * DAY_MS + 1);
+    ask_for_the_list(&w, &shop, None, shop.app_id());
+    assert_eq!(shop.receive(None).await.unwrap().lists.sent.len(), 1);
+    // Past the bound, the expired version named gets nothing.
+    ask_for_the_list(&w, &shop, Some(first.version), shop.app_id());
+    let got = shop.receive(None).await.unwrap();
+    assert!(
+        got.lists.sent.is_empty() && got.lists.resent.is_empty(),
+        "{:?}",
+        got.lists
+    );
+    // Another request answered later doesn't answer it.
+    w.clock.advance_ms(DAY_MS);
+    ask_for_the_list(&w, &shop, None, shop.app_id());
+    assert_eq!(shop.receive(None).await.unwrap().lists.sent.len(), 1);
+    // Named again once the bound allows, it gets a newer version, not the newest again.
+    w.clock.advance_ms(DAY_MS);
+    ask_for_the_list(&w, &shop, Some(first.version), shop.app_id());
+    let got = shop.receive(None).await.unwrap();
+    assert_eq!(got.lists.sent.len(), 1, "{:?}", got.lists);
+    assert!(got.lists.resent.is_empty(), "{:?}", got.lists);
 }
 
 #[tokio::test]
@@ -1312,7 +1434,9 @@ async fn test_publishing_state_restored_and_versions_stay_above_the_lost_ones() 
     assert_eq!(got.lists.sent.len(), 1, "{:?}", got.lists);
     assert!(got.lists.sent[0].version > lost.version);
     assert_eq!(lists_taken(&mut wallet).await, 1);
-    // Named again, the version it doesn't track gets no second one.
+    // Named again, the version it doesn't track gets no second one: the newest goes again.
     ask_for_the_list(&w, &shop, Some(lost.version), shop.app_id());
-    assert!(shop.receive(None).await.unwrap().lists.sent.is_empty());
+    let again = shop.receive(None).await.unwrap();
+    assert!(again.lists.sent.is_empty(), "{:?}", again.lists);
+    assert_eq!(again.lists.resent, got.lists.sent);
 }

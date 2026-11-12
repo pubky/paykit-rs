@@ -1471,16 +1471,7 @@ mod receive_tests {
     #[test]
     fn test_protocol_restore_takes_the_lists_sent_only_at_their_own_key() {
         let bob = Party::new("bob", "shop", &["request"]);
-        let sent = crate::publish::Recipient {
-            counterparty: [3; 32],
-            active: true,
-            owed: false,
-            requested: false,
-            named: Vec::new(),
-            resend: false,
-            answers: Vec::new(),
-            versions: Vec::new(),
-        };
+        let sent = crate::publish::Recipient::new([3; 32]);
         let value = state::encode(&sent).unwrap();
         let restore = |at: &[u8; 32]| {
             let layer = ProtocolLayer {
