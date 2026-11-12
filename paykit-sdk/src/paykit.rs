@@ -564,6 +564,8 @@ impl Paykit {
         // An app holding `contacts` reads the flagged senders again first, at most every 10
         // minutes, for the spam rule (Paykit wire 4.1).
         self.refresh_lists_when_due().await?;
+        // Whether the client may list at this read's start ([`Paykit::records_listed`]).
+        let keys_held_before = self.holds_scope_keys();
         let report = match self.app.receive(wait).await {
             Ok(report) => report,
             // The erasure's wait: the switch answers as for an account it doesn't host, and
@@ -595,11 +597,12 @@ impl Paykit {
         }
         self.refresh_own()?;
         // The client lists the shared records at its read when a listing is owed, a
-        // restore's included, before the read itself: a read that wasn't stopped got past
-        // that listing, so the restore's mark goes (`Paykit::records_known`). A stopped one
-        // (the app removed here, a provider change followed) may have returned before it.
+        // restore's included, before the read itself, while it holds the keys that read
+        // them: a read that wasn't stopped got past that listing, so the restore's mark goes
+        // (`Paykit::records_listed`). A stopped one (the app removed here, a provider change
+        // followed) may have returned before it.
         if !report.stopped {
-            self.records_listed().await?;
+            self.records_listed(keys_held_before).await?;
         }
         // A certificate the read took may read more than the one before: its records are
         // listed now, or stay unlisted for the next receive or write (`Paykit::list_widened`).

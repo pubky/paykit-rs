@@ -23,7 +23,9 @@
 use paykit_lib::collections::Collection;
 use paykit_lib::records::ActivityRecord;
 use pubky_switch_client::app::Protocol as _;
-use pubky_switch_client::app::{AppError, Collection as SwitchCollection, RecordContent, Unopened};
+use pubky_switch_client::app::{
+    AppError, Collection as SwitchCollection, PolicyFamily, RecordContent, Unopened,
+};
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::records::{AppCert, CLOCK_TOLERANCE_MS};
 use pubky_switch_core::scopes::Permission;
@@ -89,6 +91,15 @@ impl RecordSide {
             Self::All => vec![payer, payee, lists],
         }
     }
+}
+
+/// Whether `scope` reads `collection`, or a member of it: its read scope, or, in a sub-scope
+/// family, one of its sub-scopes (Switch spec 3.3, 10.3).
+fn read_by_scope(collection: &SwitchCollection, scope: &str) -> bool {
+    scope == collection.policy.read_scope
+        || (collection.family == PolicyFamily::SubScopes
+            && pubky_switch_core::scopes::split(scope)
+                .is_some_and(|(name, sub)| sub.is_some() && name == collection.policy.read_scope))
 }
 
 /// Whether the app's copy of `side`'s records may lack records, so a record's absence there
@@ -237,17 +248,21 @@ impl Paykit {
             || (keys.is_some() && self.side_unlisted(RecordSide::Payer).await?))
     }
 
-    /// Whether the app holds the scope keys its certificate's scopes have, at the current
-    /// data epoch: a certificate just taken that reads more gets them with the key bundle
-    /// the next read fetches (Switch spec 3.5), and a listing before then keeps values it
-    /// can't open, so it waits for them.
-    fn holds_scope_keys(&self) -> bool {
+    /// Whether the app holds, at the current data epoch, the key of every scope of its
+    /// certificate that reads a collection of Paykit's (Switch spec 3.5): a certificate
+    /// just taken that reads more gets them with the key bundle the next read fetches, and
+    /// a listing before then keeps values it can't open, so it waits for them. The client
+    /// skips its own listing exactly while this doesn't hold, so it also tells whether a
+    /// read listed ([`Paykit::records_listed`]).
+    pub(crate) fn holds_scope_keys(&self) -> bool {
         let epoch = self.app.data_epoch();
+        let collections = RecordSide::All.collections();
         self.app
             .cert()
             .scopes()
             .iter()
             .filter(|scope| self.protocol.has_keys(scope))
+            .filter(|scope| collections.iter().any(|c| read_by_scope(c, scope)))
             .all(|scope| self.app.scope_key(epoch, scope).is_some())
     }
 
@@ -384,10 +399,18 @@ impl Paykit {
         self.local_commit(tx).await
     }
 
-    /// The client listed the shared records at a receive, a restore's listing included: the
-    /// restore's mark goes. The certificate listed under stays as it was, since the read
-    /// may have taken a wider one after its listing ([`Unlisted::Certificate`]).
-    pub(crate) async fn records_listed(&mut self) -> Result<()> {
+    /// A read that wasn't stopped got past the client's listing, a restore's included, which
+    /// the client makes only while it holds the keys of the scopes that read the records
+    /// ([`Paykit::holds_scope_keys`]): so the restore's mark goes when those keys were held
+    /// at the read's start, `keys_held_before`, and are under the certificate held after it,
+    /// which a restore's first read may have widened before its listing. Otherwise the
+    /// listing was skipped, and the mark stays until a read that lists. The certificate
+    /// listed under stays as it was, since the read may have taken a wider one after its
+    /// listing ([`Unlisted::Certificate`]).
+    pub(crate) async fn records_listed(&mut self, keys_held_before: bool) -> Result<()> {
+        if !keys_held_before || !self.holds_scope_keys() {
+            return Ok(());
+        }
         if self
             .local_get::<bool>(key::RECORDS_UNLISTED)
             .await?
