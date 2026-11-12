@@ -633,10 +633,10 @@ impl Paykit {
         let duties = self.app.unacknowledged_events().await?;
         let account_gone =
             account_gone(&report.events) || (report.stopped && account_gone(&duties));
-        // The duty events about stored entries are taken before anything returns, so that
-        // once the host acknowledges what this report showed none is lost: only the SDK's
-        // own marks and notes are kept here, and nothing is written at the switch
-        // (`stored.rs`).
+        // The duty events about stored entries, and about messages a record holds that were
+        // given up undelivered, are taken before anything returns, so that once the host
+        // acknowledges what this report showed none is lost: only the SDK's own marks, notes
+        // and notices are kept here, and nothing is written at the switch (`stored.rs`).
         self.take_stored_events(&duties).await?;
         // Removed from its identity, the app's lists are paid no more (Paykit spec 4): their
         // single-use payloads go back to the payment method.

@@ -42,7 +42,7 @@
 //! | `lc` | the certificate the shared records were last listed under, signed: a certificate held now that reads more collections than it means the copy lacks their records until Paykit lists them (`hold.rs`); written at a join, a restore and each Paykit listing; never restored | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named, when, and its `msg_id`, to ask again for one that didn't reach the payee's inbox (Paykit spec 8.4) | |
-//! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
+//! | `nt/<attempt_id>/<kind>`, `nt/<counterparty>/<msg_id>` | a notice for the host about a payment, a message received and given up, or a message this app sent that a record holds and the client gave up undelivered, until acknowledged (`notices.rs`) | |
 //! | `dl` | the deny list as the app last read it, for the views (Paykit spec 8.1) | |
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
@@ -406,7 +406,8 @@ pub(crate) enum StateKey {
     },
     /// `se/<sender>/<msg_id>`: a stored entry's message to write later.
     StoredNote { sender: [u8; 32], msg_id: String },
-    /// `nt/<sender>/<msg_id>`: a notice for the host about a message given up.
+    /// `nt/<counterparty>/<msg_id>`: a notice for the host about a message given up, its
+    /// sender, or undelivered, its recipient.
     MessageNotice { sender: [u8; 32], msg_id: String },
     /// `nt/<attempt_id>/<kind>`: a notice for the host.
     Notice {
