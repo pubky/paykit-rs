@@ -573,7 +573,7 @@ fn receipt_effect(
         view: view.as_ref(),
         service_time: cx.highest_service_time(),
         journaled,
-        first_after_failed: found.first_after_failed,
+        first_receipt: found.first_receipt,
     })?;
     if let Some((op, deadline)) = settles.claim {
         cx.claim(op, Vec::new(), deadline)?;
@@ -612,9 +612,9 @@ pub(crate) fn receipt_target(
 pub(crate) struct ReceiptOnRecord {
     /// The record holds the proof the receipt names, so the receipt goes beside it.
     pub(crate) names_held_proof: bool,
-    /// The record shows the payment made after `failed` was written on its claim, and this
-    /// receipt is the first it gets.
-    pub(crate) first_after_failed: bool,
+    /// The record holds the proof the receipt names and no receipt yet: this receipt is the
+    /// first of that payment.
+    pub(crate) first_receipt: bool,
 }
 
 /// What a receipt `stored` finds in `record`, the payer's record it names: `None` when the
@@ -625,9 +625,9 @@ pub(crate) struct ReceiptOnRecord {
 /// receipt only beside that proof (Paykit wire 5.3): the payer's proof goes into the record
 /// in the batch that sends it, so a receipt for a record without it, or naming another
 /// proof, isn't stored. Stored, it would leave the payer unable to record its own proof. It
-/// still settles the attempt it names. The first receipt of a payment made after `failed`
-/// was written is what every app that gets it tells the user once the claim is gone
-/// (Paykit spec 7.2, 8.3).
+/// still settles the attempt it names. Only stored messages decide here: the record's
+/// `status` is informational, rewritten by every writer, so it is never read (Paykit wire
+/// 5.3).
 pub(crate) fn receipt_on_record(
     record: &ActivityRecord,
     stored: &StoredMessage,
@@ -641,9 +641,7 @@ pub(crate) fn receipt_on_record(
         .is_some_and(|proof| stored.message().refs.first() == Some(&proof.hash()));
     Some(ReceiptOnRecord {
         names_held_proof,
-        first_after_failed: names_held_proof
-            && record.receipt.is_none()
-            && record.status.as_deref() == Some(PAID_AFTER_FAILED),
+        first_receipt: names_held_proof && record.receipt.is_none(),
     })
 }
 
@@ -685,7 +683,8 @@ pub(crate) struct ReceiptClaim<'a> {
     pub(crate) service_time: Option<u64>,
     /// The attempt's journal entry, if this app holds it.
     pub(crate) journaled: Option<JournalEntry>,
-    pub(crate) first_after_failed: bool,
+    /// The receipt is the first of the payment its record holds the proof of.
+    pub(crate) first_receipt: bool,
 }
 
 /// What a receipt does beside its placing ([`receipt_settles`]), each part in the batch that
@@ -707,7 +706,12 @@ pub(crate) struct ReceiptSettles {
 /// days or more before the highest service time verified, when the switch may delete it
 /// (Switch spec 6.3): the receipt can't be recorded on it. For a payment made after
 /// `failed` was written on it, the user is told it was paid (Paykit spec 7.2, "What a
-/// payment method declares"), and the entry no longer waits. A claim SETTLED holds the
+/// payment method declares"), and the entry no longer waits. Two stable sources tell such
+/// a payment, never the record's informational `status` (Paykit wire 5.3): the journal
+/// entry of the app that made it (`failed_on_claim`), or, at another own app, the first
+/// receipt of a proof the record holds while the claim the app keeps or reads shows the
+/// attempt `failed`. An own app that holds no view of the claim once the switch deleted it,
+/// such as one that joined later, can't tell, and raises nothing. A claim SETTLED holds the
 /// payment, and one with the attempt open, unknown or failed is settled by this receipt's
 /// evidence: either way an entry waiting for its receipt no longer waits.
 ///
@@ -732,7 +736,11 @@ pub(crate) fn receipt_settles(claim: &ReceiptClaim<'_>) -> Result<ReceiptSettles
     });
     let mut out = ReceiptSettles::default();
     let Some(view) = claim.view.filter(|_| !gone) else {
-        if waiting.is_some() || claim.first_after_failed {
+        let failed_on_view = claim
+            .view
+            .and_then(|view| view.attempt(&claim.attempt_id.to_bytes()))
+            .is_some_and(|attempt| attempt.outcome == Outcome::Failed);
+        if waiting.is_some() || (claim.first_receipt && failed_on_view) {
             out.notice = Some(KeptNotice::late(
                 claim.attempt_id,
                 claim.stored.sender(),
@@ -769,7 +777,8 @@ pub(crate) fn receipt_settles(claim: &ReceiptClaim<'_>) -> Result<ReceiptSettles
 }
 
 /// The `status` of a payer's record whose payment was made after `failed` was written on its
-/// claim, which stays `failed` until a receipt settles it (Paykit wire 5.3: informational).
+/// claim, which stays `failed` until a receipt settles it (Paykit wire 5.3: informational,
+/// written for display and never read for a decision).
 pub(crate) const PAID_AFTER_FAILED: &str = "failed";
 
 /// The obligation ID of a request or Billing Period, blinded through the receive context

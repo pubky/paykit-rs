@@ -244,6 +244,37 @@ async fn test_notices_late_receipt_raised_by_an_own_app_without_the_payment() {
 }
 
 #[tokio::test]
+async fn test_notices_late_receipt_raised_by_an_own_app_after_a_crossing_cancellation() {
+    // Alice's second wallet holds the payer's record, not the payment's journal entry.
+    // Bob's cancellation, sent before he saw the proof, reaches it after the proof and is
+    // placed in the record; the first receipt past the claim's window still tells the user
+    // the payment marked failed was paid.
+    let w = World::new();
+    let mut other = w.wallet("second").await;
+    let (_wallet, mut shop, attempt_id) = paid_after_failed(&w).await;
+    other.receive(None).await.unwrap();
+    let request = other.requests().await.unwrap().remove(0).request;
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[other.app_id()],
+        "paykit.payment_request_cancellation",
+        vec![request.request_hash],
+        serde_json::Map::new(),
+    );
+    other.receive(None).await.unwrap();
+    other.resume_payments().await.unwrap();
+    w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    receipt(&mut shop).await;
+    other.receive(None).await.unwrap();
+    let notices = other.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, NoticeKind::PaidAfterFailed);
+    assert_eq!(notices[0].attempt_id, Some(attempt_id));
+}
+
+#[tokio::test]
 async fn test_notices_second_receipt_after_the_window_raises_none_where_one_is_held() {
     let w = World::new();
     let mut other = w.wallet("second").await;
@@ -310,19 +341,24 @@ async fn test_notices_receipt_past_the_deadline_within_the_claim_settles_it_and_
 }
 
 #[tokio::test]
-async fn test_notices_late_receipt_raised_where_the_switch_holds_no_claim() {
+async fn test_notices_late_receipt_raises_none_at_an_app_without_the_claim_or_the_payment() {
     // An own app that joins once the claim is gone holds no view of it, and the switch no
-    // longer holds it: a claim the switch holds none of counts as gone.
+    // longer holds it: nothing stable tells it the payment was marked failed, since the
+    // record's `status` is informational (Paykit wire 5.3). It records the receipt and
+    // raises nothing; the app that made the payment raises the notice from its journal.
     let w = World::new();
-    let (_wallet, mut shop, attempt_id) = paid_after_failed(&w).await;
+    let (mut wallet, mut shop, attempt_id) = paid_after_failed(&w).await;
     w.clock.advance_ms(PAST_THE_CLAIM_MS);
     let mut late = w.wallet("late").await;
     late.receive(None).await.unwrap();
     receipt(&mut shop).await;
     late.receive(None).await.unwrap();
-    let notices = late.notices().await.unwrap();
+    assert!(late.notices().await.unwrap().is_empty());
+    let view = late.requests().await.unwrap().remove(0);
+    assert!(view.receipt.is_some());
+    wallet.receive(None).await.unwrap();
+    let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
-    assert_eq!(notices[0].kind, NoticeKind::PaidAfterFailed);
     assert_eq!(notices[0].attempt_id, Some(attempt_id));
 }
 

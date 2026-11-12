@@ -568,7 +568,7 @@ impl Paykit {
                 view: view.as_ref(),
                 service_time: self.service_time(),
                 journaled,
-                first_after_failed: found.first_after_failed,
+                first_receipt: found.first_receipt,
             })?;
             if let Some((op, deadline)) = settles.claim {
                 batch = batch

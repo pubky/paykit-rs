@@ -2440,8 +2440,8 @@ impl Paykit {
         if let Some(proof) = proof {
             changed |= activity::place(&mut record, Role::Proof, self.own_copy(proof)?);
         }
-        // A payment made after `failed` was written on its claim: the record shows it, for
-        // every own app that gets the receipt (Paykit spec 7.2).
+        // A payment made after `failed` was written on its claim: the record's informational
+        // `status` shows it for display; no reader decides by it (Paykit wire 5.3).
         let after_failed = Some(crate::receive::PAID_AFTER_FAILED);
         if paid && entry.failed_on_claim && record.status.as_deref() != after_failed {
             record.status = after_failed.map(str::to_owned);
