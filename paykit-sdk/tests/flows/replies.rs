@@ -170,6 +170,91 @@ async fn test_replies_from_a_blocked_payer_not_kept() {
     );
 }
 
+/// The message of `kind` alice's wallet sent bob, as bob's apps store it.
+async fn sent_reply(w: &World, wallet: &Paykit, kind: &str) -> StoredMessage {
+    let sent = wallet
+        .app()
+        .sent_to(&w.bob_id(), 0, u64::MAX)
+        .await
+        .unwrap();
+    let mut of_kind = sent.iter().filter(|m| m.kind == kind);
+    let reply = of_kind.next().unwrap();
+    assert!(of_kind.next().is_none());
+    StoredMessage::new(
+        w.alice_id(),
+        wallet.app().cert().signed(),
+        reply.plaintext.clone(),
+        None,
+        &w.bob_id(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_replies_their_record_already_holds_not_written_again() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    let acceptance = sent_reply(&w, &wallet, "paykit.payment_request_acceptance").await;
+    let proof = sent_reply(&w, &wallet, "paykit.payment_proof").await;
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 2);
+    // Another of bob's apps placed both replies long ago, and has since reflected 20 other
+    // messages: the record's newest 16 msg_ids are of those.
+    let copy = StoredMessage::new(
+        w.bob_id(),
+        shop.app().cert().signed(),
+        request.plaintext().clone(),
+        None,
+        &w.alice_id(),
+    )
+    .unwrap();
+    let mut record = ActivityRecord::new(ActivitySide::Payee, w.alice_id());
+    record.request = Some(copy);
+    record.response = Some(acceptance.clone());
+    record.proof = Some(proof);
+    let stored: Vec<String> = record
+        .stored()
+        .iter()
+        .map(|(_, s)| s.message().msg_id.clone())
+        .collect();
+    let others: Vec<String> = (0..20)
+        .map(|i| format!("123e4567-e89b-42d3-a456-4266141740{i:02}"))
+        .collect();
+    record.msg_ids = paykit_lib::records::bounded_msg_ids(&stored, &others);
+    assert!(!record.msg_ids[stored.len()..].contains(&acceptance.message().msg_id));
+    let target = RecordTarget::new(
+        SwitchCollection::new(
+            Collection::PayeeActivity.name(),
+            Collection::PayeeActivity.policy(None),
+        ),
+        &natural_key::request_record(&w.bob_id(), &request.hash()),
+    );
+    let value = record.to_json().unwrap();
+    let entry = shop
+        .app_mut()
+        .record_op(&target, Some(&value), Vec::new())
+        .await
+        .unwrap();
+    shop.app_mut()
+        .submit_batch(OpBatch::new().entry(entry))
+        .await
+        .unwrap();
+    let key = shop.app().record_key(&target).unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), 1);
+    // This app's kept copies of the same replies are taken now: the record holds them, so
+    // nothing is written, and the copies go.
+    shop.receive(None).await.unwrap();
+    assert_eq!(w.record_writes(&w.bob, &key), 1);
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    let held = shop.app().shared_record(&key).await.unwrap().unwrap();
+    assert_eq!(held.content.value(), Some(&value[..]));
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        PayeeStatus::ProofReceived
+    );
+}
+
 /// Alice's wallet sends bob's shop `n` acceptances of requests bob never sent.
 fn unmatched_replies(w: &World, shop: &Paykit, n: usize) {
     for i in 0..n {
