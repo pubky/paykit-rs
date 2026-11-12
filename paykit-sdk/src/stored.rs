@@ -131,16 +131,16 @@ impl Paykit {
         Ok(out)
     }
 
-    /// Take the duty events about stored entries the client hasn't had acknowledged, each
-    /// at its first sight (module docs, "Taken at first sight"); acknowledge, in order, those
-    /// taken up to the first that isn't; drop the marks of events acknowledged; then write
-    /// the kept messages that can be written now.
-    pub(crate) async fn take_stored_entries(&mut self) -> Result<()> {
-        let events = self.app.unacknowledged_events().await?;
+    /// Take the duty events about stored entries the client hasn't had acknowledged,
+    /// `events`, each at its first sight (module docs, "Taken at first sight"); acknowledge,
+    /// in order, those taken up to the first that isn't; drop the marks of events
+    /// acknowledged. Only Paykit's own local state is written: the kept messages are written
+    /// into their records by [`Paykit::place_stored`].
+    pub(crate) async fn take_stored_events(&mut self, events: &[AppEvent]) -> Result<()> {
         let mut listed = std::collections::BTreeSet::new();
         let mut prefix = true;
         let mut through = None;
-        for event in &events {
+        for event in events {
             let Some(id) = event.id() else {
                 continue;
             };
@@ -165,8 +165,7 @@ impl Paykit {
                 gone.delete(&mark);
             }
         }
-        self.local_commit(gone).await?;
-        self.place_stored().await
+        self.local_commit(gone).await
     }
 
     /// Keep what a duty event about a stored entry says, with its mark `mark`, in one
@@ -327,7 +326,7 @@ impl Paykit {
     /// place, and drop its note. A write that fails now is tried again at the next receive;
     /// a message not written within [`crate::KEPT_REPLY_MS`] of its acceptance, on the
     /// highest service time verified, is given up, its entry left stored for the host.
-    async fn place_stored(&mut self) -> Result<()> {
+    pub(crate) async fn place_stored(&mut self) -> Result<()> {
         let own = self.identity();
         for (rest, mut note) in self.local_scan::<StoredNote>(key::STORED_NOTES).await? {
             let note_key = format!("{}{rest}", key::STORED_NOTES);

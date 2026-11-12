@@ -573,8 +573,17 @@ impl Paykit {
             }
             Err(error) => return Err(error.into()),
         };
-        let account_gone = account_gone(&report.events)
-            || (report.stopped && account_gone(&self.app.unacknowledged_events().await?));
+        // The duty events kept, listed once, right after the read: a listing hands every
+        // kept duty event to the host, so one made later in this receive would hand over,
+        // in no report, those the steps below raise, such as a listing's.
+        let duties = self.app.unacknowledged_events().await?;
+        let account_gone =
+            account_gone(&report.events) || (report.stopped && account_gone(&duties));
+        // The duty events about stored entries are taken before anything returns, so that
+        // once the host acknowledges what this report showed none is lost: only the SDK's
+        // own marks and notes are kept here, and nothing is written at the switch
+        // (`stored.rs`).
+        self.take_stored_events(&duties).await?;
         if account_gone {
             // Nothing more is read or written there: the summary tells the host.
             return Ok(ReceiveSummary {
@@ -609,9 +618,9 @@ impl Paykit {
         // after a refused one, too (`Paykit::follow_listed_cert`).
         self.follow_listed_cert(false).await?;
         let keys = self.scope_keys_awaited().await?;
-        // The entries the client stored for good: their messages kept and written into
-        // their records as room frees, their duty events acknowledged (`stored.rs`).
-        self.take_stored_entries().await?;
+        // The entries the client stored for good: their messages, kept above, written into
+        // their records as room frees (`stored.rs`).
+        self.place_stored().await?;
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1), unless the payer's side waits for its scope keys:
         // they build on request records the copy may lack, and stay kept meanwhile.
