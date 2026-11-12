@@ -812,6 +812,9 @@ mod tests {
         assert_send(&wallet.payments());
         assert_send(&wallet.repair_activity_record(&attempt));
         assert_send(&wallet.resume_payments());
+        assert_send(&wallet.block(&key));
+        assert_send(&wallet.unblock(&key));
+        assert_send(&wallet.confirm_possibly_cancelled(&request, confirmed));
         assert_send(&wallet.notices());
         assert_send(&wallet.acknowledge_notice(""));
         assert_send(&wallet.receipts(ReceiptsOf::All));
