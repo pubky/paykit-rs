@@ -1187,7 +1187,8 @@ impl Paykit {
     }
 
     /// Unblock `pubky`, as [`Paykit::block`] blocks: the deny list drops it, and the copy at
-    /// once. Unblocking ends the pause (Paykit spec 8.1).
+    /// once. Unblocking ends the pause (Paykit spec 8.1). An unblock made through the client
+    /// directly is seen at the next read of the lists.
     ///
     /// # Errors
     ///
