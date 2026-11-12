@@ -7,7 +7,9 @@
 //!   permission_missing`), or one over a quota: the message is kept (`p/se/<sender>/<msg_id>`)
 //!   and written into its record by a later write of the app's own, tried at every receive
 //!   until it lands, as room frees: a request, a payer's reply, a proof of a payment without
-//!   a request into the record of its settlement, a receipt beside the proof it names.
+//!   a request into the record of its settlement, a receipt beside the proof it names, and
+//!   period details and a Billing Period's proof into the period record, once the request
+//!   record they are checked against is held.
 //!   Meanwhile a Private Payment List is held over its record (`lh/`), the newer kept, and a
 //!   request is shown unrecorded ([`crate::RequestStatus::Unrecorded`]). A payee's
 //!   cancellation needs nothing here: its stop is kept with the cursor move, with no write
@@ -126,6 +128,9 @@ enum Place {
     },
     /// A list, held over its record: the hold to keep, `None` when a list as new is held.
     List(Option<(String, KeptMessage)>),
+    /// Into a period record of a request whose record of this side the app doesn't hold yet:
+    /// which period record is decided once it does (Paykit spec 8.2).
+    AwaitsRequest(crate::hold::RecordSide),
 }
 
 impl Paykit {
@@ -157,8 +162,10 @@ impl Paykit {
                 label: request.label.as_ref().map(|l| l.as_str().to_owned()),
                 proposal_expires_at_ms: request.proposal_expires_at,
                 recurring: request.is_recurring(),
+                recurrence: request.recurrence,
                 status: RequestStatus::Unrecorded,
                 receipt: None,
+                periods: Vec::new(),
             });
         }
         Ok(out)
@@ -328,18 +335,15 @@ impl Paykit {
                     Some(request)
                         if crate::protocol::writes_payee_label(&scopes, label.as_ref()) =>
                     {
-                        record(
-                            ActivityTarget::payee(
-                                natural_key::request_record(&own, &request),
-                                label.as_ref(),
-                            ),
-                            Role::of(stored.body()).unwrap_or(Role::Response),
-                            false,
-                        )
+                        self.period_place(stored, &request).await?
                     }
                     _ => None,
                 }
             }
+            Body::PaymentPeriodDetails(_) if pay => match first {
+                Some(request) => self.period_place(stored, &request).await?,
+                None => None,
+            },
             Body::PaymentReceipt(receipt) if pay => {
                 let target = match stored.message().refs.get(1) {
                     Some(request) => natural_key::request_record(&sender, request),
@@ -361,6 +365,41 @@ impl Paykit {
             }
             _ => None,
         })
+    }
+
+    /// Where `stored`, a payer's reply or a payee's period details naming `request`, goes: a
+    /// Billing Period's into its period record, once the request record is held to check the
+    /// period against, else into the request record; `None` for a period that isn't the
+    /// request's (Paykit wire 4.4, 5.3).
+    async fn period_place(
+        &self,
+        stored: &StoredMessage,
+        request: &[u8; 32],
+    ) -> Result<Option<Place>> {
+        let own = self.identity();
+        let target = crate::receive::kept_request_target(&own, stored, request);
+        let periodic = matches!(stored.body(), Body::PaymentPeriodDetails(_))
+            || stored.body().billing_period().is_some();
+        let Some(record) = self.held_activity(&target).await? else {
+            return Ok(Some(if periodic {
+                Place::AwaitsRequest(record_side(&target))
+            } else {
+                Place::Record {
+                    target,
+                    role: Role::of(stored.body()).unwrap_or(Role::Response),
+                    creates: false,
+                }
+            }));
+        };
+        Ok(
+            crate::receive::period_or_request(&own, &target, &record, stored, request).map(
+                |placed| Place::Record {
+                    creates: placed != target,
+                    target: placed,
+                    role: Role::of(stored.body()).unwrap_or(Role::Response),
+                },
+            ),
+        )
     }
 
     /// Write every kept message whose record can take it now, each as a later write of the
@@ -390,6 +429,13 @@ impl Paykit {
                         .place_note(&target, role, creates, stored.clone())
                         .await
                         .unwrap_or(Placed::Not),
+                    Some(Place::AwaitsRequest(side)) => {
+                        if self.side_unlisted(side).await? {
+                            Placed::Waits
+                        } else {
+                            Placed::Not
+                        }
+                    }
                     None => Placed::Not,
                 };
                 // A message whose record the copy may lack, or holds waiting for its key,

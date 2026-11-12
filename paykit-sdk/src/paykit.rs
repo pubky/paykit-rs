@@ -8,8 +8,8 @@
 //! The flows live in their own modules, each an `impl Paykit` block: receiving
 //! (`receive.rs`), requests and their answers (`requests.rs`), paying (`pay.rs`), destination
 //! checks (`destination.rs`), re-sends (`resend.rs`) and reconciliation (`reconcile.rs`).
-//! Recurring requests, Allowances and publishing Private Payment Lists add their own modules
-//! the same way.
+//! Recurring requests' Billing Periods have theirs (`periods.rs`); Allowances and publishing
+//! Private Payment Lists add their own the same way.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;

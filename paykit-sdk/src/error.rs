@@ -63,10 +63,18 @@ pub enum Refusal {
     /// The attempt's deadline has passed, or the request's proposal expired (Paykit spec 7.1).
     #[error("Paykit spec 7.1: the deadline has passed")]
     DeadlinePassed,
-    /// A recurring request is paid per Billing Period, which this version of the SDK doesn't
-    /// do yet (Paykit spec 8.2).
+    /// A recurring request is paid, and cancelled by its payer, per Billing Period, which
+    /// this version of the SDK doesn't do yet (Paykit spec 8.2).
     #[error("Paykit spec 8.2: a recurring request is paid per Billing Period")]
     Recurring,
+    /// The recurring request is accepted already, by this app or another own app (Paykit
+    /// spec 8.2): it is neither accepted nor rejected again, only cancelled.
+    #[error("Paykit spec 8.2: the subscription is accepted already")]
+    Subscribed,
+    /// The payer hasn't accepted the recurring request, as the payee's record shows: its
+    /// period details wait for the acceptance, as v0.1's quotes did (Paykit spec 8.2).
+    #[error("Paykit spec 8.2: the payer hasn't accepted the subscription")]
+    NotSubscribed,
     /// The destination check failed (Paykit spec 4, 7.2): the text names the rule. Refused
     /// before the attempt was written, nothing was written; refused after it, the refusal
     /// comes as [`Refusal::AttemptFailed`].

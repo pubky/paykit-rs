@@ -60,17 +60,18 @@ use crate::receive::{self, Fail, QueuedAnswer};
 use crate::records::{list_target, KeptMessage};
 use crate::state::{self, key, StateKey};
 
-/// The kinds this SDK handles (Paykit wire 4.3): the one-time request flow, payments without
-/// a request, the payer's side of Private Payment Lists and re-sends. Recurring requests,
-/// Allowances and publishing Private Payment Lists come later. A
-/// `private_payment_list_request` this SDK receives is taken with no effect: it publishes no
-/// list at all yet, so the Publishing rule's answer to a request naming a used version
-/// (Paykit spec 8.4) comes with list publishing, with that rule's other triggers.
-pub const HANDLED_KINDS: [Kind; 9] = [
+/// The kinds this SDK handles (Paykit wire 4.3): the one-time request flow, recurring
+/// requests' acceptance and period details, payments without a request, the payer's side of
+/// Private Payment Lists and re-sends. Allowances and publishing Private Payment Lists come
+/// later. A `private_payment_list_request` this SDK receives is taken with no effect: it
+/// publishes no list at all yet, so the Publishing rule's answer to a request naming a used
+/// version (Paykit spec 8.4) comes with list publishing, with that rule's other triggers.
+pub const HANDLED_KINDS: [Kind; 10] = [
     Kind::PaymentRequest,
     Kind::PaymentRequestAcceptance,
     Kind::PaymentRequestRejection,
     Kind::PaymentRequestCancellation,
+    Kind::PaymentPeriodDetails,
     Kind::PaymentProof,
     Kind::PaymentReceipt,
     Kind::ResendRequest,
@@ -597,10 +598,12 @@ fn check_kept_cancellation(
     Ok(())
 }
 
-/// A payer's reply kept for a request record the app didn't hold yet (`pr/<sender>/<record
-/// key>/<msg_id>`, Switch spec 8.2): it verifies for `own`, is an acceptance, rejection,
-/// cancellation or proof from the sender and with the `msg_id` its key names, and is kept
-/// under the record key of the payee's record of the request it names, under its label.
+/// A message kept for a request record the app didn't hold yet (`pr/<sender>/<record
+/// key>/<msg_id>`, Switch spec 8.2, Paykit spec 8.1): it verifies for `own`, is a payer's
+/// acceptance, rejection, cancellation or proof, or a payee's period details, from the
+/// sender and with the `msg_id` its key names, and is kept under the record key of the
+/// record of the request it names it waits for: the payee's, under its label, for a reply,
+/// the payer's for details.
 fn check_kept_reply(
     value: &[u8],
     own: &[u8; 32],
@@ -617,12 +620,10 @@ fn check_kept_reply(
             | Body::PaymentRequestRejection(_)
             | Body::PaymentRequestCancellation(_)
             | Body::PaymentProof(_)
+            | Body::PaymentPeriodDetails(_)
     );
     let request = reply.message().refs.first().ok_or_else(bad)?;
-    let target = ActivityTarget::payee(
-        natural_key::request_record(own, request),
-        reply.body().label(),
-    );
+    let target = receive::kept_request_target(own, &reply, request);
     if !replies
         || reply.sender() != sender
         || reply.message().msg_id != msg_id
