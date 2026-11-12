@@ -2065,3 +2065,23 @@ async fn test_allowances_consent_under_a_key_not_its_spelling_is_corrupt() {
     let error = exec.receive(None).await.unwrap_err();
     assert!(error.to_string().contains("corrupt"), "{error:?}");
 }
+
+#[tokio::test]
+async fn test_allowances_conflict_kept_as_the_stop_though_its_record_write_fails() {
+    // The second proposal is kept as the stop before anything else: the later write of it
+    // into the record is refused, and the Allowance shows conflicted all the same.
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    let (_, mine) = proposed(&w, &mut shop, &mut wallet).await;
+    let id = wallet.allowance(&mine).await.unwrap().allowance_id;
+    propose_as(&w, &[wallet.app_id()], id.as_str(), "0.20");
+    refuse_writes(&w, 2);
+    wallet.receive(None).await.unwrap();
+    assert!(value(&wallet, &mine).await["conflicted"].is_null());
+    assert_eq!(wallet.app().protocol_scan(b"cf/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Conflicted
+    );
+}
