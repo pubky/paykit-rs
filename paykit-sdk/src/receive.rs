@@ -133,7 +133,8 @@ impl std::fmt::Debug for QueuedAnswer {
 }
 
 /// The writes `stored`, a message that passed check 10, causes, added to `cx` (module docs).
-/// The settlement ID of a proof's `proof` object, by the app's rail ([`crate::Rail::settlement_id`]).
+/// The settlement ID of a proof's `proof` object, by the app's rail
+/// ([`crate::Rail::settlement_id`]).
 pub(crate) type Settlement<'a> = &'a paykit_lib::derive::SettlementIdReader<'a>;
 
 pub(crate) fn effect(
@@ -426,8 +427,8 @@ fn held_or_unlisted(
 /// 8.1, "Records not listed yet"): after a restore, a `missed` item, or a certificate that
 /// reads more, until Paykit has listed them. The rule is [`crate::hold::side_unlisted`], read
 /// per entry from the context's certificate and Paykit's state (`nl`, `ml`, `lc`), so an
-/// entry after a wider certificate or a `missed` item the same read took is held too. The entry is held as for a store
-/// unavailable for now (Paykit spec 17, question 27), and read again at a later read.
+/// entry after a wider certificate or a `missed` item the same read took is held too. The
+/// entry is held as for a store unavailable for now (Paykit spec 17, question 27), and read again at a later read.
 fn hold_while_unlisted(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<(), Fail> {
     if side_may_lack(cx, side)? {
         return Err(Fail::Store(StoreFailure::unavailable(
@@ -1081,9 +1082,10 @@ pub(crate) fn kept_reply_evicted(kept: &[CountedReply], sender: &[u8; 32]) -> Op
 }
 
 /// Make room for a new reply from `sender` among the kept replies, in the step: the one the
-/// bounds drop ([`kept_reply_evicted`]) goes, dropped without being processed, and counts in
-/// its sender's mark (`pd/<sender>`, `marks.rs`) with its acceptance time, so the sender is
-/// asked to send it again once the record of one of its requests is held.
+/// bounds drop ([`kept_reply_evicted`]) goes, and counts in its sender's mark
+/// (`pd/<sender>`, `marks.rs`) with its acceptance time, so the sender is asked to send it
+/// again once the record of one of its requests is held. The client marked it processed
+/// when it was kept, so at this pin a re-sent copy arrives as a duplicate and isn't taken.
 fn make_room_for_reply(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<(), Fail> {
     let mut kept = Vec::new();
     let mut names = Vec::new();

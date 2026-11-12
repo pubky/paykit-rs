@@ -181,8 +181,8 @@ impl Paykit {
     }
 
     /// Why the shared records aren't listed, if they aren't: a restore's mark, a `missed`
-    /// item's, or the certificate held now reading more than the one last listed under. The second is
-    /// read from what the store holds, the client's certificate and `p/lc`, so a read that
+    /// item's, or the certificate held now reading more than the one last listed under. The
+    /// last is read from what the store holds, the client's certificate and `p/lc`, so a read that
     /// takes the certificate and fails, a crash or a restart before the next listing loses
     /// nothing.
     pub(crate) async fn unlisted(&self) -> Result<Option<Unlisted>> {
@@ -409,7 +409,10 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotFound`] when the app holds no record of the request; a store failure.
+    /// [`Refusal::NotFound`] when the app holds no open record of the request: none, one
+    /// whose value doesn't read, one sealed under a scope key the app doesn't hold yet, or
+    /// one missing from a copy that may lack records. A later restore holds the request again
+    /// all the same. A store failure.
     pub async fn confirm_possibly_cancelled(
         &mut self,
         request: &crate::requests::RequestRef,
@@ -485,8 +488,8 @@ impl Paykit {
     }
 
     /// List every collection the app's certificate reads, then clear the restore's and a
-    /// `missed` item's marks and keep that certificate as the one listed under, in one commit: a crash before it
-    /// leaves the records to be listed again. Refused while a wider certificate's scope
+    /// `missed` item's marks and keep that certificate as the one listed under, in one
+    /// commit: a crash before it leaves the records to be listed again. Refused while a wider certificate's scope
     /// keys are missing ([`Paykit::refuse_while_scope_keys_missing`]): a listing before them
     /// keeps values the app can't open, and keeping the certificate then would mark them
     /// listed for good. Every listing of Paykit's comes here. Only a receive takes a
