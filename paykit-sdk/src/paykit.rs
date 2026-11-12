@@ -635,8 +635,11 @@ impl Paykit {
         self.follow_listed_cert(false).await?;
         let keys = self.scope_keys_awaited().await?;
         // The entries the client stored for good: their messages, kept above, written into
-        // their records as room frees (`stored.rs`).
-        self.place_stored().await?;
+        // their records as room frees (`stored.rs`), unless the payer's side waits for its
+        // scope keys or its listing, as for the payees' cancellations below.
+        if !self.payer_waits(keys).await? {
+            self.place_stored().await?;
+        }
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1), unless the payer's side waits for its scope keys:
         // they build on request records the copy may lack, and stay kept meanwhile.

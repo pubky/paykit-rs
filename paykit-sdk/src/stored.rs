@@ -52,6 +52,26 @@ use crate::records::{list_target, KeptMessage};
 use crate::requests::{RequestRef, RequestStatus, RequestView};
 use crate::state::{key, Tx};
 
+/// Whether a kept message is in its record ([`Paykit::place_note`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Placed {
+    /// Written now, or reflected already.
+    Done,
+    /// Not written now: tried again at the next receive, and given up past its window.
+    Not,
+    /// Not written while the record's absence decides nothing yet, or its value waits for
+    /// its scope key: tried again at the next receive, and never given up meanwhile.
+    Waits,
+}
+
+/// The side of the shared records `target` is of.
+fn record_side(target: &ActivityTarget) -> crate::hold::RecordSide {
+    match target.side {
+        crate::activity::SideTag::Payer => crate::hold::RecordSide::Payer,
+        crate::activity::SideTag::Payee => crate::hold::RecordSide::Payee,
+    }
+}
+
 /// A stored entry's message Paykit writes into its record later (`p/se/<sender>/<msg_id>`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct StoredNote {
@@ -333,12 +353,12 @@ impl Paykit {
             if !note.placed {
                 let stored = note.message.stored(&own)?;
                 let accepted_at = stored.accepted_at();
-                note.placed = match self.place_of(&stored.clone()).await? {
+                let placed = match self.place_of(&stored.clone()).await? {
                     Some(Place::List(hold)) => {
                         if let Some((held, kept)) = hold {
                             self.local_put(&held, &kept).await?;
                         }
-                        true
+                        Placed::Done
                     }
                     Some(Place::Record {
                         target,
@@ -347,9 +367,15 @@ impl Paykit {
                     }) => self
                         .place_note(&target, role, creates, stored.clone())
                         .await
-                        .unwrap_or(false),
-                    None => false,
+                        .unwrap_or(Placed::Not),
+                    None => Placed::Not,
                 };
+                // A message whose record the copy may lack, or holds waiting for its key,
+                // waits: it is neither written nor given up meanwhile.
+                if placed == Placed::Waits {
+                    continue;
+                }
+                note.placed = placed == Placed::Done;
                 if !note.placed {
                     let stale = accepted_at.is_none_or(|at| {
                         self.service_time().is_some_and(|t| {
@@ -406,39 +432,48 @@ impl Paykit {
     /// record held as a value that doesn't read, or that the app can't open, is never
     /// written over (Switch spec 8.2: a reader doesn't act on a record it can't read, and a
     /// write over one that is only unopenable for now could drop what its writer stored). A
-    /// value sealed at a key the app doesn't hold yet (`Unopened::KeyNotHeld`) is tried
-    /// again at each receive, and placed once the key comes and it reads; one that never
-    /// opens stays as it is.
+    /// value sealed at a key the app doesn't hold yet (`Unopened::KeyNotHeld`), and a record
+    /// absent while the copy of its side may lack records ([`Paykit::side_unlisted`]), wait:
+    /// tried again at each receive, never given up meanwhile, and placed once the key comes
+    /// or the records are listed. A value that never opens stays as it is.
     async fn place_note(
         &mut self,
         target: &ActivityTarget,
         role: Role,
         creates: bool,
         stored: StoredMessage,
-    ) -> Result<bool> {
+    ) -> Result<Placed> {
         let key = self.activity_key(target)?;
         let content = self.app.shared_record(&key).await?.map(|held| held.content);
         match content {
+            // Absent while the copy of its side may lack records: the absence decides
+            // nothing yet (Paykit spec 8.1, "Records not listed yet").
+            None if self.side_unlisted(record_side(target)).await? => return Ok(Placed::Waits),
             None | Some(RecordContent::Deleted) => {
                 if !creates {
-                    return Ok(false);
+                    return Ok(Placed::Not);
                 }
             }
-            Some(RecordContent::Unreadable(_)) => return Ok(false),
+            Some(content) if crate::hold::awaits_key(&content) => return Ok(Placed::Waits),
+            Some(RecordContent::Unreadable(_)) => return Ok(Placed::Not),
             Some(RecordContent::Value(_)) => {
                 let Some(record) = self.held_activity(target).await? else {
-                    return Ok(false);
+                    return Ok(Placed::Not);
                 };
                 let names_proof = record
                     .proof
                     .as_ref()
                     .is_some_and(|proof| stored.message().refs.first() == Some(&proof.hash()));
                 if role == Role::Receipt && !names_proof {
-                    return Ok(false);
+                    return Ok(Placed::Not);
                 }
             }
         }
-        self.write_placed(target, stored).await
+        Ok(if self.write_placed(target, stored).await? {
+            Placed::Done
+        } else {
+            Placed::Not
+        })
     }
 
     async fn write_placed(

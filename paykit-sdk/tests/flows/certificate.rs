@@ -2554,3 +2554,88 @@ async fn test_certificate_restore_taking_a_labelled_one_without_keys_keeps_the_m
     restored.receive(None).await.unwrap();
     assert!(restored.app().protocol_get(b"nl").await.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn test_certificate_late_receipt_for_a_record_not_listed_yet_is_held_then_raised_once() {
+    // The wallet is narrowed to `contacts` while the phone pays bob's request: the method
+    // reports a failure, `failed` is written, and its history then shows the payment made.
+    // Past the claim's window the wallet is renewed to `pay` with no bundle, so its copy lacks
+    // the payer record, and bob's receipt comes. The record's absence decides nothing: the
+    // receipt is held, raising nothing. Once the keys come and the records are listed, it is
+    // taken once, and the wallet tells its user once.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let me = wallet.app_id();
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let first = wallet.app().cert().clone();
+    let narrow = renew(&w, me, &AppScopes::new().contacts().build().unwrap(), 1_000);
+    let _ = wallet.receive(None).await;
+    list(&w, me, &first, &narrow);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().cert().hash(), narrow.hash());
+    let request = crate::common::request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::common::draft("1", w.clock.now_ms()),
+    )
+    .await;
+    phone.receive(None).await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Fail);
+    let paykit_sdk::PayOutcome::Failed { attempt_id, .. } = phone
+        .pay_request(&request, paykit_sdk::PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("failed");
+    };
+    w.rail.complete_after_failure(&attempt_id);
+    let resumed = phone.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [paykit_sdk::PayOutcome::Paid { .. }]),
+        "{resumed:?}"
+    );
+    shop.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(32 * pubky_switch_core::records::DAY_MS);
+    let wider = renew(
+        &w,
+        me,
+        &AppScopes::new().pay().request().build().unwrap(),
+        2_000,
+    );
+    wallet.receive(None).await.unwrap();
+    list(&w, me, &narrow, &wider);
+    let summary = wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().cert().hash(), wider.hash());
+    assert!(summary.scope_keys_awaited, "{summary:?}");
+    // Bob's shop reads alice's directory again, which lists the wallet under its new
+    // certificate, so the receipt goes to it too.
+    w.clock.advance_ms(11 * 60_000);
+    shop.receive(None).await.unwrap();
+    let sale = shop.payee_activity().await.unwrap()[0].record;
+    assert!(shop.confirm_payment(&sale).await.unwrap().is_some());
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(!received(&summary, "paykit.payment_receipt"), "{summary:?}");
+    assert!(wallet.notices().await.unwrap().is_empty());
+    let key = wallet
+        .app()
+        .record_key(&crate::outcome_record::payer_record(&request))
+        .unwrap();
+    assert!(wallet.app().shared_record(&key).await.unwrap().is_none());
+    store_bundle(&w, me, &wider);
+    let mut receipts = 0;
+    for _ in 0..3 {
+        let summary = wallet.receive(None).await.unwrap();
+        receipts += usize::from(received(&summary, "paykit.payment_receipt"));
+    }
+    assert_eq!(receipts, 1);
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::PaidAfterFailed);
+    assert_eq!(notices[0].attempt_id, Some(attempt_id));
+    let value = crate::outcome_record::record_value(&mut wallet, &request)
+        .await
+        .unwrap();
+    assert!(!value["receipt"].is_null(), "{value}");
+}
