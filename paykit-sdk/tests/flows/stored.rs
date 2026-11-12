@@ -7,7 +7,7 @@ use std::sync::Arc;
 use paykit_sdk::{AppScopes, PayOptions, PayeeStatus, Paykit, PaykitConfig, Rail, RequestStatus};
 use pubky_switch_client::app::AppEvent;
 use pubky_switch_client::clock::Clock;
-use pubky_switch_client::testing::{Fault, TestSigner};
+use pubky_switch_client::testing::Fault;
 use pubky_switch_core::claims::Outcome;
 use pubky_switch_core::http::ErrorCode;
 

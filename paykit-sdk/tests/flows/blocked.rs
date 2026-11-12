@@ -235,3 +235,99 @@ async fn test_blocked_local_block_seen_with_no_read() {
         .unwrap_err();
     assert_eq!(shown(error).payee, w.bob_id());
 }
+
+/// The next `n` calls to alice's switch's `/ops` don't connect: the batch is kept unanswered.
+fn keep_ops(w: &World, n: usize) {
+    for _ in 0..n {
+        w.alice.switch().fail_next(Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    }
+}
+
+#[tokio::test]
+async fn test_blocked_own_block_kept_unanswered_counts_at_once() {
+    // The wallet blocks bob while its switch doesn't answer: the `deny.put` is kept, the list
+    // at the switch doesn't hold bob yet. The resume's fresh read of the list counts the
+    // wallet's own block all the same, and makes no repeat (Paykit spec 8.1).
+    let w = World::new();
+    let calls = resumed_repeat(&w, async |wallet| {
+        keep_ops(&w, 8);
+        wallet.block(&w.bob_id()).await.unwrap();
+        let lists = wallet.app_mut().allow_list().await.unwrap();
+        assert!(!lists.deny.contains(&w.bob_id()));
+    })
+    .await;
+    assert_eq!(calls, 1);
+}
+
+#[tokio::test]
+async fn test_blocked_own_unblock_kept_unanswered_unblocks_nothing_yet() {
+    // Bob is blocked; the wallet's unblock is kept unanswered: the list still holds him, and
+    // the resume makes no repeat until the list shows him dropped.
+    let w = World::new();
+    let calls = resumed_repeat(&w, async |wallet| {
+        wallet.block(&w.bob_id()).await.unwrap();
+        keep_ops(&w, 8);
+        wallet.unblock(&w.bob_id()).await.unwrap();
+    })
+    .await;
+    assert_eq!(calls, 1);
+}
+
+#[tokio::test]
+async fn test_blocked_own_block_mark_goes_once_the_list_shows_it() {
+    // The kept `deny.put` lands at the next flush; the next read of the list shows bob, and
+    // the mark of the block kept goes.
+    let w = World::new();
+    let (mut wallet, _, _) = received(&w, PaykitConfig::default()).await;
+    keep_ops(&w, 1);
+    wallet.block(&w.bob_id()).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"bk/").await.unwrap().len(), 1);
+    wallet.flush().await.unwrap();
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(lists.deny.contains(&w.bob_id()));
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_scan(b"bk/").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_blocked_restore_reads_the_deny_list_again_before_a_payment() {
+    // The backup holds the deny list read a moment before it, without bob; bob is blocked
+    // after it. A restore within 10 minutes reads the list again before the user's payment,
+    // which is refused, not judged by the backup's copy (Paykit spec 8.1).
+    let w = World::new();
+    let (mut wallet, _, request) = received(&w, PaykitConfig::default()).await;
+    let backup = wallet.backup().await.unwrap();
+    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    drop(wallet);
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    restored.reconcile().await.unwrap();
+    restored
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    restored
+        .confirm_possibly_cancelled(&request, pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    let refused = restored
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::Blocked { .. })),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}

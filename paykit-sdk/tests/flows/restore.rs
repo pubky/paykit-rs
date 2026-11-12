@@ -1315,9 +1315,9 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
             kept(serde_json::json!({ "records": [record_json.clone()] })),
         ),
         (
-            "lists read time",
-            "lr".into(),
-            kept(serde_json::json!("soon")),
+            "missed item time other than its key's",
+            format!("mi/{:020}", 5),
+            kept(serde_json::json!(0)),
         ),
         (
             "queued ask",
