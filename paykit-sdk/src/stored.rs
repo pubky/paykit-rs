@@ -415,9 +415,10 @@ impl Paykit {
     /// (`creates`), and a receipt goes only beside the proof it names (Paykit wire 5.3). A
     /// record held as a value that doesn't read, or that the app can't open, is never
     /// written over (Switch spec 8.2: a reader doesn't act on a record it can't read, and a
-    /// write over one that is only unopenable for now could drop what its writer stored).
-    /// This client can't yet tell a value unopenable for now from one that never will
-    /// open, so no such value is written over at all.
+    /// write over one that is only unopenable for now could drop what its writer stored). A
+    /// value sealed at a key the app doesn't hold yet (`Unopened::KeyNotHeld`) is tried
+    /// again at each receive, and placed once the key comes and it reads; one that never
+    /// opens stays as it is.
     async fn place_note(
         &mut self,
         target: &ActivityTarget,
@@ -433,7 +434,7 @@ impl Paykit {
                     return Ok(false);
                 }
             }
-            Some(RecordContent::Unreadable) => return Ok(false),
+            Some(RecordContent::Unreadable(_)) => return Ok(false),
             Some(RecordContent::Value(_)) => {
                 let Some(record) = self.held_activity(target).await? else {
                     return Ok(false);

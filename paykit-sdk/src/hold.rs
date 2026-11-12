@@ -20,11 +20,13 @@
 //! clock tolerance (Paykit spec 9). A cancellation that comes back is kept
 //! and placed as any other.
 
+use paykit_lib::collections::Collection;
 use paykit_lib::records::ActivityRecord;
-use pubky_switch_client::app::AppError;
 use pubky_switch_client::app::Protocol as _;
+use pubky_switch_client::app::{AppError, RecordContent, Unopened};
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::records::{AppCert, CLOCK_TOLERANCE_MS};
+use pubky_switch_core::scopes::Permission;
 use pubky_switch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +57,15 @@ impl RestoreHold {
     }
 }
 
+/// Which side waits for a wider certificate's scope keys ([`Paykit::scope_keys_awaited`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeysAwaited {
+    /// The payer's records, claims or `pay` key: a resume writes nothing to the switch.
+    PayerSide,
+    /// Only records the payer's side doesn't read: a resume goes on.
+    PayeeSideOnly,
+}
+
 /// Why the shared records aren't listed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Unlisted {
@@ -62,8 +73,10 @@ pub(crate) enum Unlisted {
     /// before the feed (Switch spec 12.4 step 2.1).
     Restore,
     /// The certificate the app holds reads collections, or members of one, that the one
-    /// the records were last listed under (`p/lc`) didn't (Switch spec 8.3): the client owes
-    /// no listing for it, so only one Paykit makes ([`Paykit::list_records`]) covers it.
+    /// the records were last listed under (`p/lc`) didn't (Switch spec 8.3). The client
+    /// owes a listing for it too, made at the start of a later read once it holds the
+    /// scope keys, but tells no caller when it made it: a listing Paykit makes
+    /// ([`Paykit::list_records`]) ends this.
     Certificate,
 }
 
@@ -91,10 +104,66 @@ impl Paykit {
         {
             return Ok(Some(Unlisted::Restore));
         }
-        let widened = self.listed_cert().await?.is_some_and(|listed| {
-            crate::protocol::reads_more(&self.protocol.collections(), &listed, self.app.cert())
-        });
-        Ok(widened.then_some(Unlisted::Certificate))
+        Ok(self.widened_from().await?.map(|_| Unlisted::Certificate))
+    }
+
+    /// The certificate the records were last listed under, when the one held now reads
+    /// collections, or members of one, it didn't. With none kept ([`Paykit::follow_listed_cert`]),
+    /// a certificate that passes now counts as reading more than nothing: its records are
+    /// listed once, as at a join.
+    async fn widened_from(&self) -> Result<Option<Option<AppCert>>> {
+        match self.listed_cert().await? {
+            None if self.certificate_refused().is_none() => Ok(Some(None)),
+            None => Ok(None),
+            Some(listed) => Ok(crate::protocol::reads_more(
+                &self.protocol.collections(),
+                &listed,
+                self.app.cert(),
+            )
+            .then_some(Some(listed))),
+        }
+    }
+
+    /// Whether the app waits for a wider certificate's scope keys, which the signer stores
+    /// when it is next online (Switch spec 3.5), and on which side: the records it adds
+    /// can't be listed until they come. The payer's side waits when the app lacks the
+    /// current key of `pay`, or the certificate reads more of `payer_activity`,
+    /// `payment_lists` or the claims than the one listed under; otherwise only the payee's
+    /// side does, which a payment's resume doesn't touch.
+    pub(crate) async fn scope_keys_awaited(&self) -> Result<Option<KeysAwaited>> {
+        if self.holds_scope_keys() {
+            return Ok(None);
+        }
+        let Some(widened) = self.widened_from().await? else {
+            return Ok(None);
+        };
+        let held = self.app.cert();
+        // Nothing listed yet: every side waits.
+        let Some(listed) = widened else {
+            return Ok(Some(KeysAwaited::PayerSide));
+        };
+        let payer_collections = [
+            crate::activity::family(Collection::PayerActivity),
+            crate::activity::family(Collection::PaymentLists),
+        ];
+        // Without the current `pay` key the payer's records can't be written: a data epoch
+        // rotation besides a widening on the payee's side leaves the app so, the certificate
+        // reading no more of the payer's side.
+        let pay_key = self.app.scope_key(self.app.data_epoch(), "pay").is_some();
+        // Claims read now and not under the certificate listed under. Today this follows from
+        // the payer collections' term or from `pay` not held, where a resume reads nothing:
+        // `claims.read` comes with `pay`, which reads `payer_activity`, or with `allowance`
+        // (paykit-lib `scopes.rs`), which doesn't hold `pay`. It is kept so the rule doesn't
+        // lean on that table.
+        let claims = !listed.has_permission(Permission::ClaimsRead)
+            && held.has_permission(Permission::ClaimsRead);
+        let payer =
+            !pay_key || claims || crate::protocol::reads_more(&payer_collections, &listed, held);
+        Ok(Some(if payer {
+            KeysAwaited::PayerSide
+        } else {
+            KeysAwaited::PayeeSideOnly
+        }))
     }
 
     /// Whether the app holds the scope keys its certificate's scopes have, at the current
@@ -111,18 +180,35 @@ impl Paykit {
             .all(|scope| self.app.scope_key(epoch, scope).is_some())
     }
 
-    /// At a join and a load: a store that keeps no certificate last listed under takes the
-    /// one held now. After a join that is right, the client's first read listing under it;
-    /// a crash between the join's commit and this write leaves it to the next load. A store
-    /// an earlier build wrote has none either: its first load here takes the certificate it
-    /// holds as listed under, so a wider one an earlier build took before then, without a
-    /// listing since, isn't seen as wider. Nothing is written under a certificate Paykit
+    /// Keep the certificate held now as the one listed under, when nothing is lost by it:
+    /// when none is kept and `none_listed`, or when the one kept reads everything the held
+    /// one does. A narrowed certificate is followed so, so a later certificate that reads
+    /// more again is seen as wider. Run at a join, a load and after each receive; one write,
+    /// which a crash leaves to the next load. Nothing is written under a certificate Paykit
     /// refuses.
-    pub(crate) async fn settle_listed_cert(&mut self) -> Result<()> {
-        if self.certificate_refused().is_some() || self.listed_cert().await?.is_some() {
+    ///
+    /// Only a join takes the certificate when none is kept (`none_listed`): the client's
+    /// first read lists under the join's certificate. A load and a receive keep none then,
+    /// whatever the reason none is kept: a join that crashed before its write, a load
+    /// under a certificate Paykit refused, a receive that took a passing one after it, a
+    /// restart before the listing, or a store an earlier build wrote. The records then count
+    /// as unlisted ([`Paykit::unlisted`]) and are listed once, and that listing keeps it.
+    pub(crate) async fn follow_listed_cert(&mut self, none_listed: bool) -> Result<()> {
+        if self.certificate_refused().is_some() {
             return Ok(());
         }
-        let signed = self.app.cert().signed().clone();
+        let held = self.app.cert();
+        let follow = match self.listed_cert().await? {
+            None => none_listed,
+            Some(listed) => {
+                listed.hash() != held.hash()
+                    && !crate::protocol::reads_more(&self.protocol.collections(), &listed, held)
+            }
+        };
+        if !follow {
+            return Ok(());
+        }
+        let signed = held.signed().clone();
         self.local_put(key::LISTED_CERT, &signed).await
     }
 
@@ -187,10 +273,9 @@ impl Paykit {
     /// never "gone". Any other failure (a store failure, an alarm, the switch's refusal for
     /// good) is that error: the call is refused all the same.
     pub(crate) async fn records_known(&mut self) -> Result<()> {
-        match self.unlisted().await? {
-            None => return Ok(()),
-            Some(Unlisted::Certificate) if !self.holds_scope_keys() => return Err(unlisted()),
-            Some(_) => {}
+        self.refuse_while_scope_keys_missing().await?;
+        if self.unlisted().await?.is_none() {
+            return Ok(());
         }
         self.list_records().await.map_err(|error| {
             if unanswered(&error) {
@@ -201,11 +286,25 @@ impl Paykit {
         })
     }
 
+    /// Refused as not now while a wider certificate's scope keys are still missing: the
+    /// records it adds can't be listed yet, and a call that acts on what they hold waits,
+    /// with a reason of its own, so the host can tell the user the signer must come online.
+    pub(crate) async fn refuse_while_scope_keys_missing(&self) -> Result<()> {
+        if self.scope_keys_awaited().await?.is_some() {
+            return Err(keys_awaited());
+        }
+        Ok(())
+    }
+
     /// List every collection the app's certificate reads, then clear the restore's mark and
     /// keep that certificate as the one listed under, in one commit: a crash before it
-    /// leaves the records to be listed again. Only a receive takes a certificate, so none
-    /// is taken during the listing.
+    /// leaves the records to be listed again. Refused while a wider certificate's scope
+    /// keys are missing ([`Paykit::refuse_while_scope_keys_missing`]): a listing before them
+    /// keeps values the app can't open, and keeping the certificate then would mark them
+    /// listed for good. Every listing of Paykit's comes here. Only a receive takes a
+    /// certificate, so none is taken during the listing.
     pub(crate) async fn list_records(&mut self) -> Result<()> {
+        self.refuse_while_scope_keys_missing().await?;
         let signed = self.app.cert().signed().clone();
         self.app.list_collections().await?;
         let mut tx = Tx::default();
@@ -248,6 +347,7 @@ impl Paykit {
     /// a restore, or since a certificate that reads more, rather than showing the copy that
     /// lacks them as the records.
     pub(crate) async fn refuse_while_unlisted(&self) -> Result<()> {
+        self.refuse_while_scope_keys_missing().await?;
         if self.unlisted().await?.is_some() {
             return Err(unlisted());
         }
@@ -345,6 +445,38 @@ fn unlisted() -> crate::error::PaykitError {
     Refusal::NotNow(
         "Switch spec 8.3, 12.4 step 2.1: the shared records aren't listed since the restore or \
          the certificate that reads more"
+            .into(),
+    )
+    .into()
+}
+
+/// The refusal while a wider certificate's scope keys are missing.
+fn keys_awaited() -> crate::error::PaykitError {
+    Refusal::NotNow(
+        "Switch spec 3.5: waiting for the scope keys of the certificate taken, which the \
+         signer stores when it is next online"
+            .into(),
+    )
+    .into()
+}
+
+/// Whether a record's value isn't open for now only: sealed under a scope key the app
+/// doesn't hold yet (Switch spec 3.5). The client opens it once the key comes, so a value
+/// that is only waiting is never treated as one that doesn't read: nothing offers to write
+/// over it, which would drop what it holds unseen, such as single-use marks.
+pub(crate) fn awaits_key(content: &RecordContent) -> bool {
+    matches!(
+        content,
+        RecordContent::Unreadable(Unopened::KeyNotHeld { .. })
+    )
+}
+
+/// The refusal of a write over a value that is only waiting for its scope key
+/// ([`awaits_key`]).
+pub(crate) fn value_awaits_key() -> crate::error::PaykitError {
+    Refusal::NotNow(
+        "Switch spec 3.5: waiting for the scope keys the record's value is sealed under, which \
+         the signer stores when it is next online"
             .into(),
     )
     .into()

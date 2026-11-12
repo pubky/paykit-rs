@@ -692,3 +692,69 @@ async fn test_stored_refused_request_never_written_over_a_value_that_doesnt_read
         RequestStatus::Unrecorded
     );
 }
+
+#[tokio::test]
+async fn test_stored_refused_request_never_written_over_a_value_awaiting_its_key() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(kept(&wallet, "se/").await.len(), 1);
+    // The data epoch rotates, and the phone, holding the new epoch's key, writes the
+    // request's record under it: the wallet doesn't hold that key yet.
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    crate::unrequested::store_bundle(&w, phone.app_id(), &phone.app().cert().clone());
+    // Its first read takes the new key, its next the request.
+    phone.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            paykit_lib::collections::Collection::PayerActivity.name(),
+            paykit_lib::collections::Collection::PayerActivity.policy(None),
+        ),
+        &paykit_lib::derive::natural_key::request_record(&w.bob_id(), &request.request_hash),
+    );
+    let key = wallet.app().record_key(&target).unwrap();
+    let written = w.record_writes(&w.alice, &key);
+    assert!(written >= 1);
+    // The epoch rotates again, and the wallet gets the newest key alone: it could write the
+    // record, but can't open what the phone wrote.
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    crate::unrequested::store_bundle_from(
+        &w,
+        wallet.app_id(),
+        &wallet.app().cert().clone(),
+        newest,
+    );
+    wallet.receive(None).await.unwrap();
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            held.content,
+            pubky_switch_client::app::RecordContent::Unreadable(
+                pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+            )
+        ),
+        "{:?}",
+        held.content
+    );
+    // Not written over while its key is awaited: the message stays kept.
+    wallet.receive(None).await.unwrap();
+    assert_eq!(w.record_writes(&w.alice, &key), written);
+    assert_eq!(kept(&wallet, "se/").await.len(), 1);
+    // Once its key comes the record reads, already holding the request: nothing is
+    // written, and the kept message goes.
+    crate::unrequested::store_bundle(&w, wallet.app_id(), &wallet.app().cert().clone());
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(w.record_writes(&w.alice, &key), written);
+    assert!(kept(&wallet, "se/").await.is_empty());
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+}

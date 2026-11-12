@@ -220,6 +220,14 @@ pub struct ReceiveSummary {
     /// content. The records stay unlisted, so the calls that only read are refused as not
     /// now, and the next receive or write lists them again.
     pub records_unlisted: Option<String>,
+    /// A certificate taken reads collections the one the records were last listed under
+    /// didn't, and the app waits for its scope keys, which the signer stores when it is next
+    /// online (Switch spec 3.5). The client asks the signer for a full bundle once, and asks
+    /// again only after a later bundle part leaves a key still missing, or after a restore;
+    /// it doesn't ask at every read. Until the keys come the records the certificate adds
+    /// aren't listed, and the calls that act on them are refused as not now; the host tells
+    /// the user the signer must come online.
+    pub scope_keys_awaited: bool,
     /// The account is gone at this switch: the client took it as erased (Switch spec 12.7),
     /// a provider loss (Switch spec 12.6). The host tells the user. The app reads nothing
     /// more there, and the SDK acts on nothing by itself: lookups of the identity there fail
@@ -328,7 +336,7 @@ impl Paykit {
         let app = App::join(env.clone(), protocol.clone(), config.app.clone(), request).await?;
         let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
         // The client lists the collections at its first read, under this certificate.
-        paykit.settle_listed_cert().await?;
+        paykit.follow_listed_cert(true).await?;
         Ok(paykit)
     }
 
@@ -358,7 +366,10 @@ impl Paykit {
         if paykit.certificate_refused().is_none() {
             paykit.bound_restored_cursor_time().await?;
         }
-        paykit.settle_listed_cert().await?;
+        // A load follows a narrowing only: with no certificate kept as listed under, as after
+        // a load under one Paykit refused or a store an earlier build wrote, the records
+        // count as unlisted until a listing (`Paykit::unlisted`).
+        paykit.follow_listed_cert(false).await?;
         Ok(paykit)
     }
 
@@ -562,9 +573,6 @@ impl Paykit {
             }
             Err(error) => return Err(error.into()),
         };
-        // The client's events about the app's kept batches, first: a request or an attempt
-        // whose batch it dropped is no longer kept (`kept.rs`).
-        self.note_kept_events(&report.events).await?;
         let account_gone = account_gone(&report.events)
             || (report.stopped && account_gone(&self.app.unacknowledged_events().await?));
         if account_gone {
@@ -596,12 +604,20 @@ impl Paykit {
         // A certificate the read took may read more than the one before: its records are
         // listed now, or stay unlisted for the next receive or write (`Paykit::list_widened`).
         let records_unlisted = self.list_widened().await?;
+        // A certificate the read took that reads no more than the one listed under, a
+        // narrowed one included, is followed; one that passes Paykit's checks only now, as
+        // after a refused one, too (`Paykit::follow_listed_cert`).
+        self.follow_listed_cert(false).await?;
+        let keys = self.scope_keys_awaited().await?;
         // The entries the client stored for good: their messages kept and written into
         // their records as room frees, their duty events acknowledged (`stored.rs`).
         self.take_stored_entries().await?;
         // The payees' cancellations the read kept go into their records, as later writes of
-        // this app's own (Paykit spec 8.1).
-        self.place_kept_cancellations().await?;
+        // this app's own (Paykit spec 8.1), unless the payer's side waits for its scope keys:
+        // they build on request records the copy may lack, and stay kept meanwhile.
+        if keys != Some(crate::hold::KeysAwaited::PayerSide) {
+            self.place_kept_cancellations().await?;
+        }
         // The senders of messages dropped before they were taken: of replies dropped for the
         // bounds once the record of one of their requests came, of entries dropped
         // unverified at once, then again at most once a day while the mark lives.
@@ -626,6 +642,7 @@ impl Paykit {
             resends: answered.saturating_add(asked).saturating_add(marked),
             certificate_refused: None,
             records_unlisted,
+            scope_keys_awaited: keys.is_some(),
             account_gone: false,
         })
     }
@@ -638,7 +655,6 @@ impl Paykit {
     pub async fn flush(&mut self) -> Result<()> {
         self.refresh_own()?;
         self.app.flush_outbox().await?;
-        self.note_unacknowledged().await?;
         Ok(())
     }
 }

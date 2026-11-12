@@ -208,7 +208,11 @@ impl PaykitError {
 
     /// The ID of the call's own batch, when the client kept it to send again
     /// ([`AppError::Kept`]): what it writes and sends goes, the same bytes, at the app's next
-    /// write or read, so the caller doesn't make the call again. `None` when nothing of the
+    /// write or read, so the caller doesn't make the call again. The batch keeps this ID for
+    /// its whole life, signed again or not, and the client's `App::kept_batch` (through
+    /// [`crate::Paykit::app`]) tells what became of it: still kept, applied, or dropped and
+    /// why, for `SENT_RETENTION_MS` after it ended. `None` from there never says the batch
+    /// was never sent. `None` here when nothing of the
     /// call was kept, but for a store failure: the client returns that bare when it can't
     /// read whether it kept the batch, which may still go with the next write or read, so a
     /// caller reads the state the call would change after that write before it calls again.

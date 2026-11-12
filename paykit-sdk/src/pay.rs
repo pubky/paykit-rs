@@ -34,9 +34,9 @@ use paykit_lib::{
     AttemptId, Body, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
 };
 use pubky_switch_client::app::{
-    claim_conflict, AppError, ClaimOp, Initiator, LocalWrite, ObligationDeadline, OpBatch,
-    PeerIdentity, RecordContent, Refusal as ClientRefusal, SignedMessage, UserConfirmed,
-    REVALIDATION_MS,
+    claim_conflict, AppError, ClaimAttempt, ClaimOp, Initiator, KeptBatch, KeptBatchStatus,
+    LocalWrite, ObligationDeadline, OpBatch, PeerIdentity, RecordContent, Refusal as ClientRefusal,
+    SignedMessage, UserConfirmed, REVALIDATION_MS,
 };
 use pubky_switch_core::chain::TransitionProof;
 use pubky_switch_core::claims::{
@@ -970,9 +970,13 @@ impl Paykit {
     /// # Errors
     ///
     /// [`Refusal::NotFound`] for an attempt whose outcome doesn't wait on its record;
-    /// [`PaykitError::Conflict`] as above; the client's errors.
+    /// [`PaykitError::Conflict`] as above; [`Refusal::NotNow`] naming the scope keys while
+    /// the record's value is sealed under a key the app doesn't hold yet, which opens once
+    /// it comes and is never replaced meanwhile; the client's errors.
     pub async fn repair_activity_record(&mut self, attempt_id: &AttemptId) -> Result<PayOutcome> {
         self.refresh_own()?;
+        // A repair writes over a value the app can't read, on the user's word: it waits for
+        // the records to be listed, a wider certificate's keys included.
         self.records_known().await?;
         self.require_pay()?;
         let mut entry = self
@@ -1421,8 +1425,10 @@ impl Paykit {
     /// read again, never on a copy held: another own app may have rejected or cancelled the
     /// request, or the payee cancelled it, as the request's status shows before its expiry.
     /// [`Refusal::DeadlinePassed`] only for a record that is there, reads, is bound to this
-    /// request's key, holds this request, and leaves it open; a closed one gives what closed
-    /// it. Any other record gives `otherwise`, the error the attempt met, or, without one,
+    /// request's key, holds this request, and leaves it open, as the switch's current write
+    /// ([`Paykit::fresh_request`]); a closed one gives what closed it. The switch holding none
+    /// (`404`), or a newer write this app refused, is no evidence the request is open: it
+    /// gives `otherwise`, as any other record does: the error the attempt met, or, without one,
     /// [`Refusal::NotFound`] for none and [`PaykitError::Conflict`] for one that doesn't read
     /// as this request. The caller has taken the claim's state first.
     ///
@@ -1746,14 +1752,9 @@ impl Paykit {
             }
             // The answer may have been lost: the batch is kept and the journal says no money
             // moved, so a resume reads the claim and writes `failed` if the attempt is ours.
-            // A batch the client still keeps is noted: until it is sent or dropped, the claim
-            // can't show the attempt, and a resume leaves the entry as it is.
-            Err(error) => {
-                if let Some(batch_id) = error.kept_batch() {
-                    self.note_kept(batch_id, None, Some(&attempt_id)).await?;
-                }
-                return Err(error.into());
-            }
+            // While the client still keeps the batch, the claim can't show the attempt, and a
+            // resume leaves the entry as it is ([`Paykit::attempt_still_kept`]).
+            Err(error) => return Err(error.into()),
         };
         let proof = submitted.proofs.first();
         entry.step = proof.and_then(|proof| proof.body().step);
@@ -1934,7 +1935,7 @@ impl Paykit {
                 activity::read(Some(value), &self.identity(), ActivitySide::Payer)
                     .is_some_and(|record| record.response.is_none())
             }
-            Some(RecordContent::Unreadable) => false,
+            Some(RecordContent::Unreadable(_)) => false,
             None | Some(RecordContent::Deleted) => true,
         })
     }
@@ -2050,7 +2051,7 @@ impl Paykit {
                     None
                 }
             }
-            Some(RecordContent::Unreadable) => return Ok(()),
+            Some(RecordContent::Unreadable(_)) => return Ok(()),
             None | Some(RecordContent::Deleted) => None,
         };
         let mut finished = entry.clone();
@@ -2444,6 +2445,14 @@ impl Paykit {
         let own = self.identity();
         let key = self.activity_key(target)?;
         let held = self.app.shared_record(&key).await?;
+        // A value only waiting for its scope key opens once the key comes: the outcome waits
+        // for it, never offered as a repair over a value that only isn't open yet.
+        if held
+            .as_ref()
+            .is_some_and(|r| crate::hold::awaits_key(&r.content))
+        {
+            return Err(crate::hold::value_awaits_key());
+        }
         let read = match held.as_ref().map(|r| &r.content) {
             None | Some(RecordContent::Deleted) => None,
             Some(content) => match activity::read(content.value(), &own, ActivitySide::Payer) {
@@ -2551,6 +2560,26 @@ impl Paykit {
             .map(|a| (read.view.step, a.outcome)))
     }
 
+    /// Whether the client still keeps the batch that carries `entry`'s attempt, to send
+    /// again: its claim can't show the attempt until the batch is answered, so the entry is
+    /// left as it is. Anything else reads the claim: a batch applied or dropped, and an
+    /// attempt the client knows no batch of, which never says it was never written. A batch
+    /// ended past the client's retention, kept before a restore, or written another way is
+    /// unknown to the client, and only the claim tells whether the attempt is on it.
+    async fn attempt_still_kept(&self, entry: &JournalEntry) -> Result<bool> {
+        let attempt = ClaimAttempt {
+            claim_key: entry.obligation,
+            attempt_id: entry.attempt()?.to_bytes(),
+        };
+        Ok(matches!(
+            self.app.kept_attempt(attempt).await?,
+            Some(KeptBatch {
+                status: KeptBatchStatus::Kept { .. },
+                ..
+            })
+        ))
+    }
+
     /// The proof (Paykit spec 7.2 step 4, Paykit wire 4.10), signed for the outcome's batch.
     fn sign_proof(&self, entry: &JournalEntry) -> Result<SignedMessage> {
         let request_hash = entry.request_hash()?;
@@ -2587,22 +2616,40 @@ impl Paykit {
     /// isn't confirmed in the last 60 s; the client's errors; the rail's errors.
     pub async fn resume_payments(&mut self) -> Result<Vec<PayOutcome>> {
         self.refresh_own()?;
-        self.records_known().await?;
+        // While a wider certificate's scope keys are missing, the resume goes on only on the
+        // payer's side it can read: with the `pay` key held and the payer's records and
+        // claims read as before, its writes are built on versions it holds. Otherwise it
+        // asks the method's history only, journals what it says, and writes nothing to the
+        // switch, as without `pay`, until the keys come.
+        // A restore's copy not listed yet lacks every record: while keys wait, which leaves it
+        // unlisted, the payer's side waits too.
+        let keys = self.scope_keys_awaited().await?;
+        let payer_waits = keys == Some(crate::hold::KeysAwaited::PayerSide)
+            || (keys.is_some() && self.unlisted().await? == Some(crate::hold::Unlisted::Restore));
+        if keys.is_none() {
+            self.records_known().await?;
+        }
         // Batches kept from before go first, so the claim read below shows those sent and
         // the journal holds what their answers settled. One the client still can't send
         // stays kept: its attempt isn't on the claim yet, so its entry is left `Recorded`
-        // below, until the batch is sent or the client drops it (`kept.rs`).
+        // below, until the batch is sent or the client drops it. The flush sends only bytes
+        // signed earlier, kept batches and queued messages, and builds nothing on the copy,
+        // so it goes while the payer's side waits too.
         self.app.flush_outbox().await?;
-        self.note_unacknowledged().await?;
-        // Cancellations kept and not yet placed go into their records (Paykit spec 8.1).
-        self.place_kept_cancellations().await?;
+        // Cancellations kept and not yet placed go into their records (Paykit spec 8.1),
+        // which they build on: not while the payer's side waits.
+        if !payer_waits {
+            self.place_kept_cancellations().await?;
+        }
         let mut out = Vec::new();
         for mut entry in self.journal().await? {
             // An outcome written whose acceptance is still owed: queued and placed now.
             // One that fails now stays owed for the next resume, and stops no other entry:
             // those after it are still resolved from the method's history.
             if entry.stage == Stage::AcceptanceOwed {
-                let _ = self.finish_owed_acceptance(&mut entry).await;
+                if !payer_waits {
+                    let _ = self.finish_owed_acceptance(&mut entry).await;
+                }
                 continue;
             }
             if !entry.open() {
@@ -2613,7 +2660,7 @@ impl Paykit {
             // service refuses both, `403 permission_missing`), and makes no payment
             // ([`Paykit::final_payment_check`]): every open entry waits for an app holding
             // it, its proof kept if it has one, and the other entries go on.
-            if !self.holds("pay") {
+            if !self.holds("pay") || payer_waits {
                 out.push(self.held_without_pay(&mut entry).await?);
                 continue;
             }
@@ -2630,7 +2677,7 @@ impl Paykit {
                         None => self.set_stage(&mut entry, Stage::Abandoned).await?,
                     }
                 }
-                Stage::Recorded if self.attempt_kept(&attempt_id).await? => {}
+                Stage::Recorded if self.attempt_still_kept(&entry).await? => {}
                 Stage::Recorded | Stage::Attempted => match self.attempt_state(&entry).await? {
                     // No payment started: the open attempt is written `failed`.
                     Some((step, Outcome::Open | Outcome::Unknown)) => {
@@ -2654,7 +2701,7 @@ impl Paykit {
                 Stage::AcceptanceOwed | Stage::Finished | Stage::Abandoned => {}
             }
         }
-        if self.holds("pay") {
+        if self.holds("pay") && !payer_waits {
             out.extend(self.recheck_failed().await?);
         }
         self.prune_journal().await?;
@@ -2896,8 +2943,9 @@ impl Paykit {
 
     /// Whether a repeat of `entry`'s dispatch is withheld because its request may no longer
     /// be paid (Paykit spec 8.1): this app keeps a stop for it, or the request record the
-    /// switch holds, read again, shows it cancelled or rejected, or isn't there or doesn't
-    /// read as the request, so nothing shows it still open. A payment without a request has
+    /// switch holds, read again, shows it cancelled or rejected, or isn't there (a `404`
+    /// included, whatever copy this app keeps) or doesn't read as the request, a newer write
+    /// this app refused included, so nothing shows it still open. A payment without a request has
     /// nothing a payee cancels.
     async fn repeat_withheld(&mut self, entry: &JournalEntry) -> Result<bool> {
         if entry.request_hash()?.is_none() {

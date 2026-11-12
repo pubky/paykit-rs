@@ -153,7 +153,11 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// The client's errors; the rail's errors.
+    /// The client's errors; the rail's errors; [`crate::Refusal::NotNow`] while a wider
+    /// certificate's scope keys are still missing: its payer pass reads the obligations from
+    /// the records, and a listing before the keys can't open the records they add, so the
+    /// pass would miss them. [`Paykit::resume_payments`] still finishes the payments already
+    /// dispatched meanwhile.
     pub async fn reconcile(&mut self) -> Result<ReconcileReport> {
         self.refresh_own()?;
         self.list_records().await?;

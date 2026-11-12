@@ -37,7 +37,7 @@ use paykit_lib::{Label, PaykitKindRules};
 use pubky_switch_client::app::{
     decode_local_state, Collection as SwitchCollection, Effect, LocalView, LocalWrite, LossActions,
     MissedEntries, OpaqueRule, Outcome, Protocol, ProtocolLayer, ProviderLoss, ReceiveContext,
-    ReceivedMessage, RecordTarget, ResendNeeded, RestoreContext, StoreFailure,
+    ReceivedMessage, RecordTarget, ResendNeeded, RestoreContext, StoreFailure, WriteBase,
 };
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
@@ -365,8 +365,7 @@ pub(crate) fn restore_paykit_layer(
             // So do the marks of records not yet listed and of the payer pass owed: this
             // restore sets its own.
             // The certificate last listed under is the backup's own: this restore sets it to
-            // the restored one, which its listing covers. The client's kept batches are its
-            // own; a restore keeps no note of them.
+            // the restored one, which its listing covers.
             // A stored entry's note is the client's entry's: the client tells of the entries it
             // restores again, and the note is kept anew then (`stored.rs`). A taken event's
             // mark isn't restored: the client tells the protocol again of the events a restore
@@ -378,7 +377,6 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::RecordsUnlisted
             | StateKey::PayerPassOwed
             | StateKey::ListedCert
-            | StateKey::KeptBatch(_)
             | StateKey::StoredNote { .. }
             | StateKey::Taken(_) => continue,
             StateKey::Journal(attempt) => attempt,
@@ -907,12 +905,41 @@ impl Protocol for PaykitProtocol {
     /// Whether a newer write goes back on what the app saw (Paykit wire 5.3, 5.4): drops or
     /// replaces a message in a role seen, or changes the Allowance seen; for a
     /// `payment_lists` record, holds an older list or drops a single-use endpoint marked
-    /// used. A value that doesn't read is refused too. A delete isn't such a write.
+    /// used. A value that doesn't read is refused too. A delete isn't such a write. Judged
+    /// as a reader that doesn't hold the version the write builds on
+    /// ([`Protocol::record_regression_on`] is told).
     fn record_regression(
         &self,
         collection: &str,
         seen: &[u8],
         value: Option<&[u8]>,
+    ) -> Option<String> {
+        self.regression(collection, seen, value, false)
+    }
+
+    /// [`Protocol::record_regression`], told what the write builds on: a write built on the
+    /// version this app holds is judged as by a reader holding it, which also refuses a
+    /// reassociation at or before a period it attempted (Paykit wire 5.3 "Seen Allowance").
+    fn record_regression_on(
+        &self,
+        collection: &str,
+        seen: &[u8],
+        value: Option<&[u8]>,
+        base: WriteBase,
+    ) -> Option<String> {
+        self.regression(collection, seen, value, base.held)
+    }
+}
+
+impl PaykitProtocol {
+    /// [`Protocol::record_regression`]'s rules; `built_on` when the write builds on the
+    /// version this app holds.
+    fn regression(
+        &self,
+        collection: &str,
+        seen: &[u8],
+        value: Option<&[u8]>,
+        built_on: bool,
     ) -> Option<String> {
         let own = self.own()?;
         let value = value?;
@@ -927,12 +954,18 @@ impl Protocol for PaykitProtocol {
                 let Some(later) = activity::read(Some(value), &own.identity, side) else {
                     return Some("Paykit wire 5.3: an activity record that doesn't read".into());
                 };
-                // The client names the value the app saw, not the version the write builds on,
-                // which may be a later one the app never saw (after a `missed` item it lists
-                // only the latest values). So the app checks as a reader that doesn't hold it:
-                // the seen rules that hold whatever the base, without the reassociation rule
-                // of the version a write builds on (Paykit wire 5.3 "Seen Allowance").
-                held.check_later_write(&later).err().map(|e| e.to_string())
+                // The mark is the value the app saw. A write built on the version the app
+                // holds is checked as by a reader holding it, the reassociation rule of that
+                // version included; one built on a version it never took, such as one it
+                // skipped by listing only the latest values after a `missed` item, is checked
+                // only by the seen rules that hold whatever the base (Paykit wire 5.3 "Seen
+                // Allowance").
+                let checked = if built_on {
+                    held.check_later_write_built_on(&later)
+                } else {
+                    held.check_later_write(&later)
+                };
+                checked.err().map(|e| e.to_string())
             }
             Collection::PaymentLists => {
                 let held = PaymentListRecord::read(seen, &own.identity).ok()?;
@@ -1223,7 +1256,7 @@ mod receive_tests {
     }
 
     #[test]
-    fn test_protocol_record_regression_takes_a_reassociation_on_a_version_it_missed() {
+    fn test_protocol_record_regression_judges_a_reassociation_by_the_version_built_on() {
         use paykit_lib::identifiers::AllowanceId;
         use paykit_lib::records::Reassociation;
         let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
@@ -1261,6 +1294,15 @@ mod receive_tests {
         let (seen, moved) = (seen.to_json().unwrap(), moved.to_json().unwrap());
         assert_eq!(
             p.record_regression("payer_activity", &seen, Some(&moved)),
+            None
+        );
+        // Built on the version the app holds, the one that attempted the period, the same
+        // write moves an attempted period: a regression.
+        assert!(p
+            .regression("payer_activity", &seen, Some(&moved), true)
+            .is_some());
+        assert_eq!(
+            p.regression("payer_activity", &seen, Some(&moved), false),
             None
         );
         // Dropping the entry again is a regression.
