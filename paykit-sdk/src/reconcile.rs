@@ -35,7 +35,7 @@ use pubky_switch_core::ops::{Condition, OpKind};
 
 use crate::activity::{self, ActivityTarget};
 use crate::destination::Carrier;
-use crate::error::{Refusal, Result};
+use crate::error::{PaykitError, Refusal, Result};
 use crate::hold::RestoreHold;
 use crate::journal::{Destination, JournalEntry, KeptAmount, KeptPeriod, Stage};
 use crate::pay::{own_deadline, PayOutcome, Written};
@@ -106,7 +106,7 @@ impl Paykit {
     /// that may have an open attempt: those its request record lists in `attempted_periods`,
     /// where every attempt on a period is listed from its own batch on until its claim has
     /// no open or `unknown` attempt (Paykit spec 8.2).
-    fn obligations(&self, records: &[ActivityRecord]) -> Vec<Obligation> {
+    fn obligations(&self, records: &[ActivityRecord]) -> Result<Vec<Obligation>> {
         let mut out: Vec<Obligation> = Vec::new();
         let mut periods: Vec<([u8; 32], [u8; 32], u64)> = Vec::new();
         for record in records {
@@ -151,20 +151,21 @@ impl Paykit {
         periods.sort_unstable();
         periods.dedup();
         for (payee, request_hash, start) in periods {
-            // A period of a request whose record this app holds, by its recurrence.
-            let Some((record, period)) = records.iter().find_map(|record| {
+            // The period of a request whose record lists it, by its recurrence; one the
+            // recurrence can't compute is an error, never a period with nothing to reconcile.
+            let Some((record, body)) = records.iter().find_map(|record| {
                 let (stored, body) = request_of(record)?;
-                let period = body
-                    .recurrence
-                    .as_ref()?
-                    .lookup(start.checked_mul(1000)?)
-                    .ok()??;
-                (stored.hash() == request_hash
-                    && record.counterparty == payee
-                    && period.start_secs() == start)
-                    .then(|| (record.clone(), period))
+                (stored.hash() == request_hash && record.counterparty == payee)
+                    .then_some((record.clone(), body.clone()))
             }) else {
                 continue;
+            };
+            let at = start.checked_mul(1000).ok_or_else(PaykitError::corrupt)?;
+            let period = match body.recurrence.as_ref().map(|r| r.lookup(at)).transpose()? {
+                Some(Some(period)) if period.start_secs() == start => period,
+                // A listed start that names no Billing Period of the request fences nothing
+                // (Paykit wire 5.3).
+                _ => continue,
             };
             out.push(Obligation {
                 claim_key: self.obligation(&payee, &request_hash, start),
@@ -175,7 +176,7 @@ impl Paykit {
                 period: Some(period),
             });
         }
-        out
+        Ok(out)
     }
 
     async fn payer_records(&self) -> Result<Vec<ActivityRecord>> {
@@ -251,7 +252,7 @@ impl Paykit {
             Vec::new()
         };
         let me = self.app_id();
-        for obligation in self.obligations(&records) {
+        for obligation in self.obligations(&records)? {
             let Some(read) = self.app.read_claim(&obligation.claim_key).await? else {
                 continue;
             };
@@ -648,7 +649,7 @@ impl Paykit {
             }
             None => {
                 let records = self.payer_records().await?;
-                self.obligations(&records)
+                self.obligations(&records)?
                     .into_iter()
                     .find(|o| o.claim_key == *obligation)
                     .map(|o| o.natural_key)

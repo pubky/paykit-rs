@@ -711,11 +711,7 @@ fn receipt_effect(
     // that doesn't read parks the receipt rather than settling the claim with no deadline,
     // or consuming it (Switch spec 8.2): the store is corrupt.
     let journaled = match cx.local_get(key::journal(&attempt_id).as_bytes())? {
-        Some(bytes) => Some(
-            state::decode::<JournalEntry>(&bytes)
-                .and_then(|entry| entry.check().map(|()| entry))
-                .map_err(|_| Fail::corrupt())?,
-        ),
+        Some(bytes) => Some(journaled_entry(cx, &bytes, &attempt_id)?),
         None => None,
     };
     // A receipt reaches only an app holding `pay`, which carries `claims.write`, and an entry
@@ -828,6 +824,25 @@ fn late_receipt(
         Some(entry) => received_in_time(cx, entry),
         None => Ok(()),
     }
+}
+
+/// The journal entry kept at `attempt_id`'s key, read as every journal read takes it: checked
+/// as a restore checks it, its claim key bound to its request and Billing Period through the
+/// receive context's naming key ([`JournalEntry::check_bound`]), and the attempt it names
+/// the key's. One that doesn't is a corrupt store, never taken as no entry.
+fn journaled_entry(
+    cx: &ReceiveContext<'_>,
+    bytes: &[u8],
+    attempt_id: &AttemptId,
+) -> Result<JournalEntry, Fail> {
+    let entry = state::decode::<JournalEntry>(bytes).map_err(|_| Fail::corrupt())?;
+    entry
+        .check_bound(|payee, request, start| obligation(cx, payee, request, start))
+        .map_err(|_| Fail::corrupt())?;
+    if entry.attempt().map_err(|_| Fail::corrupt())? != *attempt_id {
+        return Err(Fail::corrupt());
+    }
+    Ok(entry)
 }
 
 /// The `status` of a payer's record whose payment was made after `failed` was written on its

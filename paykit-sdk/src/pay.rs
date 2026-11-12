@@ -2569,7 +2569,16 @@ impl Paykit {
         };
         changed |= self.place_acceptance(&mut record, entry)?;
         if let Some(proof) = proof {
-            changed |= activity::place(&mut record, Role::Proof, self.own_copy(proof)?);
+            let proof = self.own_copy(proof)?;
+            // A period's proof goes only beside the details it names (Paykit wire 5.3): a
+            // record written since without them, such as one rebuilt after a delete, gets
+            // them back first.
+            if activity::names_details_not_held(&record, &proof) {
+                if let Some(details) = self.details_paid_by(entry)? {
+                    changed |= activity::place(&mut record, Role::PeriodDetails, details);
+                }
+            }
+            changed |= activity::place(&mut record, Role::Proof, proof);
         }
         // A payment made after `failed` was written on its claim: the record shows it, for
         // every own app that gets the receipt (Paykit spec 7.2).
@@ -2621,13 +2630,10 @@ impl Paykit {
         let mut record = activity::empty(ActivitySide::Payer, entry.payee);
         match entry.request_hash()? {
             // A period record holds no request: it names its request and Billing Period,
-            // and holds the details the payment used (Paykit wire 5.3).
+            // and the outcome places the details the payment used (Paykit wire 5.3).
             Some(hash) if entry.billing_period.is_some() => {
                 record.request_hash = Some(hash);
                 record.billing_period = entry.period()?;
-                if let Some(details) = self.details_paid_by(entry)? {
-                    activity::place(&mut record, Role::PeriodDetails, details);
-                }
             }
             Some(hash) => {
                 let Some(kept) = &entry.request else {

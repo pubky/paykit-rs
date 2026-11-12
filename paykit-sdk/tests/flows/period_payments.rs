@@ -1491,3 +1491,268 @@ async fn test_period_payments_by_policy_fails_over_a_manual_only_mark_written_si
         .unwrap_err();
     assert_eq!(refusal(&refused), Refusal::ManualOnly);
 }
+
+#[tokio::test]
+async fn test_period_payments_outcome_rebuilds_a_deleted_period_record_with_its_details() {
+    // January is paid by period details; its period record is deleted before the outcome:
+    // the outcome writes it again, the details the proof names placed before the proof, so
+    // the record binds (Paykit wire 5.3).
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    let now = w.clock.now_ms();
+    shop.send_period_details(&sale, details(january(), "lnbc1jan", now + DAY_MS))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let pending = by_user(&mut wallet, &request, january(), PayOptions::default())
+        .await
+        .unwrap();
+    let collection = Collection::PayerActivity;
+    let target = RecordTarget::new(
+        SwitchCollection::new(collection.name(), collection.policy(None)),
+        &natural_key::period_record(
+            &request.payee,
+            &request.request_hash,
+            january().start_secs(),
+        ),
+    );
+    let op = wallet
+        .app_mut()
+        .record_op(&target, None, Vec::new())
+        .await
+        .unwrap();
+    wallet
+        .app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    w.rail.settle(&pending.attempt_id(), true);
+    let outcomes = wallet.resume_payments().await.unwrap();
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| matches!(o, PayOutcome::Paid { .. })),
+        "{outcomes:?}"
+    );
+    let record = period_record(&w, &wallet, &request, january())
+        .await
+        .unwrap();
+    let (stored, _) = proof_of(&record);
+    assert_eq!(
+        stored.message().refs[1],
+        record.period_details.as_ref().unwrap().hash()
+    );
+    shop.receive(None).await.unwrap();
+    assert!(shop.payee_activity().await.unwrap()[0].periods[0].paid);
+}
+
+/// A store that serves every journal entry as `tamper` rewrites it, once set: what a damaged
+/// or foreign store would hand back.
+#[derive(Default)]
+struct TamperedJournal {
+    inner: pubky_switch_client::store::MemoryStore,
+    #[allow(clippy::type_complexity)]
+    tamper: std::sync::Mutex<Option<Box<dyn Fn(&mut serde_json::Value) + Send + Sync>>>,
+}
+
+impl pubky_switch_client::store::StateStore for TamperedJournal {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        let value = self.inner.get(ns, key)?;
+        let tamper = self.tamper.lock().unwrap();
+        match (value, tamper.as_ref()) {
+            (Some(bytes), Some(tamper)) if key.starts_with(b"p/j/") => {
+                let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                tamper(&mut value["d"]);
+                Ok(Some(serde_json::to_vec(&value).unwrap()))
+            }
+            (value, _) => Ok(value),
+        }
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.inner.commit(batch)
+    }
+}
+
+/// The wallet pays January on a store whose journal reads are then rewritten by `tamper`,
+/// and receives the shop's receipt of the payment. Returns whether the receipt was placed.
+async fn receipt_over_a_tampered_entry(tamper: fn(&mut serde_json::Value)) -> bool {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let store = Arc::new(TamperedJournal::default());
+    let mut wallet = w
+        .wallet_on(
+            "wallet",
+            Arc::clone(&store) as Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    by_user(&mut wallet, &request, january(), PayOptions::default())
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let period = shop.payee_activity().await.unwrap()[0].periods[0].record;
+    shop.confirm_payment(&period).await.unwrap().unwrap();
+    *store.tamper.lock().unwrap() = Some(Box::new(tamper));
+    let _ = wallet.receive(None).await;
+    *store.tamper.lock().unwrap() = None;
+    wallet.request(&request).await.unwrap().periods[0]
+        .receipt
+        .is_some()
+}
+
+#[tokio::test]
+async fn test_period_payments_receipt_parked_over_an_entry_of_another_obligation() {
+    // The receipt's attempt is journaled with another claim key than its period's: a corrupt
+    // store, which parks the receipt rather than settle a claim through it (state read back
+    // as a restore reads it).
+    assert!(
+        receipt_over_a_tampered_entry(|_| {}).await,
+        "an entry that reads places the receipt"
+    );
+    assert!(
+        !receipt_over_a_tampered_entry(|entry| {
+            entry["obligation"] = serde_json::json!(pubky_switch_core::enc::b64(&[7; 32]));
+        })
+        .await
+    );
+}
+
+#[tokio::test]
+async fn test_period_payments_receipt_parked_over_an_entry_naming_another_attempt() {
+    assert!(
+        !receipt_over_a_tampered_entry(|entry| {
+            entry["attempt_id"] = serde_json::json!(AttemptId::from_bytes([5; 16]).to_text());
+        })
+        .await
+    );
+}
+
+/// A backup of the wallet with January's payment in flight, and Paykit's layer of it.
+async fn backup_paying_january(w: &World) -> (serde_json::Value, [u8; 16]) {
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed(w, &mut shop, &mut wallet).await;
+    w.rail.next(Behaviour::Hang);
+    by_user(&mut wallet, &request, january(), PayOptions::default())
+        .await
+        .unwrap();
+    let bytes = wallet.backup().await.unwrap().to_bytes().unwrap();
+    (serde_json::from_slice(&bytes).unwrap(), wallet.app_id())
+}
+
+/// Whether a restore takes the backup `w`'s wallet took paying January, its Paykit layer's
+/// entries under keys starting with `prefix` rewritten by `tamper`.
+async fn restore_takes(
+    w: &World,
+    backup: &serde_json::Value,
+    prefix: &[u8],
+    tamper: impl Fn(&mut Vec<u8>, &mut serde_json::Value),
+) -> bool {
+    let data = backup["protocol"]["data"].as_str().unwrap();
+    let bytes = pubky_switch_core::enc::unb64(data).unwrap();
+    let mut state: Vec<(Vec<u8>, Vec<u8>)> = pubky_switch_client::app::decode_local_state(&bytes)
+        .unwrap()
+        .into_iter()
+        .collect();
+    let mut found = false;
+    for (key, value) in &mut state {
+        if key.starts_with(prefix) {
+            found = true;
+            let mut json: serde_json::Value = serde_json::from_slice(value).unwrap();
+            tamper(key, &mut json["d"]);
+            *value = serde_json::to_vec(&json).unwrap();
+        }
+    }
+    assert!(found, "nothing under the prefix");
+    let mut out = backup.clone();
+    out["protocol"]["data"] = serde_json::Value::String(pubky_switch_core::enc::b64(
+        &pubky_switch_client::app::encode_local_state(&state),
+    ));
+    let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&out).unwrap()).unwrap();
+    Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .is_ok()
+}
+
+#[tokio::test]
+async fn test_period_payments_restore_refuses_a_period_entry_a_run_cant_write() {
+    // A period's journal entry naming another period's claim key, owing an acceptance, at
+    // its request record's key, or with an empty period: no run writes one, and the
+    // restore refuses the backup.
+    let w = World::new();
+    let (backup, _) = backup_paying_january(&w).await;
+    assert!(restore_takes(&w, &backup, b"j/", |_, _| {}).await);
+    let request_key = |entry: &serde_json::Value| {
+        let payee =
+            pubky_switch_core::enc::unb64_array::<32>(entry["payee"].as_str().unwrap()).unwrap();
+        let hash =
+            pubky_switch_core::enc::unb64_array::<32>(entry["request_hash"].as_str().unwrap())
+                .unwrap();
+        pubky_switch_core::enc::b64(&natural_key::request_record(&payee, &hash))
+    };
+    let refused: [Box<dyn Fn(&mut Vec<u8>, &mut serde_json::Value)>; 4] = [
+        Box::new(|_, e| e["obligation"] = serde_json::json!(pubky_switch_core::enc::b64(&[7; 32]))),
+        Box::new(|_, e| e["acceptance_owed"] = serde_json::json!(true)),
+        Box::new(move |_, e| e["natural_key"] = serde_json::json!(request_key(e))),
+        Box::new(|_, e| e["billing_period"]["ends_at"] = e["billing_period"]["starts_at"].clone()),
+    ];
+    for tamper in refused {
+        assert!(!restore_takes(&w, &backup, b"j/", tamper).await);
+    }
+}
+
+#[tokio::test]
+async fn test_period_payments_restore_refuses_a_kept_receipt_under_another_record() {
+    // A receipt kept before its record is bound to the request record its key names: one
+    // kept under another record's key is refused.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let proof = outside_proof(&w, &shop, &request, january()).await;
+    w.deliver(&w.alice, "wallet", &w.bob, &[shop.app_id()], &proof);
+    shop.receive(None).await.unwrap();
+    let period = shop.payee_activity().await.unwrap()[0].periods[0].record;
+    shop.confirm_payment(&period).await.unwrap().unwrap();
+    wallet.receive(None).await.unwrap();
+    let bytes = wallet.backup().await.unwrap().to_bytes().unwrap();
+    let backup: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(restore_takes(&w, &backup, b"pr/", |_, _| {}).await);
+    let other = pubky_switch_core::enc::b64(&[9; 32]);
+    assert!(
+        !restore_takes(&w, &backup, b"pr/", move |key, _| {
+            let text = String::from_utf8(key.clone()).unwrap();
+            let parts: Vec<&str> = text.split('/').collect();
+            *key = format!("{}/{}/{}/{}", parts[0], parts[1], other, parts[3]).into_bytes();
+        })
+        .await
+    );
+}
