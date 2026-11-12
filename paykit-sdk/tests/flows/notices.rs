@@ -260,6 +260,34 @@ async fn test_notices_acknowledged_with_its_journal_entry_at_another_key_refused
 }
 
 #[tokio::test]
+async fn test_notices_late_receipt_written_later_raised_by_an_own_app_from_its_kept_view() {
+    // Alice's second wallet keeps the claim's view showing the attempt failed, and holds no
+    // journal entry. The service deletes the claim; bob's receipt then reaches the second
+    // wallet, whose step and first later write are refused. Its later write tells the user
+    // from the kept view, as its first read would have.
+    let w = World::new();
+    let mut other = w.wallet("second").await;
+    let (_wallet, mut shop, attempt_id) = paid_after_failed(&w).await;
+    other.receive(None).await.unwrap();
+    w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    // The client's own read first takes what is due at the switch past the window.
+    other.app_mut().receive(None).await.unwrap();
+    receipt(&mut shop).await;
+    refuse_writes(&w, 2);
+    other.receive(None).await.unwrap();
+    assert!(other.notices().await.unwrap().is_empty());
+    other.receive(None).await.unwrap();
+    assert!(other.requests().await.unwrap()[0].receipt.is_some());
+    let notices = other.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, NoticeKind::PaidAfterFailed);
+    assert_eq!(notices[0].attempt_id, Some(attempt_id));
+    // Raised once: a later receive raises it no more.
+    other.receive(None).await.unwrap();
+    assert_eq!(other.notices().await.unwrap(), notices);
+}
+
+#[tokio::test]
 async fn test_notices_receipt_within_the_claim_settles_it_and_raises_none() {
     let w = World::new();
     let (mut wallet, mut shop, _) = paid_after_failed(&w).await;

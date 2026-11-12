@@ -55,7 +55,10 @@ use crate::activity::{ActivityTarget, Role};
 use crate::error::{PaykitError, Result};
 use crate::notices::{KeptNotice, NoticeKind, StoredHandle};
 use crate::paykit::Paykit;
-use crate::receive::{receipt_obligation, receipt_on_record, receipt_settles, ReceiptClaim};
+use crate::receive::{
+    failure_view, receipt_obligation, receipt_on_record, receipt_settles, FailureView,
+    ReceiptClaim, ReceiptSettles, SwitchClaim,
+};
 use crate::records::{list_target, KeptMessage};
 use crate::requests::{RequestRef, RequestStatus, RequestView};
 
@@ -82,13 +85,15 @@ pub(crate) fn submitted<T>(result: std::result::Result<T, AppError>) -> Result<P
     match result {
         Ok(_) => Ok(Placed::Done),
         Err(AppError::Refused(ClientRefusal::NotNow(_))) => Ok(Placed::Waits),
-        Err(error)
-            if !crate::pay::switch_unavailable(&error) && error.unkept().code().is_some() =>
-        {
-            Ok(Placed::Not)
-        }
+        Err(error) if refused(&error) => Ok(Placed::Not),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Whether `error` is the switch's refusal of a request, an answer with its error code,
+/// rather than a switch that doesn't answer or a failure of the app's own.
+fn refused(error: &AppError) -> bool {
+    !crate::pay::switch_unavailable(error) && error.unkept().code().is_some()
 }
 
 /// The side of the shared records `target` is of.
@@ -685,21 +690,36 @@ impl Paykit {
                 &attempt_id,
                 |request| self.obligation(&sender, request, 0),
             );
-            let view = self
+            // The claim view as the first read takes it, by the same rule
+            // (`receive::failure_view`): the view the app keeps, or the switch's read only
+            // when it asks for it. A read the switch refuses settles nothing.
+            let kept = self
                 .app
-                .read_claim(&obligation)
+                .claim_evidence(&obligation)
                 .await?
-                .map(|read| read.view);
-            let settles = receipt_settles(&ReceiptClaim {
-                stored: &stored,
-                attempt_id,
-                obligation,
-                deadline,
-                view: view.as_ref(),
-                service_time: self.service_time(),
-                journaled,
-                first_receipt: found.first_receipt,
-            })?;
+                .map(|kept| kept.view);
+            let mut view = failure_view(kept, None);
+            if matches!(view, FailureView::ReadSwitch) {
+                let read = match self.app.read_claim(&obligation).await {
+                    Ok(read) => SwitchClaim::Read(read.map(|read| read.view)),
+                    Err(error) if refused(&error) => SwitchClaim::Refused,
+                    Err(error) => return Err(error.into()),
+                };
+                view = failure_view(None, Some(read));
+            }
+            let settles = match view {
+                FailureView::View(view) => receipt_settles(&ReceiptClaim {
+                    stored: &stored,
+                    attempt_id,
+                    obligation,
+                    deadline,
+                    view: view.as_ref(),
+                    service_time: self.service_time(),
+                    journaled,
+                    first_receipt: found.first_receipt,
+                })?,
+                FailureView::Refused | FailureView::ReadSwitch => ReceiptSettles::default(),
+            };
             if let Some((op, deadline)) = settles.claim {
                 batch = batch
                     .op(op.kind())
