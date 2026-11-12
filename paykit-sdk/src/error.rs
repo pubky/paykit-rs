@@ -73,6 +73,13 @@ pub enum Refusal {
     /// start"). Nothing was written.
     #[error("Paykit spec 8.2: the Billing Period hasn't started")]
     PeriodNotStarted,
+    /// The Billing Period's payment needs period details the payer's period record doesn't
+    /// hold yet: a later period of a request with `per_period_endpoints` needs valid details
+    /// carrying its destination, and one priced by rates valid details carrying them, both in
+    /// one details when it needs both (Paykit spec 8.2). The payer waits for them. Nothing was
+    /// written.
+    #[error("Paykit spec 8.2: waiting for the Billing Period's period details")]
+    WaitingForPeriodDetails,
     /// The occurrence is paid only by hand, after the user's confirmation: its request was
     /// accepted under an Allowance, which alone could pay it automatically (one Allowance
     /// per request), or its record is marked manual-only (Paykit spec 8.3). Nothing was

@@ -476,14 +476,22 @@ async fn test_period_payments_per_period_endpoints_wait_for_the_periods_details(
     .await;
     w.clock.set_ms(february().starts_at);
     wallet.receive(None).await.unwrap();
-    // A later period waits for period details with its destination (Paykit spec 8.2).
+    // A later period waits for valid period details with its destination (Paykit spec 8.2):
+    // none yet, then only expired ones.
     let refused = by_user(&mut wallet, &request, february(), PayOptions::default())
         .await
         .unwrap_err();
-    assert!(
-        matches!(refusal(&refused), Refusal::NoDestination(_)),
-        "{refused:?}"
-    );
+    assert_eq!(refusal(&refused), Refusal::WaitingForPeriodDetails);
+    let now = w.clock.now_ms();
+    shop.send_period_details(&sale, details(february(), "lnbc1short", now + HOUR_MS))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(HOUR_MS);
+    let refused = by_policy(&mut wallet, &request, february())
+        .await
+        .unwrap_err();
+    assert_eq!(refusal(&refused), Refusal::WaitingForPeriodDetails);
     assert!(w.rail.all_executions().is_empty());
     // The first is the request's.
     by_user(&mut wallet, &request, january(), PayOptions::default())
@@ -1380,4 +1388,102 @@ async fn test_period_payments_two_due_periods_are_two_rail_payments() {
         sale.periods.iter().all(|p| p.paid) && sale.periods.len() == 2,
         "{sale:?}"
     );
+}
+
+#[tokio::test]
+async fn test_period_payments_cancellation_refused_over_an_unknown_attempt_until_released() {
+    // January's attempt by the phone turned `unknown`: the period stays listed and the
+    // cancellation is refused as may be paid (Paykit spec 8.2, "Ending"). Once its owner
+    // reports it failed (Switch spec 10.2 row 5), the cancellation goes.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    phone.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let attempt = by_user(&mut phone, &request, january(), PayOptions::default())
+        .await
+        .unwrap()
+        .attempt_id();
+    let obligation = period_obligation(&phone, january()).await;
+    w.clock.advance_ms(PAST_ORPHAN_MS);
+    wallet.receive(None).await.unwrap();
+    let confirmed = UserConfirmed::new();
+    wallet
+        .resolve_attempt(
+            &obligation,
+            attempt,
+            paykit_sdk::Resolution::Unknown,
+            confirmed,
+        )
+        .await
+        .unwrap();
+    let refused = wallet.cancel_request(&request, None).await.unwrap_err();
+    assert!(
+        matches!(refusal(&refused), Refusal::MayBePaid { .. }),
+        "{refused:?}"
+    );
+    // A period with an `unknown` attempt stays listed: the record still fences it.
+    assert_eq!(
+        request_record(&w, &wallet, &request)
+            .await
+            .attempted_periods,
+        [january().start_secs()]
+    );
+    // Nor does a write that adds another period drop it.
+    w.clock.set_ms(february().starts_at);
+    by_user(&mut wallet, &request, february(), PayOptions::default())
+        .await
+        .unwrap();
+    assert!(request_record(&w, &wallet, &request)
+        .await
+        .attempted_periods
+        .contains(&january().start_secs()));
+    w.rail.settle(&attempt, false);
+    phone.resume_payments().await.unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.cancel_request(&request, None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn test_period_payments_by_policy_fails_over_a_manual_only_mark_written_since() {
+    // The phone marks January manual-only after the wallet last read the period record: the
+    // wallet's payment by policy is conditioned on the version it read, so its batch fails
+    // and nothing is paid; read again, the mark refuses it (Paykit spec 8.3).
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    let now = w.clock.now_ms();
+    shop.send_period_details(&sale, details(january(), "lnbc1jan", now + DAY_MS))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let mut record = period_record(&w, &phone, &request, january())
+        .await
+        .unwrap();
+    record.manual_only = true;
+    let natural = natural_key::period_record(
+        &request.payee,
+        &request.request_hash,
+        january().start_secs(),
+    );
+    write_payer_record(&mut phone, &natural, &record).await;
+    let refused = by_policy(&mut wallet, &request, january())
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, PaykitError::Conflict(_)), "{refused:?}");
+    assert!(w.rail.all_executions().is_empty());
+    wallet.receive(None).await.unwrap();
+    let refused = by_policy(&mut wallet, &request, january())
+        .await
+        .unwrap_err();
+    assert_eq!(refusal(&refused), Refusal::ManualOnly);
 }

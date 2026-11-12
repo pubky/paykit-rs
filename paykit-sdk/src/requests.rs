@@ -1520,9 +1520,21 @@ impl Paykit {
             if finished.contains(listed) {
                 continue;
             }
+            // An `unknown` attempt may have paid, whatever the claim's state: may be paid,
+            // until its owner reports it or another own app writes it `failed`.
             let claim_key = self.obligation(&request.payee, &request.request_hash, *listed);
-            if let Some(read) = self.app.read_claim(&claim_key).await? {
-                refuse_on_claim(&read.view)?;
+            let unknown = self.app.read_claim(&claim_key).await?.is_some_and(|read| {
+                read.view
+                    .attempts
+                    .iter()
+                    .any(|a| a.outcome == Outcome::Unknown)
+            });
+            if unknown {
+                return Err(Refusal::MayBePaid {
+                    reason: "Paykit spec 8.2: a listed period's attempt is unknown".into(),
+                    doubt: None,
+                }
+                .into());
             }
             return Err(Refusal::PaymentInProgress.into());
         }
