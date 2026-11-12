@@ -237,6 +237,11 @@ pub(crate) mod key {
         format!("{KEPT_REPLIES}{}/", b64(sender))
     }
 
+    /// The prefix of the notes of stored entries' messages from `sender`.
+    pub(crate) fn stored_notes_of(sender: &[u8; 32]) -> String {
+        format!("{STORED_NOTES}{}/", b64(sender))
+    }
+
     /// The note of a stored entry's message `msg_id` from `sender`.
     pub(crate) fn stored_note(sender: &[u8; 32], msg_id: &str) -> String {
         format!("{STORED_NOTES}{}/{msg_id}", b64(sender))

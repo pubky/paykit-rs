@@ -417,6 +417,16 @@ fn held_or_unlisted(
 /// entry after a wider certificate or a `missed` item the same read took is held too. The entry is held as for a store
 /// unavailable for now (Paykit spec 17, question 27), and read again at a later read.
 fn hold_while_unlisted(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<(), Fail> {
+    if side_may_lack(cx, side)? {
+        return Err(Fail::Store(StoreFailure::unavailable(
+            StoreError::Unavailable,
+        )));
+    }
+    Ok(())
+}
+
+/// Whether the app's copy of `side`'s records may lack records ([`hold_while_unlisted`]).
+fn side_may_lack(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<bool, Fail> {
     let marked = cx.local_get(key::RECORDS_UNLISTED.as_bytes())?.is_some()
         || cx.local_get(key::MISSED_UNLISTED.as_bytes())?.is_some();
     let listed = match cx.local_get(key::LISTED_CERT.as_bytes())? {
@@ -426,12 +436,12 @@ fn hold_while_unlisted(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<(), 
             Some(AppCert::verify(&signed, &cx.identity()).map_err(|_| Fail::corrupt())?)
         }
     };
-    if crate::hold::side_unlisted(side, marked, listed.as_ref(), cx.cert()) {
-        return Err(Fail::Store(StoreFailure::unavailable(
-            StoreError::Unavailable,
-        )));
-    }
-    Ok(())
+    Ok(crate::hold::side_unlisted(
+        side,
+        marked,
+        listed.as_ref(),
+        cx.cert(),
+    ))
 }
 
 /// Place `stored` in its `role` of the record at `target`, in the effect's batch, built on
@@ -497,8 +507,18 @@ fn keep_cancellation(
 }
 
 /// Make room for a new stop from `sender` among the stops kept for requests not held, in the
-/// step: the one the bounds drop ([`kept_reply_evicted`]) goes.
+/// step: those the bounds drop ([`kept_reply_evicted`]) go, until there is room. Left out of
+/// the bounds, neither counted nor dropped, are the stops for a request the copy holds
+/// ([`holds_record`]), those whose record is absent while the copy of the payer's records
+/// may lack records ([`side_may_lack`]), when the request may be held, and those for a
+/// request the app keeps a stored message of to write ([`crate::stored::writes_request`]),
+/// the request's own entry among them. These last are bounded by the entries the client
+/// stores (Switch spec 8.2), one stop per request record; counted here, they would make the
+/// stops of other requests go first. One that is left out no longer counts again from then
+/// on, which can put its sender past the bound: the loop drops back to it.
 fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<(), Fail> {
+    let own = cx.identity();
+    let unlisted = side_may_lack(cx, RecordSide::Payer)?;
     let mut kept = Vec::new();
     let mut names = Vec::new();
     for (bytes, value) in cx.local_scan(key::KEPT_CANCELLATIONS.as_bytes())? {
@@ -508,13 +528,22 @@ fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<
             return Err(Fail::corrupt());
         };
         let stop = state::decode::<KeptMessage>(&value).map_err(|_| Fail::corrupt())?;
-        if holds_record(cx.record_at(&record)?.map(|held| held.content).as_ref()) {
+        let content = cx.record_at(&record)?.map(|held| held.content);
+        if holds_record(content.as_ref()) || (content.is_none() && unlisted) {
             continue;
         }
-        kept.push((stop.sender(), stop.accepted_at().unwrap_or(0)));
+        let from = stop.sender();
+        let cancellation = stop.stored(&own).map_err(|_| Fail::corrupt())?;
+        if let Some(request) = cancellation.message().refs.first() {
+            if keeps_stored_of(cx, &from, request)? {
+                continue;
+            }
+        }
+        kept.push((from, stop.accepted_at().unwrap_or(0)));
         names.push(bytes);
     }
-    if let Some(index) = kept_reply_evicted(&kept, sender) {
+    while let Some(index) = kept_reply_evicted(&kept, sender) {
+        kept.swap_remove(index);
         keep_local(
             cx,
             LocalWrite::Delete {
@@ -523,6 +552,24 @@ fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<
         );
     }
     Ok(())
+}
+
+/// Whether the app keeps a stored message from `sender` of `request` still to write
+/// ([`crate::stored::writes_request`]).
+fn keeps_stored_of(
+    cx: &ReceiveContext<'_>,
+    sender: &[u8; 32],
+    request: &[u8; 32],
+) -> Result<bool, Fail> {
+    let own = cx.identity();
+    for (_, value) in cx.local_scan(key::stored_notes_of(sender).as_bytes())? {
+        let note =
+            state::decode::<crate::stored::StoredNote>(&value).map_err(|_| Fail::corrupt())?;
+        if crate::stored::writes_request(&note, &own, request).map_err(|_| Fail::corrupt())? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// A payer's acceptance, rejection, cancellation or proof, at the payee (Paykit spec 3.4,
@@ -1216,10 +1263,17 @@ impl Paykit {
 
     /// Place the payer's replies kept for requests this app held no record of, each once
     /// the record is held, as a later write of its own with the kept copy dropped in its
-    /// batch (Switch spec 8.2, Paykit spec 8.1). One whose record doesn't come within
-    /// [`KEPT_MESSAGE_MS`] of its acceptance, on the highest service time verified, is
-    /// dropped: the payer keeps what it sent that long, and may send it again (Paykit spec
-    /// 9). A placement that fails now is tried again at the next receive.
+    /// batch (Switch spec 8.2, Paykit spec 8.1). A placement that fails now is tried again
+    /// at the next receive. Once [`KEPT_MESSAGE_MS`] have passed since a reply's acceptance,
+    /// on the highest service time verified:
+    /// - with its record absent or deleted, it is dropped: the payer keeps what it sent that
+    ///   long, and may send it again (Paykit spec 9). Never while the copy of the payee's
+    ///   records may lack records ([`Paykit::side_unlisted`]): the absence decides nothing
+    ///   then;
+    /// - with its record held but not open, sealed under a scope key the app doesn't hold
+    ///   or a value that doesn't read, or with a placement that keeps failing, it is given
+    ///   up, and the host told ([`crate::NoticeKind::MessageGivenUp`]) in the commit that
+    ///   drops it, as a stored entry's message (`stored.rs`).
     pub(crate) async fn place_kept_replies(&mut self) -> crate::error::Result<()> {
         let own = self.identity();
         for (rest, kept) in self.local_scan::<KeptMessage>(key::KEPT_REPLIES).await? {
@@ -1236,28 +1290,55 @@ impl Paykit {
                 natural_key::request_record(&own, request),
                 reply.body().label(),
             );
-            if self.held_activity(&target).await?.is_none() {
-                let stale = reply.accepted_at().is_none_or(|at| {
-                    self.service_time()
-                        .is_some_and(|t| at.saturating_add(KEPT_MESSAGE_MS) <= t)
-                });
-                if stale {
-                    self.local_delete(&kept_key).await?;
+            let stale = reply.accepted_at().is_none_or(|at| {
+                self.service_time()
+                    .is_some_and(|t| at.saturating_add(KEPT_MESSAGE_MS) <= t)
+            });
+            let content = self
+                .app
+                .shared_record(&self.activity_key(&target)?)
+                .await?
+                .map(|held| held.content);
+            let open = match content {
+                Some(RecordContent::Value(_)) => self.held_activity(&target).await?.is_some(),
+                _ => false,
+            };
+            if !open {
+                if !stale {
+                    continue;
+                }
+                match content {
+                    None | Some(RecordContent::Deleted) => {
+                        if !self.side_unlisted(RecordSide::Payee).await? {
+                            self.local_delete(&kept_key).await?;
+                        }
+                    }
+                    Some(_) => self.give_up(&kept_key, &reply).await?,
                 }
                 continue;
             }
+            let sender = reply.sender();
+            let Ok(write) = self
+                .placed_write(&target, sender, role, reply.clone(), Vec::new())
+                .await
+            else {
+                // A reply the record can't take, such as one whose sender isn't its
+                // counterparty: kept no longer than any other.
+                if stale {
+                    self.give_up(&kept_key, &reply).await?;
+                }
+                continue;
+            };
             let mut tx = Tx::default();
             tx.delete(&kept_key);
-            let sender = reply.sender();
-            match self
-                .placed_write(&target, sender, role, reply, Vec::new())
-                .await?
-            {
+            match write {
                 Some(entry) => {
                     let batch = pubky_switch_client::app::OpBatch::new()
                         .entry(entry)
                         .locals(tx.into_writes());
-                    let _ = self.app.submit_batch(batch).await;
+                    if self.app.submit_batch(batch).await.is_err() && stale {
+                        self.give_up(&kept_key, &reply).await?;
+                    }
                 }
                 None => self.local_commit(tx).await?,
             }

@@ -1422,3 +1422,138 @@ async fn test_one_time_stop_for_a_request_not_held_goes_30_days_after_its_accept
     wallet.receive(None).await.unwrap();
     assert!(!keeps_stop(&w, &wallet, hash).await);
 }
+
+/// Send the wallet's own housekeeping now, its next receive key's registration and a
+/// deferred cursor move (Switch spec 3.6, 8.2), so that its next receive sends the switch
+/// only Paykit's writes, which the switch is set to refuse.
+async fn housekeeping(wallet: &mut paykit_sdk::Paykit) {
+    wallet.app_mut().rotate().await.unwrap();
+    wallet.app_mut().flush_cursor().await.unwrap();
+}
+
+/// Bob's cancellation of a request the wallet holds no record of yet, then, 20 days on, the
+/// request itself, whose write the switch refuses: the wallet keeps a stop for it and the
+/// request to write later. Returns the request.
+async fn stop_then_request_stored(w: &World, wallet: &mut paykit_sdk::Paykit) -> [u8; 32] {
+    let (request, hash) = unsent_request(w);
+    cancel_to(w, &[wallet.app_id()], hash);
+    wallet.receive(None).await.unwrap();
+    assert!(keeps_stop(w, wallet, hash).await);
+    w.clock.advance_ms(20 * pubky_switch_core::records::DAY_MS);
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &request);
+    // The receive step's write, and the app's first write of it, are refused.
+    housekeeping(wallet).await;
+    crate::common::refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.app().protocol_scan(b"se/").await.unwrap().len(),
+        1,
+        "the request is kept to write later"
+    );
+    hash
+}
+
+#[tokio::test]
+async fn test_one_time_stop_for_a_request_kept_to_write_stays_past_30_days() {
+    // 30 days after the cancellation's acceptance, the request still waits to be written:
+    // the stop stays, and once room frees the request is written cancelled, never payable
+    // (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let hash = stop_then_request_stored(&w, &mut wallet).await;
+    let day = pubky_switch_core::records::DAY_MS;
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS - 20 * day + day);
+    housekeeping(&mut wallet).await;
+    crate::common::refuse_writes(&w.alice, 1);
+    wallet.receive(None).await.unwrap();
+    assert!(keeps_stop(&w, &wallet, hash).await);
+    // Room frees: the request is written, the stop placed in its record.
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_scan(b"se/").await.unwrap().is_empty());
+    assert!(!keeps_stop(&w, &wallet, hash).await);
+    let request = paykit_sdk::RequestRef {
+        payee: w.bob_id(),
+        request_hash: hash,
+    };
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+    assert!(wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .is_err());
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_one_time_stop_for_a_request_given_up_goes_past_30_days() {
+    // The request arrives a day after its cancellation and is never written: 30 days after
+    // its acceptance it is given up, and the stop, no longer kept for a message to write,
+    // goes with it, 30 days having passed since its own acceptance.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let (request, hash) = unsent_request(&w);
+    cancel_to(&w, &[wallet.app_id()], hash);
+    wallet.receive(None).await.unwrap();
+    let day = pubky_switch_core::records::DAY_MS;
+    w.clock.advance_ms(day);
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &request);
+    housekeeping(&mut wallet).await;
+    crate::common::refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    // A day short of 30 days since the request's acceptance, both stay.
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - day);
+    housekeeping(&mut wallet).await;
+    crate::common::refuse_writes(&w.alice, 1);
+    wallet.receive(None).await.unwrap();
+    assert!(keeps_stop(&w, &wallet, hash).await);
+    assert_eq!(wallet.app().protocol_scan(b"se/").await.unwrap().len(), 1);
+    // At 30 days the request is given up, and the stop goes.
+    w.clock.advance_ms(day);
+    housekeeping(&mut wallet).await;
+    crate::common::refuse_writes(&w.alice, 1);
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_scan(b"se/").await.unwrap().is_empty());
+    assert!(!keeps_stop(&w, &wallet, hash).await);
+}
+
+#[tokio::test]
+async fn test_one_time_stops_bound_never_drops_a_stop_for_a_request_kept_to_write() {
+    // Bob's stop for a request kept to write is his earliest. 65 cancellations of requests
+    // the wallet holds no record of follow: the bound drops the earliest of those, never
+    // the stop kept for the request, which counts in no bound (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let hash = stop_then_request_stored(&w, &mut wallet).await;
+    let unknown = |i: usize| [u8::try_from(i + 1).unwrap(); 32];
+    let max = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    for i in 0..max {
+        w.clock.advance_ms(1);
+        cancel_to(&w, &[wallet.app_id()], unknown(i));
+    }
+    housekeeping(&mut wallet).await;
+    crate::common::refuse_writes(&w.alice, 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.app().protocol_scan(b"kc/").await.unwrap().len(),
+        max + 1
+    );
+    w.clock.advance_ms(1);
+    cancel_to(&w, &[wallet.app_id()], unknown(max));
+    housekeeping(&mut wallet).await;
+    crate::common::refuse_writes(&w.alice, 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.app().protocol_scan(b"kc/").await.unwrap().len(),
+        max + 1
+    );
+    assert!(keeps_stop(&w, &wallet, hash).await);
+    assert!(!keeps_stop(&w, &wallet, unknown(0)).await);
+    assert!(keeps_stop(&w, &wallet, unknown(max)).await);
+    assert_eq!(wallet.app().protocol_scan(b"se/").await.unwrap().len(), 1);
+}
