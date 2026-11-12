@@ -1559,10 +1559,10 @@ async fn test_one_time_stops_bound_never_drops_a_stop_for_a_request_kept_to_writ
 }
 
 #[tokio::test]
-async fn test_one_time_cancellation_of_a_request_not_held_kept_once_at_an_app_paying_and_requesting(
+async fn test_one_time_cancellation_of_a_request_not_held_kept_as_stop_and_reply_at_an_app_paying_and_requesting(
 ) {
     // Alice's till both pays and requests. Bob cancels a request it holds on neither side:
-    // it keeps the cancellation once, as the stop, and no payer's reply of it.
+    // it keeps the cancellation as the stop and as a payer's reply, one of each.
     let w = World::new();
     let till = w
         .join(
@@ -1582,7 +1582,8 @@ async fn test_one_time_cancellation_of_a_request_not_held_kept_once_at_an_app_pa
     cancel_to(&w, &[till.app_id()], hash);
     till.receive(None).await.unwrap();
     assert!(keeps_stop(&w, &till, hash).await);
-    assert!(till.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert_eq!(till.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    assert_eq!(till.app().protocol_scan(b"kc/").await.unwrap().len(), 1);
 }
 
 /// `app` pays `request`: the acceptance goes with the dispatch, then the method reports the
@@ -1915,4 +1916,42 @@ async fn test_one_time_no_response_over_a_record_sealed_at_a_key_not_held() {
         );
     }
     assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_one_time_payers_cancellation_before_its_record_placed_at_an_app_paying_and_requesting() {
+    // Bob's dual app holds `pay` and `request`. Bob's till sends alice a request and writes
+    // its record; alice cancels it. The dual app reads the record and alice's cancellation
+    // in one read: the payee's record shows alice's cancellation (Paykit spec 8.1, "Replies
+    // before their record"), the till never reading it.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut dual = w
+        .join(
+            &w.bob,
+            "dual",
+            paykit_sdk::AppScopes::new()
+                .pay()
+                .request()
+                .build()
+                .unwrap(),
+        )
+        .await;
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let request = request_from(&mut till, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet.cancel_request(&request, None).await.unwrap();
+    wallet.flush().await.unwrap();
+    dual.receive(None).await.unwrap();
+    dual.receive(None).await.unwrap();
+    let sales = dual.payee_activity().await.unwrap();
+    assert_eq!(sales.len(), 1, "{sales:?}");
+    assert_eq!(sales[0].status, PayeeStatus::Cancelled, "{sales:?}");
+    assert!(dual.app().protocol_scan(b"pr/").await.unwrap().is_empty());
 }

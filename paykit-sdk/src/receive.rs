@@ -191,31 +191,40 @@ pub(crate) fn effect(
                 return keep_cancellation(cx, &payer_target, stored, true);
             }
             // A payer's cancellation of a request this app holds goes into its record. One
-            // naming a request held on neither side is kept once: at an app holding `pay`, as
-            // the stop, which no payment passes; at one that only takes payments, as a
-            // payer's reply until the record comes.
-            let payee_held = payee && {
-                let label = stored.body().label().cloned();
-                let target = ActivityTarget::payee(
-                    natural_key::request_record(&cx.identity(), &request),
-                    label.as_ref(),
-                );
-                cx.record(&target.record_target())?.is_some()
-            };
-            if payee && (payee_held || !pay) {
-                payer_reply(cx, stored, &scopes, settlement)?;
-            } else if pay {
-                // One for a request the app holds no record of is new state, which the spam
-                // rule gates. While the copy of the payer's records may lack records, the
-                // absence decides nothing: the entry is held.
-                let content = cx
-                    .record(&payer_target.record_target())?
-                    .map(|held| held.content);
-                if !holds_record(content.as_ref()) {
-                    hold_while_unlisted(cx, RecordSide::Payer)?;
+            // naming a request held on neither side is new state, which the spam rule gates
+            // once: at an app holding `pay`, it is kept as the stop, which no payment passes;
+            // at one taking payments, as a payer's reply until the record comes (Paykit spec
+            // 8.1, "Replies before their record"). An app holding both keeps both, each
+            // counted only in its own bounds: the message may be a payee's cancellation of a
+            // request to this identity, or a payer's of one another own app sent.
+            let label = stored.body().label().cloned();
+            let payee_target = ActivityTarget::payee(
+                natural_key::request_record(&cx.identity(), &request),
+                label.as_ref(),
+            );
+            let payee_held = payee && cx.record(&payee_target.record_target())?.is_some();
+            if !pay || payee_held {
+                if payee {
+                    payer_reply(cx, stored, &scopes, settlement)?;
                 }
-                if admits_new_state(cx, &sender, &scopes)? {
-                    keep_cancellation(cx, &payer_target, stored, false)?;
+                return Ok(());
+            }
+            // While the copy of a side may lack records, the absence decides nothing: the
+            // entry is held.
+            let content = cx
+                .record(&payer_target.record_target())?
+                .map(|held| held.content);
+            if !holds_record(content.as_ref()) {
+                hold_while_unlisted(cx, RecordSide::Payer)?;
+            }
+            let reply = payee && writes_payee_label(&scopes, label.as_ref());
+            if reply {
+                hold_while_unlisted(cx, RecordSide::Payee)?;
+            }
+            if admits_new_state(cx, &sender, &scopes)? {
+                keep_cancellation(cx, &payer_target, stored, false)?;
+                if reply {
+                    keep_reply(cx, &payee_target, stored)?;
                 }
             }
         }
@@ -673,17 +682,7 @@ fn payer_reply(
             // nothing: the entry is held instead ([`held_or_unlisted`]).
             if held_or_unlisted(cx, &target, RecordSide::Payee)?.is_none() {
                 if admits_new_state(cx, &sender, scopes)? {
-                    let record = cx.record_key(&target.record_target())?;
-                    let kept = key::kept_reply(&sender, &record, &stored.message().msg_id);
-                    match cx.local_get(kept.as_bytes())? {
-                        Some(value) => {
-                            checked_reply(cx, kept.as_bytes(), &value)?;
-                        }
-                        None => {
-                            make_room_for_reply(cx, &sender)?;
-                            keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
-                        }
-                    }
+                    keep_reply(cx, &target, stored)?;
                 }
                 return Ok(false);
             }
@@ -713,6 +712,30 @@ fn payer_reply(
             Ok(true)
         }
     }
+}
+
+/// Keep `stored`, a payer's reply to the request whose payee record is at `target`, which
+/// the app doesn't hold yet (`pr/<sender>/<record key>/<msg_id>`), within the bounds on kept
+/// replies ([`make_room_for_reply`]); one kept already is read with a restore's check and
+/// left as it is. Admission is the caller's.
+fn keep_reply(
+    cx: &mut ReceiveContext<'_>,
+    target: &ActivityTarget,
+    stored: &StoredMessage,
+) -> Result<(), Fail> {
+    let sender = stored.sender();
+    let record = cx.record_key(&target.record_target())?;
+    let kept = key::kept_reply(&sender, &record, &stored.message().msg_id);
+    match cx.local_get(kept.as_bytes())? {
+        Some(value) => {
+            checked_reply(cx, kept.as_bytes(), &value)?;
+        }
+        None => {
+            make_room_for_reply(cx, &sender)?;
+            keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
+        }
+    }
+    Ok(())
 }
 
 /// A receipt (Paykit spec 7.3, 8.4): stored in the payer's record and, in the same batch,
