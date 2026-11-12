@@ -13,12 +13,18 @@
 //!   rejection goes into the proposer's record, or is kept until the app holds it (Paykit
 //!   spec 8.1, "Replies before their record"). Every branch holds its entry while the app's
 //!   copy of `allowances` isn't listed yet, never deciding from a record's absence (Paykit
-//!   spec 8.1, "Records not listed yet").
+//!   spec 8.1, "Records not listed yet"). One whose record the app holds as a value it
+//!   can't read is never written over that record, nor dropped at once: it waits
+//!   unprocessed while the value waits for its scope key, and is otherwise kept as a stored
+//!   entry, tried at each read and written in once the record reads, and given up with the
+//!   host's notice 30 days from its acceptance (Paykit spec 8.1, "Stored entries").
 //! - **The stop:** a counterparty's `allowance_end` is kept in the app's own state in the
 //!   commit that passes its entry, with no write at the switch (`ae/`): at once for an
 //!   Allowance whose record the app holds, whatever the record's value, never waiting for
 //!   a scope key; for one it holds no record of, as new state, bounded together with the
-//!   payees' cancellations kept for requests not held. From then on nothing
+//!   payees' cancellations kept for requests not held. Such a stop goes 30 days after the
+//!   end's acceptance, but never while the copy may lack records or the app keeps a stored
+//!   message of the Allowance to write, and the bounds drop none kept so. From then on nothing
 //!   is done under the Allowance, whatever the record says, until the record holds an end or
 //!   a rejection: the app writes the end there by a later write of its own, with the
 //!   `executor_notice`. An end that names its proposal alone, crossing the acceptance this
@@ -62,7 +68,7 @@ use crate::receive::{self, Fail, KEPT_MESSAGE_MS};
 use crate::records::{conflict, KeptMessage};
 use crate::requests::MessageDelivery;
 use crate::state::{self, key, Tx};
-use crate::stored::Placed;
+use crate::stored::{Placed, StoredNote};
 
 /// How many times a write of this app's is built again after its record changed meanwhile.
 const WRITE_TRIES: usize = 3;
@@ -339,7 +345,8 @@ enum Held {
     /// A record that binds.
     Record(Box<AllowanceRecord>),
     /// A delete, or a value that doesn't read or doesn't bind: never written over, since it
-    /// may hold what another own app stored (Paykit spec 8.1, "Stored entries").
+    /// may hold what another own app stored; the entry is kept as a stored entry and given
+    /// up after 30 days ([`stored_entry`], Paykit spec 8.1, "Stored entries").
     Unreadable,
 }
 
@@ -384,7 +391,7 @@ pub(crate) fn receive_effect(
                 Ok(())
             }
             Held::Record(record) => put_placed(cx, &target, *record, stored),
-            Held::Unreadable => Err(unreadable()),
+            Held::Unreadable => stored_entry(cx, stored),
         },
         _ => match held {
             // An answer before the app holds its proposal's record, such as one to a
@@ -403,13 +410,35 @@ pub(crate) fn receive_effect(
                 Ok(())
             }
             Held::Record(record) => put_placed(cx, &target, *record, stored),
-            Held::Unreadable => Err(unreadable()),
+            Held::Unreadable => stored_entry(cx, stored),
         },
     }
 }
 
-fn unreadable() -> Fail {
-    Fail::Drop("Paykit wire 5.4: the Allowance record doesn't read; it isn't written over".into())
+/// A proposal or an answer whose Allowance record the app holds as a value it can't read
+/// for a reason other than a missing key, or a delete: never written over, since it may hold
+/// what another own app stored, and not dropped at once. The entry is stored locally, the
+/// cursor passing it (Switch spec 8.2), and its step is tried again at each read, so the
+/// message goes into the record once the record reads. Once [`KEPT_MESSAGE_MS`] have passed
+/// since its acceptance it is given up, processed with the host's notice as its only write
+/// ([`crate::NoticeKind::MessageGivenUp`]), as an activity record's message is (Paykit spec
+/// 8.1, "Stored entries"). A value only waiting for its scope key holds the entry
+/// unprocessed before this ([`receive::held_or_unlisted_at`]).
+fn stored_entry(
+    cx: &mut ReceiveContext<'_>,
+    stored: &StoredMessage,
+) -> std::result::Result<(), Fail> {
+    if receive::key_wait_over(cx, stored.accepted_at()) {
+        let notice = crate::stored::given_up_write(stored, cx.highest_service_time())
+            .map_err(|_| Fail::corrupt())?;
+        receive::keep_local(cx, notice);
+        return Ok(());
+    }
+    Err(Fail::Store(
+        pubky_switch_client::app::StoreFailure::of_entry(
+            pubky_switch_client::error::StoreError::Corrupt,
+        ),
+    ))
 }
 
 /// Write `record` with `stored` placed, in the step, unless it reflects it already.
@@ -442,7 +471,9 @@ fn put_placed(
 /// held while the copy of `allowances` may lack records, when the absence decides nothing.
 /// It is kept under the bounds of the stops for records not held, counted together with the
 /// payees' cancellations kept so ([`receive::make_room_for_stop`]), and goes
-/// [`KEPT_MESSAGE_MS`] after its acceptance while the record is still not held.
+/// [`KEPT_MESSAGE_MS`] after its acceptance while the record is still not held. Neither
+/// happens while a stored message of the Allowance is kept to write
+/// ([`keeps_stored_message`]), nor while the copy of `allowances` may lack records.
 fn keep_end(
     cx: &mut ReceiveContext<'_>,
     target: &RecordTarget,
@@ -524,9 +555,42 @@ pub(crate) fn notice_effect(
     drop_consent(cx, &notice.allowance_record, reason)
 }
 
+/// The `allowances` record the stored entry's message `note` is to be written into (`se/`,
+/// `stored.rs`): `None` for a note placed already, or for a message of no Allowance.
+fn note_target(note: &StoredNote, own: &[u8; 32]) -> Result<Option<RecordTarget>> {
+    if note.placed {
+        return Ok(None);
+    }
+    let stored = note.message.stored(own)?;
+    Ok(named_allowance(stored.body()).map(|id| allowance_target(&stored.sender(), id)))
+}
+
+/// Whether the app keeps a stored entry's message of the Allowance whose record is `record`,
+/// still to write into it (`se/`, `stored.rs`), read in the receive step. Such a message can
+/// open the record or give it the response an end names, so the end's stop is neither
+/// dropped by the bounds ([`receive::make_room_for_stop`]) nor given up while it is kept
+/// (Paykit spec 8.1, 8.3).
+pub(crate) fn keeps_stored_message(
+    cx: &ReceiveContext<'_>,
+    record: &[u8; 32],
+) -> std::result::Result<bool, Fail> {
+    let own = cx.identity();
+    for (_, value) in cx.local_scan(key::STORED_NOTES.as_bytes())? {
+        let note = state::decode::<StoredNote>(&value).map_err(|_| Fail::corrupt())?;
+        if let Some(target) = note_target(&note, &own).map_err(|_| Fail::corrupt())? {
+            if cx.record_key(&target)? == *record {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// Whether the kept stop `kept`, the counterparty's end, may go: an Allowance the app holds
 /// no record of, or whose record doesn't name the response the end refers to yet, 30 days
-/// from its acceptance on the service time verified (Paykit spec 8.1, 9).
+/// from its acceptance on the service time verified (Paykit spec 8.1, 9). Its callers keep
+/// it meanwhile while the copy of `allowances` may lack records, or while a stored message
+/// of the Allowance is kept to write ([`Paykit::keeps_stored_message`]).
 fn stale(kept: &StoredMessage, service: Option<u64>) -> bool {
     kept.accepted_at()
         .is_none_or(|at| service.is_some_and(|t| at.saturating_add(KEPT_MESSAGE_MS) <= t))
@@ -563,6 +627,19 @@ impl Paykit {
         };
         let target = allowance_target(&bound.counterparty, &bound.allowance_id);
         Ok((self.app.record_key(&target)? == *record).then_some(bound))
+    }
+
+    /// [`keeps_stored_message`], outside the receive step.
+    async fn keeps_stored_message(&self, record: &[u8; 32]) -> Result<bool> {
+        let own = self.identity();
+        for (_, note) in self.local_scan::<StoredNote>(key::STORED_NOTES).await? {
+            if let Some(target) = note_target(&note, &own)? {
+                if self.app.record_key(&target)? == *record {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Whether this app keeps the counterparty's end of the Allowance at `record` as its
@@ -917,7 +994,7 @@ impl Paykit {
     }
 
     /// The counterparties of every Allowance not ended or rejected that this app holds a
-    /// record of, for the re-sends after a restore.
+    /// record of, for the re-sends after a restore or a `missed` item.
     pub(crate) async fn open_allowance_counterparties(&self) -> Result<Vec<[u8; 32]>> {
         let mut out = Vec::new();
         for held in self.app.records_of(Collection::Allowances.name()).await? {
@@ -1009,8 +1086,9 @@ impl Paykit {
     /// of its own with its `executor_notice`, the kept stop dropped in the same batch (Paykit
     /// spec 8.3). Run after each receive. One whose record holds an end or a rejection
     /// already only goes; one whose record isn't held, or doesn't hold the acceptance the
-    /// end names yet, stays kept, 30 days from its acceptance; one that can't be written now
-    /// stays for the next run. Nothing runs while the copy of `allowances` may lack records.
+    /// end names yet, stays kept, 30 days from its acceptance, and longer while a stored
+    /// message of the Allowance is kept to write; one that can't be written now stays for
+    /// the next run. Nothing runs while the copy of `allowances` may lack records.
     pub(crate) async fn place_allowance_stops(&mut self) -> Result<()> {
         if !self.holds("allowance")
             || self.scope_keys_awaited().await?.is_some()
@@ -1035,7 +1113,9 @@ impl Paykit {
             match content {
                 // No record held, or a delete: the stop goes 30 days after its acceptance.
                 None | Some(RecordContent::Deleted) => {
-                    if stale(&end, self.service_time()) {
+                    if stale(&end, self.service_time())
+                        && !self.keeps_stored_message(&record).await?
+                    {
                         self.local_delete(&stop).await?;
                     }
                 }
@@ -1099,7 +1179,9 @@ impl Paykit {
                 }
                 // An end naming an acceptance the record doesn't hold yet waits for it.
                 None if refs.len() == 2 && held.response.is_none() => {
-                    if stale(&end, self.service_time()) {
+                    if stale(&end, self.service_time())
+                        && !self.keeps_stored_message(&record).await?
+                    {
                         self.local_delete(stop).await?;
                     }
                     return Ok(());

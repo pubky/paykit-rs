@@ -530,7 +530,9 @@ fn keep_cancellation(
 /// ([`holds_record`]), in the step: the one the bounds drop ([`kept_reply_evicted`]) goes.
 /// The payees' cancellations of requests not held (`kc/`) and the counterparties' ends of
 /// Allowances not held (`ae/`, `allowances.rs`) are counted together, under one sender's
-/// bound and the bound in all.
+/// bound and the bound in all. An Allowance's stop whose Allowance has a stored message
+/// kept to write ([`crate::allowances::keeps_stored_message`]) is neither counted nor
+/// dropped: the message could open the record, and the stop must then be there.
 pub(crate) fn make_room_for_stop(
     cx: &mut ReceiveContext<'_>,
     sender: &[u8; 32],
@@ -539,15 +541,16 @@ pub(crate) fn make_room_for_stop(
     let mut names = Vec::new();
     for prefix in [key::KEPT_CANCELLATIONS, key::ALLOWANCE_ENDS] {
         for (bytes, value) in cx.local_scan(prefix.as_bytes())? {
-            let Some(
-                crate::state::StateKey::KeptCancellation(record)
-                | crate::state::StateKey::AllowanceEnd(record),
-            ) = crate::state::StateKey::parse(&bytes)
-            else {
-                return Err(Fail::corrupt());
+            let (record, allowance) = match crate::state::StateKey::parse(&bytes) {
+                Some(crate::state::StateKey::KeptCancellation(record)) => (record, false),
+                Some(crate::state::StateKey::AllowanceEnd(record)) => (record, true),
+                _ => return Err(Fail::corrupt()),
             };
             let stop = state::decode::<KeptMessage>(&value).map_err(|_| Fail::corrupt())?;
             if holds_record(cx.record_at(&record)?.map(|held| held.content).as_ref()) {
+                continue;
+            }
+            if allowance && crate::allowances::keeps_stored_message(cx, &record)? {
                 continue;
             }
             kept.push((stop.sender(), stop.accepted_at().unwrap_or(0)));

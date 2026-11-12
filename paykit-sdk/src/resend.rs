@@ -114,7 +114,8 @@ impl Paykit {
 
     /// Send the re-sends the protocol queued: for entries the app couldn't read, to their
     /// sender; for `missed` items and a provider loss, to every counterparty with Paykit
-    /// activity. Returns how many requests went out.
+    /// activity and every counterparty of an open Allowance. Returns how many requests went
+    /// out.
     pub(crate) async fn send_asks(&mut self) -> Result<u64> {
         let mut sent = 0u64;
         for (rest, ask) in self.local_scan::<QueuedAsk>(key::ASKS).await? {
@@ -135,12 +136,15 @@ impl Paykit {
             return Ok(sent);
         }
         let from = missed.iter().map(|(_, from)| *from).min().unwrap_or(0);
-        let peers: Vec<[u8; 32]> = self
+        let mut peers: std::collections::BTreeSet<[u8; 32]> = self
             .local_scan::<u64>(key::PEERS)
             .await?
             .into_iter()
             .map(|(rest, _)| unb64_array::<32>(&rest).map_err(|_| PaykitError::corrupt()))
             .collect::<Result<_>>()?;
+        // And every counterparty of an Allowance not ended or rejected, as after a restore:
+        // its end may be among the entries the service deleted (Paykit spec 8.3, 9).
+        peers.extend(self.open_allowance_counterparties().await?);
         for peer in peers {
             self.request_resend(
                 peer,
