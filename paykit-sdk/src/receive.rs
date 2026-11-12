@@ -674,9 +674,15 @@ fn receipt_effect(
             } else {
                 let held = held_or_unlisted(cx, &named, RecordSide::Payer)?;
                 let record = held.and_then(|v| activity::read(Some(&v), &own, ActivitySide::Payer));
+                // Checked against the request just above: one that doesn't compute now
+                // drops the receipt, never settles another claim.
                 let period = crate::requests::request_of(&request_record)
                     .zip(stored.body().billing_period())
-                    .and_then(|((_, body), named)| body.named_period(named).ok());
+                    .map(|((_, body), named)| body.named_period(named))
+                    .transpose()
+                    .map_err(|_| {
+                        Fail::Drop("Paykit wire 4.4: a receipt naming another period".into())
+                    })?;
                 (named, record, period)
             }
         }
