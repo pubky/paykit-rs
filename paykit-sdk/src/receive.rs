@@ -746,7 +746,7 @@ pub(crate) type CountedReply = ([u8; 32], u64);
 /// Which of `kept` goes for a new reply from `sender` to be kept (Switch spec 8.2's rule):
 /// past the sender's [`MAX_KEPT_REPLIES_PER_SENDER`], its reply accepted earliest; past
 /// [`MAX_KEPT_REPLIES`] in all, the one accepted earliest of the sender holding the most, a
-/// tie going against the sender whose newest reply is newest. `None` while there is room.
+/// tie going against the lower sender identity. `None` while there is room.
 pub(crate) fn kept_reply_evicted(kept: &[CountedReply], sender: &[u8; 32]) -> Option<usize> {
     let earliest_of = |who: &[u8; 32]| {
         kept.iter()
@@ -762,16 +762,10 @@ pub(crate) fn kept_reply_evicted(kept: &[CountedReply], sender: &[u8; 32]) -> Op
     if kept.len() < MAX_KEPT_REPLIES {
         return None;
     }
-    let newest = |who: &[u8; 32]| {
-        kept.iter()
-            .filter(|(from, _)| from == who)
-            .map(|(_, at)| *at)
-            .max()
-    };
     let most = kept
         .iter()
         .map(|(from, _)| *from)
-        .max_by_key(|from| (held(from), newest(from)))?;
+        .max_by_key(|from| (held(from), std::cmp::Reverse(*from)))?;
     earliest_of(&most)
 }
 
@@ -1395,9 +1389,15 @@ mod tests {
             kept_reply_evicted(&kept, &[3; 32]),
             Some(MAX_KEPT_REPLIES_PER_SENDER - 1)
         );
-        // Tied, the one whose newest reply is newest gives, wherever it comes.
-        let mut tied = replies(2, MAX_KEPT_REPLIES_PER_SENDER, 500);
-        tied.extend(replies(1, MAX_KEPT_REPLIES_PER_SENDER, 100));
+        // Tied, the lower sender identity gives, wherever its replies come.
+        let mut tied = replies(2, MAX_KEPT_REPLIES_PER_SENDER, 100);
+        tied.extend(replies(1, MAX_KEPT_REPLIES_PER_SENDER, 500));
+        assert_eq!(
+            kept_reply_evicted(&tied, &[3; 32]),
+            Some(MAX_KEPT_REPLIES_PER_SENDER)
+        );
+        let mut tied = replies(1, MAX_KEPT_REPLIES_PER_SENDER, 500);
+        tied.extend(replies(2, MAX_KEPT_REPLIES_PER_SENDER, 100));
         assert_eq!(kept_reply_evicted(&tied, &[3; 32]), Some(0));
     }
 }
