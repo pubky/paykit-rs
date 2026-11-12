@@ -35,7 +35,7 @@
 //! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads | |
 //! | `kc/<record key>` | a payee's cancellation of a one-time request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
-//! | `lr` | when the app last read the lists, on the device clock; absent before the first read and after a due read failed, when new activity waits (Paykit wire 4.1) | |
+//! | `lr` | when the app last read the lists, on the device clock; absent before the first read and after a due read failed, when new activity waits (Paykit wire 4.1); never restored, so a restored app reads the deny list again before any payment | |
 //! | `spam/<pubky>` | how many messages from a blocked or flagged sender only were counted (Paykit wire 4.1) | |
 //! | `rs/<pubky>/<msg_id>` | when a message was last re-sent to a requester | |
 //! | `rsd/<pubky>/<day>` | how many messages were re-sent to a requester that day | |
@@ -44,7 +44,8 @@
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
-//! | `dl` | the deny list as the app last read it, for the views (Paykit spec 8.1) | |
+//! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
+//! | `bk/<pubky>` | this app's block (`true`) or unblock (`false`) of `pubky` whose `deny.put` or `deny.delete` the client keeps unanswered: a block counts at once, an unblock once the list shows it (Paykit spec 8.1); cleared once a read of the list shows it; never restored | |
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply to a request the app holds no record of yet, kept until it does (`receive.rs`) | |
@@ -222,6 +223,7 @@ pub(crate) mod key {
         format!("{DROPPED_UNVERIFIED}{}", b64(sender))
     }
     pub(crate) const DENIED: &str = "dl";
+    pub(crate) const OWN_BLOCKS: &str = "bk/";
     pub(crate) const TAKEN: &str = "dt/";
 
     /// The mark of the duty event `id`, taken.
@@ -293,6 +295,11 @@ pub(crate) mod key {
 
     pub(crate) fn held_list(record_key: &[u8; 32]) -> String {
         format!("{HELD_LISTS}{}", b64(record_key))
+    }
+
+    /// This app's block (`true`) or unblock of `pubky` kept unanswered.
+    pub(crate) fn own_block(pubky: &[u8; 32]) -> String {
+        format!("{OWN_BLOCKS}{}", b64(pubky))
     }
 
     pub(crate) fn kept_cancellation(record_key: &[u8; 32]) -> String {
@@ -381,6 +388,8 @@ pub(crate) enum StateKey {
     },
     /// `dl`: the deny list as last read.
     Denied,
+    /// `bk/<pubky>`: this app's block or unblock of `pubky` kept unanswered.
+    OwnBlock([u8; 32]),
     /// `dt/<event ID>`: a duty event taken.
     Taken(String),
     /// `pd/<sender>`: the mark of a sender's replies dropped for the bounds.
@@ -469,6 +478,7 @@ impl StateKey {
                     },
                     "peer" => Self::Peer(b64_32(rest)?),
                     "kc" => Self::KeptCancellation(b64_32(rest)?),
+                    "bk" => Self::OwnBlock(b64_32(rest)?),
                     "hc" => Self::HoldConfirmed(b64_32(rest)?),
                     "lh" => Self::HeldList(b64_32(rest)?),
                     "side" => Self::Side(msg_id(rest)?),
@@ -638,6 +648,7 @@ mod tests {
             (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),
             (key::LISTS_READ.into(), StateKey::ListsRead),
             (key::DENIED.into(), StateKey::Denied),
+            (key::own_block(&pubky), StateKey::OwnBlock(pubky)),
             (
                 format!("{}{}-7", key::TAKEN, "05".repeat(16)),
                 StateKey::Taken(format!("{}-7", "05".repeat(16))),

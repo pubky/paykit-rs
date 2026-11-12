@@ -1395,9 +1395,8 @@ impl Paykit {
         }
         match self.app.allow_list().await {
             Ok(lists) => {
-                let mut tx = Tx::default();
-                tx.put(key::LISTS_READ, &now)?
-                    .put(key::DENIED, &lists.deny)?;
+                let (deny, mut tx) = self.judged_deny(lists.deny).await?;
+                tx.put(key::LISTS_READ, &now)?.put(key::DENIED, &deny)?;
                 self.local_commit(tx).await
             }
             Err(error @ (AppError::Alarm(_) | AppError::Store(_))) => Err(error.into()),
@@ -1423,11 +1422,34 @@ impl Paykit {
                 crate::error::PaykitError::from(error)
             }
         })?;
-        let mut tx = Tx::default();
+        let (deny, mut tx) = self.judged_deny(lists.deny).await?;
         tx.put(key::LISTS_READ, &self.now())?
-            .put(key::DENIED, &lists.deny)?;
+            .put(key::DENIED, &deny)?;
         self.local_commit(tx).await?;
-        Ok(lists.deny.contains(pubky))
+        Ok(deny.contains(pubky))
+    }
+
+    /// The deny list as this app judges payments by, from `deny` as read from the switch:
+    /// with this app's own blocks whose `deny.put` the client keeps unanswered (`bk/`), which
+    /// count at once (Paykit spec 8.1, "a block the app wrote itself counts at once"). A kept
+    /// unblock changes nothing until the list shows it. The marks the list shows landed go,
+    /// in the returned commit.
+    async fn judged_deny(
+        &self,
+        mut deny: Vec<[u8; 32]>,
+    ) -> crate::error::Result<(Vec<[u8; 32]>, Tx)> {
+        let mut tx = Tx::default();
+        for (rest, blocked) in self.local_scan::<bool>(key::OWN_BLOCKS).await? {
+            let pubky = pubky_switch_core::enc::unb64_array::<32>(&rest)
+                .map_err(|_| crate::error::PaykitError::corrupt())?;
+            let listed = deny.contains(&pubky);
+            if listed == blocked {
+                tx.delete(&key::own_block(&pubky));
+            } else if blocked {
+                deny.push(pubky);
+            }
+        }
+        Ok((deny, tx))
     }
 
     /// Whether the identity's deny list holds `pubky`, for a payment the user starts (Paykit
@@ -1452,29 +1474,57 @@ impl Paykit {
 
     /// Block `pubky`: the identity's deny list takes it (`deny.put`, the client's
     /// [`pubky_switch_client::app::App::deny`]), and the copy of the list this app judges
-    /// payments by holds it at once, whatever its age (Paykit spec 8.1). A block made
-    /// through the client directly is seen at the next read of the lists.
+    /// payments by holds it at once, whatever its age (Paykit spec 8.1). A `deny.put` the
+    /// client keeps unanswered ([`AppError::Kept`]) counts at once all the same: the copy
+    /// holds it, and so does every fresh read of the list before an automatic payment until
+    /// the list shows it (`bk/`). A block made through the client directly is seen at the
+    /// next read of the lists.
     ///
     /// # Errors
     ///
-    /// The client's errors, such as without `manage_contacts`; nothing is written then.
+    /// The client's errors but a kept batch, such as without `manage_contacts`; nothing is
+    /// written then.
     pub async fn block(&mut self, pubky: &[u8; 32]) -> crate::error::Result<()> {
         self.refresh_own()?;
-        self.app.deny(pubky).await?;
-        self.copy_denied(pubky, true).await
+        self.list_own(pubky, true).await
     }
 
     /// Unblock `pubky`, as [`Paykit::block`] blocks: the deny list drops it, and the copy at
-    /// once. Unblocking ends the pause (Paykit spec 8.1). An unblock made through the client
-    /// directly is seen at the next read of the lists.
+    /// once. Unblocking ends the pause (Paykit spec 8.1). A `deny.delete` the client keeps
+    /// unanswered unblocks nothing yet: `pubky` counts as blocked until a read of the list
+    /// shows it dropped. An unblock made through the client directly is seen at the next
+    /// read of the lists.
     ///
     /// # Errors
     ///
     /// As [`Paykit::block`].
     pub async fn unblock(&mut self, pubky: &[u8; 32]) -> crate::error::Result<()> {
         self.refresh_own()?;
-        self.app.undeny(pubky).await?;
-        self.copy_denied(pubky, false).await
+        self.list_own(pubky, false).await
+    }
+
+    /// Write `pubky` to the deny list (`blocked`) or drop it, and the copy with it; a batch
+    /// the client keeps unanswered is marked (`bk/`) as [`Paykit::block`] says.
+    async fn list_own(&mut self, pubky: &[u8; 32], blocked: bool) -> crate::error::Result<()> {
+        let sent = if blocked {
+            self.app.deny(pubky).await
+        } else {
+            self.app.undeny(pubky).await
+        };
+        match sent {
+            Ok(()) => {
+                self.local_delete(&key::own_block(pubky)).await?;
+                self.copy_denied(pubky, blocked).await
+            }
+            Err(error) if error.kept_batch().is_some() => {
+                self.local_put(&key::own_block(pubky), &blocked).await?;
+                if blocked {
+                    self.copy_denied(pubky, true).await?;
+                }
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// The copy of the deny list with `pubky` held or not.
