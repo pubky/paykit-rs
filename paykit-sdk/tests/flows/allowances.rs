@@ -1452,22 +1452,23 @@ async fn test_allowances_restore_after_an_undelivered_proposal_proposes_once() {
 
 #[tokio::test]
 async fn test_allowances_missed_item_hold_ends_once_the_record_shows_a_stop() {
-    // After a `missed` item the executor's consent waits to be confirmed again; once the
-    // record shows the Allowance ended, the entry is removed for good (Paykit spec 8.3).
+    // After a `missed` item the phone's consent waits to be confirmed again; once the
+    // record shows the Allowance ended, the entry is removed for good (Paykit spec 8.3). The
+    // phone isn't the grant's executor, so no notice reaches it: the record alone ends it.
     let w = World::new();
-    let (mut shop, mut wallet, mut exec, _phone, theirs, mine) = executed(&w).await;
+    let (mut shop, mut wallet, _exec, mut phone, theirs, mine) = executed(&w).await;
     missed(&w);
-    exec.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
     assert_eq!(
-        consent_entry(&exec, &mine).await,
+        consent_entry(&phone, &mine).await,
         Some(json!({ "held": { "confirm_again": true } }))
     );
     shop.receive(None).await.unwrap();
     shop.end_allowance(&theirs).await.unwrap();
     wallet.receive(None).await.unwrap();
-    exec.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
     assert_eq!(
-        consent_entry(&exec, &mine).await,
+        consent_entry(&phone, &mine).await,
         Some(json!({ "removed": { "reason": "ended" } }))
     );
 }
