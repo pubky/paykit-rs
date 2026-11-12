@@ -469,6 +469,36 @@ async fn test_publishing_list_requests_answered_within_the_daily_bound() {
 }
 
 #[tokio::test]
+async fn test_publishing_list_requests_naming_none_answered_within_the_daily_bound() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default().with_list_answers_per_day(2),
+            store(),
+        )
+        .await;
+    w.publish_to_alice(&mut shop).await;
+    wallet.receive(None).await.unwrap();
+    for _ in 0..2 {
+        ask_for_the_list(&w, &shop, None, shop.app_id());
+        assert_eq!(shop.receive(None).await.unwrap().lists.sent.len(), 1);
+    }
+    // Past the bound: no answer, nothing issued. Renewals don't count against it.
+    ask_for_the_list(&w, &shop, None, shop.app_id());
+    assert!(shop.receive(None).await.unwrap().lists.sent.is_empty());
+    assert_eq!(w.rail.issued().len(), 3);
+    w.clock.advance_ms(LIST_LIFETIME_MS / 2);
+    assert_eq!(shop.receive(None).await.unwrap().lists.sent.len(), 1);
+    // A day on, a request is answered again.
+    ask_for_the_list(&w, &shop, None, shop.app_id());
+    assert_eq!(shop.receive(None).await.unwrap().lists.sent.len(), 1);
+}
+
+#[tokio::test]
 async fn test_publishing_list_request_naming_an_older_version_resends_the_current() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -1282,4 +1312,7 @@ async fn test_publishing_state_restored_and_versions_stay_above_the_lost_ones() 
     assert_eq!(got.lists.sent.len(), 1, "{:?}", got.lists);
     assert!(got.lists.sent[0].version > lost.version);
     assert_eq!(lists_taken(&mut wallet).await, 1);
+    // Named again, the version it doesn't track gets no second one.
+    ask_for_the_list(&w, &shop, Some(lost.version), shop.app_id());
+    assert!(shop.receive(None).await.unwrap().lists.sent.is_empty());
 }

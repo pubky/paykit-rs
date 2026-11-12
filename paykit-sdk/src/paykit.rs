@@ -71,7 +71,7 @@ pub(crate) fn check_orphan_window(config: &PaykitConfig, rail: &dyn Rail) -> Res
 pub const DEFAULT_RESEND_BUDGET: u64 = 500;
 
 /// The default number of newer Private Payment List versions sent to one counterparty a day
-/// on its word that the version it holds is used (Paykit spec 8.4).
+/// in answer to its list requests (Paykit spec 8.4).
 pub const DEFAULT_LIST_ANSWERS_PER_DAY: u64 = 4;
 
 /// The integrator's choices for one Paykit App.
@@ -99,10 +99,10 @@ pub struct PaykitConfig {
     /// How many messages the app re-sends to one requester identity a day (Paykit spec 9).
     pub resend_budget: u64,
     /// How many newer versions of its Private Payment List the app sends one counterparty a
-    /// day on its word, a `private_payment_list_request` naming the newest version as used
-    /// (Paykit spec 8.4); each version is answered so once. Past it the request gets no
-    /// answer, and the counterparty waits for the renewal. [`DEFAULT_LIST_ANSWERS_PER_DAY`]
-    /// by default.
+    /// day in answer to its `private_payment_list_request`s (Paykit spec 8.4), whatever they
+    /// name; a version named is answered once. Renewals, list changes and the answers to
+    /// proofs don't count. Past it a request gets no answer, and the counterparty waits for
+    /// the renewal. [`DEFAULT_LIST_ANSWERS_PER_DAY`] by default.
     pub list_answers_per_day: u64,
 }
 
@@ -153,8 +153,8 @@ impl PaykitConfig {
         self
     }
 
-    /// How many newer list versions the app sends one counterparty a day on its word that
-    /// the newest is used (Paykit spec 8.4).
+    /// How many newer list versions the app sends one counterparty a day in answer to its
+    /// list requests (Paykit spec 8.4).
     #[must_use]
     pub fn with_list_answers_per_day(mut self, list_answers_per_day: u64) -> Self {
         self.list_answers_per_day = list_answers_per_day;
