@@ -557,9 +557,16 @@ impl Paykit {
     /// needs of the events about stored entries before it returns. The SDK itself
     /// acknowledges, in order, the events it took up to the first it didn't; the rest wait
     /// for the host. An entry dropped unverified (`AppEvent::StoredEntryDropped`) is left to
-    /// the host: the re-send request for entries dropped unverified is not part of this
-    /// change, so once the host acknowledges that event nothing asks its sender to send the
-    /// entry again.
+    /// the host: this SDK doesn't ask the sender to re-send entries dropped unverified
+    /// (Paykit spec 8.1, "Stored entries"), so once the host acknowledges that event,
+    /// nothing asks for the entry again.
+    ///
+    /// A receive that returns an error shows no report. When the client's read returned
+    /// before the error, the client counts the duty events the read raised as handed to the
+    /// host, so no later report shows them: after an error, the host takes them from
+    /// [`App::unacknowledged_events`] (through [`Paykit::app_mut`]), and acknowledges them
+    /// only once a later receive has returned, up to the last event its report shows, so the
+    /// SDK has taken those about stored entries first.
     ///
     /// # Errors
     ///

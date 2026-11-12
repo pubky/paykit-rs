@@ -798,7 +798,11 @@ fn hold_list(
 }
 
 /// How long a message kept to be written into its record later is tried: 30 days from its
-/// acceptance, the time its sender keeps it to send again (Paykit spec 9).
+/// acceptance, the time its sender keeps it to send again (Paykit spec 9). While its record
+/// decides nothing yet, it waits without this limit and is never given up: the record's
+/// value is sealed at a key the app doesn't hold yet (`Unopened::KeyNotHeld`), the app
+/// lacks the current data epoch's key of the record's scope, or the record is absent while
+/// the copy of its side may lack records (Paykit spec 8.1, "Records not listed yet").
 pub const KEPT_MESSAGE_MS: u64 = 30 * pubky_switch_core::records::DAY_MS;
 
 /// How long an app holding `contacts` goes between its reads of the lists, the flagged

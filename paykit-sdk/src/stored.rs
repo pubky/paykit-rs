@@ -22,9 +22,9 @@
 //!   processed, so its effect isn't applied twice (`PaykitProtocol`'s receive step).
 //! - **A released entry that ran as a duplicate** (`ReleasedDuplicate`): its note goes.
 //! - **An entry dropped unverified** (`StoredEntryDropped`) isn't taken: the event stays
-//!   for the host, and the SDK never acknowledges it. The re-send request for entries
-//!   dropped unverified is not part of this change: a host that acknowledges the event
-//!   leaves nothing to ask for the re-send.
+//!   for the host, and the SDK never acknowledges it. This SDK doesn't ask the sender to
+//!   re-send entries dropped unverified (Paykit spec 8.1, "Stored entries"): once the host
+//!   acknowledges the event, nothing asks for the entry again.
 //!
 //! **Taken at first sight.** The SDK acts on each such event the first time a receive sees
 //! it, and keeps a mark of it (`p/dt/<event ID>`) in the same commit as what the event says,
