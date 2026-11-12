@@ -28,7 +28,7 @@ use paykit_lib::{
 };
 use pubky_switch_client::app::{
     claim_conflict, AppError, Delivery, KeptReason, OpBatch, RecordContent, RecordRead,
-    UndeliverableReason,
+    UndeliverableReason, UserConfirmed,
 };
 use pubky_switch_client::error::ClientError;
 use pubky_switch_core::claims::{ClaimStatus, Outcome};
@@ -38,6 +38,7 @@ use serde_json::{Map, Value};
 
 use crate::activity::{self, ActivityTarget, KeptSide, Role, SideTag};
 use crate::error::{PaykitError, Refusal, Result};
+use crate::pay::BlockedPayment;
 use crate::paykit::Paykit;
 use crate::periods::PeriodView;
 use crate::rail::ProofCheck;
@@ -308,6 +309,52 @@ pub struct SentRequest {
     pub request: Option<RequestRef>,
 }
 
+/// A message this app sent that its record holds, such as an acceptance or period details:
+/// written in the batch that queues it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SentMessage {
+    /// The message ID.
+    pub msg_id: String,
+    /// Where the message is. [`MessageDelivery::Kept`] when the batch that records and queues
+    /// it is kept, to go at the app's next write or read: calling again would send a second
+    /// message.
+    pub delivery: MessageDelivery,
+}
+
+/// What the user confirmed before accepting a subscription ([`Paykit::accept_subscription_with`]),
+/// as the guards of paying take it (Paykit spec 7.2, 8.1).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AcceptOptions {
+    /// The user has seen that the payee may have cancelled this request since the backup the
+    /// app was restored from, and accepts it anyway ([`Refusal::HeldAfterRestore`]; Paykit
+    /// spec 7.2, "What a restore loses"). It ends the request's hold; it never overrides a
+    /// cancellation the app holds.
+    pub possibly_cancelled_confirmed: Option<UserConfirmed>,
+    /// The subscription of a blocked payee the user was shown and chose to accept, as a
+    /// [`Refusal::Blocked`] gave it (Paykit spec 8.1): only that same request is accepted.
+    pub blocked_confirmed: Option<BlockedPayment>,
+}
+
+impl AcceptOptions {
+    /// The user has seen that the payee may have cancelled this request since the backup the
+    /// app was restored from, and accepts it anyway ([`Refusal::HeldAfterRestore`]).
+    #[must_use]
+    pub fn with_possibly_cancelled_confirmed(mut self, confirmed: UserConfirmed) -> Self {
+        self.possibly_cancelled_confirmed = Some(confirmed);
+        self
+    }
+
+    /// The subscription of a blocked payee the user was shown and chose to accept, as a
+    /// [`Refusal::Blocked`] gave it: only that same request is accepted.
+    #[must_use]
+    pub fn with_blocked_confirmed(mut self, payment: BlockedPayment) -> Self {
+        self.blocked_confirmed = Some(payment);
+        self
+    }
+}
+
 /// What the payer sees for a request (Paykit spec 8.5).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -341,7 +388,8 @@ pub enum RequestStatus {
     /// paid only once the user confirms (Paykit spec 8.1, [`Refusal::Blocked`]).
     Blocked,
     /// A recurring request this identity accepted, the subscription running: each Billing
-    /// Period is paid on its own (Paykit spec 8.2), and either side may cancel it.
+    /// Period is paid on its own (Paykit spec 8.2). The payee may cancel it; the SDK refuses
+    /// the payer's cancellation of it ([`Refusal::Recurring`]).
     Subscribed,
     /// An accepted recurring request whose last Billing Period has ended, on the highest
     /// service time verified: no period is left to come, though a payment of an earlier one
@@ -595,19 +643,26 @@ impl Paykit {
         // The request is recorded and queued: a try to deliver it now that fails leaves it
         // queued for the next flush, and the call still reports it sent, so the caller
         // doesn't send a second request.
-        let delivery = match self.app.flush_message(&msg_id).await {
+        Ok(SentRequest {
+            delivery: self.delivered(&msg_id).await?,
+            msg_id,
+            request,
+        })
+    }
+
+    /// Where `msg_id`, recorded and queued, is once a try to deliver it now is made: a try
+    /// that fails leaves it queued for the next flush, and the call still reports it sent,
+    /// so the caller doesn't send a second message.
+    pub(crate) async fn delivered(&mut self, msg_id: &str) -> Result<MessageDelivery> {
+        let delivery = match self.app.flush_message(msg_id).await {
             Ok(Some(delivery)) => delivery,
             _ => self
                 .app
-                .delivery(&msg_id)
+                .delivery(msg_id)
                 .await?
                 .ok_or_else(PaykitError::corrupt)?,
         };
-        Ok(SentRequest {
-            msg_id,
-            delivery: MessageDelivery::of(delivery),
-            request,
-        })
+        Ok(MessageDelivery::of(delivery))
     }
 
     /// Where the message this app sent as `msg_id` is now, such as a request after the
@@ -701,7 +756,12 @@ impl Paykit {
     }
 
     /// The payee's own check of the proof in `record` (Paykit spec 8.1 step 4): the verified
-    /// payment time, or `None` when the payment method doesn't confirm it.
+    /// payment time, or `None` when the payment method doesn't confirm it. A Billing Period's
+    /// endpoint is the one in the period details the proof names, or else the request's,
+    /// which with per-period endpoints serve only the first period: a later one paid there
+    /// is `None`. So is a payment whose settlement another record credits already, holding
+    /// its receipt: one settlement credits one request, period or payment without a request,
+    /// as in v0.1.
     ///
     /// # Errors
     ///
@@ -727,23 +787,42 @@ impl Paykit {
                 _ => None,
             })
         });
+        let id = &proof.payment_endpoint_identifier;
         let (amount, payload) = match request_record.as_ref().and_then(request_of) {
             Some((_, request)) => {
-                let endpoints = match (&named_details, &request.destination) {
-                    (Some(endpoints), _) | (None, RequestDestination::Endpoints(endpoints)) => {
-                        Some(endpoints)
-                    }
+                let from_details = named_details.as_ref().and_then(|e| e.get(id).cloned());
+                let from_request = match &request.destination {
+                    RequestDestination::Endpoints(endpoints) => endpoints.get(id).cloned(),
                     _ => None,
                 };
-                let payload =
-                    endpoints.and_then(|e| e.get(&proof.payment_endpoint_identifier).cloned());
-                (request.amount.clone(), payload)
+                // With per-period endpoints, the request's own serve only its first Billing
+                // Period: a later one paid there isn't credited (Paykit spec 8.2).
+                let later_period = request.per_period_endpoints
+                    && proof.billing_period.is_some_and(|period| {
+                        request
+                            .recurrence
+                            .as_ref()
+                            .and_then(|r| r.first().ok())
+                            .is_none_or(|first| first.starts_at != period.starts_at)
+                    });
+                if later_period && from_details.is_none() && from_request.is_some() {
+                    return Ok(None);
+                }
+                (request.amount.clone(), from_details.or(from_request))
             }
             None if bound.request_hash.is_none() && bound.billing_period.is_none() => {
                 (proof.amount.clone().ok_or(Refusal::NotFound)?, None)
             }
             None => return Err(Refusal::NotFound.into()),
         };
+        // One settlement credits at most one payment, as in v0.1: one credited to a request,
+        // a Billing Period or a payment without a request, its record holding the receipt,
+        // is never credited to another (Paykit spec 8.4).
+        if let Some(settlement) = self.rail.settlement_id(&proof.proof) {
+            if self.credited_elsewhere(record, id, &settlement).await? {
+                return Ok(None);
+            }
+        }
         let check = ProofCheck {
             endpoint_id: proof.payment_endpoint_identifier.clone(),
             payload,
@@ -752,6 +831,44 @@ impl Paykit {
             proof: proof.proof.clone(),
         };
         Ok(self.rail.verify(check).await?)
+    }
+
+    /// Whether a `payee_activity` record other than `record` credits the settlement
+    /// `settlement` paid to `endpoint`: it holds a proof of it and the receipt.
+    async fn credited_elsewhere(
+        &self,
+        record: &[u8; 32],
+        endpoint: &PaymentEndpointIdentifier,
+        settlement: &[u8],
+    ) -> Result<bool> {
+        for held in self
+            .app
+            .records_of(Collection::PayeeActivity.name())
+            .await?
+        {
+            if held.key == *record {
+                continue;
+            }
+            let Ok((_, other)) = self.payee_record(&held.key).await else {
+                continue;
+            };
+            let credits = other.receipt.is_some()
+                && other
+                    .proof
+                    .as_ref()
+                    .is_some_and(|stored| match stored.body() {
+                        Body::PaymentProof(proof) => {
+                            proof.payment_endpoint_identifier == *endpoint
+                                && self.rail.settlement_id(&proof.proof).as_deref()
+                                    == Some(settlement)
+                        }
+                        _ => false,
+                    });
+            if credits {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Verify the proof in `record` and, when the payment method confirms it, send the
@@ -1338,7 +1455,8 @@ impl Paykit {
     /// request whose proposal expired, decided once the record the service holds shows it
     /// still unanswered: one another own app accepted meanwhile gives
     /// [`Refusal::Subscribed`], one rejected or cancelled gives that refusal;
-    /// [`PaykitError::Conflict`] when the record changed meanwhile; the client's errors.
+    /// [`PaykitError::Conflict`] when the record changed meanwhile, unless it now shows the
+    /// request answered, which gives what answered it; the client's errors.
     pub async fn reject_request(
         &mut self,
         request: &RequestRef,
@@ -1346,7 +1464,10 @@ impl Paykit {
     ) -> Result<String> {
         self.refresh_own()?;
         self.records_known().await?;
-        self.answer_request(request, Answer::Reject, reason).await
+        Ok(self
+            .answer_request(request, Answer::Reject, reason, AcceptOptions::default())
+            .await?
+            .msg_id)
     }
 
     /// The payer cancels a one-time request (Paykit spec 8.1, Paykit wire 4.8), recorded and
@@ -1363,7 +1484,10 @@ impl Paykit {
     ) -> Result<String> {
         self.refresh_own()?;
         self.records_known().await?;
-        self.answer_request(request, Answer::Cancel, reason).await
+        Ok(self
+            .answer_request(request, Answer::Cancel, reason, AcceptOptions::default())
+            .await?
+            .msg_id)
     }
 
     /// The user accepts the subscription `request`, a recurring request (Paykit spec 8.2,
@@ -1371,18 +1495,44 @@ impl Paykit {
     /// conditioned on the version of the record read and, when the request has a proposal
     /// expiry, on `server_time_in(null, proposal_expires_at + 1 ms)`, its own millisecond
     /// the last at which it is recorded; it is sent once that batch is applied. A rejection
-    /// is recorded the same way, so the two can't both go out. Returns the acceptance's
-    /// `msg_id`. Accepting pays nothing: each Billing Period is paid on its own.
+    /// is recorded the same way, so the two can't both go out. Accepting pays nothing: each
+    /// Billing Period is paid on its own. A subscription whose last Billing Period has ended
+    /// is accepted too, as in v0.1, and shows [`RequestStatus::Ended`].
+    ///
+    /// It takes paying's guards (Paykit spec 7.2, 8.1): a request held after a restore is
+    /// accepted only once the user has seen the payee may have cancelled it, and a blocked
+    /// payee's only once the user confirms it ([`Paykit::accept_subscription_with`]).
     ///
     /// # Errors
     ///
     /// [`Refusal::NotFound`]; [`Refusal::Usage`] for a one-time request, which is accepted
     /// by paying it; [`Refusal::Subscribed`] when it is accepted already, here or by another
-    /// own app; otherwise as [`Paykit::reject_request`].
-    pub async fn accept_subscription(&mut self, request: &RequestRef) -> Result<String> {
+    /// own app, also when the record changed meanwhile to show that acceptance;
+    /// [`Refusal::HeldAfterRestore`]; [`Refusal::Blocked`]; otherwise as
+    /// [`Paykit::reject_request`]. A failure that leaves the acceptance's batch kept (the
+    /// network, `429`, `503`) is no error: it is reported sent, [`MessageDelivery::Kept`], so
+    /// the host doesn't accept again.
+    pub async fn accept_subscription(&mut self, request: &RequestRef) -> Result<SentMessage> {
+        self.accept_subscription_with(request, AcceptOptions::default())
+            .await
+    }
+
+    /// [`Paykit::accept_subscription`], with what the user confirmed: that the payee may
+    /// have cancelled a request held after a restore, or the subscription of a blocked
+    /// payee, as the refusal showed it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::accept_subscription`].
+    pub async fn accept_subscription_with(
+        &mut self,
+        request: &RequestRef,
+        options: AcceptOptions,
+    ) -> Result<SentMessage> {
         self.refresh_own()?;
         self.records_known().await?;
-        self.answer_request(request, Answer::Accept, None).await
+        self.answer_request(request, Answer::Accept, None, options)
+            .await
     }
 
     async fn answer_request(
@@ -1390,7 +1540,8 @@ impl Paykit {
         request: &RequestRef,
         answer: Answer,
         reason: Option<String>,
-    ) -> Result<String> {
+        options: AcceptOptions,
+    ) -> Result<SentMessage> {
         self.require_pay()?;
         let (target, record) = self.payer_request(request).await?;
         let (_, body) = request_of(&record).ok_or(Refusal::NotFound)?;
@@ -1399,6 +1550,26 @@ impl Paykit {
         let acceptance_end = body.acceptance_end();
         let stopped = self.kept_stop(&target).await?;
         self.refuse_answer(&record, body, answer, stopped)?;
+        // An acceptance takes paying's guards: held after a restore, it waits for the user
+        // to see the payee may have cancelled it, which ends the hold (Paykit spec 7.2); a
+        // blocked payee's waits for the user's confirmation (Paykit spec 8.1).
+        let mut end_hold = None;
+        if answer == Answer::Accept {
+            let record_key = self.activity_key(&target)?;
+            if self.held(&record_key, &record).await? {
+                if options.possibly_cancelled_confirmed.is_none() {
+                    return Err(Refusal::HeldAfterRestore.into());
+                }
+                end_hold = Some(record_key);
+            }
+            let blocked = self.denied_for_user(&request.payee).await?;
+            let shown = BlockedPayment {
+                payee: request.payee,
+                request: Some(*request),
+                amount: body.amount.clone(),
+            };
+            crate::pay::refuse_blocked(blocked, shown, options.blocked_confirmed.as_ref())?;
+        }
         let expiry = expiry_deadline(&record, body);
         // Past its proposal expiry, a recurring request can't be answered: the batch's time
         // condition would refuse it on every try. The copy held may be stale, so the record
@@ -1430,7 +1601,12 @@ impl Paykit {
             ),
         };
         let signed = self.sign(request.payee, kind, vec![request.request_hash], body)?;
+        let msg_id = signed.msg_id().to_owned();
         let mut tx = Tx::default();
+        if let Some(record_key) = end_hold {
+            // The hold ends with the acceptance, and stays when it isn't recorded.
+            tx.put(&key::hold_confirmed(&record_key), &true)?;
+        }
         if answer == Answer::Cancel {
             tx.put(
                 &key::side(signed.msg_id()),
@@ -1457,11 +1633,20 @@ impl Paykit {
         } else {
             vec![self.app.claim_condition(&obligation).await?]
         };
-        let msg_id = match self
+        match self
             .send_with_record(signed, &target, role, conditions, tx.into_writes())
             .await
         {
-            Ok(msg_id) => msg_id,
+            Ok(_) => {}
+            // An acceptance kept to go at the next write or read is sent, as far as the
+            // caller goes, so the host doesn't accept again.
+            Err(error) if answer == Answer::Accept && error.kept_batch().is_some() => {
+                let batch_id = error.kept_batch().ok_or_else(PaykitError::corrupt)?;
+                return Ok(SentMessage {
+                    msg_id,
+                    delivery: MessageDelivery::Kept { batch_id },
+                });
+            }
             Err(error) => {
                 if let PaykitError::Client(client) = &error {
                     if let Some(view) = claim_conflict(client.unkept()) {
@@ -1476,11 +1661,28 @@ impl Paykit {
                     let error = conflict(error);
                     return Err(self.expired_answer(&target, answer, Some(error)).await?);
                 }
+                // The record changed meanwhile, read again on the conflict: one that now
+                // shows the request answered, here or by another own app, gives what
+                // answered it, such as [`Refusal::Subscribed`].
+                if error.code() == Some(ErrorCode::Conflict) {
+                    if let Some(fresh) = self.held_activity(&target).await? {
+                        if let Some((_, body)) = request_of(&fresh) {
+                            self.refuse_answer(&fresh, body, answer, false)?;
+                        }
+                    }
+                }
                 return Err(conflict(error));
             }
-        };
-        self.app.flush_message(&msg_id).await?;
-        Ok(msg_id)
+        }
+        // An acceptance recorded and queued is sent whatever a try to deliver it now gives;
+        // a rejection's or cancellation's failed try is the call's error, as before.
+        if answer != Answer::Accept {
+            self.app.flush_message(&msg_id).await?;
+        }
+        Ok(SentMessage {
+            delivery: self.delivered(&msg_id).await?,
+            msg_id,
+        })
     }
 }
 

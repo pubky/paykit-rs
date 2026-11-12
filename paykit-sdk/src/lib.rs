@@ -91,8 +91,8 @@ pub use receive::{
 };
 pub use reconcile::{Doubtful, ReconcileReport, Resolution};
 pub use requests::{
-    MessageDelivery, PayeeActivity, PayeeStatus, RequestDraft, RequestRef, RequestStatus,
-    RequestView, SentRequest,
+    AcceptOptions, MessageDelivery, PayeeActivity, PayeeStatus, RequestDraft, RequestRef,
+    RequestStatus, RequestView, SentMessage, SentRequest,
 };
 pub use resend::{ResendSelection, RESEND_COOLDOWN_MS};
 pub use timer::Timer;

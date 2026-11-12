@@ -68,7 +68,7 @@ pub(crate) enum Placed {
 }
 
 /// The side of the shared records `target` is of.
-fn record_side(target: &ActivityTarget) -> crate::hold::RecordSide {
+pub(crate) fn record_side(target: &ActivityTarget) -> crate::hold::RecordSide {
     match target.side {
         crate::activity::SideTag::Payer => crate::hold::RecordSide::Payer,
         crate::activity::SideTag::Payee => crate::hold::RecordSide::Payee,
@@ -131,6 +131,9 @@ enum Place {
     /// Into a period record of a request whose record of this side the app doesn't hold yet:
     /// which period record is decided once it does (Paykit spec 8.2).
     AwaitsRequest(crate::hold::RecordSide),
+    /// Nowhere: taken with no effect, such as period details the payer doesn't store
+    /// ([`crate::periods::stores_details`]).
+    Taken,
 }
 
 impl Paykit {
@@ -370,7 +373,8 @@ impl Paykit {
     /// Where `stored`, a payer's reply or a payee's period details naming `request`, goes: a
     /// Billing Period's into its period record, once the request record is held to check the
     /// period against, else into the request record; `None` for a period that isn't the
-    /// request's (Paykit wire 4.4, 5.3).
+    /// request's (Paykit wire 4.4, 5.3); [`Place::Taken`] for details the payer doesn't
+    /// store.
     async fn period_place(
         &self,
         stored: &StoredMessage,
@@ -391,6 +395,13 @@ impl Paykit {
                 }
             }));
         };
+        // Details the payer doesn't store, as at receive, are taken with no effect.
+        if matches!(stored.body(), Body::PaymentPeriodDetails(_)) {
+            let stopped = self.kept_stop(&target).await?;
+            if !crate::periods::stores_details(&record, stored, self.service_time(), stopped) {
+                return Ok(Some(Place::Taken));
+            }
+        }
         Ok(
             crate::receive::period_or_request(&own, &target, &record, stored, request).map(
                 |placed| Place::Record {
@@ -436,6 +447,7 @@ impl Paykit {
                             Placed::Not
                         }
                     }
+                    Some(Place::Taken) => Placed::Done,
                     None => Placed::Not,
                 };
                 // A message whose record the copy may lack, or holds waiting for its key,

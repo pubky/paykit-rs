@@ -63,8 +63,8 @@ pub enum Refusal {
     /// The attempt's deadline has passed, or the request's proposal expired (Paykit spec 7.1).
     #[error("Paykit spec 7.1: the deadline has passed")]
     DeadlinePassed,
-    /// A recurring request is paid, and cancelled by its payer, per Billing Period, which
-    /// this version of the SDK doesn't do yet (Paykit spec 8.2).
+    /// A recurring request is paid, and cancelled by its payer, per Billing Period (Paykit
+    /// spec 8.2): `pay_request` and `cancel_request` refuse it.
     #[error("Paykit spec 8.2: a recurring request is paid per Billing Period")]
     Recurring,
     /// The recurring request is accepted already, by this app or another own app (Paykit

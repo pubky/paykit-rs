@@ -491,12 +491,14 @@ fn keep_before_record(
 /// 8.1, "Replies before their record"); while the copy of the payer's records may lack
 /// records, the absence decides nothing and the entry is held ([`held_or_unlisted`]), and a
 /// value of either record waiting for its scope key holds it too ([`wait_for_key`]).
-/// Details invalid against the request are dropped; those of a request rejected or
-/// cancelled are taken with no effect, a subscription that runs no more having no periods
-/// to pay. So are details for a period other than one that has started or the first that
-/// hasn't, or past the period's payment deadline, on the highest service time verified
-/// ([`crate::periods::stores_details`]): a payee can't make the payer hold records for
-/// periods it can't pay.
+/// Details invalid against the request are dropped. Those the payer doesn't store, for a
+/// request it hasn't accepted, or rejected, or either side cancelled, or for a period it
+/// can't pay yet or any more ([`crate::periods::stores_details`]), are taken with no effect.
+///
+/// The spam rule (Paykit wire 4.1) doesn't gate the details stored here: they go only into
+/// the period record of a subscription the payer accepted, an update of activity it holds
+/// with this payee, not new state. Details kept before their request record are new state,
+/// and [`keep_before_record`] gates them.
 fn period_details_effect(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
@@ -523,10 +525,9 @@ fn period_details_effect(
             "Paykit wire 4.9: period details invalid against their request".into(),
         ));
     };
-    if crate::requests::rejected(&record) || crate::requests::cancelled(&record) {
-        return Ok(());
-    }
-    if !crate::periods::stores_details(&record, stored, cx.highest_service_time()) {
+    let kept_stop = key::kept_cancellation(&cx.record_key(&request_target.record_target())?);
+    let stopped = cx.local_get(kept_stop.as_bytes())?.is_some();
+    if !crate::periods::stores_details(&record, stored, cx.highest_service_time(), stopped) {
         return Ok(());
     }
     // The period record is of the request record's side, whose hold was judged above, and
@@ -574,13 +575,27 @@ fn payer_reply(
             // (Paykit wire 5.3 "Binding"): the period is checked against the request first,
             // and a proof naming a period that isn't the request's is dropped. A record that
             // doesn't read is written again with the message, as before.
+            let request_target = target;
             let target = match activity::read(Some(&value), &own, ActivitySide::Payee) {
-                Some(record) => period_or_request(&own, &target, &record, stored, request)
+                Some(record) => period_or_request(&own, &request_target, &record, stored, request)
                     .ok_or_else(|| {
                         Fail::Drop("Paykit wire 4.4: a message naming another period".into())
                     })?,
-                None => target,
+                None => request_target.clone(),
             };
+            // A proof naming period details the period record doesn't hold, such as ones
+            // another own app sent whose record this app hasn't taken yet, would leave the
+            // record unbound (Paykit wire 5.3): it waits for them as a reply before its
+            // record, placed once the period record holds them.
+            if target != request_target {
+                let period = held_or_unlisted(cx, &target, RecordSide::Payee)?;
+                let held = activity::read(period.as_deref(), &own, ActivitySide::Payee)
+                    .unwrap_or_else(|| activity::empty(ActivitySide::Payee, sender));
+                if activity::names_details_not_held(&held, stored) {
+                    keep_before_record(cx, stored, scopes, &request_target)?;
+                    return Ok(true);
+                }
+            }
             // A period record is of the request record's side, whose hold was judged above,
             // and `place` holds the entry while its value waits for its key.
             place(cx, &target, sender, role, stored)?;
@@ -1135,11 +1150,15 @@ impl Paykit {
     /// for requests whose payer record it didn't hold, each once the request record is
     /// held, as a later write of its own with the kept copy dropped in its batch (Switch spec
     /// 8.2). A period's details or proof go into the period record, once checked against the
-    /// request; one that fails is dropped, as are details for a period the payer doesn't
-    /// store them for ([`crate::periods::stores_details`]). One whose record doesn't come
-    /// within [`KEPT_MESSAGE_MS`] of its acceptance, on the highest service time verified,
-    /// is dropped: the sender keeps what it sent that long, and may send it again (Paykit
-    /// spec 9). A placement that fails now is tried again at the next receive.
+    /// request; one that fails is dropped, as are details the payer doesn't store
+    /// ([`crate::periods::stores_details`]). The record it goes into is waited for, never
+    /// written over, while its value is sealed at a key the app doesn't hold yet or doesn't
+    /// read, while it is absent and the copy of its side may lack records, or while nothing
+    /// can be sealed there for want of the current key; a proof waits for the period
+    /// details it names. One whose record doesn't come within [`KEPT_MESSAGE_MS`] of its
+    /// acceptance, on the highest service time verified, is dropped: the sender keeps what
+    /// it sent that long, and may send it again (Paykit spec 9). A placement that fails now
+    /// is tried again at the next receive.
     pub(crate) async fn place_kept_replies(&mut self) -> crate::error::Result<()> {
         let own = self.identity();
         for (rest, kept) in self.local_scan::<KeptMessage>(key::KEPT_REPLIES).await? {
@@ -1152,36 +1171,74 @@ impl Paykit {
                 self.local_delete(&kept_key).await?;
                 continue;
             };
+            // One whose record doesn't come within `KEPT_MESSAGE_MS` of its acceptance, on the
+            // highest service time verified, is dropped.
+            let stale = reply.accepted_at().is_none_or(|at| {
+                self.service_time()
+                    .is_some_and(|t| at.saturating_add(KEPT_MESSAGE_MS) <= t)
+            });
             let target = kept_request_target(&own, &reply, &request);
             let Some(record) = self.held_activity(&target).await? else {
-                let stale = reply.accepted_at().is_none_or(|at| {
-                    self.service_time()
-                        .is_some_and(|t| at.saturating_add(KEPT_MESSAGE_MS) <= t)
-                });
                 if stale {
                     self.local_delete(&kept_key).await?;
                 }
                 continue;
             };
-            let Some(target) = period_or_request(&own, &target, &record, &reply, &request) else {
+            let Some(placed) = period_or_request(&own, &target, &record, &reply, &request) else {
                 self.local_delete(&kept_key).await?;
                 continue;
             };
-            // Details kept before their record take the bound on stored details, as those
-            // that come after it do.
-            if matches!(reply.body(), Body::PaymentPeriodDetails(_))
-                && !crate::periods::stores_details(&record, &reply, self.service_time())
-            {
-                self.local_delete(&kept_key).await?;
+            // Details the payer doesn't store, for a subscription that doesn't run or a period
+            // it can't pay, are dropped, as at receive.
+            let details = matches!(reply.body(), Body::PaymentPeriodDetails(_));
+            if details {
+                let stopped = self.kept_stop(&target).await?;
+                if !crate::periods::stores_details(&record, &reply, self.service_time(), stopped) {
+                    self.local_delete(&kept_key).await?;
+                    continue;
+                }
+            }
+            // The record it goes into is waited for, never written over, while its value is
+            // sealed at a key the app doesn't hold yet or doesn't read, or while it is absent
+            // and the copy of its side may lack records (Paykit spec 8.1, Switch spec 3.5);
+            // and a proof waits for the period details it names (Paykit wire 5.3).
+            let held = self.app.shared_record(&self.activity_key(&placed)?).await?;
+            let mut waits = match held.map(|held| held.content) {
+                None => {
+                    self.side_unlisted(crate::stored::record_side(&placed))
+                        .await?
+                }
+                Some(content) => matches!(content, RecordContent::Unreadable(_)),
+            };
+            if placed != target {
+                let period = self
+                    .held_activity(&placed)
+                    .await?
+                    .unwrap_or_else(|| crate::activity::empty(placed.side.side(), reply.sender()));
+                waits |= crate::activity::names_details_not_held(&period, &reply);
+            }
+            if waits {
+                if stale {
+                    self.local_delete(&kept_key).await?;
+                }
                 continue;
             }
             let mut tx = Tx::default();
             tx.delete(&kept_key);
             let sender = reply.sender();
-            match self
-                .placed_write(&target, sender, role, reply, Vec::new())
-                .await?
+            let write = match self
+                .placed_write(&placed, sender, role, reply, Vec::new())
+                .await
             {
+                Ok(write) => write,
+                // Nothing can be sealed there yet, for want of the current key: tried again
+                // at a later receive.
+                Err(crate::error::PaykitError::Client(AppError::Refused(
+                    ClientRefusal::NotNow(_),
+                ))) => continue,
+                Err(error) => return Err(error),
+            };
+            match write {
                 Some(entry) => {
                     let batch = pubky_switch_client::app::OpBatch::new()
                         .entry(entry)

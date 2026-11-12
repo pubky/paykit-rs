@@ -210,6 +210,12 @@ pub(crate) fn place(record: &mut ActivityRecord, role: Role, message: StoredMess
     };
     if slot.is_none() {
         *slot = Some(message);
+        // The details a period's proof names are the period's current ones from then on,
+        // whichever the record held as latest: the payer may pay by any valid details
+        // (Paykit spec 8.2, Paykit wire 5.3).
+        if role == Role::Proof {
+            order_details(record);
+        }
     } else {
         others.push(msg_id);
     }
@@ -238,6 +244,15 @@ fn place_details(record: &mut ActivityRecord, message: StoredMessage) -> bool {
     if record.billing_period.is_none() {
         record.billing_period = message.body().billing_period().copied();
     }
+    record.earlier_details.push(message);
+    order_details(record);
+    true
+}
+
+/// Order the period details `record` holds (Paykit wire 5.3): the ones its proof names in
+/// `period_details`, or else the latest, by `created_at` then `msg_id`, and the others in
+/// `earlier_details` in that order.
+fn order_details(record: &mut ActivityRecord) {
     let named = record
         .proof
         .as_ref()
@@ -247,15 +262,27 @@ fn place_details(record: &mut ActivityRecord, message: StoredMessage) -> bool {
         .take()
         .into_iter()
         .chain(std::mem::take(&mut record.earlier_details))
-        .chain(std::iter::once(message))
         .collect();
+    if all.is_empty() {
+        return;
+    }
     all.sort_by(|a, b| period_details_order(a.message(), b.message()));
     let current = named
         .and_then(|hash| all.iter().position(|d| d.hash() == hash))
-        .unwrap_or(all.len().saturating_sub(1));
+        .unwrap_or(all.len() - 1);
     record.period_details = Some(all.remove(current));
     record.earlier_details = all;
-    true
+}
+
+/// Whether the proof `stored` names period details `record` doesn't hold: placed now, the
+/// record wouldn't bind (Paykit wire 5.3), so it waits for them as a reply before its record.
+pub(crate) fn names_details_not_held(record: &ActivityRecord, stored: &StoredMessage) -> bool {
+    matches!(stored.body(), Body::PaymentProof(_))
+        && stored
+            .message()
+            .refs
+            .get(1)
+            .is_some_and(|named| record.details().iter().all(|d| d.hash() != *named))
 }
 
 /// The informational `status` a writer sets (Paykit wire 5.3): written by the last writer,
