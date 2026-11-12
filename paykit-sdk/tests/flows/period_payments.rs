@@ -1649,6 +1649,9 @@ async fn test_period_payments_receipt_parked_over_an_entry_naming_another_attemp
     );
 }
 
+/// A rewrite of one entry of a backup's Paykit layer: its key and its value.
+type Tamper = dyn Fn(&mut Vec<u8>, &mut serde_json::Value);
+
 /// A backup of the wallet with January's payment in flight, and Paykit's layer of it.
 async fn backup_paying_january(w: &World) -> (serde_json::Value, [u8; 16]) {
     let mut shop = w.shop().await;
@@ -1718,7 +1721,7 @@ async fn test_period_payments_restore_refuses_a_period_entry_a_run_cant_write() 
                 .unwrap();
         pubky_switch_core::enc::b64(&natural_key::request_record(&payee, &hash))
     };
-    let refused: [Box<dyn Fn(&mut Vec<u8>, &mut serde_json::Value)>; 4] = [
+    let refused: [Box<Tamper>; 4] = [
         Box::new(|_, e| e["obligation"] = serde_json::json!(pubky_switch_core::enc::b64(&[7; 32]))),
         Box::new(|_, e| e["acceptance_owed"] = serde_json::json!(true)),
         Box::new(move |_, e| e["natural_key"] = serde_json::json!(request_key(e))),
@@ -1755,4 +1758,56 @@ async fn test_period_payments_restore_refuses_a_kept_receipt_under_another_recor
         })
         .await
     );
+}
+
+/// A weekly request for 1 btc from the start of the world's clock, paid to one invoice of
+/// the sending app.
+fn weekly() -> RequestDraft {
+    let rule = AnchoredRule::new(START_MS, 1, Unit::Week).unwrap();
+    let mut draft = monthly();
+    draft.recurrence = Some(Recurrence::new(rule, START_MS, None).unwrap());
+    draft
+}
+
+/// The weekly request's first `n` Billing Periods.
+fn weeks(n: usize) -> Vec<PeriodRef> {
+    let rule = AnchoredRule::new(START_MS, 1, Unit::Week).unwrap();
+    Recurrence::new(rule, START_MS, None)
+        .unwrap()
+        .periods(n)
+        .unwrap()
+        .into_iter()
+        .map(PeriodRef::from)
+        .collect()
+}
+
+#[tokio::test]
+async fn test_period_payments_period_past_the_details_window_paid_by_the_request() {
+    // Details are held for the first two weeks. Once 17 weeks have started, the first no
+    // longer takes details (the 16 latest started periods do): it is paid by the request's
+    // own destination, its proof naming no details, while the second is paid by its details.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, sale) = subscribed_to(&w, &mut shop, &mut wallet, weekly()).await;
+    let all = weeks(17);
+    let now = w.clock.now_ms();
+    shop.send_period_details(&sale, details(all[0], "lnbc1first", now + 300 * DAY_MS))
+        .await
+        .unwrap();
+    w.clock.set_ms(all[1].starts_at);
+    let now = w.clock.now_ms();
+    shop.send_period_details(&sale, details(all[1], "lnbc1second", now + 300 * DAY_MS))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    w.clock.set_ms(all[16].starts_at);
+    wallet.receive(None).await.unwrap();
+    for (period, refs) in [(all[0], 1), (all[1], 2)] {
+        by_user(&mut wallet, &request, period, PayOptions::default())
+            .await
+            .unwrap();
+        let record = period_record(&w, &wallet, &request, period).await.unwrap();
+        assert_eq!(proof_of(&record).0.message().refs.len(), refs, "{period:?}");
+    }
 }
