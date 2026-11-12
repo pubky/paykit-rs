@@ -938,7 +938,7 @@ fn hold_list(
 /// that sender's earliest reply is dropped. The payees' cancellations kept as stops for
 /// requests the app holds no record of, and the counterparties' Allowance ends kept as stops
 /// for Allowances it holds no record of, are bounded the same way, counted together and
-/// apart from the replies ([`make_room_for_stop`]).
+/// apart from the replies.
 pub const MAX_KEPT_REPLIES_PER_SENDER: usize = 64;
 
 /// How many such replies it keeps in all: past it, the earliest reply of the sender holding
