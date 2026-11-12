@@ -28,11 +28,14 @@ pub enum Refusal {
     /// The request was rejected by this identity (Paykit spec 8.1).
     #[error("the request was rejected")]
     Rejected,
-    /// Restored from a backup, the app holds the request: the payee may have cancelled it
-    /// since the backup. It is paid only once the user has seen that
+    /// Restored from a backup, or past a `missed` item, the app holds the request: the payee
+    /// may have cancelled it since the backup, or among the entries the service deleted. It
+    /// is paid only once the user has seen that
     /// ([`crate::PayOptions::possibly_cancelled_confirmed`]; Paykit spec 7.2, "What a
     /// restore loses").
-    #[error("Paykit spec 7.2: held after a restore; the payee may have cancelled it")]
+    #[error(
+        "Paykit spec 7.2: held after a restore or a missed item; the payee may have cancelled it"
+    )]
     HeldAfterRestore,
     /// The request was cancelled by either side (Paykit spec 8.1).
     #[error("the request was cancelled")]

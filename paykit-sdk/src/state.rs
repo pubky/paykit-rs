@@ -199,10 +199,12 @@ pub(crate) mod key {
     pub(crate) const KEPT_CANCELLATIONS: &str = "kc/";
     pub(crate) const CURSOR_TIME: &str = "ct";
     pub(crate) const RESTORE_HOLD: &str = "rh";
+    pub(crate) const MISSED_HOLD: &str = "mh";
     pub(crate) const HOLD_CONFIRMED: &str = "hc/";
     pub(crate) const LISTS_READ: &str = "lr";
     pub(crate) const HELD_LISTS: &str = "lh/";
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
+    pub(crate) const MISSED_UNLISTED: &str = "ml";
     pub(crate) const PAYER_PASS_OWED: &str = "pp";
     pub(crate) const LISTED_CERT: &str = "lc";
     pub(crate) const NOTICES: &str = "nt/";
@@ -353,8 +355,12 @@ pub(crate) enum StateKey {
     CursorTime,
     /// `rh`: the hold a restore set.
     RestoreHold,
+    /// `mh`: the hold a `missed` item set.
+    MissedHold,
     /// `nl`: the shared records aren't listed since a restore.
     RecordsUnlisted,
+    /// `ml`: the shared records aren't listed by Paykit since a `missed` item.
+    MissedUnlisted,
     /// `pp`: no reconcile ran the payer pass since a restore.
     PayerPassOwed,
     /// `lc`: the certificate the shared records were last listed under.
@@ -440,7 +446,9 @@ impl StateKey {
         Some(match text {
             "ct" => Self::CursorTime,
             "rh" => Self::RestoreHold,
+            "mh" => Self::MissedHold,
             "nl" => Self::RecordsUnlisted,
+            "ml" => Self::MissedUnlisted,
             "pp" => Self::PayerPassOwed,
             "lc" => Self::ListedCert,
             "lr" => Self::ListsRead,
@@ -634,7 +642,9 @@ mod tests {
             ),
             (key::CURSOR_TIME.into(), StateKey::CursorTime),
             (key::RESTORE_HOLD.into(), StateKey::RestoreHold),
+            (key::MISSED_HOLD.into(), StateKey::MissedHold),
             (key::RECORDS_UNLISTED.into(), StateKey::RecordsUnlisted),
+            (key::MISSED_UNLISTED.into(), StateKey::MissedUnlisted),
             (key::PAYER_PASS_OWED.into(), StateKey::PayerPassOwed),
             (key::LISTED_CERT.into(), StateKey::ListedCert),
             (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),

@@ -60,10 +60,11 @@ use crate::state::{key, Tx};
 pub(crate) enum Placed {
     /// Written now, or reflected already.
     Done,
-    /// Not written now: tried again at the next receive, and given up past its window.
+    /// Not written now: tried again at the next receive, and given up past its window, a
+    /// message waiting for a scope key included.
     Not,
-    /// Not written while the record's absence decides nothing yet, or its value waits for
-    /// its scope key: tried again at the next receive, and never given up meanwhile.
+    /// Not written while the record's absence decides nothing yet: tried again at the next
+    /// receive, and never given up meanwhile.
     Waits,
 }
 
@@ -418,8 +419,8 @@ impl Paykit {
                         .unwrap_or(Placed::Not),
                     None => Placed::Not,
                 };
-                // A message whose record the copy may lack, or holds waiting for its key,
-                // waits: it is neither written nor given up meanwhile.
+                // A message whose record the copy may lack waits: it is neither written nor
+                // given up meanwhile.
                 if placed == Placed::Waits {
                     continue;
                 }
@@ -480,11 +481,13 @@ impl Paykit {
     /// record held as a value that doesn't read, or that the app can't open, is never
     /// written over (Switch spec 8.2: a reader doesn't act on a record it can't read, and a
     /// write over one that is only unopenable for now could drop what its writer stored). A
-    /// value sealed at a key the app doesn't hold yet (`Unopened::KeyNotHeld`), a record whose
-    /// scope's key at the current data epoch the app doesn't hold yet, and a record absent
-    /// while the copy of its side may lack records ([`Paykit::side_unlisted`]), wait:
-    /// tried again at each receive, never given up meanwhile, and placed once the key comes
-    /// or the records are listed. A value that never opens stays as it is.
+    /// value sealed at a key the app doesn't hold yet (`Unopened::KeyNotHeld`) and a record
+    /// whose scope's key at the current data epoch the app doesn't hold yet wait for the key:
+    /// tried again at each receive and placed once it comes, and given up as any other
+    /// message not written once [`crate::KEPT_MESSAGE_MS`] have passed since its acceptance
+    /// (Paykit spec 8.1). A record absent while the copy of its side may lack records
+    /// ([`Paykit::side_unlisted`]) waits, never given up meanwhile, and the message is placed
+    /// once the records are listed. A value that never opens stays as it is.
     async fn place_note(
         &mut self,
         target: &ActivityTarget,
@@ -493,10 +496,10 @@ impl Paykit {
         stored: StoredMessage,
     ) -> Result<Placed> {
         // Without the current data epoch's key of the record's scope, nothing can be sealed
-        // there yet: the message waits for it rather than count as not written.
+        // there yet: the message waits for it, within its window.
         let scope = target.record_target().collection.policy.read_scope;
         if self.app.scope_key(self.app.data_epoch(), &scope).is_none() {
-            return Ok(Placed::Waits);
+            return Ok(Placed::Not);
         }
         let key = self.activity_key(target)?;
         let content = self.app.shared_record(&key).await?.map(|held| held.content);
@@ -509,7 +512,9 @@ impl Paykit {
                     return Ok(Placed::Not);
                 }
             }
-            Some(content) if crate::hold::awaits_key(&content) => return Ok(Placed::Waits),
+            // A value sealed under a key the app doesn't hold yet: the message waits for it,
+            // within its window.
+            Some(content) if crate::hold::awaits_key(&content) => return Ok(Placed::Not),
             Some(RecordContent::Unreadable(_)) => return Ok(Placed::Not),
             Some(RecordContent::Value(_)) => {
                 let Some(record) = self.held_activity(target).await? else {

@@ -396,8 +396,10 @@ pub(crate) fn restore_paykit_layer(
             // again changes nothing: a dropped entry's time is already in its sender's mark,
             // which asks on its own cadence (`marks.rs`).
             StateKey::RestoreHold
+            | StateKey::MissedHold
             | StateKey::HoldConfirmed(_)
             | StateKey::RecordsUnlisted
+            | StateKey::MissedUnlisted
             | StateKey::PayerPassOwed
             | StateKey::ListedCert
             | StateKey::StoredNote { .. }
@@ -926,12 +928,27 @@ impl Protocol for PaykitProtocol {
     }
 
     /// Entries missed while lagging: ask the counterparties of unfinished activity to send
-    /// again from the item's time (Paykit spec 9).
+    /// again from the item's time (Paykit spec 9), and hold every open request as after a
+    /// restore (Paykit spec 7.2; `hold.rs`): a payee's cancellation may be among the entries
+    /// the service deleted. The confirmations of an earlier hold go in the same commit, so
+    /// none releases the new one. The copy of the shared records counts as not listed from
+    /// the item on (`ml`, Paykit spec 8.1, "Records not listed yet"), until Paykit's own
+    /// listing at the end of the receive (`Paykit::list_records`): the client lists
+    /// them again only at the start of its next read, so entries later in this read decide
+    /// nothing from an absence. A mark of its own, not `nl`, which the same read's end
+    /// would clear.
     fn missed(&self, missed: &MissedEntries) -> Result<Vec<LocalWrite>, StoreFailure> {
-        Ok(vec![local_write(
-            &key::missed(missed.accepted_from_ms),
-            &missed.accepted_from_ms,
-        )?])
+        Ok(vec![
+            local_write(
+                &key::missed(missed.accepted_from_ms),
+                &missed.accepted_from_ms,
+            )?,
+            local_write(key::MISSED_HOLD, &true)?,
+            local_write(key::MISSED_UNLISTED, &true)?,
+            LocalWrite::DeletePrefix {
+                prefix: key::HOLD_CONFIRMED.as_bytes().to_vec(),
+            },
+        ])
     }
 
     /// A provider loss, without the protocol's state at hand: only the re-sends are queued.

@@ -290,3 +290,213 @@ async fn test_restore_hold_keeps_a_request_created_before_and_resent_after() {
     assert_eq!(requests.len(), 1, "{requests:?}");
     assert_eq!(requests[0].status, RequestStatus::Held);
 }
+
+/// A `missed` item at alice's switch: entries accepted in the last second were deleted before
+/// the wallet read them (Switch spec 8.2).
+fn missed(w: &World) {
+    let now = w.clock.now_ms();
+    w.alice.switch().push_missed(1, now - 1_000, now);
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_holds_an_open_request_until_the_user_confirms() {
+    // A payee's cancellation may be among the entries a `missed` item tells of: every open
+    // request is held as after a restore (Paykit spec 7.2).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+    missed(&w);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Held
+    );
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::HeldAfterRestore));
+    assert!(w.rail.all_executions().is_empty());
+    let paid = wallet.pay_request(&request, confirmed()).await.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_holds_a_repeat_until_the_user_confirms() {
+    // A payment is in flight on a method that is idempotent and keeps no history, so a
+    // resume repeats it. The user confirmed the request before; then a `missed` item comes:
+    // that confirmation releases nothing, and the repeat is withheld, the attempt left open,
+    // until the user confirms again.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true),
+    );
+    wallet
+        .confirm_possibly_cancelled(&request, UserConfirmed::new())
+        .await
+        .unwrap();
+    missed(&w);
+    wallet.receive(None).await.unwrap();
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Paying
+    );
+    wallet
+        .confirm_possibly_cancelled(&request, UserConfirmed::new())
+        .await
+        .unwrap();
+    // Repeated: the method is called again for the same attempt.
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt_id), 2);
+}
+
+#[tokio::test]
+async fn test_restore_hold_confirming_a_request_not_held_refused_as_not_found() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let unknown = RequestRef {
+        payee: w.bob_id(),
+        request_hash: [9; 32],
+    };
+    let refused = wallet
+        .confirm_possibly_cancelled(&unknown, UserConfirmed::new())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::NotFound));
+}
+
+/// Whether `wallet` keeps the mark of records not listed since a `missed` item.
+async fn missed_unlisted(wallet: &Paykit) -> bool {
+    wallet
+        .app()
+        .protocol_scan(b"ml")
+        .await
+        .unwrap()
+        .iter()
+        .any(|(key, _)| key == b"ml")
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_absence_decides_nothing_until_the_listing() {
+    // A request comes after a `missed` item in one read: its record's absence from the copy
+    // decides nothing, since the client lists again only at its next read. The entry is held;
+    // Paykit's own listing at the end of the receive ends the mark, and the next read takes
+    // the request (Paykit spec 8.1, "Records not listed yet").
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    wallet.receive(None).await.unwrap();
+    missed(&w);
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.applied.is_empty(), "{got:?}");
+    assert!(wallet.requests().await.unwrap().is_empty());
+    assert!(!missed_unlisted(&wallet).await);
+    let got = wallet.receive(None).await.unwrap();
+    assert_eq!(got.applied.len(), 1, "{got:?}");
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Held
+    );
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_mark_stays_until_paykit_lists() {
+    // Paykit's listing at the end of the receive fails: the mark stays past the client's own
+    // listing at the next read's start, and calls that only read are refused until a listing
+    // of Paykit's own ends it.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    wallet.receive(None).await.unwrap();
+    missed(&w);
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "records?collection".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.applied.is_empty(), "{got:?}");
+    assert!(got.records_unlisted.is_some(), "{got:?}");
+    assert!(missed_unlisted(&wallet).await);
+    let refused = wallet.requests().await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{refused:?}"
+    );
+    wallet.receive(None).await.unwrap();
+    assert!(!missed_unlisted(&wallet).await);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_keeps_a_stop_past_30_days_until_paykit_lists() {
+    // A stop kept for a request the wallet holds no record of is past its 30 days when a
+    // `missed` item comes, and Paykit's listing fails: the absence decides nothing, so the
+    // stop stays until a listing of Paykit's own, and goes then (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let stops = async |wallet: &Paykit| wallet.app().protocol_scan(b"kc/").await.unwrap().len();
+    let body = paykit_lib::bodies::RequestReply {
+        reason: None,
+        label: None,
+    }
+    .to_body()
+    .unwrap();
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.payment_request_cancellation",
+        vec![[7; 32]],
+        body,
+    );
+    wallet.receive(None).await.unwrap();
+    assert_eq!(stops(&wallet).await, 1);
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+    missed(&w);
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "records?collection".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.records_unlisted.is_some(), "{got:?}");
+    assert_eq!(stops(&wallet).await, 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(stops(&wallet).await, 0);
+}

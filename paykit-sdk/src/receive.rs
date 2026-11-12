@@ -176,19 +176,29 @@ pub(crate) fn effect(
             };
             let payer_target =
                 ActivityTarget::payer(natural_key::request_record(&sender, &request));
+            // A payee's cancellation is kept, the kept-copy stop (Paykit spec 8.1): the
+            // receive step writes no record for it. The app places it in the request record
+            // itself, as a later write of its own, and every new attempt reads the kept copy,
+            // so a stop that can't be placed still refuses the payment. One for a request
+            // whose record the app holds, open or sealed under a scope key it doesn't hold
+            // yet, always applies and is kept at once: keeping it needs only the record's
+            // key, so the stop never waits for the value's key or a listing, and no give-up
+            // of the entry can lose it.
+            if pay && held_request(cx, &payer_target)? {
+                return keep_cancellation(cx, &payer_target, stored, true);
+            }
             if payee && payer_reply(cx, stored, &scopes, settlement)? {
                 // A payer's cancellation of a request this app sent.
-            } else if pay
-                && (held_or_unlisted(cx, &payer_target, RecordSide::Payer)?.is_some()
-                    || admits_new_state(cx, &sender, &scopes)?)
-            {
-                // A payee's cancellation is kept, the kept-copy stop (Paykit spec 8.1): the
-                // receive step writes no record for it. The app places it in the request
-                // record itself, as a later write of its own, and every new attempt reads
-                // the kept copy, so a stop that can't be placed still refuses the payment.
+            } else if pay {
                 // One for a request the app holds no record of is new state, which the spam
-                // rule gates; one for a held request always applies.
-                keep_cancellation(cx, &payer_target, stored)?;
+                // rule gates. While the copy of the payer's records may lack records, the
+                // absence decides nothing: the entry is held.
+                if cx.record(&payer_target.record_target())?.is_none() {
+                    hold_while_unlisted(cx, RecordSide::Payer)?;
+                }
+                if admits_new_state(cx, &sender, &scopes)? {
+                    keep_cancellation(cx, &payer_target, stored, false)?;
+                }
             }
         }
         Body::PaymentReceipt(receipt) if pay => {
@@ -379,6 +389,23 @@ pub(crate) fn key_wait_over(cx: &ReceiveContext<'_>, accepted_at: Option<u64>) -
     })
 }
 
+/// Whether the app's copy holds the record at `target` ([`holds_record`]).
+fn held_request(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<bool, Fail> {
+    Ok(holds_record(
+        cx.record(&target.record_target())?
+            .map(|held| held.content)
+            .as_ref(),
+    ))
+}
+
+/// Whether `content`, what the app's copy holds at a record, is a record held, for the stop a
+/// payee's cancellation keeps: any content but a delete, a value that doesn't read and one
+/// sealed under a scope key the app doesn't hold yet included. A stop for a request held
+/// stays until it is placed; one for a request not held is bounded ([`keep_cancellation`]).
+pub(crate) fn holds_record(content: Option<&RecordContent>) -> bool {
+    content.is_some_and(|content| *content != RecordContent::Deleted)
+}
+
 /// The value held at `target`, which is of `side`: `None` for none, or one that isn't
 /// open or is deleted. The entry is held instead while the value waits for its scope key
 /// ([`wait_for_key`]), and while the record is absent and the app's copy of `side` may
@@ -407,10 +434,10 @@ pub(crate) fn held_or_unlisted_at(
 }
 
 /// Hold the entry while the app's copy of `side`'s records may lack records (Paykit spec
-/// 8.1, "Records not listed yet"): after a restore, or a certificate that reads more, until
-/// Paykit has listed them. The rule is [`crate::hold::side_unlisted`], read per entry from
-/// the context's certificate and Paykit's state (`nl`, `lc`), so an entry after a wider
-/// certificate the same read took is held too. The entry is held as for a store
+/// 8.1, "Records not listed yet"): after a restore, a `missed` item, or a certificate that
+/// reads more, until Paykit has listed them. The rule is [`crate::hold::side_unlisted`], read
+/// per entry from the context's certificate and Paykit's state (`nl`, `ml`, `lc`), so an
+/// entry after a wider certificate or a `missed` item the same read took is held too. The entry is held as for a store
 /// unavailable for now (Paykit spec 17, question 27), and read again at a later read.
 ///
 /// [`Paykit::side_unlisted`] counts the records as listed under a certificate Paykit
@@ -418,7 +445,8 @@ pub(crate) fn held_or_unlisted_at(
 /// entry under a certificate that fails the same check before any branch reaches here, so
 /// the two agree wherever this runs.
 fn hold_while_unlisted(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<(), Fail> {
-    let restore = cx.local_get(key::RECORDS_UNLISTED.as_bytes())?.is_some();
+    let marked = cx.local_get(key::RECORDS_UNLISTED.as_bytes())?.is_some()
+        || cx.local_get(key::MISSED_UNLISTED.as_bytes())?.is_some();
     let listed = match cx.local_get(key::LISTED_CERT.as_bytes())? {
         None => None,
         Some(bytes) => {
@@ -426,7 +454,7 @@ fn hold_while_unlisted(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<(), 
             Some(AppCert::verify(&signed, &cx.identity()).map_err(|_| Fail::corrupt())?)
         }
     };
-    if crate::hold::side_unlisted(side, restore, listed.as_ref(), cx.cert()) {
+    if crate::hold::side_unlisted(side, marked, listed.as_ref(), cx.cert()) {
         return Err(Fail::Store(StoreFailure::unavailable(
             StoreError::Unavailable,
         )));
@@ -470,20 +498,58 @@ fn place(
 /// Security: the cancellation passed every recipient check and check 10 before it was kept,
 /// and is verified again when it is placed. It is keyed by the payer's record of the request
 /// it names first in `refs`, which derives from the sender and that hash, so it can only
-/// cancel that sender's request. It is kept until it is placed: a request record can still
-/// come from another own app after the sender stops re-sending, and a cancelled request must
-/// never become payable. Admission bounds what a sender can make the app keep (Switch spec
-/// 7).
+/// cancel that sender's request. A stop for a request `held` ([`holds_record`]) is kept until
+/// it is placed. One for a request not held is new state, which admission gates (Switch spec
+/// 7), and is kept under the bounds of a payer's reply before its record, counted apart from
+/// those: past its sender's [`MAX_KEPT_REPLIES_PER_SENDER`] such stops, that sender's earliest
+/// goes, and past [`MAX_KEPT_REPLIES`] in all, the earliest of the sender keeping the most
+/// ([`kept_reply_evicted`]). It goes [`KEPT_MESSAGE_MS`] after the cancellation's acceptance
+/// while the request is still not held ([`crate::Paykit::place_kept_cancellations`]): by then
+/// its sender re-sends nothing, and any own app that held the request got the cancellation
+/// too.
 fn keep_cancellation(
     cx: &mut ReceiveContext<'_>,
     target: &ActivityTarget,
     stored: &StoredMessage,
+    held: bool,
 ) -> Result<(), Fail> {
     let kept = key::kept_cancellation(&cx.record_key(&target.record_target())?);
     if cx.local_get(kept.as_bytes())?.is_some() {
         return Ok(());
     }
+    if !held {
+        make_room_for_stop(cx, &stored.sender())?;
+    }
     keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
+    Ok(())
+}
+
+/// Make room for a new stop from `sender` among the stops kept for requests not held, in the
+/// step: the one the bounds drop ([`kept_reply_evicted`]) goes.
+fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<(), Fail> {
+    let mut kept = Vec::new();
+    let mut names = Vec::new();
+    for (bytes, value) in cx.local_scan(key::KEPT_CANCELLATIONS.as_bytes())? {
+        let Some(crate::state::StateKey::KeptCancellation(record)) =
+            crate::state::StateKey::parse(&bytes)
+        else {
+            return Err(Fail::corrupt());
+        };
+        let stop = state::decode::<KeptMessage>(&value).map_err(|_| Fail::corrupt())?;
+        if holds_record(cx.record_at(&record)?.map(|held| held.content).as_ref()) {
+            continue;
+        }
+        kept.push((stop.sender(), stop.accepted_at().unwrap_or(0)));
+        names.push(bytes);
+    }
+    if let Some(index) = kept_reply_evicted(&kept, sender) {
+        keep_local(
+            cx,
+            LocalWrite::Delete {
+                key: names.swap_remove(index),
+            },
+        );
+    }
     Ok(())
 }
 
@@ -857,7 +923,8 @@ fn hold_list(
 
 /// How many payer's replies to requests this app holds no record of it keeps from one
 /// sender identity, as Switch spec 8.2 bounds the entries of an unverified sender: past it,
-/// that sender's earliest reply is dropped.
+/// that sender's earliest reply is dropped. The payees' cancellations kept as stops for
+/// requests the app holds no record of are bounded the same way, counted apart.
 pub const MAX_KEPT_REPLIES_PER_SENDER: usize = 64;
 
 /// How many such replies it keeps in all: past it, the earliest reply of the sender holding
