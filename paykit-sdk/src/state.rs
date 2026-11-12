@@ -45,7 +45,7 @@
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
 //! | `dl` | the deny list as the app last read it, for the views (Paykit spec 8.1) | |
-//! | `pd/<record key>/<sender>` | a sender whose replies naming the record were dropped for the bounds on kept replies, and the earliest acceptance dropped: asked once to send again when the record is held (`receive.rs`) | |
+//! | `pd/<sender>` | a sender whose replies were dropped for the bounds on kept replies, and the earliest acceptance among them not yet asked for: asked once to send again from it when the record of one of its requests is held (`receive.rs`) | |
 //! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply to a request the app holds no record of yet, kept until it does (`receive.rs`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing but may send a `resend_request` twice | |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
@@ -208,9 +208,9 @@ pub(crate) mod key {
     pub(crate) const KEPT_REPLIES: &str = "pr/";
     pub(crate) const DROPPED_REPLIES: &str = "pd/";
 
-    /// The mark of replies from `sender` naming `record_key` dropped for the bounds.
-    pub(crate) fn dropped_replies(record_key: &[u8; 32], sender: &[u8; 32]) -> String {
-        format!("{DROPPED_REPLIES}{}/{}", b64(record_key), b64(sender))
+    /// The mark of replies from `sender` dropped for the bounds.
+    pub(crate) fn dropped_replies(sender: &[u8; 32]) -> String {
+        format!("{DROPPED_REPLIES}{}", b64(sender))
     }
     pub(crate) const DENIED: &str = "dl";
     pub(crate) const TAKEN: &str = "dt/";
@@ -365,8 +365,8 @@ pub(crate) enum StateKey {
     Denied,
     /// `dt/<event ID>`: a duty event taken.
     Taken(String),
-    /// `pd/<record key>/<sender>`: replies naming the record dropped for the bounds.
-    DroppedReplies { record: [u8; 32], sender: [u8; 32] },
+    /// `pd/<sender>`: replies of a sender dropped for the bounds.
+    DroppedReplies { sender: [u8; 32] },
     /// `pr/<record key>/<msg_id>`: a payer's reply kept for its record.
     KeptReply {
         sender: [u8; 32],
@@ -484,13 +484,9 @@ impl StateKey {
                         let id = rest.parse::<pubky_switch_client::app::EventId>().ok()?;
                         (id.to_string() == rest).then(|| Self::Taken(rest.to_owned()))?
                     }
-                    "pd" => {
-                        let (record, sender) = rest.split_once('/')?;
-                        Self::DroppedReplies {
-                            record: b64_32(record)?,
-                            sender: b64_32(sender)?,
-                        }
-                    }
+                    "pd" => Self::DroppedReplies {
+                        sender: b64_32(rest)?,
+                    },
                     "pr" => {
                         let (sender, rest) = rest.split_once('/')?;
                         let (record, id) = rest.split_once('/')?;
@@ -664,11 +660,8 @@ mod tests {
                 },
             ),
             (
-                key::dropped_replies(&pubky, &[6; 32]),
-                StateKey::DroppedReplies {
-                    record: pubky,
-                    sender: [6; 32],
-                },
+                key::dropped_replies(&pubky),
+                StateKey::DroppedReplies { sender: pubky },
             ),
             (
                 key::stored_note(&pubky, id),

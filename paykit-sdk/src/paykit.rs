@@ -602,6 +602,8 @@ impl Paykit {
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1).
         self.place_kept_cancellations().await?;
+        // The senders of replies dropped for the bounds, once one of their records came.
+        self.ask_for_dropped_replies(&report.events).await?;
         // The payers' replies kept for requests whose record wasn't held yet.
         self.place_kept_replies().await?;
         // Lists held over a `payment_lists` record that didn't read, once it reads.

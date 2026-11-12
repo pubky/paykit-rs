@@ -82,7 +82,8 @@ pub use rail::{
 };
 pub use receipts::{ReceiptDetails, ReceiptsOf, ReceivedReceipt};
 pub use receive::{
-    HeldList, KEPT_REPLY_MS, LISTS_REFRESH_MS, MAX_KEPT_REPLIES, MAX_KEPT_REPLIES_PER_SENDER,
+    HeldList, KEPT_REPLY_MS, LISTS_REFRESH_MS, MAX_DROPPED_MARKS, MAX_KEPT_REPLIES,
+    MAX_KEPT_REPLIES_PER_SENDER,
 };
 pub use reconcile::{Doubtful, ReconcileReport, Resolution};
 pub use requests::{
