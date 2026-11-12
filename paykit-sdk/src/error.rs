@@ -67,6 +67,16 @@ pub enum Refusal {
     /// spec 8.2): `pay_request` and `cancel_request` refuse it.
     #[error("Paykit spec 8.2: a recurring request is paid per Billing Period")]
     Recurring,
+    /// Whether this payment is credited already to another occurrence of the payer's can't
+    /// be told now: a record of the payee's the app holds can't be opened, or its copy of
+    /// them may lack records. One payment credits one occurrence, so nothing is credited
+    /// or receipted. Tried again once that clears; or credited when the user, shown that
+    /// it may be credited already, confirms
+    /// ([`crate::ReceiptDetails::with_maybe_credited_confirmed`]).
+    #[error(
+        "Paykit spec 8.4: whether this payment is credited to another occurrence can't be told now"
+    )]
+    MaybeCredited,
     /// The recurring request is accepted already, by this app or another own app (Paykit
     /// spec 8.2): it is neither accepted nor rejected again, only cancelled.
     #[error("Paykit spec 8.2: the subscription is accepted already")]

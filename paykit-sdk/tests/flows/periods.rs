@@ -1034,28 +1034,117 @@ async fn test_periods_details_bound_period_after_the_next_dropped() {
 }
 
 #[tokio::test]
-async fn test_periods_details_bound_period_past_its_deadline_dropped() {
-    // Each period is due a day after its start: February's at the last instant of its
-    // deadline, then 1 ms later.
+async fn test_periods_details_bound_period_past_its_deadline_taken() {
+    // Each period is due a day after its start; its deadline bounds no details: a payer
+    // that fell behind can still pay it. February's are taken past its deadline, and
+    // January's too.
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
     let now = w.clock.now_ms();
     let draft = monthly(now, None).with_period_deadline_s(86_400);
-    let sub = subscribed_for(&w, &mut shop, &mut wallet, draft, 32).await;
+    let sub = subscribed_for(&w, &mut shop, &mut wallet, draft, 40).await;
     assert!(details_stored(&w, &mut shop, &mut wallet, &sub, month(1)).await);
-    w.clock.advance_ms(1);
-    assert!(!details_stored(&w, &mut shop, &mut wallet, &sub, month(1)).await);
-    // January's deadline passed long ago; March, not started, is still open.
-    assert!(!details_stored(&w, &mut shop, &mut wallet, &sub, month(0)).await);
-    assert!(details_stored(&w, &mut shop, &mut wallet, &sub, month(2)).await);
-    let view = wallet.request(&sub.0).await.unwrap();
-    let held: Vec<(PeriodRef, usize)> = view
-        .periods
-        .iter()
-        .map(|p| (p.billing_period, p.details.len()))
-        .collect();
-    assert_eq!(held, [(month(1), 1), (month(2), 1)]);
+    assert!(details_stored(&w, &mut shop, &mut wallet, &sub, month(0)).await);
+}
+
+/// A daily request for 1 btc, from now, paid to one invoice of the sending app, its
+/// proposal open a day.
+fn daily(now: u64) -> RequestDraft {
+    let mut endpoints = BTreeMap::new();
+    endpoints.insert(
+        endpoint("btc-lightning-bolt11"),
+        PaymentEndpointPayload::new("lnbc1invoice").unwrap(),
+    );
+    let rule = AnchoredRule::new(now, 1, Unit::Day).unwrap();
+    RequestDraft::new(
+        btc("1"),
+        PaymentReference::new("plan-1").unwrap(),
+        RequestDestination::Endpoints(endpoints),
+    )
+    .with_proposal_expires_at_ms(now + DAY_MS)
+    .with_recurrence(Recurrence::new(rule, now, None).unwrap())
+}
+
+/// The daily request's Billing Period `k`, from January 1st 2026 (0).
+fn day(k: u64) -> PeriodRef {
+    let start = pubky_switch_client::testing::START_MS;
+    PeriodRef {
+        starts_at: start + k * DAY_MS,
+        ends_at: start + (k + 1) * DAY_MS,
+    }
+}
+
+/// A daily subscription, on its day 20 at 01:00: day 20 is the latest period to have
+/// started, day 5 the 16th latest.
+async fn on_day_20(w: &World, shop: &mut Paykit, wallet: &mut Paykit) -> (RequestRef, [u8; 32]) {
+    let now = w.clock.now_ms();
+    let sub = subscribed_for(w, shop, wallet, daily(now), 20).await;
+    w.clock.advance_ms(HOUR_MS);
+    sub
+}
+
+/// The shop's refusal of details for `period`, and the wallet taking them with no effect
+/// when sent all the same: no period record for it.
+async fn refused_and_dropped(
+    w: &World,
+    shop: &mut Paykit,
+    wallet: &mut Paykit,
+    (request, sale): &(RequestRef, [u8; 32]),
+    period: PeriodRef,
+) {
+    let refused = shop
+        .send_period_details(sale, details(period, "lnbc1p", w.clock.now_ms() + DAY_MS))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&refused, PaykitError::Lib(paykit_lib::Error::Validation(_))),
+        "{refused:?}"
+    );
+    inject_details(w, &[wallet.app_id()], request.request_hash, period);
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(received(&summary, "paykit.payment_period_details"));
+    let view = wallet.request(request).await.unwrap();
+    assert!(
+        view.periods.iter().all(|p| p.billing_period != period),
+        "{view:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_periods_details_window_sixteenth_latest_started_taken() {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let sub = on_day_20(&w, &mut shop, &mut wallet).await;
+    assert!(details_stored(&w, &mut shop, &mut wallet, &sub, day(5)).await);
+}
+
+#[tokio::test]
+async fn test_periods_details_window_seventeenth_latest_started_dropped() {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let sub = on_day_20(&w, &mut shop, &mut wallet).await;
+    refused_and_dropped(&w, &mut shop, &mut wallet, &sub, day(4)).await;
+}
+
+#[tokio::test]
+async fn test_periods_details_window_next_period_taken() {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let sub = on_day_20(&w, &mut shop, &mut wallet).await;
+    assert!(details_stored(&w, &mut shop, &mut wallet, &sub, day(21)).await);
+}
+
+#[tokio::test]
+async fn test_periods_details_window_period_after_the_next_dropped() {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let sub = on_day_20(&w, &mut shop, &mut wallet).await;
+    refused_and_dropped(&w, &mut shop, &mut wallet, &sub, day(22)).await;
 }
 
 #[tokio::test]
@@ -1245,6 +1334,13 @@ async fn test_periods_one_payment_credits_one_period() {
         receipts += usize::from(shop.confirm_payment(&p.record).await.unwrap().is_some());
     }
     assert_eq!(receipts, 1);
+    // The other occurrence, paid in the same transaction, keeps its proof, shows no
+    // receipt, and isn't credited when asked again.
+    let sale = &shop.payee_activity().await.unwrap()[0];
+    let other = sale.periods.iter().find(|p| p.receipt.is_none()).unwrap();
+    assert!(other.paid);
+    assert!(shop.verify_payment(&other.record).await.unwrap().is_none());
+    assert!(shop.confirm_payment(&other.record).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -1370,13 +1466,24 @@ async fn test_periods_proof_naming_earlier_details_credited_at_the_payee() {
 /// The signer stores bob's app `app`'s key bundle for `cert`, every data epoch up to the
 /// current.
 fn store_bob_bundle(w: &World, app: [u8; 16], cert: &pubky_switch_core::records::AppCert) {
+    store_bob_bundle_from(w, app, cert, 1);
+}
+
+/// The signer stores bob's app `app`'s key bundle for `cert`, the data epochs from `first`
+/// to the current.
+fn store_bob_bundle_from(
+    w: &World,
+    app: [u8; 16],
+    cert: &pubky_switch_core::records::AppCert,
+    first: u64,
+) {
     use pubky_switch_client::app::Protocol as _;
     let epoch = w.bob.switch().identity_doc().unwrap().data_epoch();
     let protocol = paykit_sdk::PaykitProtocol::new();
     let parts = pubky_switch_core::records::seal_bundle_parts(
         w.bob.identity().key(),
         cert,
-        1,
+        first,
         epoch,
         &|scope| protocol.has_keys(scope),
     )
@@ -1398,14 +1505,15 @@ fn store_bob_bundle(w: &World, app: [u8; 16], cert: &pubky_switch_core::records:
 
 /// Bob's payee period record of `request`'s January.
 fn payee_period(request: &RequestRef) -> RecordTarget {
+    payee_period_at(request, january())
+}
+
+/// Bob's payee period record of `request`'s `period`.
+fn payee_period_at(request: &RequestRef, period: PeriodRef) -> RecordTarget {
     let collection = Collection::PayeeActivity;
     RecordTarget::new(
         SwitchCollection::new(collection.name(), collection.policy(None)),
-        &natural_key::period_record(
-            &request.payee,
-            &request.request_hash,
-            january().start_secs(),
-        ),
+        &natural_key::period_record(&request.payee, &request.request_hash, period.start_secs()),
     )
 }
 
@@ -1616,6 +1724,40 @@ async fn test_periods_per_period_endpoints_serve_only_the_first_period() {
         .await
         .unwrap()
         .is_none());
+    // March paid to the destination of the details its proof names is credited.
+    let sale = shop.payee_activity().await.unwrap()[0].record;
+    shop.send_period_details(
+        &sale,
+        details(month(2), "lnbc1march", w.clock.now_ms() + DAY_MS),
+    )
+    .await
+    .unwrap();
+    let held = shop
+        .app_mut()
+        .read_record(&payee_period_at(&request, month(2)))
+        .await
+        .unwrap()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    let named =
+        paykit_lib::records::StoredMessage::read(&value["period_details"], &w.alice_id()).unwrap();
+    let body = proof_to(&w, shop.app_id(), month(2), "lnbc1march", 8).await;
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash, named.hash()],
+        body,
+    );
+    shop.receive(None).await.unwrap();
+    let periods = shop.payee_activity().await.unwrap()[0].periods.clone();
+    let march = periods
+        .iter()
+        .find(|p| p.billing_period == month(2))
+        .unwrap();
+    assert!(shop.verify_payment(&march.record).await.unwrap().is_some());
 }
 
 #[tokio::test]
@@ -1789,4 +1931,262 @@ async fn test_periods_accept_after_another_app_accepted_unseen_refused_as_subscr
     phone.accept_subscription(&request).await.unwrap();
     let refused = wallet.accept_subscription(&request).await.unwrap_err();
     assert_eq!(refusal(&refused), Refusal::Subscribed);
+}
+
+/// Bob's shop and till take alice's proof of January; the till writes January's period
+/// record again at a data epoch the shop holds no key of yet; a proof of February, another
+/// payment, then reaches the shop. Returns the shop and February's record.
+async fn with_a_sealed_record(w: &World) -> (Paykit, [u8; 32]) {
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed(w, &mut shop, &mut wallet).await;
+    till.receive(None).await.unwrap();
+    let body = proof_to(w, shop.app_id(), month(0), "lnbc1invoice", 6).await;
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id(), till.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        body,
+    );
+    shop.receive(None).await.unwrap();
+    till.receive(None).await.unwrap();
+    w.bob.next_doc(|body| body.data_epoch += 1).unwrap();
+    store_bob_bundle(w, till.app_id(), &till.app().cert().clone());
+    till.receive(None).await.unwrap();
+    rewrites(&mut till, &payee_period_at(&request, month(0))).await;
+    // The shop gets the newest epoch's key only: it writes there, and can't open January.
+    w.bob.next_doc(|body| body.data_epoch += 1).unwrap();
+    let newest = w.bob.switch().identity_doc().unwrap().data_epoch();
+    store_bob_bundle_from(w, shop.app_id(), &shop.app().cert().clone(), newest);
+    shop.receive(None).await.unwrap();
+    let body = proof_to(w, shop.app_id(), month(1), "lnbc1invoice", 7).await;
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        body,
+    );
+    shop.receive(None).await.unwrap();
+    let key = shop
+        .app()
+        .record_key(&payee_period_at(&request, month(0)))
+        .unwrap();
+    let held = shop.app().shared_record(&key).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            held.content,
+            RecordContent::Unreadable(Unopened::KeyNotHeld { .. })
+        ),
+        "{:?}",
+        held.content
+    );
+    let key = shop
+        .app()
+        .record_key(&payee_period_at(&request, month(1)))
+        .unwrap();
+    (shop, key)
+}
+
+#[tokio::test]
+async fn test_periods_credit_held_while_a_record_is_sealed_then_given_once_it_opens() {
+    // A record the shop can't open may credit this payment: nothing is credited or
+    // receipted until it opens.
+    let w = World::new();
+    let (mut shop, february) = with_a_sealed_record(&w).await;
+    let held = shop.confirm_payment(&february).await.unwrap_err();
+    assert_eq!(refusal(&held), Refusal::MaybeCredited);
+    let refused = shop.verify_payment(&february).await.unwrap_err();
+    assert_eq!(refusal(&refused), Refusal::MaybeCredited);
+    store_bob_bundle(&w, shop.app_id(), &shop.app().cert().clone());
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(shop.confirm_payment(&february).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn test_periods_credit_given_on_the_users_confirmation_while_a_record_is_sealed() {
+    let w = World::new();
+    let (mut shop, february) = with_a_sealed_record(&w).await;
+    let confirmed = paykit_sdk::ReceiptDetails::new()
+        .with_maybe_credited_confirmed(pubky_switch_client::app::UserConfirmed::new());
+    assert!(shop
+        .confirm_payment_with(&february, confirmed)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn test_periods_credit_held_while_the_copy_is_unlisted_then_given() {
+    // Restored, the shop's copy of its records lacks records until it lists them: a
+    // listing that fails holds the credit, and once it lists, the payment is credited.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let body = period_proof(&w, shop.app_id(), january()).await;
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        body,
+    );
+    shop.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].periods[0].record;
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let mut shop = Paykit::restore(
+        w.env(&w.bob, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/records".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    assert!(shop.confirm_payment(&record).await.is_err());
+    assert!(shop.confirm_payment(&record).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn test_periods_kept_details_wait_over_a_record_sealed_at_an_older_key() {
+    // The wallet holds the current key but not the older one the phone sealed the period
+    // record at: kept details wait, never written over it, and once the key comes both
+    // details are held.
+    let w = World::new();
+    let _shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let (plaintext, hash) = signed_request(&w);
+    inject_details(&w, &[wallet.app_id()], hash, january());
+    wallet.receive(None).await.unwrap();
+    let request = accepted_by(&w, &mut phone, &plaintext, hash).await;
+    inject_details(&w, &[phone.app_id()], hash, january());
+    phone.receive(None).await.unwrap();
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    crate::unrequested::store_bundle(&w, phone.app_id(), &phone.app().cert().clone());
+    phone.receive(None).await.unwrap();
+    rewrites(&mut phone, &payer_period(&request)).await;
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let cert = wallet.app().cert().clone();
+    crate::unrequested::store_bundle_from(&w, wallet.app_id(), &cert, newest);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let view = wallet.request(&request).await.unwrap();
+    assert_eq!(view.periods[0].details.len(), 2, "{view:?}");
+}
+
+#[tokio::test]
+async fn test_periods_details_after_a_kept_payee_cancellation_never_stored() {
+    // The payee's cancellation is kept as a stop, its placement refused for now; details
+    // sent after it are taken with no effect, as for a cancellation the record holds.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    shop.cancel_sent_request(&sale, None).await.unwrap();
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            current: serde_json::Value::Null,
+        });
+    wallet.receive(None).await.unwrap();
+    inject_details(&w, &[wallet.app_id()], request.request_hash, january());
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(received(&summary, "paykit.payment_period_details"));
+    let view = wallet.request(&request).await.unwrap();
+    assert_eq!(view.status, RequestStatus::Cancelled);
+    assert!(view.periods.is_empty(), "{view:?}");
+}
+
+#[tokio::test]
+async fn test_periods_kept_details_after_a_kept_payee_cancellation_never_placed() {
+    // Details kept before their record; the phone accepts, the payee cancels, and the
+    // wallet's placement of the cancellation is refused for now: the kept details are
+    // dropped, the stop kept counting as the cancellation.
+    let w = World::new();
+    let _shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let (plaintext, hash) = signed_request(&w);
+    inject_details(&w, &[wallet.app_id()], hash, january());
+    wallet.receive(None).await.unwrap();
+    let request = accepted_by(&w, &mut phone, &plaintext, hash).await;
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.payment_request_cancellation",
+        vec![hash],
+        serde_json::Map::new(),
+    );
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            current: serde_json::Value::Null,
+        });
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let view = wallet.request(&request).await.unwrap();
+    assert_eq!(view.status, RequestStatus::Cancelled);
+    assert!(view.periods.is_empty(), "{view:?}");
+}
+
+#[tokio::test]
+async fn test_periods_accept_whose_delivery_fails_now_reported_queued() {
+    // The acceptance is recorded and queued; a try to deliver it now that fails is no
+    // error: it stays queued for the next flush.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let request = requested(&w, &mut shop, &mut wallet).await;
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/inbox".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    let accepted = wallet.accept_subscription(&request).await.unwrap();
+    assert!(
+        matches!(
+            accepted.delivery,
+            paykit_sdk::MessageDelivery::Queued { .. }
+        ),
+        "{accepted:?}"
+    );
+    wallet.flush().await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        PayeeStatus::Accepted
+    );
 }

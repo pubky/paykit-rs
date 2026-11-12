@@ -757,19 +757,36 @@ impl Paykit {
 
     /// The payee's own check of the proof in `record` (Paykit spec 8.1 step 4): the verified
     /// payment time, or `None` when the payment method doesn't confirm it. A Billing Period's
-    /// endpoint is the one in the period details the proof names, or else the request's,
-    /// which with per-period endpoints serve only the first period: a later one paid there
-    /// is `None`. So is a payment whose settlement another record credits already, holding
-    /// its receipt: one settlement credits one request, period or payment without a request,
-    /// as in v0.1.
+    /// endpoint is the one in the period details the proof names, or else the request's;
+    /// with per-period endpoints a later period is paid only to the destination of the
+    /// details its proof names, so one paid elsewhere is `None`.
+    ///
+    /// **One payment, one occurrence**, as in v0.1: a payment whose settlement this app has
+    /// credited to another request, Billing Period or payment without a request of the same
+    /// payer, that record holding a proof of the same settlement with its receipt, is `None`
+    /// too. Its proof stays in its record and gets no receipt. The settlement is the one the
+    /// payment method names, such as the transaction ID of an on-chain payment, with no
+    /// output index, so one transaction pays one occurrence. A proof without a receipt, such
+    /// as late evidence, credits nothing.
     ///
     /// # Errors
     ///
     /// [`Refusal::CertificateRefused`] while the app's certificate fails Paykit's checks;
-    /// [`Refusal::NotFound`] for a record without a proof; the rail's errors.
+    /// [`Refusal::NotFound`] for a record without a proof; [`Refusal::MaybeCredited`] while
+    /// whether another record credits the settlement can't be told; the rail's errors.
     pub async fn verify_payment(&mut self, record: &[u8; 32]) -> Result<Option<u64>> {
         self.refresh_own()?;
         self.records_known().await?;
+        self.verified(record, false).await
+    }
+
+    /// [`Paykit::verify_payment`], the "can't tell" hold skipped when the user
+    /// `maybe_credited_confirmed`.
+    async fn verified(
+        &mut self,
+        record: &[u8; 32],
+        maybe_credited_confirmed: bool,
+    ) -> Result<Option<u64>> {
         let (target, bound) = self.payee_record(record).await?;
         let proof_stored = bound.proof.as_ref().ok_or(Refusal::NotFound)?;
         let Body::PaymentProof(proof) = proof_stored.body() else {
@@ -791,12 +808,9 @@ impl Paykit {
         let (amount, payload) = match request_record.as_ref().and_then(request_of) {
             Some((_, request)) => {
                 let from_details = named_details.as_ref().and_then(|e| e.get(id).cloned());
-                let from_request = match &request.destination {
-                    RequestDestination::Endpoints(endpoints) => endpoints.get(id).cloned(),
-                    _ => None,
-                };
                 // With per-period endpoints, the request's own serve only its first Billing
-                // Period: a later one paid there isn't credited (Paykit spec 8.2).
+                // Period: a later one is credited only for a payment to the destination of
+                // the period details its proof names (Paykit spec 8.2).
                 let later_period = request.per_period_endpoints
                     && proof.billing_period.is_some_and(|period| {
                         request
@@ -805,9 +819,13 @@ impl Paykit {
                             .and_then(|r| r.first().ok())
                             .is_none_or(|first| first.starts_at != period.starts_at)
                     });
-                if later_period && from_details.is_none() && from_request.is_some() {
+                if later_period && from_details.is_none() {
                     return Ok(None);
                 }
+                let from_request = match &request.destination {
+                    RequestDestination::Endpoints(endpoints) => endpoints.get(id).cloned(),
+                    _ => None,
+                };
                 (request.amount.clone(), from_details.or(from_request))
             }
             None if bound.request_hash.is_none() && bound.billing_period.is_none() => {
@@ -815,12 +833,16 @@ impl Paykit {
             }
             None => return Err(Refusal::NotFound.into()),
         };
-        // One settlement credits at most one payment, as in v0.1: one credited to a request,
-        // a Billing Period or a payment without a request, its record holding the receipt,
-        // is never credited to another (Paykit spec 8.4).
         if let Some(settlement) = self.rail.settlement_id(&proof.proof) {
-            if self.credited_elsewhere(record, id, &settlement).await? {
-                return Ok(None);
+            match self
+                .other_credit(record, &bound.counterparty, &settlement)
+                .await?
+            {
+                OtherCredit::Credited => return Ok(None),
+                OtherCredit::CantTell if !maybe_credited_confirmed => {
+                    return Err(Refusal::MaybeCredited.into())
+                }
+                _ => {}
             }
         }
         let check = ProofCheck {
@@ -833,14 +855,18 @@ impl Paykit {
         Ok(self.rail.verify(check).await?)
     }
 
-    /// Whether a `payee_activity` record other than `record` credits the settlement
-    /// `settlement` paid to `endpoint`: it holds a proof of it and the receipt.
-    async fn credited_elsewhere(
+    /// Whether another `payee_activity` record than `record` credits `settlement` from
+    /// `payer`: it holds a proof of that settlement with its receipt. A record the app holds
+    /// but can't open (sealed at a key it doesn't hold, or a value that doesn't read), whose
+    /// payer can't be seen, and a copy of the payee's records that may lack records, mean
+    /// it can't be told.
+    async fn other_credit(
         &self,
         record: &[u8; 32],
-        endpoint: &PaymentEndpointIdentifier,
+        payer: &[u8; 32],
         settlement: &[u8],
-    ) -> Result<bool> {
+    ) -> Result<OtherCredit> {
+        let mut cant_tell = self.side_unlisted(crate::hold::RecordSide::Payee).await?;
         for held in self
             .app
             .records_of(Collection::PayeeActivity.name())
@@ -849,31 +875,42 @@ impl Paykit {
             if held.key == *record {
                 continue;
             }
-            let Ok((_, other)) = self.payee_record(&held.key).await else {
+            let other = match held.content {
+                RecordContent::Deleted => continue,
+                RecordContent::Value(_) => self.payee_record(&held.key).await.ok(),
+                _ => None,
+            };
+            let Some((_, other)) = other else {
+                cant_tell = true;
                 continue;
             };
-            let credits = other.receipt.is_some()
+            let credits = other.counterparty == *payer
+                && other.receipt.is_some()
                 && other
                     .proof
                     .as_ref()
                     .is_some_and(|stored| match stored.body() {
                         Body::PaymentProof(proof) => {
-                            proof.payment_endpoint_identifier == *endpoint
-                                && self.rail.settlement_id(&proof.proof).as_deref()
-                                    == Some(settlement)
+                            self.rail.settlement_id(&proof.proof).as_deref() == Some(settlement)
                         }
                         _ => false,
                     });
             if credits {
-                return Ok(true);
+                return Ok(OtherCredit::Credited);
             }
         }
-        Ok(false)
+        Ok(if cant_tell {
+            OtherCredit::CantTell
+        } else {
+            OtherCredit::None
+        })
     }
 
     /// Verify the proof in `record` and, when the payment method confirms it, send the
-    /// payer a receipt (Paykit spec 8.1 step 4, Paykit wire 4.11). Returns the receipt's
-    /// `msg_id`, or `None` when the method doesn't confirm the payment.
+    /// payer a receipt (Paykit spec 8.1 step 4, Paykit wire 4.11), recorded in the record in
+    /// the batch that queues it: a credit always leaves its receipt in the record. Returns
+    /// the receipt's `msg_id`, or `None` when the method doesn't confirm the payment, or
+    /// its settlement is credited to another occurrence already ([`Paykit::verify_payment`]).
     ///
     /// # Errors
     ///
@@ -890,7 +927,9 @@ impl Paykit {
     /// # Errors
     ///
     /// As [`Paykit::confirm_payment`]; [`PaykitError::Lib`] for a `payment_reference` on a
-    /// receipt of a request, whose reference applies, with nothing sent.
+    /// receipt of a request, whose reference applies, with nothing sent. With
+    /// [`ReceiptDetails::with_maybe_credited_confirmed`], [`Refusal::MaybeCredited`] isn't
+    /// given: the payment is credited unless a credit the app can see refuses it.
     pub async fn confirm_payment_with(
         &mut self,
         record: &[u8; 32],
@@ -898,7 +937,8 @@ impl Paykit {
     ) -> Result<Option<String>> {
         self.refresh_own()?;
         self.records_known().await?;
-        if self.verify_payment(record).await?.is_none() {
+        let confirmed = details.maybe_credited_confirmed.is_some();
+        if self.verified(record, confirmed).await?.is_none() {
             return Ok(None);
         }
         let mut tries = 0;
@@ -1695,6 +1735,16 @@ enum Answer {
     Reject,
     /// A payer's cancellation.
     Cancel,
+}
+
+/// What the payee's other records say of a settlement ([`Paykit::other_credit`]).
+enum OtherCredit {
+    /// No other record credits it.
+    None,
+    /// Another record credits it.
+    Credited,
+    /// Whether one does can't be told now.
+    CantTell,
 }
 
 /// The request record the switch holds, read again ([`Paykit::fresh_request`]).
