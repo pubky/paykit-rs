@@ -469,7 +469,7 @@ mod tests {
         let bytes = record_bytes(&bob, tip_jar(), NOW, Some(NOW + DAY_MS));
         assert!(usable_bytes(&bob.id(), &bob.app_id(), &bytes, &bob.doc(&[]), NOW + 1).is_none());
         // An app without `request` publishes no destination.
-        let wallet = Party::new("bob", "wallet", &["pay"]);
+        let wallet = Party::new("bob", "wallet", &["pay", "contacts"]);
         let bytes = record_bytes(&wallet, tip_jar(), NOW, Some(NOW + DAY_MS));
         let doc = bob.doc(&[&wallet]);
         assert!(usable_bytes(&bob.id(), &wallet.app_id(), &bytes, &doc, NOW + 1).is_none());

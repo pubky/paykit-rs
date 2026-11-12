@@ -546,7 +546,9 @@ fn test_writers_refuse_every_rejection_case() {
     let cases = arr(&d["certificate_rejections"], "cases")
         .iter()
         .chain(arr(&d["labelled_scope_rejections"], "cases"))
-        .chain(arr(&d["multi_protocol_certificates"], "refused"));
+        .chain(arr(&d["multi_protocol_certificates"], "refused"))
+        .chain(arr(&d["executor_certificates"], "refused"))
+        .chain(arr(&d["payer_certificates"], "refused"));
     for case in cases {
         let name = st(case, "name");
         let scopes: Vec<String> = serde_json::from_value(case["scopes"].clone()).unwrap();

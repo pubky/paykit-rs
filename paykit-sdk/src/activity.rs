@@ -289,7 +289,7 @@ mod place_tests {
 
     #[test]
     fn test_activity_place_stores_one_message_per_role() {
-        let alice = Party::new("alice", "wallet", &["pay"]);
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
         let bob = Party::new("bob", "shop", &["request"]);
         let mut record = empty(ActivitySide::Payer, bob.id());
         let first = request(&bob, &alice, "order-1");
@@ -311,7 +311,7 @@ mod place_tests {
 
     #[test]
     fn test_activity_place_keeps_the_newest_sixteen_others() {
-        let alice = Party::new("alice", "wallet", &["pay"]);
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
         let bob = Party::new("bob", "shop", &["request"]);
         let mut record = empty(ActivitySide::Payer, bob.id());
         assert!(place(

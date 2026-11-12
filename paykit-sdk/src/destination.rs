@@ -630,7 +630,7 @@ mod tests {
 
     fn parties() -> (Party, Party) {
         (
-            Party::new("alice", "wallet", &["pay"]),
+            Party::new("alice", "wallet", &["pay", "contacts"]),
             Party::new("bob", "shop", &["request"]),
         )
     }
@@ -836,7 +836,7 @@ mod tests {
         .is_err());
         // A request from an app without `request` carries no destination: the reader refuses
         // to store it at all (Paykit wire 5.2, the sender's side of check 8).
-        let payer_app = Party::new("bob", "wallet", &["pay"]);
+        let payer_app = Party::new("bob", "wallet", &["pay", "contacts"]);
         assert!(payer_app
             .try_message(&alice, "paykit.payment_request", vec![], request_body())
             .is_err());

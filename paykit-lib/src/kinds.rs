@@ -805,7 +805,7 @@ mod tests {
         // kind: its payment_request and its resend_request are dropped at check 8.
         let chat = issued(&identity, &["chat"], &[Permission::ListsRead]);
         crate::scopes::check_certificate(&chat).unwrap();
-        let wallet = PaykitKindRules::new(owned(&["pay"]));
+        let wallet = PaykitKindRules::new(owned(&["pay", "contacts"]));
         let request = message(
             "paykit.payment_request",
             json!({ "amount": { "asset": "btc", "value": "1" }, "payment_reference": "r",
@@ -838,7 +838,12 @@ mod tests {
             &["allowance"],
             &[Permission::ClaimsRead, Permission::ConversationAdd],
         );
-        let rules = PaykitKindRules::new(owned(&["allowance_execute", "allowance", "pay"]));
+        let rules = PaykitKindRules::new(owned(&[
+            "allowance_execute",
+            "allowance",
+            "pay",
+            "contacts",
+        ]));
         let mut notice = message("paykit.executor_notice", json!({}));
         notice.from.identity = identity.public();
         notice.to = identity.public();
