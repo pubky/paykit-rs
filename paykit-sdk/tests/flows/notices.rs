@@ -296,3 +296,28 @@ async fn test_notices_receipt_on_a_claim_settled_already_ends_the_wait() {
     assert!(wallet.payments().await.unwrap().is_empty());
     assert!(wallet.notices().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn test_notices_receipt_at_exactly_the_claims_window_end_counts_it_gone() {
+    // At the claim's deadline plus the 30 days it is kept after it, the switch may delete it:
+    // the receipt counts the claim gone, and raises the notice.
+    let w = World::new();
+    let (mut wallet, mut shop, _) = paid_after_failed(&w).await;
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    let deadline = wallet
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap()
+        .view
+        .deadline
+        .unwrap();
+    receipt(&mut shop).await;
+    w.clock
+        .set_ms(deadline + pubky_switch_core::claims::RECONCILIATION_MS);
+    wallet.receive(None).await.unwrap();
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, NoticeKind::PaidAfterFailed);
+}
