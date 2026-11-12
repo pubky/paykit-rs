@@ -24,7 +24,8 @@
 //! |---|---|---|
 //! | `ask/<sender>/<from>` | a re-send to ask of a sender | |
 //! | `ans/<seq>/<msg_id>` | a `resend_request` received and still to be answered | |
-//! | `missed/<from>` | entries missed while lagging, or before a provider loss | |
+//! | `missed/<from>` | entries missed before a provider loss: every counterparty with Paykit activity is asked to re-send | |
+//! | `mi/<from>` | entries missed while lagging, a `missed` item's: the counterparties of open requests and unfinished payments are asked to re-send | |
 //! | `j/<attempt_id>` | the payment journal: one payment, from before its `attempt` | yes |
 //! | `side/<msg_id>` | the side a cancellation is sent from, kept with the batch that queues it | |
 //! | `ar/<payee>/<app_id>` | a payee app's records that took part in its comparison, for its public endpoints | |
@@ -191,6 +192,7 @@ pub(crate) mod key {
     pub(crate) const ASKS: &str = "ask/";
     pub(crate) const ANSWERS: &str = "ans/";
     pub(crate) const MISSED: &str = "missed/";
+    pub(crate) const MISSED_ITEMS: &str = "mi/";
     pub(crate) const JOURNAL: &str = "j/";
     pub(crate) const PEERS: &str = "peer/";
     pub(crate) const KEPT_CANCELLATIONS: &str = "kc/";
@@ -269,6 +271,10 @@ pub(crate) mod key {
         format!("{MISSED}{}", num(from))
     }
 
+    pub(crate) fn missed_item(from: u64) -> String {
+        format!("{MISSED_ITEMS}{}", num(from))
+    }
+
     pub(crate) fn journal(attempt_id: &AttemptId) -> String {
         format!("{JOURNAL}{}", attempt_id.to_text())
     }
@@ -330,8 +336,10 @@ pub(crate) enum StateKey {
     Ask { sender: [u8; 32], from_ms: u64 },
     /// `ans/<seq>/<msg_id>`: a `resend_request` received, to answer.
     Answer { seq: u64, msg_id: String },
-    /// `missed/<from>`: a `missed` item's re-sends to ask for.
+    /// `missed/<from>`: the re-sends to ask for after a provider loss.
     Missed { from_ms: u64 },
+    /// `mi/<from>`: a `missed` item's re-sends to ask for.
+    MissedItem { from_ms: u64 },
     /// `peer/<pubky>`: a counterparty with Paykit activity.
     Peer([u8; 32]),
     /// `kc/<record key>`: a payee's cancellation kept to place.
@@ -454,6 +462,9 @@ impl StateKey {
                         }
                     }
                     "missed" => Self::Missed {
+                        from_ms: number(rest)?,
+                    },
+                    "mi" => Self::MissedItem {
                         from_ms: number(rest)?,
                     },
                     "peer" => Self::Peer(b64_32(rest)?),
@@ -611,6 +622,7 @@ mod tests {
                 },
             ),
             (key::missed(9), StateKey::Missed { from_ms: 9 }),
+            (key::missed_item(9), StateKey::MissedItem { from_ms: 9 }),
             (key::peer(&pubky), StateKey::Peer(pubky)),
             (
                 key::kept_cancellation(&pubky),
@@ -727,6 +739,7 @@ mod tests {
             "ask/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM/7",
             "ans/00000000000000000001/not-a-uuid",
             "missed/1",
+            "mi/1",
             "j/",
             "ctx",
             "side/123E4567-E89B-42D3-A456-426614174000",
