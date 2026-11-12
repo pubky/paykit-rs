@@ -194,30 +194,6 @@ impl PaykitProtocol {
     }
 }
 
-/// Whether `new` reads a record of `collections` that `old` doesn't (Switch spec 8.3, Paykit
-/// spec 6): a collection `old` lists none of, or, in a family with a policy per sub-scope,
-/// a sub-scope's records `old` reads neither by that sub-scope nor by the family's own read
-/// scope, which reads every member, such as `request:<label>` after `request` alone.
-pub(crate) fn reads_more(collections: &[SwitchCollection], old: &AppCert, new: &AppCert) -> bool {
-    collections.iter().any(|collection| {
-        if !collection.readable_by(new) {
-            return false;
-        }
-        if !collection.readable_by(old) {
-            return true;
-        }
-        let name = collection.policy.read_scope.as_str();
-        if old.holds_scope(name) {
-            return false;
-        }
-        new.holds_scope(name)
-            || new.scopes().iter().any(|scope| {
-                switch_scopes::split(scope).is_some_and(|(held, sub)| sub.is_some() && held == name)
-                    && !old.scopes().contains(scope)
-            })
-    })
-}
-
 /// A record of Paykit's local state, read through a [`LocalView`]: `Err` when the store
 /// can't be read or the record doesn't read, which the caller never takes as an absent one.
 fn view_get<T: serde::de::DeserializeOwned>(
@@ -932,26 +908,6 @@ mod tests {
 
     fn protocol() -> PaykitProtocol {
         PaykitProtocol::new()
-    }
-
-    fn cert(scopes: &[&str]) -> AppCert {
-        crate::testkit::Party::new("alice", "wallet", scopes).cert
-    }
-
-    #[test]
-    fn test_protocol_reads_more_with_a_collection_or_a_label_added() {
-        let collections = protocol().collections();
-        let reads_more =
-            |old: &[&str], new: &[&str]| reads_more(&collections, &cert(old), &cert(new));
-        assert!(reads_more(&["pay"], &["pay", "request"]));
-        assert!(reads_more(
-            &["request:shop"],
-            &["request:shop", "request:cafe"]
-        ));
-        assert!(reads_more(&["request:shop"], &["request"]));
-        assert!(!reads_more(&["pay", "request"], &["pay"]));
-        assert!(!reads_more(&["request"], &["request:shop"]));
-        assert!(!reads_more(&["pay"], &["pay", "contacts"]));
     }
 
     #[test]
