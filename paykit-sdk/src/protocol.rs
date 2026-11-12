@@ -367,7 +367,9 @@ pub(crate) fn restore_paykit_layer(
             // own; a restore keeps no note of them.
             // A stored entry's note is the client's entry's: the client tells of the entries it
             // restores again, and the note is kept anew then (`stored.rs`). A taken event's
-            // mark names an event of this store, whose IDs a restore doesn't keep.
+            // mark isn't restored: the client tells the protocol again of the events a restore
+            // carries, under the same IDs in place or new ones elsewhere, and taking an event
+            // again changes nothing but may send a `resend_request` twice.
             StateKey::RestoreHold
             | StateKey::HoldConfirmed(_)
             | StateKey::RecordsUnlisted
