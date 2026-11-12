@@ -709,9 +709,11 @@ where
     /// Requests with bound Payment Endpoints have no public fallback; use
     /// [`Self::resolve_private_payment_request`] for their private destinations.
     /// Returns `Policy` while the counterparty is `Blocked`, before any App
-    /// Registry or Payment Endpoint read. The block is rechecked before
-    /// Payment Endpoint reads and before candidates reach the payment adapter,
-    /// so a block that lands during resolution also returns `Policy`.
+    /// Registry or Payment Endpoint read. The block is rechecked at each step
+    /// that leaves the SDK (the Pubky public storage provider call, App
+    /// Registry and Payment Endpoint reads, payment adapter selection, and
+    /// target building) and before the result is returned, so a block that
+    /// lands during resolution also returns `Policy`.
     pub async fn resolve_public_payment_request(
         &self,
         counterparty: PubkyPublicKey,
@@ -746,14 +748,13 @@ where
         let loaded = self
             .public_payment_candidates(&counterparty, required_app_id, refuse_blocked_counterparty)
             .await;
-        if refuse_blocked_counterparty {
-            // A block can land while the Payment Endpoint reads are in flight.
-            // Those reads cannot be recalled without serializing against
-            // `block_peer`, so the guarantee is that no candidate reaches the
-            // payment adapter once a block is observed, and the call returns
-            // `Policy`, outranking a loading error or a `NoEndpoint` result.
-            self.ensure_peer_not_blocked(&counterparty).await?;
-        }
+        // A block can land while the Payment Endpoint reads are in flight.
+        // Those reads cannot be recalled without serializing against
+        // `block_peer`, so the guarantee is that no candidate reaches the
+        // payment adapter once a block is observed, and the call returns
+        // `Policy`, outranking a loading error or a `NoEndpoint` result.
+        self.ensure_peer_not_blocked_if(refuse_blocked_counterparty, &counterparty)
+            .await?;
         let mut batch = loaded?;
         filter_public_candidates_for_request(&mut batch.candidates, payment_request_terms.as_ref());
         if batch.candidates.is_empty() {
@@ -770,6 +771,7 @@ where
             batch.candidates,
             batch.failures,
             batch.loaded_app_count,
+            refuse_blocked_counterparty,
         )
         .await
     }
@@ -1116,13 +1118,19 @@ where
     ) -> Result<PaymentRequestTermsRecord> {
         // A blocked counterparty's received Payment Request is not resolved.
         // The preflight keeps a blocked peer's App Registry from being
-        // contacted at all. The recheck below runs atomically with the Payment
-        // Request read, so a block that lands during the registry fetch still
-        // refuses; its failing transaction also discards the authorized-apps
-        // cache write made by the registry observation.
+        // contacted at all, and the fetch rechecks after the provider call and
+        // after a failed registry read. The recheck below runs atomically with
+        // the Payment Request read, so a block that lands during the registry
+        // fetch still refuses; its failing transaction also discards the
+        // authorized-apps cache write made by the registry observation.
         self.ensure_peer_not_blocked(counterparty).await?;
+        let observation = self
+            .fetch_counterparty_app_authorization_refusing_blocked(counterparty, true)
+            .await?;
         let (context, record) = self
-            .counterparty_app_authorization_context_with(counterparty, |tx| {
+            .storage
+            .transaction(|tx| {
+                let context = observation.apply(tx, counterparty);
                 if tx.linked_peer(counterparty).map(|peer| peer.state)
                     == Some(LinkedPeerState::Blocked)
                 {
@@ -1131,15 +1139,28 @@ where
                         source: None,
                     });
                 }
-                self.payment_request_record_in_transaction(
+                let record = self.payment_request_record_in_transaction(
                     tx,
                     counterparty,
                     payment_request_id,
                     true,
-                )
+                )?;
+                Ok((context, record))
             })
             .await?;
         payment_request_resolution_terms(record, context.payment_request_apps.as_deref())
+    }
+
+    /// Return `Policy` for a `Blocked` counterparty when `refuse_blocked_counterparty` is set.
+    pub(super) async fn ensure_peer_not_blocked_if(
+        &self,
+        refuse_blocked_counterparty: bool,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<()> {
+        if refuse_blocked_counterparty {
+            self.ensure_peer_not_blocked(counterparty).await?;
+        }
+        Ok(())
     }
 
     async fn cached_private_resolution_allowed_for_peer(
@@ -1231,14 +1252,13 @@ where
         refuse_blocked_counterparty: bool,
     ) -> Result<PublicPaymentCandidateLoad> {
         let public_storage = self.pubky.load_public_storage().await?;
-        if refuse_blocked_counterparty {
-            // Recheck after the provider call and before any App Registry or
-            // Payment Endpoint read. Reads already in flight cannot be recalled
-            // without serializing against `block_peer`, so the guarantee is
-            // that no read starts after a block has been observed, and the
-            // call returns `Policy`.
-            self.ensure_peer_not_blocked(counterparty).await?;
-        }
+        // Recheck after the provider call and before any App Registry or
+        // Payment Endpoint read. Reads already in flight cannot be recalled
+        // without serializing against `block_peer`, so the guarantee is that
+        // no read starts after a block has been observed, and the call returns
+        // `Policy`.
+        self.ensure_peer_not_blocked_if(refuse_blocked_counterparty, counterparty)
+            .await?;
         let public_storage = public_storage.ok_or_else(|| PaykitSdkError::Identity {
             context: "no Pubky public storage available for public Payment Endpoint lookup".into(),
             source: None,
@@ -1356,6 +1376,7 @@ where
         counterparty: PubkyPublicKey,
         amount: Option<PaymentAmountContext>,
         candidates: Vec<PublicPaymentEndpointCandidate>,
+        refuse_blocked_counterparty: bool,
     ) -> Result<PublicContactPaymentResolution> {
         self.resolve_public_candidate_batch_with_failures(
             counterparty,
@@ -1363,6 +1384,7 @@ where
             candidates,
             Vec::new(),
             1,
+            refuse_blocked_counterparty,
         )
         .await
     }
@@ -1374,17 +1396,25 @@ where
         candidates: Vec<PublicPaymentEndpointCandidate>,
         failures: Vec<PublicPaymentEndpointLoadFailure>,
         loaded_app_count: usize,
+        refuse_blocked_counterparty: bool,
     ) -> Result<PublicContactPaymentResolution> {
         let payable = self
             .payment
             .select_public_payment_endpoints(&PublicPaymentEndpointSelectionRequest {
-                counterparty,
+                counterparty: counterparty.clone(),
                 amount,
                 candidates: candidates.clone(),
             })
             .await?;
+        // Adapter work already in flight cannot be recalled without
+        // serializing against `block_peer`. Once a block is observed, no
+        // target is built and no result is returned.
+        self.ensure_peer_not_blocked_if(refuse_blocked_counterparty, &counterparty)
+            .await?;
         let payable = public_payable_from_batch(&payable, &candidates)?;
         let payable_endpoints = self.build_public_payable_endpoints(payable).await?;
+        self.ensure_peer_not_blocked_if(refuse_blocked_counterparty, &counterparty)
+            .await?;
         if payable_endpoints.is_empty() {
             return Ok(unresolved_public_resolution(
                 true,

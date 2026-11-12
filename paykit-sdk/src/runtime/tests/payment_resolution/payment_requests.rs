@@ -222,6 +222,63 @@ impl PaymentAdapter for UnreachablePublicPaymentAdapter {
     }
 }
 
+/// Selects every public candidate and builds its target, blocking the
+/// counterparty during selection or during the first target build.
+struct BlockingPublicPaymentAdapter {
+    storage: InMemoryStorage,
+    counterparty: PubkyPublicKey,
+    block_during_selection: bool,
+    builds: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl PaymentAdapter for BlockingPublicPaymentAdapter {
+    async fn select_public_payment_endpoints(
+        &self,
+        request: &PublicPaymentEndpointSelectionRequest,
+    ) -> Result<Vec<PublicPaymentEndpointCandidate>> {
+        if self.block_during_selection {
+            block_counterparty(&self.storage, &self.counterparty).await;
+        }
+        Ok(request.candidates.clone())
+    }
+
+    async fn build_public_payment_target(
+        &self,
+        endpoint: &PublicPaymentEndpointCandidate,
+    ) -> Result<PaymentTarget> {
+        if self.builds.fetch_add(1, Ordering::SeqCst) == 0 && !self.block_during_selection {
+            block_counterparty(&self.storage, &self.counterparty).await;
+        }
+        Ok(PaymentTarget {
+            payload: endpoint.payload.clone(),
+        })
+    }
+}
+
+fn blocking_adapter_sdk(
+    block_during_selection: bool,
+) -> (
+    PaykitSdk<InMemoryStorage, TestPubkySessionProvider, BlockingPublicPaymentAdapter, FixedClock>,
+    PublicPaymentEndpointCandidate,
+) {
+    let storage = InMemoryStorage::new();
+    let candidate = public_endpoint_candidate("ln-public");
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        BlockingPublicPaymentAdapter {
+            storage,
+            counterparty: candidate.counterparty.clone(),
+            block_during_selection,
+            builds: 0.into(),
+        },
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+    (sdk, candidate)
+}
+
 fn assert_blocked_policy<T>(result: Result<T>) {
     assert!(
         matches!(result, Err(PaykitSdkError::Policy { ref context, .. }) if context.contains("is blocked")),
@@ -697,6 +754,115 @@ async fn test_resolve_public_contact_payment_ignores_block_during_candidate_load
     );
     assert_eq!(sdk.pubky.loads.load(Ordering::SeqCst), 1);
     assert!(relay_lookups.load(Ordering::SeqCst) > 0);
+}
+
+#[tokio::test]
+async fn test_resolve_public_payment_request_rechecks_blocked_peer_before_registry_read() {
+    let (storage, counterparty, request_id) = unbound_payment_request_fixture().await;
+    let (public_storage, relay_lookups) = offline_public_storage(None).await;
+    // The block lands during the first load, made for the App Registry
+    // lookup, which then returns public storage.
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        CandidateDiscoverySessionProvider {
+            storage,
+            counterparty: counterparty.clone(),
+            discovery_load: 1,
+            block_at_discovery: true,
+            public_storage,
+            loads: 0.into(),
+        },
+        UnreachablePublicPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+
+    let result = sdk
+        .resolve_public_payment_request(counterparty, &request_id)
+        .await;
+
+    assert_blocked_policy(result);
+    assert_eq!(sdk.pubky.loads.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        relay_lookups.load(Ordering::SeqCst),
+        0,
+        "the App Registry read may not start after the block"
+    );
+}
+
+#[tokio::test]
+async fn test_resolve_public_payment_request_block_outranks_failed_registry_read() {
+    let (storage, counterparty, request_id) = unbound_payment_request_fixture().await;
+    // The block lands during the App Registry read, which then fails.
+    let (public_storage, relay_lookups) =
+        offline_public_storage(Some((storage.clone(), counterparty.clone()))).await;
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        CandidateDiscoverySessionProvider {
+            storage,
+            counterparty: counterparty.clone(),
+            discovery_load: 1,
+            block_at_discovery: false,
+            public_storage,
+            loads: 0.into(),
+        },
+        UnreachablePublicPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+
+    let result = sdk
+        .resolve_public_payment_request(counterparty, &request_id)
+        .await;
+
+    assert_blocked_policy(result);
+    assert_eq!(sdk.pubky.loads.load(Ordering::SeqCst), 1);
+    assert!(relay_lookups.load(Ordering::SeqCst) > 0);
+}
+
+#[tokio::test]
+async fn test_request_candidate_batch_rechecks_blocked_peer_after_adapter_selection() {
+    let (sdk, candidate) = blocking_adapter_sdk(true);
+
+    let result = sdk
+        .resolve_public_candidate_batch(candidate.counterparty.clone(), None, vec![candidate], true)
+        .await;
+
+    assert_blocked_policy(result);
+    assert_eq!(sdk.payment.builds.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn test_request_candidate_batch_rechecks_blocked_peer_after_target_building() {
+    let (sdk, candidate) = blocking_adapter_sdk(false);
+
+    let result = sdk
+        .resolve_public_candidate_batch(candidate.counterparty.clone(), None, vec![candidate], true)
+        .await;
+
+    assert_blocked_policy(result);
+    assert_eq!(sdk.payment.builds.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_contact_candidate_batch_ignores_block_during_adapter_work() {
+    for block_during_selection in [true, false] {
+        let (sdk, candidate) = blocking_adapter_sdk(block_during_selection);
+
+        let result = sdk
+            .resolve_public_candidate_batch(
+                candidate.counterparty.clone(),
+                None,
+                vec![candidate.clone()],
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, PublicPaymentResolutionStatus::Payable);
+        assert_eq!(result.payable_endpoints.len(), 1);
+        assert_eq!(result.payable_endpoints[0].endpoint, candidate);
+    }
 }
 
 #[tokio::test]

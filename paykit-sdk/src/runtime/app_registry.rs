@@ -222,18 +222,38 @@ where
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<CounterpartyAppAuthorizationObservation> {
-        if let Some(public_storage) = self.pubky.load_public_storage().await? {
-            let registry = paykit_lib::get_paykit_app_registry(
-                &public_storage,
-                &counterparty.to_public_key()?,
-            )
+        self.fetch_counterparty_app_authorization_refusing_blocked(counterparty, false)
+            .await
+    }
+
+    /// Like [`Self::fetch_counterparty_app_authorization`]. When
+    /// `refuse_blocked_counterparty` is set, a `Blocked` counterparty returns
+    /// `Policy` before the App Registry read starts, and a block observed after
+    /// a failed read outranks the read error.
+    pub(super) async fn fetch_counterparty_app_authorization_refusing_blocked(
+        &self,
+        counterparty: &PubkyPublicKey,
+        refuse_blocked_counterparty: bool,
+    ) -> Result<CounterpartyAppAuthorizationObservation> {
+        let Some(public_storage) = self.pubky.load_public_storage().await? else {
+            return Ok(CounterpartyAppAuthorizationObservation::Cached);
+        };
+        // A block can land while the provider call is in flight. Nothing
+        // further starts once it is observed.
+        self.ensure_peer_not_blocked_if(refuse_blocked_counterparty, counterparty)
             .await?;
-            Ok(CounterpartyAppAuthorizationObservation::Public(
-                registry.map(Box::new),
-            ))
-        } else {
-            Ok(CounterpartyAppAuthorizationObservation::Cached)
+        let registry =
+            paykit_lib::get_paykit_app_registry(&public_storage, &counterparty.to_public_key()?)
+                .await;
+        if registry.is_err() {
+            // An in-flight read cannot be recalled without serializing against
+            // `block_peer`; a block that landed during it outranks its error.
+            self.ensure_peer_not_blocked_if(refuse_blocked_counterparty, counterparty)
+                .await?;
         }
+        Ok(CounterpartyAppAuthorizationObservation::Public(
+            registry?.map(Box::new),
+        ))
     }
 
     pub(super) async fn cached_counterparty_app_authorization_context(

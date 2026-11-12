@@ -50,6 +50,7 @@ async fn test_resolve_public_candidate_batch_returns_ordered_payable_endpoints()
                 asset: "usd".into(),
             }),
             vec![first.clone(), second.clone()],
+            false,
         )
         .await
         .unwrap();
