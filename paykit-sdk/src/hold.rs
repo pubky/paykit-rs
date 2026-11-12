@@ -64,6 +64,31 @@ impl RestoreHold {
     }
 }
 
+/// The hold a `missed` item set (`p/mh`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct MissedHold {
+    /// A time no earlier than the last acceptance time of the entries the item tells of:
+    /// the highest service time verified once the read that took the item returned, as
+    /// the client at this pin tells only the item's first time. `None` until then, when
+    /// every open request is held.
+    pub(crate) bound_ms: Option<u64>,
+}
+
+impl MissedHold {
+    /// Whether the open request `request` is held (Paykit spec 7.2, 9). One the app held at
+    /// the item, its inbox having accepted it no later than the bound, is held. One first
+    /// seen after the item is held only when its signed `created_at` is earlier than the
+    /// bound plus the clock tolerance: a request created later can't have had its
+    /// cancellation among the entries missed. A request with no acceptance time is held.
+    pub(crate) fn holds(&self, request: &paykit_lib::records::StoredMessage) -> bool {
+        let Some(bound) = self.bound_ms else {
+            return true;
+        };
+        let held_at_item = request.accepted_at().is_none_or(|at| at <= bound);
+        held_at_item || request.message().created_at_ms < bound.saturating_add(CLOCK_TOLERANCE_MS)
+    }
+}
+
 /// Which side waits for a wider certificate's scope keys ([`Paykit::scope_keys_awaited`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum KeysAwaited {
@@ -319,10 +344,13 @@ impl Paykit {
     /// Whether the request record at `record_key`, `record`, is held after a restore or a
     /// `missed` item: one of them set the hold, the user hasn't confirmed this request
     /// since, and it is open.
-    /// Every open request is held, one first seen after the restore too: no time the app
-    /// can see proves a request new, since its creation time is the counterparty's and a
-    /// request from before the backup can come again with a later acceptance time (Paykit
-    /// spec 7.2, "What a restore loses": nothing releases the hold automatically).
+    /// After a restore every open request is held, one first seen after the restore too: no
+    /// time the app can see proves a request new, since its creation time is the
+    /// counterparty's and a request from before the backup can come again with a later
+    /// acceptance time (Paykit spec 7.2, "What a restore loses": nothing releases the hold
+    /// automatically). After a `missed` item, a request first seen after it is held only
+    /// when created before the item's last acceptance time plus the clock tolerance
+    /// ([`MissedHold::holds`]).
     pub(crate) async fn held(
         &self,
         record_key: &[u8; 32],
@@ -332,8 +360,16 @@ impl Paykit {
             .local_get::<RestoreHold>(key::RESTORE_HOLD)
             .await?
             .is_some();
-        if !restored && self.local_get::<bool>(key::MISSED_HOLD).await?.is_none() {
-            return Ok(false);
+        if !restored {
+            let Some(missed) = self.local_get::<MissedHold>(key::MISSED_HOLD).await? else {
+                return Ok(false);
+            };
+            let Some((request, _)) = crate::requests::request_of(record) else {
+                return Ok(false);
+            };
+            if !missed.holds(request) {
+                return Ok(false);
+            }
         }
         if record.shows_paid() || cancelled(record) || rejected(record) {
             return Ok(false);
@@ -342,6 +378,25 @@ impl Paykit {
             .local_get::<bool>(&key::hold_confirmed(record_key))
             .await?
             .is_none())
+    }
+
+    /// Bound a `missed` item's hold set by the read that just returned
+    /// ([`MissedHold::bound_ms`]) with the highest service time verified: the item came no
+    /// later. Without a verified time, it stays unbounded.
+    pub(crate) async fn bound_missed_hold(&mut self) -> Result<()> {
+        let Some(hold) = self.local_get::<MissedHold>(key::MISSED_HOLD).await? else {
+            return Ok(());
+        };
+        if hold.bound_ms.is_some() {
+            return Ok(());
+        }
+        let Some(bound) = self.service_time() else {
+            return Ok(());
+        };
+        let hold = MissedHold {
+            bound_ms: Some(bound),
+        };
+        self.local_put(key::MISSED_HOLD, &hold).await
     }
 
     /// The user has seen that the payee may have cancelled `request` since the backup the
