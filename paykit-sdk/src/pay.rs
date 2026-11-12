@@ -904,9 +904,10 @@ impl Paykit {
             let mut view = entry.view()?;
             let target = ActivityTarget::payer(entry.natural_key.clone());
             if let Some(record) = self.held_activity(&target).await? {
-                view.receipt =
-                    crate::receipts::received_receipt(self.activity_key(&target)?, &record)
-                        .filter(|receipt| receipt.attempt_id == view.attempt_id);
+                view.receipt = self
+                    .received_receipt_of(self.activity_key(&target)?, &record)
+                    .await?
+                    .filter(|receipt| receipt.attempt_id == view.attempt_id);
             }
             out.push(view);
         }

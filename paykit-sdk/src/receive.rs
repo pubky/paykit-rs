@@ -591,7 +591,9 @@ fn receipt_effect(
 }
 
 /// The payer's record a receipt goes into: its request's, or for a payment without a
-/// request the record of the attempt it names (Paykit wire 4.11, 5.3).
+/// request the record of the attempt it names (Paykit wire 4.11, 5.3). This SDK makes no
+/// payment of a Billing Period: the request record holds no proof of one, so a receipt
+/// naming a period is neither stored nor settles its claim here.
 pub(crate) fn receipt_target(
     stored: &StoredMessage,
     own: &[u8; 32],
