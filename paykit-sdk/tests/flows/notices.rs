@@ -464,4 +464,7 @@ async fn test_notices_receipt_waiting_for_its_records_key_given_up_after_30_days
         .await
         .unwrap();
     assert!(value["receipt"].is_null(), "{value}");
+    // Stored locally while it waited, the entry was tried again by the receive step alone:
+    // nothing of it is kept to write later.
+    assert!(wallet.app().protocol_scan(b"se/").await.unwrap().is_empty());
 }
