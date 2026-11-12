@@ -331,3 +331,21 @@ async fn test_blocked_restore_reads_the_deny_list_again_before_a_payment() {
     );
     assert!(w.rail.all_executions().is_empty());
 }
+
+#[tokio::test]
+async fn test_blocked_own_unblock_kept_unanswered_still_refuses_the_users_payment() {
+    // The copy the user's payment is judged by keeps bob while the unblock is kept: the
+    // payment is still shown blocked.
+    let w = World::new();
+    let (mut wallet, request) = blocked(&w).await;
+    keep_ops(&w, 8);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::Blocked { .. })),
+        "{refused:?}"
+    );
+}
