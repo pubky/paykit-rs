@@ -206,6 +206,59 @@ async fn test_notices_late_receipt_raised_by_an_owner_restored_from_before_the_f
     assert_eq!(notices[0].attempt_id, Some(attempt_id));
 }
 
+/// The wallet's journal entry of `attempt_id`, its value rewritten to name `other`.
+async fn journal_names(wallet: &mut Paykit, attempt_id: paykit_lib::AttemptId, other: &str) {
+    let key = format!("j/{}", attempt_id.to_text());
+    let bytes = wallet
+        .app()
+        .protocol_get(key.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut entry: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    entry["d"]["attempt_id"] = serde_json::Value::String(other.to_owned());
+    wallet
+        .app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: key.into_bytes(),
+            value: serde_json::to_vec(&entry).unwrap(),
+        }])
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_notices_late_receipt_with_its_journal_entry_at_another_key_raises_none() {
+    // The entry at the attempt's key names another attempt: a corrupt store, so the
+    // receipt's step neither reads it as the payment's nor raises the notice from it.
+    let w = World::new();
+    let (mut wallet, mut shop, attempt_id) = paid_after_failed(&w).await;
+    w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    wallet.receive(None).await.unwrap();
+    let other = paykit_lib::AttemptId::from_bytes([9; 16]).to_text();
+    journal_names(&mut wallet, attempt_id, &other).await;
+    receipt(&mut shop).await;
+    let _ = wallet.receive(None).await;
+    assert!(wallet.notices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_notices_acknowledged_with_its_journal_entry_at_another_key_refused() {
+    let w = World::new();
+    let (mut wallet, mut shop, attempt_id) = paid_after_failed(&w).await;
+    w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    wallet.receive(None).await.unwrap();
+    wallet.resume_payments().await.unwrap();
+    receipt(&mut shop).await;
+    wallet.receive(None).await.unwrap();
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1);
+    let other = paykit_lib::AttemptId::from_bytes([9; 16]).to_text();
+    journal_names(&mut wallet, attempt_id, &other).await;
+    assert!(wallet.acknowledge_notice(&notices[0].id).await.is_err());
+    assert_eq!(wallet.notices().await.unwrap(), notices);
+}
+
 #[tokio::test]
 async fn test_notices_receipt_within_the_claim_settles_it_and_raises_none() {
     let w = World::new();

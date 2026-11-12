@@ -678,6 +678,51 @@ async fn test_stored_note_past_its_window_kept_when_its_write_errs() {
 }
 
 #[tokio::test]
+async fn test_stored_note_under_another_key_is_corrupt() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    let (key, value) = wallet.app().protocol_scan(b"se/").await.unwrap().remove(0);
+    let key = String::from_utf8(key).unwrap();
+    let (sender, _) = key.trim_start_matches("se/").split_once('/').unwrap();
+    wallet
+        .app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: format!("se/{sender}/223e4567-e89b-42d3-a456-426614174000").into_bytes(),
+            value,
+        }])
+        .await
+        .unwrap();
+    assert!(wallet.requests().await.is_err());
+}
+
+#[tokio::test]
+async fn test_stored_note_past_its_window_kept_when_the_switch_doesnt_answer() {
+    // Past its window, the later write's batch doesn't reach the switch: it wasn't
+    // evaluated, so the note stays and nothing is given up.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let attempt_id = pending(&w, &mut wallet, &request).await;
+    receipt_of_another_proof(&w, &wallet, &request, attempt_id);
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+    wallet.app_mut().receive(None).await.unwrap();
+    w.alice.switch().fail_next(Fault::Unreachable {
+        path: "/ops".into(),
+        after: 0,
+    });
+    assert!(wallet.receive(None).await.is_err());
+    assert_eq!(kept(&wallet, "se/").await.len(), 1);
+    assert!(kept(&wallet, "nt/").await.is_empty());
+}
+
+#[tokio::test]
 async fn test_stored_refused_lists_hold_the_newer() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
