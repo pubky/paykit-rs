@@ -826,11 +826,35 @@ async fn test_stored_refused_older_list_never_replaces_a_newer_held() {
     }
 }
 
+/// The wallet's kept receipt for `request`, waiting for a scope key: kept a day short of 30
+/// days from its acceptance, then given up with the host's notice.
+async fn given_up_after_30_days(
+    w: &World,
+    wallet: &mut paykit_sdk::Paykit,
+    request: &paykit_sdk::RequestRef,
+) {
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - DAY_MS);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(kept(wallet, "se/").await.len(), 1);
+    assert!(wallet.notices().await.unwrap().is_empty());
+    w.clock.advance_ms(2 * DAY_MS);
+    wallet.receive(None).await.unwrap();
+    assert!(kept(wallet, "se/").await.is_empty());
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].request_hash, Some(request.request_hash));
+}
+
 #[tokio::test]
-async fn test_stored_refused_receipt_waits_for_its_records_key_past_its_window() {
+async fn test_stored_refused_receipt_waiting_for_its_records_key_given_up_after_30_days() {
     // A refused receipt is kept while the payer's record is held unopened, written again by
-    // the phone under a key the wallet doesn't hold yet: it isn't given up past its window
-    // while it waits, and is written once the key comes.
+    // the phone under a key the wallet doesn't hold yet. It waits for the key a day short of
+    // 30 days from its acceptance, and is then given up, the host told once: a key that comes
+    // later finds nothing kept (Paykit spec 8.1). The phone took the receipt too, so the
+    // record holds it whatever the wallet does.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut phone = w.wallet("phone").await;
@@ -866,25 +890,21 @@ async fn test_stored_refused_receipt_waits_for_its_records_key_past_its_window()
     let cert = wallet.app().cert().clone();
     crate::unrequested::store_bundle_from(&w, wallet.app_id(), &cert, newest);
     wallet.receive(None).await.unwrap();
-    w.clock
-        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
-    wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
-    assert_eq!(kept(&wallet, "se/").await.len(), 1);
-    assert!(wallet.notices().await.unwrap().is_empty());
+    given_up_after_30_days(&w, &mut wallet, &request).await;
     crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
     for _ in 0..3 {
         wallet.receive(None).await.unwrap();
     }
     assert!(kept(&wallet, "se/").await.is_empty());
-    assert!(holds_receipt(&wallet, &request).await);
+    assert_eq!(wallet.notices().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn test_stored_refused_receipt_waits_for_the_current_epochs_key_past_its_window() {
+async fn test_stored_refused_receipt_waiting_for_the_current_epochs_key_given_up_after_30_days() {
     // A refused receipt is kept, and then the data epoch rotates with no key for the wallet:
-    // nothing can be sealed at the record yet, so the receipt is neither written nor given up
-    // past its window, and is written once the key comes.
+    // nothing can be sealed at the record yet. The receipt waits for the key a day short of
+    // 30 days from its acceptance, and is then given up, the host told: a key that comes
+    // later doesn't bring it back (Paykit spec 8.1).
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -902,17 +922,12 @@ async fn test_stored_refused_receipt_waits_for_the_current_epochs_key_past_its_w
     assert_eq!(kept(&wallet, "se/").await.len(), 1);
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
     wallet.receive(None).await.unwrap();
-    w.clock
-        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
-    wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
-    assert_eq!(kept(&wallet, "se/").await.len(), 1);
-    assert!(wallet.notices().await.unwrap().is_empty());
+    given_up_after_30_days(&w, &mut wallet, &request).await;
     let cert = wallet.app().cert().clone();
     crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
     for _ in 0..3 {
         wallet.receive(None).await.unwrap();
     }
     assert!(kept(&wallet, "se/").await.is_empty());
-    assert!(holds_receipt(&wallet, &request).await);
+    assert!(!holds_receipt(&wallet, &request).await);
 }
