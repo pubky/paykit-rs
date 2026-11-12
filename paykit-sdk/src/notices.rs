@@ -286,6 +286,20 @@ impl Paykit {
         let at = self.service_time().unwrap_or(0);
         self.local_put(&key, &KeptNotice::of(kind, entry, at)).await
     }
+
+    /// Drop the notice of `kind` about `entry`'s payment, acknowledged or not, once what it
+    /// says no longer holds: raised again, it is listed again.
+    pub(crate) async fn drop_notice(
+        &mut self,
+        kind: NoticeKind,
+        entry: &JournalEntry,
+    ) -> Result<()> {
+        let key = key::notice(&entry.attempt()?, kind);
+        if self.local_get::<KeptNotice>(&key).await?.is_some() {
+            self.local_delete(&key).await?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

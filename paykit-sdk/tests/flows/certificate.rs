@@ -460,6 +460,50 @@ async fn test_certificate_renewal_dropping_pay_raises_a_notice_for_a_held_paymen
 }
 
 #[tokio::test]
+async fn test_certificate_renewal_bringing_pay_back_drops_the_held_payment_notice() {
+    // Renewed without `pay` while a payment is in flight, then renewed with it again: the
+    // payment finishes, and the notice that it was held without `pay` goes.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let me = wallet.app_id();
+    let mut shop = w.shop().await;
+    let request = crate::common::request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::common::draft("1", w.clock.now_ms()),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, paykit_sdk::PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("in flight");
+    };
+    let first = wallet.app().cert().clone();
+    let reduced = renew(&w, me, &AppScopes::new().contacts().build().unwrap(), 1_000);
+    let _ = wallet.receive(None).await;
+    list(&w, me, &first, &reduced);
+    wallet.receive(None).await.unwrap();
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(wallet.notices().await.unwrap().len(), 1);
+    let again = renew(&w, me, &AppScopes::new().pay().build().unwrap(), 2_000);
+    let _ = wallet.receive(None).await;
+    list(&w, me, &reduced, &again);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().cert().hash(), again.hash());
+    w.rail.settle(&attempt_id, true);
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [paykit_sdk::PayOutcome::Paid { .. }]),
+        "{resumed:?}"
+    );
+    assert!(wallet.notices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn test_certificate_renewal_dropping_pay_keeps_a_dispatched_payment() {
     // The payment is in flight, its acceptance released, when the app is renewed to
     // `contacts`. Without `pay` the app can neither write nor read payer records, so its

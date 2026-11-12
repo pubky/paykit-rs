@@ -2593,6 +2593,12 @@ impl Paykit {
                 }
                 continue;
             }
+            let held = !self.holds("pay") || payer_waits;
+            if !held {
+                // Under `pay` again, the payment is held without it no more: that notice goes,
+                // so a later certificate without `pay` tells the host again.
+                self.drop_notice(NoticeKind::HeldWithoutPay, &entry).await?;
+            }
             if !entry.open() {
                 continue;
             }
@@ -2601,7 +2607,7 @@ impl Paykit {
             // service refuses both, `403 permission_missing`), and makes no payment
             // ([`Paykit::final_payment_check`]): every open entry waits for an app holding
             // it, its proof kept if it has one, and the other entries go on.
-            if !self.holds("pay") || payer_waits {
+            if held {
                 out.push(self.held_without_pay(&mut entry).await?);
                 continue;
             }
