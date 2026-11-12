@@ -1520,6 +1520,20 @@ mod receive_tests {
         assert!(crate::stored::note_at(other.as_bytes(), &value, &alice.id()).is_err());
         let by_other = key::stored_note(&[8; 32], &msg_id);
         assert!(crate::stored::note_at(by_other.as_bytes(), &value, &alice.id()).is_err());
+        // At its message's key, a note that names another `msg_id` or sender itself.
+        for note in [
+            crate::stored::StoredNote {
+                msg_id: "123e4567-e89b-42d3-a456-426614174000".into(),
+                ..note.clone()
+            },
+            crate::stored::StoredNote {
+                sender: [8; 32],
+                ..note.clone()
+            },
+        ] {
+            let value = state::encode(&note).unwrap();
+            assert!(crate::stored::note_at(at.as_bytes(), &value, &alice.id()).is_err());
+        }
     }
 
     #[test]
