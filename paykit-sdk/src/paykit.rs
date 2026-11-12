@@ -602,8 +602,10 @@ impl Paykit {
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1).
         self.place_kept_cancellations().await?;
-        // The senders of replies dropped for the bounds, once one of their records came.
-        self.ask_for_dropped_replies(&report.events).await?;
+        // The senders of messages dropped before they were taken: of replies dropped for the
+        // bounds once the record of one of their requests came, of entries dropped
+        // unverified at once, then again at most once a day while the mark lives.
+        let marked = self.ask_on_marks(&report.events).await?;
         // The payers' replies kept for requests whose record wasn't held yet.
         self.place_kept_replies().await?;
         // Lists held over a `payment_lists` record that didn't read, once it reads.
@@ -621,7 +623,7 @@ impl Paykit {
         Ok(ReceiveSummary {
             report,
             applied,
-            resends: answered.saturating_add(asked),
+            resends: answered.saturating_add(asked).saturating_add(marked),
             certificate_refused: None,
             records_unlisted,
             account_gone: false,

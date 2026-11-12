@@ -779,3 +779,22 @@ impl World {
         .unwrap()
     }
 }
+
+/// The re-send requests `app` delivered to `to`, as their `accepted_from` and
+/// `accepted_until`, in the order delivered.
+pub async fn asked(app: &Paykit, to: &[u8; 32]) -> Vec<(Option<u64>, Option<u64>)> {
+    let mut sent = app.app().sent_to(to, 0, u64::MAX).await.unwrap();
+    sent.sort_by_key(|m| m.accepted_at_ms);
+    sent.iter()
+        .filter(|m| m.kind == "paykit.resend_request")
+        .map(|m| {
+            let message = pubky_switch_core::message::Message::parse(
+                m.plaintext.json(),
+                paykit_lib::kinds::OPAQUE_MEMBERS,
+            )
+            .unwrap();
+            let body = paykit_lib::bodies::ResendRequest::from_body(&message.body).unwrap();
+            (body.accepted_from, body.accepted_until)
+        })
+        .collect()
+}

@@ -9,7 +9,9 @@
 //!   of messages per requester identity.
 //! - **Asking**: entries the app can't read, `missed` items and a provider loss queue
 //!   `resend_request`s, which [`crate::Paykit::receive`] sends; the client bounds their times
-//!   (Paykit spec 9, "What an app asks for"). A `resend_request` adds no conversation entry.
+//!   (Paykit spec 9, "What an app asks for"). The marks of messages dropped before they were
+//!   taken ask on their own cadence (`marks.rs`). A `resend_request` adds no conversation
+//!   entry.
 
 use paykit_lib::bodies::ResendRequest;
 use paykit_lib::kinds::{targets_app, Kind, Side, OPAQUE_MEMBERS};
@@ -87,6 +89,18 @@ impl Paykit {
         selection: ResendSelection,
     ) -> Result<String> {
         self.refresh_own()?;
+        let signed = self.resend_request_message(counterparty, selection)?;
+        let msg_id = self.app.queue_signed(signed).await?;
+        self.app.flush_message(&msg_id).await?;
+        Ok(msg_id)
+    }
+
+    /// A `resend_request` to `counterparty` for `selection`, signed and not yet queued.
+    pub(crate) fn resend_request_message(
+        &self,
+        counterparty: [u8; 32],
+        selection: ResendSelection,
+    ) -> Result<pubky_switch_client::app::SignedMessage> {
         let body = ResendRequest {
             msg_ids: selection.msg_ids,
             accepted_from: selection.accepted_from_ms,
@@ -95,10 +109,7 @@ impl Paykit {
             billing_period: None,
         }
         .to_body()?;
-        let signed = self.sign(counterparty, Kind::ResendRequest, Vec::new(), body)?;
-        let msg_id = self.app.queue_signed(signed).await?;
-        self.app.flush_message(&msg_id).await?;
-        Ok(msg_id)
+        self.sign(counterparty, Kind::ResendRequest, Vec::new(), body)
     }
 
     /// Send the re-sends the protocol queued: for entries the app couldn't read, to their

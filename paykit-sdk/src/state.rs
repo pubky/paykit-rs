@@ -45,7 +45,8 @@
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
 //! | `dl` | the deny list as the app last read it, for the views (Paykit spec 8.1) | |
-//! | `pd/<sender>` | a sender whose replies were dropped for the bounds on kept replies, and the earliest acceptance among them not yet asked for: asked once to send again from it when the record of one of its requests is held (`receive.rs`) | |
+//! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
+//! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply to a request the app holds no record of yet, kept until it does (`receive.rs`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing but may send a `resend_request` twice | |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
@@ -207,10 +208,16 @@ pub(crate) mod key {
     pub(crate) const STORED_NOTES: &str = "se/";
     pub(crate) const KEPT_REPLIES: &str = "pr/";
     pub(crate) const DROPPED_REPLIES: &str = "pd/";
+    pub(crate) const DROPPED_UNVERIFIED: &str = "ud/";
 
     /// The mark of replies from `sender` dropped for the bounds.
     pub(crate) fn dropped_replies(sender: &[u8; 32]) -> String {
         format!("{DROPPED_REPLIES}{}", b64(sender))
+    }
+
+    /// The mark of entries from `sender` dropped unverified.
+    pub(crate) fn dropped_unverified(sender: &[u8; 32]) -> String {
+        format!("{DROPPED_UNVERIFIED}{}", b64(sender))
     }
     pub(crate) const DENIED: &str = "dl";
     pub(crate) const TAKEN: &str = "dt/";
@@ -365,8 +372,10 @@ pub(crate) enum StateKey {
     Denied,
     /// `dt/<event ID>`: a duty event taken.
     Taken(String),
-    /// `pd/<sender>`: replies of a sender dropped for the bounds.
+    /// `pd/<sender>`: the mark of a sender's replies dropped for the bounds.
     DroppedReplies { sender: [u8; 32] },
+    /// `ud/<sender>`: the mark of a sender's entries dropped unverified.
+    DroppedUnverified { sender: [u8; 32] },
     /// `pr/<record key>/<msg_id>`: a payer's reply kept for its record.
     KeptReply {
         sender: [u8; 32],
@@ -485,6 +494,9 @@ impl StateKey {
                         (id.to_string() == rest).then(|| Self::Taken(rest.to_owned()))?
                     }
                     "pd" => Self::DroppedReplies {
+                        sender: b64_32(rest)?,
+                    },
+                    "ud" => Self::DroppedUnverified {
                         sender: b64_32(rest)?,
                     },
                     "pr" => {
@@ -662,6 +674,10 @@ mod tests {
             (
                 key::dropped_replies(&pubky),
                 StateKey::DroppedReplies { sender: pubky },
+            ),
+            (
+                key::dropped_unverified(&pubky),
+                StateKey::DroppedUnverified { sender: pubky },
             ),
             (
                 key::stored_note(&pubky, id),

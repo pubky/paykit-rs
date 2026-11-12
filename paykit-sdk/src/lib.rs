@@ -44,6 +44,7 @@ mod error;
 mod hold;
 mod journal;
 mod kept;
+mod marks;
 mod notices;
 mod pay;
 mod paykit;
@@ -66,6 +67,7 @@ pub use approval::{AppScopes, RequestedScopes};
 pub use destination::IDENTITY_GRACE_MS;
 pub use error::{PaykitError, Refusal, Result};
 pub use journal::{PaymentView, Stage};
+pub use marks::MAX_DROPPED_MARKS;
 pub use notices::{Notice, NoticeKind};
 pub use pay::{
     BlockedPayment, PayOptions, PayOutcome, PaymentDoubt, PaymentMode, TransferQuote,
@@ -82,8 +84,7 @@ pub use rail::{
 };
 pub use receipts::{ReceiptDetails, ReceiptsOf, ReceivedReceipt};
 pub use receive::{
-    HeldList, KEPT_REPLY_MS, LISTS_REFRESH_MS, MAX_DROPPED_MARKS, MAX_KEPT_REPLIES,
-    MAX_KEPT_REPLIES_PER_SENDER,
+    HeldList, KEPT_REPLY_MS, LISTS_REFRESH_MS, MAX_KEPT_REPLIES, MAX_KEPT_REPLIES_PER_SENDER,
 };
 pub use reconcile::{Doubtful, ReconcileReport, Resolution};
 pub use requests::{

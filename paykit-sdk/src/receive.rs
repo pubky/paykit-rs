@@ -53,6 +53,7 @@ use serde_json::{Map, Value};
 
 use crate::activity::{self, ActivityTarget, Role};
 use crate::journal::JournalEntry;
+use crate::marks::{count_dropped, read_mark, MarkFamily};
 use crate::notices::{KeptNotice, NoticeKind};
 use crate::paykit::Paykit;
 use crate::protocol::writes_payee_label;
@@ -769,28 +770,10 @@ pub(crate) fn kept_reply_evicted(kept: &[CountedReply], sender: &[u8; 32]) -> Op
     earliest_of(&most)
 }
 
-/// How many senders of replies dropped for the bounds the app keeps a mark of: past it, the
-/// mark with the earliest time goes, a tie going to the lower sender identity.
-pub const MAX_DROPPED_MARKS: usize = 128;
-
-/// Which of `marks` goes for a new one to be kept ([`MAX_DROPPED_MARKS`]): the earliest, a
-/// tie going to the lower sender identity. `None` while there is room.
-pub(crate) fn dropped_mark_evicted(marks: &[CountedReply]) -> Option<usize> {
-    if marks.len() < MAX_DROPPED_MARKS {
-        return None;
-    }
-    marks
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, (sender, at))| (*at, *sender))
-        .map(|(index, _)| index)
-}
-
 /// Make room for a new reply from `sender` among the kept replies, in the step: the one the
-/// bounds drop ([`kept_reply_evicted`]) goes, and its sender's mark (`pd/<sender>`) holds the
-/// earliest acceptance among its replies dropped and not yet asked for, so it is asked once
-/// to send again from that time when the record of one of its requests is held
-/// ([`Paykit::ask_for_dropped_replies`]). The marks are bounded ([`MAX_DROPPED_MARKS`]).
+/// bounds drop ([`kept_reply_evicted`]) goes, dropped without being processed, and counts in
+/// its sender's mark (`pd/<sender>`, `marks.rs`) with its acceptance time, so the sender is
+/// asked to send it again once the record of one of its requests is held.
 fn make_room_for_reply(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<(), Fail> {
     let mut kept = Vec::new();
     let mut names = Vec::new();
@@ -814,37 +797,32 @@ fn make_room_for_reply(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result
             key: names.swap_remove(index),
         },
     );
-    let mark = key::dropped_replies(&from);
-    let since = match cx.local_get(mark.as_bytes())? {
-        Some(held) => state::decode::<u64>(&held)
-            .map_err(|_| Fail::corrupt())?
-            .min(at),
-        None => {
-            let mut marks = Vec::new();
-            for (bytes, value) in cx.local_scan(key::DROPPED_REPLIES.as_bytes())? {
-                let Some(crate::state::StateKey::DroppedReplies { sender }) =
-                    crate::state::StateKey::parse(&bytes)
-                else {
-                    return Err(Fail::corrupt());
-                };
-                marks.push((
-                    sender,
-                    state::decode::<u64>(&value).map_err(|_| Fail::corrupt())?,
-                ));
-            }
-            if let Some(gone) = dropped_mark_evicted(&marks) {
-                let key = key::dropped_replies(&marks[gone].0);
-                keep_local(
-                    cx,
-                    LocalWrite::Delete {
-                        key: key.into_bytes(),
-                    },
-                );
-            }
-            at
-        }
+    let family = MarkFamily::Replies;
+    let mark_key = family.key(&from);
+    let held = match cx.local_get(mark_key.as_bytes())? {
+        Some(value) => Some(read_mark(family, &mark_key, &value).map_err(|_| Fail::corrupt())?),
+        None => None,
     };
-    keep_local(cx, local(&mark, &since)?);
+    let mut others = Vec::new();
+    if held.is_none() {
+        for (bytes, value) in cx.local_scan(family.prefix().as_bytes())? {
+            let name = String::from_utf8(bytes).map_err(|_| Fail::corrupt())?;
+            let mark = read_mark(family, &name, &value).map_err(|_| Fail::corrupt())?;
+            others.push((mark.sender, mark.latest_ms));
+        }
+    }
+    let counted = count_dropped(held, &others, from, at, false);
+    if let Some(gone) = counted.evicted {
+        keep_local(
+            cx,
+            LocalWrite::Delete {
+                key: family.key(&gone).into_bytes(),
+            },
+        );
+    }
+    if let Some(mark) = counted.put {
+        keep_local(cx, local(&mark_key, &mark)?);
+    }
     Ok(())
 }
 
@@ -959,72 +937,6 @@ impl Paykit {
                 let _ = self.app.submit_batch(batch).await;
             }
             None => self.local_commit(tx).await?,
-        }
-        Ok(())
-    }
-
-    /// Ask once each sender whose replies were dropped for the bounds and who holds a mark
-    /// (`pd/<sender>`), when this read took the record of one of its requests (`events`):
-    /// a `resend_request` for what the sender's inbox accepted from the mark's time, queued
-    /// with the mark's delete in one commit (Paykit spec 9). A re-sent reply naming a record
-    /// still not held is kept or dropped again by the same rules. A mark goes, with nothing
-    /// asked, [`KEPT_REPLY_MS`] after the time it holds, on the highest service time
-    /// verified.
-    pub(crate) async fn ask_for_dropped_replies(
-        &mut self,
-        events: &[pubky_switch_client::app::AppEvent],
-    ) -> crate::error::Result<()> {
-        let own = self.identity();
-        let service = self.service_time();
-        let mut marks = std::collections::BTreeMap::new();
-        for (rest, since) in self.local_scan::<u64>(key::DROPPED_REPLIES).await? {
-            let mark = format!("{}{rest}", key::DROPPED_REPLIES);
-            let Some(crate::state::StateKey::DroppedReplies { sender }) =
-                crate::state::StateKey::parse(mark.as_bytes())
-            else {
-                return Err(crate::error::PaykitError::corrupt());
-            };
-            if service.is_some_and(|t| since.saturating_add(KEPT_REPLY_MS) <= t) {
-                self.local_delete(&mark).await?;
-            } else {
-                marks.insert(sender, since);
-            }
-        }
-        for event in events {
-            let pubky_switch_client::app::AppEvent::RecordChanged { key: record } = event else {
-                continue;
-            };
-            if marks.is_empty() {
-                break;
-            }
-            let Some(held) = self.app.shared_record(record).await? else {
-                continue;
-            };
-            let (Some(_), Some(value)) = (
-                paykit_lib::collections::Collection::PayeeActivity.policy_label(&held.policy),
-                held.content.value(),
-            ) else {
-                continue;
-            };
-            let Ok(read) = paykit_lib::records::ActivityRecord::read(
-                value,
-                &own,
-                paykit_lib::records::ActivitySide::Payee,
-            ) else {
-                continue;
-            };
-            let Some(since) = marks.remove(&read.counterparty) else {
-                continue;
-            };
-            let ask = crate::protocol::QueuedAsk {
-                sender: read.counterparty,
-                from_ms: since,
-                until_ms: None,
-            };
-            let mut tx = Tx::default();
-            tx.delete(&key::dropped_replies(&read.counterparty));
-            tx.put(&key::ask(&read.counterparty, since), &ask)?;
-            self.local_commit(tx).await?;
         }
         Ok(())
     }
@@ -1350,34 +1262,6 @@ mod tests {
         let mut kept = replies(2, 3, 1);
         kept.extend(replies(1, MAX_KEPT_REPLIES_PER_SENDER, 10));
         assert_eq!(kept_reply_evicted(&kept, &[1; 32]), Some(3));
-    }
-
-    #[test]
-    fn test_dropped_mark_evicted_none_with_room() {
-        let marks = replies(1, MAX_DROPPED_MARKS - 1, 10);
-        assert_eq!(dropped_mark_evicted(&marks), None);
-    }
-
-    #[test]
-    fn test_dropped_mark_evicted_the_earliest_past_the_bound() {
-        let mut marks: Vec<CountedReply> = (0..MAX_DROPPED_MARKS)
-            .map(|i| {
-                (
-                    [u8::try_from(i % 250).unwrap(); 32],
-                    100 + u64::try_from(i).unwrap(),
-                )
-            })
-            .collect();
-        marks.swap(0, 50);
-        assert_eq!(dropped_mark_evicted(&marks), Some(50));
-    }
-
-    #[test]
-    fn test_dropped_mark_evicted_tie_goes_to_the_lower_identity() {
-        let mut marks = replies(9, 1, 5);
-        marks.extend(replies(3, 1, 5));
-        marks.extend((0..MAX_DROPPED_MARKS - 2).map(|_| ([200; 32], 50)));
-        assert_eq!(dropped_mark_evicted(&marks), Some(1));
     }
 
     #[test]

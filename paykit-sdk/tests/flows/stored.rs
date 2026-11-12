@@ -8,7 +8,8 @@ use pubky_switch_client::clock::Clock;
 use pubky_switch_client::testing::{Fault, TestSigner};
 use pubky_switch_core::http::ErrorCode;
 
-use crate::common::{draft, request_from, World};
+use crate::common::{asked, draft, request_from, World};
+use pubky_switch_core::records::DAY_MS;
 
 /// The next `n` batches at `signer`'s switch are refused for good, `403 permission_missing`,
 /// as an effect the switch refuses whatever is sent again.
@@ -111,17 +112,18 @@ async fn test_stored_refused_proof_at_the_payee_written_later() {
     assert!(shop.app_mut().parked_entries().await.unwrap().is_empty());
 }
 
-#[tokio::test]
-async fn test_stored_entry_dropped_unverified_asked_for_again() {
-    let w = World::new();
-    let mut wallet = w.wallet("wallet").await;
-    let mut shop = w.shop().await;
+/// Bob's request to alice, stored unverified at her wallet while bob's standing can't be
+/// checked, then dropped past 21 days, with the homeserver down. Returns the request and
+/// when alice's inbox accepted it.
+async fn dropped_unverified(
+    w: &World,
+    wallet: &mut paykit_sdk::Paykit,
+    shop: &mut paykit_sdk::Paykit,
+) -> (paykit_sdk::RequestRef, u64) {
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
-    // Bob's standing can't be checked: his request is stored unverified, then dropped
-    // past 21 days.
     let mut unexpiring = draft("1", w.clock.now_ms());
     unexpiring.proposal_expires_at_ms = None;
-    let request = request_from(&mut shop, w.alice_id(), unexpiring).await;
+    let request = request_from(shop, w.alice_id(), unexpiring).await;
     w.homeserver.set_down(true);
     // Past the 10 minutes bob's `identity.json` is cached for.
     w.clock.advance_ms(11 * 60_000);
@@ -135,15 +137,25 @@ async fn test_stored_entry_dropped_unverified_asked_for_again() {
     // The bounds are judged on the service time verified: the first read verifies it.
     let mut events = wallet.receive(None).await.unwrap().report.events;
     events.extend(wallet.receive(None).await.unwrap().report.events);
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, AppEvent::StoredEntryDropped { .. })),
-        "{events:?}"
-    );
+    let at = events
+        .iter()
+        .find_map(|e| match e {
+            AppEvent::StoredEntryDropped { accepted_at_ms, .. } => Some(*accepted_at_ms),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{events:?}"));
     assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
     let events = wallet.app_mut().unacknowledged_events().await.unwrap();
     assert!(!about_stored(&events), "{events:?}");
+    (request, at)
+}
+
+#[tokio::test]
+async fn test_stored_entry_dropped_unverified_asked_for_again() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let (request, _) = dropped_unverified(&w, &mut wallet, &mut shop).await;
     w.homeserver.set_down(false);
     // The wallet asked bob to send it again; bob's shop answers, and the request arrives.
     wallet.flush().await.unwrap();
@@ -153,6 +165,63 @@ async fn test_stored_entry_dropped_unverified_asked_for_again() {
         wallet.request(&request).await.unwrap().status,
         RequestStatus::Open
     );
+}
+
+/// The marks of entries dropped unverified, whole.
+async fn unverified_marks(app: &paykit_sdk::Paykit) -> Vec<serde_json::Value> {
+    app.app()
+        .protocol_scan(b"ud/")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, value)| serde_json::from_slice::<serde_json::Value>(&value).unwrap()["d"].clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn test_stored_entry_dropped_unverified_mark_asks_its_window_once_a_day() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let (_, at) = dropped_unverified(&w, &mut wallet, &mut shop).await;
+    w.homeserver.set_down(false);
+    wallet.flush().await.unwrap();
+    // Asked for what bob's inbox accepted from the mark's earliest time to its latest.
+    assert_eq!(
+        asked(&wallet, &w.bob_id()).await,
+        vec![(Some(at), Some(at))]
+    );
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
+    // A backup carries the mark whole, so a restore doesn't reset it.
+    let held = unverified_marks(&wallet).await;
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0]["earliest_ms"], at);
+    assert_eq!(held[0]["latest_ms"], at);
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut wallet = paykit_sdk::Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(unverified_marks(&wallet).await, held);
+    wallet.reconcile().await.unwrap();
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
+    // Asked again a day later while the mark lives.
+    w.clock.advance_ms(DAY_MS);
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
+    assert_eq!(
+        asked(&wallet, &w.bob_id()).await.last(),
+        Some(&(Some(at), Some(at)))
+    );
+    // 30 days after its latest time, the mark goes.
+    w.clock.set_ms(at + paykit_sdk::KEPT_REPLY_MS);
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
+    assert!(unverified_marks(&wallet).await.is_empty());
 }
 
 /// Bob's request reaches alice's wallet, whose receive step's batch is applied and its
@@ -526,7 +595,8 @@ async fn test_stored_dropped_entry_between_host_events_asked_for_once() {
         .next_back()
         .unwrap();
     wallet.app_mut().ack_events(last).await.unwrap();
-    // The re-send was asked once, at first sight: later reads ask nothing more.
+    // The re-send was asked once, at first sight: later reads within the day ask nothing
+    // more.
     w.homeserver.set_down(false);
     wallet.flush().await.unwrap();
     assert_eq!(wallet.receive(None).await.unwrap().resends, 0);

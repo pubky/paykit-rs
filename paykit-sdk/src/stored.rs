@@ -21,9 +21,11 @@
 //!   nothing. A copy of the entry the host released after that is declined, its message
 //!   processed, so its effect isn't applied twice (`PaykitProtocol`'s receive step).
 //! - **A released entry that ran as a duplicate** (`ReleasedDuplicate`): its note goes.
-//! - **An entry dropped unverified** (`StoredEntryDropped`): a `resend_request` for the
-//!   messages its sender's inbox accepted in that millisecond is queued to the sender, who
-//!   may still keep it (Paykit spec 9).
+//! - **An entry dropped unverified** (`StoredEntryDropped`): it counts in its sender's mark
+//!   of entries dropped unverified (`ud/<sender>`, `marks.rs`), and the sender is asked at
+//!   once to send again what its inbox accepted from the mark's earliest time to its latest,
+//!   while it may still keep them, and again at most once a day while the mark lives (Paykit
+//!   spec 8.1, 9).
 //!
 //! **Taken at first sight.** The SDK acts on each such event the first time a receive sees
 //! it, and keeps a mark of it (`p/dt/<event ID>`) in the same commit as what the event says,
@@ -47,7 +49,6 @@ use crate::activity::{ActivityTarget, Role};
 use crate::error::Result;
 use crate::notices::KeptNotice;
 use crate::paykit::Paykit;
-use crate::protocol::QueuedAsk;
 use crate::records::{list_target, KeptMessage};
 use crate::requests::{RequestRef, RequestStatus, RequestView};
 use crate::state::{key, Tx};
@@ -191,12 +192,8 @@ impl Paykit {
                 accepted_at_ms,
                 ..
             } => {
-                let ask = QueuedAsk {
-                    sender: *sender,
-                    from_ms: *accepted_at_ms,
-                    until_ms: Some(*accepted_at_ms),
-                };
-                tx.put(&key::ask(sender, *accepted_at_ms), &ask)?;
+                self.count_dropped_unverified(&mut tx, *sender, *accepted_at_ms)
+                    .await?;
                 true
             }
             _ => false,

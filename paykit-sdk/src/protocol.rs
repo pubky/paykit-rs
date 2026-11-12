@@ -52,6 +52,7 @@ use serde_json::{Map, Value};
 use crate::activity::{self, ActivityTarget, KeptSide, SideTag};
 use crate::hold::RestoreHold;
 use crate::journal::JournalEntry;
+use crate::marks::{read_mark, MarkFamily};
 use crate::notices::KeptNotice;
 use crate::pay::ListAsk;
 use crate::rail::Rail;
@@ -406,8 +407,19 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            StateKey::DroppedReplies { .. } | StateKey::DroppedUnverified { .. } => {
+                // A mark is restored whole, its times and when it was last asked, so a restore
+                // neither loses nor resets it (Paykit spec 8.1), bound to its key's sender.
+                let family = match family {
+                    StateKey::DroppedReplies { .. } => MarkFamily::Replies,
+                    _ => MarkFamily::Unverified,
+                };
+                let key_text = std::str::from_utf8(&key).map_err(|_| unread())?;
+                read_mark(family, key_text, &value).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
             StateKey::Peer(_)
-            | StateKey::DroppedReplies { .. }
             | StateKey::Spam(_)
             | StateKey::Resent { .. }
             | StateKey::ResentDay { .. }
