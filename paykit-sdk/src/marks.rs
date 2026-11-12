@@ -23,7 +23,7 @@
 //! the next receive, one refused for good, or no longer kept, is asked anew, and the 24 hours
 //! count from the last request the outbox delivered.
 //!
-//! **Expiry and bounds.** A mark goes [`crate::KEPT_REPLY_MS`] after its latest time, on the
+//! **Expiry and bounds.** A mark goes [`crate::KEPT_MESSAGE_MS`] after its latest time, on the
 //! highest service time verified, once its sender keeps none of the messages it covers.
 //! Past [`MAX_DROPPED_MARKS`] marks in a family, the mark whose latest time is earliest goes,
 //! on a tie the one of the lower sender identity. A mark that goes leaves nothing to ask
@@ -68,9 +68,9 @@ pub(crate) struct DropMark {
 
 impl DropMark {
     /// Whether the mark has gone by `service`, the highest service time verified: its
-    /// latest time plus [`crate::KEPT_REPLY_MS`] is at or before it.
+    /// latest time plus [`crate::KEPT_MESSAGE_MS`] is at or before it.
     pub(crate) fn expired(&self, service: Option<u64>) -> bool {
-        service.is_some_and(|t| self.latest_ms.saturating_add(crate::KEPT_REPLY_MS) <= t)
+        service.is_some_and(|t| self.latest_ms.saturating_add(crate::KEPT_MESSAGE_MS) <= t)
     }
 }
 
@@ -394,8 +394,8 @@ mod tests {
     fn test_marks_expire_by_the_latest_time() {
         let held = mark(1, 100, 200);
         assert!(!held.expired(None));
-        assert!(!held.expired(Some(200 + crate::KEPT_REPLY_MS - 1)));
-        assert!(held.expired(Some(200 + crate::KEPT_REPLY_MS)));
+        assert!(!held.expired(Some(200 + crate::KEPT_MESSAGE_MS - 1)));
+        assert!(held.expired(Some(200 + crate::KEPT_MESSAGE_MS)));
     }
 
     #[test]

@@ -204,7 +204,9 @@ impl PaykitBackup {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ReceiveSummary {
-    /// The client's report of the feed read.
+    /// The client's report of the feed read. Once the receive has returned, the host may
+    /// acknowledge its duty events up to the last one the report shows
+    /// ([`Paykit::receive`]).
     pub report: ReceiveReport,
     /// The `msg_id`s of the messages received, each with its effect committed with the
     /// cursor move (Switch spec 8.2).
@@ -548,6 +550,15 @@ impl Paykit {
     /// `resend_request`s received are answered and the re-sends the app needs are asked for
     /// (Paykit spec 9). `wait` is the long-poll wait in seconds.
     ///
+    /// **Acknowledging duty events.** Once this call has returned, the host may acknowledge
+    /// the client's duty events up to the last one its summary's report shows
+    /// ([`pubky_switch_client::app::App::ack_events`]), whether the call returned early, under
+    /// a certificate Paykit refuses or an account gone, or not: the SDK has kept what it
+    /// needs of the events about stored entries before it returns. The SDK itself
+    /// acknowledges, in order, the events it took up to the first it didn't; the rest wait
+    /// for the host. An entry dropped unverified (`AppEvent::StoredEntryDropped`) counts in
+    /// its sender's mark, which asks that sender to send it again (`marks.rs`).
+    ///
     /// # Errors
     ///
     /// The client's errors; [`Refusal::SwitchUnavailable`] while the account may have been
@@ -564,6 +575,8 @@ impl Paykit {
         // An app holding `contacts` reads the flagged senders again first, at most every 10
         // minutes, for the spam rule (Paykit wire 4.1).
         self.refresh_lists_when_due().await?;
+        // Whether the client may list at this read's start ([`Paykit::records_listed`]).
+        let keys_held_before = self.holds_scope_keys();
         let report = match self.app.receive(wait).await {
             Ok(report) => report,
             // The erasure's wait: the switch answers as for an account it doesn't host, and
@@ -573,8 +586,17 @@ impl Paykit {
             }
             Err(error) => return Err(error.into()),
         };
-        let account_gone = account_gone(&report.events)
-            || (report.stopped && account_gone(&self.app.unacknowledged_events().await?));
+        // The duty events kept, listed once, right after the read: a listing hands every
+        // kept duty event to the host, so one made later in this receive would hand over,
+        // in no report, those the steps below raise, such as a listing's.
+        let duties = self.app.unacknowledged_events().await?;
+        let account_gone =
+            account_gone(&report.events) || (report.stopped && account_gone(&duties));
+        // The duty events about stored entries are taken before anything returns, so that
+        // once the host acknowledges what this report showed none is lost: only the SDK's
+        // own marks and notes are kept here, and nothing is written at the switch
+        // (`stored.rs`).
+        self.take_stored_events(&duties).await?;
         if account_gone {
             // Nothing more is read or written there: the summary tells the host.
             return Ok(ReceiveSummary {
@@ -595,11 +617,12 @@ impl Paykit {
         }
         self.refresh_own()?;
         // The client lists the shared records at its read when a listing is owed, a
-        // restore's included, before the read itself: a read that wasn't stopped got past
-        // that listing, so the restore's mark goes (`Paykit::records_known`). A stopped one
-        // (the app removed here, a provider change followed) may have returned before it.
+        // restore's included, before the read itself, while it holds the keys that read
+        // them: a read that wasn't stopped got past that listing, so the restore's mark goes
+        // (`Paykit::records_listed`). A stopped one (the app removed here, a provider change
+        // followed) may have returned before it.
         if !report.stopped {
-            self.records_listed().await?;
+            self.records_listed(keys_held_before).await?;
         }
         // A certificate the read took may read more than the one before: its records are
         // listed now, or stay unlisted for the next receive or write (`Paykit::list_widened`).
@@ -609,13 +632,16 @@ impl Paykit {
         // after a refused one, too (`Paykit::follow_listed_cert`).
         self.follow_listed_cert(false).await?;
         let keys = self.scope_keys_awaited().await?;
-        // The entries the client stored for good: their messages kept and written into
-        // their records as room frees, their duty events acknowledged (`stored.rs`).
-        self.take_stored_entries().await?;
+        // The entries the client stored for good: their messages, kept above, written into
+        // their records as room frees (`stored.rs`), unless the payer's side waits for its
+        // scope keys or its listing, as for the payees' cancellations below.
+        if !self.payer_waits(keys).await? {
+            self.place_stored().await?;
+        }
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1), unless the payer's side waits for its scope keys:
         // they build on request records the copy may lack, and stay kept meanwhile.
-        if keys != Some(crate::hold::KeysAwaited::PayerSide) {
+        if !self.payer_waits(keys).await? {
             self.place_kept_cancellations().await?;
         }
         // The senders of messages dropped before they were taken: of replies dropped for the

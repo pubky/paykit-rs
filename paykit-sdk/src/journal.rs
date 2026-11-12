@@ -610,7 +610,10 @@ pub struct PaymentView {
     /// with [`crate::Paykit::repair_activity_record`].
     pub record_held: bool,
     /// The payee's receipt of this attempt the payer's activity record holds, if any
-    /// (Paykit wire 4.11).
+    /// (Paykit wire 4.11), as this app's copy shows it: for display. While the records
+    /// aren't listed, after a restore or a certificate that reads more, the copy may lack a
+    /// receipt the switch holds; [`crate::Paykit::receipts`] is refused as not now
+    /// meanwhile.
     pub receipt: Option<crate::ReceivedReceipt>,
 }
 

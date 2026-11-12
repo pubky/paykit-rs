@@ -14,7 +14,7 @@ The design is still open to review. It may change before it is frozen. The spec'
 | --- | --- |
 | [`spec.md`](spec.md) | The specification. It decides behaviour: Paykit's scopes and authorization, app records, message kinds, shared records, paying, payment flows and features, re-sends, threat model, guarantees and performance targets. Start here. |
 | [`wire-format.md`](wire-format.md) | The wire format. It decides bytes: Paykit's encodings, derivations, signature, certificate and record checks, messages and shared record values, so that a second team can build a compatible implementation. |
-| [`vectors/`](vectors/) | Test vectors for the wire format, as JSON files. Its `README.md` lists the files and how they were made. They build on the [Switch's vectors](https://github.com/pubky/pubky-switch/tree/c218851541ced7e49ddc0df9754db7b70da3a4f8/spec/vectors) at commit `c553428`. |
+| [`vectors/`](vectors/) | Test vectors for the wire format, as JSON files. Its `README.md` lists the files and how they were made. They build on the [Switch's vectors](https://github.com/pubky/pubky-switch/tree/c218851541ced7e49ddc0df9754db7b70da3a4f8/spec/vectors) at commit `c218851`. |
 
 ## Shared separately
 

@@ -32,10 +32,13 @@ pub enum NoticeKind {
     /// meanwhile.
     HeldWithoutPay,
     /// A message whose effect the switch refused for good, kept to write into its record
-    /// later, wasn't written within [`crate::KEPT_REPLY_MS`] of its acceptance: the SDK gave
+    /// later, wasn't written within [`crate::KEPT_MESSAGE_MS`] of its acceptance: the SDK gave
     /// it up (Switch spec 8.2). Its entry stays stored, for the host
     /// ([`pubky_switch_client::app::App::parked_entries`]), and a request it was no longer
-    /// shows as [`crate::RequestStatus::Unrecorded`].
+    /// shows as [`crate::RequestStatus::Unrecorded`]. Once the host has dealt with it, it
+    /// forgets the entry ([`pubky_switch_client::app::App::forget_parked`]) as it
+    /// acknowledges the notice: an entry left stored is told of again by a restore onto
+    /// another store, and given up, and this notice raised, again there.
     MessageGivenUp,
 }
 
@@ -285,6 +288,20 @@ impl Paykit {
         }
         let at = self.service_time().unwrap_or(0);
         self.local_put(&key, &KeptNotice::of(kind, entry, at)).await
+    }
+
+    /// Drop the notice of `kind` about `entry`'s payment, acknowledged or not, once what it
+    /// says no longer holds: raised again, it is listed again.
+    pub(crate) async fn drop_notice(
+        &mut self,
+        kind: NoticeKind,
+        entry: &JournalEntry,
+    ) -> Result<()> {
+        let key = key::notice(&entry.attempt()?, kind);
+        if self.local_get::<KeptNotice>(&key).await?.is_some() {
+            self.local_delete(&key).await?;
+        }
+        Ok(())
     }
 }
 

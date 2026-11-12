@@ -130,7 +130,7 @@ async fn test_replies_kept_no_longer_than_their_sender_keeps_them() {
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
-    w.clock.advance_ms(paykit_sdk::KEPT_REPLY_MS);
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
     // A read past the bound drops them; the record that comes later holds the request alone.
     shop.receive(None).await.unwrap();
     record_request(&w, &mut shop, &request).await;
@@ -388,13 +388,13 @@ async fn test_replies_dropped_mark_goes_30_days_after_its_latest_time() {
     let mut shop = w.shop().await;
     let (request, at) = dropped_over_ten_days(&w, &mut wallet, &mut shop).await;
     // 30 days after its earliest time, the mark still lives, and asks from that time.
-    w.clock.set_ms(at + paykit_sdk::KEPT_REPLY_MS);
+    w.clock.set_ms(at + paykit_sdk::KEPT_MESSAGE_MS);
     record_request(&w, &mut shop, &request).await;
     assert_eq!(shop.receive(None).await.unwrap().resends, 1);
     assert_eq!(asked(&shop, &w.alice_id()).await, vec![(Some(at), None)]);
     // 30 days after its latest, it goes, and asks nothing more.
     w.clock
-        .set_ms(at + 10 * DAY_MS + paykit_sdk::KEPT_REPLY_MS + DAY_MS);
+        .set_ms(at + 10 * DAY_MS + paykit_sdk::KEPT_MESSAGE_MS + DAY_MS);
     assert_eq!(shop.receive(None).await.unwrap().resends, 0);
     assert!(marks(&shop).await.is_empty());
 }
@@ -429,7 +429,7 @@ async fn test_replies_dropped_mark_past_30_days_asks_nothing() {
     let n = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
     let (request, _) = kept_then_unmatched(&w, &mut wallet, &mut shop, n).await;
     assert_eq!(marks(&shop).await.len(), 1);
-    w.clock.advance_ms(paykit_sdk::KEPT_REPLY_MS);
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
     shop.receive(None).await.unwrap();
     assert!(marks(&shop).await.is_empty());
     record_request(&w, &mut shop, &request).await;

@@ -197,7 +197,10 @@ pub enum MessageDelivery {
         accepted_at_ms: u64,
     },
     /// Refused for good, given up, or never queued: the kept batch that would have queued
-    /// it was dropped.
+    /// it was dropped. A batch dropped after a send whose answer can't tell whether it was
+    /// applied may have been applied all the same: the request's record may then be at the
+    /// switch although the message was never sent, and the host reads the request's state
+    /// ([`Paykit::payee_activity`]) before it sends it again.
     Failed {
         /// Why, without content.
         reason: String,
@@ -313,7 +316,10 @@ pub struct RequestView {
     pub recurring: bool,
     /// What the user sees.
     pub status: RequestStatus,
-    /// The payee's receipt the record holds, if any (Paykit wire 4.11).
+    /// The payee's receipt the record holds, if any (Paykit wire 4.11), as this app's copy
+    /// shows it: for display. While the records aren't listed, after a restore or a
+    /// certificate that reads more, the copy may lack a receipt the switch holds;
+    /// [`Paykit::receipts`] is refused as not now meanwhile.
     pub receipt: Option<ReceivedReceipt>,
 }
 
@@ -883,7 +889,10 @@ impl Paykit {
     /// views this app holds and the highest service time it verified, with no network
     /// read. In order: paid, by the record or a SETTLED claim; rejected or cancelled, by the
     /// record; then the claim's open attempt or doubt; then the expiry. [`Paykit::receive`]
-    /// brings it up to date.
+    /// brings it up to date. A request kept to write into its record later shows as
+    /// [`RequestStatus::Unrecorded`]. It is for display: while the records aren't listed,
+    /// after a restore or a certificate that reads more, the copy may lack records the
+    /// switch holds; a payment of a request reads its record again first.
     ///
     /// # Errors
     ///

@@ -12,7 +12,7 @@
 //!   request is shown unrecorded ([`crate::RequestStatus::Unrecorded`]). A payee's
 //!   cancellation needs nothing here: its stop is kept with the cursor move, with no write
 //!   at the switch (`kc/`, Paykit spec 8.1). Once written, the stored entry is forgotten,
-//!   its message staying processed. One not written within [`crate::KEPT_REPLY_MS`] of its
+//!   its message staying processed. One not written within [`crate::KEPT_MESSAGE_MS`] of its
 //!   acceptance, such as a receipt naming a proof the record doesn't hold, is given up: its
 //!   note goes, its entry stays stored, and the host is told
 //!   ([`crate::NoticeKind::MessageGivenUp`]).
@@ -52,6 +52,26 @@ use crate::paykit::Paykit;
 use crate::records::{list_target, KeptMessage};
 use crate::requests::{RequestRef, RequestStatus, RequestView};
 use crate::state::{key, Tx};
+
+/// Whether a kept message is in its record ([`Paykit::place_note`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Placed {
+    /// Written now, or reflected already.
+    Done,
+    /// Not written now: tried again at the next receive, and given up past its window.
+    Not,
+    /// Not written while the record's absence decides nothing yet, or its value waits for
+    /// its scope key: tried again at the next receive, and never given up meanwhile.
+    Waits,
+}
+
+/// The side of the shared records `target` is of.
+fn record_side(target: &ActivityTarget) -> crate::hold::RecordSide {
+    match target.side {
+        crate::activity::SideTag::Payer => crate::hold::RecordSide::Payer,
+        crate::activity::SideTag::Payee => crate::hold::RecordSide::Payee,
+    }
+}
 
 /// A stored entry's message Paykit writes into its record later (`p/se/<sender>/<msg_id>`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -132,16 +152,16 @@ impl Paykit {
         Ok(out)
     }
 
-    /// Take the duty events about stored entries the client hasn't had acknowledged, each
-    /// at its first sight (module docs, "Taken at first sight"); acknowledge, in order, those
-    /// taken up to the first that isn't; drop the marks of events acknowledged; then write
-    /// the kept messages that can be written now.
-    pub(crate) async fn take_stored_entries(&mut self) -> Result<()> {
-        let events = self.app.unacknowledged_events().await?;
+    /// Take the duty events about stored entries the client hasn't had acknowledged,
+    /// `events`, each at its first sight (module docs, "Taken at first sight"); acknowledge,
+    /// in order, those taken up to the first that isn't; drop the marks of events
+    /// acknowledged. Only Paykit's own local state is written: the kept messages are written
+    /// into their records by [`Paykit::place_stored`].
+    pub(crate) async fn take_stored_events(&mut self, events: &[AppEvent]) -> Result<()> {
         let mut listed = std::collections::BTreeSet::new();
         let mut prefix = true;
         let mut through = None;
-        for event in &events {
+        for event in events {
             let Some(id) = event.id() else {
                 continue;
             };
@@ -166,8 +186,7 @@ impl Paykit {
                 gone.delete(&mark);
             }
         }
-        self.local_commit(gone).await?;
-        self.place_stored().await
+        self.local_commit(gone).await
     }
 
     /// Keep what a duty event about a stored entry says, with its mark `mark`, in one
@@ -335,21 +354,21 @@ impl Paykit {
     /// Write every kept message whose record can take it now, each as a later write of the
     /// app's own, built on the version held; then forget the stored entry of each one in
     /// place, and drop its note. A write that fails now is tried again at the next receive;
-    /// a message not written within [`crate::KEPT_REPLY_MS`] of its acceptance, on the
+    /// a message not written within [`crate::KEPT_MESSAGE_MS`] of its acceptance, on the
     /// highest service time verified, is given up, its entry left stored for the host.
-    async fn place_stored(&mut self) -> Result<()> {
+    pub(crate) async fn place_stored(&mut self) -> Result<()> {
         let own = self.identity();
         for (rest, mut note) in self.local_scan::<StoredNote>(key::STORED_NOTES).await? {
             let note_key = format!("{}{rest}", key::STORED_NOTES);
             if !note.placed {
                 let stored = note.message.stored(&own)?;
                 let accepted_at = stored.accepted_at();
-                note.placed = match self.place_of(&stored.clone()).await? {
+                let placed = match self.place_of(&stored.clone()).await? {
                     Some(Place::List(hold)) => {
                         if let Some((held, kept)) = hold {
                             self.local_put(&held, &kept).await?;
                         }
-                        true
+                        Placed::Done
                     }
                     Some(Place::Record {
                         target,
@@ -358,13 +377,20 @@ impl Paykit {
                     }) => self
                         .place_note(&target, role, creates, stored.clone())
                         .await
-                        .unwrap_or(false),
-                    None => false,
+                        .unwrap_or(Placed::Not),
+                    None => Placed::Not,
                 };
+                // A message whose record the copy may lack, or holds waiting for its key,
+                // waits: it is neither written nor given up meanwhile.
+                if placed == Placed::Waits {
+                    continue;
+                }
+                note.placed = placed == Placed::Done;
                 if !note.placed {
                     let stale = accepted_at.is_none_or(|at| {
-                        self.service_time()
-                            .is_some_and(|t| at.saturating_add(crate::receive::KEPT_REPLY_MS) <= t)
+                        self.service_time().is_some_and(|t| {
+                            at.saturating_add(crate::receive::KEPT_MESSAGE_MS) <= t
+                        })
                     });
                     if stale {
                         // Given up: the host is told, in the commit that drops the note.
@@ -416,39 +442,55 @@ impl Paykit {
     /// record held as a value that doesn't read, or that the app can't open, is never
     /// written over (Switch spec 8.2: a reader doesn't act on a record it can't read, and a
     /// write over one that is only unopenable for now could drop what its writer stored). A
-    /// value sealed at a key the app doesn't hold yet (`Unopened::KeyNotHeld`) is tried
-    /// again at each receive, and placed once the key comes and it reads; one that never
-    /// opens stays as it is.
+    /// value sealed at a key the app doesn't hold yet (`Unopened::KeyNotHeld`), a record whose
+    /// scope's key at the current data epoch the app doesn't hold yet, and a record absent
+    /// while the copy of its side may lack records ([`Paykit::side_unlisted`]), wait:
+    /// tried again at each receive, never given up meanwhile, and placed once the key comes
+    /// or the records are listed. A value that never opens stays as it is.
     async fn place_note(
         &mut self,
         target: &ActivityTarget,
         role: Role,
         creates: bool,
         stored: StoredMessage,
-    ) -> Result<bool> {
+    ) -> Result<Placed> {
+        // Without the current data epoch's key of the record's scope, nothing can be sealed
+        // there yet: the message waits for it rather than count as not written.
+        let scope = target.record_target().collection.policy.read_scope;
+        if self.app.scope_key(self.app.data_epoch(), &scope).is_none() {
+            return Ok(Placed::Waits);
+        }
         let key = self.activity_key(target)?;
         let content = self.app.shared_record(&key).await?.map(|held| held.content);
         match content {
+            // Absent while the copy of its side may lack records: the absence decides
+            // nothing yet (Paykit spec 8.1, "Records not listed yet").
+            None if self.side_unlisted(record_side(target)).await? => return Ok(Placed::Waits),
             None | Some(RecordContent::Deleted) => {
                 if !creates {
-                    return Ok(false);
+                    return Ok(Placed::Not);
                 }
             }
-            Some(RecordContent::Unreadable(_)) => return Ok(false),
+            Some(content) if crate::hold::awaits_key(&content) => return Ok(Placed::Waits),
+            Some(RecordContent::Unreadable(_)) => return Ok(Placed::Not),
             Some(RecordContent::Value(_)) => {
                 let Some(record) = self.held_activity(target).await? else {
-                    return Ok(false);
+                    return Ok(Placed::Not);
                 };
                 let names_proof = record
                     .proof
                     .as_ref()
                     .is_some_and(|proof| stored.message().refs.first() == Some(&proof.hash()));
                 if role == Role::Receipt && !names_proof {
-                    return Ok(false);
+                    return Ok(Placed::Not);
                 }
             }
         }
-        self.write_placed(target, stored).await
+        Ok(if self.write_placed(target, stored).await? {
+            Placed::Done
+        } else {
+            Placed::Not
+        })
     }
 
     async fn write_placed(
