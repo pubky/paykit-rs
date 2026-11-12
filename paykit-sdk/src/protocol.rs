@@ -852,7 +852,7 @@ impl Protocol for PaykitProtocol {
 
     /// Entries missed while lagging: ask the counterparties of open requests and unfinished
     /// activity to send again (Paykit spec 9; `resend.rs`), and hold the open requests
-    /// (Paykit spec 7.2; [`crate::hold::MissedHold`]): a payee's cancellation may be among
+    /// (Paykit spec 7.2; `hold.rs`): a payee's cancellation may be among
     /// the entries the service deleted. Every request the app holds is held, and one first
     /// seen later only when created before the item's last acceptance time plus the clock
     /// tolerance. The confirmations of an earlier hold go in the same commit, so
