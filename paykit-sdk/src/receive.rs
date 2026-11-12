@@ -277,7 +277,7 @@ fn local<T: Serialize>(key: &str, value: &T) -> Result<LocalWrite, Fail> {
 /// the step; the step goes on, and the client stores the entry as too large once the step
 /// applies (Switch spec 8.2). Dropping the message here instead would consume a valid
 /// entry, so the refusal is not passed on.
-fn keep_local(cx: &mut ReceiveContext<'_>, write: LocalWrite) {
+pub(crate) fn keep_local(cx: &mut ReceiveContext<'_>, write: LocalWrite) {
     if let Err(error) = cx.local(write) {
         debug_assert!(
             matches!(error, AppError::Refused(ClientRefusal::Usage(_))),
@@ -490,6 +490,15 @@ fn place(
         .unwrap_or_else(|| activity::empty(side, counterparty));
     if !activity::place(&mut record, role, stored.clone()) {
         return Ok(());
+    }
+    // Over a divergent record its user hasn't confirmed, only a stop is written; any other
+    // message is kept, and written once the user confirms (Paykit spec 6). The view is
+    // taken either way: a stop written over it leaves the record paused.
+    if let Some(held) = cx.record(&target.record_target())? {
+        let pause = crate::divergent::step_pause(cx, &held)?;
+        if !crate::divergent::adds_stop(stored) && pause.write_waits() {
+            return crate::divergent::step_keep(cx, &held, stored);
+        }
     }
     cx.put_record(&target.record_target(), &record.to_json()?, Vec::new())?;
     Ok(())
@@ -755,6 +764,14 @@ fn receipt_effect(
     let Some(value) = held_or_unlisted(cx, &target, RecordSide::Payer)? else {
         return Ok(());
     };
+    // Over a divergent record its user hasn't confirmed, the receipt is kept whole, its
+    // effects on the claim and the journal with it, and taken once the user confirms
+    // (Paykit spec 6).
+    if let Some(held) = cx.record(&target.record_target())? {
+        if crate::divergent::step_pause(cx, &held)?.write_waits() {
+            return crate::divergent::step_keep(cx, &held, stored);
+        }
+    }
     let Some(record) = activity::read(Some(&value), &own, target.side.side()) else {
         return Ok(());
     };
@@ -1105,6 +1122,13 @@ fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Result<()
     }
     let own = cx.identity();
     let target = list_target(&payee, &app_id);
+    // Over a divergent record its user hasn't confirmed, the list is kept, and written once
+    // the user confirms (Paykit spec 6).
+    if let Some(held) = cx.record(&target)? {
+        if crate::divergent::step_pause(cx, &held)?.write_waits() {
+            return crate::divergent::step_keep(cx, &held, stored);
+        }
+    }
     let held = match cx.record(&target)?.map(|r| r.content) {
         None => None,
         Some(RecordContent::Value(value)) => match PaymentListRecord::read(&value, &own) {
@@ -1377,6 +1401,11 @@ impl Paykit {
         if format!("{}{rest}", key::HELD_LISTS) != key::held_list(&record_key) {
             return Err(crate::error::PaykitError::corrupt());
         }
+        // A newer list over a divergent record its user hasn't confirmed stays held (Paykit
+        // spec 6).
+        if self.divergent_write_waits(&record_key, &list).await? {
+            return Ok(());
+        }
         let held = match self
             .app
             .shared_record(&record_key)
@@ -1476,9 +1505,7 @@ impl Paykit {
             // A reply the record can't take, its sender not the record's counterparty, isn't
             // written: kept no longer than any other.
             let placed = match record {
-                Some(record) if record.counterparty != reply.sender() => {
-                    crate::stored::Placed::Not
-                }
+                Some(record) if record.counterparty != reply.sender() => crate::stored::Placed::Not,
                 _ => {
                     let mut tx = Tx::default();
                     tx.delete(&kept_key);
@@ -1749,6 +1776,8 @@ impl Paykit {
             .await?
             .ok_or(crate::error::Refusal::NotFound)?
             .stored(&own)?;
+        // Over a divergent record the user confirms that record first (Paykit spec 6).
+        self.refuse_while_write_waits(&record_key).await?;
         let held = self.app.shared_record(&record_key).await?;
         // A value only waiting for its scope key holds marks this app can't see yet: it is
         // never written over without them, and the list is placed with them once it opens.

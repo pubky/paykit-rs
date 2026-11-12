@@ -50,6 +50,8 @@
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply to a request the app holds no record of yet, kept until it does (`receive.rs`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing, since a dropped entry's time is already in its sender's mark | |
+//! | `dv/<record key>` | the pause mark of a record the app has seen divergent: paused until the user confirms, or the write the user confirmed over (`divergent.rs`); a restore installs it paused | |
+//! | `dw/<record key>/<role>` | a received message whose write over a divergent record waits for the user's confirmation, to write into its record later (`divergent.rs`) | |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
 
 use paykit_lib::AttemptId;
@@ -212,6 +214,21 @@ pub(crate) mod key {
     pub(crate) const KEPT_REPLIES: &str = "pr/";
     pub(crate) const DROPPED_REPLIES: &str = "pd/";
     pub(crate) const DROPPED_UNVERIFIED: &str = "ud/";
+    pub(crate) const DIVERGENT: &str = "dv/";
+    pub(crate) const DIVERGENT_WRITES: &str = "dw/";
+
+    /// The pause mark of the divergent record `record_key`.
+    pub(crate) fn divergent(record_key: &[u8; 32]) -> String {
+        format!("{DIVERGENT}{}", b64(record_key))
+    }
+
+    /// A message of `role` kept to write over the divergent record `record_key`.
+    pub(crate) fn divergent_write(
+        record_key: &[u8; 32],
+        role: crate::divergent::WriteRole,
+    ) -> String {
+        format!("{DIVERGENT_WRITES}{}/{}", b64(record_key), role.tag())
+    }
 
     /// The mark of replies from `sender` dropped for the bounds.
     pub(crate) fn dropped_replies(sender: &[u8; 32]) -> String {
@@ -406,6 +423,13 @@ pub(crate) enum StateKey {
     StoredNote { sender: [u8; 32], msg_id: String },
     /// `nt/<sender>/<msg_id>`: a notice for the host about a message given up.
     MessageNotice { sender: [u8; 32], msg_id: String },
+    /// `dv/<record key>`: the pause mark of a divergent record.
+    Divergent([u8; 32]),
+    /// `dw/<record key>/<role>`: a message kept to write over a divergent record.
+    DivergentWrite {
+        record: [u8; 32],
+        role: crate::divergent::WriteRole,
+    },
     /// `nt/<attempt_id>/<kind>`: a notice for the host.
     Notice {
         attempt: AttemptId,
@@ -531,6 +555,14 @@ impl StateKey {
                             sender: b64_32(sender)?,
                             record: b64_32(record)?,
                             msg_id: msg_id(id)?,
+                        }
+                    }
+                    "dv" => Self::Divergent(b64_32(rest)?),
+                    "dw" => {
+                        let (record, role) = rest.split_once('/')?;
+                        Self::DivergentWrite {
+                            record: b64_32(record)?,
+                            role: crate::divergent::WriteRole::from_tag(role)?,
                         }
                     }
                     "se" => {
@@ -728,6 +760,14 @@ mod tests {
                     msg_id: id.into(),
                 },
             ),
+            (key::divergent(&pubky), StateKey::Divergent(pubky)),
+            (
+                key::divergent_write(&pubky, crate::divergent::WriteRole::List),
+                StateKey::DivergentWrite {
+                    record: pubky,
+                    role: crate::divergent::WriteRole::List,
+                },
+            ),
             (
                 key::notice(&attempt, crate::notices::NoticeKind::HeldWithoutPay),
                 StateKey::Notice {
@@ -759,6 +799,9 @@ mod tests {
             "nt/BQUFBQUFBQUFBQUFBQUFBQ/paid",
             "dt/05-7",
             "nt/BQUFBQUFBQUFBQUFBQUFBQ",
+            "dv/not-base64",
+            "dw/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM/cancellation",
+            "dw/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
         ] {
             assert_eq!(StateKey::parse(key.as_bytes()), None, "{key}");
         }

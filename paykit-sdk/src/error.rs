@@ -168,6 +168,17 @@ pub enum Refusal {
         /// The payment the user is shown.
         payment: Box<crate::BlockedPayment>,
     },
+    /// A record the call acts on is divergent after a provider loss, or was seen so, and the
+    /// user hasn't confirmed it (Paykit spec 6, "Divergent records"): its upload may hold
+    /// what the current write lacks, such as a cancellation of the request, a receipt, or a
+    /// newer list in which the payee withdrew a destination. Nothing was written or paid.
+    /// The host shows `records` and, once the user has seen that, calls
+    /// [`crate::Paykit::confirm_divergent`] for each, then calls again.
+    #[error("Paykit spec 6: a record is divergent; the user must confirm")]
+    Divergent {
+        /// The records the user is asked to confirm.
+        records: Vec<crate::DivergentRecord>,
+    },
 }
 
 /// A failure of the SDK.

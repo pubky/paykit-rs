@@ -122,6 +122,9 @@ pub(crate) enum GivenUpOrigin {
     ReceiveStep,
     /// A payer's reply kept for its record (`pr/`) was given up.
     KeptReply,
+    /// A message kept to write over a divergent record (`dw/`) was given up, its record's
+    /// user not having confirmed it in time.
+    Divergent,
 }
 
 /// What a message given up leaves behind ([`KeptNotice::given_up`]).

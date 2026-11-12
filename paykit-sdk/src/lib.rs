@@ -25,6 +25,8 @@
 //! - [`AppScopes`]: Paykit's side of approval.
 //! - [`app_records`]: Paykit's member of app records, and reading a payee's public
 //!   endpoints from them ([`Paykit::public_endpoints`]).
+//! - Divergent records after a provider loss: paused until the user confirms
+//!   ([`Paykit::divergent_records`], [`Paykit::confirm_divergent`], [`DivergentRecord`]).
 //!
 //! Recurring requests, Allowances with executors and ledgers, and publishing Private Payment
 //! Lists build on the same parts, in their own modules.
@@ -40,6 +42,7 @@ mod activity;
 pub mod app_records;
 mod approval;
 mod destination;
+mod divergent;
 mod error;
 mod hold;
 mod journal;
@@ -64,6 +67,7 @@ mod timer;
 pub use activity::Role;
 pub use approval::{AppScopes, RequestedScopes};
 pub use destination::IDENTITY_GRACE_MS;
+pub use divergent::DivergentRecord;
 pub use error::{PaykitError, Refusal, Result};
 pub use journal::{PaymentView, Stage};
 pub use marks::MAX_DROPPED_MARKS;
@@ -204,6 +208,7 @@ mod tests {
                     proposal_expires_at_ms: None,
                     recurring: false,
                     status: RequestStatus::Open,
+                    divergent: false,
                     receipt: Some(ReceivedReceipt {
                         record: [5; 32],
                         payee: [1; 32],

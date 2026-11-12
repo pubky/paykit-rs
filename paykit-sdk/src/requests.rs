@@ -296,6 +296,10 @@ pub enum RequestStatus {
     /// From a payee the identity's deny list holds, as the app last read it: paused, and
     /// paid only once the user confirms (Paykit spec 8.1, [`Refusal::Blocked`]).
     Blocked,
+    /// Its request record is divergent after a provider loss, or was seen so, and the user
+    /// hasn't confirmed it: the payee may have cancelled it. Paid only once the user has
+    /// seen that ([`Paykit::confirm_divergent`], Paykit spec 6).
+    Divergent,
 }
 
 /// A request the payer holds. Its `Debug` shows the payment reference's length only.
@@ -318,6 +322,10 @@ pub struct RequestView {
     pub recurring: bool,
     /// What the user sees.
     pub status: RequestStatus,
+    /// Its request record is paused after a view showed it divergent, or its latest view
+    /// shows it divergent (Paykit spec 6): shown whatever the status
+    /// ([`Paykit::divergent_records`]).
+    pub divergent: bool,
     /// The payee's receipt the record holds, if any (Paykit wire 4.11), as this app's copy
     /// shows it: for display. While the records aren't listed, after a restore or a
     /// certificate that reads more, the copy may lack a receipt the switch holds;
@@ -339,6 +347,7 @@ impl std::fmt::Debug for RequestView {
             .field("proposal_expires_at_ms", &self.proposal_expires_at_ms)
             .field("recurring", &self.recurring)
             .field("status", &self.status)
+            .field("divergent", &self.divergent)
             .field("receipt", &self.receipt)
             .finish()
     }
@@ -381,6 +390,10 @@ pub struct PayeeActivity {
     pub attempt_id: Option<AttemptId>,
     /// Where it stands.
     pub status: PayeeStatus,
+    /// Its record is paused after a view showed it divergent, or its latest view shows it
+    /// divergent (Paykit spec 6): a proof is credited only once the user confirms it
+    /// ([`Paykit::confirm_divergent`]).
+    pub divergent: bool,
 }
 
 /// The request in a record, with its body.
@@ -571,7 +584,10 @@ impl Paykit {
     }
 
     /// The payee's record at `record`, bound under its policy, with its target.
-    async fn payee_record(&self, record: &[u8; 32]) -> Result<(ActivityTarget, ActivityRecord)> {
+    pub(crate) async fn payee_record(
+        &self,
+        record: &[u8; 32],
+    ) -> Result<(ActivityTarget, ActivityRecord)> {
         let held = self
             .app
             .shared_record(record)
@@ -626,7 +642,10 @@ impl Paykit {
                         Some(of) => self.held_activity(&of).await?,
                         None => None,
                     };
-                    out.push(payee_view(held.key, &record, request.as_ref()));
+                    let mut view = payee_view(held.key, &record, request.as_ref());
+                    let pause = self.pause_seen(&held.key).await?;
+                    view.divergent = pause.paused || pause.divergent;
+                    out.push(view);
                 }
                 // A record that doesn't bind, or isn't held under a Paykit policy, isn't acted
                 // on (Paykit wire 5.3): it is left out. A failure to read it is not.
@@ -727,6 +746,11 @@ impl Paykit {
             if let Some(receipt) = &bound.receipt {
                 return Ok(Some(receipt.message().msg_id.clone()));
             }
+            // A credit waits for the user while this record, or another of the same
+            // counterparty, is divergent or was seen so: its upload may hold a receipt of the
+            // same settlement (Paykit spec 6, 8.1 step 4).
+            self.refuse_credit_while_paused(record, &bound.counterparty)
+                .await?;
             let proof_stored = bound.proof.as_ref().ok_or(Refusal::NotFound)?;
             let Body::PaymentProof(proof) = proof_stored.body() else {
                 return Err(Refusal::NotFound.into());
@@ -1135,6 +1159,11 @@ impl Paykit {
         if status == RequestStatus::Open && stopped {
             status = RequestStatus::Cancelled;
         }
+        let pause = self.pause_seen(&record_key).await?;
+        let divergent = pause.paused || pause.divergent;
+        if status == RequestStatus::Open && pause.paused {
+            status = RequestStatus::Divergent;
+        }
         if status == RequestStatus::Open && self.held(&record_key, record).await? {
             status = RequestStatus::Held;
         }
@@ -1153,6 +1182,7 @@ impl Paykit {
             proposal_expires_at_ms: request.proposal_expires_at,
             recurring: request.is_recurring(),
             status,
+            divergent,
             receipt: received_receipt(record_key, record, Some(request)),
         }))
     }
@@ -1581,6 +1611,7 @@ fn payee_view(
         label: request.and_then(|(_, r)| r.label.as_ref().map(|l| l.as_str().to_owned())),
         attempt_id: proof.map(|p| p.attempt_id),
         status,
+        divergent: false,
     }
 }
 

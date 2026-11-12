@@ -171,7 +171,7 @@ pub(crate) fn given_up_write(
 
 /// The host's notice that `stored`, which no entry keeps stored, was given up at `origin`,
 /// raised at `at`, service time.
-fn given_up_notice(
+pub(crate) fn given_up_notice(
     stored: &StoredMessage,
     at: u64,
     origin: crate::notices::GivenUpOrigin,
@@ -296,6 +296,7 @@ impl Paykit {
                 proposal_expires_at_ms: request.proposal_expires_at,
                 recurring: request.is_recurring(),
                 status: RequestStatus::Unrecorded,
+                divergent: false,
                 receipt: None,
             });
         }
@@ -640,6 +641,11 @@ impl Paykit {
         locals: Tx,
     ) -> Result<Placed> {
         let key = self.activity_key(target)?;
+        // Over a divergent record its user hasn't confirmed, only a stop is written: the
+        // message waits, within its window (Paykit spec 6).
+        if self.divergent_write_waits(&key, &stored).await? {
+            return Ok(Placed::Not);
+        }
         let content = self.app.shared_record(&key).await?.map(|held| held.content);
         // Absent or deleted while the copy of its side may lack records: the copy decides
         // nothing yet (Paykit spec 8.1, "Records not listed yet"), whatever key the record's

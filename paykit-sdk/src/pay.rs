@@ -338,6 +338,19 @@ pub enum PayOutcome {
         /// The attempt.
         attempt_id: AttemptId,
     },
+    /// Paid by the method, but the outcome waits: the payer's activity record is divergent
+    /// after a provider loss and the user hasn't confirmed it, and an own write over it
+    /// that adds no stop waits for that (Paykit spec 6). Nothing was written; the attempt
+    /// stays open, so nothing pays again, and the journal keeps the proof. Once the user
+    /// confirms `record` ([`Paykit::confirm_divergent`]), a resume writes the outcome and
+    /// sends the proof.
+    #[non_exhaustive]
+    RecordDivergent {
+        /// The attempt.
+        attempt_id: AttemptId,
+        /// The payer's activity record.
+        record: [u8; 32],
+    },
 }
 
 impl PayOutcome {
@@ -350,7 +363,8 @@ impl PayOutcome {
             | Self::Pending { attempt_id, .. }
             | Self::Uncertain { attempt_id, .. }
             | Self::PaidOutcomeUnwritten { attempt_id, .. }
-            | Self::RecordHeld { attempt_id, .. } => *attempt_id,
+            | Self::RecordHeld { attempt_id, .. }
+            | Self::RecordDivergent { attempt_id, .. } => *attempt_id,
         }
     }
 }
@@ -515,6 +529,9 @@ pub(crate) enum Written {
     /// The outcome waits for the payer's activity record, which doesn't read: nothing was
     /// written ([`JournalEntry::record_held`]).
     Held,
+    /// The outcome waits for the user's confirmation of the payer's activity record, which is
+    /// divergent (Paykit spec 6): nothing was written.
+    Divergent([u8; 32]),
 }
 
 /// The payer's activity record's part of an outcome's batch.
@@ -525,6 +542,8 @@ enum OutcomeRecord {
     Unchanged,
     /// The record can't be updated now: the outcome waits.
     Held,
+    /// The record is divergent and the user hasn't confirmed it: the outcome waits.
+    Divergent([u8; 32]),
 }
 
 /// When a first dispatch's attempt was answered: its service time, and the device's wall
@@ -702,6 +721,9 @@ impl Paykit {
         // Held after a restore: paid only once the user has seen the payee may have
         // cancelled it, which ends the hold (Paykit spec 7.2, "What a restore loses").
         let record_key = self.activity_key(&target)?;
+        // Divergent after a provider loss, or seen so: paid by hand only once the user has
+        // seen that the payee may have cancelled it (Paykit spec 6).
+        self.refuse_while_paused(&[record_key]).await?;
         let end_hold = if self.held(&record_key, &record).await? {
             if options.possibly_cancelled_confirmed.is_none() {
                 return Err(Refusal::HeldAfterRestore.into());
@@ -1018,6 +1040,12 @@ impl Paykit {
                     attempt_id: *attempt_id,
                 })
             }
+            Written::Divergent(record) => {
+                return Ok(PayOutcome::RecordDivergent {
+                    attempt_id: *attempt_id,
+                    record,
+                })
+            }
         }
         if let Some(msg_id) = entry.proof_msg_id.clone() {
             let _ = self.app.flush_message(&msg_id).await;
@@ -1238,6 +1266,23 @@ impl Paykit {
         }
         let mut lists = self.lists_of(payee).await?;
         lists.retain(|l| app.is_none_or(|a| a == l.app_id));
+        // A list whose record is divergent, or was seen so, may be stale: the upload may hold
+        // a newer one, withdrawing or replacing a destination. None of its endpoints,
+        // single-use or reusable, is paid until the user confirms it (Paykit spec 6); with no
+        // other list to pay, the payment is refused naming those records.
+        let mut paused_lists = Vec::new();
+        let mut usable = Vec::with_capacity(lists.len());
+        for list in lists {
+            let record = self
+                .app
+                .record_key(&list_target(&list.payee, &list.app_id))?;
+            if self.pause_at(&record).await?.blocks_by_hand() {
+                paused_lists.push(record);
+            } else {
+                usable.push(list);
+            }
+        }
+        let mut lists = usable;
         // Only a current app's list counts (Paykit spec 8.4, 7.2): a removed app's list, of
         // whatever version it chose, would shadow the current apps' and then be refused by
         // the destination check. The payee's `identity.json` is the copy that check takes,
@@ -1330,6 +1375,9 @@ impl Paykit {
         }
         if let Some(chosen) = self.choose(payee, gathered, amount, options)? {
             return Ok(chosen);
+        }
+        if !paused_lists.is_empty() {
+            self.refuse_while_paused(&paused_lists).await?;
         }
         // Lists in use that offer only endpoints the method doesn't pay, and no app's list to
         // ask again: a newer list needn't differ, so the payee isn't asked. A single-use
@@ -2079,6 +2127,13 @@ impl Paykit {
         let own = self.identity();
         let key = self.activity_key(&target)?;
         let held = self.app.shared_record(&key).await?;
+        // A divergent record the user hasn't confirmed takes no own write but a stop (Paykit
+        // spec 6): the entry stays owed, for a resume after the confirmation.
+        if let Some(current) = &held {
+            if self.pause_of(current).await?.write_waits() {
+                return Ok(());
+            }
+        }
         let write = match held.as_ref().map(|r| &r.content) {
             Some(RecordContent::Value(value)) => {
                 let Some(mut record) = activity::read(Some(value), &own, ActivitySide::Payer)
@@ -2282,6 +2337,9 @@ impl Paykit {
         match self.write_outcome(entry, paid, false).await {
             Ok(Written::Done) => {}
             Ok(Written::Held) => return Ok(PayOutcome::RecordHeld { attempt_id }),
+            Ok(Written::Divergent(record)) => {
+                return Ok(PayOutcome::RecordDivergent { attempt_id, record })
+            }
             // A batch the client kept, refused about the caller before it was sent, still goes
             // once the app is current again: the entry stays, as for any outcome unwritten,
             // so a refusal of that batch later leaves it for a resume to write again.
@@ -2384,6 +2442,7 @@ impl Paykit {
                     }
                     return Ok(Written::Held);
                 }
+                OutcomeRecord::Divergent(record) => return Ok(Written::Divergent(record)),
             };
             let step = match entry.step {
                 Some(step) => Some(step),
@@ -2497,6 +2556,18 @@ impl Paykit {
             .is_some_and(|r| crate::hold::awaits_key(&r.content))
         {
             return Err(crate::hold::value_awaits_key());
+        }
+        // A divergent record the user hasn't confirmed takes no own write but a stop (Paykit
+        // spec 6): a payment made waits, `done` never going without the record's update; a
+        // failure's `failed` goes alone, its record left as it is.
+        if let Some(current) = &held {
+            if self.pause_of(current).await?.write_waits() {
+                return Ok(if paid {
+                    OutcomeRecord::Divergent(key)
+                } else {
+                    OutcomeRecord::Unchanged
+                });
+            }
         }
         let read = match held.as_ref().map(|r| &r.content) {
             None | Some(RecordContent::Deleted) => None,
@@ -3025,6 +3096,12 @@ impl Paykit {
     /// [`Paykit::confirm_possibly_cancelled`]). A payment without a request has nothing a
     /// payee cancels.
     async fn repeat_withheld(&mut self, entry: &JournalEntry) -> Result<bool> {
+        // A repeat is an automatic payment: none while its request record or its list's
+        // record is divergent, or paused since it was seen so (Paykit spec 6). The view held
+        // is taken before the record is read again, and the one read after it.
+        if self.divergent_withholds(entry).await? {
+            return Ok(true);
+        }
         if entry.request_hash()?.is_none() {
             return Ok(false);
         }
@@ -3037,9 +3114,31 @@ impl Paykit {
                 cancelled(&fresh)
                     || rejected(&fresh)
                     || self.held(&self.activity_key(&target)?, &fresh).await?
+                    || self.divergent_withholds(entry).await?
             }
             Fresh::Missing | Fresh::Unreadable => true,
         })
+    }
+
+    /// Whether `entry`'s request record, or the `payment_lists` record of the list its
+    /// destination came from, blocks an automatic payment ([`crate::divergent::Pause`]).
+    async fn divergent_withholds(&mut self, entry: &JournalEntry) -> Result<bool> {
+        let mut records = Vec::new();
+        if entry.request_hash()?.is_some() {
+            records.push(self.activity_key(&ActivityTarget::payer(entry.natural_key.clone()))?);
+        }
+        if entry.destination.source()? == DestinationSource::List {
+            records.push(
+                self.app
+                    .record_key(&list_target(&entry.payee, &entry.destination.app_id))?,
+            );
+        }
+        for record in records {
+            if self.pause_at(&record).await?.blocks_automatic() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The final payment check, the last thing before the payment method's call on every

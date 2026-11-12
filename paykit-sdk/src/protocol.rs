@@ -317,6 +317,7 @@ pub(crate) fn restore_paykit_layer(
     own: [u8; 32],
     own_cert: &AppCert,
     blind: impl Fn(&[u8]) -> [u8; 32],
+    settlement: receive::Settlement<'_>,
 ) -> Result<Vec<LocalWrite>, String> {
     let request_obligation = |payee: &[u8; 32], request_hash: &[u8; 32]| {
         request_obligation_blinded(&blind(payee), &blind(request_hash), 0)
@@ -465,6 +466,18 @@ pub(crate) fn restore_paykit_layer(
                 msg_id,
             } => {
                 check_kept_reply(&value, &own, (sender, record), &msg_id, &record_key)?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            // A divergent record's mark comes back paused, a confirmation given before the
+            // restore included; a message kept over a divergent record is bound to its
+            // record as every runtime read binds it (`divergent.rs`).
+            StateKey::Divergent(_) => {
+                writes.push(crate::divergent::restored_mark_write(key, &value)?);
+                continue;
+            }
+            StateKey::DivergentWrite { .. } => {
+                crate::divergent::kept_write_at(&key, &value, &own, &record_key, settlement)?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -703,9 +716,13 @@ impl Protocol for PaykitProtocol {
         // certificate the Switch takes and Paykit refuses writes nothing.
         check_certificate(restoring.cert())
             .map_err(|error| format!("the backup's certificate: {error}"))?;
-        restore_paykit_layer(layer, restoring.identity(), restoring.cert(), |input| {
-            restoring.blind(input)
-        })
+        restore_paykit_layer(
+            layer,
+            restoring.identity(),
+            restoring.cert(),
+            |input| restoring.blind(input),
+            &|proof| self.settlement_id(proof),
+        )
     }
 
     fn opaque_members(&self) -> Vec<OpaqueRule> {
