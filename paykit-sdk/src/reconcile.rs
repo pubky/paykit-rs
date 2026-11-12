@@ -104,8 +104,8 @@ impl Paykit {
     /// The obligations of the payer's `records` (Paykit spec 7.3): each one-time request's,
     /// each payment without a request's, and, for a recurring request, every Billing Period
     /// that may have an open attempt: those its request record lists in `attempted_periods`,
-    /// where every attempt on a period is listed from its own batch on (Paykit spec 8.2), and
-    /// those with a period record.
+    /// where every attempt on a period is listed from its own batch on until its claim has
+    /// no open or `unknown` attempt (Paykit spec 8.2).
     fn obligations(&self, records: &[ActivityRecord]) -> Vec<Obligation> {
         let mut out: Vec<Obligation> = Vec::new();
         let mut periods: Vec<([u8; 32], [u8; 32], u64)> = Vec::new();
@@ -130,14 +130,6 @@ impl Paykit {
                         }),
                     }
                 }
-                Ok(RecordBinding::Period {
-                    request_hash,
-                    billing_period,
-                }) => periods.push((
-                    record.counterparty,
-                    request_hash,
-                    billing_period.start_secs(),
-                )),
                 Ok(RecordBinding::Unrequested) => {
                     if let Some(attempt) = record.attempt_id {
                         out.push(Obligation {
@@ -153,7 +145,7 @@ impl Paykit {
                         });
                     }
                 }
-                Err(_) => {}
+                _ => {}
             }
         }
         periods.sort_unstable();

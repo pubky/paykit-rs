@@ -501,16 +501,32 @@ async fn test_period_payments_attempted_periods_drop_finished_and_keep_open_ones
         [all[1].start_secs(), all[2].start_secs()]
     );
     // An attempt on a listed period writes no request record.
-    let before = request_record(&w, &wallet, &request).await;
+    let before = request_version(&wallet, &request).await;
     w.rail.settle(&pending.attempt_id(), false);
     wallet.resume_payments().await.unwrap();
     by_user(&mut wallet, &request, all[1], early())
         .await
         .unwrap();
-    assert_eq!(
-        request_record(&w, &wallet, &request).await.msg_ids,
-        before.msg_ids
+    assert_eq!(request_version(&wallet, &request).await, before);
+}
+
+/// The version of the payer's request record of `request` that `app` holds.
+async fn request_version(
+    app: &Paykit,
+    request: &RequestRef,
+) -> pubky_switch_core::ops::RecordVersion {
+    let collection = Collection::PayerActivity;
+    let target = RecordTarget::new(
+        SwitchCollection::new(collection.name(), collection.policy(None)),
+        &natural_key::request_record(&request.payee, &request.request_hash),
     );
+    let key = app.app().record_key(&target).unwrap();
+    app.app()
+        .shared_record(&key)
+        .await
+        .unwrap()
+        .unwrap()
+        .version
 }
 
 #[tokio::test]
@@ -747,6 +763,12 @@ async fn test_period_payments_receipt_before_its_proof_kept_then_placed() {
         Some(Some(january())),
         "{view:?}"
     );
+    // The record shows the period paid, whatever its claim shows: it isn't paid again
+    // (Paykit spec 7.2, "The record shows it paid").
+    let refused = by_user(&mut wallet, &request, january(), PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(refusal(&refused), Refusal::AlreadyPaid);
 }
 
 #[tokio::test]

@@ -780,6 +780,46 @@ mod tests {
         )
     }
 
+    fn claim(state: &str, outcome: &str) -> ClaimView {
+        let open = state == "ATTEMPTING";
+        let owner = "4ppx81nsrtmpoke6yjfueg957h";
+        let attempt = "1OjeFqsP4dPATeMe9xu5-Q";
+        ClaimView::from_value(&json!({
+            "attempt_id": if open { json!(attempt) } else { json!(null) },
+            "attempts": [{ "attempt_id": attempt, "duplicate": false,
+                "opened_at": "2026-01-01T00:00:00.000Z", "orphan_after": 86400,
+                "orphaned": false, "outcome": outcome, "owner": owner,
+                "possibly_duplicate": false }],
+            "claim_key": "QZGfAHpm0NnUuyVE9zAHkr-1o0_2ofsJwVJJ2KQ8NCU",
+            "deadline": null, "divergent": false, "next_possibly_duplicate": false,
+            "owner": if open { json!(owner) } else { json!(null) },
+            "state": state, "step": 3, "tombstone": false
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_periods_attempted_with_adds_in_order_and_drops_finished() {
+        assert_eq!(attempted_with(&[], 5, &[]), Some(vec![5]));
+        assert_eq!(attempted_with(&[2, 9], 5, &[]), Some(vec![2, 5, 9]));
+        assert_eq!(attempted_with(&[2, 9], 5, &[2]), Some(vec![5, 9]));
+        // 16 listed: another goes only once one of them finished.
+        let full: Vec<u64> = (1..=16).collect();
+        assert_eq!(attempted_with(&full, 20, &[]), None);
+        let mut freed: Vec<u64> = (2..=16).collect();
+        freed.push(20);
+        assert_eq!(attempted_with(&full, 20, &[1]), Some(freed));
+    }
+
+    #[test]
+    fn test_periods_finished_step_only_without_an_open_or_unknown_attempt() {
+        assert_eq!(finished_step(None), Some(0));
+        assert_eq!(finished_step(Some(&claim("FREE", "failed"))), Some(3));
+        assert_eq!(finished_step(Some(&claim("SETTLED", "done"))), Some(3));
+        assert_eq!(finished_step(Some(&claim("ATTEMPTING", "open"))), None);
+        assert_eq!(finished_step(Some(&claim("FREE", "unknown"))), None);
+    }
+
     #[test]
     fn test_periods_details_latest_held_first_none_replaced() {
         let (alice, bob) = parties();

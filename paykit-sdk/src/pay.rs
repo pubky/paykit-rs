@@ -2565,12 +2565,6 @@ impl Paykit {
         };
         changed |= self.place_acceptance(&mut record, entry)?;
         if let Some(proof) = proof {
-            // The details a period's proof names are in its record before the proof is
-            // (Paykit wire 5.3): the payment took them from there, and a record rebuilt or
-            // written since gets them back.
-            if let Some(details) = self.details_paid_by(entry)? {
-                changed |= activity::place(&mut record, Role::PeriodDetails, details);
-            }
             changed |= activity::place(&mut record, Role::Proof, self.own_copy(proof)?);
         }
         // A payment made after `failed` was written on its claim: the record shows it, for
@@ -2713,11 +2707,9 @@ impl Paykit {
     }
 
     /// The period details `entry` pays a Billing Period by: its carrier, when that is period
-    /// details (Paykit spec 8.2). `None` for any other payment.
+    /// details (Paykit spec 8.2), which its period record holds. `None` for any other
+    /// payment.
     pub(crate) fn details_paid_by(&self, entry: &JournalEntry) -> Result<Option<StoredMessage>> {
-        if entry.billing_period.is_none() {
-            return Ok(None);
-        }
         Ok(match entry.kept_carrier(&self.identity())? {
             Some(Carrier::Message(message))
                 if matches!(message.body(), Body::PaymentPeriodDetails(_)) =>

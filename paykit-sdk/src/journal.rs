@@ -727,6 +727,101 @@ pub(crate) fn dispatched(stage: Stage, restored: bool) -> bool {
 mod tests {
     use super::*;
 
+    /// A journal entry paying the Billing Period starting at `start` of request `[7; 32]`
+    /// from payee `[5; 32]`.
+    fn period_entry(start: u64) -> JournalEntry {
+        let payee = [5; 32];
+        let request = [7; 32];
+        JournalEntry {
+            attempt_id: AttemptId::from_bytes([1; 16]).to_text(),
+            obligation: [3; 32],
+            payee,
+            request_hash: Some(pubky_switch_core::enc::b64(&request)),
+            natural_key: natural_key::period_record(&payee, &request, start / 1000),
+            amount: KeptAmount {
+                value: "1".into(),
+                asset: "btc".into(),
+            },
+            destination: Destination::new(
+                [2; 16],
+                &PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+                &PaymentEndpointPayload::new("lnbc1").unwrap(),
+                DestinationSource::Request,
+                None,
+                false,
+            ),
+            deadline: None,
+            stage: Stage::Recorded,
+            step: None,
+            label: None,
+            payment_reference: Some("plan-1".into()),
+            acceptance_owed: false,
+            acceptance_msg_id: None,
+            acceptance_plaintext: None,
+            acceptance_cert: None,
+            acceptance_released: false,
+            rail_proof: None,
+            paid_at_ms: None,
+            proof_msg_id: None,
+            restored: false,
+            journaled_at_ms: 0,
+            carrier: None,
+            carrier_record: None,
+            attempt_proof: None,
+            failed_by_method: false,
+            request: None,
+            record_held: false,
+            transfer_bound: None,
+            failed_on_claim: false,
+            billing_period: Some(KeptPeriod {
+                starts_at: start,
+                ends_at: start + 1_000,
+            }),
+        }
+    }
+
+    #[test]
+    fn test_journal_period_entry_bound_to_its_period_record_and_obligation() {
+        let entry = period_entry(5_000);
+        entry.check().unwrap();
+        assert_eq!(entry.period_start_secs().unwrap(), 5);
+        assert_eq!(
+            entry.request_record().unwrap(),
+            Some(natural_key::request_record(&[5; 32], &[7; 32]))
+        );
+        // The obligation is the period's.
+        entry
+            .check_bound(|_, _, start| if start == 5 { [3; 32] } else { [4; 32] })
+            .unwrap();
+        assert!(entry.check_bound(|_, _, _| [4; 32]).is_err());
+    }
+
+    #[test]
+    fn test_journal_period_entry_refused_off_its_record_owing_or_without_a_request() {
+        // The request record's key, another period's, an acceptance owed, an empty period,
+        // or no request: a corrupt store.
+        let mut request_key = period_entry(5_000);
+        request_key.natural_key = natural_key::request_record(&[5; 32], &[7; 32]);
+        let mut other = period_entry(5_000);
+        other.natural_key = period_entry(6_000).natural_key;
+        let mut owing = period_entry(5_000);
+        owing.acceptance_owed = true;
+        let mut empty = period_entry(5_000);
+        empty.billing_period = Some(KeptPeriod {
+            starts_at: 5_000,
+            ends_at: 5_000,
+        });
+        let mut unrequested = period_entry(5_000);
+        unrequested.request_hash = None;
+        unrequested.payment_reference = None;
+        unrequested.obligation = payment_obligation(&unrequested.attempt().unwrap());
+        unrequested.destination.source = "list".into();
+        unrequested.destination.list_version = Some(1);
+        for bad in [request_key, other, owing, empty, unrequested] {
+            assert!(bad.check().is_err());
+        }
+    }
+
     #[test]
     fn test_journal_dispatched_only_at_paying_or_restored_before_an_outcome() {
         let stages = [

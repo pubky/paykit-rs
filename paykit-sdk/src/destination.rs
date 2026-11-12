@@ -711,6 +711,103 @@ mod tests {
         );
     }
 
+    fn recurring_body(per_period: bool) -> serde_json::Map<String, serde_json::Value> {
+        let mut body = request_body();
+        body.insert(
+            "recurrence".into(),
+            json!({ "anchor": "2026-01-01T00:00:00.000Z", "ends_at": null, "every": 1,
+                "starts_at": "2026-01-01T00:00:00.000Z", "unit": "month" }),
+        );
+        if per_period {
+            body.insert("per_period_endpoints".into(), json!(true));
+        }
+        body
+    }
+
+    fn month(starts: &str, ends: &str) -> PeriodRef {
+        PeriodRef::from_json(&json!({ "starts_at": starts, "ends_at": ends }), "t").unwrap()
+    }
+
+    #[test]
+    fn test_destination_per_period_request_carries_only_its_first_period() {
+        let (alice, bob) = parties();
+        let january = month("2026-01-01T00:00:00.000Z", "2026-02-01T00:00:00.000Z");
+        let february = month("2026-02-01T00:00:00.000Z", "2026-03-01T00:00:00.000Z");
+        let dest = destination(
+            &bob,
+            "btc-lightning-bolt11",
+            "lnbc1",
+            DestinationSource::Request,
+        );
+        for per_period in [false, true] {
+            let request = bob.message(
+                &alice,
+                "paykit.payment_request",
+                vec![],
+                recurring_body(per_period),
+            );
+            let carrier = Carrier::Message(Box::new(request.clone()));
+            let hash = request.hash();
+            let named = |p| (Some(&hash), Some(p));
+            assert_eq!(
+                carries(&bob.id(), &dest, &carrier, named(&january), NOW),
+                Ok(())
+            );
+            let later = carries(&bob.id(), &dest, &carrier, named(&february), NOW);
+            assert_eq!(later.is_ok(), !per_period, "{later:?}");
+        }
+    }
+
+    #[test]
+    fn test_destination_period_details_carry_their_period_until_they_expire() {
+        let (alice, bob) = parties();
+        let january = month("2026-01-01T00:00:00.000Z", "2026-02-01T00:00:00.000Z");
+        let february = month("2026-02-01T00:00:00.000Z", "2026-03-01T00:00:00.000Z");
+        let request = [7; 32];
+        let details = bob.message(
+            &alice,
+            "paykit.payment_period_details",
+            vec![request],
+            object(json!({
+                "billing_period": january.to_json(),
+                "expires_at": pubky_switch_core::time::rfc3339(NOW + 1_000),
+                "payment_endpoints": { "btc-lightning-bolt11": "lnbc1period" }
+            })),
+        );
+        let carrier = Carrier::Message(Box::new(details));
+        let dest = |payload| {
+            destination(
+                &bob,
+                "btc-lightning-bolt11",
+                payload,
+                DestinationSource::Request,
+            )
+        };
+        let ok = dest("lnbc1period");
+        let named = (Some(&request), Some(&january));
+        assert_eq!(carries(&bob.id(), &ok, &carrier, named, NOW), Ok(()));
+        // Another request, another period, another payload, or past their expiry: refused.
+        assert!(carries(
+            &bob.id(),
+            &ok,
+            &carrier,
+            (Some(&[8; 32]), Some(&january)),
+            NOW
+        )
+        .is_err());
+        assert!(carries(
+            &bob.id(),
+            &ok,
+            &carrier,
+            (Some(&request), Some(&february)),
+            NOW
+        )
+        .is_err());
+        assert!(carries(&bob.id(), &ok, &carrier, (Some(&request), None), NOW).is_err());
+        assert!(carries(&bob.id(), &dest("lnbc1other"), &carrier, named, NOW).is_err());
+        assert!(carries(&bob.id(), &ok, &carrier, named, NOW + 1_000).is_err());
+    }
+
     #[test]
     fn test_destination_refuses_another_identity_app_payload_or_request() {
         let (alice, bob) = parties();
