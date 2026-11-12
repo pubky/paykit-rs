@@ -17,6 +17,7 @@ use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, PayeeStatus, Paykit, PaykitConfig, Rail, RequestStatus,
 };
+use pubky_switch_client::app::Initiator;
 use pubky_switch_client::clock::Clock;
 use pubky_switch_client::store::{Fault, FaultStore, StateStore};
 use pubky_switch_client::testing::TestSigner;
@@ -163,6 +164,93 @@ async fn test_crash_before_every_commit_pays_once() {
         assert!(n < 64, "the payment never finished");
     }
     assert!(n > 3, "the payment commits at several points: {n}");
+}
+
+/// Pay January of a subscription with the wallet's store stopping at `fault`, reload and
+/// resume. Returns whether the fault was hit. The period is paid once, its claim settled
+/// once, the request record lists it, and the payee credits the period (Paykit spec 7.2,
+/// 8.2).
+async fn crash_and_resume_a_period(fault: Fault) -> bool {
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let wallet_id = wallet.app_id();
+    let mut shop = w.shop().await;
+    let (request, january) = crate::period_payments::subscription(&w, &mut shop, &mut wallet).await;
+    drop(wallet);
+
+    let faulty = Arc::new(FaultStore::new(Arc::clone(&base), fault));
+    let mut crashing = load(
+        &w,
+        &w.alice,
+        Arc::clone(&faulty) as Arc<dyn StateStore>,
+        wallet_id,
+    )
+    .await;
+    let first = crashing
+        .pay_period(&request, &january, Initiator::User, PayOptions::default())
+        .await;
+    let hit = faulty.stopped();
+    drop(crashing);
+    if !hit {
+        assert!(
+            matches!(first, Ok(PayOutcome::Paid { .. })),
+            "{fault:?}: {first:?}"
+        );
+    }
+
+    let mut wallet = load(&w, &w.alice, Arc::clone(&base), wallet_id).await;
+    wallet.resume_payments().await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let paid = |view: &paykit_sdk::RequestView| view.periods.first().is_some_and(|p| p.paid);
+    if !paid(&wallet.request(&request).await.unwrap()) {
+        let again = wallet
+            .pay_period(&request, &january, Initiator::User, PayOptions::default())
+            .await;
+        assert!(
+            matches!(again, Ok(PayOutcome::Paid { .. })),
+            "{fault:?}: {again:?}"
+        );
+    }
+    let executions = w.rail.all_executions();
+    assert_eq!(executions.len(), 1, "{fault:?}: {executions:?}");
+    assert!(executions.values().all(|n| *n == 1), "{fault:?}");
+    let payment = wallet
+        .payments()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|p| matches!(p.stage, paykit_sdk::Stage::Finished) && p.billing_period.is_some())
+        .unwrap_or_else(|| panic!("{fault:?}: no finished payment of the period"));
+    let claim = wallet
+        .app_mut()
+        .read_claim(&payment.obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.view.status, ClaimStatus::Settled, "{fault:?}");
+    let done = claim
+        .view
+        .attempts
+        .iter()
+        .filter(|a| a.outcome == Outcome::Done)
+        .count();
+    assert_eq!(done, 1, "{fault:?}");
+    shop.receive(None).await.unwrap();
+    assert!(
+        shop.payee_activity().await.unwrap()[0].periods[0].paid,
+        "{fault:?}"
+    );
+    hit
+}
+
+#[tokio::test]
+async fn test_crash_at_every_commit_of_a_periods_payment_pays_it_once() {
+    let points = every_commit(crash_and_resume_a_period).await;
+    assert!(
+        points > 3,
+        "a period's payment commits at several points: {points}"
+    );
 }
 
 /// The wallet receives bob's request with its store stopping at `fault`, is reloaded and

@@ -17,6 +17,7 @@ mod mixed_versions;
 mod notices;
 mod one_time;
 mod outcome_record;
+mod period_payments;
 mod periods;
 mod protocols;
 mod pruning;
