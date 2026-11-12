@@ -1252,7 +1252,7 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_restore_takes_a_kept_reply_at_its_record() {
-        let alice = Party::new("alice", "wallet", &["pay"]);
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
         let bob = Party::new("bob", "shop", &["request"]);
         let reply = alice.message(
             &bob,
@@ -1269,7 +1269,7 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_restore_refuses_a_kept_reply_at_another_key() {
-        let alice = Party::new("alice", "wallet", &["pay"]);
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
         let bob = Party::new("bob", "shop", &["request"]);
         let reply = alice.message(
             &bob,
