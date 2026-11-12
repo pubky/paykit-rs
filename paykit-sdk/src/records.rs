@@ -57,6 +57,11 @@ impl KeptMessage {
         }
     }
 
+    /// Its sender, as kept: verified only by [`KeptMessage::stored`].
+    pub(crate) fn sender(&self) -> [u8; 32] {
+        self.sender
+    }
+
     /// When its inbox accepted it, service time.
     pub(crate) fn accepted_at(&self) -> Option<u64> {
         self.accepted_at

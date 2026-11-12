@@ -39,6 +39,7 @@ use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
 use crate::rail::ProofCheck;
 use crate::receipts::{received_receipt, ReceiptDetails, ReceivedReceipt};
+use crate::receive::KEPT_MESSAGE_MS;
 use crate::records::{conflict, KeptMessage};
 use crate::state::{key, Tx};
 
@@ -854,10 +855,14 @@ impl Paykit {
     /// Place every kept cancellation whose request record this app holds, each as a later
     /// write of its own with the kept copy dropped (Paykit spec 8.1). Run after each
     /// receive, at a resume, and before any payment. One that can't be placed now stays
-    /// kept, for the next run; its kept copy refuses every new attempt meanwhile.
+    /// kept, for the next run; its kept copy refuses every new attempt meanwhile. A stop
+    /// for a request the copy doesn't hold ([`crate::receive::holds_record`]) goes once
+    /// [`KEPT_MESSAGE_MS`] have passed since the cancellation's acceptance, on the highest
+    /// service time verified, but never while the copy of the payer's records may lack
+    /// records, when the absence decides nothing.
     pub(crate) async fn place_kept_cancellations(&mut self) -> Result<()> {
         let own = self.identity();
-        for (_, kept) in self
+        for (rest, kept) in self
             .local_scan::<KeptMessage>(key::KEPT_CANCELLATIONS)
             .await?
         {
@@ -877,6 +882,23 @@ impl Paykit {
                 // A placement that fails now is tried again at the next run; the kept stop
                 // stands meanwhile, so it can't let a payment through.
                 let _ = self.place_kept_cancellation(&target).await;
+                continue;
+            }
+            let content = self
+                .app
+                .shared_record(&self.activity_key(&target)?)
+                .await?
+                .map(|record| record.content);
+            let stale = kept.accepted_at().is_none_or(|at| {
+                self.service_time()
+                    .is_some_and(|t| at.saturating_add(KEPT_MESSAGE_MS) <= t)
+            });
+            if stale
+                && !crate::receive::holds_record(content.as_ref())
+                && !self.side_unlisted(crate::hold::RecordSide::Payer).await?
+            {
+                self.local_delete(&format!("{}{rest}", key::KEPT_CANCELLATIONS))
+                    .await?;
             }
         }
         Ok(())
