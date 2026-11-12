@@ -671,8 +671,10 @@ impl Paykit {
         self.place_held_lists().await?;
         // The counterparties' Allowance ends kept as stops go into their records, with their
         // executor notices, and the consent list drops every Allowance seen ended or rejected
-        // (Paykit spec 8.3).
+        // (Paykit spec 8.3). After a `missed` item, every Allowance on it is to be confirmed
+        // again, as after a restore.
         self.place_allowance_stops().await?;
+        self.confirm_consents_again().await?;
         self.sweep_consents().await?;
         let applied = report
             .events

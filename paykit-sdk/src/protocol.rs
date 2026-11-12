@@ -400,6 +400,7 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::HoldConfirmed(_)
             | StateKey::RecordsUnlisted
             | StateKey::MissedUnlisted
+            | StateKey::MissedConsents
             | StateKey::PayerPassOwed
             | StateKey::ListedCert
             | StateKey::StoredNote { .. }
@@ -479,12 +480,9 @@ pub(crate) fn restore_paykit_layer(
                 // The backup may predate an end: every Allowance on the consent list is
                 // confirmed by the user again before the executor pays under it (Paykit spec
                 // 8.3, "After a restore"). A removal stays for good.
-                let consent = match state::decode::<Consent>(&value).map_err(|_| unread())? {
-                    Consent::Held { .. } => Consent::Held {
-                        confirm_again: true,
-                    },
-                    removed => removed,
-                };
+                let consent = state::decode::<Consent>(&value)
+                    .map_err(|_| unread())?
+                    .confirm_again();
                 let value = state::encode(&consent).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
@@ -936,7 +934,10 @@ impl Protocol for PaykitProtocol {
     /// listing at the end of the receive (`Paykit::list_records`): the client lists
     /// them again only at the start of its next read, so entries later in this read decide
     /// nothing from an absence. A mark of its own, not `nl`, which the same read's end
-    /// would clear.
+    /// would clear. Every Allowance on the consent list is held too, to be confirmed again
+    /// as after a restore (Paykit spec 8.3; `mc`, which `Paykit::confirm_consents_again`
+    /// turns into each entry's mark after the receive): an end may be among the deleted
+    /// entries.
     fn missed(&self, missed: &MissedEntries) -> Result<Vec<LocalWrite>, StoreFailure> {
         Ok(vec![
             local_write(
@@ -945,6 +946,7 @@ impl Protocol for PaykitProtocol {
             )?,
             local_write(key::MISSED_HOLD, &true)?,
             local_write(key::MISSED_UNLISTED, &true)?,
+            local_write(key::MISSED_CONSENTS, &true)?,
             LocalWrite::DeletePrefix {
                 prefix: key::HOLD_CONFIRMED.as_bytes().to_vec(),
             },

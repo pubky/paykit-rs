@@ -402,6 +402,7 @@ fn held_request(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<bool
 /// payee's cancellation keeps: any content but a delete, a value that doesn't read and one
 /// sealed under a scope key the app doesn't hold yet included. A stop for a request held
 /// stays until it is placed; one for a request not held is bounded ([`keep_cancellation`]).
+/// An Allowance end kept as the stop follows the same rule (`allowances.rs`).
 pub(crate) fn holds_record(content: Option<&RecordContent>) -> bool {
     content.is_some_and(|content| *content != RecordContent::Deleted)
 }
@@ -444,7 +445,7 @@ pub(crate) fn held_or_unlisted_at(
 /// refuses with none kept as listed under; this needs no such case: [`effect`] holds every
 /// entry under a certificate that fails the same check before any branch reaches here, so
 /// the two agree wherever this runs.
-fn hold_while_unlisted(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<(), Fail> {
+pub(crate) fn hold_while_unlisted(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<(), Fail> {
     let marked = cx.local_get(key::RECORDS_UNLISTED.as_bytes())?.is_some()
         || cx.local_get(key::MISSED_UNLISTED.as_bytes())?.is_some();
     let listed = match cx.local_get(key::LISTED_CERT.as_bytes())? {
@@ -501,9 +502,10 @@ fn place(
 /// cancel that sender's request. A stop for a request `held` ([`holds_record`]) is kept until
 /// it is placed. One for a request not held is new state, which admission gates (Switch spec
 /// 7), and is kept under the bounds of a payer's reply before its record, counted apart from
-/// those: past its sender's [`MAX_KEPT_REPLIES_PER_SENDER`] such stops, that sender's earliest
-/// goes, and past [`MAX_KEPT_REPLIES`] in all, the earliest of the sender keeping the most
-/// ([`kept_reply_evicted`]). It goes [`KEPT_MESSAGE_MS`] after the cancellation's acceptance
+/// those and together with the Allowance ends kept as stops for Allowances not held
+/// ([`make_room_for_stop`]): past its sender's [`MAX_KEPT_REPLIES_PER_SENDER`] such stops,
+/// that sender's earliest goes, and past [`MAX_KEPT_REPLIES`] in all, the earliest of the
+/// sender keeping the most ([`kept_reply_evicted`]). It goes [`KEPT_MESSAGE_MS`] after the cancellation's acceptance
 /// while the request is still not held ([`crate::Paykit::place_kept_cancellations`]): by then
 /// its sender re-sends nothing, and any own app that held the request got the cancellation
 /// too.
@@ -524,23 +526,33 @@ fn keep_cancellation(
     Ok(())
 }
 
-/// Make room for a new stop from `sender` among the stops kept for requests not held, in the
-/// step: the one the bounds drop ([`kept_reply_evicted`]) goes.
-fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<(), Fail> {
+/// Make room for a new stop from `sender` among the stops kept for records not held
+/// ([`holds_record`]), in the step: the one the bounds drop ([`kept_reply_evicted`]) goes.
+/// The payees' cancellations of requests not held (`kc/`) and the counterparties' ends of
+/// Allowances not held (`ae/`, `allowances.rs`) are counted together, under one sender's
+/// bound and the bound in all.
+pub(crate) fn make_room_for_stop(
+    cx: &mut ReceiveContext<'_>,
+    sender: &[u8; 32],
+) -> Result<(), Fail> {
     let mut kept = Vec::new();
     let mut names = Vec::new();
-    for (bytes, value) in cx.local_scan(key::KEPT_CANCELLATIONS.as_bytes())? {
-        let Some(crate::state::StateKey::KeptCancellation(record)) =
-            crate::state::StateKey::parse(&bytes)
-        else {
-            return Err(Fail::corrupt());
-        };
-        let stop = state::decode::<KeptMessage>(&value).map_err(|_| Fail::corrupt())?;
-        if holds_record(cx.record_at(&record)?.map(|held| held.content).as_ref()) {
-            continue;
+    for prefix in [key::KEPT_CANCELLATIONS, key::ALLOWANCE_ENDS] {
+        for (bytes, value) in cx.local_scan(prefix.as_bytes())? {
+            let Some(
+                crate::state::StateKey::KeptCancellation(record)
+                | crate::state::StateKey::AllowanceEnd(record),
+            ) = crate::state::StateKey::parse(&bytes)
+            else {
+                return Err(Fail::corrupt());
+            };
+            let stop = state::decode::<KeptMessage>(&value).map_err(|_| Fail::corrupt())?;
+            if holds_record(cx.record_at(&record)?.map(|held| held.content).as_ref()) {
+                continue;
+            }
+            kept.push((stop.sender(), stop.accepted_at().unwrap_or(0)));
+            names.push(bytes);
         }
-        kept.push((stop.sender(), stop.accepted_at().unwrap_or(0)));
-        names.push(bytes);
     }
     if let Some(index) = kept_reply_evicted(&kept, sender) {
         keep_local(
@@ -924,7 +936,9 @@ fn hold_list(
 /// How many payer's replies to requests this app holds no record of it keeps from one
 /// sender identity, as Switch spec 8.2 bounds the entries of an unverified sender: past it,
 /// that sender's earliest reply is dropped. The payees' cancellations kept as stops for
-/// requests the app holds no record of are bounded the same way, counted apart.
+/// requests the app holds no record of, and the counterparties' Allowance ends kept as stops
+/// for Allowances it holds no record of, are bounded the same way, counted together and
+/// apart from the replies ([`make_room_for_stop`]).
 pub const MAX_KEPT_REPLIES_PER_SENDER: usize = 64;
 
 /// How many such replies it keeps in all: past it, the earliest reply of the sender holding

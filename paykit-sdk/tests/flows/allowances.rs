@@ -8,6 +8,7 @@ use paykit_sdk::{
     AllowanceRole, AllowanceStatus, AppScopes, Paykit, PaykitError, Refusal, RequestedScopes,
 };
 use pubky_switch_client::app::{AppEvent, LocalWrite, OpBatch};
+use pubky_switch_client::clock::Clock;
 use serde_json::{json, Value};
 
 use crate::certificate::{is_not_now, list, renew, store_bundle};
@@ -750,4 +751,313 @@ async fn test_allowances_stored_proposal_written_later() {
     let views = wallet.allowances().await.unwrap();
     assert_eq!(views.len(), 1);
     assert_eq!(views[0].status, AllowanceStatus::Proposed);
+}
+
+/// Bob's Allowance, proposed to alice's `wallet` and `phone` and accepted by the phone, whose
+/// record the wallet holds sealed under a key it doesn't hold yet: the phone wrote the
+/// acceptance under an epoch's key the wallet never got, and the wallet holds only a later
+/// one. Bob's shop has taken the acceptance. Returns the record keys on bob's side and on
+/// alice's, and the wallet's certificate, for the key bundle that opens the record.
+async fn sealed_allowance(
+    w: &World,
+    shop: &mut Paykit,
+    wallet: &mut Paykit,
+    phone: &mut Paykit,
+) -> ([u8; 32], [u8; 32], pubky_switch_core::records::AppCert) {
+    let (theirs, mine) = proposed(w, shop, wallet).await;
+    phone.receive(None).await.unwrap();
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    crate::unrequested::store_bundle(w, phone.app_id(), &phone.app().cert().clone());
+    phone.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    phone.accept_allowance(&mine).await.unwrap();
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let cert = wallet.app().cert().clone();
+    crate::unrequested::store_bundle_from(w, wallet.app_id(), &cert, newest);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let held = wallet.app().shared_record(&mine).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            held.content,
+            pubky_switch_client::app::RecordContent::Unreadable(
+                pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+            )
+        ),
+        "{:?}",
+        held.content
+    );
+    shop.receive(None).await.unwrap();
+    (theirs, mine, cert)
+}
+
+/// A wallet and a phone of alice's, both holding `pay` and `allowance`, and bob's shop.
+async fn two_wallets(w: &World) -> (Paykit, Paykit, Paykit) {
+    let shop = shop(w).await;
+    let wallet = wallet(w).await;
+    let phone = alice_app(
+        w,
+        "phone",
+        AppScopes::new().pay().allowance().build().unwrap(),
+    )
+    .await;
+    (shop, wallet, phone)
+}
+
+#[tokio::test]
+async fn test_allowances_end_while_its_record_awaits_its_key_stops_it_past_30_days() {
+    // The wallet holds the Allowance's record sealed under a key it doesn't hold yet. Bob
+    // ends it. The stop is kept at once, the entry waiting for no key, and 30 days on no
+    // give-up takes it: once the key comes, the record opens and the wallet records the end
+    // (Paykit spec 8.3). The phone never reads its inbox again, so only the wallet's stop
+    // can end it.
+    let w = World::new();
+    let (mut shop, mut wallet, mut phone) = two_wallets(&w).await;
+    let (theirs, mine, cert) = sealed_allowance(&w, &mut shop, &mut wallet, &mut phone).await;
+    shop.end_allowance(&theirs).await.unwrap();
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.key_epochs_awaited.is_empty(), "{got:?}");
+    assert!(received(&got, "paykit.allowance_end"), "{got:?}");
+    assert_eq!(wallet.app().protocol_scan(b"ae/").await.unwrap().len(), 1);
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(wallet.app().protocol_scan(b"ae/").await.unwrap().len(), 1);
+    assert!(wallet.notices().await.unwrap().is_empty());
+    crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Ended
+    );
+    assert!(!value(&wallet, &mine).await["end"].is_null());
+    assert!(wallet.app().protocol_scan(b"ae/").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_allowances_end_kept_while_sealed_goes_once_it_opens_naming_another_proposal() {
+    // An end kept at once over a sealed record is checked once the record opens: one that
+    // refers to another proposal isn't this Allowance's end, and its stop goes, the Allowance
+    // still accepted (Paykit wire 4.16).
+    let w = World::new();
+    let (mut shop, mut wallet, mut phone) = two_wallets(&w).await;
+    let (_, mine, cert) = sealed_allowance(&w, &mut shop, &mut wallet, &mut phone).await;
+    let allowance_id = phone.allowance(&mine).await.unwrap().allowance_id;
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.allowance_end",
+        vec![[7; 32], [8; 32]],
+        json!({ "allowance_id": allowance_id.as_str() })
+            .as_object()
+            .cloned()
+            .unwrap(),
+    );
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.key_epochs_awaited.is_empty(), "{got:?}");
+    assert_eq!(wallet.app().protocol_scan(b"ae/").await.unwrap().len(), 1);
+    crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(wallet.app().protocol_scan(b"ae/").await.unwrap().is_empty());
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Accepted
+    );
+    assert!(value(&wallet, &mine).await["end"].is_null());
+}
+
+/// Bob's end of an Allowance with ID number `i` that alice's `wallet` holds no record of.
+fn end_unknown(w: &World, wallet: &Paykit, i: usize) {
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.allowance_end",
+        vec![[0xee; 32]],
+        json!({ "allowance_id": format!("d0efffb7-191b-4709-b6c7-e343af55{i:04x}") })
+            .as_object()
+            .cloned()
+            .unwrap(),
+    );
+}
+
+/// The stops `wallet` keeps, its kept cancellations and Allowance ends together.
+async fn stops(wallet: &Paykit) -> usize {
+    let mut n = 0;
+    for prefix in [&b"kc/"[..], &b"ae/"[..]] {
+        n += wallet.app().protocol_scan(prefix).await.unwrap().len();
+    }
+    n
+}
+
+/// Whether `wallet` keeps bob's end of the Allowance with ID number `i` as a stop.
+async fn keeps_end(w: &World, wallet: &Paykit, i: usize) -> bool {
+    let id =
+        paykit_lib::AllowanceId::new(&format!("d0efffb7-191b-4709-b6c7-e343af55{i:04x}")).unwrap();
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "allowances",
+            paykit_lib::Collection::Allowances.fixed_policy(),
+        ),
+        &paykit_lib::derive::natural_key::allowance(&w.bob_id(), &id),
+    );
+    let key = wallet.app().record_key(&target).unwrap();
+    let stop = format!("ae/{}", pubky_switch_core::enc::b64(&key));
+    wallet
+        .app()
+        .protocol_get(stop.as_bytes())
+        .await
+        .unwrap()
+        .is_some()
+}
+
+#[tokio::test]
+async fn test_allowances_stops_for_allowances_not_held_bounded_with_cancellations() {
+    // Bob cancels half of 64 requests the wallet holds no record of and ends as many
+    // Allowances it holds none of, a millisecond apart: the 64 stops are kept. One more end
+    // drops the earliest of them, a cancellation, since the two kinds of stop count under one
+    // bound per sender (Paykit spec 8.1, 8.3).
+    let w = World::new();
+    let _shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    let half = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER / 2;
+    let unknown = |i: usize| [u8::try_from(i + 1).unwrap(); 32];
+    for i in 0..half {
+        w.clock.advance_ms(1);
+        crate::one_time::cancel_to(&w, &[wallet.app_id()], unknown(i));
+    }
+    for i in 0..half {
+        w.clock.advance_ms(1);
+        end_unknown(&w, &wallet, i);
+    }
+    wallet.receive(None).await.unwrap();
+    let all = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    assert_eq!(stops(&wallet).await, all);
+    w.clock.advance_ms(1);
+    end_unknown(&w, &wallet, half);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(stops(&wallet).await, all);
+    assert_eq!(
+        wallet.app().protocol_scan(b"kc/").await.unwrap().len(),
+        half - 1
+    );
+    assert!(keeps_end(&w, &wallet, 0).await);
+    assert!(keeps_end(&w, &wallet, half).await);
+}
+
+#[tokio::test]
+async fn test_allowances_stop_for_an_allowance_held_never_dropped_for_the_bound() {
+    // Bob's end of an Allowance the wallet holds names an acceptance its record doesn't hold:
+    // the stop is kept, and counts in no bound. Then 64 ends of Allowances it holds no record
+    // of, later: all are kept. A 65th drops the earliest of those, never the stop of the
+    // Allowance held.
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    let (_, mine) = proposed(&w, &mut shop, &mut wallet).await;
+    let record = AllowanceRecord::read(
+        &serde_json::to_vec(&value(&wallet, &mine).await).unwrap(),
+        &w.alice_id(),
+    )
+    .unwrap();
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.allowance_end",
+        vec![record.proposal.hash(), [8; 32]],
+        json!({ "allowance_id": record.allowance_id.as_str() })
+            .as_object()
+            .cloned()
+            .unwrap(),
+    );
+    wallet.receive(None).await.unwrap();
+    assert_eq!(stops(&wallet).await, 1);
+    let bound = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    for i in 0..bound {
+        w.clock.advance_ms(1);
+        end_unknown(&w, &wallet, i);
+    }
+    wallet.receive(None).await.unwrap();
+    assert_eq!(stops(&wallet).await, bound + 1);
+    w.clock.advance_ms(1);
+    end_unknown(&w, &wallet, bound);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(stops(&wallet).await, bound + 1);
+    let held = format!("ae/{}", pubky_switch_core::enc::b64(&mine));
+    assert!(wallet
+        .app()
+        .protocol_get(held.as_bytes())
+        .await
+        .unwrap()
+        .is_some());
+    assert!(!keeps_end(&w, &wallet, 0).await);
+    assert!(keeps_end(&w, &wallet, 1).await);
+    assert!(keeps_end(&w, &wallet, bound).await);
+}
+
+/// A `missed` item at alice's switch: entries accepted in the last second were deleted before
+/// her apps read them (Switch spec 8.2).
+fn missed(w: &World) {
+    let now = w.clock.now_ms();
+    w.alice.switch().push_missed(1, now - 1_000, now);
+}
+
+#[tokio::test]
+async fn test_allowances_missed_item_asks_consent_again_until_the_user_confirms() {
+    // An end may be among the entries a `missed` item tells of: every Allowance on the
+    // consent list is to be confirmed again, as after a restore (Paykit spec 7.2, 8.3). The
+    // user's confirmation then counts again.
+    let w = World::new();
+    let (_shop, _wallet, mut exec, _phone, _, mine) = executed(&w).await;
+    missed(&w);
+    exec.receive(None).await.unwrap();
+    assert_eq!(
+        consent_entry(&exec, &mine).await,
+        Some(json!({ "held": { "confirm_again": true } }))
+    );
+    assert!(!exec.allowance(&mine).await.unwrap().consented);
+    consent(&mut exec, &mine).await;
+    assert!(exec.allowance(&mine).await.unwrap().consented);
+}
+
+#[tokio::test]
+async fn test_allowances_missed_item_keeps_removals_and_consents_nothing_before_the_marks() {
+    // A removal stays removed past a `missed` item. Until the receive marks each entry to be
+    // confirmed again, the item's own mark consents nothing, as after a crash between them.
+    let w = World::new();
+    let (_shop, _wallet, mut exec, mut phone, _, mine) = executed(&w).await;
+    notice(&w, &w.alice, "wallet", exec.app_id(), &mine, "handed_off");
+    exec.receive(None).await.unwrap();
+    missed(&w);
+    exec.receive(None).await.unwrap();
+    assert_eq!(
+        consent_entry(&exec, &mine).await,
+        Some(json!({ "removed": { "reason": "handed_off" } }))
+    );
+    assert!(phone.allowance(&mine).await.unwrap().consented);
+    phone
+        .app_mut()
+        .protocol_commit(&[LocalWrite::Put {
+            key: b"mc".to_vec(),
+            value: br#"{"v":1,"d":true}"#.to_vec(),
+        }])
+        .await
+        .unwrap();
+    assert!(!phone.allowance(&mine).await.unwrap().consented);
+    assert_eq!(
+        consent_entry(&phone, &mine).await,
+        Some(json!({ "held": { "confirm_again": false } }))
+    );
 }

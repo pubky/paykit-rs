@@ -15,7 +15,10 @@
 //!   copy of `allowances` isn't listed yet, never deciding from a record's absence (Paykit
 //!   spec 8.1, "Records not listed yet").
 //! - **The stop:** a counterparty's `allowance_end` is kept in the app's own state in the
-//!   commit that passes its entry, with no write at the switch (`ae/`). From then on nothing
+//!   commit that passes its entry, with no write at the switch (`ae/`): at once for an
+//!   Allowance whose record the app holds, whatever the record's value, never waiting for
+//!   a scope key; for one it holds no record of, as new state, bounded together with the
+//!   payees' cancellations kept for requests not held. From then on nothing
 //!   is done under the Allowance, whatever the record says, until the record holds an end or
 //!   a rejection: the app writes the end there by a later write of its own, with the
 //!   `executor_notice`. An end that names its proposal alone, crossing the acceptance this
@@ -24,7 +27,8 @@
 //! - **The consent list** (`ac/`): the Allowances this app, as executor, may pay under. An
 //!   Allowance seen ended or rejected, or named by an `executor_notice`, is removed for
 //!   good: a removed entry never comes back. A restore marks every entry to be confirmed
-//!   again, since the backup may predate an end.
+//!   again, since the backup may predate an end, and so does a `missed` item, since an end
+//!   may be among the entries the service deleted (`mc`, Paykit spec 7.2, 8.3).
 //! - **`executor_notice`:** an app that ends an Allowance, or records the counterparty's
 //!   end, tells the executor the record's current grant names, through the identity's own
 //!   inbox, wrapped to that app only (Paykit wire 4.17).
@@ -144,6 +148,20 @@ pub(crate) enum Consent {
         /// Why.
         reason: ConsentEnd,
     },
+}
+
+impl Consent {
+    /// The entry as a restore or a `missed` item leaves it (Paykit spec 8.3, "After a
+    /// restore"): one on the list is to be confirmed by the user again before the executor
+    /// pays under it; a removal stays for good.
+    pub(crate) fn confirm_again(self) -> Self {
+        match self {
+            Self::Held { .. } => Self::Held {
+                confirm_again: true,
+            },
+            removed => removed,
+        }
+    }
 }
 
 /// Why an Allowance left the consent list.
@@ -326,9 +344,10 @@ enum Held {
 }
 
 /// The receive step of a proposal, an acceptance, a rejection or an end that passed check
-/// 10, at an app holding `allowance` (module docs). The entry is held while the record
-/// waits for its scope key or the copy of `allowances` isn't listed yet: its absence then
-/// decides nothing (Paykit spec 8.1, "Records not listed yet").
+/// 10, at an app holding `allowance` (module docs). The entry of a proposal or an answer is
+/// held while the record waits for its scope key or the copy of `allowances` isn't listed
+/// yet: its absence then decides nothing (Paykit spec 8.1, "Records not listed yet"). An
+/// end's stop waits for no key ([`keep_end`]).
 pub(crate) fn receive_effect(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
@@ -340,6 +359,9 @@ pub(crate) fn receive_effect(
         return Ok(());
     };
     let target = allowance_target(&sender, &allowance_id);
+    if let Body::AllowanceEnd(_) = stored.body() {
+        return keep_end(cx, &target, &allowance_id, stored, scopes);
+    }
     let value = receive::held_or_unlisted_at(cx, &target, RecordSide::Allowances)?;
     let present = cx.record(&target)?.is_some();
     let held = match value {
@@ -349,7 +371,6 @@ pub(crate) fn receive_effect(
         None => Held::None,
     };
     match stored.body() {
-        Body::AllowanceEnd(_) => keep_end(cx, &target, held, stored, scopes),
         Body::AllowanceProposal(_) => match held {
             Held::None => {
                 if receive::admits_new_state(cx, &sender, scopes)? {
@@ -405,42 +426,62 @@ fn put_placed(
 }
 
 /// A counterparty's end (Paykit spec 8.3, "Ends reach the executor"): kept as the stop in
-/// the commit that passes the entry, with no write at the switch, unless the record holds
-/// an end or a rejection already. An executor's consent list drops the Allowance in the
-/// same commit. One for an Allowance the app holds no record of is new state, which the
-/// spam rule gates; one naming another proposal than the record's isn't this Allowance's.
+/// the commit that passes the entry, with no write at the switch. An executor's consent list
+/// drops the Allowance in the same commit.
+///
+/// One for an Allowance whose record the app holds ([`receive::holds_record`]: any content
+/// but a delete, a value that doesn't read and one sealed under a scope key the app doesn't
+/// hold yet included) always applies and is kept at once: keeping it needs only the
+/// record's key, so the stop never waits for the value's key or a listing, and no give-up of
+/// the entry can lose it. A value that reads is checked first: nothing is kept when the
+/// record holds an end or a rejection already, and an end naming another proposal than the
+/// record's isn't this Allowance's. A sealed value is checked once it opens
+/// ([`Paykit::place_allowance_stops`]).
+///
+/// One for an Allowance the app holds no record of is new state, which the spam rule gates,
+/// held while the copy of `allowances` may lack records, when the absence decides nothing.
+/// It is kept under the bounds of the stops for records not held, counted together with the
+/// payees' cancellations kept so ([`receive::make_room_for_stop`]), and goes
+/// [`KEPT_MESSAGE_MS`] after its acceptance while the record is still not held.
 fn keep_end(
     cx: &mut ReceiveContext<'_>,
     target: &RecordTarget,
-    held: Held,
+    allowance_id: &AllowanceId,
     stored: &StoredMessage,
     scopes: &[String],
 ) -> std::result::Result<(), Fail> {
     let sender = stored.sender();
-    match &held {
-        Held::Record(record) => {
-            if record.end.is_some()
-                || rejected(record)
-                || reflects(record, &stored.message().msg_id)
-            {
-                return Ok(());
-            }
-            if stored.message().refs.first() != Some(&record.proposal.hash()) {
-                return Err(Fail::Drop(
-                    "Paykit wire 4.16: an end refers to its Allowance's proposal".into(),
-                ));
-            }
+    let content = cx.record(target)?.map(|held| held.content);
+    let held = receive::holds_record(content.as_ref());
+    let record = content
+        .as_ref()
+        .and_then(RecordContent::value)
+        .and_then(|value| bind_at(value, &cx.identity(), &sender, allowance_id));
+    if let Some(record) = record {
+        if record.end.is_some() || rejected(&record) || reflects(&record, &stored.message().msg_id)
+        {
+            return Ok(());
         }
-        Held::None => {
-            if !receive::admits_new_state(cx, &sender, scopes)? {
-                return Ok(());
-            }
+        if stored.message().refs.first() != Some(&record.proposal.hash()) {
+            return Err(Fail::Drop(
+                "Paykit wire 4.16: an end refers to its Allowance's proposal".into(),
+            ));
         }
-        Held::Unreadable => {}
+    }
+    if !held {
+        if content.is_none() {
+            receive::hold_while_unlisted(cx, RecordSide::Allowances)?;
+        }
+        if !receive::admits_new_state(cx, &sender, scopes)? {
+            return Ok(());
+        }
     }
     let record_key = cx.record_key(target)?;
     let stop = key::allowance_end(&record_key);
     if cx.local_get(stop.as_bytes())?.is_none() {
+        if !held {
+            receive::make_room_for_stop(cx, &sender)?;
+        }
         receive::keep_local(cx, receive::local(&stop, &KeptMessage::of(stored))?);
     }
     if scopes.iter().any(|s| s == "allowance_execute") {
@@ -897,14 +938,46 @@ impl Paykit {
     // The consent list
 
     /// Whether this app's consent list holds the Allowance at `record`, confirmed since any
-    /// restore (Paykit spec 8.3, "Executor"). A kept stop removes the entry in the commit
-    /// that keeps it.
+    /// restore or `missed` item (Paykit spec 8.3, "Executor"). A kept stop removes the entry
+    /// in the commit that keeps it. None is confirmed while a `missed` item's mark (`mc`)
+    /// waits for [`Paykit::confirm_consents_again`].
     pub(crate) async fn consents(&self, record: &[u8; 32]) -> Result<bool> {
+        if self
+            .local_get::<bool>(key::MISSED_CONSENTS)
+            .await?
+            .is_some()
+        {
+            return Ok(false);
+        }
         let held = self.local_get::<Consent>(&key::consent(record)).await?;
         Ok(held
             == Some(Consent::Held {
                 confirm_again: false,
             }))
+    }
+
+    /// After a `missed` item, which sets `mc` in the commit that passes it: mark every
+    /// Allowance on the consent list to be confirmed by the user again, as a restore marks
+    /// it ([`Consent::confirm_again`]), and clear the mark, in one commit. An end may be among
+    /// the entries the service deleted (Paykit spec 7.2, 8.3). Run after each receive; a
+    /// commit that fails leaves the mark, under which nothing is consented, for the next.
+    pub(crate) async fn confirm_consents_again(&mut self) -> Result<()> {
+        if self
+            .local_get::<bool>(key::MISSED_CONSENTS)
+            .await?
+            .is_none()
+        {
+            return Ok(());
+        }
+        let mut tx = Tx::default();
+        for (rest, consent) in self.local_scan::<Consent>(key::CONSENTS).await? {
+            let again = consent.confirm_again();
+            if again != consent {
+                tx.put(&format!("{}{rest}", key::CONSENTS), &again)?;
+            }
+        }
+        tx.delete(key::MISSED_CONSENTS);
+        self.local_commit(tx).await
     }
 
     /// Remove from the consent list, for good, every Allowance whose record this app holds
@@ -960,7 +1033,8 @@ impl Paykit {
                 .await?
                 .map(|held| held.content);
             match content {
-                None => {
+                // No record held, or a delete: the stop goes 30 days after its acceptance.
+                None | Some(RecordContent::Deleted) => {
                     if stale(&end, self.service_time()) {
                         self.local_delete(&stop).await?;
                     }
@@ -972,8 +1046,8 @@ impl Paykit {
                         let _ = self.record_end(&target, record, held, end, &stop).await;
                     }
                 }
-                // A delete, or a value that doesn't read or waits for its key: never
-                // written over; the stop stands.
+                // A value that doesn't read or waits for its key: never written over; the
+                // stop stands.
                 Some(_) => {}
             }
         }

@@ -51,6 +51,7 @@
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
 //! | `ae/<record key>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection (`allowances.rs`, Paykit spec 8.3) | |
 //! | `ac/<record key>` | the consent list: an Allowance this app may pay under, or removed from it for good (`allowances.rs`, Paykit spec 8.3); a restore marks every entry to confirm again | |
+//! | `mc` | set by a `missed` item: every entry of the consent list is to be confirmed again, as after a restore; nothing is consented while it is set, and the next receive marks each entry so and clears it (`allowances.rs`); never restored | |
 //! | `en/<msg_id>` | the executor app an `executor_notice` is wrapped to, kept with the batch that queues it | |
 
 use paykit_lib::AttemptId;
@@ -205,6 +206,7 @@ pub(crate) mod key {
     pub(crate) const HELD_LISTS: &str = "lh/";
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
     pub(crate) const MISSED_UNLISTED: &str = "ml";
+    pub(crate) const MISSED_CONSENTS: &str = "mc";
     pub(crate) const PAYER_PASS_OWED: &str = "pp";
     pub(crate) const LISTED_CERT: &str = "lc";
     pub(crate) const NOTICES: &str = "nt/";
@@ -361,6 +363,8 @@ pub(crate) enum StateKey {
     RecordsUnlisted,
     /// `ml`: the shared records aren't listed by Paykit since a `missed` item.
     MissedUnlisted,
+    /// `mc`: the consent list is to be confirmed again since a `missed` item.
+    MissedConsents,
     /// `pp`: no reconcile ran the payer pass since a restore.
     PayerPassOwed,
     /// `lc`: the certificate the shared records were last listed under.
@@ -449,6 +453,7 @@ impl StateKey {
             "mh" => Self::MissedHold,
             "nl" => Self::RecordsUnlisted,
             "ml" => Self::MissedUnlisted,
+            "mc" => Self::MissedConsents,
             "pp" => Self::PayerPassOwed,
             "lc" => Self::ListedCert,
             "lr" => Self::ListsRead,
@@ -645,6 +650,7 @@ mod tests {
             (key::MISSED_HOLD.into(), StateKey::MissedHold),
             (key::RECORDS_UNLISTED.into(), StateKey::RecordsUnlisted),
             (key::MISSED_UNLISTED.into(), StateKey::MissedUnlisted),
+            (key::MISSED_CONSENTS.into(), StateKey::MissedConsents),
             (key::PAYER_PASS_OWED.into(), StateKey::PayerPassOwed),
             (key::LISTED_CERT.into(), StateKey::ListedCert),
             (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),
