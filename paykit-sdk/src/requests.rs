@@ -860,7 +860,10 @@ impl Paykit {
     /// for a request the copy doesn't hold ([`crate::receive::holds_record`]) goes once
     /// [`KEPT_MESSAGE_MS`] have passed since the cancellation's acceptance, on the highest
     /// service time verified, but never while the copy of the payer's records may lack
-    /// records, when the absence decides nothing.
+    /// records, when the absence decides nothing, nor while the app keeps a stored message
+    /// of that request to write ([`crate::stored::writes_request`]): the request's own entry
+    /// may be one, waiting for a write that failed or for a listing, and written without
+    /// the stop the request would be payable.
     pub(crate) async fn place_kept_cancellations(&mut self) -> Result<()> {
         let own = self.identity();
         for (rest, kept) in self
@@ -897,12 +900,30 @@ impl Paykit {
             if stale
                 && !crate::receive::holds_record(content.as_ref())
                 && !self.side_unlisted(crate::hold::RecordSide::Payer).await?
+                && !self
+                    .keeps_stored_of(&cancellation.sender(), &request)
+                    .await?
             {
                 self.local_delete(&format!("{}{rest}", key::KEPT_CANCELLATIONS))
                     .await?;
             }
         }
         Ok(())
+    }
+
+    /// Whether the app keeps a stored message from `sender` of `request` still to write
+    /// ([`crate::stored::writes_request`]).
+    async fn keeps_stored_of(&self, sender: &[u8; 32], request: &[u8; 32]) -> Result<bool> {
+        let own = self.identity();
+        for (_, note) in self
+            .local_scan::<crate::stored::StoredNote>(&key::stored_notes_of(sender))
+            .await?
+        {
+            if crate::stored::writes_request(&note, &own, request)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Every request the payer's apps received, from the `payer_activity` records this app

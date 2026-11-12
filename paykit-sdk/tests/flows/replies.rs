@@ -587,3 +587,162 @@ async fn test_replies_past_the_bound_per_sender_drop_the_earliest_and_ask_for_it
     // Asked once: a later read within the day asks nothing more.
     assert_eq!(shop.receive(None).await.unwrap().resends, 0);
 }
+
+/// The signer stores bob's app `app`'s key bundle for `cert`, epochs `first` to current.
+fn bob_bundle(w: &World, app: [u8; 16], cert: &pubky_switch_core::records::AppCert, first: u64) {
+    use pubky_switch_client::app::Protocol as _;
+    let epoch = w.bob.switch().identity_doc().unwrap().data_epoch();
+    let protocol = paykit_sdk::PaykitProtocol::new();
+    let parts = pubky_switch_core::records::seal_bundle_parts(
+        w.bob.identity().key(),
+        cert,
+        first,
+        epoch,
+        &|scope| protocol.has_keys(scope),
+    )
+    .unwrap();
+    for part in parts {
+        w.bob
+            .switch()
+            .signer_op(pubky_switch_core::ops::OpKind::KeyBundlePut(
+                pubky_switch_core::ops::KeyBundlePut {
+                    target_app_id: app,
+                    bundle: part.bundle,
+                    first_epoch: part.first_epoch,
+                    last_epoch: part.last_epoch,
+                },
+            ))
+            .unwrap();
+    }
+}
+
+/// `writer` writes the payee record of `request`, which `signer_cert`'s app signed.
+async fn record_request_by(
+    w: &World,
+    writer: &mut Paykit,
+    signer_cert: &pubky_switch_core::sig::SignedDoc,
+    request: &SignedMessage,
+) {
+    let copy = StoredMessage::new(
+        w.bob_id(),
+        signer_cert,
+        request.plaintext().clone(),
+        None,
+        &w.alice_id(),
+    )
+    .unwrap();
+    let mut record = ActivityRecord::new(ActivitySide::Payee, w.alice_id());
+    record.msg_ids = vec![copy.message().msg_id.clone()];
+    record.request = Some(copy);
+    let target = RecordTarget::new(
+        SwitchCollection::new(
+            Collection::PayeeActivity.name(),
+            Collection::PayeeActivity.policy(None),
+        ),
+        &natural_key::request_record(&w.bob_id(), &request.hash()),
+    );
+    let value = record.to_json().unwrap();
+    let entry = writer
+        .app_mut()
+        .record_op(&target, Some(&value), Vec::new())
+        .await
+        .unwrap();
+    writer
+        .app_mut()
+        .submit_batch(OpBatch::new().entry(entry))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_replies_kept_over_a_record_sealed_at_a_key_not_held_given_up_with_the_notice() {
+    // The payer's acceptance and proof reach the shop before it holds the request's record.
+    // Another of bob's apps then writes the record at a new data epoch whose key the shop
+    // doesn't hold: the shop holds the record, unopened. Past 30 days the kept replies are
+    // given up, and the host told, as any message that waited for a scope key (Paykit spec
+    // 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    let kept = shop.app().protocol_scan(b"pr/").await.unwrap().len();
+    assert_eq!(kept, 2, "acceptance and proof kept");
+    w.bob.next_doc(|body| body.data_epoch += 1).unwrap();
+    let till_cert = till.app().cert().clone();
+    bob_bundle(&w, till.app_id(), &till_cert, 1);
+    till.receive(None).await.unwrap();
+    till.receive(None).await.unwrap();
+    let shop_cert = shop.app().cert().signed().clone();
+    record_request_by(&w, &mut till, &shop_cert, &request).await;
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let key = shop
+        .app()
+        .record_key(&RecordTarget::new(
+            SwitchCollection::new(
+                Collection::PayeeActivity.name(),
+                Collection::PayeeActivity.policy(None),
+            ),
+            &natural_key::request_record(&w.bob_id(), &request.hash()),
+        ))
+        .unwrap();
+    let held = shop.app().shared_record(&key).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            held.content,
+            pubky_switch_client::app::RecordContent::Unreadable(
+                pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+            )
+        ),
+        "{:?}",
+        held.content
+    );
+    // Within 30 days, both stay kept.
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - DAY_MS);
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 2);
+    assert!(shop.notices().await.unwrap().is_empty());
+    w.clock.advance_ms(2 * DAY_MS);
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    let notices = shop.notices().await.unwrap();
+    assert_eq!(notices.len(), 2, "{notices:?}");
+    assert!(notices
+        .iter()
+        .all(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp
+            && n.request_hash == Some(request.hash())));
+}
+
+#[tokio::test]
+async fn test_replies_kept_past_30_days_stay_while_the_records_are_not_listed() {
+    // A kept reply past its 30 days when a `missed` item comes and Paykit's listing fails:
+    // the absence of its record decides nothing then, so it stays; once Paykit lists, with
+    // still no record, it goes (Paykit spec 8.1, "Records not listed yet").
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let _request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 2);
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS + DAY_MS);
+    let now = w.clock.now_ms();
+    w.bob.switch().push_missed(1, now - 1_000, now);
+    w.bob.switch().fail_next(Fault::Error {
+        path: "records?collection".into(),
+        code: ErrorCode::Unavailable,
+        current: serde_json::Value::Null,
+    });
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.records_unlisted.is_some(), "{got:?}");
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 2);
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.records_unlisted.is_none(), "{got:?}");
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert!(shop.notices().await.unwrap().is_empty());
+}

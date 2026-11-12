@@ -11,20 +11,10 @@ use pubky_switch_client::testing::{Fault, TestSigner};
 use pubky_switch_core::claims::Outcome;
 use pubky_switch_core::http::ErrorCode;
 
-use crate::common::{asked, draft, mark_senders, request_from, seed_marks, store, World};
+use crate::common::{
+    asked, draft, mark_senders, refuse_writes, request_from, seed_marks, store, World,
+};
 use pubky_switch_core::records::DAY_MS;
-
-/// The next `n` batches at `signer`'s switch are refused for good, `403 permission_missing`,
-/// as an effect the switch refuses whatever is sent again.
-fn refuse_writes(signer: &TestSigner, n: usize) {
-    for _ in 0..n {
-        signer.switch().fail_next(Fault::Error {
-            path: "/ops".into(),
-            code: ErrorCode::PermissionMissing,
-            current: serde_json::Value::Null,
-        });
-    }
-}
 
 /// Whether `events` hold a duty event about an entry stored locally.
 fn about_stored(events: &[AppEvent]) -> bool {

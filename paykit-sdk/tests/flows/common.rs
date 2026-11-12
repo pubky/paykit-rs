@@ -842,3 +842,17 @@ pub async fn mark_senders(app: &Paykit, prefix: &str) -> Vec<[u8; 32]> {
         })
         .collect()
 }
+
+/// The next `n` batches at `signer`'s switch are refused for good, `403 permission_missing`,
+/// as an effect the switch refuses whatever is sent again.
+pub fn refuse_writes(signer: &TestSigner, n: usize) {
+    for _ in 0..n {
+        signer
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/ops".into(),
+                code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+                current: serde_json::Value::Null,
+            });
+    }
+}

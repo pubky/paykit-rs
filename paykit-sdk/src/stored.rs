@@ -101,8 +101,35 @@ pub(crate) fn given_up_write(
 ) -> Result<pubky_switch_client::app::LocalWrite> {
     let sender = stored.sender();
     let msg_id = &stored.message().msg_id;
-    let notice = KeptNotice::given_up(sender, msg_id, named_request(stored), service.unwrap_or(0));
-    crate::state::local_put(&key::message_notice(&sender, msg_id), &notice)
+    crate::state::local_put(
+        &key::message_notice(&sender, msg_id),
+        &given_up_notice(stored, service.unwrap_or(0)),
+    )
+}
+
+/// The host's notice that `stored` was given up, raised at `at`, service time.
+fn given_up_notice(stored: &StoredMessage, at: u64) -> KeptNotice {
+    KeptNotice::given_up(
+        stored.sender(),
+        &stored.message().msg_id,
+        named_request(stored),
+        at,
+    )
+}
+
+/// Whether `note` keeps a message of `request` still to write: one not in its record yet,
+/// whether it waits for a write that failed or for a listing. A payee's cancellation of that
+/// request kept as a stop stays while one does ([`Paykit::place_kept_cancellations`]): the
+/// request's own entry may be among them, and written without the stop it would be payable.
+pub(crate) fn writes_request(
+    note: &StoredNote,
+    own: &[u8; 32],
+    request: &[u8; 32],
+) -> Result<bool> {
+    if note.placed {
+        return Ok(false);
+    }
+    Ok(named_request(&note.message.stored(own)?) == Some(*request))
 }
 
 /// The request `stored` is, or names: a request's own hash, the first of a payer's reply's
@@ -416,21 +443,7 @@ impl Paykit {
                         })
                     });
                     if stale {
-                        // Given up: the host is told, in the commit that drops the note.
-                        let mut tx = Tx::default();
-                        tx.delete(&note_key);
-                        let notice = key::message_notice(&note.sender, &note.msg_id);
-                        if self.local_get::<KeptNotice>(&notice).await?.is_none() {
-                            let at = self.service_time().unwrap_or(0);
-                            let given_up = KeptNotice::given_up(
-                                note.sender,
-                                &note.msg_id,
-                                named_request(&stored),
-                                at,
-                            );
-                            tx.put(&notice, &given_up)?;
-                        }
-                        self.local_commit(tx).await?;
+                        self.give_up(&note_key, &stored).await?;
                     }
                     continue;
                 }
@@ -455,6 +468,19 @@ impl Paykit {
             }
         }
         Ok(())
+    }
+
+    /// Give up `stored`, kept at `kept_key`: the kept copy goes and the host is told
+    /// ([`NoticeKind::MessageGivenUp`]), in one commit. The notice is raised once.
+    pub(crate) async fn give_up(&mut self, kept_key: &str, stored: &StoredMessage) -> Result<()> {
+        let mut tx = Tx::default();
+        tx.delete(kept_key);
+        let notice = key::message_notice(&stored.sender(), &stored.message().msg_id);
+        if self.local_get::<KeptNotice>(&notice).await?.is_none() {
+            let at = self.service_time().unwrap_or(0);
+            tx.put(&notice, &given_up_notice(stored, at))?;
+        }
+        self.local_commit(tx).await
     }
 
     /// Place `stored` in its `role` of the record at `target`, as a write of the app's own.
