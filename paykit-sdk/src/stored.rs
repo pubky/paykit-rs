@@ -483,7 +483,7 @@ mod tests {
     use crate::testkit::{object, Party};
 
     fn note(placed: bool) -> StoredNote {
-        let alice = Party::new("alice", "wallet", &["pay"]);
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
         let bob = Party::new("bob", "shop", &["request"]);
         let stored = bob.message(
             &alice,
