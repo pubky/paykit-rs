@@ -2720,13 +2720,13 @@ impl Paykit {
         let now = self.now();
         let mut tx = state::Tx::default();
         for entry in self.journal().await? {
-            let done = matches!(entry.stage, Stage::Finished | Stage::Abandoned);
-            if !done || entry.failed_by_method || entry.failed_on_claim {
+            let Some(bound) = prune_bound(
+                entry.stage,
+                entry.failed_by_method || entry.failed_on_claim,
+                entry.deadline,
+                entry.journaled_at_ms,
+            ) else {
                 continue;
-            }
-            let bound = match entry.deadline {
-                Some(deadline) => deadline.saturating_add(RECONCILIATION_MS),
-                None => entry.journaled_at_ms.saturating_add(MAX_CLAIM_AGE_MS),
             };
             if bound_passed(bound, service, now) {
                 let attempt = entry.attempt()?;
@@ -3298,6 +3298,26 @@ pub(crate) fn switch_unavailable(error: &AppError) -> bool {
     }
 }
 
+/// From when a journal entry at `stage` may be pruned ([`Paykit::prune_journal`]): a
+/// `Finished` or `Abandoned` one from its `deadline` plus [`RECONCILIATION_MS`], or, without
+/// one, from [`MAX_CLAIM_AGE_MS`] after it was journaled. `None` for one a later reconcile
+/// needs: every other stage, and one whose payment method may still show it paid or that
+/// waits for a late receipt (`asked_about`).
+pub(crate) fn prune_bound(
+    stage: Stage,
+    asked_about: bool,
+    deadline: Option<u64>,
+    journaled_at_ms: u64,
+) -> Option<u64> {
+    if !matches!(stage, Stage::Finished | Stage::Abandoned) || asked_about {
+        return None;
+    }
+    Some(match deadline {
+        Some(deadline) => deadline.saturating_add(RECONCILIATION_MS),
+        None => journaled_at_ms.saturating_add(MAX_CLAIM_AGE_MS),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use pubky_switch_client::error::{ClientError, TransportError};
@@ -3321,6 +3341,34 @@ mod tests {
         assert!(!super::bound_passed(5 * day, Some(100 * day), day));
         assert!(super::bound_passed(5 * day, Some(100 * day), 5 * day));
         assert!(!super::bound_passed(0, None, 100 * day));
+    }
+
+    #[test]
+    fn test_prune_bound_only_for_a_finished_or_abandoned_entry() {
+        let kept = [
+            Stage::Recorded,
+            Stage::Attempted,
+            Stage::Paying,
+            Stage::RailPaid,
+            Stage::RailFailed,
+            Stage::AcceptanceOwed,
+        ];
+        for stage in kept {
+            assert_eq!(prune_bound(stage, false, Some(5), 1), None, "{stage:?}");
+            assert_eq!(prune_bound(stage, false, None, 1), None, "{stage:?}");
+        }
+        for stage in [Stage::Finished, Stage::Abandoned] {
+            assert_eq!(
+                prune_bound(stage, false, Some(5), 1),
+                Some(5 + RECONCILIATION_MS)
+            );
+            assert_eq!(
+                prune_bound(stage, false, None, 1),
+                Some(1 + MAX_CLAIM_AGE_MS)
+            );
+            // Still asked about, or waiting for a late receipt: kept.
+            assert_eq!(prune_bound(stage, true, Some(5), 1), None, "{stage:?}");
+        }
     }
 
     #[test]
