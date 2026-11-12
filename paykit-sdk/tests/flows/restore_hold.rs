@@ -290,3 +290,102 @@ async fn test_restore_hold_keeps_a_request_created_before_and_resent_after() {
     assert_eq!(requests.len(), 1, "{requests:?}");
     assert_eq!(requests[0].status, RequestStatus::Held);
 }
+
+/// A `missed` item at alice's switch: entries accepted in the last second were deleted before
+/// the wallet read them (Switch spec 8.2).
+fn missed(w: &World) {
+    let now = w.clock.now_ms();
+    w.alice.switch().push_missed(1, now - 1_000, now);
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_holds_an_open_request_until_the_user_confirms() {
+    // A payee's cancellation may be among the entries a `missed` item tells of: every open
+    // request is held as after a restore (Paykit spec 7.2).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+    missed(&w);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Held
+    );
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::HeldAfterRestore));
+    assert!(w.rail.all_executions().is_empty());
+    let paid = wallet.pay_request(&request, confirmed()).await.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_holds_a_repeat_until_the_user_confirms() {
+    // A payment is in flight on a method that is idempotent and keeps no history, so a
+    // resume repeats it. The user confirmed the request before; then a `missed` item comes:
+    // that confirmation releases nothing, and the repeat is withheld, the attempt left open,
+    // until the user confirms again.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true),
+    );
+    wallet
+        .confirm_possibly_cancelled(&request, UserConfirmed::new())
+        .await
+        .unwrap();
+    missed(&w);
+    wallet.receive(None).await.unwrap();
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Paying
+    );
+    wallet
+        .confirm_possibly_cancelled(&request, UserConfirmed::new())
+        .await
+        .unwrap();
+    // Repeated: the method is called again for the same attempt.
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt_id), 2);
+}
+
+#[tokio::test]
+async fn test_restore_hold_confirming_a_request_not_held_refused_as_not_found() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let unknown = RequestRef {
+        payee: w.bob_id(),
+        request_hash: [9; 32],
+    };
+    let refused = wallet
+        .confirm_possibly_cancelled(&unknown, UserConfirmed::new())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::NotFound));
+}

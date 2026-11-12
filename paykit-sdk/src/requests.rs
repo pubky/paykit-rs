@@ -283,9 +283,10 @@ pub enum RequestStatus {
     Cancelled,
     /// Its proposal expired unpaid.
     Expired,
-    /// Held after a restore: the payee may have cancelled it since the backup, and it is
-    /// paid only once the user has seen that (Paykit spec 7.2,
-    /// [`crate::PayOptions::possibly_cancelled_confirmed`]).
+    /// Held after a restore or a `missed` item: the payee may have cancelled it since the
+    /// backup, or among the entries the service deleted, and it is paid only once the user
+    /// has seen that (Paykit spec 7.2, [`crate::PayOptions::possibly_cancelled_confirmed`],
+    /// [`crate::Paykit::confirm_possibly_cancelled`]).
     Held,
     /// Received, but its record couldn't be written: the switch refused the write for good,
     /// such as over a quota (Switch spec 8.2). It is shown from the app's own copy and

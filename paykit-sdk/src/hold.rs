@@ -1,13 +1,18 @@
-//! The hold after a restore (Paykit spec 7.2, "What a restore loses"), one-time branch.
+//! The hold after a restore (Paykit spec 7.2, "What a restore loses"), one-time branch, and
+//! the same hold after a `missed` item.
 //!
 //! A backup can predate a payee's cancellation of a request it holds open: the restored app
 //! would see the request payable. So every restore from a backup holds every open request,
 //! as the restore itself sets it: [`crate::protocol::PaykitProtocol`]'s restore step adds the
 //! hold to the writes it installs, in the restore's one commit, so no restore can leave it
 //! out; it is no part of what a backup carries, and a confirmation an older backup holds is
-//! dropped by the restore. While a request is held:
+//! dropped by the restore. A `missed` item (Switch spec 8.2) shows the service deleted
+//! entries before the app read them, a payee's cancellation possibly among them: the
+//! protocol's `missed` step sets the same hold (`mh`) and drops every confirmation of an
+//! earlier one, in the commit that passes the item. While a request is held:
 //!
-//! - no automatic attempt is made on it (part 1 makes none);
+//! - no automatic attempt is made on it, and a dispatch made before is not repeated at a
+//!   resume;
 //! - a manual one only once the user has seen that the payee may have cancelled it
 //!   ([`crate::PayOptions::possibly_cancelled_confirmed`]), which ends the hold for that
 //!   request;
@@ -298,8 +303,9 @@ impl Paykit {
         self.local_put(key::LISTED_CERT, &signed).await
     }
 
-    /// Whether the request record at `record_key`, `record`, is held after a restore: a
-    /// restore set the hold, the user hasn't confirmed this request since, and it is open.
+    /// Whether the request record at `record_key`, `record`, is held after a restore or a
+    /// `missed` item: one of them set the hold, the user hasn't confirmed this request
+    /// since, and it is open.
     /// Every open request is held, one first seen after the restore too: no time the app
     /// can see proves a request new, since its creation time is the counterparty's and a
     /// request from before the backup can come again with a later acceptance time (Paykit
@@ -309,11 +315,11 @@ impl Paykit {
         record_key: &[u8; 32],
         record: &ActivityRecord,
     ) -> Result<bool> {
-        if self
+        let restored = self
             .local_get::<RestoreHold>(key::RESTORE_HOLD)
             .await?
-            .is_none()
-        {
+            .is_some();
+        if !restored && self.local_get::<bool>(key::MISSED_HOLD).await?.is_none() {
             return Ok(false);
         }
         if record.shows_paid() || cancelled(record) || rejected(record) {
@@ -323,6 +329,34 @@ impl Paykit {
             .local_get::<bool>(&key::hold_confirmed(record_key))
             .await?
             .is_none())
+    }
+
+    /// The user has seen that the payee may have cancelled `request` since the backup the
+    /// app was restored from, or a `missed` item, and lets its payment go on: the request's
+    /// hold ends, as a payment confirmed with
+    /// [`crate::PayOptions::possibly_cancelled_confirmed`] ends it, so a dispatch made before
+    /// the hold is repeated at a later resume (Paykit spec 7.2). It never overrides a
+    /// cancellation the record shows or the app keeps. A later `missed` item holds the
+    /// request again.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::NotFound`] when the app holds no record of the request; a store failure.
+    pub async fn confirm_possibly_cancelled(
+        &mut self,
+        request: &crate::requests::RequestRef,
+        _confirmed: pubky_switch_client::app::UserConfirmed,
+    ) -> Result<()> {
+        self.refresh_own()?;
+        let target = crate::activity::ActivityTarget::payer(
+            paykit_lib::derive::natural_key::request_record(&request.payee, &request.request_hash),
+        );
+        if self.held_activity(&target).await?.is_none() {
+            return Err(Refusal::NotFound.into());
+        }
+        let record_key = self.activity_key(&target)?;
+        self.local_put(&key::hold_confirmed(&record_key), &true)
+            .await
     }
 
     /// A restored cursor time (`ct`) above the backup's highest verified service time plus

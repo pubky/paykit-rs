@@ -106,9 +106,9 @@ pub struct PayOptions {
     /// anyway ([`Refusal::IdentityUnconfirmed`]; Switch spec 4.3, Paykit spec 7.2).
     pub unconfirmed_identity_confirmed: Option<UserConfirmed>,
     /// The user has seen that the payee may have cancelled this request since the backup the
-    /// app was restored from, and pays it anyway ([`Refusal::HeldAfterRestore`]; Paykit spec
-    /// 7.2, "What a restore loses"). It ends the request's hold; it never overrides a
-    /// cancellation the app holds.
+    /// app was restored from, or a `missed` item, and pays it anyway
+    /// ([`Refusal::HeldAfterRestore`]; Paykit spec 7.2, "What a restore loses"). It ends the
+    /// request's hold; it never overrides a cancellation the app holds.
     pub possibly_cancelled_confirmed: Option<UserConfirmed>,
     /// The payment of a request from a blocked payee the user was shown and chose to make,
     /// as a [`Refusal::Blocked`] gave it (Paykit spec 8.1): only that same payment is made.
@@ -2977,8 +2977,10 @@ impl Paykit {
     /// be paid (Paykit spec 8.1): this app keeps a stop for it, or the request record the
     /// switch holds, read again, shows it cancelled or rejected, or isn't there (a `404`
     /// included, whatever copy this app keeps) or doesn't read as the request, a newer write
-    /// this app refused included, so nothing shows it still open. A payment without a request has
-    /// nothing a payee cancels.
+    /// this app refused included, so nothing shows it still open; or the request is held
+    /// after a restore or a `missed` item until the user confirms it (Paykit spec 7.2,
+    /// [`Paykit::confirm_possibly_cancelled`]). A payment without a request has nothing a
+    /// payee cancels.
     async fn repeat_withheld(&mut self, entry: &JournalEntry) -> Result<bool> {
         if entry.request_hash()?.is_none() {
             return Ok(false);
@@ -2988,7 +2990,11 @@ impl Paykit {
             return Ok(true);
         }
         Ok(match self.fresh_request(&target).await? {
-            Fresh::Held(fresh) => cancelled(&fresh) || rejected(&fresh),
+            Fresh::Held(fresh) => {
+                cancelled(&fresh)
+                    || rejected(&fresh)
+                    || self.held(&self.activity_key(&target)?, &fresh).await?
+            }
             Fresh::Missing | Fresh::Unreadable => true,
         })
     }
