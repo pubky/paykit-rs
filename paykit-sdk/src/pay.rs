@@ -185,7 +185,8 @@ impl PayOptions {
 /// A payment to a payee the identity's deny list holds, as a [`Refusal::Blocked`] shows it
 /// to the user (Paykit spec 8.1, "Blocked counterparties"): the payee, the request paid, if
 /// any, and the amount. A payment the user then makes anyway carries it back
-/// ([`PayOptions::with_blocked_confirmed`]): the SDK reads the deny list again and pays only
+/// ([`PayOptions::with_blocked_confirmed`]): the SDK judges the payment again, by the deny
+/// list as read in the last 10 minutes or read first, as at the first try, and pays only
 /// when what it would show now is this, field for field.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
