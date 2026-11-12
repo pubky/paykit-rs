@@ -700,7 +700,7 @@ async fn test_unrequested_paid_with_its_outcome_unwritten_is_no_error() {
 }
 
 #[tokio::test]
-async fn test_review_list_ask_mark_backs_up_and_restores() {
+async fn test_unrequested_list_ask_mark_backs_up_and_restores() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
