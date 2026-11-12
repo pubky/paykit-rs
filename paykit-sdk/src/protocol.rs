@@ -29,7 +29,7 @@ use paykit_lib::bodies::{check_body, Body, ResendRequest};
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::{natural_key, request_obligation_blinded};
 use paykit_lib::kinds::{targets_app, Kind, Role as KindRole, Side, OPAQUE_MEMBERS};
-use paykit_lib::records::{ActivitySide, PaymentListRecord, StoredMessage};
+use paykit_lib::records::{ActivitySide, AllowanceRecord, PaymentListRecord, StoredMessage};
 use paykit_lib::scopes::{
     acts_as_payee, check_certificate, verify_certificate, PaykitScope, ScopeName,
 };
@@ -50,6 +50,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::activity::{self, ActivityTarget, KeptSide, SideTag};
+use crate::allowances::{allowance_target, Consent};
 use crate::hold::RestoreHold;
 use crate::journal::JournalEntry;
 use crate::marks::{read_mark, MarkFamily};
@@ -61,12 +62,13 @@ use crate::records::{list_target, KeptMessage};
 use crate::state::{self, key, StateKey};
 
 /// The kinds this SDK handles (Paykit wire 4.3): the one-time request flow, payments without
-/// a request, the payer's side of Private Payment Lists and re-sends. Recurring requests,
-/// Allowances and publishing Private Payment Lists come later. A
-/// `private_payment_list_request` this SDK receives is taken with no effect: it publishes no
-/// list at all yet, so the Publishing rule's answer to a request naming a used version
-/// (Paykit spec 8.4) comes with list publishing, with that rule's other triggers.
-pub const HANDLED_KINDS: [Kind; 9] = [
+/// a request, the payer's side of Private Payment Lists, re-sends, and the Allowance
+/// messages with `executor_notice`. Recurring requests and publishing Private Payment Lists
+/// come later. A `private_payment_list_request` this SDK receives is taken with no effect:
+/// it publishes no list at all yet, so the Publishing rule's answer to a request naming a
+/// used version (Paykit spec 8.4) comes with list publishing, with that rule's other
+/// triggers.
+pub const HANDLED_KINDS: [Kind; 14] = [
     Kind::PaymentRequest,
     Kind::PaymentRequestAcceptance,
     Kind::PaymentRequestRejection,
@@ -76,6 +78,11 @@ pub const HANDLED_KINDS: [Kind; 9] = [
     Kind::ResendRequest,
     Kind::PrivatePaymentList,
     Kind::PrivatePaymentListRequest,
+    Kind::AllowanceProposal,
+    Kind::AllowanceAcceptance,
+    Kind::AllowanceRejection,
+    Kind::AllowanceEnd,
+    Kind::ExecutorNotice,
 ];
 
 /// A re-send to ask of a sender (`p/ask/`).
@@ -328,12 +335,13 @@ pub const BACKUP_NAME: &str = "paykit";
 /// Every message another party signed that the layer keeps is verified again for `own`, as
 /// its later use verifies it, and bound to the record key it is kept under, from `blind`,
 /// the backup's naming key: a journal entry's request and carrier
-/// ([`JournalEntry::check_restored`]), a kept cancellation (`kc/`), a kept payer's reply
-/// (`pr/`), a held list (`lh/`),
+/// ([`JournalEntry::check_restored`]), a kept cancellation (`kc/`), a kept payer's reply or
+/// Allowance answer (`pr/`), a kept Allowance end (`ae/`), a held list (`lh/`),
 /// a queued `resend_request` (`ans/`: the requester's certificate, a `resend_request`'s
 /// body, and the `seq` and `msg_id` its key names), and a payee app's records seen (`ar/`,
 /// bound to the payee and app its key names). The rest is the app's own data, read as its
-/// family's and bound to its key (`ask/`, times and counts, `side/`, notices `nt/`): a
+/// family's and bound to its key (`ask/`, times and counts, `side/`, `en/`, notices `nt/`,
+/// the consent list `ac/`, each entry marked to be confirmed again): a
 /// backup carries the app's signing keys, so whoever can write one can sign anything the
 /// app can, and a check of what the app signed guards against corruption only.
 pub(crate) fn restore_paykit_layer(
@@ -457,6 +465,34 @@ pub(crate) fn restore_paykit_layer(
             }
             StateKey::KeptCancellation(_) => {
                 check_kept_cancellation(&key, &value, &own, &record_key)?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::AllowanceEnd(_) => {
+                check_kept_end(&key, &value, &own, &record_key)?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::Consent(_) => {
+                // The backup may predate an end: every Allowance on the consent list is
+                // confirmed by the user again before the executor pays under it (Paykit spec
+                // 8.3, "After a restore"). A removal stays for good.
+                let consent = match state::decode::<Consent>(&value).map_err(|_| unread())? {
+                    Consent::Held { .. } => Consent::Held {
+                        confirm_again: true,
+                    },
+                    removed => removed,
+                };
+                let value = state::encode(&consent).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::NoticeTarget(msg_id) => {
+                let kept = state::decode::<crate::allowances::NoticeTarget>(&value)
+                    .map_err(|_| unread())?;
+                if kept.msg_id != msg_id {
+                    return Err(unread());
+                }
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -611,6 +647,18 @@ fn check_kept_reply(
     let bad = || String::from("Switch spec 8.2: a kept payer's reply in the backup doesn't verify");
     let kept = state::decode::<KeptMessage>(value).map_err(|_| bad())?;
     let reply = kept.stored(own).map_err(|_| bad())?;
+    // An Allowance's answer kept before its record, under the key of the record its
+    // proposal's Allowance names (Paykit spec 8.1).
+    if let Body::AllowanceAcceptance(answer) | Body::AllowanceRejection(answer) = reply.body() {
+        let target = allowance_target(&reply.sender(), &answer.allowance_id);
+        if reply.sender() != sender
+            || reply.message().msg_id != msg_id
+            || record_key(&target)? != record
+        {
+            return Err(bad());
+        }
+        return Ok(());
+    }
     let replies = matches!(
         reply.body(),
         Body::PaymentRequestAcceptance(_)
@@ -628,6 +676,28 @@ fn check_kept_reply(
         || reply.message().msg_id != msg_id
         || record_key(&target.record_target())? != record
     {
+        return Err(bad());
+    }
+    Ok(())
+}
+
+/// A counterparty's Allowance end kept as the stop (`ae/<record key>`, Paykit spec 8.3): it
+/// verifies for `own`, is a `paykit.allowance_end`, and is kept under the record key of the
+/// Allowance record it names.
+fn check_kept_end(
+    key: &[u8],
+    value: &[u8],
+    own: &[u8; 32],
+    record_key: &impl Fn(&RecordTarget) -> Result<[u8; 32], String>,
+) -> Result<(), String> {
+    let bad = || String::from("Paykit spec 8.3: a kept Allowance end in the backup doesn't verify");
+    let kept = state::decode::<KeptMessage>(value).map_err(|_| bad())?;
+    let end = kept.stored(own).map_err(|_| bad())?;
+    let Body::AllowanceEnd(reply) = end.body() else {
+        return Err(bad());
+    };
+    let target = allowance_target(&end.sender(), &reply.allowance_id);
+    if key != key::allowance_end(&record_key(&target)?).as_bytes() {
         return Err(bad());
     }
     Ok(())
@@ -762,6 +832,15 @@ impl Protocol for PaykitProtocol {
         // A kept side that can't be read sends to no one rather than guess (Paykit spec 3.4):
         // the message isn't sealed to this recipient.
         // So does one that names another message than its key.
+        // An `executor_notice` is wrapped only to the executor app its batch kept (Paykit
+        // wire 4.17): to no app without one.
+        if message.kind == Kind::ExecutorNotice.as_str() {
+            return matches!(
+                view_get::<crate::allowances::NoticeTarget>(view, &key::notice_target(&message.msg_id)),
+                Ok(Some(kept)) if kept.msg_id == message.msg_id
+                    && kept.app_id == recipient.cert().app_id()
+            );
+        }
         match view_get::<KeptSide>(view, &key::side(&message.msg_id)) {
             Ok(Some(kept)) if kept.msg_id != message.msg_id => false,
             Ok(kept) => self.narrows(message, recipient, KeptSide::of(kept, &message.msg_id)),
@@ -925,6 +1004,7 @@ impl Protocol for PaykitProtocol {
             (Collection::PaymentLists, Some(v)) => {
                 PaymentListRecord::read(v, &own.identity).is_ok()
             }
+            (Collection::Allowances, Some(v)) => AllowanceRecord::read(v, &own.identity).is_ok(),
             _ => false,
         };
         match (reads, value) {
@@ -1012,6 +1092,15 @@ impl PaykitProtocol {
                 };
                 // Wire 5.4 "Seen lists": a later list of a greater version, or the same list,
                 // and never a single-use mark dropped, at any version.
+                held.check_later_write(&later).err().map(|e| e.to_string())
+            }
+            Collection::Allowances => {
+                let held = AllowanceRecord::read(seen, &own.identity).ok()?;
+                let Ok(later) = AllowanceRecord::read(value, &own.identity) else {
+                    return Some("Paykit wire 5.4: an allowances record that doesn't read".into());
+                };
+                // Wire 5.4 "Seen roles" and "Rewrites": the proposal, the response and the end
+                // seen are kept, and the grant history seen starts the later one.
                 held.check_later_write(&later).err().map(|e| e.to_string())
             }
             _ => None,
@@ -1206,10 +1295,32 @@ mod receive_tests {
         let kinds = p.accepts(&wallet.cert);
         assert!(kinds.contains(&"paykit.payment_request".to_owned()));
         assert!(!kinds.contains(&"paykit.payment_proof".to_owned()));
-        assert!(!kinds.contains(&"paykit.allowance_proposal".to_owned()));
-        // Another app's scopes receive by Paykit's table, handled here or not.
+        // `allowance` takes the four Allowance messages; only `allowance_execute` takes
+        // `executor_notice` (Paykit spec 3.3).
+        for kind in [
+            "paykit.allowance_proposal",
+            "paykit.allowance_acceptance",
+            "paykit.allowance_rejection",
+            "paykit.allowance_end",
+        ] {
+            assert!(kinds.contains(&kind.to_owned()), "{kind}");
+        }
+        assert!(!kinds.contains(&"paykit.executor_notice".to_owned()));
+        let executor = Party::new(
+            "alice",
+            "executor",
+            &["pay", "allowance", "allowance_execute", "contacts"],
+        );
+        assert!(p
+            .accepts(&executor.cert)
+            .contains(&"paykit.executor_notice".to_owned()));
+        // Another app's scopes receive by Paykit's table.
         assert!(p.receives("paykit.allowance_proposal", &wallet.cert));
         assert!(!p.receives("paykit.payment_proof", &wallet.cert));
+        let plain = Party::new("alice", "wallet", &["pay", "contacts"]);
+        assert!(!p
+            .accepts(&plain.cert)
+            .contains(&"paykit.allowance_proposal".to_owned()));
     }
 
     #[test]
@@ -1369,6 +1480,97 @@ mod receive_tests {
         assert!(
             check_kept_reply(&value, &bob.id(), (alice.id(), record), &msg_id, &fake_key).is_ok()
         );
+    }
+
+    /// Bob's Allowance proposal to alice, his end of it, and the parties.
+    fn allowance_end() -> (Party, Party, StoredMessage, StoredMessage) {
+        let alice = Party::new("alice", "wallet", &["pay", "allowance", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request", "allowance"]);
+        let id = "d0efffb7-191b-4709-b6c7-e343af5500b4";
+        let terms = json!({
+            "asset": "btc", "per_payment_amount": null, "period_limits": [],
+            "lifetime_amount_limit": "0.10", "active_from": null, "expires_at": null,
+            "allowed_payment_endpoint_identifiers": null
+        });
+        let proposal = bob.message(
+            &alice,
+            "paykit.allowance_proposal",
+            vec![],
+            object(json!({ "allowance_id": id, "proposer_role": "allowee", "terms": terms })),
+        );
+        let end = bob.message(
+            &alice,
+            "paykit.allowance_end",
+            vec![proposal.hash()],
+            object(json!({ "allowance_id": id })),
+        );
+        (alice, bob, proposal, end)
+    }
+
+    #[test]
+    fn test_protocol_restore_takes_a_kept_end_at_its_record() {
+        let (alice, bob, _, end) = allowance_end();
+        let Body::AllowanceEnd(reply) = end.body() else {
+            panic!("an end");
+        };
+        let target = allowance_target(&bob.id(), &reply.allowance_id);
+        let key = key::allowance_end(&fake_key(&target).unwrap());
+        let value = state::encode(&KeptMessage::of(&end)).unwrap();
+        assert!(check_kept_end(key.as_bytes(), &value, &alice.id(), &fake_key).is_ok());
+    }
+
+    #[test]
+    fn test_protocol_restore_refuses_a_kept_end_at_another_key_or_of_another_kind() {
+        let (alice, bob, proposal, end) = allowance_end();
+        let value = state::encode(&KeptMessage::of(&end)).unwrap();
+        let other = key::allowance_end(&[9; 32]);
+        assert!(check_kept_end(other.as_bytes(), &value, &alice.id(), &fake_key).is_err());
+        // The proposal under the end's key isn't an end.
+        let Body::AllowanceProposal(body) = proposal.body() else {
+            panic!("a proposal");
+        };
+        let target = allowance_target(&bob.id(), &body.allowance_id);
+        let key = key::allowance_end(&fake_key(&target).unwrap());
+        let proposal = state::encode(&KeptMessage::of(&proposal)).unwrap();
+        assert!(check_kept_end(key.as_bytes(), &proposal, &alice.id(), &fake_key).is_err());
+    }
+
+    #[test]
+    fn test_protocol_record_regression_on_a_dropped_allowance_end() {
+        let (alice, bob, proposal, end) = allowance_end();
+        let p = protocol_of(&alice);
+        let open = |end: Option<StoredMessage>| {
+            let Body::AllowanceProposal(body) = proposal.body() else {
+                panic!("a proposal");
+            };
+            AllowanceRecord {
+                counterparty: bob.id(),
+                allowance_id: body.allowance_id.clone(),
+                proposal: proposal.clone(),
+                response: None,
+                end,
+                grant: None,
+                grants: Vec::new(),
+                msg_ids: Vec::new(),
+                unknown: Default::default(),
+            }
+            .to_json()
+            .unwrap()
+        };
+        let seen = open(None);
+        let ended = open(Some(end));
+        assert_eq!(p.record_regression("allowances", &seen, Some(&ended)), None);
+        assert_eq!(
+            p.record_seen("allowances", Some(&seen), Some(&ended)),
+            Some(ended.clone())
+        );
+        // A later write that drops the end seen is refused, as is one that doesn't read.
+        assert!(p
+            .record_regression("allowances", &ended, Some(&seen))
+            .is_some());
+        assert!(p
+            .record_regression("allowances", &seen, Some(b"{}"))
+            .is_some());
     }
 
     #[test]

@@ -41,7 +41,7 @@ use paykit_lib::records::{PaymentListRecord, StoredMessage, UnrequestedDestinati
 use paykit_lib::{AttemptId, Body};
 use pubky_switch_client::app::{
     AppError, ClaimFetch, ClaimOp, LocalWrite, Need, ObligationDeadline, ReceiveContext,
-    RecordContent, Refusal as ClientRefusal, StoreFailure, Unopened,
+    RecordContent, RecordTarget, Refusal as ClientRefusal, StoreFailure, Unopened,
 };
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::claims::{Basis, ClaimStatus, Outcome, RECONCILIATION_MS};
@@ -222,6 +222,19 @@ pub(crate) fn effect(
                 local(&key::answer(seq, &stored.message().msg_id), &queued)?,
             );
         }
+        // Allowances (Paykit spec 8.3): the four messages go into the `allowances` record, an
+        // end kept first as the stop; a notice changes only the executor's consent list.
+        Body::AllowanceProposal(_)
+        | Body::AllowanceAcceptance(_)
+        | Body::AllowanceRejection(_)
+        | Body::AllowanceEnd(_)
+            if scopes.iter().any(|s| s == "allowance") =>
+        {
+            crate::allowances::receive_effect(cx, stored, &scopes)?;
+        }
+        Body::ExecutorNotice(notice) if scopes.iter().any(|s| s == "allowance_execute") => {
+            crate::allowances::notice_effect(cx, notice)?;
+        }
         // A publishing app answers a request naming a used version with its current list
         // (Paykit spec 8.4, "Publishing"). This SDK publishes no list at all yet, so the
         // request is taken with no effect; the answer comes with list publishing.
@@ -231,7 +244,7 @@ pub(crate) fn effect(
     Ok(())
 }
 
-fn local<T: Serialize>(key: &str, value: &T) -> Result<LocalWrite, Fail> {
+pub(crate) fn local<T: Serialize>(key: &str, value: &T) -> Result<LocalWrite, Fail> {
     state::local_put(key, value).map_err(|_| Fail::corrupt())
 }
 
@@ -240,7 +253,7 @@ fn local<T: Serialize>(key: &str, value: &T) -> Result<LocalWrite, Fail> {
 /// the step; the step goes on, and the client stores the entry as too large once the step
 /// applies (Switch spec 8.2). Dropping the message here instead would consume a valid
 /// entry, so the refusal is not passed on.
-fn keep_local(cx: &mut ReceiveContext<'_>, write: LocalWrite) {
+pub(crate) fn keep_local(cx: &mut ReceiveContext<'_>, write: LocalWrite) {
     if let Err(error) = cx.local(write) {
         debug_assert!(
             matches!(error, AppError::Refused(ClientRefusal::Usage(_))),
@@ -277,7 +290,7 @@ fn note_cursor_time(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Resu
 /// may miss a flag, and [`Paykit::refresh_lists_when_due`] reads the lists again before the
 /// next read of the feed. A failed store read holds the message too: it is never read as a
 /// clean sender.
-fn admits_new_state(
+pub(crate) fn admits_new_state(
     cx: &mut ReceiveContext<'_>,
     sender: &[u8; 32],
     scopes: &[String],
@@ -312,7 +325,7 @@ pub(crate) fn reads_lists(scopes: &[String]) -> bool {
 
 /// Note a counterparty with Paykit activity, for re-sends after a `missed` item or a
 /// provider loss (Paykit spec 9, Switch spec 12.6).
-fn note_peer(
+pub(crate) fn note_peer(
     cx: &mut ReceiveContext<'_>,
     pubky: &[u8; 32],
     stored: &StoredMessage,
@@ -339,7 +352,15 @@ fn held_value(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<Option
 /// as with a bundle that came in parts, so the context's own wait doesn't cover it
 /// ([`Fail::AwaitsKey`]).
 fn wait_for_key(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<(), Fail> {
-    let held = cx.record(&target.record_target())?;
+    wait_for_record_key(cx, &target.record_target())
+}
+
+/// [`wait_for_key`] for the record at any client target, such as an `allowances` record.
+pub(crate) fn wait_for_record_key(
+    cx: &ReceiveContext<'_>,
+    target: &RecordTarget,
+) -> Result<(), Fail> {
+    let held = cx.record(target)?;
     if let Some(RecordContent::Unreadable(Unopened::KeyNotHeld { data_epoch })) =
         held.map(|held| held.content)
     {
@@ -367,8 +388,18 @@ fn held_or_unlisted(
     target: &ActivityTarget,
     side: RecordSide,
 ) -> Result<Option<Vec<u8>>, Fail> {
-    wait_for_key(cx, target)?;
-    let record = cx.record(&target.record_target())?;
+    held_or_unlisted_at(cx, &target.record_target(), side)
+}
+
+/// [`held_or_unlisted`] for the record at any client target, such as an `allowances`
+/// record, of `side`.
+pub(crate) fn held_or_unlisted_at(
+    cx: &ReceiveContext<'_>,
+    target: &RecordTarget,
+    side: RecordSide,
+) -> Result<Option<Vec<u8>>, Fail> {
+    wait_for_record_key(cx, target)?;
+    let record = cx.record(target)?;
     if record.is_none() {
         hold_while_unlisted(cx, side)?;
     }
@@ -866,7 +897,10 @@ pub(crate) fn kept_reply_evicted(kept: &[CountedReply], sender: &[u8; 32]) -> Op
 /// bounds drop ([`kept_reply_evicted`]) goes, dropped without being processed, and counts in
 /// its sender's mark (`pd/<sender>`, `marks.rs`) with its acceptance time, so the sender is
 /// asked to send it again once the record of one of its requests is held.
-fn make_room_for_reply(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<(), Fail> {
+pub(crate) fn make_room_for_reply(
+    cx: &mut ReceiveContext<'_>,
+    sender: &[u8; 32],
+) -> Result<(), Fail> {
     let mut kept = Vec::new();
     let mut names = Vec::new();
     for (bytes, value) in cx.local_scan(key::KEPT_REPLIES.as_bytes())? {
@@ -1057,6 +1091,11 @@ impl Paykit {
         for (rest, kept) in self.local_scan::<KeptMessage>(key::KEPT_REPLIES).await? {
             let kept_key = format!("{}{rest}", key::KEPT_REPLIES);
             let reply = kept.stored(&own)?;
+            // An Allowance's answer kept before its record (`allowances.rs`).
+            if crate::allowances::is_allowance_response(reply.body()) {
+                self.place_kept_allowance_response(&kept_key, reply).await?;
+                continue;
+            }
             let (Some(request), Some(role)) = (
                 reply.message().refs.first(),
                 crate::activity::Role::of(reply.body()),

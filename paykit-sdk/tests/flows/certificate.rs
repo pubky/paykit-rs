@@ -40,7 +40,12 @@ fn is_cert_refused(error: &PaykitError) -> bool {
 
 /// Alice's signer renews her `wallet`'s certificate for `scopes`, issued `after_ms` from now,
 /// and stores it at her switch (Switch wire 3.8). Not listed yet.
-fn renew(w: &World, app_id: [u8; 16], scopes: &RequestedScopes, after_ms: u64) -> AppCert {
+pub(crate) fn renew(
+    w: &World,
+    app_id: [u8; 16],
+    scopes: &RequestedScopes,
+    after_ms: u64,
+) -> AppCert {
     let keys = w.alice.identity().app_keys("wallet");
     let names: Vec<&str> = scopes.scopes.iter().map(String::as_str).collect();
     let renewed = issue_cert(
@@ -61,7 +66,7 @@ fn renew(w: &World, app_id: [u8; 16], scopes: &RequestedScopes, after_ms: u64) -
 }
 
 /// Alice's next `identity.json` lists `renewed` for the app, renewing `old`.
-fn list(w: &World, app_id: [u8; 16], old: &AppCert, renewed: &AppCert) {
+pub(crate) fn list(w: &World, app_id: [u8; 16], old: &AppCert, renewed: &AppCert) {
     w.alice
         .next_doc(|body| {
             body.apps.retain(|a| a.app_id != app_id);
@@ -1202,7 +1207,7 @@ async fn reloaded_after_a_failed_read(w: &World, base: &Arc<dyn StateStore>) -> 
     wallet
 }
 
-fn is_not_now(error: &PaykitError) -> bool {
+pub(crate) fn is_not_now(error: &PaykitError) -> bool {
     matches!(error.refusal(), Some(Refusal::NotNow(_)))
 }
 
@@ -1680,7 +1685,7 @@ async fn test_certificate_wider_without_the_pay_key_writes_nothing_and_journals_
 }
 
 /// The signer stores `cert`'s key bundle for app `me`, every data epoch up to the current.
-fn store_bundle(w: &World, me: [u8; 16], cert: &AppCert) {
+pub(crate) fn store_bundle(w: &World, me: [u8; 16], cert: &AppCert) {
     let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
     let parts = pubky_switch_core::records::seal_bundle_parts(
         w.alice.identity().key(),
@@ -2478,10 +2483,11 @@ async fn test_certificate_restore_taking_a_wider_one_without_keys_stays_unlisted
 }
 
 #[tokio::test]
-async fn test_certificate_restore_taking_one_without_a_key_no_listing_needs_is_listed() {
-    // The renewal after the backup adds `allowance`, whose key the restored app lacks but
-    // which reads none of the records the client lists: the client lists at the restore's
-    // first read all the same, so the restore's mark goes and the requests show.
+async fn test_certificate_restore_taking_allowance_without_its_key_lists_once_it_comes() {
+    // The renewal after the backup adds `allowance`, whose key the restored app lacks and
+    // which reads `allowances`: the client skips the restore's listing, so the restore's
+    // mark stays and the Allowances aren't shown. Once the key comes, a read lists, the
+    // mark goes and the requests and Allowances show.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let me = wallet.app_id();
@@ -2508,8 +2514,16 @@ async fn test_certificate_restore_taking_one_without_a_key_no_listing_needs_is_l
     .unwrap();
     restored.receive(None).await.unwrap();
     assert_eq!(restored.app().cert().hash(), wider.hash());
+    assert!(restored.app().protocol_get(b"nl").await.unwrap().is_some());
+    let unlisted = restored.allowances().await.unwrap_err();
+    assert!(is_not_now(&unlisted), "{unlisted:?}");
+    store_bundle(&w, me, &wider);
+    for _ in 0..3 {
+        restored.receive(None).await.unwrap();
+    }
     assert!(restored.app().protocol_get(b"nl").await.unwrap().is_none());
     assert!(restored.requests().await.unwrap().is_empty());
+    assert!(restored.allowances().await.unwrap().is_empty());
 }
 
 #[tokio::test]

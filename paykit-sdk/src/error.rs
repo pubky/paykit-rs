@@ -37,6 +37,11 @@ pub enum Refusal {
     /// The request was cancelled by either side (Paykit spec 8.1).
     #[error("the request was cancelled")]
     Cancelled,
+    /// The Allowance has ended, by either side or by its proposal's withdrawal, or this app
+    /// keeps the counterparty's end as its stop: nothing more is done under it (Paykit spec
+    /// 8.3).
+    #[error("Paykit spec 8.3: the Allowance has ended")]
+    AllowanceEnded,
     /// The obligation is paid: its claim is SETTLED, or its record holds the proof of a
     /// payment (Paykit spec 7.2).
     #[error("already paid")]

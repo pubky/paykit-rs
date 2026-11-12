@@ -49,6 +49,9 @@
 //! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply to a request the app holds no record of yet, kept until it does (`receive.rs`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing, since a dropped entry's time is already in its sender's mark | |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
+//! | `ae/<record key>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection (`allowances.rs`, Paykit spec 8.3) | |
+//! | `ac/<record key>` | the consent list: an Allowance this app may pay under, or removed from it for good (`allowances.rs`, Paykit spec 8.3); a restore marks every entry to confirm again | |
+//! | `en/<msg_id>` | the executor app an `executor_notice` is wrapped to, kept with the batch that queues it | |
 
 use paykit_lib::AttemptId;
 use pubky_switch_client::app::LocalWrite;
@@ -207,6 +210,23 @@ pub(crate) mod key {
     pub(crate) const KEPT_REPLIES: &str = "pr/";
     pub(crate) const DROPPED_REPLIES: &str = "pd/";
     pub(crate) const DROPPED_UNVERIFIED: &str = "ud/";
+    pub(crate) const ALLOWANCE_ENDS: &str = "ae/";
+    pub(crate) const CONSENTS: &str = "ac/";
+
+    /// A counterparty's end of the Allowance whose record is `record_key`, kept as the stop.
+    pub(crate) fn allowance_end(record_key: &[u8; 32]) -> String {
+        format!("{ALLOWANCE_ENDS}{}", b64(record_key))
+    }
+
+    /// The consent list's entry of the Allowance whose record is `record_key`.
+    pub(crate) fn consent(record_key: &[u8; 32]) -> String {
+        format!("{CONSENTS}{}", b64(record_key))
+    }
+
+    /// The executor app the `executor_notice` `msg_id` is wrapped to.
+    pub(crate) fn notice_target(msg_id: &str) -> String {
+        format!("en/{msg_id}")
+    }
 
     /// The mark of replies from `sender` dropped for the bounds.
     pub(crate) fn dropped_replies(sender: &[u8; 32]) -> String {
@@ -383,6 +403,12 @@ pub(crate) enum StateKey {
         attempt: AttemptId,
         kind: crate::notices::NoticeKind,
     },
+    /// `ae/<record key>`: a counterparty's Allowance end kept as the stop.
+    AllowanceEnd([u8; 32]),
+    /// `ac/<record key>`: an entry of the consent list.
+    Consent([u8; 32]),
+    /// `en/<msg_id>`: the executor app an `executor_notice` is wrapped to.
+    NoticeTarget(String),
 }
 
 impl StateKey {
@@ -456,6 +482,9 @@ impl StateKey {
                         }
                     }
                     "spam" => Self::Spam(b64_32(rest)?),
+                    "ae" => Self::AllowanceEnd(b64_32(rest)?),
+                    "ac" => Self::Consent(b64_32(rest)?),
+                    "en" => Self::NoticeTarget(msg_id(rest)?),
                     "rs" => {
                         let (requester, id) = rest.split_once('/')?;
                         Self::Resent {
@@ -697,6 +726,9 @@ mod tests {
                     kind: crate::notices::NoticeKind::HeldWithoutPay,
                 },
             ),
+            (key::allowance_end(&pubky), StateKey::AllowanceEnd(pubky)),
+            (key::consent(&pubky), StateKey::Consent(pubky)),
+            (key::notice_target(id), StateKey::NoticeTarget(id.into())),
         ];
         for (built, family) in cases {
             assert_eq!(StateKey::parse(built.as_bytes()), Some(family), "{built}");
@@ -720,6 +752,9 @@ mod tests {
             "nt/BQUFBQUFBQUFBQUFBQUFBQ/paid",
             "dt/05-7",
             "nt/BQUFBQUFBQUFBQUFBQUFBQ",
+            "ae/not-base64",
+            "ac/",
+            "en/not-a-uuid",
         ] {
             assert_eq!(StateKey::parse(key.as_bytes()), None, "{key}");
         }

@@ -17,8 +17,9 @@
 //! - [`Paykit`]: one Paykit App, on the client's `App`, with Paykit's API: requests
 //!   ([`Paykit::send_request`], [`Paykit::reject_request`], [`Paykit::confirm_payment`]),
 //!   paying ([`Paykit::pay_request`], [`Paykit::pay_without_request`],
-//!   [`Paykit::resume_payments`]), receiving ([`Paykit::receive`]) and reconciliation
-//!   ([`Paykit::reconcile`]).
+//!   [`Paykit::resume_payments`]), receiving ([`Paykit::receive`]), reconciliation
+//!   ([`Paykit::reconcile`]) and Allowances ([`Paykit::propose_allowance`],
+//!   [`Paykit::accept_allowance`], [`Paykit::end_allowance`], [`Paykit::allowances`]).
 //! - [`Rail`]: the payment method's interface; `rail::FakeRail` for tests (feature
 //!   `test-support`).
 //! - [`Timer`]: the host's timer, which bounds the wait for a payee's switch.
@@ -26,8 +27,8 @@
 //! - [`app_records`]: Paykit's member of app records, and reading a payee's public
 //!   endpoints from them ([`Paykit::public_endpoints`]).
 //!
-//! Recurring requests, Allowances with executors and ledgers, and publishing Private Payment
-//! Lists build on the same parts, in their own modules.
+//! Recurring requests, the Allowance executor with its grant and ledger, and publishing
+//! Private Payment Lists build on the same parts, in their own modules.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -37,6 +38,7 @@
 )]
 
 mod activity;
+mod allowances;
 pub mod app_records;
 mod approval;
 mod destination;
@@ -62,6 +64,7 @@ mod testkit;
 mod timer;
 
 pub use activity::Role;
+pub use allowances::{AllowanceRole, AllowanceStatus, AllowanceView, SentAllowance};
 pub use approval::{AppScopes, RequestedScopes};
 pub use destination::IDENTITY_GRACE_MS;
 pub use error::{PaykitError, Refusal, Result};

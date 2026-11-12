@@ -11,7 +11,9 @@
 //!   Meanwhile a Private Payment List is held over its record (`lh/`), the newer kept, and a
 //!   request is shown unrecorded ([`crate::RequestStatus::Unrecorded`]). A payee's
 //!   cancellation needs nothing here: its stop is kept with the cursor move, with no write
-//!   at the switch (`kc/`, Paykit spec 8.1). Once written, the stored entry is forgotten,
+//!   at the switch (`kc/`, Paykit spec 8.1). An Allowance's proposal and answers go into its
+//!   `allowances` record the same way; its end is kept as the stop at once (`ae/`, Paykit
+//!   spec 8.3). Once written, the stored entry is forgotten,
 //!   its message staying processed. One not written within [`crate::KEPT_MESSAGE_MS`] of its
 //!   acceptance, such as a receipt naming a proof the record doesn't hold, is given up: its
 //!   note goes, its entry stays stored, and the host is told
@@ -126,6 +128,11 @@ enum Place {
     },
     /// A list, held over its record: the hold to keep, `None` when a list as new is held.
     List(Option<(String, KeptMessage)>),
+    /// An Allowance's proposal, acceptance or rejection, written into its record later
+    /// (`allowances.rs`).
+    Allowance,
+    /// An Allowance's end, kept as the stop at once, unless one is kept already.
+    Stop(Option<(String, KeptMessage)>),
 }
 
 impl Paykit {
@@ -260,7 +267,7 @@ impl Paykit {
         }
         match self.place_of(&stored).await? {
             None => return Ok(false),
-            Some(Place::List(Some((held, kept)))) => {
+            Some(Place::List(Some((held, kept)))) | Some(Place::Stop(Some((held, kept)))) => {
                 tx.put(&held, &kept)?;
             }
             Some(_) => {}
@@ -359,6 +366,21 @@ impl Paykit {
                 };
                 Some(Place::List(newer.then(|| (held, KeptMessage::of(stored)))))
             }
+            Body::AllowanceProposal(_)
+            | Body::AllowanceAcceptance(_)
+            | Body::AllowanceRejection(_)
+                if self.holds("allowance") =>
+            {
+                Some(Place::Allowance)
+            }
+            Body::AllowanceEnd(reply) if self.holds("allowance") => {
+                let target = crate::allowances::allowance_target(&sender, &reply.allowance_id);
+                let stop = key::allowance_end(&self.app.record_key(&target)?);
+                let kept = self.local_get::<KeptMessage>(&stop).await?.is_some();
+                Some(Place::Stop(
+                    (!kept).then(|| (stop, KeptMessage::of(stored))),
+                ))
+            }
             _ => None,
         })
     }
@@ -376,12 +398,16 @@ impl Paykit {
                 let stored = note.message.stored(&own)?;
                 let accepted_at = stored.accepted_at();
                 let placed = match self.place_of(&stored.clone()).await? {
-                    Some(Place::List(hold)) => {
+                    Some(Place::List(hold)) | Some(Place::Stop(hold)) => {
                         if let Some((held, kept)) = hold {
                             self.local_put(&held, &kept).await?;
                         }
                         Placed::Done
                     }
+                    Some(Place::Allowance) => self
+                        .place_allowance_note(stored.clone())
+                        .await
+                        .unwrap_or(Placed::Not),
                     Some(Place::Record {
                         target,
                         role,

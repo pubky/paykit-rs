@@ -75,6 +75,9 @@ pub(crate) enum RecordSide {
     Payer,
     /// `payee_activity`, every label's.
     Payee,
+    /// `allowances`: the Allowance records, on their own side (Paykit spec 8.1, "Records
+    /// not listed yet"; Paykit spec 8.3).
+    Allowances,
     /// Every collection of Paykit's.
     All,
 }
@@ -85,10 +88,12 @@ impl RecordSide {
         let payer = crate::activity::family(Collection::PayerActivity);
         let payee = crate::activity::family(Collection::PayeeActivity);
         let lists = crate::activity::family(Collection::PaymentLists);
+        let allowances = crate::activity::family(Collection::Allowances);
         match self {
             Self::Payer => vec![payer, lists],
             Self::Payee => vec![payee],
-            Self::All => vec![payer, payee, lists],
+            Self::Allowances => vec![allowances],
+            Self::All => vec![payer, payee, lists, allowances],
         }
     }
 }
@@ -269,7 +274,7 @@ impl Paykit {
     /// Keep the certificate held now as the one listed under, when nothing is lost by it:
     /// when none is kept and `none_listed`, or when the one kept reads everything the held
     /// one does. A narrowed certificate is followed so, so a later certificate that reads
-    /// more again is seen as wider. Run at a join, a load and after each receive; one write,
+    /// more again is seen as wider; one narrowed and widened at once leaves none kept. Run at a join, a load and after each receive; one write,
     /// which a crash leaves to the next load. Nothing is written under a certificate Paykit
     /// refuses.
     ///
@@ -284,11 +289,22 @@ impl Paykit {
             return Ok(());
         }
         let held = self.app.cert();
+        let collections = self.protocol.collections();
         let follow = match self.listed_cert().await? {
             None => none_listed,
+            // A certificate that reads less of some collections and more of others can be
+            // neither followed nor kept: the records it stops following would count as
+            // listed again once a later certificate reads them. None is kept as listed
+            // under, so every side counts as unlisted until Paykit's next listing.
+            Some(listed)
+                if crate::protocol::reads_more(&collections, &listed, held)
+                    && crate::protocol::reads_more(&collections, held, &listed) =>
+            {
+                return self.local_delete(key::LISTED_CERT).await;
+            }
             Some(listed) => {
                 listed.hash() != held.hash()
-                    && !crate::protocol::reads_more(&self.protocol.collections(), &listed, held)
+                    && !crate::protocol::reads_more(&collections, &listed, held)
             }
         };
         if !follow {
@@ -478,7 +494,7 @@ impl Paykit {
     }
 
     /// Queue, once after a restore, a `resend_request` to every counterparty with an open
-    /// request, from the restore's re-send time; [`Paykit::receive`] sends them. The start is
+    /// request or Allowance, from the restore's re-send time; [`Paykit::receive`] sends them. The start is
     /// bounded where it is used as well as at the restore and the load: no ordering of a
     /// load, a renewal and a crash leaves the re-sends starting in the future.
     pub(crate) async fn queue_restore_asks(&mut self) -> Result<()> {
@@ -508,6 +524,9 @@ impl Paykit {
                 counterparties.insert(view.request.payee);
             }
         }
+        // And every counterparty of an Allowance not ended or rejected: the backup may
+        // predate its end, which comes back with the re-sends (Paykit spec 8.3).
+        counterparties.extend(self.open_allowance_counterparties().await?);
         let mut tx = Tx::default();
         for counterparty in counterparties {
             tx.put(
