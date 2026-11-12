@@ -435,16 +435,12 @@ pub(crate) fn held_or_unlisted_at(
 }
 
 /// Hold the entry while the app's copy of `side`'s records may lack records (Paykit spec
-/// 8.1, "Records not listed yet"): after a restore, a `missed` item, or a certificate that
-/// reads more, until Paykit has listed them. The rule is [`crate::hold::side_unlisted`], read
-/// per entry from the context's certificate and Paykit's state (`nl`, `ml`, `lc`), so an
-/// entry after a wider certificate or a `missed` item the same read took is held too. The entry is held as for a store
-/// unavailable for now (Paykit spec 17, question 27), and read again at a later read.
-///
-/// [`Paykit::side_unlisted`] counts the records as listed under a certificate Paykit
-/// refuses with none kept as listed under; this needs no such case: [`effect`] holds every
-/// entry under a certificate that fails the same check before any branch reaches here, so
-/// the two agree wherever this runs.
+/// 8.1, "Records not listed yet"): after a restore, a `missed` item, or under another
+/// certificate than the one they were listed under, until Paykit has listed them. The rule
+/// is [`crate::hold::side_unlisted`], read per entry from the context's certificate and
+/// Paykit's state (`nl`, `ml`, `lc`), so an entry after a certificate or a `missed` item the
+/// same read took is held too. The entry is held as for a store unavailable for now (Paykit
+/// spec 17, question 27), and read again at a later read.
 pub(crate) fn hold_while_unlisted(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<(), Fail> {
     let marked = cx.local_get(key::RECORDS_UNLISTED.as_bytes())?.is_some()
         || cx.local_get(key::MISSED_UNLISTED.as_bytes())?.is_some();

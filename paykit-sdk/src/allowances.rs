@@ -244,6 +244,7 @@ fn opened(counterparty: [u8; 32], proposal: StoredMessage) -> Option<AllowanceRe
         proposal,
         response: None,
         end: None,
+        conflicted: None,
         grant: None,
         grants: Vec::new(),
         msg_ids: Vec::new(),
