@@ -363,11 +363,6 @@ fn held_or_unlisted(
 /// the context's certificate and Paykit's state (`nl`, `lc`), so an entry after a wider
 /// certificate the same read took is held too. The entry is held as for a store
 /// unavailable for now (Paykit spec 17, question 27), and read again at a later read.
-///
-/// [`Paykit::side_unlisted`] counts the records as listed under a certificate Paykit
-/// refuses with none kept as listed under; this needs no such case: [`effect`] holds every
-/// entry under a certificate that fails the same check before any branch reaches here, so
-/// the two agree wherever this runs.
 fn hold_while_unlisted(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<(), Fail> {
     let restore = cx.local_get(key::RECORDS_UNLISTED.as_bytes())?.is_some();
     let listed = match cx.local_get(key::LISTED_CERT.as_bytes())? {

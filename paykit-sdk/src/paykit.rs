@@ -334,9 +334,11 @@ impl Paykit {
             check_own_certificate(&approved.cert)?;
         }
         let app = App::join(env.clone(), protocol.clone(), config.app.clone(), request).await?;
-        let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
-        // The client lists the collections at its first read, under this certificate.
-        paykit.follow_listed_cert(true).await?;
+        // No certificate is kept as listed under: the copy is empty until a listing has run
+        // with the keys held, the client's at its first read or one of Paykit's, so until then
+        // the records count as unlisted (Paykit spec 8.1, "Records not listed yet";
+        // `Paykit::unlisted`) and a call that reads them lists first or is refused.
+        let paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
         Ok(paykit)
     }
 
@@ -369,7 +371,7 @@ impl Paykit {
         // A load follows a narrowing only: with no certificate kept as listed under, as after
         // a load under one Paykit refused or a store an earlier build wrote, the records
         // count as unlisted until a listing (`Paykit::unlisted`).
-        paykit.follow_listed_cert(false).await?;
+        paykit.follow_listed_cert().await?;
         Ok(paykit)
     }
 
@@ -610,7 +612,7 @@ impl Paykit {
         // A certificate the read took that reads no more than the one listed under, a
         // narrowed one included, is followed; one that passes Paykit's checks only now, as
         // after a refused one, too (`Paykit::follow_listed_cert`).
-        self.follow_listed_cert(false).await?;
+        self.follow_listed_cert().await?;
         let keys = self.scope_keys_awaited().await?;
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1), unless the payer's side waits for its scope keys:
