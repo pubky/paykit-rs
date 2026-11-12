@@ -765,3 +765,40 @@ async fn test_stored_refused_receipt_waits_for_its_records_key_past_its_window()
     assert!(kept(&wallet, "se/").await.is_empty());
     assert!(holds_receipt(&wallet, &request).await);
 }
+
+#[tokio::test]
+async fn test_stored_refused_receipt_waits_for_the_current_epochs_key_past_its_window() {
+    // A refused receipt is kept, and then the data epoch rotates with no key for the wallet:
+    // nothing can be sealed at the record yet, so the receipt is neither written nor given up
+    // past its window, and is written once the key comes.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    assert!(shop.confirm_payment(&record).await.unwrap().is_some());
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(kept(&wallet, "se/").await.len(), 1);
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    wallet.receive(None).await.unwrap();
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(kept(&wallet, "se/").await.len(), 1);
+    assert!(wallet.notices().await.unwrap().is_empty());
+    let cert = wallet.app().cert().clone();
+    crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(kept(&wallet, "se/").await.is_empty());
+    assert!(holds_receipt(&wallet, &request).await);
+}

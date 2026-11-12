@@ -432,8 +432,9 @@ impl Paykit {
     /// record held as a value that doesn't read, or that the app can't open, is never
     /// written over (Switch spec 8.2: a reader doesn't act on a record it can't read, and a
     /// write over one that is only unopenable for now could drop what its writer stored). A
-    /// value sealed at a key the app doesn't hold yet (`Unopened::KeyNotHeld`), and a record
-    /// absent while the copy of its side may lack records ([`Paykit::side_unlisted`]), wait:
+    /// value sealed at a key the app doesn't hold yet (`Unopened::KeyNotHeld`), a record whose
+    /// scope's key at the current data epoch the app doesn't hold yet, and a record absent
+    /// while the copy of its side may lack records ([`Paykit::side_unlisted`]), wait:
     /// tried again at each receive, never given up meanwhile, and placed once the key comes
     /// or the records are listed. A value that never opens stays as it is.
     async fn place_note(
@@ -443,6 +444,12 @@ impl Paykit {
         creates: bool,
         stored: StoredMessage,
     ) -> Result<Placed> {
+        // Without the current data epoch's key of the record's scope, nothing can be sealed
+        // there yet: the message waits for it rather than count as not written.
+        let scope = target.record_target().collection.policy.read_scope;
+        if self.app.scope_key(self.app.data_epoch(), &scope).is_none() {
+            return Ok(Placed::Waits);
+        }
         let key = self.activity_key(target)?;
         let content = self.app.shared_record(&key).await?.map(|held| held.content);
         match content {
