@@ -169,3 +169,65 @@ async fn test_notices_acknowledged_once_its_payment_is_pruned_goes() {
     wallet.acknowledge_notice(&notices[0].id).await.unwrap();
     assert!(wallet.app().protocol_scan(b"nt/").await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn test_notices_late_receipt_raised_by_an_own_app_without_the_payment() {
+    let w = World::new();
+    // Alice's second wallet holds the payer's record, not the payment's journal entry.
+    let mut other = w.wallet("second").await;
+    let (_wallet, mut shop, attempt_id) = paid_after_failed(&w).await;
+    other.receive(None).await.unwrap();
+    assert!(other.payments().await.unwrap().is_empty());
+    w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    receipt(&mut shop).await;
+    other.receive(None).await.unwrap();
+    let notices = other.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, NoticeKind::PaidAfterFailed);
+    assert_eq!(notices[0].attempt_id, Some(attempt_id));
+}
+
+#[tokio::test]
+async fn test_notices_second_receipt_after_the_window_raises_none_where_one_is_held() {
+    let w = World::new();
+    let mut other = w.wallet("second").await;
+    let (_wallet, mut shop, attempt_id) = paid_after_failed(&w).await;
+    other.receive(None).await.unwrap();
+    receipt(&mut shop).await;
+    other.receive(None).await.unwrap();
+    // Past the window, another receipt of the same proof: the record holds one already.
+    w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    let view = other.requests().await.unwrap().remove(0);
+    let held = other
+        .app()
+        .shared_record(&view.record)
+        .await
+        .unwrap()
+        .unwrap();
+    let record = paykit_lib::records::ActivityRecord::read(
+        held.content.value().unwrap(),
+        &w.alice_id(),
+        paykit_lib::records::ActivitySide::Payer,
+    )
+    .unwrap();
+    let proof = record.proof.unwrap().hash();
+    let body = paykit_lib::bodies::PaymentReceipt {
+        attempt_id,
+        billing_period: None,
+        metadata: None,
+        payment_reference: None,
+    }
+    .to_body(2)
+    .unwrap();
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[other.app_id()],
+        "paykit.payment_receipt",
+        vec![proof, view.request.request_hash],
+        body,
+    );
+    other.receive(None).await.unwrap();
+    assert!(other.notices().await.unwrap().is_empty());
+}

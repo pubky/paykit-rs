@@ -463,6 +463,12 @@ fn receipt_effect(
         .proof
         .as_ref()
         .is_some_and(|proof| stored.message().refs.first() == Some(&proof.hash()));
+    // The record shows the payment made after `failed` was written on its claim, and this
+    // receipt is the first it gets: what every app that gets it tells the user once the
+    // claim is gone (Paykit spec 7.2, 8.3).
+    let first_after_failed = names_held_proof
+        && record.receipt.is_none()
+        && record.status.as_deref() == Some(PAID_AFTER_FAILED);
     if names_held_proof {
         place(cx, &target, sender, Role::Receipt, stored)?;
     }
@@ -525,8 +531,10 @@ fn receipt_effect(
         })
     });
     if gone {
-        if let Some(entry) = journaled.filter(|entry| entry.failed_on_claim) {
-            late_receipt(cx, entry)?;
+        let waiting = journaled.filter(|entry| entry.failed_on_claim);
+        if waiting.is_some() || first_after_failed {
+            let late = KeptNotice::late(attempt_id, sender, stored.message().refs.get(1), 0);
+            late_receipt(cx, late, waiting)?;
         }
         return Ok(());
     }
@@ -562,24 +570,30 @@ fn receipt_effect(
     Ok(())
 }
 
-/// The notice "marked failed, was paid" for the payment `entry` journals, raised with the
-/// cursor move once (Paykit spec 7.2), and the entry kept as no longer waiting for a
-/// receipt.
-fn late_receipt(cx: &mut ReceiveContext<'_>, entry: JournalEntry) -> Result<(), Fail> {
-    let attempt = entry.attempt().map_err(|_| Fail::corrupt())?;
+/// The notice "marked failed, was paid", `late`, raised with the cursor move once (Paykit
+/// spec 7.2), and the payment's journal entry, if this app holds it `waiting`, kept as no
+/// longer waiting for a receipt.
+fn late_receipt(
+    cx: &mut ReceiveContext<'_>,
+    mut late: KeptNotice,
+    waiting: Option<JournalEntry>,
+) -> Result<(), Fail> {
+    let attempt =
+        AttemptId::parse(late.attempt_id.as_deref().unwrap_or("")).map_err(|_| Fail::corrupt())?;
     let notice = key::notice(&attempt, NoticeKind::PaidAfterFailed);
     if cx.local_get(notice.as_bytes())?.is_none() {
-        let at = cx.highest_service_time().unwrap_or(0);
-        keep_local(
-            cx,
-            local(
-                &notice,
-                &KeptNotice::of(NoticeKind::PaidAfterFailed, &entry, at),
-            )?,
-        );
+        late.raised_at_ms = cx.highest_service_time().unwrap_or(0);
+        keep_local(cx, local(&notice, &late)?);
     }
-    received_in_time(cx, entry)
+    match waiting {
+        Some(entry) => received_in_time(cx, entry),
+        None => Ok(()),
+    }
 }
+
+/// The `status` of a payer's record whose payment was made after `failed` was written on its
+/// claim, which stays `failed` until a receipt settles it (Paykit wire 5.3: informational).
+pub(crate) const PAID_AFTER_FAILED: &str = "failed";
 
 /// The payment `entry` journals no longer waits for a receipt, kept with the cursor move.
 fn received_in_time(cx: &mut ReceiveContext<'_>, mut entry: JournalEntry) -> Result<(), Fail> {

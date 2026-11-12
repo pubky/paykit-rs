@@ -109,6 +109,25 @@ impl KeptNotice {
         }
     }
 
+    /// The notice "marked failed, was paid" of `attempt`, paid to `payee` for the request
+    /// `request_hash`, if any, raised at `at`.
+    pub(crate) fn late(
+        attempt: AttemptId,
+        payee: [u8; 32],
+        request_hash: Option<&[u8; 32]>,
+        at: u64,
+    ) -> Self {
+        Self {
+            kind: NoticeKind::PaidAfterFailed,
+            attempt_id: Some(attempt.to_text()),
+            msg_id: None,
+            counterparty: payee,
+            request_hash: request_hash.map(|hash| pubky_switch_core::enc::b64(hash)),
+            raised_at_ms: at,
+            acknowledged: false,
+        }
+    }
+
     /// The notice that message `stored` from `sender` was given up, raised at `at`.
     pub(crate) fn given_up(
         sender: [u8; 32],
