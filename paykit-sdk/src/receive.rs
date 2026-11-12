@@ -724,7 +724,7 @@ fn hold_list(
 
 /// How long a message kept to be written into its record later is tried: 30 days from its
 /// acceptance, the time its sender keeps it to send again (Paykit spec 9).
-pub const KEPT_REPLY_MS: u64 = 30 * pubky_switch_core::records::DAY_MS;
+pub const KEPT_MESSAGE_MS: u64 = 30 * pubky_switch_core::records::DAY_MS;
 
 /// How long an app holding `contacts` goes between its reads of the lists, the flagged
 /// senders among them (Paykit wire 4.1: at most every 10 minutes).

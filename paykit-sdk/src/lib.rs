@@ -80,7 +80,7 @@ pub use rail::{
     RailDeclaration, RailError, RailOutcome, RailPaid, RailPayment, Transfer,
 };
 pub use receipts::{ReceiptDetails, ReceiptsOf, ReceivedReceipt};
-pub use receive::{HeldList, KEPT_REPLY_MS, LISTS_REFRESH_MS};
+pub use receive::{HeldList, KEPT_MESSAGE_MS, LISTS_REFRESH_MS};
 pub use reconcile::{Doubtful, ReconcileReport, Resolution};
 pub use requests::{
     MessageDelivery, PayeeActivity, PayeeStatus, RequestDraft, RequestRef, RequestStatus,

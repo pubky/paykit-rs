@@ -32,7 +32,7 @@ pub enum NoticeKind {
     /// meanwhile.
     HeldWithoutPay,
     /// A message whose effect the switch refused for good, kept to write into its record
-    /// later, wasn't written within [`crate::KEPT_REPLY_MS`] of its acceptance: the SDK gave
+    /// later, wasn't written within [`crate::KEPT_MESSAGE_MS`] of its acceptance: the SDK gave
     /// it up (Switch spec 8.2). Its entry stays stored, for the host
     /// ([`pubky_switch_client::app::App::parked_entries`]), and a request it was no longer
     /// shows as [`crate::RequestStatus::Unrecorded`].

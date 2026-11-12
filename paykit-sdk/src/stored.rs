@@ -12,7 +12,7 @@
 //!   request is shown unrecorded ([`crate::RequestStatus::Unrecorded`]). A payee's
 //!   cancellation needs nothing here: its stop is kept with the cursor move, with no write
 //!   at the switch (`kc/`, Paykit spec 8.1). Once written, the stored entry is forgotten,
-//!   its message staying processed. One not written within [`crate::KEPT_REPLY_MS`] of its
+//!   its message staying processed. One not written within [`crate::KEPT_MESSAGE_MS`] of its
 //!   acceptance, such as a receipt naming a proof the record doesn't hold, is given up: its
 //!   note goes, its entry stays stored, and the host is told
 //!   ([`crate::NoticeKind::MessageGivenUp`]).
@@ -324,7 +324,7 @@ impl Paykit {
     /// Write every kept message whose record can take it now, each as a later write of the
     /// app's own, built on the version held; then forget the stored entry of each one in
     /// place, and drop its note. A write that fails now is tried again at the next receive;
-    /// a message not written within [`crate::KEPT_REPLY_MS`] of its acceptance, on the
+    /// a message not written within [`crate::KEPT_MESSAGE_MS`] of its acceptance, on the
     /// highest service time verified, is given up, its entry left stored for the host.
     pub(crate) async fn place_stored(&mut self) -> Result<()> {
         let own = self.identity();
@@ -352,8 +352,9 @@ impl Paykit {
                 };
                 if !note.placed {
                     let stale = accepted_at.is_none_or(|at| {
-                        self.service_time()
-                            .is_some_and(|t| at.saturating_add(crate::receive::KEPT_REPLY_MS) <= t)
+                        self.service_time().is_some_and(|t| {
+                            at.saturating_add(crate::receive::KEPT_MESSAGE_MS) <= t
+                        })
                     });
                     if stale {
                         // Given up: the host is told, in the commit that drops the note.

@@ -437,7 +437,7 @@ async fn test_stored_refused_note_given_up_past_its_window() {
     refuse_writes(&w.alice, 1);
     wallet.receive(None).await.unwrap();
     assert_eq!(kept(&wallet, "se/").await.len(), 1);
-    w.clock.advance_ms(paykit_sdk::KEPT_REPLY_MS);
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
     wallet.receive(None).await.unwrap();
     // Given up: its note goes, its entry stays stored for the host, who is told.
     assert!(kept(&wallet, "se/").await.is_empty());
