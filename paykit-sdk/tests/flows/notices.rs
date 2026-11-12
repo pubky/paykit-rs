@@ -524,3 +524,63 @@ async fn test_notices_receipt_waiting_for_its_records_key_given_up_after_30_days
     // nothing of it is kept to write later.
     assert!(wallet.app().protocol_scan(b"se/").await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn test_notices_receipt_waiting_for_its_key_never_shown_as_a_store_unavailable() {
+    // A receipt whose record is sealed under a key the wallet doesn't hold, over the whole
+    // wait: once the client stores the entry after its bounded wait to try it again later,
+    // the report shows it waiting for the key, never a store cause.
+    let w = World::new();
+    let mut phone = w.wallet("phone").await;
+    let (mut wallet, mut shop, _) = paid_after_failed(&w).await;
+    let request = paykit_sdk::RequestRef {
+        payee: w.bob_id(),
+        request_hash: wallet.payments().await.unwrap()[0].request_hash.unwrap(),
+    };
+    phone.receive(None).await.unwrap();
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    crate::unrequested::store_bundle(&w, phone.app_id(), &phone.app().cert().clone());
+    phone.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let value = crate::outcome_record::record_value(&mut phone, &request)
+        .await
+        .unwrap();
+    crate::outcome_record::phone_writes(
+        &mut phone,
+        &request,
+        Some(&serde_json::to_vec(&value).unwrap()),
+    )
+    .await;
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let cert = wallet.app().cert().clone();
+    crate::unrequested::store_bundle_from(&w, wallet.app_id(), &cert, newest);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    receipt(&mut shop).await;
+    let mut events = Vec::new();
+    for _ in 0..pubky_switch_client::app::RETRY_EVENT_READS + 2 {
+        let summary = wallet.receive(None).await.unwrap();
+        events.extend(summary.report.events);
+    }
+    for _ in 0..5 {
+        w.clock.advance_ms(DAY_MS);
+        let summary = wallet.receive(None).await.unwrap();
+        assert!(!summary.key_epochs_awaited.is_empty(), "{summary:?}");
+        events.extend(summary.report.events);
+    }
+    let store_causes: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                pubky_switch_client::app::AppEvent::StoreFailing { .. }
+                    | pubky_switch_client::app::AppEvent::Parked {
+                        reason: pubky_switch_client::app::ParkReason::StoreUnavailable,
+                        ..
+                    }
+            )
+        })
+        .collect();
+    assert!(store_causes.is_empty(), "{store_causes:?}");
+}

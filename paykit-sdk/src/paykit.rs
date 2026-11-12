@@ -20,7 +20,7 @@ use paykit_lib::{Asset, Decimal, Label};
 use pubky_switch_client::app::Protocol as _;
 use pubky_switch_client::app::{
     App, AppBackup, AppConfig, AppEnv, AppError, AppEvent, HomeserverReader, JoinRequest,
-    ReceiveReport,
+    ParkReason, ReceiveReport,
 };
 use pubky_switch_client::clock::Clock;
 use pubky_switch_core::records::{AppCert, Approval};
@@ -593,6 +593,8 @@ impl Paykit {
         self.refresh_lists_when_due().await?;
         // Whether the client may list at this read's start ([`Paykit::records_listed`]).
         let keys_held_before = self.holds_scope_keys();
+        // Only this read's key waits count: a read that returned an error left its own.
+        self.protocol.take_key_waits();
         let report = match self.app.receive(wait).await {
             Ok(report) => report,
             // The erasure's wait: the switch answers as for an account it doesn't host, and
@@ -603,11 +605,22 @@ impl Paykit {
             Err(error) => return Err(error.into()),
         };
         // The entries this read held for a key: shown as waiting for it, not as a store
-        // failing.
+        // failing, nor, once the client's bounded wait stores one to try again later
+        // (`id: None`), as a store unavailable.
         let key_waits = self.protocol.take_key_waits();
         let mut report = report;
         report.events.retain(|event| {
-            !matches!(event, AppEvent::StoreFailing { seq, .. } if key_waits.contains_key(seq))
+            let seq = match event {
+                AppEvent::StoreFailing { seq, .. }
+                | AppEvent::Parked {
+                    id: None,
+                    seq,
+                    reason: ParkReason::StoreUnavailable,
+                    ..
+                } => seq,
+                _ => return true,
+            };
+            !key_waits.contains_key(seq)
         });
         let mut key_epochs_awaited: Vec<u64> = key_waits.values().copied().collect();
         key_epochs_awaited.sort_unstable();
