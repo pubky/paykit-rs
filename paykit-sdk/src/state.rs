@@ -45,7 +45,7 @@
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
-//! | `bk/<pubky>` | this app's block (`true`) or unblock (`false`) of `pubky` whose `deny.put` or `deny.delete` the client keeps unanswered: a block counts at once, an unblock once the list shows it (Paykit spec 8.1); cleared once a read of the list shows it; never restored | |
+//! | `bk/<pubky>` | this app's block (`true`) or unblock (`false`) of `pubky` whose `deny.put` or `deny.delete` the client keeps unanswered: either counts at once (Paykit spec 8.1); cleared once a read of the list shows it; never restored | |
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply to a request the app holds no record of yet, kept until it does (`receive.rs`) | |
