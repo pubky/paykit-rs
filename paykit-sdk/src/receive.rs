@@ -56,6 +56,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::activity::{self, ActivityTarget, Role};
+use crate::error::PaykitError;
 use crate::hold::RecordSide;
 use crate::journal::JournalEntry;
 use crate::marks::{count_dropped, read_mark, MarkFamily};
@@ -525,8 +526,25 @@ fn period_details_effect(
             "Paykit wire 4.9: period details invalid against their request".into(),
         ));
     };
+    // A kept stop is read back as a restore reads it, bound to its key: one that doesn't
+    // verify is corrupt state, never taken as a stop that drops the details.
     let kept_stop = key::kept_cancellation(&cx.record_key(&request_target.record_target())?);
-    let stopped = cx.local_get(kept_stop.as_bytes())?.is_some();
+    let stopped = match cx.local_get(kept_stop.as_bytes())? {
+        None => false,
+        Some(value) => {
+            let record_key = |target: &pubky_switch_client::app::RecordTarget| {
+                cx.record_key(target).map_err(|error| error.to_string())
+            };
+            crate::protocol::check_kept_cancellation(
+                kept_stop.as_bytes(),
+                &value,
+                &own,
+                &record_key,
+            )
+            .map_err(|_| Fail::corrupt())?;
+            true
+        }
+    };
     if !crate::periods::stores_details(&record, stored, cx.highest_service_time(), stopped) {
         return Ok(());
     }
@@ -1161,9 +1179,9 @@ impl Paykit {
     /// is tried again at the next receive.
     pub(crate) async fn place_kept_replies(&mut self) -> crate::error::Result<()> {
         let own = self.identity();
-        for (rest, kept) in self.local_scan::<KeptMessage>(key::KEPT_REPLIES).await? {
-            let kept_key = format!("{}{rest}", key::KEPT_REPLIES);
-            let reply = kept.stored(&own)?;
+        for (raw_key, value) in self.app.protocol_scan(key::KEPT_REPLIES.as_bytes()).await? {
+            let reply = self.kept_reply_read(&own, &raw_key, &value)?;
+            let kept_key = String::from_utf8(raw_key).map_err(|_| PaykitError::corrupt())?;
             let (Some(request), Some(role)) = (
                 reply.message().refs.first().copied(),
                 crate::activity::Role::of(reply.body()),
@@ -1249,6 +1267,34 @@ impl Paykit {
             }
         }
         Ok(())
+    }
+
+    /// The message kept before its record at `key`, `value` as the store holds it, read back
+    /// as a restore reads it ([`crate::protocol::check_kept_reply`]): bound to the sender,
+    /// record and `msg_id` its key names. One that doesn't is corrupt state, never a message
+    /// to drop or place.
+    fn kept_reply_read(
+        &self,
+        own: &[u8; 32],
+        key: &[u8],
+        value: &[u8],
+    ) -> crate::error::Result<StoredMessage> {
+        let Some(state::StateKey::KeptReply {
+            sender,
+            record,
+            msg_id,
+        }) = state::StateKey::parse(key)
+        else {
+            return Err(PaykitError::corrupt());
+        };
+        let record_key = |target: &pubky_switch_client::app::RecordTarget| {
+            self.app
+                .record_key(target)
+                .map_err(|error| error.to_string())
+        };
+        crate::protocol::check_kept_reply(value, own, (sender, record), &msg_id, &record_key)
+            .map_err(|_| PaykitError::corrupt())?;
+        state::decode::<KeptMessage>(value)?.stored(own)
     }
 
     /// How many messages from `sender` the spam rule only counted (Paykit wire 4.1): those

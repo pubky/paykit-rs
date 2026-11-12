@@ -2193,3 +2193,126 @@ async fn test_periods_accept_whose_delivery_fails_now_reported_queued() {
         PayeeStatus::Accepted
     );
 }
+
+#[tokio::test]
+async fn test_periods_kept_details_not_bound_to_their_key_refused_as_corrupt() {
+    // Two kept details swapped between their keys: each names another `msg_id` than its
+    // key. Read back as a restore reads them, they are corrupt state: never placed.
+    let w = World::new();
+    let _shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let (plaintext, hash) = signed_request(&w);
+    inject_details(&w, &[wallet.app_id()], hash, january());
+    inject_details(&w, &[wallet.app_id()], hash, month(1));
+    wallet.receive(None).await.unwrap();
+    let kept = wallet.app().protocol_scan(b"pr/").await.unwrap();
+    assert_eq!(kept.len(), 2);
+    wallet
+        .app_mut()
+        .protocol_commit(&[
+            pubky_switch_client::app::LocalWrite::Put {
+                key: kept[0].0.clone(),
+                value: kept[1].1.clone(),
+            },
+            pubky_switch_client::app::LocalWrite::Put {
+                key: kept[1].0.clone(),
+                value: kept[0].1.clone(),
+            },
+        ])
+        .await
+        .unwrap();
+    let request = accepted_by(&w, &mut phone, &plaintext, hash).await;
+    let first = wallet.receive(None).await;
+    let second = wallet.receive(None).await;
+    assert!(first.is_err() || second.is_err(), "{first:?} / {second:?}");
+    let view = wallet.request(&request).await.unwrap();
+    assert!(view.periods.is_empty(), "{view:?}");
+}
+
+#[tokio::test]
+async fn test_periods_details_over_a_corrupt_kept_stop_not_dropped() {
+    // A kept stop that doesn't read is corrupt state, never a stop that drops the details
+    // as taken with no effect.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    let record_key = wallet
+        .app()
+        .record_key(&crate::outcome_record::payer_record(&request))
+        .unwrap();
+    let key = format!("kc/{}", pubky_switch_core::enc::b64(&record_key));
+    wallet
+        .app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: key.into_bytes(),
+            value: b"not a kept cancellation".to_vec(),
+        }])
+        .await
+        .unwrap();
+    shop.send_period_details(
+        &sale,
+        details(january(), "lnbc1p", w.clock.now_ms() + DAY_MS),
+    )
+    .await
+    .unwrap();
+    let summary = wallet.receive(None).await;
+    assert!(
+        summary
+            .as_ref()
+            .map_or(true, |s| !received(s, "paykit.payment_period_details")),
+        "{summary:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_periods_credit_never_given_when_a_record_read_fails() {
+    // The first period is credited; the second, paid in the same transaction, is confirmed
+    // by the user while one held record read fails, whichever: a failed read is the call's
+    // error, never "no other credit", so the payment is never credited twice.
+    let w = World::new();
+    let failing = Arc::new(crate::common::FailingRecordReads::default());
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            Arc::clone(&failing) as Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let body = period_proof(&w, shop.app_id(), january()).await;
+    let mut second = body.clone();
+    second.insert("billing_period".into(), month(1).to_json());
+    for b in [body, second] {
+        w.inject(
+            &w.alice,
+            "wallet",
+            &w.bob,
+            &[shop.app_id()],
+            "paykit.payment_proof",
+            vec![request.request_hash],
+            b,
+        );
+    }
+    shop.receive(None).await.unwrap();
+    let periods = shop.payee_activity().await.unwrap()[0].periods.clone();
+    assert!(shop
+        .confirm_payment(&periods[0].record)
+        .await
+        .unwrap()
+        .is_some());
+    for n in 1..=12 {
+        failing.fail_nth(n);
+        let confirmed = paykit_sdk::ReceiptDetails::new()
+            .with_maybe_credited_confirmed(pubky_switch_client::app::UserConfirmed::new());
+        let credited = shop
+            .confirm_payment_with(&periods[1].record, confirmed)
+            .await;
+        failing.heal();
+        assert!(!matches!(credited, Ok(Some(_))), "read {n}: {credited:?}");
+    }
+}

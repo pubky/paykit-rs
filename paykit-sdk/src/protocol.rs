@@ -577,7 +577,7 @@ fn check_queued_answer(value: &[u8], seq: u64, msg_id: &str) -> Result<(), Strin
 /// A payee's cancellation kept to place (`kc/<record key>`, Paykit spec 8.1): it verifies
 /// for `own`, is a `paykit.payment_request_cancellation`, and is kept under the record key
 /// of the request it cancels.
-fn check_kept_cancellation(
+pub(crate) fn check_kept_cancellation(
     key: &[u8],
     value: &[u8],
     own: &[u8; 32],
@@ -604,7 +604,7 @@ fn check_kept_cancellation(
 /// sender and with the `msg_id` its key names, and is kept under the record key of the
 /// record of the request it names it waits for: the payee's, under its label, for a reply,
 /// the payer's for details.
-fn check_kept_reply(
+pub(crate) fn check_kept_reply(
     value: &[u8],
     own: &[u8; 32],
     (sender, record): ([u8; 32], [u8; 32]),

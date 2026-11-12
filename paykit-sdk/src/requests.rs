@@ -812,13 +812,14 @@ impl Paykit {
                 // With per-period endpoints, the request's own serve only its first Billing
                 // Period: a later one is credited only for a payment to the destination of
                 // the period details its proof names (Paykit spec 8.2).
+                let first = request
+                    .recurrence
+                    .as_ref()
+                    .map(paykit_lib::periods::Recurrence::first)
+                    .transpose()?;
                 let later_period = request.per_period_endpoints
                     && proof.billing_period.is_some_and(|period| {
-                        request
-                            .recurrence
-                            .as_ref()
-                            .and_then(|r| r.first().ok())
-                            .is_none_or(|first| first.starts_at != period.starts_at)
+                        first.is_none_or(|first| first.starts_at != period.starts_at)
                     });
                 if later_period && from_details.is_none() {
                     return Ok(None);
@@ -876,9 +877,15 @@ impl Paykit {
             if held.key == *record {
                 continue;
             }
+            // A value that doesn't read or bind can't be told; a failure to read it is the
+            // call's error, never "no other credit".
             let other = match held.content {
                 RecordContent::Deleted => continue,
-                RecordContent::Value(_) => self.payee_record(&held.key).await.ok(),
+                RecordContent::Value(_) => match self.payee_record(&held.key).await {
+                    Ok(bound) => Some(bound),
+                    Err(PaykitError::Refused(Refusal::NotFound) | PaykitError::Lib(_)) => None,
+                    Err(error) => return Err(error),
+                },
                 _ => None,
             };
             let Some((_, other)) = other else {
