@@ -9,7 +9,9 @@
 //!   once the record holds 8 for the period ([`Paykit::send_period_details`]).
 //! - **A period record** keeps every details of its period, none replacing another; the
 //!   proof of the period and its receipt go there too, never into the request record
-//!   (Paykit wire 5.3 "Binding").
+//!   (Paykit wire 5.3 "Binding"). The payer stores details only for a period that has
+//!   started, or the first that hasn't, while its payment deadline hasn't passed
+//!   ([`stores_details`]).
 //! - **Views:** a request's view lists the period records the app holds for it
 //!   ([`PeriodView`]), each with its details, latest first.
 
@@ -136,6 +138,45 @@ pub(crate) fn named_period(
         None => Ok(None),
         Some(named) => Ok(Some(request.named_period(named)?.into())),
     }
+}
+
+/// Whether the payer stores the period details `stored` for the request `record` holds
+/// (Paykit spec 8.2): only for a Billing Period that has started, or the first that hasn't,
+/// and only while that period's payment deadline hasn't passed, both judged on `t`, the
+/// highest service time verified. The deadline is the one an attempt on the period carries,
+/// so a request whose deadline isn't `period_start` gives its periods none, and only the
+/// start bounds them. With no time verified yet, no period has started and no deadline has
+/// passed, as for every deadline the SDK judges, never on the device clock: only the
+/// request's first period takes details then.
+pub(crate) fn stores_details(
+    record: &ActivityRecord,
+    stored: &StoredMessage,
+    t: Option<u64>,
+) -> bool {
+    let reached = |at: u64| t.is_some_and(|t| at <= t);
+    let Some((_, request)) = request_of(record) else {
+        return false;
+    };
+    let (Some(recurrence), Some(Ok(period))) = (
+        request.recurrence.as_ref(),
+        stored
+            .body()
+            .billing_period()
+            .map(|named| request.named_period(named)),
+    ) else {
+        return false;
+    };
+    // The first period that hasn't started is the request's first, or one whose
+    // predecessor has started.
+    let open = recurrence
+        .first()
+        .is_ok_and(|first| first.index == period.index)
+        || period
+            .index
+            .checked_sub(1)
+            .is_some_and(|k| recurrence.rule().boundary(k).is_ok_and(reached));
+    let deadline = request.attempt_deadline(Some(&period)).ok().flatten();
+    open && !deadline.is_some_and(reached)
 }
 
 /// The natural key of the period record of `request_hash`'s Billing Period `period`, the
@@ -441,5 +482,50 @@ mod tests {
             })),
         );
         assert!(named_period(&request, &other).is_err());
+    }
+
+    #[test]
+    fn test_periods_stores_details_with_no_verified_time_first_period_only() {
+        // A monthly request from 2026-01-31, each period due 1 s after its start.
+        let (alice, bob) = parties();
+        let request = bob.message(
+            &alice,
+            "paykit.payment_request",
+            Vec::new(),
+            object(json!({
+                "amount": { "asset": "btc", "value": "1" },
+                "payment_reference": "plan-1",
+                "proposal_expires_at": null,
+                "payment_deadline": { "type": "period_start", "seconds": 1 },
+                "recurrence": {
+                    "anchor": "2026-01-31T00:00:00.000Z", "ends_at": null, "every": 1,
+                    "starts_at": "2026-01-31T00:00:00.000Z", "unit": "month"
+                }
+            })),
+        );
+        let mut record = empty(ActivitySide::Payer, bob.id());
+        record.request = Some(request.clone());
+        let first = bob.message(
+            &alice,
+            "paykit.payment_period_details",
+            vec![request.hash()],
+            object(json!({
+                "billing_period": {
+                    "starts_at": "2026-01-31T00:00:00.000Z",
+                    "ends_at": "2026-02-28T00:00:00.000Z"
+                },
+                "expires_at": "2026-03-01T00:00:00.000Z",
+                "payment_endpoints": { "btc-lightning-bolt11": "lnbc1period" }
+            })),
+        );
+        let second = details(&bob, &alice, request.hash(), "2026-03-01T00:00:00.000Z");
+        // No time verified: no period has started and no deadline has passed, so only the
+        // first period, not started, takes details.
+        assert!(stores_details(&record, &first, None));
+        assert!(!stores_details(&record, &second, None));
+        // A verified time past the first period's deadline decides it.
+        let jan_31 = 1_769_817_600_000;
+        assert!(stores_details(&record, &first, Some(jan_31 + 1_000)));
+        assert!(!stores_details(&record, &first, Some(jan_31 + 1_001)));
     }
 }

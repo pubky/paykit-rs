@@ -490,9 +490,13 @@ fn keep_before_record(
 /// record of yet are kept until it does, as a payer's reply is at the payee (Paykit spec
 /// 8.1, "Replies before their record"); while the copy of the payer's records may lack
 /// records, the absence decides nothing and the entry is held ([`held_or_unlisted`]), and a
-/// value of either record waiting for its scope key holds it too ([`wait_for_key`]). Details invalid against
-/// the request are dropped; those of a request rejected or cancelled are taken with no
-/// effect, a subscription that runs no more having no periods to pay.
+/// value of either record waiting for its scope key holds it too ([`wait_for_key`]).
+/// Details invalid against the request are dropped; those of a request rejected or
+/// cancelled are taken with no effect, a subscription that runs no more having no periods
+/// to pay. So are details for a period other than one that has started or the first that
+/// hasn't, or past the period's payment deadline, on the highest service time verified
+/// ([`crate::periods::stores_details`]): a payee can't make the payer hold records for
+/// periods it can't pay.
 fn period_details_effect(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
@@ -520,6 +524,9 @@ fn period_details_effect(
         ));
     };
     if crate::requests::rejected(&record) || crate::requests::cancelled(&record) {
+        return Ok(());
+    }
+    if !crate::periods::stores_details(&record, stored, cx.highest_service_time()) {
         return Ok(());
     }
     // The period record is of the request record's side, whose hold was judged above, and
@@ -1128,10 +1135,11 @@ impl Paykit {
     /// for requests whose payer record it didn't hold, each once the request record is
     /// held, as a later write of its own with the kept copy dropped in its batch (Switch spec
     /// 8.2). A period's details or proof go into the period record, once checked against the
-    /// request; one that fails is dropped. One whose record doesn't come within
-    /// [`KEPT_MESSAGE_MS`] of its acceptance, on the highest service time verified, is
-    /// dropped: the sender keeps what it sent that long, and may send it again (Paykit spec
-    /// 9). A placement that fails now is tried again at the next receive.
+    /// request; one that fails is dropped, as are details for a period the payer doesn't
+    /// store them for ([`crate::periods::stores_details`]). One whose record doesn't come
+    /// within [`KEPT_MESSAGE_MS`] of its acceptance, on the highest service time verified,
+    /// is dropped: the sender keeps what it sent that long, and may send it again (Paykit
+    /// spec 9). A placement that fails now is tried again at the next receive.
     pub(crate) async fn place_kept_replies(&mut self) -> crate::error::Result<()> {
         let own = self.identity();
         for (rest, kept) in self.local_scan::<KeptMessage>(key::KEPT_REPLIES).await? {
@@ -1159,6 +1167,14 @@ impl Paykit {
                 self.local_delete(&kept_key).await?;
                 continue;
             };
+            // Details kept before their record take the bound on stored details, as those
+            // that come after it do.
+            if matches!(reply.body(), Body::PaymentPeriodDetails(_))
+                && !crate::periods::stores_details(&record, &reply, self.service_time())
+            {
+                self.local_delete(&kept_key).await?;
+                continue;
+            }
             let mut tx = Tx::default();
             tx.delete(&kept_key);
             let sender = reply.sender();

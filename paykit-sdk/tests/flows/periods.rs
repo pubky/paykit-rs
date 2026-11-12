@@ -919,3 +919,150 @@ async fn test_periods_acceptance_keeps_members_a_later_version_wrote() {
     assert_eq!(value["attempted_periods"], json!([january().start_secs()]));
     assert_eq!(value["future_member"], json!({ "n": 1 }));
 }
+
+/// The request's Billing Period `k`: January 2026 for 0, to April for 3.
+fn month(k: usize) -> PeriodRef {
+    const STARTS: [u64; 5] = [0, 31, 59, 90, 120];
+    let start = pubky_switch_client::testing::START_MS;
+    PeriodRef {
+        starts_at: start + STARTS[k] * DAY_MS,
+        ends_at: start + STARTS[k + 1] * DAY_MS,
+    }
+}
+
+/// Alice's wallet accepts bob's recurring request `draft`, and the shop reads the
+/// acceptance; then the clock moves on `days`. Returns the request and the shop's record.
+async fn subscribed_for(
+    w: &World,
+    shop: &mut Paykit,
+    wallet: &mut Paykit,
+    draft: RequestDraft,
+    days: u64,
+) -> (RequestRef, [u8; 32]) {
+    let request = shop
+        .send_request(w.alice_id(), draft)
+        .await
+        .unwrap()
+        .request
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.accept_subscription(&request).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let sale = shop.payee_activity().await.unwrap()[0].record;
+    w.clock.advance_ms(days * DAY_MS);
+    (request, sale)
+}
+
+/// The shop sends details for `period`, and the wallet takes them, on a service time it
+/// verifies as it receives. Returns whether the wallet stored them.
+async fn details_stored(
+    w: &World,
+    shop: &mut Paykit,
+    wallet: &mut Paykit,
+    (request, sale): &(RequestRef, [u8; 32]),
+    period: PeriodRef,
+) -> bool {
+    let expires_at = w.clock.now_ms() + DAY_MS;
+    let msg_id = shop
+        .send_period_details(sale, details(period, "lnbc1p", expires_at))
+        .await
+        .unwrap();
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(received(&summary, "paykit.payment_period_details"));
+    let view = wallet.request(request).await.unwrap();
+    view.periods
+        .iter()
+        .any(|p| p.details.iter().any(|d| d.msg_id == msg_id))
+}
+
+#[tokio::test]
+async fn test_periods_details_bound_current_period_taken() {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let now = w.clock.now_ms();
+    // In February.
+    let sub = subscribed_for(&w, &mut shop, &mut wallet, monthly(now, None), 40).await;
+    assert!(details_stored(&w, &mut shop, &mut wallet, &sub, month(1)).await);
+}
+
+#[tokio::test]
+async fn test_periods_details_bound_next_period_taken() {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let now = w.clock.now_ms();
+    let sub = subscribed_for(&w, &mut shop, &mut wallet, monthly(now, None), 40).await;
+    assert!(details_stored(&w, &mut shop, &mut wallet, &sub, month(2)).await);
+}
+
+#[tokio::test]
+async fn test_periods_details_bound_period_after_the_next_dropped() {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let now = w.clock.now_ms();
+    let sub = subscribed_for(&w, &mut shop, &mut wallet, monthly(now, None), 40).await;
+    // Taken with no effect: no period record for April.
+    assert!(!details_stored(&w, &mut shop, &mut wallet, &sub, month(3)).await);
+    assert!(wallet.request(&sub.0).await.unwrap().periods.is_empty());
+}
+
+#[tokio::test]
+async fn test_periods_details_bound_period_past_its_deadline_dropped() {
+    // Each period is due a day after its start: February's at the last instant of its
+    // deadline, then 1 ms later.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let now = w.clock.now_ms();
+    let draft = monthly(now, None).with_period_deadline_s(86_400);
+    let sub = subscribed_for(&w, &mut shop, &mut wallet, draft, 32).await;
+    assert!(details_stored(&w, &mut shop, &mut wallet, &sub, month(1)).await);
+    w.clock.advance_ms(1);
+    assert!(!details_stored(&w, &mut shop, &mut wallet, &sub, month(1)).await);
+    // January's deadline passed long ago; March, not started, is still open.
+    assert!(!details_stored(&w, &mut shop, &mut wallet, &sub, month(0)).await);
+    assert!(details_stored(&w, &mut shop, &mut wallet, &sub, month(2)).await);
+    let view = wallet.request(&sub.0).await.unwrap();
+    let held: Vec<(PeriodRef, usize)> = view
+        .periods
+        .iter()
+        .map(|p| (p.billing_period, p.details.len()))
+        .collect();
+    assert_eq!(held, [(month(1), 1), (month(2), 1)]);
+}
+
+#[tokio::test]
+async fn test_periods_details_bound_without_a_deadline_started_periods_taken() {
+    // A request with no payment deadline: only the start bounds its periods, so January's
+    // details are taken in April.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let now = w.clock.now_ms();
+    let sub = subscribed_for(&w, &mut shop, &mut wallet, monthly(now, None), 100).await;
+    assert!(details_stored(&w, &mut shop, &mut wallet, &sub, month(0)).await);
+}
+
+#[tokio::test]
+async fn test_periods_details_bound_kept_before_the_record_far_period_dropped() {
+    // Details kept before their request take the same bound once it comes: February's,
+    // next in January, are placed; March's are dropped.
+    let w = World::new();
+    let _shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, hash) = signed_request(&w);
+    inject_details(&w, &[wallet.app_id()], hash, month(1));
+    inject_details(&w, &[wallet.app_id()], hash, month(2));
+    wallet.receive(None).await.unwrap();
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &request);
+    wallet.receive(None).await.unwrap();
+    let held = RequestRef {
+        payee: w.bob_id(),
+        request_hash: hash,
+    };
+    let view = wallet.request(&held).await.unwrap();
+    let periods: Vec<PeriodRef> = view.periods.iter().map(|p| p.billing_period).collect();
+    assert_eq!(periods, [month(1)]);
+}
