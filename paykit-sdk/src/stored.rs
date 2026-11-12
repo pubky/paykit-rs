@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 use crate::activity::{ActivityTarget, Role};
 use crate::error::Result;
 use crate::journal::JournalEntry;
-use crate::notices::{KeptNotice, NoticeKind};
+use crate::notices::{KeptNotice, NoticeKind, StoredHandle};
 use crate::paykit::Paykit;
 use crate::receive::{receipt_obligation, receipt_on_record, receipt_settles, ReceiptClaim};
 use crate::records::{list_target, KeptMessage};
@@ -397,15 +397,30 @@ impl Paykit {
                         let mut tx = Tx::default();
                         tx.delete(&note_key);
                         let notice = key::message_notice(&note.sender, &note.msg_id);
-                        if self.local_get::<KeptNotice>(&notice).await?.is_none() {
-                            let at = self.service_time().unwrap_or(0);
-                            let given_up = KeptNotice::given_up(
-                                note.sender,
-                                &note.msg_id,
-                                named_request(&stored),
-                                at,
-                            );
-                            tx.put(&notice, &given_up)?;
+                        // The notice keeps the entry's handle, which its acknowledgement
+                        // forgets; one kept already, as after a restore onto another store,
+                        // takes the entry's handle here.
+                        let handle = StoredHandle {
+                            stored_id: note.stored_id,
+                            hash: stored.hash(),
+                        };
+                        match self.local_get::<KeptNotice>(&notice).await? {
+                            None => {
+                                let at = self.service_time().unwrap_or(0);
+                                let given_up = KeptNotice::given_up(
+                                    note.sender,
+                                    &note.msg_id,
+                                    named_request(&stored),
+                                    at,
+                                    handle,
+                                );
+                                tx.put(&notice, &given_up)?;
+                            }
+                            Some(mut kept) if kept.stored.as_ref() != Some(&handle) => {
+                                kept.stored = Some(handle);
+                                tx.put(&notice, &kept)?;
+                            }
+                            Some(_) => {}
                         }
                         self.local_commit(tx).await?;
                     }

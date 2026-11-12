@@ -35,10 +35,10 @@ pub enum NoticeKind {
     /// later, wasn't written within [`crate::KEPT_MESSAGE_MS`] of its acceptance: the SDK gave
     /// it up (Switch spec 8.2). Its entry stays stored, for the host
     /// ([`pubky_switch_client::app::App::parked_entries`]), and a request it was no longer
-    /// shows as [`crate::RequestStatus::Unrecorded`]. Once the host has dealt with it, it
-    /// forgets the entry ([`pubky_switch_client::app::App::forget_parked`]) as it
-    /// acknowledges the notice: an entry left stored is told of again by a restore onto
-    /// another store, and given up, and this notice raised, again there.
+    /// shows as [`crate::RequestStatus::Unrecorded`]. Acknowledging the notice
+    /// ([`Paykit::acknowledge_notice`]) forgets the entry first
+    /// ([`pubky_switch_client::app::App::forget_parked`]); if that fails, the notice stays
+    /// and the error is returned, so an entry is never left stored once its notice is gone.
     MessageGivenUp,
 }
 
@@ -96,6 +96,19 @@ pub(crate) struct KeptNotice {
     pub(crate) request_hash: Option<String>,
     pub(crate) raised_at_ms: u64,
     pub(crate) acknowledged: bool,
+    /// For a message given up: the entry the client keeps stored for it, which the
+    /// notice's acknowledgement forgets ([`Paykit::acknowledge_notice`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) stored: Option<StoredHandle>,
+}
+
+/// The handle of an entry the client keeps stored (Switch spec 8.2): its local ID, and the
+/// message hash [`pubky_switch_client::app::App::forget_parked`] checks it by.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct StoredHandle {
+    pub(crate) stored_id: u64,
+    #[serde(with = "serde_b64")]
+    pub(crate) hash: [u8; 32],
 }
 
 impl KeptNotice {
@@ -109,6 +122,7 @@ impl KeptNotice {
             request_hash: entry.request_hash.clone(),
             raised_at_ms: at,
             acknowledged: false,
+            stored: None,
         }
     }
 
@@ -128,15 +142,18 @@ impl KeptNotice {
             request_hash: request_hash.map(|hash| pubky_switch_core::enc::b64(hash)),
             raised_at_ms: at,
             acknowledged: false,
+            stored: None,
         }
     }
 
-    /// The notice that message `stored` from `sender` was given up, raised at `at`.
+    /// The notice that message `msg_id` from `sender` was given up, raised at `at`, its
+    /// entry kept stored at `stored`.
     pub(crate) fn given_up(
         sender: [u8; 32],
         msg_id: &str,
         request_hash: Option<[u8; 32]>,
         at: u64,
+        stored: StoredHandle,
     ) -> Self {
         Self {
             kind: NoticeKind::MessageGivenUp,
@@ -146,6 +163,7 @@ impl KeptNotice {
             request_hash: request_hash.map(|hash| pubky_switch_core::enc::b64(&hash)),
             raised_at_ms: at,
             acknowledged: false,
+            stored: Some(stored),
         }
     }
 
@@ -156,6 +174,7 @@ impl KeptNotice {
             || kind == NoticeKind::MessageGivenUp
             || self.attempt_id.as_deref() != Some(attempt.to_text().as_str())
             || self.msg_id.is_some()
+            || self.stored.is_some()
         {
             return Err(PaykitError::corrupt());
         }
@@ -268,11 +287,31 @@ impl Paykit {
                 .is_some(),
             None => false,
         };
+        // The entry a message given up left stored is forgotten first: a failure keeps the
+        // notice, for the host to acknowledge again.
+        if let Some(stored) = &kept.stored {
+            self.forget_stored(stored).await?;
+        }
         if !held {
             return self.local_delete(&key).await;
         }
         kept.acknowledged = true;
         self.local_put(&key, &kept).await
+    }
+
+    /// Forget the entry `stored` names, if the client still keeps it: by its local ID and
+    /// hash, or, after a restore onto another store, which tells of its entries again, by
+    /// its hash. One gone already, such as one the host forgot itself, is not looked for.
+    async fn forget_stored(&mut self, stored: &StoredHandle) -> Result<()> {
+        let entries = self.app.parked_entries().await?;
+        let entry = entries
+            .iter()
+            .find(|e| e.stored_id == stored.stored_id && e.hash == stored.hash)
+            .or_else(|| entries.iter().find(|e| e.hash == stored.hash));
+        if let Some(entry) = entry {
+            self.app.forget_parked(entry.stored_id, &entry.hash).await?;
+        }
+        Ok(())
     }
 
     /// Raise the notice of `kind` about the payment `entry` journals, unless it is kept
@@ -318,6 +357,7 @@ mod tests {
             request_hash: Some(pubky_switch_core::enc::b64(&[2; 32])),
             raised_at_ms: 3,
             acknowledged: false,
+            stored: None,
         }
     }
 
@@ -355,7 +395,11 @@ mod tests {
     #[test]
     fn test_notices_message_notice_bound_to_its_sender_and_message() {
         let id = "123e4567-e89b-42d3-a456-426614174000";
-        let notice = KeptNotice::given_up([1; 32], id, Some([2; 32]), 3);
+        let handle = StoredHandle {
+            stored_id: 4,
+            hash: [5; 32],
+        };
+        let notice = KeptNotice::given_up([1; 32], id, Some([2; 32]), 3, handle);
         assert!(notice.check_message(&[1; 32], id).is_ok());
         assert!(notice.check_message(&[9; 32], id).is_err());
         assert!(notice
