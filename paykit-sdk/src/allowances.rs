@@ -1160,9 +1160,11 @@ impl Paykit {
 
     /// A stored entry's proposal, acceptance or rejection (`stored.rs`), written into its
     /// Allowance record by a later write of the app's own: a proposal may open the record,
-    /// an answer needs it held. It waits while the record's scope key is missing, while the
-    /// copy of `allowances` may lack records, or while the record waits for its key; it is
-    /// never written over a value that doesn't read.
+    /// an answer needs it held. It waits while the copy of `allowances` may lack records,
+    /// never given up meanwhile. While the current epoch's `allowance` key is missing, or the
+    /// record waits for its key, it is tried again at each receive and given up as any other
+    /// message not written once [`KEPT_MESSAGE_MS`] have passed since its acceptance (Paykit
+    /// spec 8.1). It is never written over a value that doesn't read.
     pub(crate) async fn place_allowance_note(&mut self, stored: StoredMessage) -> Result<Placed> {
         let Some(allowance_id) = named_allowance(stored.body()).cloned() else {
             return Ok(Placed::Not);
@@ -1172,7 +1174,7 @@ impl Paykit {
             .scope_key(self.app.data_epoch(), "allowance")
             .is_none()
         {
-            return Ok(Placed::Waits);
+            return Ok(Placed::Not);
         }
         let counterparty = stored.sender();
         let target = allowance_target(&counterparty, &allowance_id);
@@ -1188,7 +1190,7 @@ impl Paykit {
                 Body::AllowanceProposal(_) => opened(counterparty, stored),
                 _ => None,
             },
-            Some(content) if crate::hold::awaits_key(&content) => return Ok(Placed::Waits),
+            Some(content) if crate::hold::awaits_key(&content) => return Ok(Placed::Not),
             Some(RecordContent::Value(_)) => match self.held_allowance(&record).await? {
                 Some(mut held) => {
                     if !place(&mut held, stored) {

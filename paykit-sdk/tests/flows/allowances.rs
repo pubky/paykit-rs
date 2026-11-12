@@ -1061,3 +1061,35 @@ async fn test_allowances_missed_item_keeps_removals_and_consents_nothing_before_
         Some(json!({ "held": { "confirm_again": false } }))
     );
 }
+
+#[tokio::test]
+async fn test_allowances_stored_proposal_waiting_for_the_current_epochs_key_given_up_after_30_days()
+{
+    // Bob's proposal is stored, and then the data epoch rotates with no key for the wallet:
+    // nothing can be sealed at the record yet. The proposal waits for the key a day short of
+    // 30 days from its acceptance, and is then given up, the host told once (Paykit spec 8.1).
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    shop.propose_allowance(w.alice_id(), AllowanceRole::Allowee, terms())
+        .await
+        .unwrap();
+    refuse_writes(&w, 2);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"se/").await.unwrap().len(), 1);
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    wallet.receive(None).await.unwrap();
+    let day = pubky_switch_core::records::DAY_MS;
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - day);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"se/").await.unwrap().len(), 1);
+    assert!(wallet.notices().await.unwrap().is_empty());
+    w.clock.advance_ms(2 * day);
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_scan(b"se/").await.unwrap().is_empty());
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+    assert_eq!(notices[0].counterparty, w.bob_id());
+}
