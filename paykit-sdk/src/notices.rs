@@ -23,10 +23,13 @@ pub enum NoticeKind {
     /// "Marked failed, was paid": the payee's receipt confirms a payment whose attempt was
     /// written `failed`, and it arrived once the claim was gone, 30 days after its deadline,
     /// so it can't be recorded on the claim (Paykit spec 7.2, "What a payment method
-    /// declares"). The receipt is in the payer's activity record. The app that made the
-    /// payment raises it from its journal; another own app raises it while it keeps or can
-    /// read the claim showing the attempt `failed`, and one that holds no view of the
-    /// claim once the switch deleted it can't tell and raises none.
+    /// declares"). An app that gets the receipt and holds the failure raises it. An app
+    /// holds the failure when it has it from a stable source: the attempt's owner from its
+    /// own journal, another own app from a view of the claim, kept or read, that shows the
+    /// attempt `failed`. The record's `status` is informational and never decides it. An own
+    /// app that never saw the failure, such as one that joined after the service deleted
+    /// the claim, can't tell and raises nothing. Either way the app records the receipt in
+    /// its activity record.
     PaidAfterFailed,
     /// The payment is held: the app's certificate no longer holds `pay`, so the app reads
     /// and writes no claim and no payer record, and the attempt waits, open, for an app

@@ -706,12 +706,14 @@ pub(crate) struct ReceiptSettles {
 /// days or more before the highest service time verified, when the switch may delete it
 /// (Switch spec 6.3): the receipt can't be recorded on it. For a payment made after
 /// `failed` was written on it, the user is told it was paid (Paykit spec 7.2, "What a
-/// payment method declares"), and the entry no longer waits. Two stable sources tell such
-/// a payment, never the record's informational `status` (Paykit wire 5.3): the journal
-/// entry of the app that made it (`failed_on_claim`), or, at another own app, the first
-/// receipt of a proof the record holds while the claim the app keeps or reads shows the
-/// attempt `failed`. An own app that holds no view of the claim once the switch deleted it,
-/// such as one that joined later, can't tell, and raises nothing. A claim SETTLED holds the
+/// payment method declares"), and the entry no longer waits. An app that gets the receipt
+/// and holds the failure tells the user: it holds the failure when it has it from a stable
+/// source, the attempt's owner from its own journal (`failed_on_claim`), another own app
+/// from a view of the claim, kept or read, that shows the attempt `failed`, for the first
+/// receipt of the proof the record holds. The record's `status` is informational and never
+/// decides it (Paykit wire 5.3). An own app that never saw the failure, such as one that
+/// joined after the service deleted the claim, can't tell and raises nothing. Either way
+/// the receipt goes into the record, by the caller. A claim SETTLED holds the
 /// payment, and one with the attempt open, unknown or failed is settled by this receipt's
 /// evidence: either way an entry waiting for its receipt no longer waits.
 ///

@@ -274,6 +274,67 @@ async fn test_notices_late_receipt_raised_by_an_own_app_after_a_crossing_cancell
     assert_eq!(notices[0].attempt_id, Some(attempt_id));
 }
 
+/// Bob's receipt of the proof `other`'s record holds, signed anew, entered for `targets`.
+async fn receipt_again(
+    w: &World,
+    other: &Paykit,
+    attempt_id: paykit_lib::AttemptId,
+    targets: &[[u8; 16]],
+) {
+    let view = other.requests().await.unwrap().remove(0);
+    let held = other
+        .app()
+        .shared_record(&view.record)
+        .await
+        .unwrap()
+        .unwrap();
+    let record = paykit_lib::records::ActivityRecord::read(
+        held.content.value().unwrap(),
+        &w.alice_id(),
+        paykit_lib::records::ActivitySide::Payer,
+    )
+    .unwrap();
+    let body = paykit_lib::bodies::PaymentReceipt {
+        attempt_id,
+        billing_period: None,
+        metadata: None,
+        payment_reference: None,
+    }
+    .to_body(2)
+    .unwrap();
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        targets,
+        "paykit.payment_receipt",
+        vec![record.proof.unwrap().hash(), view.request.request_hash],
+        body,
+    );
+}
+
+#[tokio::test]
+async fn test_notices_later_receipt_raises_none_where_the_record_holds_one() {
+    // Two own apps without the journal entry hold the failure in their claim views. The
+    // first receipt past the window reaches one, which tells its user and records it; a
+    // later receipt of the same proof at the other finds a receipt in the record already,
+    // and raises nothing.
+    let w = World::new();
+    let mut first = w.wallet("second").await;
+    let mut later = w.wallet("third").await;
+    let (_wallet, _shop, attempt_id) = paid_after_failed(&w).await;
+    first.receive(None).await.unwrap();
+    later.receive(None).await.unwrap();
+    w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    receipt_again(&w, &first, attempt_id, &[first.app_id()]).await;
+    first.receive(None).await.unwrap();
+    assert_eq!(first.notices().await.unwrap().len(), 1);
+    later.receive(None).await.unwrap();
+    receipt_again(&w, &later, attempt_id, &[later.app_id()]).await;
+    later.receive(None).await.unwrap();
+    assert!(later.notices().await.unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn test_notices_second_receipt_after_the_window_raises_none_where_one_is_held() {
     let w = World::new();
