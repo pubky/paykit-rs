@@ -416,16 +416,143 @@ async fn test_blocked_kept_resend_request_from_a_sender_blocked_since_not_answer
 }
 
 #[tokio::test]
-async fn test_blocked_peer_asked_nothing_after_a_missed_item() {
-    // Bob's request is open, but he is blocked: a `missed` item asks him nothing.
+async fn test_blocked_peer_asked_after_a_missed_item_only_once_unblocked() {
+    // Bob's request is open, but he is blocked: a `missed` item asks him nothing, and keeps
+    // the ask; once he is unblocked, the next receive asks him, once (Paykit spec 8.1).
     let w = World::new();
     let (mut wallet, _, _) = received(&w, PaykitConfig::default()).await;
     wallet.block(&w.bob_id()).await.unwrap();
     let now = w.clock.now_ms();
     w.alice.switch().push_missed(1, now - 1_000, now);
     wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
     assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
     assert!(wallet.app().protocol_scan(b"mi/").await.unwrap().is_empty());
+    assert_eq!(wallet.app().protocol_scan(b"ask/").await.unwrap().len(), 1);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(crate::common::asked(&wallet, &w.bob_id()).await.len(), 1);
+    assert!(wallet
+        .app()
+        .protocol_scan(b"ask/")
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_blocked_peer_asked_after_a_missed_item_only_once_the_deny_list_reads() {
+    // The reads of the lists at the receive that takes the `missed` item fail: the copy of
+    // the deny list isn't known, so bob is asked nothing yet, and the ask is kept; the next
+    // receive reads the list, and asks him.
+    let w = World::new();
+    let (mut wallet, _, _) = received(&w, PaykitConfig::default()).await;
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    // The read at the receive's start and the one before the asks both fail.
+    fail_list_read(&w);
+    fail_list_read(&w);
+    let now = w.clock.now_ms();
+    w.alice.switch().push_missed(1, now - 1_000, now);
+    wallet.receive(None).await.unwrap();
+    assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
+    assert_eq!(wallet.app().protocol_scan(b"ask/").await.unwrap().len(), 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(crate::common::asked(&wallet, &w.bob_id()).await.len(), 1);
+}
+
+#[tokio::test]
+async fn test_blocked_kept_resend_request_answered_only_once_the_deny_list_reads() {
+    // The read of the lists fails before the wallet answers bob's kept request to re-send:
+    // the copy of the deny list isn't known, so it is neither answered nor dropped; the
+    // next receive reads the list, and answers it.
+    let w = World::new();
+    let (mut wallet, shop, request) = received(&w, PaykitConfig::default()).await;
+    kept_resend_request(&w, &mut wallet, &shop, &request).await;
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    fail_list_read(&w);
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
+    assert_eq!(wallet.app().protocol_scan(b"ans/").await.unwrap().len(), 1);
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
+    assert!(wallet
+        .app()
+        .protocol_scan(b"ans/")
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+/// Bob's shop holding `request` and `manage_contacts`, with a due mark of alice's replies
+/// dropped for the bounds, as the shop keeps one once it holds her request's record, and
+/// alice's wallet to ask. Returns the shop.
+async fn shop_with_a_due_mark(w: &World) -> Paykit {
+    let _wallet = w.wallet("wallet").await;
+    let mut shop = w
+        .join(
+            &w.bob,
+            "till",
+            AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+        )
+        .await;
+    shop.receive(None).await.unwrap();
+    let alice = pubky_switch_core::enc::b64(&w.alice_id());
+    let at = w.clock.now_ms();
+    let value = serde_json::json!({
+        "v": 1,
+        "d": {
+            "sender": alice,
+            "earliest_ms": at,
+            "latest_ms": at,
+            "due": true,
+            "asked_at_ms": null,
+            "queued": null,
+        }
+    });
+    shop.app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: format!("pd/{alice}").into_bytes(),
+            value: serde_json::to_vec(&value).unwrap(),
+        }])
+        .await
+        .unwrap();
+    shop
+}
+
+#[tokio::test]
+async fn test_blocked_payer_asked_for_dropped_replies_only_once_unblocked() {
+    // The payee side keeps what it owes a blocked payer too: alice's mark asks nothing while
+    // she is blocked, and asks once she is unblocked (Paykit spec 8.1).
+    let w = World::new();
+    let mut shop = shop_with_a_due_mark(&w).await;
+    shop.block(&w.alice_id()).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(crate::common::asked(&shop, &w.alice_id()).await.is_empty());
+    assert_eq!(shop.app().protocol_scan(b"pd/").await.unwrap().len(), 1);
+    shop.unblock(&w.alice_id()).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(crate::common::asked(&shop, &w.alice_id()).await.len(), 1);
+}
+
+#[tokio::test]
+async fn test_blocked_payer_asked_for_dropped_replies_only_once_the_deny_list_reads() {
+    // The shop's read of the lists fails: the copy isn't known, so alice's mark asks
+    // nothing; the next receive reads the list, and asks her.
+    let w = World::new();
+    let mut shop = shop_with_a_due_mark(&w).await;
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    w.bob.switch().fail_next(Fault::Error {
+        path: "/allow".into(),
+        code: ErrorCode::Unavailable,
+        current: serde_json::Value::Null,
+    });
+    shop.receive(None).await.unwrap();
+    assert!(crate::common::asked(&shop, &w.alice_id()).await.is_empty());
+    shop.receive(None).await.unwrap();
+    assert_eq!(crate::common::asked(&shop, &w.alice_id()).await.len(), 1);
 }
 
 #[tokio::test]
@@ -499,8 +626,73 @@ async fn test_blocked_own_block_kept_mark_and_copy_written_together() {
     wallet.receive(None).await.unwrap();
     let before = wallet.app().protocol_get(b"dl").await.unwrap();
     keep_ops(&w, 1);
-    failing.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    failing
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     assert!(wallet.block(&w.bob_id()).await.is_err());
     assert!(wallet.app().protocol_scan(b"bk/").await.unwrap().is_empty());
     assert_eq!(wallet.app().protocol_get(b"dl").await.unwrap(), before);
+}
+
+#[tokio::test]
+async fn test_blocked_kept_resend_request_at_another_key_refused_as_corrupt() {
+    // A request to re-send kept under a key naming another `seq` than its own is a corrupt
+    // store: the receive fails rather than answer or drop it.
+    let w = World::new();
+    let (mut wallet, shop, request) = received(&w, PaykitConfig::default()).await;
+    kept_resend_request(&w, &mut wallet, &shop, &request).await;
+    let (key, value) = wallet.app().protocol_scan(b"ans/").await.unwrap().remove(0);
+    let moved = String::from_utf8(key.clone())
+        .unwrap()
+        .replace(&format!("ans/{:020}/", 1), &format!("ans/{:020}/", 2));
+    wallet
+        .app_mut()
+        .protocol_commit(&[
+            pubky_switch_client::app::LocalWrite::Delete { key },
+            pubky_switch_client::app::LocalWrite::Put {
+                key: moved.into_bytes(),
+                value,
+            },
+        ])
+        .await
+        .unwrap();
+    let failed = wallet.receive(None).await.unwrap_err();
+    assert!(crate::common::is_corrupt(&failed), "{failed:?}");
+    assert_eq!(wallet.app().protocol_scan(b"ans/").await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_blocked_mark_queued_request_naming_another_message_refused_as_corrupt() {
+    // A mark's queued request names the `msg_id` of another message the outbox delivered to
+    // alice, the shop's request, with a hash that isn't that message's: it doesn't point to
+    // the request it asked with, so the receive fails as corrupt rather than count alice
+    // asked (the mark's proof of its pointer).
+    let w = World::new();
+    let mut shop = shop_with_a_due_mark(&w).await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let sent = shop
+        .app()
+        .sent_to(&w.alice_id(), 0, u64::MAX)
+        .await
+        .unwrap();
+    let request = sent
+        .iter()
+        .find(|m| m.kind == "paykit.payment_request")
+        .unwrap();
+    let (key, value) = shop.app().protocol_scan(b"pd/").await.unwrap().remove(0);
+    let mut mark: serde_json::Value = serde_json::from_slice(&value).unwrap();
+    mark["d"]["queued"] = serde_json::json!({
+        "msg_id": request.msg_id,
+        "hash": pubky_switch_core::enc::b64(&[0; 32]),
+    });
+    shop.app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key,
+            value: serde_json::to_vec(&mark).unwrap(),
+        }])
+        .await
+        .unwrap();
+    let failed = shop.receive(None).await.unwrap_err();
+    assert!(crate::common::is_corrupt(&failed), "{failed:?}");
+    assert!(crate::common::asked(&shop, &w.alice_id()).await.is_empty());
 }

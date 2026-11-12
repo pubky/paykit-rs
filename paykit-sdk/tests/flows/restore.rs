@@ -1394,7 +1394,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
             "asked_at_ms": 1,
         })
     };
-    let cases: [(&str, String, serde_json::Value); 18] = [
+    let cases: [(&str, String, serde_json::Value); 19] = [
         (
             "kept cancellation of another kind",
             key_of("kc/"),
@@ -1478,7 +1478,12 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
         (
             "missed item time other than its key's",
             format!("mi/{:020}", 5),
-            kept(serde_json::json!(0)),
+            kept(serde_json::json!({ "from_ms": 6, "asked": [] })),
+        ),
+        (
+            "missed item asking a counterparty twice",
+            format!("mi/{:020}", 5),
+            kept(serde_json::json!({ "from_ms": 5, "asked": [vec![1u8; 32], vec![1u8; 32]] })),
         ),
         (
             "queued ask",

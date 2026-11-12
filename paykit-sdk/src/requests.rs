@@ -852,6 +852,34 @@ impl Paykit {
     /// or a value that doesn't read, is refused as not now, never as no request: it may hold
     /// a response or a cancellation, so no payment and no response is decided from it
     /// (Paykit spec 8.1, one response per request).
+    /// The refusal of a call on the payer's request record at `target`, which the app doesn't
+    /// hold open: not now for a record held that it can't open, sealed under a scope key it
+    /// doesn't hold yet or a value that doesn't read, and for one absent while the copy of
+    /// the payer's records may lack records (Paykit spec 8.1, "Records not listed yet"):
+    /// either may hold a response or a cancellation. [`Refusal::NotFound`] only for a record
+    /// absent or deleted from a copy that lacks none.
+    pub(crate) async fn request_record_refusal(
+        &self,
+        target: &ActivityTarget,
+    ) -> Result<PaykitError> {
+        let content = self
+            .app
+            .shared_record(&self.activity_key(target)?)
+            .await?
+            .map(|held| held.content);
+        Ok(match content {
+            Some(content) if crate::hold::awaits_key(&content) => crate::hold::value_awaits_key(),
+            Some(RecordContent::Value(_) | RecordContent::Unreadable(_)) => {
+                Refusal::NotNow("Paykit wire 5.3: the request record held doesn't read".into())
+                    .into()
+            }
+            _ if self.side_unlisted(crate::hold::RecordSide::Payer).await? => {
+                crate::hold::unlisted()
+            }
+            _ => Refusal::NotFound.into(),
+        })
+    }
+
     pub(crate) async fn payer_request(
         &mut self,
         request: &RequestRef,
@@ -861,21 +889,7 @@ impl Paykit {
             &request.request_hash,
         ));
         let Some(record) = self.activity(&target).await? else {
-            let content = self
-                .app
-                .shared_record(&self.activity_key(&target)?)
-                .await?
-                .map(|held| held.content);
-            return Err(match content {
-                Some(content) if crate::hold::awaits_key(&content) => {
-                    crate::hold::value_awaits_key()
-                }
-                Some(RecordContent::Value(_) | RecordContent::Unreadable(_)) => {
-                    Refusal::NotNow("Paykit wire 5.3: the request record held doesn't read".into())
-                        .into()
-                }
-                _ => Refusal::NotFound.into(),
-            });
+            return Err(self.request_record_refusal(&target).await?);
         };
         if request_of(&record).is_none() {
             return Err(Refusal::NotFound.into());

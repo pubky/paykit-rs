@@ -35,7 +35,7 @@
 //! restore neither loses nor resets them; a restore takes each mark bound to its key's
 //! sender.
 
-use pubky_switch_client::app::{AppEvent, Delivery};
+use pubky_switch_client::app::Delivery;
 use pubky_switch_core::enc::serde_b64;
 use pubky_switch_core::records::DAY_MS;
 use serde::{Deserialize, Serialize};
@@ -64,8 +64,18 @@ pub(crate) struct DropMark {
     pub(crate) due: bool,
     /// When the outbox last delivered a request for this mark, on the device clock.
     pub(crate) asked_at_ms: Option<u64>,
-    /// The `msg_id` of a request queued for this mark and not yet seen delivered.
-    pub(crate) queued: Option<String>,
+    /// A request queued for this mark and not yet seen delivered.
+    pub(crate) queued: Option<QueuedRequest>,
+}
+
+/// A `resend_request` a mark queued (`DropMark::queued`): its `msg_id`, which the outbox
+/// answers its delivery by, and its hash, the proof that the message the outbox delivered
+/// under that `msg_id` is this request ([`Paykit::delivered_request`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct QueuedRequest {
+    pub(crate) msg_id: String,
+    #[serde(with = "serde_b64")]
+    pub(crate) hash: [u8; 32],
 }
 
 impl DropMark {
@@ -241,12 +251,12 @@ impl Paykit {
         Ok(out)
     }
 
-    /// Ask on the marks, at a receive (module docs): a reply mark becomes due once this read
-    /// took the record of one of its sender's requests (`events`); a mark past its expiry
-    /// goes; each due mark asks its sender when its cadence allows. Returns how many requests
-    /// were queued.
-    pub(crate) async fn ask_on_marks(&mut self, events: &[AppEvent]) -> Result<u64> {
-        self.note_requests_held(events).await?;
+    /// Ask on the marks, at a receive (module docs): a reply mark becomes due once the app
+    /// holds the record of one of its sender's requests; a mark past its expiry goes; each
+    /// due mark asks its sender when its cadence allows. Returns how many requests were
+    /// queued.
+    pub(crate) async fn ask_on_marks(&mut self) -> Result<u64> {
+        self.note_requests_held().await?;
         let service = self.service_time();
         let mut asked = 0u64;
         for family in [MarkFamily::Replies, MarkFamily::Unverified] {
@@ -255,9 +265,10 @@ impl Paykit {
                 let mark = read_mark(family, &key, &value)?;
                 if mark.expired(service) {
                     self.local_delete(&key).await?;
-                } else if mark.due && !self.denied_as_last_read(&mark.sender).await? {
-                    // A sender blocked is asked nothing while it is (Paykit spec 8.1); its
-                    // mark stays until it expires.
+                } else if mark.due && !self.sends_held(&mark.sender).await? {
+                    // A sender blocked is asked nothing while it is, nor while the copy of
+                    // the deny list isn't known (Paykit spec 8.1); its mark stays, and asks
+                    // once it is unblocked, on its cadence, until it expires.
                     asked = asked.saturating_add(self.ask_on_mark(family, &key, mark).await?);
                 }
             }
@@ -273,18 +284,25 @@ impl Paykit {
         key: &str,
         mut mark: DropMark,
     ) -> Result<u64> {
-        if let Some(msg_id) = mark.queued.clone() {
+        if let Some(queued) = mark.queued.clone() {
+            let msg_id = &queued.msg_id;
             if matches!(
-                self.app.delivery(&msg_id).await?,
+                self.app.delivery(msg_id).await?,
                 Some(Delivery::Queued { .. })
             ) {
                 // Queued, it is tried again now; one that fails stays queued for the next
                 // receive.
-                let _ = self.app.flush_message(&msg_id).await;
+                let _ = self.app.flush_message(msg_id).await;
             }
-            match self.app.delivery(&msg_id).await? {
+            match self.app.delivery(msg_id).await? {
                 Some(Delivery::Queued { .. }) => return Ok(0),
-                Some(Delivery::Accepted { .. }) => mark.asked_at_ms = Some(self.now()),
+                // Delivered counts only once the message delivered is shown to be this
+                // request: a `msg_id` naming another message is a corrupt store, never a
+                // request delivered.
+                Some(Delivery::Accepted { .. }) => {
+                    self.delivered_request(&mark.sender, &queued).await?;
+                    mark.asked_at_ms = Some(self.now());
+                }
                 // Refused for good, or no longer kept: not sent, so asked anew below.
                 _ => {}
             }
@@ -304,7 +322,10 @@ impl Paykit {
         let msg_id = signed.msg_id().to_owned();
         // Kept before it is queued: a crash between the two finds the request not kept by
         // the outbox, and asks anew.
-        mark.queued = Some(msg_id.clone());
+        mark.queued = Some(QueuedRequest {
+            msg_id: msg_id.clone(),
+            hash: signed.hash(),
+        });
         self.local_put(key, &mark).await?;
         self.app.queue_signed(signed).await?;
         let _ = self.app.flush_message(&msg_id).await;
@@ -319,24 +340,52 @@ impl Paykit {
         Ok(1)
     }
 
-    /// Make due the reply mark of each sender the record of one of whose requests this read
-    /// took (`events`).
-    async fn note_requests_held(&mut self, events: &[AppEvent]) -> Result<()> {
+    /// Check that the message the outbox delivered to `sender` under `queued`'s `msg_id` is
+    /// that `resend_request`: one to `sender`, of that kind and hash.
+    ///
+    /// # Errors
+    ///
+    /// A corrupt store when none is: the mark points to another message.
+    async fn delivered_request(&self, sender: &[u8; 32], queued: &QueuedRequest) -> Result<()> {
+        let sent = self.app.sent_to(sender, 0, u64::MAX).await?;
+        if sent.iter().any(|message| {
+            message.msg_id == queued.msg_id
+                && message.kind == paykit_lib::kinds::Kind::ResendRequest.as_str()
+                && message.plaintext.hash() == queued.hash
+        }) {
+            Ok(())
+        } else {
+            Err(PaykitError::corrupt())
+        }
+    }
+
+    /// Make due the reply mark of each sender whose request's record the app holds: any
+    /// record of the payee's side whose counterparty the mark names, one held before the
+    /// reply was dropped included. The records are read only while a mark waits.
+    async fn note_requests_held(&mut self) -> Result<()> {
         let own = self.identity();
         let family = MarkFamily::Replies;
-        for event in events {
-            let AppEvent::RecordChanged { key: record } = event else {
+        let mut waiting = std::collections::BTreeMap::new();
+        for (key, value) in self.app.protocol_scan(family.prefix().as_bytes()).await? {
+            let key = String::from_utf8(key).map_err(|_| PaykitError::corrupt())?;
+            let mark = read_mark(family, &key, &value)?;
+            if !mark.due {
+                waiting.insert(mark.sender, (key, mark));
+            }
+        }
+        if waiting.is_empty() {
+            return Ok(());
+        }
+        let mut tx = crate::state::Tx::default();
+        let records = self
+            .app
+            .records_of(paykit_lib::collections::Collection::PayeeActivity.name())
+            .await?;
+        for held in records {
+            let Some(value) = held.content.value() else {
                 continue;
             };
-            let Some(held) = self.app.shared_record(record).await? else {
-                continue;
-            };
-            let (Some(_), Some(value)) = (
-                paykit_lib::collections::Collection::PayeeActivity.policy_label(&held.policy),
-                held.content.value(),
-            ) else {
-                continue;
-            };
+            // A record that doesn't read shows no counterparty: it makes no mark due.
             let Ok(read) = paykit_lib::records::ActivityRecord::read(
                 value,
                 &own,
@@ -344,17 +393,12 @@ impl Paykit {
             ) else {
                 continue;
             };
-            let mark_key = family.key(&read.counterparty);
-            let Some(bytes) = self.app.protocol_get(mark_key.as_bytes()).await? else {
-                continue;
-            };
-            let mut mark = read_mark(family, &mark_key, &bytes)?;
-            if !mark.due {
+            if let Some((key, mut mark)) = waiting.remove(&read.counterparty) {
                 mark.due = true;
-                self.local_put(&mark_key, &mark).await?;
+                tx.put(&key, &mark)?;
             }
         }
-        Ok(())
+        self.local_commit(tx).await
     }
 }
 

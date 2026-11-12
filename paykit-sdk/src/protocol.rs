@@ -87,6 +87,53 @@ pub(crate) struct QueuedAsk {
     pub(crate) until_ms: Option<u64>,
 }
 
+impl QueuedAsk {
+    /// The ask at `key` (`ask/<sender>/<from>`), `value`, read whole and bound to it: its
+    /// sender and time are those its key names. The one check for a restore and for the
+    /// asks at runtime.
+    ///
+    /// # Errors
+    ///
+    /// A key of another family, or an ask that names another sender or time.
+    pub(crate) fn bound(key: &[u8], value: &[u8]) -> Result<Self, String> {
+        let bad = || String::from("Paykit spec 9: a queued ask doesn't name its own key");
+        let Some(StateKey::Ask { sender, from_ms }) = StateKey::parse(key) else {
+            return Err(bad());
+        };
+        let ask = state::decode::<QueuedAsk>(value).map_err(|_| bad())?;
+        if ask.sender != sender || ask.from_ms != from_ms {
+            return Err(bad());
+        }
+        Ok(ask)
+    }
+}
+
+/// A `missed` item's mark (`p/mi/<from>`): the time its re-sends ask from, and the
+/// counterparties asked already for it, kept while a record whose counterparty it may still
+/// have to ask is sealed under a scope key the app doesn't hold yet (`resend.rs`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct MissedItemMark {
+    pub(crate) from_ms: u64,
+    /// In increasing order, each once.
+    pub(crate) asked: Vec<[u8; 32]>,
+}
+
+/// A `missed` item's mark (`mi/<from>`), bound to its key: its time is the one its key
+/// names, and the counterparties it asked already are each named once, in order, as the
+/// asks leave them. The one check for a restore and for the asks at runtime.
+pub(crate) fn missed_item_mark_at(from_ms: u64, value: &[u8]) -> Result<MissedItemMark, String> {
+    match state::decode::<MissedItemMark>(value) {
+        Ok(mark)
+            if mark.from_ms == from_ms && mark.asked.windows(2).all(|pair| pair[0] < pair[1]) =>
+        {
+            Ok(mark)
+        }
+        _ => Err(String::from(
+            "Paykit spec 9: a mark of a missed item doesn't name its own time",
+        )),
+    }
+}
+
 /// The own app, as the protocol's callbacks need it.
 #[derive(Clone)]
 struct Own {
@@ -385,11 +432,8 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::Ask { sender, from_ms } => {
-                let ask = state::decode::<QueuedAsk>(&value).map_err(|_| unread())?;
-                if ask.sender != sender || ask.from_ms != from_ms {
-                    return Err(unread());
-                }
+            StateKey::Ask { .. } => {
+                QueuedAsk::bound(&key, &value).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -398,7 +442,12 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::Missed { from_ms } | StateKey::MissedItem { from_ms } => {
+            StateKey::MissedItem { from_ms } => {
+                missed_item_mark_at(from_ms, &value)?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::Missed { from_ms } => {
                 missed_mark_at(from_ms, &value)?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
@@ -546,17 +595,20 @@ fn check_seen_records(value: &[u8], payee: &[u8; 32], app_id: &[u8; 16]) -> Resu
 
 /// A `resend_request` received and queued to answer (`ans/<seq>/<msg_id>`, Paykit spec 9):
 /// read at the `seq` and `msg_id` its key names, its body a `resend_request`'s, and its
-/// certificate the requester's.
-fn check_queued_answer(value: &[u8], seq: u64, msg_id: &str) -> Result<(), String> {
-    let bad =
-        || String::from("Paykit spec 9: a queued resend_request in the backup doesn't verify");
+/// certificate the requester's. The one check for a restore and for the answers at runtime.
+pub(crate) fn check_queued_answer(
+    value: &[u8],
+    seq: u64,
+    msg_id: &str,
+) -> Result<QueuedAnswer, String> {
+    let bad = || String::from("Paykit spec 9: a queued resend_request doesn't verify");
     let queued = state::decode::<QueuedAnswer>(value).map_err(|_| bad())?;
     if queued.seq != seq || queued.msg_id != msg_id {
         return Err(bad());
     }
     ResendRequest::from_body(&queued.body).map_err(|_| bad())?;
     verify_certificate(&queued.cert, &queued.requester).map_err(|_| bad())?;
-    Ok(())
+    Ok(queued)
 }
 
 /// A payee's cancellation kept to place (`kc/<record key>`, Paykit spec 8.1): it verifies
@@ -651,9 +703,9 @@ pub(crate) fn kept_reply_at(
     Ok(reply)
 }
 
-/// A `missed` item's or a provider loss's mark (`mi/<from>`, `missed/<from>`), bound to
-/// its key: the re-sends are asked from its value, so it must be the time its key names.
-/// The one check for a restore and for the asks at runtime.
+/// A provider loss's mark (`missed/<from>`), bound to its key: the re-sends are asked from
+/// its value, so it must be the time its key names. The one check for a restore and for the
+/// asks at runtime.
 pub(crate) fn missed_mark_at(from_ms: u64, value: &[u8]) -> Result<u64, String> {
     match state::decode::<u64>(value) {
         Ok(from) if from == from_ms => Ok(from),
@@ -894,7 +946,10 @@ impl Protocol for PaykitProtocol {
         Ok(vec![
             local_write(
                 &key::missed_item(missed.accepted_from_ms),
-                &missed.accepted_from_ms,
+                &MissedItemMark {
+                    from_ms: missed.accepted_from_ms,
+                    asked: Vec::new(),
+                },
             )?,
             local_write(key::MISSED_HOLD, &crate::hold::MissedHold::default())?,
             local_write(key::MISSED_UNLISTED, &true)?,
@@ -1507,6 +1562,39 @@ mod receive_tests {
         assert_eq!(missed_mark_at(5, &value), Ok(5));
         assert!(missed_mark_at(6, &value).is_err());
         assert!(missed_mark_at(5, b"not a mark").is_err());
+    }
+
+    #[test]
+    fn test_protocol_missed_item_mark_bound_to_its_time_with_its_asked_in_order() {
+        let mark =
+            |asked: Vec<[u8; 32]>| state::encode(&MissedItemMark { from_ms: 5, asked }).unwrap();
+        let asked = vec![[1; 32], [2; 32]];
+        assert_eq!(
+            missed_item_mark_at(5, &mark(asked.clone())),
+            Ok(MissedItemMark { from_ms: 5, asked })
+        );
+        assert!(missed_item_mark_at(6, &mark(Vec::new())).is_err());
+        assert!(missed_item_mark_at(5, &mark(vec![[2; 32], [1; 32]])).is_err());
+        assert!(missed_item_mark_at(5, &mark(vec![[1; 32], [1; 32]])).is_err());
+        assert!(missed_item_mark_at(5, &state::encode(&5u64).unwrap()).is_err());
+    }
+
+    #[test]
+    fn test_protocol_queued_ask_bound_to_its_key() {
+        let sender = [3; 32];
+        let ask = QueuedAsk {
+            sender,
+            from_ms: 7,
+            until_ms: None,
+        };
+        let value = state::encode(&ask).unwrap();
+        assert_eq!(
+            QueuedAsk::bound(key::ask(&sender, 7).as_bytes(), &value),
+            Ok(ask)
+        );
+        assert!(QueuedAsk::bound(key::ask(&sender, 8).as_bytes(), &value).is_err());
+        assert!(QueuedAsk::bound(key::ask(&[4; 32], 7).as_bytes(), &value).is_err());
+        assert!(QueuedAsk::bound(key::missed(7).as_bytes(), &value).is_err());
     }
 
     #[test]

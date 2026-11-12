@@ -25,7 +25,7 @@ use pubky_switch_core::sig::SignedDoc;
 use crate::activity::{KeptSide, SideTag};
 use crate::error::{PaykitError, Result};
 use crate::paykit::Paykit;
-use crate::protocol::{body_label, holds_role, QueuedAsk};
+use crate::protocol::{body_label, holds_role, MissedItemMark, QueuedAsk};
 use crate::state::{key, Tx};
 
 /// One message is re-sent to one requester identity at most once an hour (Paykit wire 4.12).
@@ -114,14 +114,25 @@ impl Paykit {
 
     /// Send the re-sends the protocol queued: for entries the app couldn't read, to their
     /// sender; after a provider loss, to every counterparty with Paykit activity; after
-    /// `missed` items, to the counterparties [`Paykit::missed_counterparties`] names. Returns
-    /// how many requests went out.
+    /// `missed` items, to the counterparties [`Paykit::missed_counterparties`] names; after a
+    /// restore, to the payees of open requests. Each is an ask kept for its counterparty
+    /// (`ask/`), sent and dropped once nothing holds sends to it back
+    /// ([`Paykit::sends_held`]): while the counterparty is blocked, or the copy of the deny
+    /// list isn't known, the ask stays, and goes once it is unblocked (Paykit spec 8.1,
+    /// "Blocked counterparties"). Returns how many requests went out.
     pub(crate) async fn send_asks(&mut self) -> Result<u64> {
+        self.queue_missed_asks().await?;
+        let asks = self.app.protocol_scan(key::ASKS.as_bytes()).await?;
+        // A copy of the deny list not known, as after a restore, is read first when there is
+        // an ask to send, so the asks a reconcile queues go now; a read that fails leaves
+        // them waiting.
+        if !asks.is_empty() && !self.deny_copy_known().await? {
+            self.refresh_lists_when_due().await?;
+        }
         let mut sent = 0u64;
-        for (rest, ask) in self.local_scan::<QueuedAsk>(key::ASKS).await? {
-            // A counterparty blocked is asked nothing (Paykit spec 8.1).
-            if self.denied_as_last_read(&ask.sender).await? {
-                self.local_delete(&format!("{}{rest}", key::ASKS)).await?;
+        for (key, value) in asks {
+            let ask = QueuedAsk::bound(&key, &value).map_err(|_| PaykitError::corrupt())?;
+            if self.sends_held(&ask.sender).await? {
                 continue;
             }
             self.request_resend(
@@ -133,9 +144,26 @@ impl Paykit {
                 },
             )
             .await?;
-            self.local_delete(&format!("{}{rest}", key::ASKS)).await?;
+            let key = String::from_utf8(key).map_err(|_| PaykitError::corrupt())?;
+            self.local_delete(&key).await?;
             sent = sent.saturating_add(1);
         }
+        Ok(sent)
+    }
+
+    /// Turn the marks of missed entries into asks, one per counterparty (`ask/`).
+    ///
+    /// - A provider loss's marks (`missed/`) ask every counterparty with Paykit activity from
+    ///   their earliest time, and go.
+    /// - A `missed` item's mark (`mi/`) asks the counterparties [`Paykit::missed_counterparties`]
+    ///   reads from the copy of the records, once the copy is listed and no scope key is
+    ///   awaited. Those it can read now are asked now, each once per mark. While a record of
+    ///   the copy is sealed under a scope key the app doesn't hold yet, its counterparty
+    ///   can't be read: the mark stays, naming the counterparties asked already, and asks
+    ///   those that show once the record opens. It goes once no record is sealed, or once
+    ///   [`crate::KEPT_MESSAGE_MS`] have passed since its time on the highest service time
+    ///   verified, when no counterparty keeps what it would ask for any longer.
+    async fn queue_missed_asks(&mut self) -> Result<()> {
         let lost = self.missed_marks(key::MISSED).await?;
         if !lost.is_empty() {
             let peers: Vec<[u8; 32]> = self
@@ -144,38 +172,82 @@ impl Paykit {
                 .into_iter()
                 .map(|(rest, _)| unb64_array::<32>(&rest).map_err(|_| PaykitError::corrupt()))
                 .collect::<Result<_>>()?;
-            sent = sent.saturating_add(self.ask_from_marks(key::MISSED, lost, peers).await?);
+            let from = lost.iter().map(|(_, from)| *from).min().unwrap_or(0);
+            let mut tx = Tx::default();
+            for peer in peers {
+                self.queue_ask(&mut tx, peer, from).await?;
+            }
+            for (rest, _) in lost {
+                tx.delete(&format!("{}{rest}", key::MISSED));
+            }
+            self.local_commit(tx).await?;
         }
-        let items = self.missed_marks(key::MISSED_ITEMS).await?;
+        let items = self.missed_item_marks().await?;
         // The counterparties come from the copy of the records, so the asks and their marks
-        // wait while it may lack records, waits for scope keys, or holds a record sealed under
-        // a key not held yet, for the receive that completes it.
-        if !items.is_empty()
-            && self.unlisted().await?.is_none()
-            && self.scope_keys_awaited().await?.is_none()
-            && !self.copy_awaits_key().await?
+        // wait while it may lack records or waits for scope keys, for the receive that
+        // completes it.
+        if items.is_empty()
+            || self.unlisted().await?.is_some()
+            || self.scope_keys_awaited().await?.is_some()
         {
-            let counterparties = self.missed_counterparties().await?.into_iter().collect();
-            sent = sent.saturating_add(
-                self.ask_from_marks(key::MISSED_ITEMS, items, counterparties)
-                    .await?,
-            );
+            return Ok(());
         }
-        Ok(sent)
+        let counterparties = self.missed_counterparties().await?;
+        let sealed = self.copy_awaits_key().await?;
+        let service = self.service_time();
+        let mut tx = Tx::default();
+        for (mark_key, mut mark) in items {
+            let mut asked: std::collections::BTreeSet<[u8; 32]> =
+                mark.asked.iter().copied().collect();
+            for counterparty in &counterparties {
+                if asked.insert(*counterparty) {
+                    self.queue_ask(&mut tx, *counterparty, mark.from_ms).await?;
+                }
+            }
+            if sealed && !crate::stored::past_window(mark.from_ms, service) {
+                mark.asked = asked.into_iter().collect();
+                tx.put(&mark_key, &mark)?;
+            } else {
+                tx.delete(&mark_key);
+            }
+        }
+        self.local_commit(tx).await
     }
 
-    /// The marks of missed entries under `prefix` (`missed/` or `mi/`), each read with the
-    /// check a restore makes ([`crate::protocol::missed_mark_at`]), bound to the time its key
-    /// names: one that fails it is a corrupt store, never no mark.
+    /// Ask `counterparty`, in `tx`, to send again what its inbox accepted from `from_ms` on
+    /// (`ask/<counterparty>/<from>`). An ask kept already at that key, read bound to it, is
+    /// widened to everything from then on.
+    pub(crate) async fn queue_ask(
+        &self,
+        tx: &mut Tx,
+        counterparty: [u8; 32],
+        from_ms: u64,
+    ) -> Result<()> {
+        let ask_key = key::ask(&counterparty, from_ms);
+        if let Some(value) = self.app.protocol_get(ask_key.as_bytes()).await? {
+            QueuedAsk::bound(ask_key.as_bytes(), &value).map_err(|_| PaykitError::corrupt())?;
+        }
+        tx.put(
+            &ask_key,
+            &QueuedAsk {
+                sender: counterparty,
+                from_ms,
+                until_ms: None,
+            },
+        )?;
+        Ok(())
+    }
+
+    /// The marks of missed entries under `prefix` (`missed/`), each read with the check a
+    /// restore makes ([`crate::protocol::missed_mark_at`]), bound to the time its key names:
+    /// one that fails it is a corrupt store, never no mark.
     async fn missed_marks(&self, prefix: &str) -> Result<Vec<(String, u64)>> {
         let mut out = Vec::new();
         for (key, value) in self.app.protocol_scan(prefix.as_bytes()).await? {
-            let from_ms = match crate::state::StateKey::parse(&key) {
-                Some(
-                    crate::state::StateKey::Missed { from_ms }
-                    | crate::state::StateKey::MissedItem { from_ms },
-                ) => from_ms,
-                _ => return Err(PaykitError::corrupt()),
+            let Some(crate::state::StateKey::Missed { from_ms }) =
+                crate::state::StateKey::parse(&key)
+            else {
+                return Err(PaykitError::corrupt());
             };
             let from = crate::protocol::missed_mark_at(from_ms, &value)
                 .map_err(|_| PaykitError::corrupt())?;
@@ -188,39 +260,25 @@ impl Paykit {
         Ok(out)
     }
 
-    /// Ask each of `counterparties` but those blocked to send again what its inbox accepted
-    /// from the earliest time of `marks`, kept under `prefix`, then drop the marks. The client gives each mark's
-    /// time no earlier than the cursor's time less the clock tolerance (Paykit spec 9, "What
-    /// an app asks for"). Returns how many requests went out.
-    async fn ask_from_marks(
-        &mut self,
-        prefix: &str,
-        marks: Vec<(String, u64)>,
-        counterparties: Vec<[u8; 32]>,
-    ) -> Result<u64> {
-        let from = marks.iter().map(|(_, from)| *from).min().unwrap_or(0);
-        let mut sent = 0u64;
-        for counterparty in counterparties {
-            // A counterparty blocked is asked nothing (Paykit spec 8.1).
-            if self.denied_as_last_read(&counterparty).await? {
-                continue;
-            }
-            self.request_resend(
-                counterparty,
-                ResendSelection {
-                    accepted_from_ms: Some(from),
-                    ..ResendSelection::default()
-                },
-            )
-            .await?;
-            sent = sent.saturating_add(1);
+    /// The marks of `missed` items (`mi/`), each read with the check a restore makes
+    /// ([`crate::protocol::missed_item_mark_at`]), bound to the time its key names, with its
+    /// key: one that fails it is a corrupt store, never no mark.
+    async fn missed_item_marks(&self) -> Result<Vec<(String, MissedItemMark)>> {
+        let mut out = Vec::new();
+        for (key, value) in self.app.protocol_scan(key::MISSED_ITEMS.as_bytes()).await? {
+            let Some(crate::state::StateKey::MissedItem { from_ms }) =
+                crate::state::StateKey::parse(&key)
+            else {
+                return Err(PaykitError::corrupt());
+            };
+            let mark = crate::protocol::missed_item_mark_at(from_ms, &value)
+                .map_err(|_| PaykitError::corrupt())?;
+            out.push((
+                String::from_utf8(key).map_err(|_| PaykitError::corrupt())?,
+                mark,
+            ));
         }
-        let mut tx = Tx::default();
-        for (rest, _) in marks {
-            tx.delete(&format!("{prefix}{rest}"));
-        }
-        self.local_commit(tx).await?;
-        Ok(sent)
+        Ok(out)
     }
 
     /// The counterparties a `missed` item asks to send again (Paykit spec 9): a payee's
