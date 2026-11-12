@@ -160,6 +160,53 @@ async fn test_notices_late_receipt_written_later_raises_one_and_ends_the_wait() 
 }
 
 #[tokio::test]
+async fn test_notices_late_receipt_raised_by_an_owner_restored_from_before_the_failure() {
+    // The wallet's backup predates the payment: restored, it has no journal entry of the
+    // attempt, and holds the failure from the claim view its reconcile reads.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    w.rail.next(Behaviour::Fail);
+    let PayOutcome::Failed { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("failed");
+    };
+    w.rail.complete_after_failure(&attempt_id);
+    wallet.resume_payments().await.unwrap();
+    shop.receive(None).await.unwrap();
+    drop(wallet);
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    restored.receive(None).await.unwrap();
+    restored.reconcile().await.unwrap();
+    restored
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    assert!(restored.payments().await.unwrap().is_empty());
+    w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    receipt(&mut shop).await;
+    restored.receive(None).await.unwrap();
+    let notices = restored.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, NoticeKind::PaidAfterFailed);
+    assert_eq!(notices[0].attempt_id, Some(attempt_id));
+}
+
+#[tokio::test]
 async fn test_notices_receipt_within_the_claim_settles_it_and_raises_none() {
     let w = World::new();
     let (mut wallet, mut shop, _) = paid_after_failed(&w).await;

@@ -322,6 +322,8 @@ pub(crate) fn restore_paykit_layer(
     let state = decode_local_state(&layer.data)
         .ok_or_else(|| String::from("Paykit's layer doesn't read as local state"))?;
     let mut open = std::collections::BTreeSet::new();
+    let mut journaled = std::collections::BTreeSet::new();
+    let mut acknowledged = Vec::new();
     let mut writes = Vec::with_capacity(state.len());
     let mut cursor_time_ms = 0;
     for (key, value) in state {
@@ -419,17 +421,17 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::MessageNotice { sender, msg_id } => {
-                state::decode::<KeptNotice>(&value)
-                    .and_then(|notice| notice.check_message(&sender, &msg_id))
-                    .map_err(|_| unread())?;
-                writes.push(LocalWrite::Put { key, value });
-                continue;
-            }
-            StateKey::Notice { attempt, kind } => {
-                state::decode::<KeptNotice>(&value)
-                    .and_then(|notice| notice.check(&attempt, kind))
-                    .map_err(|_| unread())?;
+            StateKey::MessageNotice { .. } | StateKey::Notice { .. } => {
+                // Bound to its key as every runtime read binds it (`notices::bind_notice`).
+                let text = std::str::from_utf8(&key).map_err(|_| unread())?;
+                let notice = state::decode::<KeptNotice>(&value).map_err(|_| unread())?;
+                crate::notices::bind_notice(text, &notice).map_err(|_| unread())?;
+                // An acknowledged notice of an attempt is kept only while the journal holds
+                // the attempt (`Paykit::acknowledge_notice`): one without its entry is a
+                // state no run leaves.
+                if let (true, StateKey::Notice { attempt, .. }) = (notice.acknowledged, family) {
+                    acknowledged.push(attempt);
+                }
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -449,9 +451,16 @@ pub(crate) fn restore_paykit_layer(
         if entry.open() && !open.insert(entry.obligation) {
             return Err("Paykit spec 7.2: two open journal entries for one obligation".into());
         }
+        journaled.insert(attempt);
         entry.restored = true;
         let value = state::encode(&entry).map_err(|_| bad())?;
         writes.push(LocalWrite::Put { key, value });
+    }
+    if acknowledged
+        .iter()
+        .any(|attempt| !journaled.contains(attempt))
+    {
+        return Err("Paykit's local state in the backup doesn't read".into());
     }
     // Every open request is held after a restore, set in the restore's own commit (Paykit
     // spec 7.2, "What a restore loses"; `hold.rs`).
@@ -676,9 +685,11 @@ impl Protocol for PaykitProtocol {
         // A released entry whose effect the app wrote since, by a write of its own, is
         // declined: its effect isn't applied twice (Switch spec 8.2; `stored.rs`).
         if message.released {
-            let note = key::stored_note(&message.sender, &message.message.msg_id);
-            match cx.local_get(note.as_bytes()) {
-                Ok(Some(bytes)) => match state::decode::<crate::stored::StoredNote>(&bytes) {
+            let note_key = key::stored_note(&message.sender, &message.message.msg_id);
+            match cx.local_get(note_key.as_bytes()) {
+                Ok(Some(bytes)) => match state::decode::<crate::stored::StoredNote>(&bytes)
+                    .and_then(|note| note.bound(&note_key, &cx.identity()).map(|_| note))
+                {
                     Ok(note) if crate::stored::declines(Some(&note)) => {
                         return Outcome::Drop {
                             reason: "Switch spec 8.2: a released entry whose effect the app \
