@@ -1341,8 +1341,10 @@ impl Paykit {
     /// read again, never on a copy held: another own app may have rejected or cancelled the
     /// request, or the payee cancelled it, as the request's status shows before its expiry.
     /// [`Refusal::DeadlinePassed`] only for a record that is there, reads, is bound to this
-    /// request's key, holds this request, and leaves it open; a closed one gives what closed
-    /// it. Any other record gives `otherwise`, the error the attempt met, or, without one,
+    /// request's key, holds this request, and leaves it open, as the switch's current write
+    /// ([`Paykit::fresh_request`]); a closed one gives what closed it. The switch holding none
+    /// (`404`), or a newer write this app refused, is no evidence the request is open: it
+    /// gives `otherwise`, as any other record does: the error the attempt met, or, without one,
     /// [`Refusal::NotFound`] for none and [`PaykitError::Conflict`] for one that doesn't read
     /// as this request. The caller has taken the claim's state first.
     ///
@@ -2782,8 +2784,9 @@ impl Paykit {
 
     /// Whether a repeat of `entry`'s dispatch is withheld because its request may no longer
     /// be paid (Paykit spec 8.1): this app keeps a stop for it, or the request record the
-    /// switch holds, read again, shows it cancelled or rejected, or isn't there or doesn't
-    /// read as the request, so nothing shows it still open. A payment without a request has
+    /// switch holds, read again, shows it cancelled or rejected, or isn't there (a `404`
+    /// included, whatever copy this app keeps) or doesn't read as the request, a newer write
+    /// this app refused included, so nothing shows it still open. A payment without a request has
     /// nothing a payee cancels.
     async fn repeat_withheld(&mut self, entry: &JournalEntry) -> Result<bool> {
         if entry.request_hash()?.is_none() {

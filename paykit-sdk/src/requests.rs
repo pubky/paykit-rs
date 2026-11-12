@@ -25,8 +25,10 @@ use paykit_lib::{
     AttemptId, Body, Label, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
 };
 use pubky_switch_client::app::{
-    claim_conflict, Delivery, OpBatch, RecordContent, UndeliverableReason,
+    claim_conflict, AppError, Delivery, KeptReason, OpBatch, RecordContent, RecordRead,
+    UndeliverableReason,
 };
+use pubky_switch_client::error::ClientError;
 use pubky_switch_core::claims::{ClaimStatus, Outcome};
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::ops::Condition;
@@ -980,21 +982,32 @@ impl Paykit {
         Ok(())
     }
 
-    /// The request record at `target` as the switch holds it, read again: a read that fails
-    /// is the error, never taken as the record unchanged. A value is held only when it reads
-    /// and is bound to the key it was read at, whose natural key the request derives, so it
-    /// holds that same request (Paykit wire 5.3).
+    /// The request record at `target` as the switch holds it now, read again (Switch wire
+    /// 7.4.9): only a write the read shows current is evidence, never a copy the app keeps
+    /// from before. A value is held only when it reads and is bound to the key it was read
+    /// at, whose natural key the request derives, so it holds that same request (Paykit wire
+    /// 5.3). The switch holding none (`404`) is [`Fresh::Missing`]; a newer write the app
+    /// refused, or one no newer than what it holds, is [`Fresh::Unreadable`]: the copy kept
+    /// then shows nothing of the request now.
+    ///
+    /// # Errors
+    ///
+    /// A read that fails: [`Refusal::SwitchUnavailable`] for a switch that couldn't be read
+    /// now, the switch's refusal for one it refused; never taken as the record unchanged.
     pub(crate) async fn fresh_request(&mut self, target: &ActivityTarget) -> Result<Fresh> {
-        self.app.read_record(&target.record_target()).await?;
-        let key = self.activity_key(target)?;
-        let content = self.app.shared_record(&key).await?.map(|held| held.content);
-        Ok(match content {
-            None | Some(RecordContent::Deleted) => Fresh::Missing,
-            Some(RecordContent::Unreadable(_)) => Fresh::Unreadable,
-            Some(RecordContent::Value(_)) => match self.held_activity(target).await? {
+        let record = match self.app.read_record_fresh(&target.record_target()).await? {
+            RecordRead::Fresh(record) => record,
+            RecordRead::Kept { reason, .. } => return fresh_kept(reason),
+            // A read a later client names: nothing shows the switch's write held now.
+            _ => return Ok(Fresh::Unreadable),
+        };
+        Ok(match record.content {
+            RecordContent::Deleted => Fresh::Missing,
+            RecordContent::Value(_) => match self.held_activity(target).await? {
                 Some(record) => Fresh::Held(Box::new(record)),
                 None => Fresh::Unreadable,
             },
+            _ => Fresh::Unreadable,
         })
     }
 
@@ -1235,8 +1248,30 @@ pub(crate) enum Fresh {
     Held(Box<ActivityRecord>),
     /// There is none, or it was deleted.
     Missing,
-    /// It doesn't read, isn't bound to its key, or holds another request.
+    /// It doesn't read, isn't bound to its key, or holds another request; or the switch's
+    /// write was refused, or is no newer than the one held, so nothing read now shows it.
     Unreadable,
+}
+
+/// What a read that kept the earlier copy says of the request record now
+/// ([`Paykit::fresh_request`]).
+fn fresh_kept(reason: KeptReason) -> Result<Fresh> {
+    match reason {
+        KeptReason::NotFound => Ok(Fresh::Missing),
+        KeptReason::Unreachable(why) => Err(Refusal::SwitchUnavailable(why).into()),
+        KeptReason::SwitchRefused { code } => {
+            Err(PaykitError::Client(AppError::Switch(ClientError::Switch {
+                status: code.status(),
+                code,
+                message: "the switch refused the record's read".into(),
+                current: serde_json::Value::Null,
+                known_version: None,
+                retry_after: None,
+            })))
+        }
+        // Refused, no newer than the write held, or a reason a later client names.
+        _ => Ok(Fresh::Unreadable),
+    }
 }
 
 /// The refusal of a request record that doesn't read as the request it should hold.

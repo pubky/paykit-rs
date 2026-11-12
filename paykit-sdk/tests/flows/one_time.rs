@@ -1061,3 +1061,32 @@ async fn test_one_time_attempt_kept_at_the_backup_restored_never_pays_again() {
     assert_eq!(again.refusal(), Some(&Refusal::AlreadyPaid), "{again:?}");
     assert_eq!(w.rail.all_executions().len(), 1);
 }
+
+#[tokio::test]
+async fn test_one_time_expired_request_not_found_at_the_switch_is_not_found() {
+    // Past the request's expiry the switch answers the record's read `404`, though the
+    // wallet keeps its open copy: nothing shows the request open, so it isn't refused as
+    // expired, and nothing is paid.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let mut short = draft("1", w.clock.now_ms());
+    short.proposal_expires_at_ms = Some(w.clock.now_ms() + HOUR_MS);
+    let request = request_from(&mut shop, w.alice_id(), short).await;
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(2 * HOUR_MS);
+    wallet.receive(None).await.unwrap();
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/records/".into(),
+            code: pubky_switch_core::http::ErrorCode::NotFound,
+            current: serde_json::Value::Null,
+        });
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::NotFound), "{refused:?}");
+    assert!(w.rail.all_executions().is_empty());
+}

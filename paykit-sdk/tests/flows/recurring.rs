@@ -315,6 +315,9 @@ enum PhoneWrite {
     Invalid,
     /// The record of another request, bound to that request's key.
     AnotherRequest,
+    /// Nothing; the switch then answers the record's read `404`, the wallet keeping its
+    /// copy.
+    NotFoundAtTheSwitch,
 }
 
 /// Alice's wallet and phone hold bob's monthly request, open for an hour; the phone writes
@@ -350,7 +353,7 @@ async fn rejected_over(w: &World, write: PhoneWrite, heard: bool) -> paykit_sdk:
     // The wallet keeps no mark of what it saw: a later value is taken as it is.
     store.armed.store(true, Ordering::SeqCst);
     let value = match write {
-        PhoneWrite::Delete => None,
+        PhoneWrite::Delete | PhoneWrite::NotFoundAtTheSwitch => None,
         PhoneWrite::Invalid => Some(crate::outcome_record::INVALID.to_vec()),
         PhoneWrite::AnotherRequest => {
             let target = crate::outcome_record::payer_record(&other);
@@ -358,7 +361,17 @@ async fn rejected_over(w: &World, write: PhoneWrite, heard: bool) -> paykit_sdk:
             Some(held.content.value().unwrap().to_vec())
         }
     };
-    crate::outcome_record::phone_writes(&mut phone, &request, value.as_deref()).await;
+    if let PhoneWrite::NotFoundAtTheSwitch = write {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/records/".into(),
+                code: pubky_switch_core::http::ErrorCode::NotFound,
+                current: serde_json::Value::Null,
+            });
+    } else {
+        crate::outcome_record::phone_writes(&mut phone, &request, value.as_deref()).await;
+    }
     w.clock.advance_ms(expires_at + 1 - w.clock.now_ms());
     if heard {
         wallet.app_mut().read_claim(&[0; 32]).await.unwrap();
@@ -368,12 +381,14 @@ async fn rejected_over(w: &World, write: PhoneWrite, heard: bool) -> paykit_sdk:
 
 #[tokio::test]
 async fn test_recurring_rejection_past_expiry_over_a_record_gone_or_unreadable() {
-    // The record read again isn't there, doesn't read, or holds another request: none of
-    // them shows this request unanswered, so none is refused as expired. Seen before
+    // The record read again isn't there, the switch answering `404` over the wallet's copy
+    // included, doesn't read, or holds another request: none of them shows this request
+    // unanswered, so none is refused as expired. Seen before
     // anything is sent, a record gone is not found, and one that doesn't read as this
     // request a conflict; after a `409`, the conflict is the answer.
     for (write, heard, gone) in [
         (PhoneWrite::Delete, true, true),
+        (PhoneWrite::NotFoundAtTheSwitch, true, true),
         (PhoneWrite::Invalid, true, false),
         (PhoneWrite::AnotherRequest, true, false),
         (PhoneWrite::Delete, false, false),

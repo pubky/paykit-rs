@@ -158,6 +158,12 @@ enum Crossing {
     RecordUnreadable,
     /// No claim; another own app deleted the request record before.
     RecordDeleted,
+    /// No claim; then the switch holds no request record (`404`), though the wallet keeps
+    /// its copy.
+    RecordNotFound,
+    /// No claim; another own app wrote the request record over with a value the wallet
+    /// refuses, keeping its copy.
+    RecordRefused,
 }
 
 /// Alice's wallet holds bob's request; its copy of bob's `identity.json` is old, so the
@@ -189,10 +195,14 @@ async fn attempt_answered_past_the_deadline(crossing: Crossing) -> paykit_sdk::P
         )
         .await;
     wallet.receive(None).await.unwrap();
-    if let Crossing::RecordDeleted = crossing {
+    if let Crossing::RecordDeleted | Crossing::RecordRefused = crossing {
         let mut phone = w.wallet("phone").await;
         phone.receive(None).await.unwrap();
-        crate::outcome_record::phone_writes(&mut phone, &request, None).await;
+        let value = match crossing {
+            Crossing::RecordRefused => Some(crate::outcome_record::INVALID),
+            _ => None,
+        };
+        crate::outcome_record::phone_writes(&mut phone, &request, value).await;
     }
     w.clock.advance_ms(11 * 60_000);
     reads.then(w.alice_id(), 0, false);
@@ -233,7 +243,10 @@ async fn attempt_answered_past_the_deadline(crossing: Crossing) -> paykit_sdk::P
             };
             serde_json::json!({ "claim": view.to_value() })
         }
-        Crossing::RecordUnreadable | Crossing::RecordDeleted => serde_json::Value::Null,
+        Crossing::RecordUnreadable
+        | Crossing::RecordDeleted
+        | Crossing::RecordNotFound
+        | Crossing::RecordRefused => serde_json::Value::Null,
     };
     w.alice.switch().fail_next(Fault::Error {
         path: "/ops".into(),
@@ -244,6 +257,13 @@ async fn attempt_answered_past_the_deadline(crossing: Crossing) -> paykit_sdk::P
         w.alice.switch().fail_next(Fault::Unreachable {
             path: "/records/".into(),
             after: 0,
+        });
+    }
+    if let Crossing::RecordNotFound = crossing {
+        w.alice.switch().fail_next(Fault::Error {
+            path: "/records/".into(),
+            code: pubky_switch_core::http::ErrorCode::NotFound,
+            current: serde_json::Value::Null,
         });
     }
     let error = wallet
@@ -274,9 +294,34 @@ async fn test_wallets_attempt_conflict_past_the_deadline_with_the_record_unread_
     // another own app rejected the request meanwhile isn't known, so the read's failure is
     // the answer, never that the deadline passed.
     let error = attempt_answered_past_the_deadline(Crossing::RecordUnreadable).await;
-    assert!(error.refusal().is_none(), "{error:?}");
     assert!(
-        matches!(error, paykit_sdk::PaykitError::Client(_)),
+        matches!(error.refusal(), Some(Refusal::SwitchUnavailable(_))),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_wallets_attempt_conflict_past_the_deadline_with_the_record_not_found_is_the_conflict()
+{
+    // The `409` carries no claim, and the switch answers the record's read `404`: the copy
+    // the wallet keeps shows nothing of the request now, so the conflict is the answer, not
+    // that the deadline passed.
+    let error = attempt_answered_past_the_deadline(Crossing::RecordNotFound).await;
+    assert!(
+        matches!(error, paykit_sdk::PaykitError::Conflict(_)),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_wallets_attempt_conflict_past_the_deadline_with_a_newer_write_refused_is_the_conflict(
+) {
+    // Another own app wrote the request record over with a value the wallet refuses: the
+    // copy it keeps is no evidence the request is still open, so the conflict is the
+    // answer, not that the deadline passed.
+    let error = attempt_answered_past_the_deadline(Crossing::RecordRefused).await;
+    assert!(
+        matches!(error, paykit_sdk::PaykitError::Conflict(_)),
         "{error:?}"
     );
 }
