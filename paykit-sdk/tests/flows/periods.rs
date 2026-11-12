@@ -2382,3 +2382,62 @@ async fn test_periods_no_response_while_the_request_record_is_sealed() {
     wallet.receive(None).await.unwrap();
     wallet.accept_subscription(&request).await.unwrap();
 }
+
+#[tokio::test]
+async fn test_periods_another_payers_credit_of_a_settlement_leaves_the_payment_credited() {
+    // Carol's proof of the same settlement is credited first, as a payment without a
+    // request: one payment credits one occurrence per payer, so alice's period is still
+    // credited, carol's record not being of her.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let _carol = w
+        .join(&w.carol, "wallet", AppScopes::new().pay().build().unwrap())
+        .await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let body = period_proof(&w, shop.app_id(), january()).await;
+    let mut unrequested = body.clone();
+    unrequested.remove("billing_period");
+    unrequested.insert("amount".into(), json!({ "asset": "btc", "value": "1" }));
+    w.inject(
+        &w.carol,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        Vec::new(),
+        unrequested,
+    );
+    shop.receive(None).await.unwrap();
+    let carols = shop
+        .payee_activity()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.payer == w.carol_id())
+        .unwrap()
+        .record;
+    assert!(shop.confirm_payment(&carols).await.unwrap().is_some());
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        body,
+    );
+    shop.receive(None).await.unwrap();
+    let sale = shop
+        .payee_activity()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.request_hash == Some(request.request_hash))
+        .unwrap();
+    assert!(shop
+        .confirm_payment(&sale.periods[0].record)
+        .await
+        .unwrap()
+        .is_some());
+}
