@@ -21,9 +21,10 @@
 //!   nothing. A copy of the entry the host released after that is declined, its message
 //!   processed, so its effect isn't applied twice (`PaykitProtocol`'s receive step).
 //! - **A released entry that ran as a duplicate** (`ReleasedDuplicate`): its note goes.
-//! - **An entry dropped unverified** (`StoredEntryDropped`): a `resend_request` for the
-//!   messages its sender's inbox accepted in that millisecond is queued to the sender, who
-//!   may still keep it (Paykit spec 9).
+//! - **An entry dropped unverified** (`StoredEntryDropped`) isn't taken: the event stays
+//!   for the host, and the SDK never acknowledges it. The re-send request for entries
+//!   dropped unverified is not part of this change: a host that acknowledges the event
+//!   leaves nothing to ask for the re-send.
 //!
 //! **Taken at first sight.** The SDK acts on each such event the first time a receive sees
 //! it, and keeps a mark of it (`p/dt/<event ID>`) in the same commit as what the event says,
@@ -47,7 +48,6 @@ use crate::activity::{ActivityTarget, Role};
 use crate::error::Result;
 use crate::notices::KeptNotice;
 use crate::paykit::Paykit;
-use crate::protocol::QueuedAsk;
 use crate::records::{list_target, KeptMessage};
 use crate::requests::{RequestRef, RequestStatus, RequestView};
 use crate::state::{key, Tx};
@@ -184,19 +184,6 @@ impl Paykit {
             }
             AppEvent::ReleasedDuplicate { sender, msg_id, .. } => {
                 tx.delete(&key::stored_note(sender, msg_id));
-                true
-            }
-            AppEvent::StoredEntryDropped {
-                sender,
-                accepted_at_ms,
-                ..
-            } => {
-                let ask = QueuedAsk {
-                    sender: *sender,
-                    from_ms: *accepted_at_ms,
-                    until_ms: Some(*accepted_at_ms),
-                };
-                tx.put(&key::ask(sender, *accepted_at_ms), &ask)?;
                 true
             }
             _ => false,

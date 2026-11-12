@@ -111,17 +111,18 @@ async fn test_stored_refused_proof_at_the_payee_written_later() {
     assert!(shop.app_mut().parked_entries().await.unwrap().is_empty());
 }
 
-#[tokio::test]
-async fn test_stored_entry_dropped_unverified_asked_for_again() {
-    let w = World::new();
-    let mut wallet = w.wallet("wallet").await;
-    let mut shop = w.shop().await;
+/// Bob's request to alice's wallet, stored unverified while bob's standing can't be
+/// checked, then dropped past 21 days, with the homeserver down until it returns. Returns the
+/// request and the duty event's ID.
+async fn dropped_unverified(
+    w: &World,
+    wallet: &mut paykit_sdk::Paykit,
+    shop: &mut paykit_sdk::Paykit,
+) -> (paykit_sdk::RequestRef, pubky_switch_client::app::EventId) {
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
-    // Bob's standing can't be checked: his request is stored unverified, then dropped
-    // past 21 days.
     let mut unexpiring = draft("1", w.clock.now_ms());
     unexpiring.proposal_expires_at_ms = None;
-    let request = request_from(&mut shop, w.alice_id(), unexpiring).await;
+    let request = request_from(shop, w.alice_id(), unexpiring).await;
     w.homeserver.set_down(true);
     // Past the 10 minutes bob's `identity.json` is cached for.
     w.clock.advance_ms(11 * 60_000);
@@ -135,24 +136,52 @@ async fn test_stored_entry_dropped_unverified_asked_for_again() {
     // The bounds are judged on the service time verified: the first read verifies it.
     let mut events = wallet.receive(None).await.unwrap().report.events;
     events.extend(wallet.receive(None).await.unwrap().report.events);
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, AppEvent::StoredEntryDropped { .. })),
-        "{events:?}"
-    );
-    assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
-    let events = wallet.app_mut().unacknowledged_events().await.unwrap();
-    assert!(!about_stored(&events), "{events:?}");
     w.homeserver.set_down(false);
-    // The wallet asked bob to send it again; bob's shop answers, and the request arrives.
+    let id = events
+        .iter()
+        .find_map(|e| match e {
+            AppEvent::StoredEntryDropped { id, .. } => Some(*id),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{events:?}"));
+    assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
+    (request, id)
+}
+
+/// Whether `wallet`'s host still has the duty event `id` to acknowledge.
+async fn unacknowledged(
+    wallet: &mut paykit_sdk::Paykit,
+    id: pubky_switch_client::app::EventId,
+) -> bool {
+    wallet
+        .app_mut()
+        .unacknowledged_events()
+        .await
+        .unwrap()
+        .iter()
+        .any(|e| e.id() == Some(id))
+}
+
+#[tokio::test]
+async fn test_stored_entry_dropped_unverified_left_for_the_host() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let (request, id) = dropped_unverified(&w, &mut wallet, &mut shop).await;
+    // The SDK neither takes nor acknowledges the event, and asks for no re-send.
+    for _ in 0..3 {
+        assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
+    }
+    assert!(unacknowledged(&mut wallet, id).await);
+    assert!(kept(&wallet, "dt/").await.is_empty());
+    assert!(kept(&wallet, "ask/").await.is_empty());
     wallet.flush().await.unwrap();
     shop.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
-    assert_eq!(
-        wallet.request(&request).await.unwrap().status,
-        RequestStatus::Open
-    );
+    assert!(wallet.request(&request).await.is_err());
+    // The host acknowledges it: it goes.
+    wallet.app_mut().ack_events(id).await.unwrap();
+    assert!(!unacknowledged(&mut wallet, id).await);
 }
 
 /// Bob's request reaches alice's wallet, whose receive step's batch is applied and its
@@ -442,100 +471,47 @@ async fn test_stored_refused_lists_hold_the_newer() {
     }
 }
 
-/// Alice's wallet rejects bob's `request` while her switch takes no write, then refuses the
-/// batch kept for it for good: a duty event about a kept batch, for the host.
-async fn batch_refused(
-    w: &World,
-    wallet: &mut paykit_sdk::Paykit,
-    request: &paykit_sdk::RequestRef,
-) {
-    w.alice.switch().fail_next(Fault::Unreachable {
-        path: "/ops".into(),
-        after: 0,
-    });
-    let _ = wallet.reject_request(request, None).await;
-    let before = refused_batches(wallet).await;
-    refuse_writes(&w.alice, 1);
-    let _ = wallet.receive(None).await;
-    assert_eq!(refused_batches(wallet).await, before + 1);
-}
-
-/// How many duty events about a kept batch refused the wallet's host hasn't acknowledged.
-async fn refused_batches(wallet: &mut paykit_sdk::Paykit) -> usize {
-    wallet
-        .app_mut()
-        .unacknowledged_events()
-        .await
-        .unwrap()
-        .iter()
-        .filter(|e| matches!(e, AppEvent::BatchRefused { .. }))
-        .count()
-}
-
 #[tokio::test]
-async fn test_stored_dropped_entry_between_host_events_asked_for_once() {
+async fn test_stored_events_after_an_entry_dropped_unverified_wait_for_the_host() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    shop.app_mut().invite(&w.alice_id()).await.unwrap();
-    let first = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let (_, dropped) = dropped_unverified(&w, &mut wallet, &mut shop).await;
+    // An event the SDK takes, after it: a request whose step's write is refused for good.
+    let later = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    refuse_writes(&w.alice, 1);
     wallet.receive(None).await.unwrap();
-    // A host event first, which the host doesn't acknowledge.
-    batch_refused(&w, &mut wallet, &first).await;
-    // Bob's next request is stored unverified, then dropped past 21 days.
-    let mut unexpiring = draft("2", w.clock.now_ms());
-    unexpiring.proposal_expires_at_ms = None;
-    let request = request_from(&mut shop, w.alice_id(), unexpiring).await;
-    w.homeserver.set_down(true);
-    // Past the 10 minutes bob's `identity.json` is cached for.
-    w.clock.advance_ms(11 * 60_000);
-    let _ = wallet.receive(None).await;
-    w.clock
-        .advance_ms(pubky_switch_client::app::DEFAULT_PARK_AFTER_MS + 1);
-    let _ = wallet.receive(None).await;
-    assert_eq!(wallet.app_mut().parked_entries().await.unwrap().len(), 1);
-    w.clock
-        .advance_ms(pubky_switch_client::app::MAX_UNVERIFIED_AGE_MS);
-    let (one, two) = (
-        wallet.receive(None).await.unwrap(),
-        wallet.receive(None).await.unwrap(),
-    );
-    assert!(
-        one.report
-            .events
-            .iter()
-            .chain(&two.report.events)
-            .any(|e| matches!(e, AppEvent::StoredEntryDropped { .. })),
-        "{:?} {:?}",
-        one.report.events,
-        two.report.events
-    );
-    // Asked once at first sight, though the host acknowledges nothing: a read again asks
-    // nothing more.
-    assert_eq!(one.resends + two.resends, 1);
-    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
-    // A host event after it; the host acknowledges up to it once the receive returned.
-    batch_refused(&w, &mut wallet, &first).await;
-    let last = wallet
+    let taken = wallet
         .app_mut()
         .unacknowledged_events()
         .await
         .unwrap()
         .iter()
-        .filter_map(AppEvent::id)
-        .next_back()
+        .find_map(|e| match e {
+            AppEvent::EffectRefused { id, .. } => Some(*id),
+            _ => None,
+        })
         .unwrap();
-    wallet.app_mut().ack_events(last).await.unwrap();
-    // The re-send was asked once, at first sight: later reads ask nothing more.
-    w.homeserver.set_down(false);
-    wallet.flush().await.unwrap();
-    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
-    shop.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
+    // The SDK acknowledges only up to the event it hasn't taken, so the later ones wait
+    // for the host, over every read; they keep one mark each, and no more.
+    let marks = kept(&wallet, "dt/").await.len();
+    assert!(marks >= 1);
+    for _ in 0..5 {
+        wallet.receive(None).await.unwrap();
+        assert!(unacknowledged(&mut wallet, taken).await);
+        assert_eq!(kept(&wallet, "dt/").await.len(), marks);
+    }
     assert_eq!(
-        wallet.request(&request).await.unwrap().status,
+        wallet.request(&later).await.unwrap().status,
         RequestStatus::Open
     );
+    // Once the host acknowledges the event it holds, the SDK acknowledges the rest at its
+    // next read, and the mark goes.
+    wallet.app_mut().ack_events(dropped).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(!unacknowledged(&mut wallet, taken).await);
+    wallet.receive(None).await.unwrap();
+    assert!(kept(&wallet, "dt/").await.is_empty());
 }
 
 #[tokio::test]
