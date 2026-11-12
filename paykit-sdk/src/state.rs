@@ -39,7 +39,7 @@
 //! | `rs/<pubky>/<msg_id>` | when a message was last re-sent to a requester | |
 //! | `rsd/<pubky>/<day>` | how many messages were re-sent to a requester that day | |
 //! | `nl` | set by a restore: the shared records aren't listed since, so the client's copy is empty and a record's absence means nothing yet; cleared once they are listed; never restored | |
-//! | `lc` | the certificate the shared records were last listed under, signed: a certificate held now that reads more collections than it means the copy lacks their records until Paykit lists them (`hold.rs`); written at a join, a restore and each Paykit listing; never restored | |
+//! | `lc` | the certificate the shared records were last listed under, signed: a certificate held now that reads more collections than it means the copy lacks their records until Paykit lists them (`hold.rs`); written by each Paykit listing, in its commit, and followed to a narrower certificate; absent from a join or a restore until that listing, which leaves the records unlisted; never restored | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
