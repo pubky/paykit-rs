@@ -294,8 +294,9 @@ impl Paykit {
     /// - [`Initiator::User`]: the user confirmed paying this period, as [`Paykit::pay_request`]
     ///   pays a one-time request, with the same confirmations in `options`.
     /// - [`Initiator::Automatic`]: the app pays it by its own policy, without asking its user,
-    ///   which spec 8.2 leaves to the app as v0.1 did. It is an automatic payment for every
-    ///   rule that names one: the deny list read fresh before the attempt and again before
+    ///   which spec 8.2 leaves to the app as v0.1 did, only for a request never accepted under
+    ///   an Allowance and a period not marked manual-only (Paykit spec 8.3). It is an
+    ///   automatic payment for every rule that names one: the deny list read fresh before the attempt and again before
     ///   the dispatch, the clock bound, no doubtful claim, no request held after a restore,
     ///   no destination whose transfer isn't the amount requested, and no payment priced by
     ///   rates. `options` carries no user confirmation then. Its proof carries no
@@ -312,7 +313,9 @@ impl Paykit {
     ///
     /// As [`Paykit::pay_request`], and: [`Refusal::Usage`] for a one-time request, a period
     /// that isn't one of the request's, or a payment by policy that carries a user's
-    /// confirmation; [`Refusal::NotSubscribed`] before the subscription is accepted;
+    /// confirmation; [`Refusal::ManualOnly`] for a payment by policy of a request that names
+    /// an Allowance, or a period marked manual-only; [`Refusal::NotSubscribed`] before the
+    /// subscription is accepted;
     /// [`Refusal::AlreadyPaid`] for a period whose record holds its proof;
     /// [`Refusal::PeriodNotStarted`]; [`Refusal::AttemptedPeriodsFull`];
     /// [`Refusal::NoDestination`] for a later period of a request with `per_period_endpoints`
@@ -397,6 +400,15 @@ impl Paykit {
             amount: body.amount.clone(),
         };
         let end_hold = if automatic {
+            // A request accepted under an Allowance is paid automatically only under that
+            // one, never by the app's policy: with it ended, each occurrence is paid by hand
+            // (Paykit spec 8.3, "One Allowance per request"). An occurrence marked
+            // manual-only is paid by hand too.
+            let under_allowance =
+                record.allowance_id.is_some() || !record.reassociations.is_empty();
+            if under_allowance || held_period.as_ref().is_some_and(|r| r.manual_only) {
+                return Err(Refusal::ManualOnly.into());
+            }
             // No automatic payment while the request is held, nor to a blocked payee on the
             // deny list read now; a read that fails counts as blocked (Paykit spec 7.2, 8.1).
             if self.held(&self.activity_key(&target)?, &record).await? {

@@ -1148,3 +1148,129 @@ async fn test_period_payments_reconcile_leaves_a_period_paid_by_details_doubtful
         .unwrap();
     assert_eq!(claim.view.status, ClaimStatus::Attempting);
 }
+
+/// A wallet on an idempotent rail without history pays January of bob's subscription, the
+/// dispatch left in flight; then `between` runs with the shop's record of the sale, and the
+/// wallet resumes a minute later. Returns how many times the rail was called.
+async fn resumed_period_repeat(w: &World, between: impl AsyncFnOnce(&mut Paykit, [u8; 32])) -> u64 {
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true),
+    );
+    let mut shop = w.shop().await;
+    let mut wallet = w
+        .wallet_with("wallet", store(), crate::common::day_window())
+        .await;
+    let (request, sale) = subscribed(w, &mut shop, &mut wallet).await;
+    w.rail.next(Behaviour::Hang);
+    let pending = by_user(&mut wallet, &request, january(), PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(pending, PayOutcome::Pending { .. }), "{pending:?}");
+    between(&mut shop, sale).await;
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(60_000);
+    wallet.resume_payments().await.unwrap();
+    w.rail.pay_calls(&pending.attempt_id())
+}
+
+#[tokio::test]
+async fn test_period_payments_resume_repeats_an_idempotent_dispatch_of_a_period() {
+    let w = World::new();
+    assert_eq!(resumed_period_repeat(&w, async |_, _| {}).await, 2);
+}
+
+#[tokio::test]
+async fn test_period_payments_resume_repeats_no_dispatch_the_payee_cancelled_since() {
+    // The payee cancels the subscription while January's dispatch is in flight: the repeat
+    // isn't made, the attempt staying "may be paid" (Paykit spec 7.2, 8.2).
+    let w = World::new();
+    let calls = resumed_period_repeat(&w, async |shop, sale| {
+        shop.cancel_sent_request(&sale, None).await.unwrap();
+    })
+    .await;
+    assert_eq!(calls, 1);
+}
+
+/// `app` writes `record` at the payer's `natural` key, built on the version it holds.
+async fn write_payer_record(app: &mut Paykit, natural: &[u8], record: &ActivityRecord) {
+    let collection = Collection::PayerActivity;
+    let target = RecordTarget::new(
+        SwitchCollection::new(collection.name(), collection.policy(None)),
+        natural,
+    );
+    let op = app
+        .app_mut()
+        .record_op(&target, Some(&record.to_json().unwrap()), Vec::new())
+        .await
+        .unwrap();
+    app.app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_period_payments_request_accepted_under_an_allowance_paid_only_by_hand() {
+    // The request record names the Allowance it was accepted under: no app pays it by its
+    // own policy, and the user's payment goes ahead (Paykit spec 8.3, "One Allowance per
+    // request").
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let mut record = request_record(&w, &wallet, &request).await;
+    record.allowance_id =
+        Some(paykit_lib::AllowanceId::parse("0b4f9c1e-8d2a-4e6b-9f3c-5a7d1e2b8c40").unwrap());
+    let natural = natural_key::request_record(&request.payee, &request.request_hash);
+    write_payer_record(&mut wallet, &natural, &record).await;
+    let refused = by_policy(&mut wallet, &request, january())
+        .await
+        .unwrap_err();
+    assert_eq!(refusal(&refused), Refusal::ManualOnly);
+    assert!(w.rail.all_executions().is_empty());
+    let outcome = by_user(&mut wallet, &request, january(), PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    // The request record keeps the Allowance it names.
+    assert!(request_record(&w, &wallet, &request)
+        .await
+        .allowance_id
+        .is_some());
+}
+
+#[tokio::test]
+async fn test_period_payments_period_marked_manual_only_paid_only_by_hand() {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    let now = w.clock.now_ms();
+    shop.send_period_details(&sale, details(january(), "lnbc1jan", now + DAY_MS))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let mut record = period_record(&w, &wallet, &request, january())
+        .await
+        .unwrap();
+    record.manual_only = true;
+    let natural = natural_key::period_record(
+        &request.payee,
+        &request.request_hash,
+        january().start_secs(),
+    );
+    write_payer_record(&mut wallet, &natural, &record).await;
+    let refused = by_policy(&mut wallet, &request, january())
+        .await
+        .unwrap_err();
+    assert_eq!(refusal(&refused), Refusal::ManualOnly);
+    // February isn't marked: paid by policy once it starts.
+    w.clock.set_ms(february().starts_at);
+    let outcome = by_policy(&mut wallet, &request, february()).await.unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    let outcome = by_user(&mut wallet, &request, january(), PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+}

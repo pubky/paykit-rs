@@ -73,6 +73,12 @@ pub enum Refusal {
     /// start"). Nothing was written.
     #[error("Paykit spec 8.2: the Billing Period hasn't started")]
     PeriodNotStarted,
+    /// The occurrence is paid only by hand, after the user's confirmation: its request was
+    /// accepted under an Allowance, which alone could pay it automatically (one Allowance
+    /// per request), or its record is marked manual-only (Paykit spec 8.3). Nothing was
+    /// written.
+    #[error("Paykit spec 8.3: paid only by hand")]
+    ManualOnly,
     /// The request record lists 16 Billing Periods that may have an open attempt, none of
     /// them finished: no other period is attempted until one is (Paykit spec 8.2, "Attempted
     /// periods"). Nothing was written.
