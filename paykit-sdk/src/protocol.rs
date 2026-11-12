@@ -415,7 +415,7 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::Missed { from_ms } => {
+            StateKey::Missed { from_ms } | StateKey::MissedItem { from_ms } => {
                 // The re-sends are asked from the value, so it must be the time its key names.
                 if state::decode::<u64>(&value).map_err(|_| unread())? != from_ms {
                     return Err(unread());
@@ -861,7 +861,7 @@ impl Protocol for PaykitProtocol {
     fn missed(&self, missed: &MissedEntries) -> Result<Vec<LocalWrite>, StoreFailure> {
         Ok(vec![
             local_write(
-                &key::missed(missed.accepted_from_ms),
+                &key::missed_item(missed.accepted_from_ms),
                 &missed.accepted_from_ms,
             )?,
             local_write(key::MISSED_HOLD, &crate::hold::MissedHold::default())?,

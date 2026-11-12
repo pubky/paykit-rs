@@ -592,3 +592,101 @@ async fn test_restore_hold_missed_item_holds_a_request_held_at_it_whatever_its_c
     wallet.receive(None).await.unwrap();
     assert_eq!(status_of(&w, &wallet, &ahead).await, RequestStatus::Held);
 }
+
+/// How many `resend_request`s `app` sent `to`.
+async fn asks_to(app: &Paykit, to: &[u8; 32]) -> usize {
+    crate::common::asked(app, to).await.len()
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_asks_the_payee_of_an_open_request_another_app_recorded() {
+    // Bob's request reaches only alice's phone, which records it; the wallet holds the
+    // record but never received the request itself. After a `missed` item the wallet asks
+    // bob to send again: he is the counterparty of an open request it holds (Paykit spec 9).
+    // Bob shares his list with the phone first, so his switch admits alice's messages.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[phone.app_id()], w.clock.now_ms())
+        .await;
+    let request = signed_request(&w, "order-1");
+    w.deliver(&w.bob, "shop", &w.alice, &[phone.app_id()], &request);
+    phone.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(status_of(&w, &wallet, &request).await, RequestStatus::Open);
+    assert!(wallet
+        .app()
+        .protocol_scan(b"peer/")
+        .await
+        .unwrap()
+        .is_empty());
+    missed(&w);
+    wallet.receive(None).await.unwrap();
+    let asked = crate::common::asked(&wallet, &w.bob_id()).await;
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert!(asked[0].0.is_some(), "{asked:?}");
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_asks_no_counterparty_of_a_closed_request() {
+    // The wallet rejected bob's only request: nothing of his is open, so a `missed` item asks
+    // him nothing, though he has Paykit activity with the wallet.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet.reject_request(&request, None).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"peer/").await.unwrap().len(), 1);
+    missed(&w);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(asks_to(&wallet, &w.bob_id()).await, 0);
+    // The mark is spent: a later receive asks nothing either.
+    wallet.receive(None).await.unwrap();
+    assert_eq!(asks_to(&wallet, &w.bob_id()).await, 0);
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_at_the_payee_asks_the_payer_of_an_open_request() {
+    // The wallet paid bob's request; his shop holds its record, the proof received and no
+    // receipt sent. A `missed` item at bob's switch asks alice to send again.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let now = w.clock.now_ms();
+    w.bob.switch().push_missed(1, now - 1_000, now);
+    shop.receive(None).await.unwrap();
+    assert_eq!(asks_to(&shop, &w.alice_id()).await, 1);
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_asks_wait_while_the_records_are_not_listed() {
+    // Paykit's listing after the item fails: the copy may lack records, so the asks wait,
+    // and go once a later receive lists them.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    missed(&w);
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "records?collection".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.records_unlisted.is_some(), "{got:?}");
+    assert_eq!(asks_to(&wallet, &w.bob_id()).await, 0);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(asks_to(&wallet, &w.bob_id()).await, 1);
+}
