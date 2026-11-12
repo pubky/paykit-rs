@@ -1557,3 +1557,30 @@ async fn test_one_time_stops_bound_never_drops_a_stop_for_a_request_kept_to_writ
     assert!(keeps_stop(&w, &wallet, unknown(max)).await);
     assert_eq!(wallet.app().protocol_scan(b"se/").await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn test_one_time_cancellation_of_a_request_not_held_kept_once_at_an_app_paying_and_requesting(
+) {
+    // Alice's till both pays and requests. Bob cancels a request it holds on neither side:
+    // it keeps the cancellation once, as the stop, and no payer's reply of it.
+    let w = World::new();
+    let till = w
+        .join(
+            &w.alice,
+            "till",
+            paykit_sdk::AppScopes::new()
+                .pay()
+                .request()
+                .build()
+                .unwrap(),
+        )
+        .await;
+    let mut till = till;
+    till.app_mut().invite(&w.bob_id()).await.unwrap();
+    let _shop = w.shop().await;
+    let hash = [7; 32];
+    cancel_to(&w, &[till.app_id()], hash);
+    till.receive(None).await.unwrap();
+    assert!(keeps_stop(&w, &till, hash).await);
+    assert!(till.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+}

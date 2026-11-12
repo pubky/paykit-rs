@@ -189,8 +189,20 @@ pub(crate) fn effect(
             if pay && held_request(cx, &payer_target)? {
                 return keep_cancellation(cx, &payer_target, stored, true);
             }
-            if payee && payer_reply(cx, stored, &scopes, settlement)? {
-                // A payer's cancellation of a request this app sent.
+            // A payer's cancellation of a request this app holds goes into its record. One
+            // naming a request held on neither side is kept once: at an app holding `pay`, as
+            // the stop, which no payment passes; at one that only takes payments, as a
+            // payer's reply until the record comes.
+            let payee_held = payee && {
+                let label = stored.body().label().cloned();
+                let target = ActivityTarget::payee(
+                    natural_key::request_record(&cx.identity(), &request),
+                    label.as_ref(),
+                );
+                cx.record(&target.record_target())?.is_some()
+            };
+            if payee && (payee_held || !pay) {
+                payer_reply(cx, stored, &scopes, settlement)?;
             } else if pay {
                 // One for a request the app holds no record of is new state, which the spam
                 // rule gates. While the copy of the payer's records may lack records, the
