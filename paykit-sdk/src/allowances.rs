@@ -8,7 +8,10 @@
 //!   batch that queues it: a proposal opens it, an acceptance, a rejection or an end is
 //!   recorded first and sent only if that write is applied (Paykit spec 8.1, 8.3). A
 //!   message that would break the record's rules (Paykit wire 5.4) is reflected by its
-//!   `msg_id` only, such as an acceptance crossing the proposal's withdrawal.
+//!   `msg_id` only, such as an acceptance crossing the proposal's withdrawal. No path stores
+//!   a message of this app's without queuing it, so a message this app signed in an
+//!   Allowance record is one to be sent; the re-send after a restore builds on that
+//!   (`stores_unqueued`).
 //! - **Receiving:** a proposal opens the record, gated by the spam rule; an acceptance or a
 //!   rejection goes into the proposer's record, or is kept until the app holds it (Paykit
 //!   spec 8.1, "Replies before their record"). Every branch holds its entry while the app's

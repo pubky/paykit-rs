@@ -2080,8 +2080,54 @@ async fn test_allowances_conflict_kept_as_the_stop_though_its_record_write_fails
     wallet.receive(None).await.unwrap();
     assert!(value(&wallet, &mine).await["conflicted"].is_null());
     assert_eq!(wallet.app().protocol_scan(b"cf/").await.unwrap().len(), 1);
+    // The step wrote nothing at the switch, so no stored entry came of it.
+    assert!(wallet.app().protocol_scan(b"se/").await.unwrap().is_empty());
     assert_eq!(
         wallet.allowance(&mine).await.unwrap().status,
         AllowanceStatus::Conflicted
     );
+}
+
+#[tokio::test]
+async fn test_allowances_stop_over_a_readable_record_makes_room_when_kept() {
+    // 64 ends of Allowances the wallet holds no record of, then bob's end of the one it
+    // holds, naming an acceptance its record doesn't hold: that stop counts too, so keeping
+    // it drops the sender's earliest (Paykit spec 8.1, 8.3).
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    let (_, mine) = proposed(&w, &mut shop, &mut wallet).await;
+    let record = AllowanceRecord::read(
+        &serde_json::to_vec(&value(&wallet, &mine).await).unwrap(),
+        &w.alice_id(),
+    )
+    .unwrap();
+    let bound = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    for i in 0..bound {
+        w.clock.advance_ms(1);
+        end_unknown(&w, &wallet, i);
+    }
+    w.clock.advance_ms(1);
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.allowance_end",
+        vec![record.proposal.hash(), [8; 32]],
+        json!({ "allowance_id": record.allowance_id.as_str() })
+            .as_object()
+            .cloned()
+            .unwrap(),
+    );
+    wallet.receive(None).await.unwrap();
+    assert_eq!(stops(&wallet).await, bound);
+    assert!(!keeps_end(&w, &wallet, 0).await);
+    let held = format!("ae/{}", pubky_switch_core::enc::b64(&mine));
+    assert!(wallet
+        .app()
+        .protocol_get(held.as_bytes())
+        .await
+        .unwrap()
+        .is_some());
 }
