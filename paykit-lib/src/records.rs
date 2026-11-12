@@ -581,6 +581,7 @@ static ALLOWANCE_SHAPE: Shape = Shape {
         ("proposal", Member::Object(&STORED)),
         ("response", Member::Object(&STORED)),
         ("end", Member::Object(&STORED)),
+        ("conflicted", Member::Object(&STORED)),
         ("grant", Member::Object(&CURRENT_GRANT)),
         ("grants", Member::Array(&GRANT_ENTRY)),
         ("msg_ids", Member::Leaf),
@@ -2396,6 +2397,11 @@ pub struct AllowanceRecord {
     pub response: Option<StoredMessage>,
     /// The end.
     pub end: Option<StoredMessage>,
+    /// A second proposal under the same `allowance_id`, with another hash than `proposal`,
+    /// from either side, or a second response, with another hash than `response`, from the
+    /// proposal's recipient: the Allowance is conflicted (Paykit spec 8.3). Nothing binds or
+    /// is paid under it, and no later write drops it.
+    pub conflicted: Option<StoredMessage>,
     /// The current grant: the last entry of `grants`.
     pub grant: Option<ExecutorGrant>,
     /// The grant history, oldest first.
@@ -2408,6 +2414,13 @@ pub struct AllowanceRecord {
 
 const ALLOWANCES: &str = "Paykit wire 5.4: allowances";
 
+/// The kinds `conflicted` may hold (Paykit spec 8.3): a second proposal or a second response.
+const CONFLICTING: [Kind; 3] = [
+    Kind::AllowanceProposal,
+    Kind::AllowanceAcceptance,
+    Kind::AllowanceRejection,
+];
+
 #[derive(Serialize)]
 struct AllowanceOut<'a> {
     v: u64,
@@ -2416,6 +2429,9 @@ struct AllowanceOut<'a> {
     proposal: StoredOut,
     response: Option<StoredOut>,
     end: Option<StoredOut>,
+    // Left out when absent, so a record without a conflict is written as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conflicted: Option<StoredOut>,
     grant: Option<Value>,
     grants: Vec<Value>,
     msg_ids: &'a [String],
@@ -2466,8 +2482,11 @@ fn allowance_message(
 impl AllowanceRecord {
     /// Read an `allowances` value held by `own` (Paykit wire 5.4 "Binding"): there is a
     /// proposal, with valid terms; the response comes from the proposal's recipient and the
-    /// end from either side, each addressed to the other; every stored message names
-    /// `allowance_id`; and the response and the end refer to the proposal in `refs`. A grant
+    /// end from either side, each addressed to the other; `conflicted`, when present, is
+    /// another proposal, with valid terms and another hash, from either side, or, beside a
+    /// response, another response, with another hash, from the proposal's recipient; every
+    /// stored message names `allowance_id`; and the response, the end and a conflicting
+    /// response refer to the proposal in `refs`. A grant
     /// doesn't affect whether the record is valid: the grant history is checked by
     /// [`AllowanceRecord::current_grant`] and [`AllowanceRecord::executor_at`].
     ///
@@ -2524,12 +2543,21 @@ impl AllowanceRecord {
                 )
             })
             .transpose()?;
+        let conflicted = obj
+            .opt("conflicted")
+            .map(|v| allowance_message(v, own, &counterparty, None, &CONFLICTING, &allowance_id))
+            .transpose()?;
         for stored in response.iter().chain(end.iter()) {
             refers(stored)?;
         }
         let msg_ids = read_msg_ids(
             &obj,
-            &msg_ids_of(std::iter::once(&proposal).chain(&response).chain(&end)),
+            &msg_ids_of(
+                std::iter::once(&proposal)
+                    .chain(&response)
+                    .chain(&end)
+                    .chain(&conflicted),
+            ),
         )?;
         let (unknown, origins) = UnknownMembers::read(&map, &ALLOWANCE_SHAPE);
         let mut grants = Vec::new();
@@ -2561,6 +2589,7 @@ impl AllowanceRecord {
             proposal,
             response,
             end,
+            conflicted,
             msg_ids,
             grant,
             grants,
@@ -2573,19 +2602,22 @@ impl AllowanceRecord {
     /// The record's rules (Paykit wire 5.4 "Binding"), the same for the reader and the
     /// writer: the stored messages are between the counterparty and one other identity, each
     /// of its member's kind and naming `allowance_id`; the response comes from the proposal's
-    /// recipient; and the response and the end refer to the proposal in `refs`.
+    /// recipient; the response and the end refer to the proposal in `refs`; and `conflicted`
+    /// is a proposal other than `proposal`, by hash, or, beside a response, a response other
+    /// than it, by hash, from the proposal's recipient and referring to the proposal.
     ///
     /// # Errors
     ///
     /// [`Error::Invalid`] naming the rule.
     fn check(&self) -> Result<()> {
-        let members: [(Option<&StoredMessage>, &[Kind]); 3] = [
+        let members: [(Option<&StoredMessage>, &[Kind]); 4] = [
             (Some(&self.proposal), &[Kind::AllowanceProposal]),
             (
                 self.response.as_ref(),
                 &[Kind::AllowanceAcceptance, Kind::AllowanceRejection],
             ),
             (self.end.as_ref(), &[Kind::AllowanceEnd]),
+            (self.conflicted.as_ref(), &CONFLICTING),
         ];
         let mut own: Option<[u8; 32]> = None;
         for (stored, kinds) in members {
@@ -2624,18 +2656,38 @@ impl AllowanceRecord {
                 response.sender == self.proposal.message.to,
                 "Paykit wire 5.4: a stored message isn't from the side its kind requires",
             )?;
-            // Paykit wire 4.16: executor_app_id comes in an acceptance from the allower, the
-            // proposal's recipient when the proposer is the allowee.
-            if let (Body::AllowanceAcceptance(r), Body::AllowanceProposal(p)) =
-                (&response.body, &self.proposal.body)
-            {
-                ensure(
-                    r.executor_app_id.is_none() || p.proposer_role == ProposerRole::Allowee,
-                    "Paykit wire 4.16: executor_app_id only in an acceptance from the allower",
-                )?;
-            }
+            self.check_executor_app_id(response)?;
         }
         let proposal = self.proposal.hash();
+        if let Some(conflicted) = &self.conflicted {
+            // Paykit spec 8.3: a conflict is a second, different proposal, or a second,
+            // different response. The same message again, a re-send, is the original one.
+            if conflicted.body.kind() == Kind::AllowanceProposal {
+                ensure(
+                    conflicted.hash() != proposal,
+                    "Paykit wire 5.4: conflicted holds another proposal than the record's",
+                )?;
+            } else {
+                let Some(response) = &self.response else {
+                    return invalid(
+                        "Paykit wire 5.4: a conflicting response comes beside the record's response",
+                    );
+                };
+                ensure(
+                    conflicted.hash() != response.hash(),
+                    "Paykit wire 5.4: conflicted holds another response than the record's",
+                )?;
+                ensure(
+                    conflicted.sender == self.proposal.message.to,
+                    "Paykit wire 5.4: a stored message isn't from the side its kind requires",
+                )?;
+                ensure(
+                    conflicted.message.refs == [proposal],
+                    "Paykit wire 4.16: a response or an end refers to the proposal in refs",
+                )?;
+                self.check_executor_app_id(conflicted)?;
+            }
+        }
         if let Some(response) = &self.response {
             ensure(
                 response.message.refs == [proposal],
@@ -2659,6 +2711,20 @@ impl AllowanceRecord {
                     "Paykit wire 4.16: an end before any response is the proposal's withdrawal by its sender",
                 )?,
             }
+        }
+        Ok(())
+    }
+
+    /// Paykit wire 4.16: `executor_app_id` comes in an acceptance from the allower, the
+    /// proposal's recipient when the proposer is the allowee.
+    fn check_executor_app_id(&self, response: &StoredMessage) -> Result<()> {
+        if let (Body::AllowanceAcceptance(r), Body::AllowanceProposal(p)) =
+            (&response.body, &self.proposal.body)
+        {
+            ensure(
+                r.executor_app_id.is_none() || p.proposer_role == ProposerRole::Allowee,
+                "Paykit wire 4.16: executor_app_id only in an acceptance from the allower",
+            )?;
         }
         Ok(())
     }
@@ -2751,9 +2817,12 @@ impl AllowanceRecord {
 
     /// The current grant (Paykit wire 5.4): the last entry of a usable history, if it
     /// verifies for this identity, the counterparty and the Allowance. Returns the grant and
-    /// the executor's certificate; `None` means the record has no current grant.
+    /// the executor's certificate; `None` means the record has no current grant. A
+    /// conflicted record has none, so no app pays under it (Paykit spec 8.3); the history
+    /// still names the executor at each version ([`AllowanceRecord::executor_at`]), so the
+    /// outcomes of attempts already open are still recorded.
     pub fn current_grant(&self, own: &[u8; 32]) -> Option<(&ExecutorGrant, AppCert)> {
-        if !self.history_usable() {
+        if self.conflicted.is_some() || !self.history_usable() {
             return None;
         }
         let last = self.grants.last()?;
@@ -2783,8 +2852,9 @@ impl AllowanceRecord {
 
     /// "Seen roles" of an Allowance record (Paykit spec 6, Paykit wire 5.4, Switch spec 8.2):
     /// a reader that holds `self` ignores, and shows with its writer, a later write of the
-    /// record that drops or replaces the proposal, the response or the end it saw, by hash,
-    /// or whose grant history doesn't start with the one it saw
+    /// record that drops or replaces the proposal, the response, the end or the conflicting
+    /// proposal it saw, by hash, so a conflict is never cleared, or whose grant history
+    /// doesn't start with the one it saw
     /// ([`AllowanceRecord::check_later_history`]). No message of these roles replaces
     /// another, so a tie never decides.
     ///
@@ -2801,7 +2871,8 @@ impl AllowanceRecord {
         ensure(
             kept(Some(&self.proposal), Some(&later.proposal))
                 && kept(self.response.as_ref(), later.response.as_ref())
-                && kept(self.end.as_ref(), later.end.as_ref()),
+                && kept(self.end.as_ref(), later.end.as_ref())
+                && kept(self.conflicted.as_ref(), later.conflicted.as_ref()),
             "Paykit wire 5.4: a later write drops or replaces a message in a role seen",
         )?;
         self.check_later_history(later)
@@ -2825,8 +2896,8 @@ impl AllowanceRecord {
         )
     }
 
-    /// Write the record value: every member, `null` for absent, `grants` always, `msg_ids` as
-    /// its canonical list, [`bounded_msg_ids`] of the stored messages and `msg_ids`, and the
+    /// Write the record value: every member, `null` for absent but `conflicted`, which is left
+    /// out when absent, `grants` always, `msg_ids` as its canonical list, [`bounded_msg_ids`] of the stored messages and `msg_ids`, and the
     /// members it doesn't know as it read them (Paykit wire 5, 5.3, 5.4), after the record's
     /// rules, as a reader checks them.
     ///
@@ -2850,7 +2921,8 @@ impl AllowanceRecord {
     fn json_unchecked(&self) -> Result<Vec<u8>> {
         let stored = std::iter::once(&self.proposal)
             .chain(&self.response)
-            .chain(&self.end);
+            .chain(&self.end)
+            .chain(&self.conflicted);
         let msg_ids = written_msg_ids(&msg_ids_of(stored), &self.msg_ids)?;
         let out = AllowanceOut {
             v: 1,
@@ -2859,6 +2931,7 @@ impl AllowanceRecord {
             proposal: self.proposal.out(),
             response: self.response.as_ref().map(StoredMessage::out),
             end: self.end.as_ref().map(StoredMessage::out),
+            conflicted: self.conflicted.as_ref().map(StoredMessage::out),
             grant: self.grant.as_ref().map(ExecutorGrant::to_json),
             grants: self
                 .grants

@@ -867,8 +867,8 @@ async fn test_replies_kept_under_another_messages_key_refused_as_corrupt() {
 #[tokio::test]
 async fn test_replies_kept_past_30_days_whose_write_fails_stay_kept() {
     // Past 30 days the record comes, and the shop's writes placing the replies don't reach
-    // its switch: a failed write is no refusal, so the replies stay kept, none
-    // given up, and are placed once the switch answers.
+    // its switch: a failed write is no refusal, so the receive returns the error, the
+    // replies stay kept, none given up, and are placed once the switch answers.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -879,13 +879,11 @@ async fn test_replies_kept_past_30_days_whose_write_fails_stay_kept() {
     w.clock.advance_ms(2 * DAY_MS);
     shop.app_mut().rotate().await.unwrap();
     shop.app_mut().flush_cursor().await.unwrap();
-    for _ in 0..4 {
-        w.bob.switch().fail_next(Fault::Unreachable {
-            path: "/ops".into(),
-            after: 0,
-        });
-    }
-    shop.receive(None).await.unwrap();
+    w.bob.switch().fail_next(Fault::Unreachable {
+        path: "/ops".into(),
+        after: 0,
+    });
+    assert!(shop.receive(None).await.is_err());
     assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 2);
     assert!(shop.notices().await.unwrap().is_empty());
     shop.flush().await.unwrap();

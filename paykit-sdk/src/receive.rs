@@ -744,13 +744,19 @@ fn receipt_effect(
     // The journal entry of the attempt, if this app made it: it holds a payment without a
     // request's deadline, and whether `failed` stands on the claim of a payment made. One
     // that doesn't read parks the receipt rather than settling the claim with no deadline,
-    // or consuming it (Switch spec 8.2): the store is corrupt.
+    // or consuming it (Switch spec 8.2): the store is corrupt. It is read as
+    // `Paykit::journal_entry` reads it: checked, bound to its obligation and to its key.
     let journaled = match cx.local_get(key::journal(&attempt_id).as_bytes())? {
-        Some(bytes) => Some(
-            state::decode::<JournalEntry>(&bytes)
-                .and_then(|entry| entry.check().map(|()| entry))
-                .map_err(|_| Fail::corrupt())?,
-        ),
+        Some(bytes) => {
+            let entry = state::decode::<JournalEntry>(&bytes).map_err(|_| Fail::corrupt())?;
+            entry
+                .check_bound(|payee, request| obligation(cx, payee, request, 0))
+                .map_err(|_| Fail::corrupt())?;
+            if entry.attempt().map_err(|_| Fail::corrupt())? != attempt_id {
+                return Err(Fail::corrupt());
+            }
+            Some(entry)
+        }
         None => None,
     };
     // A receipt reaches only an app holding `pay`, which carries `claims.write`, and an entry
@@ -793,8 +799,14 @@ fn receipt_effect(
     }
     if let Some(late) = settles.notice {
         let notice = key::notice(&attempt_id, NoticeKind::PaidAfterFailed);
-        if cx.local_get(notice.as_bytes())?.is_none() {
-            keep_local(cx, local(&notice, &late)?);
+        // A notice kept already is read whole and bound to its key, as `Paykit::kept_notice`
+        // reads it.
+        match cx.local_get(notice.as_bytes())? {
+            None => keep_local(cx, local(&notice, &late)?),
+            Some(bytes) => {
+                let kept = state::decode::<KeptNotice>(&bytes).map_err(|_| Fail::corrupt())?;
+                crate::notices::bind_notice(&notice, &kept).map_err(|_| Fail::corrupt())?;
+            }
         }
     }
     if let Some(entry) = settles.received {
@@ -921,9 +933,10 @@ pub(crate) struct ReceiptSettles {
 /// `failed` was written on it, the user is told it was paid (Paykit spec 7.2, "What a
 /// payment method declares"), and the entry no longer waits. An app that gets the receipt
 /// and holds the failure tells the user: it holds the failure when it has it from a stable
-/// source, the attempt's owner from its own journal (`failed_on_claim`), another own app
-/// from a view of the claim, kept or read, that shows the attempt `failed`, for the first
-/// receipt of the proof the record holds. The record's `status` is informational and never
+/// source, the attempt's owner from its own journal (`failed_on_claim`), or any own app,
+/// the owner included, from a view of the claim, kept or read, that shows the attempt
+/// `failed`, for the first receipt of the proof the record holds. An owner restored from a
+/// backup that predates the failure has no journal entry for it, and uses such a view. The record's `status` is informational and never
 /// decides it (Paykit wire 5.3). An own app that never saw the failure, such as one that
 /// joined after the service deleted the claim, can't tell and raises nothing. Either way
 /// the receipt goes into the record, by the caller. A claim SETTLED holds the
@@ -1358,8 +1371,9 @@ impl Paykit {
     ///   ([`crate::NoticeKind::MessageGivenUp`]) in the commit that drops it, as a stored
     ///   entry's message (`stored.rs`).
     ///
-    /// A write that can't be built or sent is never taken as a refusal: the reply stays
-    /// kept, within the bounds on kept replies. Every kept reply is read with a restore's
+    /// A write that can't be built or sent is never taken as a refusal: the error is
+    /// returned, the reply kept; only the switch's refusal of the batch gives it up past its
+    /// window. Every kept reply is read with a restore's
     /// check, and one that fails it fails the call as a corrupt store.
     pub(crate) async fn place_kept_replies(&mut self) -> crate::error::Result<()> {
         let own = self.identity();
@@ -1415,14 +1429,10 @@ impl Paykit {
                 }
                 continue;
             }
-            // A write that can't be built or sent now is no refusal: the reply stays kept,
-            // tried again at the next receive, within the bounds on kept replies.
-            let Ok(write) = self
+            // A write that can't be built is an error, returned: the reply stays kept.
+            let write = self
                 .placed_write(&target, sender, role, reply.clone(), Vec::new())
-                .await
-            else {
-                continue;
-            };
+                .await?;
             let mut tx = Tx::default();
             tx.delete(&kept_key);
             match write {
@@ -1430,7 +1440,13 @@ impl Paykit {
                     let batch = pubky_switch_client::app::OpBatch::new()
                         .entry(entry)
                         .locals(tx.into_writes());
-                    let _ = self.app.submit_batch(batch).await;
+                    // Only the switch's refusal is the record's: past its window the reply is
+                    // given up then. One not sent now waits; any other error is returned, the
+                    // reply kept (`stored::submitted`).
+                    let placed = crate::stored::submitted(self.app.submit_batch(batch).await)?;
+                    if placed == crate::stored::Placed::Not && stale {
+                        self.give_up(&kept_key, &reply).await?;
+                    }
                 }
                 None => self.local_commit(tx).await?,
             }

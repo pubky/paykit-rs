@@ -418,6 +418,121 @@ fn is_refused(error: &paykit_sdk::PaykitError) -> bool {
     )
 }
 
+/// `good`'s layer with a notice that a message from bob was given up, `notice` its value.
+fn with_given_up_notice(
+    w: &World,
+    good: &serde_json::Value,
+    notice: serde_json::Value,
+) -> serde_json::Value {
+    let mut state = layer_of(good);
+    let key = format!(
+        "nt/{}/123e4567-e89b-42d3-a456-426614174000",
+        pubky_switch_core::enc::b64(&w.bob_id())
+    );
+    state.push((key.into_bytes(), serde_json::json!({ "v": 1, "d": notice })));
+    with_layer(good, state)
+}
+
+/// A kept notice that a message from bob was given up, its stored entry at local ID 4.
+fn given_up_notice(w: &World) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "message_given_up",
+        "attempt_id": null,
+        "msg_id": "123e4567-e89b-42d3-a456-426614174000",
+        "counterparty": pubky_switch_core::enc::b64(&w.bob_id()),
+        "request_hash": null,
+        "raised_at_ms": 3,
+        "acknowledged": false,
+        "stored": { "stored_id": 4, "hash": pubky_switch_core::enc::b64(&[5; 32]) }
+    })
+}
+
+#[tokio::test]
+async fn test_restore_given_up_notice_with_its_entry_restored() {
+    let w = World::new();
+    let (good, _) = backup_with_a_payment(&w).await;
+    let backup = with_given_up_notice(&w, &good, given_up_notice(&w));
+    let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&backup).unwrap()).unwrap();
+    let restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(restored.notices().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_restore_given_up_notice_without_an_entry_restored() {
+    // A message given up with no entry stored, such as one the receive step gave up waiting
+    // for its key or a payer's reply kept for its record, is told with no handle: a state a
+    // valid run leaves, restored as kept.
+    let w = World::new();
+    let (good, _) = backup_with_a_payment(&w).await;
+    let mut notice = given_up_notice(&w);
+    notice.as_object_mut().unwrap().remove("stored");
+    let backup = with_given_up_notice(&w, &good, notice);
+    let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&backup).unwrap()).unwrap();
+    let restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    let notices = restored.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+}
+
+#[tokio::test]
+async fn test_restore_given_up_notice_acknowledged_refused() {
+    let w = World::new();
+    let (good, app_id) = backup_with_a_payment(&w).await;
+    let mut notice = given_up_notice(&w);
+    notice["acknowledged"] = serde_json::json!(true);
+    let target = store();
+    let error = refused_restore(
+        &w,
+        with_given_up_notice(&w, &good, notice),
+        Arc::clone(&target),
+    )
+    .await;
+    assert!(is_refused(&error), "{error:?}");
+    nothing_restored(&w, target, app_id).await;
+}
+
+#[tokio::test]
+async fn test_restore_acknowledged_notice_without_its_payment_refused() {
+    // An acknowledged notice is kept only while the journal holds its payment.
+    let w = World::new();
+    let (good, app_id) = backup_with_a_payment(&w).await;
+    let mut state = layer_of(&good);
+    let attempt = paykit_lib::AttemptId::from_bytes([9; 16]).to_text();
+    let notice = serde_json::json!({
+        "kind": "paid_after_failed",
+        "attempt_id": attempt,
+        "msg_id": null,
+        "counterparty": pubky_switch_core::enc::b64(&w.bob_id()),
+        "request_hash": null,
+        "raised_at_ms": 3,
+        "acknowledged": true
+    });
+    state.push((
+        format!("nt/{attempt}/paid_after_failed").into_bytes(),
+        serde_json::json!({ "v": 1, "d": notice }),
+    ));
+    let target = store();
+    let error = refused_restore(&w, with_layer(&good, state), Arc::clone(&target)).await;
+    assert!(is_refused(&error), "{error:?}");
+    nothing_restored(&w, target, app_id).await;
+}
+
 #[tokio::test]
 async fn test_restore_corrupt_journal_refused_and_nothing_written() {
     let w = World::new();
