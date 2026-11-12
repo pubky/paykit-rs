@@ -612,7 +612,9 @@ impl Paykit {
     /// The client's errors; [`Refusal::SwitchUnavailable`] while the account may have been
     /// erased and the client's wait before it takes it as gone goes on, as for a switch that
     /// doesn't answer (Switch spec 12.7). A message whose effect couldn't be written yet
-    /// stays before the cursor, and the next call hands it over again.
+    /// stays before the cursor, and the next call hands it over again. One waiting for a
+    /// scope key the app doesn't hold yet waits in the client's store once the client's
+    /// bounded wait ends, not behind the cursor, and is read again once the key comes.
     pub async fn receive(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
         // The read's future goes on the heap: the client's read nests deep, and a host
         // polling it on a small stack, such as a test thread's 2 MiB, keeps room for it.

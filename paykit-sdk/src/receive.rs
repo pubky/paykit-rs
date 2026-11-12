@@ -514,7 +514,8 @@ fn keep_cancellation(
     held: bool,
 ) -> Result<(), Fail> {
     let kept = key::kept_cancellation(&cx.record_key(&target.record_target())?);
-    if cx.local_get(kept.as_bytes())?.is_some() {
+    if let Some(value) = cx.local_get(kept.as_bytes())? {
+        checked_stop(cx, kept.as_bytes(), &value)?;
         return Ok(());
     }
     if !held {
@@ -541,7 +542,6 @@ fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<
     if side_may_lack(cx, RecordSide::Payer)? {
         return Ok(());
     }
-    let own = cx.identity();
     let mut kept = Vec::new();
     let mut names = Vec::new();
     for (bytes, value) in cx.local_scan(key::KEPT_CANCELLATIONS.as_bytes())? {
@@ -550,19 +550,18 @@ fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<
         else {
             return Err(Fail::corrupt());
         };
-        let stop = state::decode::<KeptMessage>(&value).map_err(|_| Fail::corrupt())?;
+        let (cancellation, at) = checked_stop(cx, &bytes, &value)?;
         let content = cx.record_at(&record)?.map(|held| held.content);
         if holds_record(content.as_ref()) {
             continue;
         }
-        let from = stop.sender();
-        let cancellation = stop.stored(&own).map_err(|_| Fail::corrupt())?;
+        let from = cancellation.sender();
         if let Some(request) = cancellation.message().refs.first() {
             if keeps_stored_of(cx, &from, request)? {
                 continue;
             }
         }
-        kept.push((from, stop.accepted_at().unwrap_or(0)));
+        kept.push((from, at));
         names.push(bytes);
     }
     while let Some(index) = kept_reply_evicted(&kept, sender) {
@@ -577,6 +576,51 @@ fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<
     Ok(())
 }
 
+/// The stop `value` at `key`, read with the check a restore makes
+/// ([`crate::protocol::kept_cancellation_at`]), with its acceptance time: one that fails it
+/// is a corrupt store.
+fn checked_stop(
+    cx: &ReceiveContext<'_>,
+    key: &[u8],
+    value: &[u8],
+) -> Result<(StoredMessage, u64), Fail> {
+    let cancellation =
+        crate::protocol::kept_cancellation_at(key, value, &cx.identity(), &|target| {
+            cx.record_key(target).map_err(|error| error.to_string())
+        })
+        .map_err(|_| Fail::corrupt())?;
+    let at = cancellation.accepted_at().ok_or_else(Fail::corrupt)?;
+    Ok((cancellation, at))
+}
+
+/// The payer's reply `value` kept at `key`, read with the check a restore makes
+/// ([`crate::protocol::kept_reply_at`]), with its acceptance time: one that fails it is a
+/// corrupt store.
+fn checked_reply(
+    cx: &ReceiveContext<'_>,
+    key: &[u8],
+    value: &[u8],
+) -> Result<(StoredMessage, u64), Fail> {
+    let Some(crate::state::StateKey::KeptReply {
+        sender,
+        record,
+        msg_id,
+    }) = crate::state::StateKey::parse(key)
+    else {
+        return Err(Fail::corrupt());
+    };
+    let reply = crate::protocol::kept_reply_at(
+        value,
+        &cx.identity(),
+        (sender, record),
+        &msg_id,
+        &|target| cx.record_key(target).map_err(|error| error.to_string()),
+    )
+    .map_err(|_| Fail::corrupt())?;
+    let at = reply.accepted_at().ok_or_else(Fail::corrupt)?;
+    Ok((reply, at))
+}
+
 /// Whether the app keeps a stored message from `sender` of `request` still to write
 /// ([`crate::stored::writes_request`]).
 fn keeps_stored_of(
@@ -585,10 +629,10 @@ fn keeps_stored_of(
     request: &[u8; 32],
 ) -> Result<bool, Fail> {
     let own = cx.identity();
-    for (_, value) in cx.local_scan(key::stored_notes_of(sender).as_bytes())? {
-        let note =
-            state::decode::<crate::stored::StoredNote>(&value).map_err(|_| Fail::corrupt())?;
-        if crate::stored::writes_request(&note, &own, request).map_err(|_| Fail::corrupt())? {
+    for (note_key, value) in cx.local_scan(key::stored_notes_of(sender).as_bytes())? {
+        if crate::stored::writes_request(&note_key, &value, &own, request)
+            .map_err(|_| Fail::corrupt())?
+        {
             return Ok(true);
         }
     }
@@ -631,9 +675,14 @@ fn payer_reply(
                 if admits_new_state(cx, &sender, scopes)? {
                     let record = cx.record_key(&target.record_target())?;
                     let kept = key::kept_reply(&sender, &record, &stored.message().msg_id);
-                    if cx.local_get(kept.as_bytes())?.is_none() {
-                        make_room_for_reply(cx, &sender)?;
-                        keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
+                    match cx.local_get(kept.as_bytes())? {
+                        Some(value) => {
+                            checked_reply(cx, kept.as_bytes(), &value)?;
+                        }
+                        None => {
+                            make_room_for_reply(cx, &sender)?;
+                            keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
+                        }
                     }
                 }
                 return Ok(false);
@@ -1114,13 +1163,8 @@ fn make_room_for_reply(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result
     let mut kept = Vec::new();
     let mut names = Vec::new();
     for (bytes, value) in cx.local_scan(key::KEPT_REPLIES.as_bytes())? {
-        let Some(crate::state::StateKey::KeptReply { sender, .. }) =
-            crate::state::StateKey::parse(&bytes)
-        else {
-            return Err(Fail::corrupt());
-        };
-        let reply = state::decode::<KeptMessage>(&value).map_err(|_| Fail::corrupt())?;
-        kept.push((sender, reply.accepted_at().unwrap_or(0)));
+        let (reply, at) = checked_reply(cx, &bytes, &value)?;
+        kept.push((reply.sender(), at));
         names.push(bytes);
     }
     let Some(index) = kept_reply_evicted(&kept, sender) else {
@@ -1309,39 +1353,46 @@ impl Paykit {
     ///   records may lack records ([`Paykit::side_unlisted`]): the absence decides nothing
     ///   then;
     /// - with its record held but not open, sealed under a scope key the app doesn't hold
-    ///   or a value that doesn't read, or with a placement that keeps failing, it is given
-    ///   up, and the host told ([`crate::NoticeKind::MessageGivenUp`]) in the commit that
-    ///   drops it, as a stored entry's message (`stored.rs`).
+    ///   or a value that doesn't read, or with a sender that isn't the record's
+    ///   counterparty, it is given up, and the host told
+    ///   ([`crate::NoticeKind::MessageGivenUp`]) in the commit that drops it, as a stored
+    ///   entry's message (`stored.rs`).
+    ///
+    /// A write that can't be built or sent is never taken as a refusal: the reply stays
+    /// kept, within the bounds on kept replies. Every kept reply is read with a restore's
+    /// check, and one that fails it fails the call as a corrupt store.
     pub(crate) async fn place_kept_replies(&mut self) -> crate::error::Result<()> {
         let own = self.identity();
-        for (rest, kept) in self.local_scan::<KeptMessage>(key::KEPT_REPLIES).await? {
-            let kept_key = format!("{}{rest}", key::KEPT_REPLIES);
-            let reply = kept.stored(&own)?;
-            let (Some(request), Some(role)) = (
+        for (key_bytes, value) in self.app.protocol_scan(key::KEPT_REPLIES.as_bytes()).await? {
+            // Read with a restore's check: a reply that fails it is a corrupt store, so the
+            // receive fails rather than drop, give up or place it.
+            let reply = self.checked_reply(&key_bytes, &value)?;
+            let kept_key =
+                String::from_utf8(key_bytes).map_err(|_| crate::error::PaykitError::corrupt())?;
+            let (Some(request), Some(role), Some(accepted_at)) = (
                 reply.message().refs.first(),
                 crate::activity::Role::of(reply.body()),
+                reply.accepted_at(),
             ) else {
-                self.local_delete(&kept_key).await?;
-                continue;
+                return Err(crate::error::PaykitError::corrupt());
             };
             let target = ActivityTarget::payee(
                 natural_key::request_record(&own, request),
                 reply.body().label(),
             );
-            let stale = reply.accepted_at().is_none_or(|at| {
-                self.service_time()
-                    .is_some_and(|t| at.saturating_add(KEPT_MESSAGE_MS) <= t)
-            });
+            let stale = self
+                .service_time()
+                .is_some_and(|t| accepted_at.saturating_add(KEPT_MESSAGE_MS) <= t);
             let content = self
                 .app
                 .shared_record(&self.activity_key(&target)?)
                 .await?
                 .map(|held| held.content);
-            let open = match content {
-                Some(RecordContent::Value(_)) => self.held_activity(&target).await?.is_some(),
-                _ => false,
+            let record = match content {
+                Some(RecordContent::Value(_)) => self.held_activity(&target).await?,
+                _ => None,
             };
-            if !open {
+            let Some(record) = record else {
                 if !stale {
                     continue;
                 }
@@ -1354,17 +1405,22 @@ impl Paykit {
                     Some(_) => self.give_up(&kept_key, &reply).await?,
                 }
                 continue;
-            }
+            };
             let sender = reply.sender();
+            // A reply the record can't take, its sender not the record's counterparty, is
+            // kept no longer than any other: given up past its window.
+            if record.counterparty != sender {
+                if stale {
+                    self.give_up(&kept_key, &reply).await?;
+                }
+                continue;
+            }
+            // A write that can't be built or sent now is no refusal: the reply stays kept,
+            // tried again at the next receive, within the bounds on kept replies.
             let Ok(write) = self
                 .placed_write(&target, sender, role, reply.clone(), Vec::new())
                 .await
             else {
-                // A reply the record can't take, such as one whose sender isn't its
-                // counterparty: kept no longer than any other.
-                if stale {
-                    self.give_up(&kept_key, &reply).await?;
-                }
                 continue;
             };
             let mut tx = Tx::default();
@@ -1374,14 +1430,37 @@ impl Paykit {
                     let batch = pubky_switch_client::app::OpBatch::new()
                         .entry(entry)
                         .locals(tx.into_writes());
-                    if self.app.submit_batch(batch).await.is_err() && stale {
-                        self.give_up(&kept_key, &reply).await?;
-                    }
+                    let _ = self.app.submit_batch(batch).await;
                 }
                 None => self.local_commit(tx).await?,
             }
         }
         Ok(())
+    }
+
+    /// The payer's reply `value` kept at `key`, read with the check a restore makes
+    /// ([`crate::protocol::kept_reply_at`]): one that fails it is a corrupt store.
+    fn checked_reply(&self, key: &[u8], value: &[u8]) -> crate::error::Result<StoredMessage> {
+        let Some(crate::state::StateKey::KeptReply {
+            sender,
+            record,
+            msg_id,
+        }) = crate::state::StateKey::parse(key)
+        else {
+            return Err(crate::error::PaykitError::corrupt());
+        };
+        crate::protocol::kept_reply_at(
+            value,
+            &self.identity(),
+            (sender, record),
+            &msg_id,
+            &|target| {
+                self.app
+                    .record_key(target)
+                    .map_err(|error| error.to_string())
+            },
+        )
+        .map_err(|_| crate::error::PaykitError::corrupt())
     }
 
     /// How many messages from `sender` the spam rule only counted (Paykit wire 4.1): those

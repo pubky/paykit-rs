@@ -136,7 +136,7 @@ impl Paykit {
             self.local_delete(&format!("{}{rest}", key::ASKS)).await?;
             sent = sent.saturating_add(1);
         }
-        let lost = self.local_scan::<u64>(key::MISSED).await?;
+        let lost = self.missed_marks(key::MISSED).await?;
         if !lost.is_empty() {
             let peers: Vec<[u8; 32]> = self
                 .local_scan::<u64>(key::PEERS)
@@ -146,7 +146,7 @@ impl Paykit {
                 .collect::<Result<_>>()?;
             sent = sent.saturating_add(self.ask_from_marks(key::MISSED, lost, peers).await?);
         }
-        let items = self.local_scan::<u64>(key::MISSED_ITEMS).await?;
+        let items = self.missed_marks(key::MISSED_ITEMS).await?;
         // The counterparties come from the copy of the records, so the asks and their marks
         // wait while it may lack records, waits for scope keys, or holds a record sealed under
         // a key not held yet, for the receive that completes it.
@@ -162,6 +162,30 @@ impl Paykit {
             );
         }
         Ok(sent)
+    }
+
+    /// The marks of missed entries under `prefix` (`missed/` or `mi/`), each read with the
+    /// check a restore makes ([`crate::protocol::missed_mark_at`]), bound to the time its key
+    /// names: one that fails it is a corrupt store, never no mark.
+    async fn missed_marks(&self, prefix: &str) -> Result<Vec<(String, u64)>> {
+        let mut out = Vec::new();
+        for (key, value) in self.app.protocol_scan(prefix.as_bytes()).await? {
+            let from_ms = match crate::state::StateKey::parse(&key) {
+                Some(
+                    crate::state::StateKey::Missed { from_ms }
+                    | crate::state::StateKey::MissedItem { from_ms },
+                ) => from_ms,
+                _ => return Err(PaykitError::corrupt()),
+            };
+            let from = crate::protocol::missed_mark_at(from_ms, &value)
+                .map_err(|_| PaykitError::corrupt())?;
+            let rest = String::from_utf8(key)
+                .ok()
+                .and_then(|key| key.get(prefix.len()..).map(str::to_owned))
+                .ok_or_else(PaykitError::corrupt)?;
+            out.push((rest, from));
+        }
+        Ok(out)
     }
 
     /// Ask each of `counterparties` but those blocked to send again what its inbox accepted

@@ -839,3 +839,61 @@ async fn test_replies_with_their_record_in_one_read_placed() {
     assert!(shop.app().protocol_scan(b"se/").await.unwrap().is_empty());
     assert!(shop.app_mut().parked_entries().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn test_replies_kept_under_another_messages_key_refused_as_corrupt() {
+    // A kept reply found under the key of another `msg_id` is a corrupt store: the receive
+    // fails rather than place, drop or give it up (Switch spec 8.2).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let _request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    let (key, value) = shop.app().protocol_scan(b"pr/").await.unwrap().remove(0);
+    let key = String::from_utf8(key).unwrap();
+    let (prefix, _) = key.rsplit_once('/').unwrap();
+    let moved = format!("{prefix}/123e4567-e89b-42d3-a456-426614174000");
+    shop.app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: moved.into_bytes(),
+            value,
+        }])
+        .await
+        .unwrap();
+    let failed = shop.receive(None).await.unwrap_err();
+    assert!(crate::common::is_corrupt(&failed), "{failed:?}");
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn test_replies_kept_past_30_days_whose_write_fails_stay_kept() {
+    // Past 30 days the record comes, and the shop's writes placing the replies don't reach
+    // its switch: a failed write is no refusal, so the replies stay kept, none
+    // given up, and are placed once the switch answers.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - DAY_MS);
+    shop.receive(None).await.unwrap();
+    record_request(&w, &mut shop, &request).await;
+    w.clock.advance_ms(2 * DAY_MS);
+    shop.app_mut().rotate().await.unwrap();
+    shop.app_mut().flush_cursor().await.unwrap();
+    for _ in 0..4 {
+        w.bob.switch().fail_next(Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    }
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 2);
+    assert!(shop.notices().await.unwrap().is_empty());
+    shop.flush().await.unwrap();
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        PayeeStatus::ProofReceived
+    );
+}
