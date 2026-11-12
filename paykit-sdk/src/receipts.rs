@@ -8,6 +8,7 @@ use paykit_lib::collections::Collection;
 use paykit_lib::periods::PeriodRef;
 use paykit_lib::records::{ActivityRecord, ActivitySide};
 use paykit_lib::{AttemptId, Body, PaymentReference};
+use pubky_switch_client::app::UserConfirmed;
 use serde_json::{Map, Value};
 
 use crate::error::Result;
@@ -25,6 +26,11 @@ pub struct ReceiptDetails {
     /// The payee's reference for a payment without a request; a receipt of a request
     /// carries none, since the request's applies.
     pub payment_reference: Option<PaymentReference>,
+    /// The user has seen that this payment may be credited already to another occurrence,
+    /// a record of the payer's the app can't open or a copy that may lack records hiding
+    /// it, and credits it anyway ([`crate::Refusal::MaybeCredited`]). It never overrides a
+    /// credit the app can see.
+    pub maybe_credited_confirmed: Option<UserConfirmed>,
 }
 
 impl std::fmt::Debug for ReceiptDetails {
@@ -32,6 +38,7 @@ impl std::fmt::Debug for ReceiptDetails {
         f.debug_struct("ReceiptDetails")
             .field("metadata", &self.metadata.as_ref().map(Map::len))
             .field("payment_reference", &self.payment_reference.is_some())
+            .field("maybe_credited_confirmed", &self.maybe_credited_confirmed)
             .finish()
     }
 }
@@ -53,6 +60,15 @@ impl ReceiptDetails {
     #[must_use]
     pub fn with_payment_reference(mut self, payment_reference: PaymentReference) -> Self {
         self.payment_reference = Some(payment_reference);
+        self
+    }
+
+    /// The user has seen that this payment may be credited already to another occurrence,
+    /// and credits it anyway ([`crate::Refusal::MaybeCredited`]): a record that never opens
+    /// then can't hold the credit for good. A credit the app can see still refuses it.
+    #[must_use]
+    pub fn with_maybe_credited_confirmed(mut self, confirmed: UserConfirmed) -> Self {
+        self.maybe_credited_confirmed = Some(confirmed);
         self
     }
 }

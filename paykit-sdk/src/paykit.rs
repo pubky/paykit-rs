@@ -665,8 +665,11 @@ impl Paykit {
         // bounds once the record of one of their requests came, of entries dropped
         // unverified at once, then again at most once a day while the mark lives.
         let marked = self.ask_on_marks(&report.events).await?;
-        // The payers' replies kept for requests whose record wasn't held yet.
-        self.place_kept_replies().await?;
+        // The replies and period details kept for requests whose record wasn't held yet,
+        // unless the payer's side waits for its scope keys or its listing, as above.
+        if !self.payer_waits(keys).await? {
+            self.place_kept_replies().await?;
+        }
         // Lists held over a `payment_lists` record that didn't read, once it reads.
         self.place_held_lists().await?;
         let applied = report

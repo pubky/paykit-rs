@@ -352,7 +352,8 @@ async fn test_period_payments_latest_details_paid_by_and_named_in_the_proof() {
     let second = shop
         .send_period_details(&sale, details(january(), "lnbc1second", now + DAY_MS))
         .await
-        .unwrap();
+        .unwrap()
+        .msg_id;
     wallet.receive(None).await.unwrap();
     by_user(&mut wallet, &request, january(), PayOptions::default())
         .await
@@ -379,12 +380,14 @@ async fn test_period_payments_earlier_details_chosen_point_the_record_back() {
     let first = shop
         .send_period_details(&sale, details(january(), "lnbc1first", now + DAY_MS))
         .await
-        .unwrap();
+        .unwrap()
+        .msg_id;
     w.clock.advance_ms(1_000);
     let second = shop
         .send_period_details(&sale, details(january(), "lnbc1second", now + 2 * DAY_MS))
         .await
-        .unwrap();
+        .unwrap()
+        .msg_id;
     wallet.receive(None).await.unwrap();
     // Details the period record doesn't hold aren't paid by (Paykit spec 8.2).
     let refused = by_user(
@@ -437,7 +440,8 @@ async fn test_period_payments_expired_details_unused_the_request_paid_by() {
     let expiring = shop
         .send_period_details(&sale, details(january(), "lnbc1short", now + HOUR_MS))
         .await
-        .unwrap();
+        .unwrap()
+        .msg_id;
     wallet.receive(None).await.unwrap();
     w.clock.advance_ms(HOUR_MS);
     wallet.receive(None).await.unwrap();
