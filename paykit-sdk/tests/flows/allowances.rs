@@ -2077,11 +2077,17 @@ async fn test_allowances_conflict_kept_as_the_stop_though_its_record_write_fails
     let id = wallet.allowance(&mine).await.unwrap().allowance_id;
     propose_as(&w, &[wallet.app_id()], id.as_str(), "0.20");
     refuse_writes(&w, 2);
-    wallet.receive(None).await.unwrap();
+    let got = wallet.receive(None).await.unwrap();
     assert!(value(&wallet, &mine).await["conflicted"].is_null());
     assert_eq!(wallet.app().protocol_scan(b"cf/").await.unwrap().len(), 1);
-    // The step wrote nothing at the switch, so no stored entry came of it.
-    assert!(wallet.app().protocol_scan(b"se/").await.unwrap().is_empty());
+    // The step wrote nothing at the switch, so no effect of it was refused.
+    assert!(
+        !got.report
+            .events
+            .iter()
+            .any(|e| matches!(e, AppEvent::EffectRefused { .. })),
+        "{got:?}"
+    );
     assert_eq!(
         wallet.allowance(&mine).await.unwrap().status,
         AllowanceStatus::Conflicted
