@@ -16,7 +16,7 @@ use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::records::DAY_MS;
 use serde_json::json;
 
-use crate::common::{asked, draft, request_from, store, World};
+use crate::common::{asked, draft, mark_senders, request_from, seed_marks, store, World};
 
 /// Bob's shop signs a request to alice and sends it alone, without writing its record, as
 /// another of bob's apps would before this one holds the record. Alice pays it: her
@@ -312,6 +312,28 @@ async fn test_replies_dropped_mark_goes_30_days_after_its_latest_time() {
         .set_ms(at + 10 * DAY_MS + paykit_sdk::KEPT_REPLY_MS + DAY_MS);
     assert_eq!(shop.receive(None).await.unwrap().resends, 0);
     assert!(marks(&shop).await.is_empty());
+}
+
+#[tokio::test]
+async fn test_replies_dropped_mark_past_128_the_one_with_the_earliest_latest_time_goes() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    // 128 marks held already, each with a latest time before alice's replies are dropped.
+    let held = seed_marks(
+        &mut shop,
+        "pd/",
+        paykit_sdk::MAX_DROPPED_MARKS,
+        w.clock.now_ms() - 1_000,
+    )
+    .await;
+    let n = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    kept_then_unmatched(&w, &mut wallet, &mut shop, n).await;
+    let senders = mark_senders(&shop, "pd/").await;
+    assert_eq!(senders.len(), paykit_sdk::MAX_DROPPED_MARKS);
+    assert!(senders.contains(&w.alice_id()));
+    assert!(!senders.contains(&held[0]));
+    assert!(senders.contains(&held[1]));
 }
 
 #[tokio::test]

@@ -798,3 +798,47 @@ pub async fn asked(app: &Paykit, to: &[u8; 32]) -> Vec<(Option<u64>, Option<u64>
         })
         .collect()
 }
+
+/// Marks of messages dropped before they were taken, under `prefix` (`pd/` or `ud/`), for
+/// `n` made-up senders `[i + 100; 32]`, the `i`-th with both times `latest + i`, not yet due.
+/// Returns the senders, in that order.
+pub async fn seed_marks(app: &mut Paykit, prefix: &str, n: usize, latest: u64) -> Vec<[u8; 32]> {
+    let mut senders = Vec::new();
+    let mut writes = Vec::new();
+    for i in 0..n {
+        let sender = [u8::try_from(i + 100).unwrap(); 32];
+        let at = latest + u64::try_from(i).unwrap();
+        let value = serde_json::json!({
+            "v": 1,
+            "d": {
+                "sender": pubky_switch_core::enc::b64(&sender),
+                "earliest_ms": at,
+                "latest_ms": at,
+                "due": false,
+                "asked_at_ms": null,
+                "queued": null,
+            }
+        });
+        writes.push(pubky_switch_client::app::LocalWrite::Put {
+            key: format!("{prefix}{}", pubky_switch_core::enc::b64(&sender)).into_bytes(),
+            value: serde_json::to_vec(&value).unwrap(),
+        });
+        senders.push(sender);
+    }
+    app.app_mut().protocol_commit(&writes).await.unwrap();
+    senders
+}
+
+/// The senders holding a mark under `prefix`.
+pub async fn mark_senders(app: &Paykit, prefix: &str) -> Vec<[u8; 32]> {
+    app.app()
+        .protocol_scan(prefix.as_bytes())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(key, _)| {
+            let rest = std::str::from_utf8(&key[prefix.len()..]).unwrap();
+            pubky_switch_core::enc::unb64_array::<32>(rest).unwrap()
+        })
+        .collect()
+}

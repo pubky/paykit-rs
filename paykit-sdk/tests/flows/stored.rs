@@ -8,7 +8,7 @@ use pubky_switch_client::clock::Clock;
 use pubky_switch_client::testing::{Fault, TestSigner};
 use pubky_switch_core::http::ErrorCode;
 
-use crate::common::{asked, draft, request_from, World};
+use crate::common::{asked, draft, mark_senders, request_from, seed_marks, World};
 use pubky_switch_core::records::DAY_MS;
 
 /// The next `n` batches at `signer`'s switch are refused for good, `403 permission_missing`,
@@ -165,6 +165,26 @@ async fn test_stored_entry_dropped_unverified_asked_for_again() {
         wallet.request(&request).await.unwrap().status,
         RequestStatus::Open
     );
+}
+
+#[tokio::test]
+async fn test_stored_entry_dropped_unverified_mark_past_128_the_earliest_latest_goes() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let held = seed_marks(
+        &mut wallet,
+        "ud/",
+        paykit_sdk::MAX_DROPPED_MARKS,
+        w.clock.now_ms() - 1_000,
+    )
+    .await;
+    dropped_unverified(&w, &mut wallet, &mut shop).await;
+    let senders = mark_senders(&wallet, "ud/").await;
+    assert_eq!(senders.len(), paykit_sdk::MAX_DROPPED_MARKS);
+    assert!(senders.contains(&w.bob_id()));
+    assert!(!senders.contains(&held[0]));
+    assert!(senders.contains(&held[1]));
 }
 
 /// The marks of entries dropped unverified, whole.
