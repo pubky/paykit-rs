@@ -606,9 +606,49 @@ async fn test_stored_refused_note_given_up_past_its_window() {
     assert_eq!(notices[0].counterparty, w.bob_id());
     assert_eq!(notices[0].request_hash, Some(request.request_hash));
     assert!(notices[0].msg_id.is_some());
-    // Acknowledged, it goes at once: nothing raises it again.
+    // Acknowledged, it goes at once with its stored entry: nothing raises it again.
     wallet.acknowledge_notice(&notices[0].id).await.unwrap();
     assert!(kept(&wallet, "nt/").await.is_empty());
+    assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_stored_given_up_notice_kept_while_its_entry_cant_be_forgotten() {
+    let w = World::new();
+    let fault = Arc::new(pubky_switch_client::store::FaultStore::new(
+        store(),
+        pubky_switch_client::store::Fault::None,
+    ));
+    let mut wallet = w
+        .wallet_on(
+            "wallet",
+            Arc::clone(&fault) as Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let attempt_id = pending(&w, &mut wallet, &request).await;
+    receipt_of_another_proof(&w, &wallet, &request, attempt_id);
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+    w.alice.switch().fail_next(Fault::Error {
+        path: "/claims/".into(),
+        code: ErrorCode::PermissionMissing,
+        current: serde_json::Value::Null,
+    });
+    wallet.receive(None).await.unwrap();
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    // The entry can't be forgotten now: the acknowledgement fails, and the notice stays.
+    fault.fail_scan(b"duty/", 0);
+    assert!(wallet.acknowledge_notice(&notices[0].id).await.is_err());
+    assert_eq!(wallet.notices().await.unwrap(), notices);
+    assert_eq!(wallet.app_mut().parked_entries().await.unwrap().len(), 1);
+    // Acknowledged again, the entry goes, then the notice.
+    wallet.acknowledge_notice(&notices[0].id).await.unwrap();
+    assert!(wallet.notices().await.unwrap().is_empty());
+    assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
 }
 
 #[tokio::test]
