@@ -700,6 +700,7 @@ mod tests {
     use super::{Paykit, PaykitBackup, PaykitConfig};
     use crate::pay::{PayOptions, UnrequestedPayment};
     use crate::rail::Rail;
+    use crate::receipts::{ReceiptDetails, ReceiptsOf};
     use crate::reconcile::Resolution;
     use crate::requests::{RequestDraft, RequestRef};
     use crate::resend::ResendSelection;
@@ -762,6 +763,7 @@ mod tests {
         assert_send(&wallet.payee_activity());
         assert_send(&wallet.verify_payment(&key));
         assert_send(&wallet.confirm_payment(&key));
+        assert_send(&wallet.confirm_payment_with(&key, ReceiptDetails::default()));
         assert_send(&wallet.cancel_sent_request(&key, None));
         assert_send(&wallet.requests());
         assert_send(&wallet.request(&request));
@@ -772,6 +774,9 @@ mod tests {
         assert_send(&wallet.payments());
         assert_send(&wallet.repair_activity_record(&attempt));
         assert_send(&wallet.resume_payments());
+        assert_send(&wallet.notices());
+        assert_send(&wallet.acknowledge_notice(""));
+        assert_send(&wallet.receipts(ReceiptsOf::All));
     }
 
     #[test]
