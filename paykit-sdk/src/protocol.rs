@@ -363,6 +363,10 @@ pub(crate) fn restore_paykit_layer(
     let mut open = std::collections::BTreeSet::new();
     let mut writes = Vec::with_capacity(state.len());
     let mut cursor_time_ms = 0;
+    // The last list version published, and the newest one sent any counterparty: a valid
+    // run keeps the one never below the other (`publish::check_last_version`).
+    let mut last_version = None;
+    let mut newest_sent = None;
     for (key, value) in state {
         // The schema is closed: a key no builder of the SDK writes is refused, and every
         // value is read as its family's, bound to what its key names (`state::StateKey`).
@@ -464,10 +468,9 @@ pub(crate) fn restore_paykit_layer(
                 continue;
             }
             StateKey::ListAsk { payee, app_id } => {
-                let asked = state::decode::<ListAsk>(&value).map_err(|_| unread())?;
-                if asked.payee != payee || asked.app_id != app_id {
-                    return Err(unread());
-                }
+                state::decode::<ListAsk>(&value)
+                    .and_then(|asked| asked.check(&payee, app_id.as_ref()))
+                    .map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -496,8 +499,12 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::LastVersion
             | StateKey::ListRecipient(_)
             | StateKey::Releases { .. }) => {
-                if !crate::publish::check_restored(&published, &value) {
-                    return Err(unread());
+                match crate::publish::check_restored(&published, &value).map_err(|_| unread())? {
+                    crate::publish::Restored::LastVersion(last) => last_version = Some(last),
+                    crate::publish::Restored::Newest(newest) => {
+                        newest_sent = newest_sent.max(Some(newest));
+                    }
+                    crate::publish::Restored::Other => {}
                 }
                 writes.push(LocalWrite::Put { key, value });
                 continue;
@@ -529,6 +536,8 @@ pub(crate) fn restore_paykit_layer(
         let value = state::encode(&entry).map_err(|_| bad())?;
         writes.push(LocalWrite::Put { key, value });
     }
+    crate::publish::check_last_version(last_version, newest_sent)
+        .map_err(|_| String::from("Paykit's local state in the backup doesn't read"))?;
     // Every open request is held after a restore, set in the restore's own commit (Paykit
     // spec 7.2, "What a restore loses"; `hold.rs`).
     let hold = state::local_put(key::RESTORE_HOLD, &RestoreHold::of(cursor_time_ms))
@@ -1468,26 +1477,88 @@ mod receive_tests {
         );
     }
 
+    /// What was sent `[3; 32]`: one version, `version`, published at 1000.
+    fn sent(version: u64) -> crate::publish::Recipient {
+        crate::publish::Recipient {
+            versions: vec![crate::publish::Offered {
+                version,
+                published_at_ms: 1_000,
+                expires_at_ms: 1_000 + crate::LIST_LIFETIME_MS,
+                msg_id: "123e4567-e89b-42d3-a456-426614174000".into(),
+                accepted_at_ms: None,
+                fate: crate::publish::Fate::Pending,
+                endpoints: std::collections::BTreeMap::new(),
+                used: false,
+                asked: false,
+            }],
+            ..crate::publish::Recipient::new([3; 32])
+        }
+    }
+
+    /// Restore bob's shop from a layer holding `state`, each value as Paykit keeps it.
+    fn restore_state(state: &[(String, Vec<u8>)]) -> Result<Vec<LocalWrite>, String> {
+        let bob = Party::new("bob", "shop", &["request"]);
+        let state: Vec<(Vec<u8>, Vec<u8>)> = state
+            .iter()
+            .map(|(k, v)| (k.clone().into_bytes(), v.clone()))
+            .collect();
+        let layer = ProtocolLayer {
+            protocol: "paykit".into(),
+            data: pubky_switch_client::app::encode_local_state(&state),
+        };
+        restore_paykit_layer(Some(&layer), bob.id(), &bob.cert, |_| [0; 32])
+    }
+
     #[test]
     fn test_protocol_restore_takes_the_lists_sent_only_at_their_own_key() {
-        let bob = Party::new("bob", "shop", &["request"]);
-        let sent = crate::publish::Recipient::new([3; 32]);
-        let value = state::encode(&sent).unwrap();
-        let restore = |at: &[u8; 32]| {
-            let layer = ProtocolLayer {
-                protocol: "paykit".into(),
-                data: pubky_switch_client::app::encode_local_state(&[(
-                    key::list_recipient(at).into_bytes(),
-                    value.clone(),
-                )]),
-            };
-            restore_paykit_layer(Some(&layer), bob.id(), &bob.cert, |_| [0; 32])
-        };
-        let writes = restore(&[3; 32]).unwrap();
+        let value = state::encode(&sent(1_000)).unwrap();
+        let last = (
+            key::LAST_VERSION.to_owned(),
+            state::encode(&1_000u64).unwrap(),
+        );
+        let writes =
+            restore_state(&[(key::list_recipient(&[3; 32]), value.clone()), last.clone()]).unwrap();
         assert!(writes.iter().any(|w| matches!(
             w,
             LocalWrite::Put { key: k, .. } if *k == key::list_recipient(&[3; 32]).into_bytes()
         )));
-        assert!(restore(&[4; 32]).is_err());
+        assert!(restore_state(&[(key::list_recipient(&[4; 32]), value), last]).is_err());
+    }
+
+    #[test]
+    fn test_protocol_restore_refuses_lists_sent_above_the_last_version() {
+        let at = key::list_recipient(&[3; 32]);
+        let value = state::encode(&sent(1_005)).unwrap();
+        let last = |version: u64| {
+            (
+                key::LAST_VERSION.to_owned(),
+                state::encode(&version).unwrap(),
+            )
+        };
+        assert!(restore_state(&[(at.clone(), value.clone()), last(1_005)]).is_ok());
+        assert!(restore_state(&[(at.clone(), value.clone()), last(1_009)]).is_ok());
+        assert!(restore_state(&[(at.clone(), value.clone()), last(1_004)]).is_err());
+        assert!(restore_state(&[(at, value)]).is_err());
+        assert!(restore_state(&[last(1_004)]).is_ok());
+    }
+
+    #[test]
+    fn test_protocol_restore_refuses_a_list_ask_with_a_msg_id_never_given_out() {
+        let payee = [3; 32];
+        let ask = |msg_id: Option<&str>| {
+            let asked = ListAsk {
+                payee,
+                app_id: None,
+                held_version: Some(5),
+                asked_at_ms: 1_000,
+                msg_id: msg_id.map(str::to_owned),
+            };
+            (key::list_ask(&payee, None), state::encode(&asked).unwrap())
+        };
+        assert!(restore_state(&[ask(Some("123e4567-e89b-42d3-a456-426614174000"))]).is_ok());
+        assert!(restore_state(&[ask(None)]).is_ok());
+        assert!(restore_state(&[ask(Some("not-a-msg-id"))]).is_err());
+        let (_, value) = ask(None);
+        assert!(restore_state(&[(key::list_ask(&[4; 32], None), value)]).is_err());
     }
 }

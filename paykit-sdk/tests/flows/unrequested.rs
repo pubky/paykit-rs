@@ -5,7 +5,7 @@ use paykit_sdk::{PayOptions, PayOutcome, PayeeStatus, Paykit, Refusal, Unrequest
 use pubky_switch_client::app::AppEvent;
 use pubky_switch_client::clock::Clock;
 
-use crate::common::{btc, endpoint, World, HOUR_MS};
+use crate::common::{btc, endpoint, is_corrupt, rewrite_state, World, HOUR_MS};
 
 /// How many `private_payment_list_request`s `shop` takes at its next receive. It sent alice no
 /// list itself, so each one is taken with no effect (Paykit spec 8.4).
@@ -1048,4 +1048,39 @@ async fn test_unrequested_list_over_a_value_awaiting_its_epoch_key_keeps_single_
     assert_eq!(value["used"].as_array().unwrap().len(), 1, "{value}");
     assert_eq!(value["msg_ids"].as_array().unwrap().len(), 2, "{value}");
     assert!(wallet.held_lists().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_unrequested_list_ask_kept_under_another_payee_refused_as_corrupt() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    pay_lightning(&w, &mut wallet).await;
+    assert_eq!(list_requests(&mut shop).await, 1);
+    // Bob's mark names carol: it is no absent mark, so nothing is asked again.
+    let mark = format!("lq/{}", pubky_switch_core::enc::b64(&w.bob_id()));
+    rewrite_state(&mut wallet, &mark, |d| {
+        d["payee"] = pubky_switch_core::enc::b64(&[7; 32]).into();
+    })
+    .await;
+    assert!(is_corrupt(&pay_lightning(&w, &mut wallet).await));
+    assert!(is_corrupt(&wallet.receive(None).await.unwrap_err()));
+    assert_eq!(list_requests(&mut shop).await, 0);
+}
+
+#[tokio::test]
+async fn test_unrequested_list_ask_with_a_msg_id_never_given_out_refused_as_corrupt() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    pay_lightning(&w, &mut wallet).await;
+    assert_eq!(list_requests(&mut shop).await, 1);
+    // A `msg_id` the outbox can't hold is no request that left it: none is asked again.
+    let mark = format!("lq/{}", pubky_switch_core::enc::b64(&w.bob_id()));
+    rewrite_state(&mut wallet, &mark, |d| d["msg_id"] = "not-a-msg-id".into()).await;
+    assert!(is_corrupt(&pay_lightning(&w, &mut wallet).await));
+    assert!(is_corrupt(&wallet.receive(None).await.unwrap_err()));
+    assert_eq!(list_requests(&mut shop).await, 0);
 }

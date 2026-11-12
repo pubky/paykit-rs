@@ -57,7 +57,7 @@ use crate::rail::{
 };
 use crate::records::{list_target, KeptMessage};
 use crate::requests::{cancelled, rejected, request_of, unreadable_request, Fresh, RequestRef};
-use crate::state::{self, key};
+use crate::state::{self, key, StateKey};
 
 /// How long after the latest time it has seen a payment without a request's attempt pins its
 /// deadline: 10 minutes (Paykit spec 8.4).
@@ -642,6 +642,18 @@ pub(crate) struct ListAsk {
 }
 
 impl ListAsk {
+    /// The mark read whole, at the payee and app its key names, whenever it is read back,
+    /// as a restore reads it: one naming another payee or app, or a `msg_id` the client
+    /// never gives out, is a corrupt store, never the absence of a mark.
+    pub(crate) fn check(&self, payee: &[u8; 32], app_id: Option<&[u8; 16]>) -> Result<()> {
+        if self.payee != *payee || self.app_id.as_ref() != app_id {
+            return Err(PaykitError::corrupt());
+        }
+        self.msg_id
+            .as_deref()
+            .map_or(Ok(()), crate::publish::check_msg_id)
+    }
+
     /// Whether it was asked in the 24 hours before `now`: a mark ahead of the clock
     /// (restored, or the clock set back) isn't, as a lists read isn't, so it never holds the
     /// next request back for longer than that.
@@ -1505,10 +1517,8 @@ impl Paykit {
         for (app_id, held_version) in asks {
             let mark = key::list_ask(payee, app_id.as_ref());
             if let Some(asked) = self.local_get::<ListAsk>(&mark).await? {
-                // One that names another payee or app than its key is no mark of this ask.
-                if asked.payee == *payee
-                    && asked.app_id == app_id
-                    && asked.held_version == held_version
+                asked.check(payee, app_id.as_ref())?;
+                if asked.held_version == held_version
                     && asked.within_a_day(now)
                     && !self.ask_not_sent(&asked).await?
                 {
@@ -1585,10 +1595,11 @@ impl Paykit {
         let now = self.now();
         for (rest, asked) in self.local_scan::<ListAsk>(key::LIST_ASKS).await? {
             let mark = format!("{}{rest}", key::LIST_ASKS);
-            if mark != key::list_ask(&asked.payee, asked.app_id.as_ref())
-                || !asked.within_a_day(now)
-                || !self.ask_not_sent(&asked).await?
-            {
+            let Some(StateKey::ListAsk { payee, app_id }) = StateKey::parse(mark.as_bytes()) else {
+                return Err(PaykitError::corrupt());
+            };
+            asked.check(&payee, app_id.as_ref())?;
+            if !asked.within_a_day(now) || !self.ask_not_sent(&asked).await? {
                 continue;
             }
             let versions = self

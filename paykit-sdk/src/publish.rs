@@ -51,6 +51,13 @@
 //! expire, as v0.1 left a shared reservation: a payment the payer started before a newer
 //! version arrived still goes on. A release is kept (`rl/<counterparty>/<version>`) until the
 //! method takes it, and asked again at each receive.
+//!
+//! **Read back whole.** Every value of this state (`ll`, `lv`, `lp/`, `rl/`) is checked
+//! whenever it is read, by the same check a restore makes, and bound to the key it is kept
+//! at: a value naming another counterparty or version, or in a state no valid run produces,
+//! such as what was sent a counterparty with no version left or a last version below one
+//! sent, is a corrupt store, never an absence. So is a store that fails while a list is
+//! sent: the call fails, rather than report the list as not sent.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -159,12 +166,14 @@ pub(crate) struct KeptList {
 }
 
 impl KeptList {
-    /// Every identifier and payload as the wire spells them (Paykit wire 1.4).
+    /// The list read whole, whenever it is read back, as a restore reads it: every
+    /// identifier and payload as the wire spells them (Paykit wire 1.4). Another is a corrupt
+    /// store.
     pub(crate) fn check(&self) -> Result<()> {
         for (id, payload) in &self.endpoints {
-            PaymentEndpointIdentifier::parse(id)?;
+            PaymentEndpointIdentifier::parse(id).map_err(|_| PaykitError::corrupt())?;
             if let Some(payload) = payload {
-                PaymentEndpointPayload::parse(payload)?;
+                check_endpoint(id, payload)?;
             }
         }
         Ok(())
@@ -209,6 +218,26 @@ pub(crate) struct Offered {
 }
 
 impl Offered {
+    /// The version read whole: one a run of [`Paykit::send_list`] and the steps after it
+    /// can't produce is a corrupt store. Its `msg_id` is the client's, its `expires_at`
+    /// [`LIST_LIFETIME_MS`] after its publishing, which is at most its version; a delivery
+    /// seen accepted is decided; one marked used offered a single-use endpoint; and each
+    /// endpoint is spelled as the wire spells it (Paykit wire 1.4).
+    fn check(&self) -> Result<()> {
+        check_msg_id(&self.msg_id)?;
+        let produced = self.expires_at_ms == self.published_at_ms.saturating_add(LIST_LIFETIME_MS)
+            && self.published_at_ms <= self.version
+            && !(self.fate == Fate::Pending && self.accepted_at_ms.is_some())
+            && (!self.used || self.endpoints.values().any(|e| e.single_use));
+        if !produced {
+            return Err(PaykitError::corrupt());
+        }
+        for (id, endpoint) in &self.endpoints {
+            check_endpoint(id, &endpoint.payload)?;
+        }
+        Ok(())
+    }
+
     /// Its single-use payloads, by identifier.
     fn single_use(&self) -> BTreeMap<String, String> {
         self.endpoints
@@ -270,6 +299,69 @@ impl Recipient {
     fn current(&self) -> Option<&Offered> {
         self.versions.last()
     }
+
+    /// What was sent `counterparty` read whole, at the key that names it, whenever it is
+    /// read back, as a restore reads it: one naming another counterparty, or in a state no
+    /// valid run produces, is a corrupt store, never an absence. A valid run keeps at least
+    /// one version, oldest first, each above the one before ([`next_version`]), each read
+    /// whole ([`Offered::check`]), and the versions requests named only while it owes their
+    /// answer.
+    pub(crate) fn check(&self, counterparty: &[u8; 32]) -> Result<()> {
+        let ascending = self
+            .versions
+            .windows(2)
+            .all(|w| w[0].version < w[1].version);
+        if self.counterparty != *counterparty
+            || self.versions.is_empty()
+            || !ascending
+            || (!self.asking.is_empty() && !self.requested)
+        {
+            return Err(PaykitError::corrupt());
+        }
+        self.versions.iter().try_for_each(Offered::check)
+    }
+}
+
+impl Releases {
+    /// The payloads to give back read whole, at the key that names their counterparty and
+    /// version, whenever they are read back, as a restore reads them: a valid run keeps none
+    /// empty, and spells each identifier and payload as the wire does. Any other is a
+    /// corrupt store.
+    pub(crate) fn check(&self, counterparty: &[u8; 32], version: u64) -> Result<()> {
+        if self.counterparty != *counterparty || self.version != version || self.payloads.is_empty()
+        {
+            return Err(PaykitError::corrupt());
+        }
+        self.payloads
+            .iter()
+            .try_for_each(|(id, payload)| check_endpoint(id, payload))
+    }
+}
+
+/// A `msg_id` as the client gives one out, a lower-case UUID v4; another is a corrupt store.
+pub(crate) fn check_msg_id(msg_id: &str) -> Result<()> {
+    pubky_switch_core::json::check_uuid_v4(msg_id).map_err(|_| PaykitError::corrupt())
+}
+
+/// An endpoint's identifier and payload as the wire spells them (Paykit wire 1.4); another is
+/// a corrupt store.
+fn check_endpoint(id: &str, payload: &str) -> Result<()> {
+    PaymentEndpointIdentifier::parse(id)
+        .and_then(|_| PaymentEndpointPayload::parse(payload))
+        .map(|_| ())
+        .map_err(|_| PaykitError::corrupt())
+}
+
+/// The last version published (`lv`) against the newest version tracked for one
+/// counterparty: a valid run keeps both in one commit, so `lv` is never absent or below a
+/// version tracked. Checked at a restore, over every counterparty, and before each new
+/// version, which [`next_version`] would otherwise not keep above it.
+pub(crate) fn check_last_version(last: Option<u64>, newest: Option<u64>) -> Result<()> {
+    match (last, newest) {
+        (_, None) => Ok(()),
+        (Some(last), Some(newest)) if newest <= last => Ok(()),
+        _ => Err(PaykitError::corrupt()),
+    }
 }
 
 /// Single-use payloads to give back (`rl/<counterparty>/<version>`), by identifier; the
@@ -282,23 +374,43 @@ pub(crate) struct Releases {
     pub(crate) payloads: BTreeMap<String, String>,
 }
 
-/// Whether `value`, kept at a key of the publishing state's `family` in a backup, reads as
-/// its family's and is bound to what its key names. It is the app's own data, so the check
+/// What `value`, kept at a key of the publishing state's `family` in a backup, holds, read
+/// as its family's and bound to what its key names, by the checks every later read makes:
+/// the last version published, or the newest version sent a counterparty, for
+/// [`check_last_version`] over the whole layer. It is the app's own data, so the check
 /// guards against corruption only.
-pub(crate) fn check_restored(family: &StateKey, value: &[u8]) -> bool {
+pub(crate) fn check_restored(family: &StateKey, value: &[u8]) -> Result<Restored> {
     match family {
-        StateKey::List => state::decode::<KeptList>(value).is_ok_and(|list| list.check().is_ok()),
-        StateKey::LastVersion => state::decode::<u64>(value).is_ok(),
-        StateKey::ListRecipient(counterparty) => state::decode::<Recipient>(value)
-            .is_ok_and(|recipient| recipient.counterparty == *counterparty),
+        StateKey::List => state::decode::<KeptList>(value)?
+            .check()
+            .map(|()| Restored::Other),
+        StateKey::LastVersion => state::decode::<u64>(value).map(Restored::LastVersion),
+        StateKey::ListRecipient(counterparty) => {
+            let recipient = state::decode::<Recipient>(value)?;
+            recipient.check(counterparty)?;
+            Ok(Restored::Newest(
+                recipient.current().map_or(0, |o| o.version),
+            ))
+        }
         StateKey::Releases {
             counterparty,
             version,
-        } => state::decode::<Releases>(value).is_ok_and(|releases| {
-            releases.counterparty == *counterparty && releases.version == *version
-        }),
-        _ => false,
+        } => state::decode::<Releases>(value)?
+            .check(counterparty, *version)
+            .map(|()| Restored::Other),
+        _ => Err(PaykitError::corrupt()),
     }
+}
+
+/// What a value of the publishing state holds for [`check_last_version`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Restored {
+    /// The last version published.
+    LastVersion(u64),
+    /// The newest version sent one counterparty.
+    Newest(u64),
+    /// Neither.
+    Other,
 }
 
 /// The version after `last`, at `now`: above every earlier one (Paykit wire 4.13).
@@ -330,10 +442,12 @@ fn read_recipient(
     cx: &ReceiveContext<'_>,
     sender: &[u8; 32],
 ) -> std::result::Result<Option<Recipient>, Fail> {
-    match cx.local_get(key::list_recipient(sender).as_bytes())? {
-        Some(bytes) => state::decode(&bytes).map(Some).map_err(|_| Fail::corrupt()),
-        None => Ok(None),
-    }
+    let Some(bytes) = cx.local_get(key::list_recipient(sender).as_bytes())? else {
+        return Ok(None);
+    };
+    let recipient = state::decode::<Recipient>(&bytes).map_err(|_| Fail::corrupt())?;
+    recipient.check(sender).map_err(|_| Fail::corrupt())?;
+    Ok(Some(recipient))
 }
 
 fn keep_recipient(
@@ -502,12 +616,12 @@ impl Paykit {
             expires_at: self.now().saturating_add(LIST_LIFETIME_MS),
         };
         self.signed_list(self.identity(), &fits)?;
-        if self.local_get::<KeptList>(key::LIST).await?.as_ref() == Some(&list) {
+        if self.kept_list().await?.as_ref() == Some(&list) {
             return Ok(ListsPublished::default());
         }
         self.local_put(key::LIST, &list).await?;
         let mut active = Vec::new();
-        for (_, recipient) in self.local_scan::<Recipient>(key::LIST_RECIPIENTS).await? {
+        for recipient in self.recipients().await? {
             if recipient.active {
                 active.push(recipient.counterparty);
             }
@@ -530,7 +644,7 @@ impl Paykit {
     pub async fn publish_list_to(&mut self, counterparties: &[[u8; 32]]) -> Result<ListsPublished> {
         self.refresh_own()?;
         self.require_payee()?;
-        if self.local_get::<KeptList>(key::LIST).await?.is_none() {
+        if self.kept_list().await?.is_none() {
             return Err(Refusal::Usage("Paykit spec 8.4: no list is set".into()).into());
         }
         if counterparties.contains(&self.identity()) {
@@ -556,11 +670,7 @@ impl Paykit {
     pub async fn withdraw_list_from(&mut self, counterparty: &[u8; 32]) -> Result<ListsPublished> {
         self.refresh_own()?;
         self.require_payee()?;
-        if self
-            .local_get::<Recipient>(&key::list_recipient(counterparty))
-            .await?
-            .is_none()
-        {
+        if self.recipient(counterparty).await?.is_none() {
             return Err(Refusal::NotFound.into());
         }
         let paused = self.refuse_paused(&[*counterparty]).await?;
@@ -574,7 +684,7 @@ impl Paykit {
     /// A store failure.
     pub async fn published_lists(&self) -> Result<Vec<PublishedList>> {
         let mut out = Vec::new();
-        for (_, recipient) in self.local_scan::<Recipient>(key::LIST_RECIPIENTS).await? {
+        for recipient in self.recipients().await? {
             if let Some(current) = recipient.current() {
                 out.push(PublishedList {
                     counterparty: recipient.counterparty,
@@ -603,9 +713,7 @@ impl Paykit {
         version: u64,
         endpoint: &PaymentEndpointIdentifier,
     ) -> Result<std::result::Result<Option<PaymentEndpointPayload>, Refusal>> {
-        let held = self
-            .local_get::<Recipient>(&key::list_recipient(payer))
-            .await?;
+        let held = self.recipient(payer).await?;
         let offered = held
             .as_ref()
             .and_then(|r| r.versions.iter().find(|o| o.version == version));
@@ -624,6 +732,79 @@ impl Paykit {
             Some(o) => Ok(Ok(Some(PaymentEndpointPayload::parse(&o.payload)?))),
             None => Ok(Err(Refusal::NotOffered)),
         }
+    }
+
+    /// The app's list (`ll`), read whole ([`KeptList::check`]); `None` before one is set.
+    ///
+    /// # Errors
+    ///
+    /// A store failure, or a list that doesn't read whole, as a corrupt store.
+    async fn kept_list(&self) -> Result<Option<KeptList>> {
+        let list = self.local_get::<KeptList>(key::LIST).await?;
+        if let Some(list) = &list {
+            list.check()?;
+        }
+        Ok(list)
+    }
+
+    /// What this app sent `counterparty` (`lp/<counterparty>`), read whole and bound to its
+    /// key ([`Recipient::check`]); `None` for a counterparty sent nothing.
+    ///
+    /// # Errors
+    ///
+    /// A store failure, or a value that doesn't read whole or names another counterparty,
+    /// as a corrupt store.
+    pub(crate) async fn recipient(&self, counterparty: &[u8; 32]) -> Result<Option<Recipient>> {
+        let held = self
+            .local_get::<Recipient>(&key::list_recipient(counterparty))
+            .await?;
+        if let Some(recipient) = &held {
+            recipient.check(counterparty)?;
+        }
+        Ok(held)
+    }
+
+    /// Every counterparty this app sends its lists to, or did, as [`Paykit::recipient`]
+    /// reads each.
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::recipient`], also for a key that doesn't parse.
+    async fn recipients(&self) -> Result<Vec<Recipient>> {
+        let mut out = Vec::new();
+        for (rest, recipient) in self.local_scan::<Recipient>(key::LIST_RECIPIENTS).await? {
+            let key = format!("{}{rest}", key::LIST_RECIPIENTS);
+            let Some(StateKey::ListRecipient(counterparty)) = StateKey::parse(key.as_bytes())
+            else {
+                return Err(PaykitError::corrupt());
+            };
+            recipient.check(&counterparty)?;
+            out.push(recipient);
+        }
+        Ok(out)
+    }
+
+    /// Every release kept (`rl/`), read whole and bound to its key ([`Releases::check`]).
+    ///
+    /// # Errors
+    ///
+    /// A store failure, or a key or value that doesn't read whole, or a value naming
+    /// another counterparty or version than its key, as a corrupt store.
+    async fn releases_kept(&self) -> Result<Vec<Releases>> {
+        let mut out = Vec::new();
+        for (rest, releases) in self.local_scan::<Releases>(key::RELEASES).await? {
+            let key = format!("{}{rest}", key::RELEASES);
+            let Some(StateKey::Releases {
+                counterparty,
+                version,
+            }) = StateKey::parse(key.as_bytes())
+            else {
+                return Err(PaykitError::corrupt());
+            };
+            releases.check(&counterparty, version)?;
+            out.push(releases);
+        }
+        Ok(out)
     }
 
     /// The list `list` signed for `to`, refused when it doesn't fit one message.
@@ -691,7 +872,7 @@ impl Paykit {
         for counterparty in counterparties {
             if paused.holds(counterparty) {
                 let rkey = key::list_recipient(counterparty);
-                if let Some(mut recipient) = self.local_get::<Recipient>(&rkey).await? {
+                if let Some(mut recipient) = self.recipient(counterparty).await? {
                     if !recipient.owed {
                         recipient.owed = true;
                         self.local_put(&rkey, &recipient).await?;
@@ -705,6 +886,11 @@ impl Paykit {
             }
             match self.send_list(*counterparty, withdraw, undelivered).await {
                 Ok(sent) => out.sent.push(sent),
+                // A store that fails, or holds state of the SDK's own that doesn't read, is
+                // no list not sent: the call fails, and what is owed stays for the next one.
+                Err(error @ PaykitError::Client(AppError::Store(_) | AppError::Alarm(_))) => {
+                    return Err(error);
+                }
                 Err(error) => out.not_sent.push(ListNotSent {
                     counterparty: *counterparty,
                     reason: error.to_string(),
@@ -727,17 +913,19 @@ impl Paykit {
         let list = if withdraw {
             KeptList::default()
         } else {
-            self.local_get::<KeptList>(key::LIST)
+            self.kept_list()
                 .await?
                 .ok_or_else(|| Refusal::Usage("Paykit spec 8.4: no list is set".into()))?
         };
         let rkey = key::list_recipient(&counterparty);
-        let mut recipient = match self.local_get::<Recipient>(&rkey).await? {
+        let mut recipient = match self.recipient(&counterparty).await? {
             Some(held) => self.settled(held, undelivered).await?,
             None => Recipient::new(counterparty),
         };
         let now = self.now();
-        let version = next_version(now, self.local_get(key::LAST_VERSION).await?);
+        let last = self.local_get(key::LAST_VERSION).await?;
+        check_last_version(last, recipient.current().map(|o| o.version))?;
+        let version = next_version(now, last);
         let expires_at_ms = now.saturating_add(LIST_LIFETIME_MS);
         let mut issued = Releases {
             counterparty,
@@ -950,7 +1138,7 @@ impl Paykit {
         let mut waiting = Vec::new();
         let now = self.now();
         let mut tx = Tx::default();
-        for (_, recipient) in self.local_scan::<Recipient>(key::LIST_RECIPIENTS).await? {
+        for recipient in self.recipients().await? {
             if removed {
                 for offered in recipient
                     .versions
@@ -1043,7 +1231,7 @@ impl Paykit {
                 continue;
             }
             let rkey = key::list_recipient(&counterparty);
-            if let Some(mut recipient) = self.local_get::<Recipient>(&rkey).await? {
+            if let Some(mut recipient) = self.recipient(&counterparty).await? {
                 recipient.resend = false;
                 recipient.resent_at_ms = Some(now);
                 self.local_put(&rkey, &recipient).await?;
@@ -1060,7 +1248,7 @@ impl Paykit {
     /// Ask the payment method to take back every single-use payload kept to release
     /// (`rl/`), each once per call. One it doesn't take now stays kept, for the next receive.
     pub(crate) async fn run_releases(&mut self) -> Result<()> {
-        for (_, mut releases) in self.local_scan::<Releases>(key::RELEASES).await? {
+        for mut releases in self.releases_kept().await? {
             let rkey = key::releases(&releases.counterparty, releases.version);
             let mut kept = BTreeMap::new();
             for (id, payload) in std::mem::take(&mut releases.payloads) {
@@ -1164,48 +1352,213 @@ mod tests {
         assert!(!overtaken(&[(10, 500), (20, 500)], 10, 500));
     }
 
-    #[test]
-    fn test_publish_restore_binds_each_value_to_its_key() {
-        let recipient = Recipient {
-            versions: vec![offered(1, 2)],
+    const MSG_ID: &str = "123e4567-e89b-42d3-a456-426614174000";
+
+    /// A version as [`Paykit::send_list`] keeps it, published at `at`.
+    fn sent_at(at: u64) -> Offered {
+        let mut endpoints = BTreeMap::new();
+        endpoints.insert(
+            "btc-bitcoin-p2wpkh".to_owned(),
+            OfferedPayload {
+                payload: "bc1qissued1".into(),
+                single_use: true,
+            },
+        );
+        Offered {
+            msg_id: MSG_ID.into(),
+            endpoints,
+            ..offered(at, at + LIST_LIFETIME_MS)
+        }
+    }
+
+    /// What was sent `[3; 32]`, one version.
+    fn recipient() -> Recipient {
+        Recipient {
+            versions: vec![sent_at(1_000)],
             ..Recipient::new([3; 32])
-        };
-        let value = state::encode(&recipient).unwrap();
-        assert!(check_restored(&StateKey::ListRecipient([3; 32]), &value));
-        assert!(!check_restored(&StateKey::ListRecipient([4; 32]), &value));
-        let releases = Releases {
+        }
+    }
+
+    fn restores(recipient: &Recipient) -> bool {
+        let value = state::encode(recipient).unwrap();
+        check_restored(&StateKey::ListRecipient([3; 32]), &value).is_ok()
+    }
+
+    fn releases() -> Releases {
+        let mut payloads = BTreeMap::new();
+        payloads.insert("btc-bitcoin-p2wpkh".to_owned(), "bc1qissued1".to_owned());
+        Releases {
             counterparty: [3; 32],
             version: 7,
-            payloads: BTreeMap::new(),
+            payloads,
+        }
+    }
+
+    fn releases_restore(releases: &Releases) -> bool {
+        let at = StateKey::Releases {
+            counterparty: [3; 32],
+            version: 7,
         };
-        let value = state::encode(&releases).unwrap();
+        check_restored(&at, &state::encode(releases).unwrap()).is_ok()
+    }
+
+    #[test]
+    fn test_publish_restore_binds_each_value_to_its_key() {
+        let value = state::encode(&recipient()).unwrap();
+        assert_eq!(
+            check_restored(&StateKey::ListRecipient([3; 32]), &value).unwrap(),
+            Restored::Newest(1_000)
+        );
+        assert!(check_restored(&StateKey::ListRecipient([4; 32]), &value).is_err());
+        let value = state::encode(&releases()).unwrap();
         let at = |counterparty, version| StateKey::Releases {
             counterparty,
             version,
         };
-        assert!(check_restored(&at([3; 32], 7), &value));
-        assert!(!check_restored(&at([3; 32], 8), &value));
-        assert!(!check_restored(&at([4; 32], 7), &value));
+        assert!(check_restored(&at([3; 32], 7), &value).is_ok());
+        assert!(check_restored(&at([3; 32], 8), &value).is_err());
+        assert!(check_restored(&at([4; 32], 7), &value).is_err());
         let mut list = KeptList::default();
         list.endpoints
             .insert("btc-bitcoin-p2wpkh".into(), Some("bc1q".into()));
-        assert!(check_restored(
-            &StateKey::List,
-            &state::encode(&list).unwrap()
-        ));
+        assert!(check_restored(&StateKey::List, &state::encode(&list).unwrap()).is_ok());
         list.endpoints.insert("not an identifier".into(), None);
-        assert!(!check_restored(
-            &StateKey::List,
-            &state::encode(&list).unwrap()
-        ));
-        assert!(check_restored(
-            &StateKey::LastVersion,
-            &state::encode(&5u64).unwrap()
-        ));
-        assert!(!check_restored(
-            &StateKey::LastVersion,
-            &state::encode(&"5").unwrap()
-        ));
+        assert!(check_restored(&StateKey::List, &state::encode(&list).unwrap()).is_err());
+        assert_eq!(
+            check_restored(&StateKey::LastVersion, &state::encode(&5u64).unwrap()).unwrap(),
+            Restored::LastVersion(5)
+        );
+        assert!(check_restored(&StateKey::LastVersion, &state::encode(&"5").unwrap()).is_err());
+    }
+
+    #[test]
+    fn test_publish_restore_takes_every_state_a_run_produces() {
+        let mut sent = recipient();
+        // Accepted and decided, used by a proof, a request's answer owed, renewed later.
+        sent.versions[0].accepted_at_ms = Some(1_500);
+        sent.versions[0].fate = Fate::Reached;
+        sent.versions[0].used = true;
+        sent.versions[0].asked = true;
+        sent.requested = true;
+        sent.asking.insert(900);
+        let mut later = sent_at(2_000);
+        later.version = 2_500;
+        later.fate = Fate::Unreached;
+        later.endpoints.clear();
+        sent.versions.push(later);
+        sent.active = false;
+        assert!(restores(&sent));
+        assert!(releases_restore(&releases()));
+    }
+
+    #[test]
+    fn test_publish_restore_refuses_lists_sent_with_no_version() {
+        let mut sent = recipient();
+        sent.versions.clear();
+        assert!(!restores(&sent));
+    }
+
+    #[test]
+    fn test_publish_restore_refuses_versions_out_of_order() {
+        let mut sent = recipient();
+        sent.versions.push(sent_at(1_000));
+        assert!(!restores(&sent));
+        let mut sent = recipient();
+        sent.versions.insert(0, sent_at(2_000));
+        assert!(!restores(&sent));
+    }
+
+    #[test]
+    fn test_publish_restore_refuses_a_version_with_a_msg_id_never_given_out() {
+        let mut sent = recipient();
+        sent.versions[0].msg_id = MSG_ID.to_uppercase();
+        assert!(!restores(&sent));
+    }
+
+    #[test]
+    fn test_publish_restore_refuses_an_expiry_not_a_lifetime_after_publishing() {
+        let mut sent = recipient();
+        sent.versions[0].expires_at_ms -= 1;
+        assert!(!restores(&sent));
+    }
+
+    #[test]
+    fn test_publish_restore_refuses_a_version_below_its_publishing_time() {
+        let mut sent = recipient();
+        sent.versions[0].version -= 1;
+        assert!(!restores(&sent));
+    }
+
+    #[test]
+    fn test_publish_restore_refuses_an_accepted_version_left_undecided() {
+        let mut sent = recipient();
+        sent.versions[0].accepted_at_ms = Some(1_500);
+        assert!(!restores(&sent));
+    }
+
+    #[test]
+    fn test_publish_restore_refuses_a_used_version_without_a_single_use_endpoint() {
+        let mut sent = recipient();
+        sent.versions[0].used = true;
+        for endpoint in sent.versions[0].endpoints.values_mut() {
+            endpoint.single_use = false;
+        }
+        assert!(!restores(&sent));
+    }
+
+    #[test]
+    fn test_publish_restore_refuses_an_offered_endpoint_misspelled() {
+        let mut sent = recipient();
+        let payload = sent.versions[0]
+            .endpoints
+            .remove("btc-bitcoin-p2wpkh")
+            .unwrap();
+        sent.versions[0]
+            .endpoints
+            .insert("not an identifier".into(), payload);
+        assert!(!restores(&sent));
+        let mut sent = recipient();
+        for endpoint in sent.versions[0].endpoints.values_mut() {
+            endpoint.payload.clear();
+        }
+        assert!(!restores(&sent));
+    }
+
+    #[test]
+    fn test_publish_restore_refuses_versions_named_with_no_answer_owed() {
+        let mut sent = recipient();
+        sent.asking.insert(900);
+        assert!(!restores(&sent));
+    }
+
+    #[test]
+    fn test_publish_restore_refuses_releases_with_no_payload() {
+        let mut empty = releases();
+        empty.payloads.clear();
+        assert!(!releases_restore(&empty));
+    }
+
+    #[test]
+    fn test_publish_restore_refuses_releases_misspelled() {
+        let mut misspelled = releases();
+        misspelled
+            .payloads
+            .insert("not an identifier".into(), "bc1q".into());
+        assert!(!releases_restore(&misspelled));
+        let mut misspelled = releases();
+        misspelled
+            .payloads
+            .insert("btc-lightning-bolt11".into(), String::new());
+        assert!(!releases_restore(&misspelled));
+    }
+
+    #[test]
+    fn test_publish_last_version_never_below_a_version_sent() {
+        assert!(check_last_version(None, None).is_ok());
+        assert!(check_last_version(Some(5), None).is_ok());
+        assert!(check_last_version(Some(5), Some(5)).is_ok());
+        assert!(check_last_version(Some(5), Some(6)).is_err());
+        assert!(check_last_version(None, Some(1)).is_err());
     }
 
     #[test]

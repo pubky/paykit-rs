@@ -863,3 +863,38 @@ pub async fn mark_senders(app: &Paykit, prefix: &str) -> Vec<[u8; 32]> {
         })
         .collect()
 }
+
+/// Rewrite the value `app` keeps at its local key `key` with `edit`, given the record as
+/// Paykit keeps it, as a store that changed it would.
+pub async fn rewrite_state(app: &mut Paykit, key: &str, edit: impl FnOnce(&mut Value)) {
+    let bytes = app
+        .app()
+        .protocol_get(key.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+    edit(&mut value["d"]);
+    put_state(app, key, &value).await;
+}
+
+/// Put `value`, a record as Paykit keeps it, at `app`'s local key `key`.
+pub async fn put_state(app: &mut Paykit, key: &str, value: &Value) {
+    app.app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: key.as_bytes().to_vec(),
+            value: serde_json::to_vec(value).unwrap(),
+        }])
+        .await
+        .unwrap();
+}
+
+/// Whether `error` is the SDK's own state in the store not reading.
+pub fn is_corrupt(error: &paykit_sdk::PaykitError) -> bool {
+    matches!(
+        error,
+        paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Store(
+            pubky_switch_client::store::StoreError::Corrupt
+        ))
+    )
+}

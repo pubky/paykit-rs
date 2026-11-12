@@ -15,7 +15,7 @@ use pubky_switch_client::app::AppEvent;
 use pubky_switch_client::clock::Clock;
 use pubky_switch_client::store::{MemoryStore, StateStore, Write, WriteBatch};
 
-use crate::common::{btc, endpoint, store, World, HOUR_MS};
+use crate::common::{btc, endpoint, is_corrupt, put_state, rewrite_state, store, World, HOUR_MS};
 
 const DAY_MS: u64 = 24 * HOUR_MS;
 
@@ -818,8 +818,15 @@ async fn test_publishing_payloads_of_a_version_never_queued_released() {
     let base = Arc::new(FailingCommits::default());
     let mut shop = shop_on(&w, &base).await;
     base.fail(Some(b"out/"));
-    let published = shop.publish_list_to(&[w.alice_id()]).await.unwrap();
-    assert_eq!(published.not_sent.len(), 1, "{published:?}");
+    // The store's failure is the call's: no list is reported as merely not sent.
+    let failed = shop.publish_list_to(&[w.alice_id()]).await.unwrap_err();
+    assert!(
+        matches!(
+            failed,
+            PaykitError::Client(pubky_switch_client::app::AppError::Store(_))
+        ),
+        "{failed:?}"
+    );
     base.fail(None);
     assert!(released(&w).is_empty());
     // The version is recorded, and never left: the next receive gives its payload back,
@@ -842,11 +849,19 @@ async fn test_publishing_payloads_of_a_version_not_recorded_released() {
     let base = Arc::new(FailingCommits::default());
     let mut shop = shop_on(&w, &base).await;
     base.fail(Some(b"p/lp/"));
-    let published = shop.publish_list_to(&[w.alice_id()]).await.unwrap();
-    assert_eq!(published.not_sent.len(), 1, "{published:?}");
-    assert_eq!(released(&w), vec!["bc1qissued1".to_owned()]);
+    let failed = shop.publish_list_to(&[w.alice_id()]).await.unwrap_err();
+    assert!(
+        matches!(
+            failed,
+            PaykitError::Client(pubky_switch_client::app::AppError::Store(_))
+        ),
+        "{failed:?}"
+    );
     base.fail(None);
     assert!(shop.published_lists().await.unwrap().is_empty());
+    // Kept to give back, the payload goes back at the next receive.
+    shop.receive(None).await.unwrap();
+    assert_eq!(released(&w), vec!["bc1qissued1".to_owned()]);
     assert_eq!(lists_taken(&mut wallet).await, 0);
 }
 
@@ -1463,4 +1478,146 @@ async fn test_publishing_state_restored_and_versions_stay_above_the_lost_ones() 
     let again = shop.receive(None).await.unwrap();
     assert!(again.lists.sent.is_empty(), "{:?}", again.lists);
     assert_eq!(again.lists.resent, got.lists.sent);
+}
+
+/// Bob's local key of what he sent `counterparty`.
+fn sent_key(counterparty: &[u8; 32]) -> String {
+    format!("lp/{}", pubky_switch_core::enc::b64(counterparty))
+}
+
+#[tokio::test]
+async fn test_publishing_lists_sent_kept_under_another_counterparty_refused_as_corrupt() {
+    let w = World::new();
+    let _wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.publish_to_alice(&mut shop).await;
+    assert_eq!(shop.published_lists().await.unwrap().len(), 1);
+    // Alice's key holds what names carol: no read takes it for carol's, or as nothing sent.
+    let carol = [7; 32];
+    rewrite_state(&mut shop, &sent_key(&w.alice_id()), |d| {
+        d["counterparty"] = pubky_switch_core::enc::b64(&carol).into();
+    })
+    .await;
+    assert!(is_corrupt(&shop.published_lists().await.unwrap_err()));
+    assert!(is_corrupt(
+        &shop.withdraw_list_from(&w.alice_id()).await.unwrap_err()
+    ));
+    assert!(is_corrupt(&shop.receive(None).await.unwrap_err()));
+    assert!(shop
+        .app()
+        .protocol_get(sent_key(&carol).as_bytes())
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn test_publishing_lists_sent_with_no_version_refused_as_corrupt() {
+    let w = World::new();
+    let _wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.publish_to_alice(&mut shop).await;
+    // A run forgets a counterparty with its last version: kept without one, it isn't absent.
+    rewrite_state(&mut shop, &sent_key(&w.alice_id()), |d| {
+        d["versions"] = serde_json::json!([]);
+    })
+    .await;
+    assert!(is_corrupt(&shop.published_lists().await.unwrap_err()));
+    assert!(is_corrupt(
+        &shop.publish_list_to(&[w.alice_id()]).await.unwrap_err()
+    ));
+}
+
+#[tokio::test]
+async fn test_publishing_list_request_against_lists_sent_under_another_key_parked() {
+    let w = World::new();
+    let _wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.publish_to_alice(&mut shop).await;
+    shop.receive(None).await.unwrap();
+    rewrite_state(&mut shop, &sent_key(&w.alice_id()), |d| {
+        d["counterparty"] = pubky_switch_core::enc::b64(&[7; 32]).into();
+    })
+    .await;
+    // The receive step reads alice's lists sent as corrupt: her request is held, not taken.
+    ask_for_the_list(&w, &shop, None, shop.app_id());
+    assert!(is_corrupt(&shop.receive(None).await.unwrap_err()));
+    let parked = shop.app_mut().parked_entries().await.unwrap();
+    assert_eq!(parked.len(), 1, "{parked:?}");
+}
+
+#[tokio::test]
+async fn test_publishing_release_kept_under_another_counterparty_refused_as_corrupt() {
+    let w = World::new();
+    let _wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.publish_to_alice(&mut shop).await;
+    shop.receive(None).await.unwrap();
+    let release = |counterparty: &[u8; 32]| {
+        serde_json::json!({
+            "v": 1,
+            "d": {
+                "counterparty": pubky_switch_core::enc::b64(counterparty),
+                "version": 7,
+                "payloads": { "btc-bitcoin-p2wpkh": "bc1qkept" },
+            }
+        })
+    };
+    let at_alice = format!(
+        "rl/{}/{:020}",
+        pubky_switch_core::enc::b64(&w.alice_id()),
+        7
+    );
+    // Bound to its key, a release is asked of the method.
+    put_state(&mut shop, &at_alice, &release(&w.alice_id())).await;
+    shop.receive(None).await.unwrap();
+    assert_eq!(released(&w), vec!["bc1qkept".to_owned()]);
+    // One naming carol at alice's key goes to no one.
+    put_state(&mut shop, &at_alice, &release(&[7; 32])).await;
+    assert!(is_corrupt(&shop.receive(None).await.unwrap_err()));
+    assert_eq!(w.rail.released().len(), 1);
+}
+
+#[tokio::test]
+async fn test_publishing_list_misspelled_refused_as_corrupt() {
+    let w = World::new();
+    let _wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.publish_to_alice(&mut shop).await;
+    rewrite_state(&mut shop, "ll", |d| {
+        d["endpoints"]["not an identifier"] = serde_json::Value::Null;
+    })
+    .await;
+    assert!(is_corrupt(
+        &shop.publish_list_to(&[w.alice_id()]).await.unwrap_err()
+    ));
+    assert!(is_corrupt(
+        &shop
+            .set_list_endpoints(list("lno1other"))
+            .await
+            .unwrap_err()
+    ));
+}
+
+#[tokio::test]
+async fn test_publishing_last_version_below_a_version_sent_refused_as_corrupt() {
+    let w = World::new();
+    let _wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let first = w.publish_to_alice(&mut shop).await;
+    w.clock.advance_ms(1_000);
+    put_state(
+        &mut shop,
+        "lv",
+        &serde_json::json!({ "v": 1, "d": first.version - 1 }),
+    )
+    .await;
+    // The next version would be built on a last version below one sent: none goes.
+    assert!(is_corrupt(
+        &shop.publish_list_to(&[w.alice_id()]).await.unwrap_err()
+    ));
+    assert_eq!(
+        shop.published_lists().await.unwrap()[0].version,
+        first.version
+    );
 }
