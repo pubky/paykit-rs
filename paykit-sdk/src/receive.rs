@@ -1428,10 +1428,12 @@ impl Paykit {
     ///   ([`crate::NoticeKind::MessageGivenUp`]) in the commit that drops it, as a stored
     ///   entry's message (`stored.rs`).
     ///
-    /// A write that can't be built or sent is never taken as a refusal: the error is
-    /// returned, the reply kept; only the switch's refusal of the batch gives it up past its
-    /// window. Every kept reply is read with a restore's
-    /// check, and one that fails it fails the call as a corrupt store.
+    /// A reply over a held record goes through the stored entries' later write
+    /// ([`Paykit::place_note`]) and its one rule ([`crate::stored::later_write`]): a write the
+    /// switch refuses, for good or over a quota, past the window gives the reply up with the
+    /// notice; a write that can't be built or sent now, for a store failure or a switch that
+    /// doesn't answer, is an error, returned, and the reply stays kept. Every kept reply is
+    /// read with a restore's check, and one that fails it fails the call as a corrupt store.
     pub(crate) async fn place_kept_replies(&mut self) -> crate::error::Result<()> {
         let own = self.identity();
         for (key_bytes, value) in self.app.protocol_scan(key::KEPT_REPLIES.as_bytes()).await? {
@@ -1451,61 +1453,43 @@ impl Paykit {
                 natural_key::request_record(&own, request),
                 reply.body().label(),
             );
-            let stale = self
-                .service_time()
-                .is_some_and(|t| accepted_at.saturating_add(KEPT_MESSAGE_MS) <= t);
             let content = self
                 .app
                 .shared_record(&self.activity_key(&target)?)
                 .await?
                 .map(|held| held.content);
+            // No record yet: the reply waits for it within its window, and past it is dropped
+            // with no notice, its sender keeping it no longer either, but never while the
+            // copy may lack records.
+            if matches!(content, None | Some(RecordContent::Deleted)) {
+                if crate::stored::past_window(accepted_at, self.service_time())
+                    && !self.side_unlisted(RecordSide::Payee).await?
+                {
+                    self.local_delete(&kept_key).await?;
+                }
+                continue;
+            }
             let record = match content {
                 Some(RecordContent::Value(_)) => self.held_activity(&target).await?,
                 _ => None,
             };
-            let Some(record) = record else {
-                if !stale {
-                    continue;
+            // A reply the record can't take, its sender not the record's counterparty, isn't
+            // written: kept no longer than any other.
+            let placed = match record {
+                Some(record) if record.counterparty != reply.sender() => {
+                    crate::stored::Placed::Not
                 }
-                match content {
-                    None | Some(RecordContent::Deleted) => {
-                        if !self.side_unlisted(RecordSide::Payee).await? {
-                            self.local_delete(&kept_key).await?;
-                        }
-                    }
-                    Some(_) => self.give_up(&kept_key, &reply).await?,
+                _ => {
+                    let mut tx = Tx::default();
+                    tx.delete(&kept_key);
+                    self.place_note(&target, role, false, reply.clone(), tx)
+                        .await?
                 }
-                continue;
             };
-            let sender = reply.sender();
-            // A reply the record can't take, its sender not the record's counterparty, is
-            // kept no longer than any other: given up past its window.
-            if record.counterparty != sender {
-                if stale {
-                    self.give_up(&kept_key, &reply).await?;
-                }
-                continue;
-            }
-            // A write that can't be built is an error, returned: the reply stays kept.
-            let write = self
-                .placed_write(&target, sender, role, reply.clone(), Vec::new())
-                .await?;
-            let mut tx = Tx::default();
-            tx.delete(&kept_key);
-            match write {
-                Some(entry) => {
-                    let batch = pubky_switch_client::app::OpBatch::new()
-                        .entry(entry)
-                        .locals(tx.into_writes());
-                    // Only the switch's refusal is the record's: past its window the reply is
-                    // given up then. One not sent now waits; any other error is returned, the
-                    // reply kept (`stored::submitted`).
-                    let placed = crate::stored::submitted(self.app.submit_batch(batch).await)?;
-                    if placed == crate::stored::Placed::Not && stale {
-                        self.give_up(&kept_key, &reply).await?;
-                    }
-                }
-                None => self.local_commit(tx).await?,
+            if crate::stored::later_write(placed, accepted_at, self.service_time())
+                == crate::stored::LaterWrite::GiveUp
+            {
+                self.give_up(&kept_key, &reply).await?;
             }
         }
         Ok(())
