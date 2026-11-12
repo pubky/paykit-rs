@@ -533,11 +533,9 @@ pub(crate) fn restore_paykit_layer(
     let unlisted = state::local_put(key::RECORDS_UNLISTED, &true)
         .map_err(|_| String::from("the restore's records mark can't be written"))?;
     writes.push(unlisted);
-    // The restore's listing covers what the restored certificate reads; a wider one the
-    // client takes later is listed by Paykit (`Paykit::unlisted`).
-    let listed = state::local_put(key::LISTED_CERT, own_cert.signed())
-        .map_err(|_| String::from("the restore's listed certificate can't be written"))?;
-    writes.push(listed);
+    // No certificate is kept as listed under, a backup's included: only a listing Paykit
+    // makes keeps one (`Paykit::list_records`), so the restored copy counts as unlisted
+    // until then, whichever certificate the client lists under.
     // No new attempt until a reconcile has run the payer pass, under `pay`: the backup
     // doesn't hold the attempts made after it (`Paykit::payer_pass_owed`).
     let owed = state::local_put(key::PAYER_PASS_OWED, &true)

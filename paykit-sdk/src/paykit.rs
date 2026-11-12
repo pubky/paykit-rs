@@ -343,9 +343,11 @@ impl Paykit {
             check_own_certificate(&approved.cert)?;
         }
         let app = App::join(env.clone(), protocol.clone(), config.app.clone(), request).await?;
-        let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
-        // The client lists the collections at its first read, under this certificate.
-        paykit.follow_listed_cert(true).await?;
+        // No certificate is kept as listed under: the copy is empty until a listing has run
+        // with the keys held, the client's at its first read or one of Paykit's, so until then
+        // the records count as unlisted (Paykit spec 8.1, "Records not listed yet";
+        // `Paykit::unlisted`) and a call that reads them lists first or is refused.
+        let paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
         Ok(paykit)
     }
 
@@ -378,7 +380,7 @@ impl Paykit {
         // A load follows a narrowing only: with no certificate kept as listed under, as after
         // a load under one Paykit refused or a store an earlier build wrote, the records
         // count as unlisted until a listing (`Paykit::unlisted`).
-        paykit.follow_listed_cert(false).await?;
+        paykit.follow_listed_cert().await?;
         Ok(paykit)
     }
 
@@ -566,6 +568,13 @@ impl Paykit {
     /// for the host. An entry dropped unverified (`AppEvent::StoredEntryDropped`) counts in
     /// its sender's mark, which asks that sender to send it again (`marks.rs`).
     ///
+    /// A receive that returns an error shows no report. When the client's read returned
+    /// before the error, the client counts the duty events the read raised as handed to the
+    /// host, so no later report shows them: after an error, the host takes them from
+    /// [`App::unacknowledged_events`] (through [`Paykit::app_mut`]), and acknowledges them
+    /// only once a later receive has returned, up to the last event its report shows, so the
+    /// SDK has taken those about stored entries first.
+    ///
     /// # Errors
     ///
     /// The client's errors; [`Refusal::SwitchUnavailable`] while the account may have been
@@ -647,7 +656,7 @@ impl Paykit {
         // A certificate the read took that reads no more than the one listed under, a
         // narrowed one included, is followed; one that passes Paykit's checks only now, as
         // after a refused one, too (`Paykit::follow_listed_cert`).
-        self.follow_listed_cert(false).await?;
+        self.follow_listed_cert().await?;
         let keys = self.scope_keys_awaited().await?;
         // The entries the client stored for good: their messages, kept above, written into
         // their records as room frees (`stored.rs`), unless the payer's side waits for its
@@ -700,5 +709,101 @@ impl Paykit {
         self.refresh_own()?;
         self.app.flush_outbox().await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use paykit_lib::AttemptId;
+    use pubky_switch_client::app::{AppEnv, JoinRequest, UserConfirmed};
+
+    use super::{Paykit, PaykitBackup, PaykitConfig};
+    use crate::pay::{PayOptions, UnrequestedPayment};
+    use crate::rail::Rail;
+    use crate::receipts::{ReceiptDetails, ReceiptsOf};
+    use crate::reconcile::Resolution;
+    use crate::requests::{RequestDraft, RequestRef};
+    use crate::resend::ResendSelection;
+    use crate::timer::Timer;
+
+    fn assert_send<T: Send>(_: &T) {}
+
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    /// Every public async call's future is `Send`, so a host on a multi-threaded runtime
+    /// can spawn it. Only compiled: the futures are made and dropped, never polled.
+    #[allow(clippy::too_many_arguments)]
+    fn public_futures_are_send(
+        wallet: &mut Paykit,
+        env: AppEnv,
+        config: PaykitConfig,
+        join: JoinRequest,
+        backup: &PaykitBackup,
+        rail: Arc<dyn Rail>,
+        timer: Arc<dyn Timer>,
+        confirmed: UserConfirmed,
+        attempt: AttemptId,
+        resolution: Resolution,
+        draft: RequestDraft,
+        payment: UnrequestedPayment,
+    ) {
+        let key = [0; 32];
+        let request = RequestRef {
+            payee: key,
+            request_hash: key,
+        };
+        assert_send(&Paykit::join(
+            env.clone(),
+            config.clone(),
+            join,
+            Arc::clone(&rail),
+            Arc::clone(&timer),
+        ));
+        assert_send(&Paykit::load(
+            env.clone(),
+            config.clone(),
+            [0; 16],
+            Arc::clone(&rail),
+            Arc::clone(&timer),
+        ));
+        assert_send(&Paykit::restore(env, config, backup, rail, timer));
+        assert_send(&wallet.backup());
+        assert_send(&wallet.receive(None));
+        assert_send(&wallet.flush());
+        assert_send(&wallet.public_endpoints(&key, Some(confirmed)));
+        assert_send(&wallet.reconcile());
+        assert_send(&wallet.resolve_attempt(&key, attempt, resolution, confirmed));
+        assert_send(&wallet.end_reconcile(confirmed));
+        assert_send(&wallet.request_resend(key, ResendSelection::default()));
+        assert_send(&wallet.held_lists());
+        assert_send(&wallet.spam_count(&key));
+        assert_send(&wallet.place_held_list_without_marks(&key, &[0; 16], confirmed));
+        assert_send(&wallet.send_request(key, draft));
+        assert_send(&wallet.message_delivery(""));
+        assert_send(&wallet.payee_activity());
+        assert_send(&wallet.verify_payment(&key));
+        assert_send(&wallet.confirm_payment(&key));
+        assert_send(&wallet.confirm_payment_with(&key, ReceiptDetails::default()));
+        assert_send(&wallet.cancel_sent_request(&key, None));
+        assert_send(&wallet.requests());
+        assert_send(&wallet.request(&request));
+        assert_send(&wallet.reject_request(&request, None));
+        assert_send(&wallet.cancel_request(&request, None));
+        assert_send(&wallet.pay_request(&request, PayOptions::default()));
+        assert_send(&wallet.pay_without_request(payment));
+        assert_send(&wallet.payments());
+        assert_send(&wallet.repair_activity_record(&attempt));
+        assert_send(&wallet.resume_payments());
+        assert_send(&wallet.notices());
+        assert_send(&wallet.acknowledge_notice(""));
+        assert_send(&wallet.receipts(ReceiptsOf::All));
+    }
+
+    #[test]
+    fn test_paykit_futures_are_send() {
+        assert_send_sync::<Paykit>();
+        let _ = public_futures_are_send;
     }
 }

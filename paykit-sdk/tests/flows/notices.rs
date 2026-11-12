@@ -7,7 +7,9 @@ use std::sync::Arc;
 use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{NoticeKind, PayOptions, PayOutcome, Paykit, PaykitConfig, Rail};
 use pubky_switch_client::clock::Clock;
+use pubky_switch_client::testing::Fault;
 use pubky_switch_core::claims::ClaimStatus;
+use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::records::DAY_MS;
 
 use crate::common::{draft, request_from, store, World};
@@ -101,6 +103,60 @@ async fn test_notices_late_receipt_of_a_payment_written_failed_raises_one() {
     assert!(wallet.payments().await.unwrap().is_empty());
     let kept = wallet.app().protocol_scan(b"nt/").await.unwrap();
     assert!(kept.is_empty());
+}
+
+/// The next `n` batches at alice's switch are refused for good, `403 permission_missing`.
+fn refuse_writes(w: &World, n: usize) {
+    for _ in 0..n {
+        w.alice.switch().fail_next(Fault::Error {
+            path: "/ops".into(),
+            code: ErrorCode::PermissionMissing,
+            current: serde_json::Value::Null,
+        });
+    }
+}
+
+/// Whether the wallet's journal entry of `attempt_id` waits for a late receipt.
+async fn waits_for_receipt(wallet: &Paykit, attempt_id: paykit_lib::AttemptId) -> bool {
+    let key = format!("j/{}", attempt_id.to_text());
+    let bytes = wallet
+        .app()
+        .protocol_get(key.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    let entry: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    entry["d"]["failed_on_claim"] == serde_json::Value::Bool(true)
+}
+
+#[tokio::test]
+async fn test_notices_late_receipt_written_later_raises_one_and_ends_the_wait() {
+    let w = World::new();
+    let (mut wallet, mut shop, attempt_id) = paid_after_failed(&w).await;
+    w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    wallet.receive(None).await.unwrap();
+    wallet.resume_payments().await.unwrap();
+    receipt(&mut shop).await;
+    // The receipt's step is refused for good, and so is its first later write: its entry
+    // is stored, and the receipt is written later, with the same effects as at its first
+    // read.
+    refuse_writes(&w, 2);
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.notices().await.unwrap().is_empty());
+    assert!(waits_for_receipt(&wallet, attempt_id).await);
+    wallet.receive(None).await.unwrap();
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, NoticeKind::PaidAfterFailed);
+    assert_eq!(notices[0].attempt_id, Some(attempt_id));
+    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert!(!waits_for_receipt(&wallet, attempt_id).await);
+    assert!(wallet.payments().await.unwrap()[0].receipt.is_some());
+    // Raised once, and the entry goes past its window like any other.
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.notices().await.unwrap(), notices);
+    wallet.resume_payments().await.unwrap();
+    assert!(wallet.payments().await.unwrap().is_empty());
 }
 
 #[tokio::test]
