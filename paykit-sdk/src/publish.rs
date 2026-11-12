@@ -29,10 +29,11 @@
 //!
 //! Per counterparty the app keeps what it sent (`lp/<counterparty>`): each version still
 //! tracked, its expiry, when the counterparty's inbox accepted it, the payloads it offered and
-//! whether a proof used it. The payee's check of a proof reads the payload it offered
-//! ([`Paykit::verify_payment`]); a proof of a version no longer tracked is checked by the
-//! payment method alone. A version is tracked until [`KEPT_MESSAGE_MS`] after its expiry,
-//! the time a payer keeps a proof to send again (Paykit spec 9).
+//! whether a proof used it. A version is tracked until [`KEPT_MESSAGE_MS`] after its expiry,
+//! the time a payer keeps a proof to send again (Paykit spec 9); the newest stays tracked
+//! while the counterparty gets the app's lists. The payee's check of a proof reads the
+//! payload it offered ([`Paykit::verify_payment`]) until that time only: a proof of a version
+//! past it is checked by the payment method alone (Paykit spec 8.4, "Only what it offered").
 //!
 //! **Releases.** A single-use payload goes back to the payment method
 //! ([`crate::Rail::release_single_use`]) only once no payer can pay it to this app:
@@ -588,11 +589,14 @@ impl Paykit {
     }
 
     /// What a proof naming this app's list `version` and `endpoint` is checked against
-    /// (Paykit spec 8.4): the payload this app offered `payer` there, while it tracks that
-    /// version. Past the time it would track a version published then, [`KEPT_MESSAGE_MS`]
-    /// after its lifetime, `None`: a late proof of a real payment (Paykit spec 7.2) is
-    /// checked by the payment method alone, and credited once by its settlement. Within it,
-    /// [`Refusal::NotOffered`] for a version or endpoint this app didn't offer the payer.
+    /// (Paykit spec 8.4, "Only what it offered"): the payload this app offered `payer` there,
+    /// while it keeps the offer, until [`KEPT_MESSAGE_MS`] after the version's `expires_at`.
+    /// After that `None`, the newest version an active counterparty holds included: a late
+    /// proof of a real payment (Paykit spec 7.2) is checked by the payment method alone, and
+    /// credited once by its settlement. Within it, [`Refusal::NotOffered`] for a version or
+    /// endpoint this app didn't offer the payer. For a version it doesn't hold, the offer
+    /// would still be kept while a version published then would be: its `expires_at` is at
+    /// most [`LIST_LIFETIME_MS`] after its version.
     pub(crate) async fn offered_payload(
         &self,
         payer: &[u8; 32],
@@ -605,17 +609,17 @@ impl Paykit {
         let offered = held
             .as_ref()
             .and_then(|r| r.versions.iter().find(|o| o.version == version));
+        let kept = |expires_at_ms: u64| self.now() < expires_at_ms.saturating_add(KEPT_MESSAGE_MS);
         let Some(offered) = offered else {
-            let untracked = version
-                .saturating_add(LIST_LIFETIME_MS)
-                .saturating_add(KEPT_MESSAGE_MS)
-                <= self.now();
-            return Ok(if untracked {
-                Ok(None)
-            } else {
+            return Ok(if kept(version.saturating_add(LIST_LIFETIME_MS)) {
                 Err(Refusal::NotOffered)
+            } else {
+                Ok(None)
             });
         };
+        if !kept(offered.expires_at_ms) {
+            return Ok(Ok(None));
+        }
         match offered.endpoints.get(endpoint.as_str()) {
             Some(o) => Ok(Ok(Some(PaymentEndpointPayload::parse(&o.payload)?))),
             None => Ok(Err(Refusal::NotOffered)),

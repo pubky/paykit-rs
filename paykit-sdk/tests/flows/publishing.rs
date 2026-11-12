@@ -1327,6 +1327,30 @@ async fn test_publishing_proof_of_an_endpoint_the_tracked_version_lacks_not_offe
 }
 
 #[tokio::test]
+async fn test_publishing_proof_past_the_kept_offer_credited_by_the_rail_alone() {
+    let w = World::new();
+    let (mut shop, record) = paid_to_a_list_at_the_shops_version(
+        &w,
+        offer("btc-lightning-bolt11", "lnbc1other"),
+        "btc-lightning-bolt11",
+    )
+    .await;
+    // The newest version she holds stays tracked, but its offer is kept only until 30 days
+    // after its expiry: after that, the proof is checked by the payment method alone.
+    let expires_at = shop.published_lists().await.unwrap()[0].expires_at_ms;
+    w.clock
+        .advance_ms(expires_at + 30 * DAY_MS - 1 - w.clock.now_ms());
+    let refused = shop.verify_payment(&record).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotOffered)),
+        "{refused:?}"
+    );
+    w.clock.advance_ms(1);
+    assert!(shop.verify_payment(&record).await.unwrap().is_some());
+    assert!(shop.confirm_payment(&record).await.unwrap().is_some());
+}
+
+#[tokio::test]
 async fn test_publishing_proof_of_another_payload_at_a_tracked_version_not_confirmed() {
     let w = World::new();
     let (mut shop, record) = paid_to_a_list_at_the_shops_version(
