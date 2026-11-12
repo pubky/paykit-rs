@@ -466,28 +466,74 @@ async fn test_restore_given_up_notice_with_its_entry_restored() {
 }
 
 #[tokio::test]
-async fn test_restore_given_up_notice_without_an_entry_restored() {
-    // A message given up with no entry stored, such as one the receive step gave up waiting
-    // for its key or a payer's reply kept for its record, is told with no handle: a state a
-    // valid run leaves, restored as kept.
+async fn test_restore_given_up_notice_without_its_entry_refused() {
     let w = World::new();
-    let (good, _) = backup_with_a_payment(&w).await;
+    let (good, app_id) = backup_with_a_payment(&w).await;
     let mut notice = given_up_notice(&w);
     notice.as_object_mut().unwrap().remove("stored");
-    let backup = with_given_up_notice(&w, &good, notice);
-    let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&backup).unwrap()).unwrap();
-    let restored = Paykit::restore(
-        w.env(&w.alice, store()),
-        PaykitConfig::default(),
-        &backup,
-        Arc::clone(&w.rail) as Arc<dyn Rail>,
-        w.timer(),
+    let target = store();
+    let error = refused_restore(
+        &w,
+        with_given_up_notice(&w, &good, notice),
+        Arc::clone(&target),
     )
-    .await
-    .unwrap();
-    let notices = restored.notices().await.unwrap();
-    assert_eq!(notices.len(), 1, "{notices:?}");
-    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+    .await;
+    assert!(is_refused(&error), "{error:?}");
+    nothing_restored(&w, target, app_id).await;
+}
+
+/// A message given up with no entry stored, from `origin` (`receive_step` or `kept_reply`).
+fn given_up_notice_from(w: &World, origin: &str) -> serde_json::Value {
+    let mut notice = given_up_notice(w);
+    let object = notice.as_object_mut().unwrap();
+    object.remove("stored");
+    object.insert("origin".into(), serde_json::json!(origin));
+    notice
+}
+
+#[tokio::test]
+async fn test_restore_given_up_notice_with_no_entry_from_its_origin_restored() {
+    // A message the receive step gave up waiting for its key, or a kept reply given up, has
+    // no entry stored: its notice names where it came from, and restores with no handle.
+    for origin in ["receive_step", "kept_reply"] {
+        let w = World::new();
+        let (good, _) = backup_with_a_payment(&w).await;
+        let backup = with_given_up_notice(&w, &good, given_up_notice_from(&w, origin));
+        let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&backup).unwrap()).unwrap();
+        let restored = Paykit::restore(
+            w.env(&w.alice, store()),
+            PaykitConfig::default(),
+            &backup,
+            Arc::clone(&w.rail) as Arc<dyn Rail>,
+            w.timer(),
+        )
+        .await
+        .unwrap();
+        let notices = restored.notices().await.unwrap();
+        assert_eq!(notices.len(), 1, "{origin}: {notices:?}");
+        assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+    }
+}
+
+#[tokio::test]
+async fn test_restore_given_up_notice_with_an_origin_and_a_handle_refused() {
+    // A notice naming an origin has no entry stored: one that also holds a handle is a
+    // state no run leaves.
+    for origin in ["receive_step", "kept_reply"] {
+        let w = World::new();
+        let (good, app_id) = backup_with_a_payment(&w).await;
+        let mut notice = given_up_notice(&w);
+        notice["origin"] = serde_json::json!(origin);
+        let target = store();
+        let error = refused_restore(
+            &w,
+            with_given_up_notice(&w, &good, notice),
+            Arc::clone(&target),
+        )
+        .await;
+        assert!(is_refused(&error), "{origin}: {error:?}");
+        nothing_restored(&w, target, app_id).await;
+    }
 }
 
 #[tokio::test]

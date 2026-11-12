@@ -718,6 +718,13 @@ async fn test_replies_kept_over_a_record_sealed_at_a_key_not_held_given_up_with_
         .iter()
         .all(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp
             && n.request_hash == Some(request.hash())));
+    // No entry is stored for a kept reply: acknowledging its notice forgets none, and the
+    // notice goes.
+    let parked = shop.app_mut().parked_entries().await.unwrap().len();
+    shop.acknowledge_notice(&notices[0].id).await.unwrap();
+    assert_eq!(shop.app_mut().parked_entries().await.unwrap().len(), parked);
+    assert_eq!(shop.app().protocol_scan(b"nt/").await.unwrap().len(), 1);
+    assert_eq!(shop.notices().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
