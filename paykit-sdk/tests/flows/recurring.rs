@@ -315,6 +315,9 @@ enum PhoneWrite {
     Invalid,
     /// The record of another request, bound to that request's key.
     AnotherRequest,
+    /// Nothing; the switch then answers the record's read `404`, the wallet keeping its
+    /// copy.
+    NotFoundAtTheSwitch,
 }
 
 /// Alice's wallet and phone hold bob's monthly request, open for an hour; the phone writes
@@ -350,7 +353,7 @@ async fn rejected_over(w: &World, write: PhoneWrite, heard: bool) -> paykit_sdk:
     // The wallet keeps no mark of what it saw: a later value is taken as it is.
     store.armed.store(true, Ordering::SeqCst);
     let value = match write {
-        PhoneWrite::Delete => None,
+        PhoneWrite::Delete | PhoneWrite::NotFoundAtTheSwitch => None,
         PhoneWrite::Invalid => Some(crate::outcome_record::INVALID.to_vec()),
         PhoneWrite::AnotherRequest => {
             let target = crate::outcome_record::payer_record(&other);
@@ -358,7 +361,17 @@ async fn rejected_over(w: &World, write: PhoneWrite, heard: bool) -> paykit_sdk:
             Some(held.content.value().unwrap().to_vec())
         }
     };
-    crate::outcome_record::phone_writes(&mut phone, &request, value.as_deref()).await;
+    if let PhoneWrite::NotFoundAtTheSwitch = write {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/records/".into(),
+                code: pubky_switch_core::http::ErrorCode::NotFound,
+                current: serde_json::Value::Null,
+            });
+    } else {
+        crate::outcome_record::phone_writes(&mut phone, &request, value.as_deref()).await;
+    }
     w.clock.advance_ms(expires_at + 1 - w.clock.now_ms());
     if heard {
         wallet.app_mut().read_claim(&[0; 32]).await.unwrap();
@@ -368,12 +381,14 @@ async fn rejected_over(w: &World, write: PhoneWrite, heard: bool) -> paykit_sdk:
 
 #[tokio::test]
 async fn test_recurring_rejection_past_expiry_over_a_record_gone_or_unreadable() {
-    // The record read again isn't there, doesn't read, or holds another request: none of
-    // them shows this request unanswered, so none is refused as expired. Seen before
+    // The record read again isn't there, the switch answering `404` over the wallet's copy
+    // included, doesn't read, or holds another request: none of them shows this request
+    // unanswered, so none is refused as expired. Seen before
     // anything is sent, a record gone is not found, and one that doesn't read as this
     // request a conflict; after a `409`, the conflict is the answer.
     for (write, heard, gone) in [
         (PhoneWrite::Delete, true, true),
+        (PhoneWrite::NotFoundAtTheSwitch, true, true),
         (PhoneWrite::Invalid, true, false),
         (PhoneWrite::AnotherRequest, true, false),
         (PhoneWrite::Delete, false, false),
@@ -395,4 +410,52 @@ async fn test_recurring_rejection_past_expiry_over_a_record_gone_or_unreadable()
             );
         }
     }
+}
+
+#[tokio::test]
+async fn test_recurring_reassociation_built_on_an_attempted_period_flagged() {
+    // The phone attempted a Billing Period early, which the wallet saw. Its next write,
+    // built on that version, moves the request to another Allowance from that period: the
+    // wallet, holding the version the write builds on, refuses it and keeps what it saw
+    // (Paykit wire 5.3 "Seen Allowance").
+    let w = World::new();
+    let _shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    monthly(
+        &w,
+        &[wallet.app_id(), phone.app_id()],
+        w.clock.now_ms() + HOUR_MS,
+        "plan-1",
+    );
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let request = wallet.requests().await.unwrap()[0].request;
+    let target = crate::outcome_record::payer_record(&request);
+    let held = phone.app_mut().read_record(&target).await.unwrap().unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    let period = 1_772_236_800u64;
+    value["allowance_id"] = json!("d0efffb7-191b-4709-b6c7-e343af5500b4");
+    value["attempted_periods"] = json!([period]);
+    let attempted = serde_json::to_vec(&value).unwrap();
+    crate::outcome_record::phone_writes(&mut phone, &request, Some(&attempted)).await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().flagged_writes().await.unwrap().is_empty());
+    value["reassociations"] = json!([{
+        "allowance_id": "55de1f16-1a9e-4504-bc9c-57efc3a2b38c",
+        "from_period": period,
+    }]);
+    let moved = serde_json::to_vec(&value).unwrap();
+    crate::outcome_record::phone_writes(&mut phone, &request, Some(&moved)).await;
+    wallet.receive(None).await.unwrap();
+    let flagged = wallet.app().flagged_writes().await.unwrap();
+    assert_eq!(flagged.len(), 1, "{flagged:?}");
+    let kept = wallet
+        .app()
+        .shared_record(&wallet.app().record_key(&target).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept.content.value(), Some(attempted.as_slice()));
 }

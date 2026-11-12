@@ -1027,3 +1027,68 @@ async fn test_recovery_repeat_withheld_when_the_request_record_is_gone() {
     );
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
+
+/// The payment in flight, the method keeping no history, as a resume would repeat it.
+async fn in_flight_without_history(
+    w: &World,
+) -> (
+    paykit_sdk::Paykit,
+    paykit_sdk::RequestRef,
+    paykit_lib::AttemptId,
+) {
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    w.rail.set_declaration(idempotent_without_history());
+    (wallet, request, attempt_id)
+}
+
+#[tokio::test]
+async fn test_recovery_repeat_over_a_request_record_not_found_withheld() {
+    // The switch answers the request record's read `404`, though the wallet keeps its open
+    // copy: nothing shows the request still open, so the repeat is withheld and the attempt
+    // stays "may be paid".
+    let w = World::new();
+    let (mut wallet, _request, attempt_id) = in_flight_without_history(&w).await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/records/".into(),
+            code: pubky_switch_core::http::ErrorCode::NotFound,
+            current: serde_json::Value::Null,
+        });
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Paying);
+}
+
+#[tokio::test]
+async fn test_recovery_repeat_over_a_newer_request_record_refused_withheld() {
+    // Another own app wrote the request record over with a value the wallet refuses: the
+    // copy it keeps is no evidence the request is open, so the repeat is withheld.
+    let w = World::new();
+    let (mut wallet, request, attempt_id) = in_flight_without_history(&w).await;
+    let mut phone = w.wallet("phone").await;
+    phone.receive(None).await.unwrap();
+    crate::outcome_record::phone_writes(&mut phone, &request, Some(crate::outcome_record::INVALID))
+        .await;
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}

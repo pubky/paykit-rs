@@ -648,7 +648,7 @@ fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Result<()
             Ok(held) => Some(held),
             Err(_) => return hold_list(cx, &target, stored),
         },
-        Some(RecordContent::Deleted | RecordContent::Unreadable) => {
+        Some(RecordContent::Deleted | RecordContent::Unreadable(_)) => {
             return hold_list(cx, &target, stored)
         }
     };
@@ -753,7 +753,9 @@ impl Paykit {
     /// is deleted (Paykit wire 5.4): a durable notice for the host. Each is placed once the
     /// record reads again, at a receive, or by
     /// [`Paykit::place_held_list_without_marks`]; until then no payment uses the payee app's
-    /// list.
+    /// list. A list held over a value only waiting for its scope key isn't listed: that
+    /// value opens once the key comes, and the list is placed with its marks then, so
+    /// nothing offers to place it without them.
     ///
     /// # Errors
     ///
@@ -761,7 +763,17 @@ impl Paykit {
     pub async fn held_lists(&self) -> crate::error::Result<Vec<HeldList>> {
         let own = self.identity();
         let mut out = Vec::new();
-        for (_, kept) in self.local_scan::<KeptMessage>(key::HELD_LISTS).await? {
+        for (rest, kept) in self.local_scan::<KeptMessage>(key::HELD_LISTS).await? {
+            let record_key = pubky_switch_core::enc::unb64_array::<32>(&rest)
+                .map_err(|_| crate::error::PaykitError::corrupt())?;
+            if self
+                .app
+                .shared_record(&record_key)
+                .await?
+                .is_some_and(|r| crate::hold::awaits_key(&r.content))
+            {
+                continue;
+            }
             let list = kept.stored(&own)?;
             out.push(HeldList {
                 payee: list.sender(),
@@ -816,7 +828,7 @@ impl Paykit {
                 Ok(held) => Some(held),
                 Err(_) => return Ok(()),
             },
-            Some(RecordContent::Deleted | RecordContent::Unreadable) => return Ok(()),
+            Some(RecordContent::Deleted | RecordContent::Unreadable(_)) => return Ok(()),
         };
         let mut tx = Tx::default();
         tx.delete(&key::held_list(&record_key));
@@ -891,8 +903,10 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`crate::Refusal::NotFound`] when no list is held for that app; the client's errors,
-    /// such as `NotNow` while the record is sealed at an epoch whose key the app lacks.
+    /// [`crate::Refusal::NotFound`] when no list is held for that app;
+    /// [`crate::Refusal::NotNow`] naming the scope keys while the record's value is sealed
+    /// under a key the app doesn't hold yet: the list is placed with its marks once the
+    /// value opens, at a receive; the client's errors.
     pub async fn place_held_list_without_marks(
         &mut self,
         payee: &[u8; 32],
@@ -910,10 +924,16 @@ impl Paykit {
             .await?
             .ok_or(crate::error::Refusal::NotFound)?
             .stored(&own)?;
-        let held = self
-            .app
-            .shared_record(&record_key)
-            .await?
+        let held = self.app.shared_record(&record_key).await?;
+        // A value only waiting for its scope key holds marks this app can't see yet: it is
+        // never written over without them, and the list is placed with them once it opens.
+        if held
+            .as_ref()
+            .is_some_and(|r| crate::hold::awaits_key(&r.content))
+        {
+            return Err(crate::hold::value_awaits_key());
+        }
+        let held = held
             .and_then(|r| r.content.value().map(<[u8]>::to_vec))
             .and_then(|value| PaymentListRecord::read(&value, &own).ok());
         let mut tx = Tx::default();
