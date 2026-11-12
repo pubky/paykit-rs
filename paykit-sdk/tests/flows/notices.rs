@@ -231,3 +231,68 @@ async fn test_notices_second_receipt_after_the_window_raises_none_where_one_is_h
     other.receive(None).await.unwrap();
     assert!(other.notices().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn test_notices_receipt_past_the_deadline_within_the_claim_settles_it_and_raises_none() {
+    // Past the request's deadline, a day after it was sent, but within the 30 days the claim
+    // is kept after it: the claim is still there, so the receipt settles it.
+    let w = World::new();
+    let (mut wallet, mut shop, _) = paid_after_failed(&w).await;
+    w.clock.advance_ms(2 * DAY_MS);
+    wallet.receive(None).await.unwrap();
+    receipt(&mut shop).await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.notices().await.unwrap().is_empty());
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    let claim = wallet
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.view.status, ClaimStatus::Settled);
+}
+
+#[tokio::test]
+async fn test_notices_late_receipt_raised_where_the_switch_holds_no_claim() {
+    // An own app that joins once the claim is gone holds no view of it, and the switch no
+    // longer holds it: a claim the switch holds none of counts as gone.
+    let w = World::new();
+    let (_wallet, mut shop, attempt_id) = paid_after_failed(&w).await;
+    w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    let mut late = w.wallet("late").await;
+    late.receive(None).await.unwrap();
+    receipt(&mut shop).await;
+    late.receive(None).await.unwrap();
+    let notices = late.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, NoticeKind::PaidAfterFailed);
+    assert_eq!(notices[0].attempt_id, Some(attempt_id));
+}
+
+#[tokio::test]
+async fn test_notices_receipt_on_a_claim_settled_already_ends_the_wait() {
+    // Another own app takes the receipt first and settles the claim; the wallet that made
+    // the payment then takes it on a SETTLED claim: it waits no more, and its entry is
+    // pruned past the claim's window.
+    let w = World::new();
+    let mut other = w.wallet("second").await;
+    let (mut wallet, mut shop, _) = paid_after_failed(&w).await;
+    other.receive(None).await.unwrap();
+    receipt(&mut shop).await;
+    other.receive(None).await.unwrap();
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    let claim = other
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.view.status, ClaimStatus::Settled);
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    wallet.receive(None).await.unwrap();
+    wallet.resume_payments().await.unwrap();
+    assert!(wallet.payments().await.unwrap().is_empty());
+    assert!(wallet.notices().await.unwrap().is_empty());
+}

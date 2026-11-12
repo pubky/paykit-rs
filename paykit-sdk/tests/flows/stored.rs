@@ -644,3 +644,70 @@ async fn test_stored_refused_request_never_written_over_a_value_awaiting_its_key
         RequestStatus::Open
     );
 }
+
+#[tokio::test]
+async fn test_stored_refused_receipt_never_opens_a_deleted_record() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    assert!(shop.confirm_payment(&record).await.unwrap().is_some());
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(kept(&wallet, "se/").await.len(), 1);
+    // Meanwhile the payer's record of the request is deleted: a receipt never opens it.
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            paykit_lib::collections::Collection::PayerActivity.name(),
+            paykit_lib::collections::Collection::PayerActivity.policy(None),
+        ),
+        &paykit_lib::derive::natural_key::request_record(&w.bob_id(), &request.request_hash),
+    );
+    let entry = wallet
+        .app_mut()
+        .record_op(&target, None, Vec::new())
+        .await
+        .unwrap();
+    wallet
+        .app_mut()
+        .submit_batch(pubky_switch_client::app::OpBatch::new().entry(entry))
+        .await
+        .unwrap();
+    let key = wallet.app().record_key(&target).unwrap();
+    let written = w.record_writes(&w.alice, &key);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(w.record_writes(&w.alice, &key), written);
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    assert_eq!(
+        held.content,
+        pubky_switch_client::app::RecordContent::Deleted
+    );
+    assert_eq!(kept(&wallet, "se/").await.len(), 1);
+}
+
+#[tokio::test]
+async fn test_stored_refused_older_list_never_replaces_a_newer_held() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let newer = w.clock.now_ms() + 1;
+    // The newer list's step is refused, then the older's, and the writes that would place
+    // the held list: the newer stays held.
+    for version in [newer, newer - 1] {
+        w.list_to_alice(&mut shop, &[wallet.app_id()], version)
+            .await;
+        refuse_writes(&w.alice, 2);
+        wallet.receive(None).await.unwrap();
+        let held = wallet.held_lists().await.unwrap();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].version, newer);
+    }
+}
