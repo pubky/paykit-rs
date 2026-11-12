@@ -862,8 +862,9 @@ impl Paykit {
     /// Place the lists held because their record didn't read or was deleted, once another
     /// own app has written it again so it reads (Paykit wire 5.4): the record's update,
     /// built on the version held with its marks kept, and the notice's delete, in one batch.
-    /// A record that still doesn't read, or is still deleted, keeps its list held; a list no
-    /// newer than the record's is dropped. A placement that fails now is tried again at the
+    /// A record that still doesn't read, or is still deleted, keeps its list held, as does
+    /// one absent while the payer's side isn't listed yet; a list no newer than the
+    /// record's is dropped. A placement that fails now is tried again at the
     /// next receive, with no bound in time: one held list per payee app, replaced by a
     /// newer one, and one write of it per receive.
     pub(crate) async fn place_held_lists(&mut self) -> crate::error::Result<()> {
@@ -898,6 +899,10 @@ impl Paykit {
             .await?
             .map(|r| r.content)
         {
+            // Absent while the copy of the payer's side may lack records, as after a join
+            // or a restore before the first listing: the absence decides nothing yet, so the
+            // list stays held (Paykit spec 8.1, "Records not listed yet").
+            None if self.side_unlisted(RecordSide::Payer).await? => return Ok(()),
             None => None,
             Some(RecordContent::Value(value)) => match PaymentListRecord::read(&value, &own) {
                 Ok(held) => Some(held),
