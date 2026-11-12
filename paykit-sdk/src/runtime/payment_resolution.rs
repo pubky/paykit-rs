@@ -709,7 +709,9 @@ where
     /// Requests with bound Payment Endpoints have no public fallback; use
     /// [`Self::resolve_private_payment_request`] for their private destinations.
     /// Returns `Policy` while the counterparty is `Blocked`, before any App
-    /// Registry or Payment Endpoint read.
+    /// Registry or Payment Endpoint read. The block is rechecked before
+    /// Payment Endpoint reads and before candidates reach the payment adapter,
+    /// so a block that lands during resolution also returns `Policy`.
     pub async fn resolve_public_payment_request(
         &self,
         counterparty: PubkyPublicKey,
@@ -738,9 +740,21 @@ where
         let required_app_id = payment_request_terms
             .as_ref()
             .and_then(|terms| terms.required_app_id.as_ref());
-        let mut batch = self
-            .public_payment_candidates(&counterparty, required_app_id)
-            .await?;
+        // Only a received Payment Request refuses a blocked counterparty;
+        // plain contact resolution ignores Linked Peer state.
+        let refuse_blocked_counterparty = payment_request_terms.is_some();
+        let loaded = self
+            .public_payment_candidates(&counterparty, required_app_id, refuse_blocked_counterparty)
+            .await;
+        if refuse_blocked_counterparty {
+            // A block can land while the Payment Endpoint reads are in flight.
+            // Those reads cannot be recalled without serializing against
+            // `block_peer`, so the guarantee is that no candidate reaches the
+            // payment adapter once a block is observed, and the call returns
+            // `Policy`, outranking a loading error or a `NoEndpoint` result.
+            self.ensure_peer_not_blocked(&counterparty).await?;
+        }
+        let mut batch = loaded?;
         filter_public_candidates_for_request(&mut batch.candidates, payment_request_terms.as_ref());
         if batch.candidates.is_empty() {
             return Ok(unresolved_public_resolution(
@@ -1214,16 +1228,21 @@ where
         &self,
         counterparty: &PubkyPublicKey,
         required_app_id: Option<&paykit_lib::PaykitAppId>,
+        refuse_blocked_counterparty: bool,
     ) -> Result<PublicPaymentCandidateLoad> {
-        let public_storage =
-            self.pubky
-                .load_public_storage()
-                .await?
-                .ok_or_else(|| PaykitSdkError::Identity {
-                    context: "no Pubky public storage available for public Payment Endpoint lookup"
-                        .into(),
-                    source: None,
-                })?;
+        let public_storage = self.pubky.load_public_storage().await?;
+        if refuse_blocked_counterparty {
+            // Recheck after the provider call and before any App Registry or
+            // Payment Endpoint read. Reads already in flight cannot be recalled
+            // without serializing against `block_peer`, so the guarantee is
+            // that no read starts after a block has been observed, and the
+            // call returns `Policy`.
+            self.ensure_peer_not_blocked(counterparty).await?;
+        }
+        let public_storage = public_storage.ok_or_else(|| PaykitSdkError::Identity {
+            context: "no Pubky public storage available for public Payment Endpoint lookup".into(),
+            source: None,
+        })?;
         let public_key = counterparty.to_public_key()?;
         let Some(registry) =
             paykit_lib::get_paykit_app_registry(&public_storage, &public_key).await?

@@ -1587,8 +1587,10 @@ of other apps' endpoints.
 
 `resolve_public_payment_request` reads the received Payment Request, so it
 fails with `Policy` while the counterparty is blocked, before App Registry
-access; `resolve_public_contact_payment` reads no Payment Request and is
-unaffected.
+access. It rechecks the block before Payment Endpoint reads and before
+candidates reach the payment adapter, so a block that lands during resolution
+also returns `Policy`. `resolve_public_contact_payment` reads no Payment
+Request and is unaffected.
 
 ### Resolve Private Payment
 
