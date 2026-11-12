@@ -492,8 +492,8 @@ fn keep_before_record(
 /// records, the absence decides nothing and the entry is held ([`held_or_unlisted`]), and a
 /// value of either record waiting for its scope key holds it too ([`wait_for_key`]).
 /// Details invalid against the request are dropped. Those the payer doesn't store, for a
-/// request it hasn't accepted, or rejected, or either side cancelled, or for a period it
-/// can't pay yet or any more ([`crate::periods::stores_details`]), are taken with no effect.
+/// request it hasn't accepted, or rejected, or either side cancelled, or for a period that
+/// doesn't take details now ([`crate::periods::stores_details`]), are taken with no effect.
 ///
 /// The spam rule (Paykit wire 4.1) doesn't gate the details stored here: they go only into
 /// the period record of a subscription the payer accepted, an update of activity it holds

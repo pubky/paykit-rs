@@ -287,8 +287,7 @@ impl Paykit {
     /// record that changed meanwhile is read again and the write built again. Each details
     /// stays valid until its own expiry: a later one replaces none. They are sent only for
     /// a period that takes details, the periods the payer stores them for: one of the 16
-    /// latest to have started, or the next one, on the highest service time verified
-    /// ([`takes_details`]).
+    /// latest to have started, or the next one, on the highest service time verified.
     ///
     /// # Errors
     ///
