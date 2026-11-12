@@ -228,6 +228,8 @@ mod tests {
         for scopes in [
             &["pay", "request", "contacts", "manage_contacts"][..],
             &["pay", "allowance", "allowance_execute", "contacts"],
+            &["pay", "allowance", "contacts"],
+            &["pay", "contacts"],
             &["request:shop1", "request:shop2"],
             &["contacts"],
             &["ext:paykit-cap", "request"],
@@ -262,11 +264,13 @@ mod tests {
             names(&["allowance_execute", "allowance"]),
             names(&["allowance_execute", "pay"]),
             names(&["allowance_execute", "allowance", "pay"]),
+            names(&["pay"]),
+            names(&["pay", "allowance"]),
             names(&["manage_contacts"]),
             names(&["ext:cap"]),
             names(&["ext:paykit"]),
             names(&["pay:x"]),
-            names(&["pay", "ext"]),
+            names(&["pay", "contacts", "ext"]),
             extensions,
             labels,
         ] {
@@ -295,7 +299,7 @@ mod tests {
     #[test]
     fn test_signer_protocol_another_protocols_scope_unknown_without_it() {
         assert!(matches!(
-            refusal(&paykit(), &["pay", "chat"]),
+            refusal(&paykit(), &["pay", "contacts", "chat"]),
             Refusal::UnknownScopes { scopes } if scopes == ["chat"]
         ));
     }
@@ -313,5 +317,118 @@ mod tests {
             .grant_paths(&[3; 16], &names(&["chat"]))
             .unwrap()
             .is_empty());
+        // A paying app's request holds the `contacts` that `pay` requires, and is offered
+        // the Paykit Profile too.
+        let wallet = names(&["pay", "contacts"]);
+        protocols.terms(&wallet).unwrap();
+        let paths = protocols.grant_paths(&[3; 16], &wallet).unwrap();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0].path, "/pub/paykit/profile.json");
+    }
+
+    #[test]
+    fn test_signer_protocol_pay_request_without_contacts_refused() {
+        let protocols = paykit();
+        for scopes in [&["pay"][..], &["pay", "allowance"], &["pay", "request"]] {
+            match refusal(&protocols, scopes) {
+                Refusal::ProtocolRule { protocol, reason } => {
+                    assert_eq!(protocol, "paykit");
+                    assert!(reason.contains("pay requires contacts"), "{reason}");
+                }
+                other => panic!("{scopes:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_signer_protocol_pay_request_with_contacts_reads_the_lists() {
+        let protocols = paykit();
+        for scopes in [&["pay", "contacts"][..], &["pay", "allowance", "contacts"]] {
+            let terms = terms(&protocols, scopes);
+            assert!(
+                terms.permissions.contains(&Permission::ListsRead),
+                "{scopes:?}"
+            );
+            check_certificate(&certificate(scopes, &terms)).unwrap();
+        }
+    }
+
+    /// An Allowance executor's scopes (Paykit spec 3.1).
+    const EXECUTOR: [&str; 4] = ["pay", "allowance", "allowance_execute", "contacts"];
+
+    #[test]
+    fn test_signer_protocol_executor_renewal_keeps_its_terms() {
+        // An automatic renewal keeps the certificate's scopes, and the signer renews it only
+        // while the terms those scopes get now are the ones it holds (Switch spec 3.2):
+        // an executor's are, so it is renewed with `allowance_execute` and every scope it
+        // requires.
+        let protocols = paykit();
+        let held = certificate(&EXECUTOR, &terms(&protocols, &EXECUTOR));
+        let now = protocols.terms(held.scopes()).unwrap();
+        assert_eq!(now.permissions, held.permissions());
+        assert_eq!(held.scopes(), names(&EXECUTOR).as_slice());
+        let scopes: Vec<&str> = held.scopes().iter().map(String::as_str).collect();
+        check_certificate(&certificate(&scopes, &now)).unwrap();
+    }
+
+    #[test]
+    fn test_signer_protocol_executor_with_other_terms_isnt_renewed_as_it_is() {
+        // An executor's certificate holding other permissions than Paykit's table gives its
+        // scopes now: the signer leaves its renewal to the user (Switch spec 3.2).
+        let protocols = paykit();
+        let mut fewer = terms(&protocols, &EXECUTOR);
+        fewer.permissions.retain(|p| *p != Permission::ClaimsWrite);
+        let held = certificate(&EXECUTOR, &fewer);
+        let now = protocols.terms(held.scopes()).unwrap();
+        assert_ne!(now.permissions, held.permissions());
+    }
+
+    #[test]
+    fn test_signer_protocol_dropping_allowance_execute_rotates_the_epoch() {
+        // A reduction that removes a scope with keys rotates the data epoch (Paykit spec 3.2,
+        // 3.5): `allowance_execute` has keys, and the scopes left still pass Paykit's rules.
+        let protocols = paykit();
+        assert!(protocols.has_keys("allowance_execute"));
+        let reduced = ["pay", "allowance", "contacts"];
+        check_certificate(&certificate(&reduced, &terms(&protocols, &reduced))).unwrap();
+    }
+
+    #[test]
+    fn test_signer_protocol_executor_without_a_scope_it_requires_refused() {
+        // A reduction that drops a scope `allowance_execute` requires, but keeps it, is
+        // refused (Paykit spec 3.1).
+        let protocols = paykit();
+        for scopes in [
+            &["allowance", "allowance_execute", "contacts"][..],
+            &["pay", "allowance_execute", "contacts"],
+        ] {
+            assert!(
+                matches!(refusal(&protocols, scopes), Refusal::ProtocolRule { .. }),
+                "{scopes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_signer_protocol_grant_paths_cover_neither_identity_json_nor_the_backup() {
+        // The signer refuses a capability covering the Switch's `identity.json` or its
+        // backup, which only it writes (Switch spec 3.4, 12.8): no grant path Paykit offers
+        // is one, or a folder holding one.
+        use pubky_switch_core::records::{IDENTITY_PATH, SIGNER_BACKUP_PATH};
+        let covers = |path: &str, file: &str| {
+            path == file || (path.ends_with('/') && file.starts_with(path))
+        };
+        let paths = PaykitProtocol.grant_paths(&[7; 16], &EXECUTOR);
+        assert!(!paths.is_empty());
+        for granted in &paths {
+            for file in [IDENTITY_PATH, SIGNER_BACKUP_PATH] {
+                assert!(
+                    !covers(&granted.path, file),
+                    "{} covers {file}",
+                    granted.path
+                );
+            }
+        }
+        assert!(covers("/pub/", IDENTITY_PATH), "a folder holding it would");
     }
 }

@@ -260,19 +260,27 @@ async fn test_spam_blocked_payer_unrequested_proof_only_counted() {
 
 #[tokio::test]
 async fn test_spam_without_contacts_unknown_lists_gate_nothing() {
-    // A wallet without `contacts` never reads the lists: bob's standing is unknown there,
-    // and his request opens.
+    // A payee app without `contacts` never reads the lists: alice's standing is unknown
+    // there, and her proof of a payment without a request is recorded. A paying app always
+    // holds `contacts` (Paykit spec 3.1), so this is a payee app.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
-    let got = wallet.receive(None).await.unwrap();
+    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    wallet.receive(None).await.unwrap();
+    let outcome = wallet
+        .pay_without_request(
+            UnrequestedPayment::new(w.bob_id(), btc("0.001")).with_options(
+                PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    let got = shop.receive(None).await.unwrap();
     assert_eq!(got.applied.len(), 1, "{got:?}");
-    assert_eq!(
-        wallet.request(&request).await.unwrap().status,
-        RequestStatus::Open
-    );
-    assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 0);
+    assert_eq!(shop.payee_activity().await.unwrap().len(), 1);
+    assert_eq!(shop.spam_count(&w.alice_id()).await.unwrap(), 0);
 }
 
 /// A transport counting the `GET /allow` reads of the lists, and failing them to connect

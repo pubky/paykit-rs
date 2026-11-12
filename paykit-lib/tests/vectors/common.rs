@@ -157,42 +157,70 @@ impl Keys {
 /// `contacts`, which `allowance_execute` requires.
 pub const EXECUTOR_SCOPES: [&str; 4] = ["pay", "allowance", "allowance_execute", "contacts"];
 
+/// The scopes of Paykit's own phone certificate (Paykit spec 3.1): the Switch set's, with
+/// `contacts`, which `pay` requires.
+pub const PHONE_SCOPES: [&str; 3] = ["pay", "allowance", "contacts"];
+
+/// The scopes of the certificates this set signs itself, by app name: the apps whose Switch
+/// set certificate lacks `contacts`, which Paykit requires beside `pay` and
+/// `allowance_execute` (Paykit spec 3.1).
+pub fn paykit_signed_scopes(app: &str) -> Option<&'static [&'static str]> {
+    match app {
+        "executor" => Some(&EXECUTOR_SCOPES),
+        "phone" => Some(&PHONE_SCOPES),
+        _ => None,
+    }
+}
+
 /// The certificate of an app, by app name: the Switch set's `documents.json` certificate, but
-/// the executor's, which this set signs itself ([`executor_cert`]).
+/// the executor's and the phone's, which this set signs itself ([`paykit_cert`]).
 pub fn cert_doc(app: &str) -> SignedDoc {
+    if paykit_signed_scopes(app).is_some() {
+        return paykit_cert(&Keys::load(), app).signed().clone();
+    }
     let name = match app {
         "cap" => "cap certificate, extension scope ext:paykit-cap",
         "hosted" => "hosted certificate, labelled selling scope request:shop1",
-        "executor" => return executor_cert(&Keys::load()).signed().clone(),
         other => return document(&format!("{other} certificate")),
     };
     document(name)
 }
 
-/// Paykit's own executor certificate: the Switch set's executor certificate with
-/// [`EXECUTOR_SCOPES`] and the permissions they need, signed again by alice's identity key.
-/// The Switch set's holds no `contacts`, so Paykit's verifiers refuse it (Paykit spec 3.1).
-pub fn executor_cert(keys: &Keys) -> AppCert {
-    let app = keys.app("executor");
-    let switch_cert = document("executor certificate");
+/// Paykit's own certificate of `app`, the executor or the phone: the Switch set's certificate
+/// with [`paykit_signed_scopes`] and the permissions they need, signed again by alice's
+/// identity key. The Switch set's hold no `contacts`, so Paykit's verifiers refuse them
+/// (Paykit spec 3.1).
+pub fn paykit_cert(keys: &Keys, app: &str) -> AppCert {
+    let scopes = paykit_signed_scopes(app).unwrap_or_else(|| panic!("{app} isn't Paykit's"));
+    let app = keys.app(app);
+    let switch_cert = document(&format!("{} certificate", app.name));
     let mut body = AppCert::verify(&switch_cert, &app.identity)
         .unwrap()
         .body()
         .clone();
-    let scopes: Vec<String> = EXECUTOR_SCOPES.iter().map(|s| (*s).to_owned()).collect();
+    let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
     body.permissions =
         pubky_switch_core::scopes::permission_names(&paykit_lib::scopes::permissions_for(&scopes));
     body.scopes = scopes;
     AppCert::issue(keys.identity(&app.identity), body).unwrap()
 }
 
+/// Paykit's own executor certificate ([`paykit_cert`]).
+pub fn executor_cert(keys: &Keys) -> AppCert {
+    paykit_cert(keys, "executor")
+}
+
+/// Paykit's own phone certificate ([`paykit_cert`]).
+pub fn phone_cert(keys: &Keys) -> AppCert {
+    paykit_cert(keys, "phone")
+}
+
 /// The scopes of an app's certificate in this set: the Switch set's `keys.json` scopes, and
-/// the executor's [`EXECUTOR_SCOPES`].
+/// [`paykit_signed_scopes`] for the certificates this set signs itself.
 pub fn scopes_of(app: &App) -> Vec<String> {
-    if app.name == "executor" {
-        EXECUTOR_SCOPES.iter().map(|s| (*s).to_owned()).collect()
-    } else {
-        app.scopes.clone()
+    match paykit_signed_scopes(&app.name) {
+        Some(scopes) => scopes.iter().map(|s| (*s).to_owned()).collect(),
+        None => app.scopes.clone(),
     }
 }
 

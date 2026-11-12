@@ -148,7 +148,7 @@ impl ExtensionPrefix {
 /// One of Paykit's scopes (Paykit spec 3.1).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PaykitScope {
-    /// `pay`: act as payer.
+    /// `pay`: act as payer; requires `contacts`, so a paying app reads the deny list.
     Pay,
     /// `request`: act as payee, under every label.
     Request,
@@ -280,10 +280,10 @@ pub fn holds_other_protocol(scopes: &[String]) -> bool {
 ///
 /// Paykit refuses a malformed `ext:` or `request:` name (such as `ext:paykit`), more than 8
 /// extension scopes, more than 8 labelled selling scopes, and a scope without the scopes it
-/// requires: `allowance_execute` without `allowance`, `pay` and `contacts`, `manage_contacts`
-/// without `contacts`. Its bounds count only its own scopes, whatever another protocol's scopes
-/// beside them (Switch wire 3.1 "Several protocols"). It ignores other names it doesn't
-/// know.
+/// requires: `pay` without `contacts`, `allowance_execute` without `allowance`, `pay` and
+/// `contacts`, and `manage_contacts` without `contacts`. Its bounds count only its own
+/// scopes, whatever another protocol's scopes beside them (Switch wire 3.1 "Several
+/// protocols"). It ignores other names it doesn't know.
 ///
 /// # Errors
 ///
@@ -312,6 +312,11 @@ pub fn check_scopes(scopes: &[String]) -> Result<()> {
     // to a counterparty on it (Paykit spec 8.1).
     if has("allowance_execute") && !(has("allowance") && has("pay") && has("contacts")) {
         return invalid("Paykit spec 3.1: allowance_execute requires allowance, pay and contacts");
+    }
+    // Paykit spec 3.1: every paying app reads the deny list, so it refuses to pay a
+    // counterparty the user blocked, whichever app pays.
+    if has("pay") && !has("contacts") {
+        return invalid("Paykit spec 3.1: pay requires contacts");
     }
     if has("manage_contacts") && !has("contacts") {
         return invalid("Paykit spec 3.1: manage_contacts requires contacts");
@@ -522,6 +527,8 @@ mod tests {
 
     #[test]
     fn test_scopes_accept_valid_certificates() {
+        check_scopes(&owned(&["pay", "contacts"])).unwrap();
+        check_scopes(&owned(&["pay", "allowance", "contacts"])).unwrap();
         check_scopes(&owned(&["pay", "contacts", "manage_contacts"])).unwrap();
         check_scopes(&owned(&[
             "pay",
@@ -559,6 +566,10 @@ mod tests {
                 owned(&["allowance_execute", "allowance", "pay"]),
                 "requires allowance, pay and contacts",
             ),
+            (owned(&["pay"]), "pay requires contacts"),
+            (owned(&["pay", "allowance"]), "pay requires contacts"),
+            (owned(&["pay", "request"]), "pay requires contacts"),
+            (owned(&["pay", "manage_contacts"]), "pay requires contacts"),
             (owned(&["manage_contacts"]), "requires contacts"),
         ] {
             let error = check_scopes(&scopes).unwrap_err().to_string();
@@ -568,7 +579,7 @@ mod tests {
 
     #[test]
     fn test_scopes_requested_refuses_unknown_names_and_request_beside_a_label() {
-        check_requested_scopes(&owned(&["request:shop1", "pay"])).unwrap();
+        check_requested_scopes(&owned(&["request:shop1", "pay", "contacts"])).unwrap();
         assert!(check_requested_scopes(&owned(&["future_scope"])).is_err());
         assert!(check_requested_scopes(&owned(&["pay:x"])).is_err());
         assert!(check_requested_scopes(&owned(&["request", "request:shop1"])).is_err());
@@ -665,8 +676,16 @@ mod tests {
             error.contains("lack one that its Paykit scopes need"),
             "{error}"
         );
+        // `claims.write`, which `pay` needs, is missing.
+        let error = check_certificate(&cert(
+            &["pay", "contacts", "chat"],
+            &[Permission::ClaimsRead, LISTS_READ, ADD],
+        ))
+        .unwrap_err()
+        .to_string();
         assert!(
-            check_certificate(&cert(&["pay", "chat"], &[Permission::ClaimsRead, ADD])).is_err()
+            error.contains("lack one that its Paykit scopes need"),
+            "{error}"
         );
     }
 
@@ -710,6 +729,8 @@ mod tests {
                 vec!["allowance_execute", "allowance", "pay", "chat"],
                 "requires allowance, pay and contacts",
             ),
+            (vec!["pay", "chat"], "pay requires contacts"),
+            (vec!["pay", "allowance", "chat"], "pay requires contacts"),
             (vec!["manage_contacts", "chat"], "requires contacts"),
         ] {
             let all = [
@@ -727,6 +748,36 @@ mod tests {
         let mut exts: Vec<String> = (1..=9).map(|i| format!("ext:e-{i}")).collect();
         exts.push("chat".into());
         assert!(check_scopes(&exts).is_err());
+    }
+
+    #[test]
+    fn test_scopes_certificate_pay_without_contacts_refused() {
+        // A paying app reads the deny list, so it never pays a counterparty the user
+        // blocked (Paykit spec 3.1). `permissions` are exactly what the scopes need, so only
+        // the rule refuses it.
+        for scopes in [&["pay"][..], &["pay", "allowance"], &["pay", "request"]] {
+            let permissions = permissions_for(&owned(scopes));
+            let error = check_certificate(&cert(scopes, &permissions))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("pay requires contacts"),
+                "{scopes:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_scopes_certificate_pay_with_contacts_accepted() {
+        for scopes in [
+            &["pay", "contacts"][..],
+            &["pay", "allowance", "contacts"],
+            &["pay", "request", "contacts", "manage_contacts"],
+        ] {
+            let permissions = permissions_for(&owned(scopes));
+            assert!(permissions.contains(&LISTS_READ), "{scopes:?}");
+            check_certificate(&cert(scopes, &permissions)).unwrap();
+        }
     }
 
     #[test]
