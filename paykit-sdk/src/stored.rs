@@ -122,18 +122,27 @@ pub(crate) fn given_up_write(
     let msg_id = &stored.message().msg_id;
     crate::state::local_put(
         &key::message_notice(&sender, msg_id),
-        &given_up_notice(stored, service.unwrap_or(0)),
+        &given_up_notice(
+            stored,
+            service.unwrap_or(0),
+            crate::notices::GivenUpOrigin::ReceiveStep,
+        ),
     )
 }
 
-/// The host's notice that `stored` was given up, raised at `at`, service time.
-fn given_up_notice(stored: &StoredMessage, at: u64) -> KeptNotice {
+/// The host's notice that `stored`, which no entry keeps stored, was given up at `origin`,
+/// raised at `at`, service time.
+fn given_up_notice(
+    stored: &StoredMessage,
+    at: u64,
+    origin: crate::notices::GivenUpOrigin,
+) -> KeptNotice {
     KeptNotice::given_up(
         stored.sender(),
         &stored.message().msg_id,
         named_request(stored),
         at,
-        None,
+        crate::notices::GivenUpFrom::Origin(origin),
     )
 }
 
@@ -520,12 +529,13 @@ impl Paykit {
                                     &note.msg_id,
                                     named_request(&stored),
                                     at,
-                                    Some(handle),
+                                    crate::notices::GivenUpFrom::Stored(handle),
                                 );
                                 tx.put(&notice, &given_up)?;
                             }
                             Some(mut kept) if kept.stored.as_ref() != Some(&handle) => {
                                 kept.stored = Some(handle);
+                                kept.origin = None;
                                 tx.put(&notice, &kept)?;
                             }
                             Some(_) => {}
@@ -557,15 +567,19 @@ impl Paykit {
         Ok(())
     }
 
-    /// Give up `stored`, kept at `kept_key`: the kept copy goes and the host is told
-    /// ([`NoticeKind::MessageGivenUp`]), in one commit. The notice is raised once.
+    /// Give up `stored`, a payer's reply kept at `kept_key` (`pr/`): the kept copy goes and
+    /// the host is told ([`NoticeKind::MessageGivenUp`], from a kept reply, with no entry's
+    /// handle), in one commit. The notice is raised once.
     pub(crate) async fn give_up(&mut self, kept_key: &str, stored: &StoredMessage) -> Result<()> {
         let mut tx = Tx::default();
         tx.delete(kept_key);
         let notice = key::message_notice(&stored.sender(), &stored.message().msg_id);
         if self.kept_notice(&notice).await?.is_none() {
             let at = self.service_time().unwrap_or(0);
-            tx.put(&notice, &given_up_notice(stored, at))?;
+            tx.put(
+                &notice,
+                &given_up_notice(stored, at, crate::notices::GivenUpOrigin::KeptReply),
+            )?;
         }
         self.local_commit(tx).await
     }
