@@ -535,6 +535,11 @@ impl Paykit {
         if hold.asks_queued {
             return Ok(());
         }
+        // An `allowances` record waiting for its key may hold an open Allowance: the asks
+        // are queued once none waits, so none is left out for good.
+        if self.allowances_await_key().await? {
+            return Ok(());
+        }
         let mut counterparties = std::collections::BTreeSet::new();
         for view in self.requests().await? {
             let open = !matches!(
@@ -628,7 +633,7 @@ fn unanswered(error: &PaykitError) -> bool {
 }
 
 /// A failure of this app's own: its store or an alarm.
-fn local_failure(error: &PaykitError) -> bool {
+pub(crate) fn local_failure(error: &PaykitError) -> bool {
     matches!(error, PaykitError::Client(client) if matches!(client.unkept(), AppError::Store(_) | AppError::Alarm(_)))
 }
 

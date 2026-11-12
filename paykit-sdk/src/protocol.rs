@@ -447,7 +447,7 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::AllowanceEnd(_) => {
+            StateKey::AllowanceEnd(_) | StateKey::Conflict(_) => {
                 check_kept_end(&key, &value, &own, &record_key)?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
@@ -655,26 +655,22 @@ fn check_kept_reply(
     Ok(())
 }
 
-/// A counterparty's Allowance end kept as the stop (`ae/<record key>`, Paykit spec 8.3): it
-/// verifies for `own`, is a `paykit.allowance_end`, and is kept under the record key of the
-/// Allowance record it names.
+/// A stop kept for an Allowance (Paykit spec 8.3): a counterparty's end (`ae/<record key>`)
+/// or a conflicting proposal or response (`cf/<record key>`). It verifies for `own`, is of
+/// its family's kinds, and is kept under the record key of the Allowance record it names:
+/// the check every runtime read makes too ([`crate::allowances::kept_stop_at`]).
 fn check_kept_end(
     key: &[u8],
     value: &[u8],
     own: &[u8; 32],
     record_key: &impl Fn(&RecordTarget) -> Result<[u8; 32], String>,
 ) -> Result<(), String> {
-    let bad = || String::from("Paykit spec 8.3: a kept Allowance end in the backup doesn't verify");
+    let bad =
+        || String::from("Paykit spec 8.3: a kept Allowance stop in the backup doesn't verify");
     let kept = state::decode::<KeptMessage>(value).map_err(|_| bad())?;
-    let end = kept.stored(own).map_err(|_| bad())?;
-    let Body::AllowanceEnd(reply) = end.body() else {
-        return Err(bad());
-    };
-    let target = allowance_target(&end.sender(), &reply.allowance_id);
-    if key != key::allowance_end(&record_key(&target)?).as_bytes() {
-        return Err(bad());
-    }
-    Ok(())
+    crate::allowances::kept_stop_at(key, &kept, own, record_key)?
+        .map(|_| ())
+        .ok_or_else(bad)
 }
 
 /// A list held over a record that didn't read (`lh/<record key>`, Paykit wire 5.4): it

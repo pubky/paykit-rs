@@ -442,6 +442,17 @@ pub(crate) fn held_or_unlisted_at(
 /// same read took is held too. The entry is held as for a store unavailable for now (Paykit
 /// spec 17, question 27), and read again at a later read.
 pub(crate) fn hold_while_unlisted(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<(), Fail> {
+    if side_unlisted_in(cx, side)? {
+        return Err(Fail::Store(StoreFailure::unavailable(
+            StoreError::Unavailable,
+        )));
+    }
+    Ok(())
+}
+
+/// Whether the app's copy of `side`'s records may lack records, read in the receive step
+/// ([`crate::hold::side_unlisted`]).
+pub(crate) fn side_unlisted_in(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<bool, Fail> {
     let marked = cx.local_get(key::RECORDS_UNLISTED.as_bytes())?.is_some()
         || cx.local_get(key::MISSED_UNLISTED.as_bytes())?.is_some();
     let listed = match cx.local_get(key::LISTED_CERT.as_bytes())? {
@@ -451,12 +462,12 @@ pub(crate) fn hold_while_unlisted(cx: &ReceiveContext<'_>, side: RecordSide) -> 
             Some(AppCert::verify(&signed, &cx.identity()).map_err(|_| Fail::corrupt())?)
         }
     };
-    if crate::hold::side_unlisted(side, marked, listed.as_ref(), cx.cert()) {
-        return Err(Fail::Store(StoreFailure::unavailable(
-            StoreError::Unavailable,
-        )));
-    }
-    Ok(())
+    Ok(crate::hold::side_unlisted(
+        side,
+        marked,
+        listed.as_ref(),
+        cx.cert(),
+    ))
 }
 
 /// Place `stored` in its `role` of the record at `target`, in the effect's batch, built on
@@ -535,18 +546,38 @@ pub(crate) fn make_room_for_stop(
 ) -> Result<(), Fail> {
     let mut kept = Vec::new();
     let mut names = Vec::new();
-    for prefix in [key::KEPT_CANCELLATIONS, key::ALLOWANCE_ENDS] {
+    let own = cx.identity();
+    for (prefix, side) in [
+        (key::KEPT_CANCELLATIONS, RecordSide::Payer),
+        (key::ALLOWANCE_ENDS, RecordSide::Allowances),
+    ] {
+        // While the copy of a side may lack records, its stops are judged from no copy:
+        // none of them is counted or dropped.
+        if side_unlisted_in(cx, side)? {
+            continue;
+        }
         for (bytes, value) in cx.local_scan(prefix.as_bytes())? {
+            let stop = state::decode::<KeptMessage>(&value).map_err(|_| Fail::corrupt())?;
             let (record, allowance) = match crate::state::StateKey::parse(&bytes) {
                 Some(crate::state::StateKey::KeptCancellation(record)) => (record, false),
-                Some(crate::state::StateKey::AllowanceEnd(record)) => (record, true),
+                Some(crate::state::StateKey::AllowanceEnd(record)) => {
+                    crate::allowances::kept_stop_at(&bytes, &stop, &own, |t| cx.record_key(t))?
+                        .ok_or_else(Fail::corrupt)?;
+                    (record, true)
+                }
                 _ => return Err(Fail::corrupt()),
             };
-            let stop = state::decode::<KeptMessage>(&value).map_err(|_| Fail::corrupt())?;
-            if holds_record(cx.record_at(&record)?.map(|held| held.content).as_ref()) {
-                continue;
-            }
-            if allowance && crate::allowances::keeps_stored_message(cx, &record)? {
+            let content = cx.record_at(&record)?.map(|held| held.content);
+            // A request's stop counts while its record isn't held. An Allowance's counts
+            // unless its record is held without a value that reads, which may yet open, or a
+            // stored message of the Allowance waits to be written.
+            let counted = if allowance {
+                !matches!(content, Some(RecordContent::Unreadable(_)))
+                    && !crate::allowances::keeps_stored_message(cx, &record)?
+            } else {
+                !holds_record(content.as_ref())
+            };
+            if !counted {
                 continue;
             }
             kept.push((stop.sender(), stop.accepted_at().unwrap_or(0)));

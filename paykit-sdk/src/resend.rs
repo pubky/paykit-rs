@@ -135,6 +135,16 @@ impl Paykit {
         if missed.is_empty() {
             return Ok(sent);
         }
+        // The open Allowances are read from the copy: while it may lack records, or an
+        // `allowances` record waits for its key, the marks stay for a later receive rather
+        // than ask from a copy that leaves some out.
+        if self
+            .side_unlisted(crate::hold::RecordSide::Allowances)
+            .await?
+            || self.allowances_await_key().await?
+        {
+            return Ok(sent);
+        }
         let from = missed.iter().map(|(_, from)| *from).min().unwrap_or(0);
         let mut peers: std::collections::BTreeSet<[u8; 32]> = self
             .local_scan::<u64>(key::PEERS)

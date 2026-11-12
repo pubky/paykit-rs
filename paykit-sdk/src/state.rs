@@ -51,6 +51,7 @@
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
 //! | `ae/<record key>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection (`allowances.rs`, Paykit spec 8.3) | |
 //! | `ac/<record key>` | the consent list: an Allowance this app may pay under, or removed from it for good (`allowances.rs`, Paykit spec 8.3); a restore marks every entry to confirm again | |
+//! | `cf/<record key>` | a second, different proposal or response of an Allowance, kept as the stop until the Allowance record holds `conflicted` (`allowances.rs`, Paykit spec 8.3) | |
 //! | `mc` | set by a `missed` item: every entry of the consent list is to be confirmed again, as after a restore; nothing is consented while it is set, and the next receive marks each entry so and clears it (`allowances.rs`); never restored | |
 //! | `en/<msg_id>` | the executor app an `executor_notice` is wrapped to, kept with the batch that queues it | |
 
@@ -215,11 +216,18 @@ pub(crate) mod key {
     pub(crate) const DROPPED_REPLIES: &str = "pd/";
     pub(crate) const DROPPED_UNVERIFIED: &str = "ud/";
     pub(crate) const ALLOWANCE_ENDS: &str = "ae/";
+    pub(crate) const CONFLICTS: &str = "cf/";
     pub(crate) const CONSENTS: &str = "ac/";
 
     /// A counterparty's end of the Allowance whose record is `record_key`, kept as the stop.
     pub(crate) fn allowance_end(record_key: &[u8; 32]) -> String {
         format!("{ALLOWANCE_ENDS}{}", b64(record_key))
+    }
+
+    /// A conflicting proposal or response of the Allowance whose record is `record_key`,
+    /// kept as the stop.
+    pub(crate) fn conflict(record_key: &[u8; 32]) -> String {
+        format!("{CONFLICTS}{}", b64(record_key))
     }
 
     /// The consent list's entry of the Allowance whose record is `record_key`.
@@ -417,6 +425,8 @@ pub(crate) enum StateKey {
     AllowanceEnd([u8; 32]),
     /// `ac/<record key>`: an entry of the consent list.
     Consent([u8; 32]),
+    /// `cf/<record key>`: a conflicting proposal or response kept as the stop.
+    Conflict([u8; 32]),
     /// `en/<msg_id>`: the executor app an `executor_notice` is wrapped to.
     NoticeTarget(String),
 }
@@ -497,6 +507,7 @@ impl StateKey {
                     "spam" => Self::Spam(b64_32(rest)?),
                     "ae" => Self::AllowanceEnd(b64_32(rest)?),
                     "ac" => Self::Consent(b64_32(rest)?),
+                    "cf" => Self::Conflict(b64_32(rest)?),
                     "en" => Self::NoticeTarget(msg_id(rest)?),
                     "rs" => {
                         let (requester, id) = rest.split_once('/')?;
@@ -744,6 +755,7 @@ mod tests {
             ),
             (key::allowance_end(&pubky), StateKey::AllowanceEnd(pubky)),
             (key::consent(&pubky), StateKey::Consent(pubky)),
+            (key::conflict(&pubky), StateKey::Conflict(pubky)),
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),
         ];
         for (built, family) in cases {
@@ -770,6 +782,7 @@ mod tests {
             "nt/BQUFBQUFBQUFBQUFBQUFBQ",
             "ae/not-base64",
             "ac/",
+            "cf/not-base64",
             "en/not-a-uuid",
         ] {
             assert_eq!(StateKey::parse(key.as_bytes()), None, "{key}");

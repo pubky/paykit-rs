@@ -45,6 +45,11 @@ pub enum Refusal {
     /// 8.3).
     #[error("Paykit spec 8.3: the Allowance has ended")]
     AllowanceEnded,
+    /// The Allowance is conflicted: a second, different proposal or response came, so
+    /// nothing is answered, ended, granted or paid under it, for good (Paykit spec 8.3,
+    /// "Conflicted").
+    #[error("Paykit spec 8.3: the Allowance is conflicted")]
+    AllowanceConflicted,
     /// The obligation is paid: its claim is SETTLED, or its record holds the proof of a
     /// payment (Paykit spec 7.2).
     #[error("already paid")]

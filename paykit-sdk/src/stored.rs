@@ -374,13 +374,22 @@ impl Paykit {
             {
                 Some(Place::Allowance)
             }
+            // An end's stop is kept at once over a record the app holds, as the receive step
+            // keeps it. One for an Allowance not held is new state: the entry's own step,
+            // which the client tries again at each read, keeps it under the spam rule and the
+            // bounds, so none is kept from the note.
             Body::AllowanceEnd(reply) if self.holds("allowance") => {
                 let target = crate::allowances::allowance_target(&sender, &reply.allowance_id);
-                let stop = key::allowance_end(&self.app.record_key(&target)?);
+                let record = self.app.record_key(&target)?;
+                let content = self
+                    .app
+                    .shared_record(&record)
+                    .await?
+                    .map(|held| held.content);
+                let stop = key::allowance_end(&record);
                 let kept = self.local_get::<KeptMessage>(&stop).await?.is_some();
-                Some(Place::Stop(
-                    (!kept).then(|| (stop, KeptMessage::of(stored))),
-                ))
+                let keep = !kept && crate::receive::holds_record(content.as_ref());
+                Some(Place::Stop(keep.then(|| (stop, KeptMessage::of(stored)))))
             }
             _ => None,
         })
@@ -405,10 +414,7 @@ impl Paykit {
                         }
                         Placed::Done
                     }
-                    Some(Place::Allowance) => self
-                        .place_allowance_note(stored.clone())
-                        .await
-                        .unwrap_or(Placed::Not),
+                    Some(Place::Allowance) => self.place_allowance_note(stored.clone()).await?,
                     Some(Place::Record {
                         target,
                         role,
