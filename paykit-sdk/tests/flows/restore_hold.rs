@@ -299,6 +299,17 @@ fn missed(w: &World) {
     w.alice.switch().push_missed(1, now - 1_000, now);
 }
 
+/// Fail Paykit's own listing at the end of the next receive, after a `missed` item: the
+/// client's listing after the item, of the wallet's two collections, goes through first.
+fn fail_paykit_listing(w: &World) {
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "records?collection".into(),
+            after: 2,
+        });
+}
+
 #[tokio::test]
 async fn test_restore_hold_missed_item_holds_an_open_request_until_the_user_confirms() {
     // A payee's cancellation may be among the entries a `missed` item tells of: every open
@@ -428,22 +439,16 @@ async fn test_restore_hold_missed_item_absence_decides_nothing_until_the_listing
 
 #[tokio::test]
 async fn test_restore_hold_missed_item_mark_stays_until_paykit_lists() {
-    // Paykit's listing at the end of the receive fails: the mark stays past the client's own
-    // listing at the next read's start, and calls that only read are refused until a listing
-    // of Paykit's own ends it.
+    // The client lists right after the item, and Paykit's listing at the end of the receive
+    // fails: the mark stays past the client's listing, and calls that only read are refused
+    // until a listing of Paykit's own ends it.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     wallet.receive(None).await.unwrap();
     missed(&w);
     request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
-    w.alice
-        .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
-            path: "records?collection".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
-            current: serde_json::Value::Null,
-        });
+    fail_paykit_listing(&w);
     let got = wallet.receive(None).await.unwrap();
     assert!(got.applied.is_empty(), "{got:?}");
     assert!(got.records_unlisted.is_some(), "{got:?}");
@@ -488,13 +493,7 @@ async fn test_restore_hold_missed_item_keeps_a_stop_past_30_days_until_paykit_li
     w.clock
         .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
     missed(&w);
-    w.alice
-        .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
-            path: "records?collection".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
-            current: serde_json::Value::Null,
-        });
+    fail_paykit_listing(&w);
     let got = wallet.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
     assert_eq!(stops(&wallet).await, 1);
