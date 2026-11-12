@@ -1712,3 +1712,81 @@ async fn test_periods_accept_and_details_kept_reported_sent() {
     assert_eq!(view.periods[0].details.len(), 1);
     assert_eq!(view.periods[0].details[0].msg_id, sent.msg_id);
 }
+
+#[tokio::test]
+async fn test_periods_proof_naming_details_not_held_kept_not_dropped() {
+    // A proof naming period details the shop doesn't hold is taken and kept, to be placed
+    // once the period record holds them: placed now, the record wouldn't bind.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let body = period_proof(&w, shop.app_id(), january()).await;
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash, [1; 32]],
+        body,
+    );
+    let summary = shop.receive(None).await.unwrap();
+    assert!(received(&summary, "paykit.payment_proof"), "{summary:?}");
+    shop.receive(None).await.unwrap();
+    let sale = &shop.payee_activity().await.unwrap()[0];
+    assert!(sale.periods.is_empty(), "{sale:?}");
+}
+
+#[tokio::test]
+async fn test_periods_details_refused_for_good_dropped_once_the_payee_cancelled() {
+    // The details' record write is refused for good and kept to write later; the payee's
+    // cancellation that follows is kept as a stop. The later write takes the details with
+    // no effect: a subscription that runs no more has no periods to pay.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    shop.send_period_details(
+        &sale,
+        details(january(), "lnbc1p", w.clock.now_ms() + DAY_MS),
+    )
+    .await
+    .unwrap();
+    shop.cancel_sent_request(&sale, None).await.unwrap();
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            current: serde_json::Value::Null,
+        });
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(
+        summary
+            .report
+            .events
+            .iter()
+            .any(|e| matches!(e, AppEvent::EffectRefused { .. })),
+        "{summary:?}"
+    );
+    wallet.receive(None).await.unwrap();
+    let view = wallet.request(&request).await.unwrap();
+    assert_eq!(view.status, RequestStatus::Cancelled);
+    assert!(view.periods.is_empty(), "{view:?}");
+}
+
+#[tokio::test]
+async fn test_periods_accept_after_another_app_accepted_unseen_refused_as_subscribed() {
+    // The phone accepts; the wallet, whose copy doesn't show that yet, accepts too: its
+    // batch meets the newer version, and the record read again shows the subscription.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let request = requested(&w, &mut shop, &mut wallet).await;
+    phone.receive(None).await.unwrap();
+    phone.accept_subscription(&request).await.unwrap();
+    let refused = wallet.accept_subscription(&request).await.unwrap_err();
+    assert_eq!(refusal(&refused), Refusal::Subscribed);
+}
