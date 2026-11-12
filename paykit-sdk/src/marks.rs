@@ -255,7 +255,9 @@ impl Paykit {
                 let mark = read_mark(family, &key, &value)?;
                 if mark.expired(service) {
                     self.local_delete(&key).await?;
-                } else if mark.due {
+                } else if mark.due && !self.denied_as_last_read(&mark.sender).await? {
+                    // A sender blocked is asked nothing while it is (Paykit spec 8.1); its
+                    // mark stays until it expires.
                     asked = asked.saturating_add(self.ask_on_mark(family, &key, mark).await?);
                 }
             }

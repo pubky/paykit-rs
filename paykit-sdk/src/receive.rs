@@ -1543,7 +1543,10 @@ impl Paykit {
     }
 
     /// Whether the copy of the deny list kept from the last read holds `pubky`, at an app
-    /// holding `contacts`, for the views, which read nothing from the switch.
+    /// holding `contacts`, for the views, which read nothing from the switch, and for the
+    /// re-sends, which send a blocked counterparty nothing. The copy holds this app's own
+    /// blocks at once, a block kept unanswered included ([`Paykit::block`]), and a receive
+    /// reads it again first once it is [`LISTS_REFRESH_MS`] old.
     pub(crate) async fn denied_as_last_read(&self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
         if !reads_lists(self.app.cert().scopes()) {
             return Ok(false);
@@ -1628,7 +1631,9 @@ impl Paykit {
     pub(crate) async fn answer_kept_resends(&mut self) -> crate::error::Result<u64> {
         let mut answered = 0u64;
         for (rest, queued) in self.local_scan::<QueuedAnswer>(key::ANSWERS).await? {
-            if let Ok(request) = ResendRequest::from_body(&queued.body) {
+            // A requester blocked since the request was kept is sent nothing (Paykit spec 8.1).
+            let blocked = self.denied_as_last_read(&queued.requester).await?;
+            if let (false, Ok(request)) = (blocked, ResendRequest::from_body(&queued.body)) {
                 self.answer_resend(&queued.requester, &queued.cert, &request)
                     .await?;
                 answered = answered.saturating_add(1);
