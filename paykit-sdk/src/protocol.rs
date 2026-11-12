@@ -371,7 +371,8 @@ pub(crate) fn restore_paykit_layer(
             // restores again, and the note is kept anew then (`stored.rs`). A taken event's
             // mark isn't restored: the client tells the protocol again of the events a restore
             // carries, under the same IDs in place or new ones elsewhere, and taking an event
-            // again changes nothing but may send a `resend_request` twice.
+            // again changes nothing: a dropped entry's time is already in its sender's mark,
+            // which asks on its own cadence (`marks.rs`).
             StateKey::RestoreHold
             | StateKey::HoldConfirmed(_)
             | StateKey::RecordsUnlisted
