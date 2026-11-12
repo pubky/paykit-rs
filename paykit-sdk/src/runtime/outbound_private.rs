@@ -174,17 +174,14 @@ fn pending_outbound_counterparties_from_snapshot(
     }
 
     message_candidates.retain(|counterparty| {
-        if snapshot.linked_peers.get(counterparty).is_some_and(|peer| {
+        !snapshot.linked_peers.get(counterparty).is_some_and(|peer| {
             matches!(
                 peer.state,
                 LinkedPeerState::Linking
                     | LinkedPeerState::RecoveryRequired
                     | LinkedPeerState::Blocked
             )
-        }) {
-            return false;
-        }
-        true
+        })
     });
     message_candidates.extend(cleanup_candidates);
     let mut counterparties = message_candidates.into_iter().collect::<Vec<_>>();
