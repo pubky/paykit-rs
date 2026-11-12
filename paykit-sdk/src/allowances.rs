@@ -897,14 +897,14 @@ impl Paykit {
     // The consent list
 
     /// Whether this app's consent list holds the Allowance at `record`, confirmed since any
-    /// restore, with no stop kept for it (Paykit spec 8.3, "Executor").
+    /// restore (Paykit spec 8.3, "Executor"). A kept stop removes the entry in the commit
+    /// that keeps it.
     pub(crate) async fn consents(&self, record: &[u8; 32]) -> Result<bool> {
         let held = self.local_get::<Consent>(&key::consent(record)).await?;
         Ok(held
             == Some(Consent::Held {
                 confirm_again: false,
-            })
-            && !self.allowance_stopped(record).await?)
+            }))
     }
 
     /// Remove from the consent list, for good, every Allowance whose record this app holds

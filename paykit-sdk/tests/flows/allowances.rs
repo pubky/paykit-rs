@@ -247,7 +247,9 @@ async fn test_allowances_end_naming_another_proposal_dropped() {
             .cloned()
             .unwrap(),
     );
-    wallet.receive(None).await.unwrap();
+    // Dropped at the receive step: no stop is kept from it, not even for a moment.
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(!received(&summary, "paykit.allowance_end"), "{summary:?}");
     assert_eq!(
         wallet.allowance(&mine).await.unwrap().status,
         AllowanceStatus::Accepted
@@ -273,7 +275,9 @@ async fn test_allowances_withdrawal_crossing_the_acceptance_ends_it_on_both_side
     );
     let end = value(&wallet, &mine).await["end"].clone();
     assert!(!end.is_null());
-    shop.receive(None).await.unwrap();
+    // Bob gets the acceptance and alice's own end.
+    let summary = shop.receive(None).await.unwrap();
+    assert!(received(&summary, "paykit.allowance_end"), "{summary:?}");
     assert_eq!(
         shop.allowance(&theirs).await.unwrap().status,
         AllowanceStatus::Ended
