@@ -144,6 +144,7 @@ pub(crate) fn effect(
         Body::PaymentRequest(_) if pay => {
             let target =
                 ActivityTarget::payer(natural_key::request_record(&sender, &stored.hash()));
+            wait_for_key(cx, &target)?;
             if held_value(cx, &target)?.is_some() || admits_new_state(cx, &sender, &scopes)? {
                 place(cx, &target, sender, Role::Request, stored)?;
                 note_peer(cx, &sender, stored)?;
@@ -315,6 +316,26 @@ fn held_value(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<Option
         .and_then(|held| held.content.value().map(<[u8]>::to_vec)))
 }
 
+/// Hold the entry while the record at `target` holds a value not open only for want of its
+/// scope key (Switch spec 3.5), as the client holds one whose write it can't seal yet: such
+/// a value opens once the key comes, so it is neither absent nor a value that doesn't read,
+/// and a message about it is read again then. Written over now, it would lose what it holds
+/// unseen. The app may hold the current epoch's key and not the one the value is sealed at,
+/// as with a bundle that came in parts, so the context's own wait doesn't cover it. The
+/// entry is held as for a store unavailable for now, the way the receive step holds one
+/// under a certificate Paykit refuses.
+fn wait_for_key(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<(), Fail> {
+    let waits = cx
+        .record(&target.record_target())?
+        .is_some_and(|held| crate::hold::awaits_key(&held.content));
+    if waits {
+        return Err(Fail::Store(StoreFailure::unavailable(
+            StoreError::Unavailable,
+        )));
+    }
+    Ok(())
+}
+
 /// Place `stored` in its `role` of the record at `target`, in the effect's batch, built on
 /// the version the app holds. A record that doesn't read is written again with the message
 /// (the reader doesn't act on an invalid record, Paykit wire 5.3). Nothing is written when
@@ -326,6 +347,7 @@ fn place(
     role: Role,
     stored: &StoredMessage,
 ) -> Result<(), Fail> {
+    wait_for_key(cx, target)?;
     let own = cx.identity();
     let side = target.side.side();
     let current = held_value(cx, target)?;
@@ -396,6 +418,7 @@ fn payer_reply(
             // The request's record goes in the batch that queues the request, so it comes
             // before any reply in the feed: a reply to a request this app holds no record of
             // isn't about one of its scopes' requests.
+            wait_for_key(cx, &target)?;
             if held_value(cx, &target)?.is_none() {
                 return Ok(false);
             }
@@ -418,6 +441,7 @@ fn payer_reply(
                 None,
             );
             // A proof no held record matches is new state, which the spam rule gates.
+            wait_for_key(cx, &target)?;
             if held_value(cx, &target)?.is_some() || admits_new_state(cx, &sender, scopes)? {
                 place(cx, &target, sender, role, stored)?;
             }
@@ -442,6 +466,7 @@ fn receipt_effect(
     };
     // The payer matches a receipt through its record, whose counterparty must be the
     // receipt's sender (Paykit spec 8.4).
+    wait_for_key(cx, &target)?;
     let Some(value) = held_value(cx, &target)? else {
         return Ok(());
     };
