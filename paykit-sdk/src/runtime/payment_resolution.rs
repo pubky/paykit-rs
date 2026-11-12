@@ -212,11 +212,17 @@ pub(in crate::runtime) fn public_payment_list_fits_resolution_budget(
             <= PUBLIC_PAYMENT_RESOLUTION_MAX_PAYLOAD_BYTES
 }
 
-pub(in crate::runtime) async fn load_public_payment_lists_with_budget<F, Fut>(
+/// Load each App's Payment List within the shared resolution budget.
+/// `ensure_read_may_start` runs before each read starts; its error stops
+/// loading, so no further read starts.
+pub(in crate::runtime) async fn load_public_payment_lists_with_budget<G, GFut, F, Fut>(
     app_ids: Vec<paykit_lib::PaykitAppId>,
+    mut ensure_read_may_start: G,
     mut fetch: F,
-) -> PublicPaymentListLoad
+) -> Result<PublicPaymentListLoad>
 where
+    G: FnMut() -> GFut,
+    GFut: Future<Output = Result<()>>,
     F: FnMut(paykit_lib::PaykitAppId, usize, usize, usize) -> Fut,
     Fut: Future<
         Output = (
@@ -240,6 +246,7 @@ where
                 .push(public_payment_endpoint_resource_limit_failure(app_id));
             continue;
         };
+        ensure_read_may_start().await?;
         let (result, remaining_endpoints, remaining_requests, remaining_payload_bytes) = fetch(
             app_id.clone(),
             max_endpoints,
@@ -277,7 +284,7 @@ where
         load.loaded_app_count += 1;
         load.payment_lists.push((app_id, payment_list));
     }
-    load
+    Ok(load)
 }
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
@@ -709,11 +716,13 @@ where
     /// Requests with bound Payment Endpoints have no public fallback; use
     /// [`Self::resolve_private_payment_request`] for their private destinations.
     /// Returns `Policy` while the counterparty is `Blocked`, before any App
-    /// Registry or Payment Endpoint read. The block is rechecked at each step
-    /// that leaves the SDK (the Pubky public storage provider call, App
-    /// Registry and Payment Endpoint reads, payment adapter selection, and
-    /// target building) and before the result is returned, so a block that
-    /// lands during resolution also returns `Policy`.
+    /// Registry or Payment Endpoint read. The block is rechecked after each
+    /// Pubky public storage provider call, before each App Registry or
+    /// Payment List read, before payment adapter selection and target
+    /// building, and before the result is returned. A block that lands during
+    /// a provider call or a read therefore returns `Policy`, even when that
+    /// call failed. Requests inside a single App's Payment List read are not
+    /// interrupted.
     pub async fn resolve_public_payment_request(
         &self,
         counterparty: PubkyPublicKey,
@@ -1251,15 +1260,15 @@ where
         required_app_id: Option<&paykit_lib::PaykitAppId>,
         refuse_blocked_counterparty: bool,
     ) -> Result<PublicPaymentCandidateLoad> {
-        let public_storage = self.pubky.load_public_storage().await?;
+        let public_storage = self.pubky.load_public_storage().await;
         // Recheck after the provider call and before any App Registry or
         // Payment Endpoint read. Reads already in flight cannot be recalled
         // without serializing against `block_peer`, so the guarantee is that
         // no read starts after a block has been observed, and the call returns
-        // `Policy`.
+        // `Policy`, outranking a provider error.
         self.ensure_peer_not_blocked_if(refuse_blocked_counterparty, counterparty)
             .await?;
-        let public_storage = public_storage.ok_or_else(|| PaykitSdkError::Identity {
+        let public_storage = public_storage?.ok_or_else(|| PaykitSdkError::Identity {
             context: "no Pubky public storage available for public Payment Endpoint lookup".into(),
             source: None,
         })?;
@@ -1271,6 +1280,9 @@ where
         };
         let loaded = load_public_payment_lists_with_budget(
             public_app_load_order(&registry, required_app_id),
+            // A block can land during the App Registry read or an earlier
+            // Payment List read. Nothing further starts once it is observed.
+            || self.ensure_peer_not_blocked_if(refuse_blocked_counterparty, counterparty),
             |app_id,
              mut remaining_endpoints,
              mut remaining_requests,
@@ -1296,7 +1308,7 @@ where
                 }
             },
         )
-        .await;
+        .await?;
         let mut endpoints = Vec::new();
         for (app_id, payment_list) in loaded.payment_lists {
             endpoints.extend(payment_list.payment_endpoints.into_iter().map(

@@ -202,6 +202,61 @@ impl PubkySessionProvider for CandidateDiscoverySessionProvider {
     }
 }
 
+/// Returns `Ok(None)` except on load number `failing_load` (1-based), which
+/// blocks the counterparty and then fails with a transport error.
+struct BlockThenFailSessionProvider {
+    storage: InMemoryStorage,
+    counterparty: PubkyPublicKey,
+    failing_load: usize,
+    loads: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl PubkySessionProvider for BlockThenFailSessionProvider {
+    async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>> {
+        Ok(None)
+    }
+
+    async fn clear_session_access(&self) -> Result<()> {
+        unreachable!("resolution must not sign out")
+    }
+
+    async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>> {
+        if self.loads.fetch_add(1, Ordering::SeqCst) + 1 != self.failing_load {
+            return Ok(None);
+        }
+        block_counterparty(&self.storage, &self.counterparty).await;
+        Err(PaykitSdkError::Transport {
+            context: "public storage unavailable".into(),
+            source: None,
+        })
+    }
+}
+
+fn block_then_fail_sdk(
+    storage: InMemoryStorage,
+    counterparty: &PubkyPublicKey,
+    failing_load: usize,
+) -> PaykitSdk<
+    InMemoryStorage,
+    BlockThenFailSessionProvider,
+    UnreachablePublicPaymentAdapter,
+    FixedClock,
+> {
+    PaykitSdk::with_clock(
+        storage.clone(),
+        BlockThenFailSessionProvider {
+            storage,
+            counterparty: counterparty.clone(),
+            failing_load,
+            loads: 0.into(),
+        },
+        UnreachablePublicPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    )
+}
+
 /// Fails the test if any public candidate reaches the payment adapter.
 struct UnreachablePublicPaymentAdapter;
 
@@ -818,6 +873,65 @@ async fn test_resolve_public_payment_request_block_outranks_failed_registry_read
     assert_blocked_policy(result);
     assert_eq!(sdk.pubky.loads.load(Ordering::SeqCst), 1);
     assert!(relay_lookups.load(Ordering::SeqCst) > 0);
+}
+
+#[tokio::test]
+async fn test_resolve_public_payment_request_block_outranks_failed_registry_provider_call() {
+    let (storage, counterparty, request_id) = unbound_payment_request_fixture().await;
+    // The block lands during the first load, made for the App Registry
+    // lookup, which then fails.
+    let sdk = block_then_fail_sdk(storage, &counterparty, 1);
+
+    let result = sdk
+        .resolve_public_payment_request(counterparty, &request_id)
+        .await;
+
+    assert_blocked_policy(result);
+    assert_eq!(sdk.pubky.loads.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_resolve_public_payment_request_block_outranks_failed_discovery_provider_call() {
+    let (storage, counterparty, request_id) = unbound_payment_request_fixture().await;
+    // The first load falls back to the cache; the block lands during the
+    // second load, made for candidate discovery, which then fails.
+    let sdk = block_then_fail_sdk(storage, &counterparty, 2);
+
+    let result = sdk
+        .resolve_public_payment_request(counterparty, &request_id)
+        .await;
+
+    assert_blocked_policy(result);
+    assert_eq!(sdk.pubky.loads.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn test_contact_reads_return_provider_error_despite_block() {
+    let (storage, counterparty, _) = unbound_payment_request_fixture().await;
+    let sdk = block_then_fail_sdk(storage.clone(), &counterparty, 1);
+
+    let result = sdk
+        .resolve_public_contact_payment(counterparty.clone(), None)
+        .await;
+
+    // Contact resolution reads no Payment Request, so a block that lands
+    // during the provider call leaves the provider error unchanged.
+    assert!(
+        matches!(result, Err(PaykitSdkError::Transport { ref context, .. }) if context == "public storage unavailable"),
+        "unexpected result: {:?}",
+        result.map_err(|error| error.to_string())
+    );
+
+    // The shared App Registry fetch keeps the same behaviour without the flag.
+    let sdk = block_then_fail_sdk(storage, &counterparty, 1);
+    let result = sdk
+        .fetch_counterparty_app_authorization(&counterparty)
+        .await;
+    assert!(
+        matches!(result, Err(PaykitSdkError::Transport { ref context, .. }) if context == "public storage unavailable"),
+        "unexpected result: {:?}",
+        result.err().map(|error| error.to_string())
+    );
 }
 
 #[tokio::test]

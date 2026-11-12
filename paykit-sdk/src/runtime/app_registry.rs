@@ -229,19 +229,20 @@ where
     /// Like [`Self::fetch_counterparty_app_authorization`]. When
     /// `refuse_blocked_counterparty` is set, a `Blocked` counterparty returns
     /// `Policy` before the App Registry read starts, and a block observed after
-    /// a failed read outranks the read error.
+    /// a failed provider call or read outranks its error.
     pub(super) async fn fetch_counterparty_app_authorization_refusing_blocked(
         &self,
         counterparty: &PubkyPublicKey,
         refuse_blocked_counterparty: bool,
     ) -> Result<CounterpartyAppAuthorizationObservation> {
-        let Some(public_storage) = self.pubky.load_public_storage().await? else {
-            return Ok(CounterpartyAppAuthorizationObservation::Cached);
-        };
-        // A block can land while the provider call is in flight. Nothing
-        // further starts once it is observed.
+        let public_storage = self.pubky.load_public_storage().await;
+        // A block can land while the provider call is in flight; it outranks
+        // the provider result. Nothing further starts once it is observed.
         self.ensure_peer_not_blocked_if(refuse_blocked_counterparty, counterparty)
             .await?;
+        let Some(public_storage) = public_storage? else {
+            return Ok(CounterpartyAppAuthorizationObservation::Cached);
+        };
         let registry =
             paykit_lib::get_paykit_app_registry(&public_storage, &counterparty.to_public_key()?)
                 .await;
