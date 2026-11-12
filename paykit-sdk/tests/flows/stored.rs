@@ -2,13 +2,15 @@
 //! the switch refuses is written later by the app, an entry dropped unverified is asked for
 //! again, and the SDK acknowledges the duty events it took.
 
-use paykit_sdk::{PayOptions, PayeeStatus, RequestStatus};
+use std::sync::Arc;
+
+use paykit_sdk::{AppScopes, PayOptions, PayeeStatus, Paykit, PaykitConfig, Rail, RequestStatus};
 use pubky_switch_client::app::AppEvent;
 use pubky_switch_client::clock::Clock;
 use pubky_switch_client::testing::{Fault, TestSigner};
 use pubky_switch_core::http::ErrorCode;
 
-use crate::common::{draft, request_from, World};
+use crate::common::{draft, request_from, store, World};
 
 /// The next `n` batches at `signer`'s switch are refused for good, `403 permission_missing`,
 /// as an effect the switch refuses whatever is sent again.
@@ -331,6 +333,47 @@ async fn test_stored_refused_receipt_written_beside_its_proof() {
     assert!(!holds_receipt(&wallet, &request).await);
     wallet.receive(None).await.unwrap();
     assert!(holds_receipt(&wallet, &request).await);
+}
+
+#[tokio::test]
+async fn test_stored_refused_receipt_from_before_a_joined_apps_first_listing_written_after() {
+    // Alice's wallet pays bob's request; a phone joins, and its first read takes bob's
+    // receipt, whose write is refused for good, before Paykit has listed the phone's
+    // records. The stored entry is kept, and written after the listing.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    let mut phone = Paykit::join(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        w.approve(&w.alice, "phone", &AppScopes::new().pay().build().unwrap()),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    // No certificate is kept as listed under before the first listing.
+    assert!(phone.app().protocol_get(b"lc").await.unwrap().is_none());
+    // Bob's shop reads alice's directory again, which lists the phone, so the receipt goes
+    // to it too.
+    w.clock.advance_ms(11 * 60_000);
+    shop.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    assert!(shop.confirm_payment(&record).await.unwrap().is_some());
+    refuse_writes(&w.alice, 2);
+    let summary = phone.receive(None).await.unwrap();
+    assert!(about_stored(&summary.report.events), "{summary:?}");
+    assert!(phone.app().protocol_get(b"lc").await.unwrap().is_some());
+    assert!(!holds_receipt(&phone, &request).await);
+    phone.receive(None).await.unwrap();
+    assert!(holds_receipt(&phone, &request).await);
+    assert!(phone.notices().await.unwrap().is_empty());
 }
 
 /// Alice's wallet pays `request`, the dispatch left in flight. Returns the attempt.
