@@ -926,3 +926,34 @@ async fn test_replies_kept_past_30_days_refused_by_the_switch_given_up_with_the_
         .iter()
         .all(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp));
 }
+
+#[tokio::test]
+async fn test_replies_kept_past_30_days_over_quota_given_up_with_the_notice() {
+    // As the write-fails test, but each write placing the replies is refused for good
+    // (`429 quota_exceeded`), not unreachable, 31 days after their acceptance: a reply is kept
+    // at most 30 days (Paykit spec 8.1), so both are given up, the host told.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - DAY_MS);
+    shop.receive(None).await.unwrap();
+    record_request(&w, &mut shop, &request).await;
+    w.clock.advance_ms(2 * DAY_MS);
+    shop.app_mut().rotate().await.unwrap();
+    shop.app_mut().flush_cursor().await.unwrap();
+    for _ in 0..2 {
+        w.bob.switch().fail_next(Fault::Error {
+            path: "/ops".into(),
+            code: ErrorCode::QuotaExceeded,
+            current: serde_json::Value::Null,
+        });
+    }
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    let notices = shop.notices().await.unwrap();
+    assert_eq!(notices.len(), 2, "{notices:?}");
+    assert!(notices
+        .iter()
+        .all(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp));
+}
