@@ -41,7 +41,7 @@ use paykit_lib::records::{PaymentListRecord, StoredMessage, UnrequestedDestinati
 use paykit_lib::{AttemptId, Body};
 use pubky_switch_client::app::{
     AppError, ClaimFetch, ClaimOp, LocalWrite, Need, ObligationDeadline, ReceiveContext,
-    RecordContent, Refusal as ClientRefusal, StoreFailure,
+    RecordContent, Refusal as ClientRefusal, StoreFailure, Unopened,
 };
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::claims::{Basis, ClaimStatus, Outcome, RECONCILIATION_MS};
@@ -76,6 +76,14 @@ pub(crate) enum Fail {
     /// The store failed, or holds data of the SDK's own that doesn't read: the entry is
     /// held, or parked, never consumed (Switch spec 8.2).
     Store(StoreFailure),
+    /// The message's record holds a value sealed at data epoch `data_epoch`, whose scope key
+    /// the app doesn't hold yet ([`wait_for_key`]): the entry waits for the key, and is given
+    /// up once [`crate::KEPT_MESSAGE_MS`] have passed since its acceptance
+    /// (`PaykitProtocol`'s receive step).
+    AwaitsKey {
+        /// The data epoch the value is sealed at.
+        data_epoch: u64,
+    },
 }
 
 impl Fail {
@@ -328,19 +336,26 @@ fn held_value(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<Option
 /// a value opens once the key comes, so it is neither absent nor a value that doesn't read,
 /// and a message about it is read again then. Written over now, it would lose what it holds
 /// unseen. The app may hold the current epoch's key and not the one the value is sealed at,
-/// as with a bundle that came in parts, so the context's own wait doesn't cover it. The
-/// entry is held as for a store unavailable for now, the way the receive step holds one
-/// under a certificate Paykit refuses.
+/// as with a bundle that came in parts, so the context's own wait doesn't cover it
+/// ([`Fail::AwaitsKey`]).
 fn wait_for_key(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<(), Fail> {
-    let waits = cx
-        .record(&target.record_target())?
-        .is_some_and(|held| crate::hold::awaits_key(&held.content));
-    if waits {
-        return Err(Fail::Store(StoreFailure::unavailable(
-            StoreError::Unavailable,
-        )));
+    let held = cx.record(&target.record_target())?;
+    if let Some(RecordContent::Unreadable(Unopened::KeyNotHeld { data_epoch })) =
+        held.map(|held| held.content)
+    {
+        return Err(Fail::AwaitsKey { data_epoch });
     }
     Ok(())
+}
+
+/// Whether a message accepted at `accepted_at` that waits for a key is given up now: once
+/// [`KEPT_MESSAGE_MS`] have passed since its acceptance, on the highest service time
+/// verified (Paykit spec 8.1).
+pub(crate) fn key_wait_over(cx: &ReceiveContext<'_>, accepted_at: Option<u64>) -> bool {
+    accepted_at.is_none_or(|at| {
+        cx.highest_service_time()
+            .is_some_and(|t| at.saturating_add(KEPT_MESSAGE_MS) <= t)
+    })
 }
 
 /// The value held at `target`, which is of `side`: `None` for none, or one that isn't

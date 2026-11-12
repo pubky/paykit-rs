@@ -228,8 +228,15 @@ pub struct ReceiveSummary {
     /// again only after a later bundle part leaves a key still missing, or after a restore;
     /// it doesn't ask at every read. Until the keys come the records the certificate adds
     /// aren't listed, and the calls that act on them are refused as not now; the host tells
-    /// the user the signer must come online.
+    /// the user the signer must come online. Set too while an entry waits for the key of a
+    /// data epoch its record's value is sealed at ([`ReceiveSummary::key_epochs_awaited`]).
     pub scope_keys_awaited: bool,
+    /// The data epochs whose scope keys entries of this read wait for, ascending: each
+    /// entry's record holds a value sealed at that epoch, which the app can't open yet. Such
+    /// an entry is held, not failing, and its `StoreFailing` events aren't in the report. It
+    /// is given up 30 days after its acceptance, on the service time verified, and the host
+    /// is told ([`crate::NoticeKind::MessageGivenUp`]) (Paykit spec 8.1).
+    pub key_epochs_awaited: Vec<u64>,
     /// The account is gone at this switch: the client took it as erased (Switch spec 12.7),
     /// a provider loss (Switch spec 12.6). The host tells the user. The app reads nothing
     /// more there, and the SDK acts on nothing by itself: lookups of the identity there fail
@@ -586,6 +593,16 @@ impl Paykit {
             }
             Err(error) => return Err(error.into()),
         };
+        // The entries this read held for a key: shown as waiting for it, not as a store
+        // failing.
+        let key_waits = self.protocol.take_key_waits();
+        let mut report = report;
+        report.events.retain(|event| {
+            !matches!(event, AppEvent::StoreFailing { seq, .. } if key_waits.contains_key(seq))
+        });
+        let mut key_epochs_awaited: Vec<u64> = key_waits.values().copied().collect();
+        key_epochs_awaited.sort_unstable();
+        key_epochs_awaited.dedup();
         // The duty events kept, listed once, right after the read: a listing hands every
         // kept duty event to the host, so one made later in this receive would hand over,
         // in no report, those the steps below raise, such as a listing's.
@@ -668,7 +685,8 @@ impl Paykit {
             resends: answered.saturating_add(asked).saturating_add(marked),
             certificate_refused: None,
             records_unlisted,
-            scope_keys_awaited: keys.is_some(),
+            scope_keys_awaited: keys.is_some() || !key_epochs_awaited.is_empty(),
+            key_epochs_awaited,
             account_gone: false,
         })
     }

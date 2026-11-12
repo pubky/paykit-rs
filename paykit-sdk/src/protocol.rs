@@ -105,6 +105,9 @@ pub struct PaykitProtocol {
     /// The app's rail, which names a proof's settlement (Paykit wire 1.5); without one, the
     /// methods `paykit-lib` knows.
     rail: Option<Arc<dyn Rail>>,
+    /// The entries this read held because their record's value waits for its scope key:
+    /// each `seq` with the data epoch it waits for, taken by [`crate::Paykit::receive`].
+    key_waits: std::sync::Mutex<std::collections::BTreeMap<u64, u64>>,
 }
 
 impl std::fmt::Debug for PaykitProtocol {
@@ -125,6 +128,7 @@ impl PaykitProtocol {
         Self {
             own: RwLock::new(None),
             rail: None,
+            key_waits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         }
     }
 
@@ -150,6 +154,17 @@ impl PaykitProtocol {
     pub fn set_own(&self, identity: [u8; 32], cert: AppCert) {
         let mut own = self.own.write().unwrap_or_else(PoisonError::into_inner);
         *own = Some(Own { identity, cert });
+    }
+
+    /// The entries held for a key since the last call, each `seq` with the data epoch it
+    /// waits for ([`receive::Fail::AwaitsKey`]).
+    pub(crate) fn take_key_waits(&self) -> std::collections::BTreeMap<u64, u64> {
+        std::mem::take(
+            &mut *self
+                .key_waits
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
     }
 
     fn own(&self) -> Option<Own> {
@@ -795,6 +810,26 @@ impl Protocol for PaykitProtocol {
             Err(Fail::Need(needs)) => Outcome::Need(needs),
             Err(Fail::Drop(reason)) => Outcome::Drop { reason },
             Err(Fail::Store(failure)) => Outcome::Retry(failure),
+            // A record value waits for its scope key: the entry waits for it, held as for a
+            // store unavailable for now, until 30 days after its acceptance; then it is given
+            // up, processed with the host's notice as its only write (Paykit spec 8.1). The
+            // notice can't go with `Outcome::Drop`, which keeps none of the step's writes.
+            Err(Fail::AwaitsKey { .. }) if receive::key_wait_over(cx, stored.accepted_at()) => {
+                match crate::stored::given_up_write(&stored, cx.highest_service_time()) {
+                    Ok(notice) => Outcome::Apply(Effect {
+                        ops: Vec::new(),
+                        local: vec![notice],
+                    }),
+                    Err(_) => Outcome::Retry(StoreFailure::of_entry(StoreError::Corrupt)),
+                }
+            }
+            Err(Fail::AwaitsKey { data_epoch }) => {
+                self.key_waits
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(message.seq, data_epoch);
+                Outcome::Retry(StoreFailure::unavailable(StoreError::Unavailable))
+            }
         }
     }
 

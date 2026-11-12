@@ -393,3 +393,75 @@ async fn test_notices_late_receipt_held_while_its_record_awaits_its_key() {
     wallet.resume_payments().await.unwrap();
     assert!(wallet.payments().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn test_notices_receipt_waiting_for_its_records_key_given_up_after_30_days() {
+    // The wallet holds the payer record unopened after an epoch rotation, as above, and the
+    // key never comes. The receipt waits, shown as waiting for that epoch's key and never as
+    // a store failing; 30 days after its acceptance it is given up, and the host is told.
+    let w = World::new();
+    let mut phone = w.wallet("phone").await;
+    let (mut wallet, mut shop, _) = paid_after_failed(&w).await;
+    let request = paykit_sdk::RequestRef {
+        payee: w.bob_id(),
+        request_hash: wallet.payments().await.unwrap()[0].request_hash.unwrap(),
+    };
+    phone.receive(None).await.unwrap();
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    let sealed_at = w.alice.switch().identity_doc().unwrap().data_epoch();
+    crate::unrequested::store_bundle(&w, phone.app_id(), &phone.app().cert().clone());
+    phone.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let value = crate::outcome_record::record_value(&mut phone, &request)
+        .await
+        .unwrap();
+    crate::outcome_record::phone_writes(
+        &mut phone,
+        &request,
+        Some(&serde_json::to_vec(&value).unwrap()),
+    )
+    .await;
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let cert = wallet.app().cert().clone();
+    crate::unrequested::store_bundle_from(&w, wallet.app_id(), &cert, newest);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    receipt(&mut shop).await;
+    let mut events = Vec::new();
+    for _ in 0..pubky_switch_client::app::RETRY_EVENT_READS + 2 {
+        let summary = wallet.receive(None).await.unwrap();
+        assert_eq!(summary.key_epochs_awaited, vec![sealed_at], "{summary:?}");
+        assert!(summary.scope_keys_awaited);
+        events.extend(summary.report.events);
+    }
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, pubky_switch_client::app::AppEvent::StoreFailing { .. })),
+        "{events:?}"
+    );
+    assert!(wallet.notices().await.unwrap().is_empty());
+    // Past 30 days from its acceptance it is given up: the host is told, and the entry is
+    // waited for no more.
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - DAY_MS);
+    let summary = wallet.receive(None).await.unwrap();
+    assert_eq!(summary.key_epochs_awaited, vec![sealed_at], "{summary:?}");
+    assert!(wallet.notices().await.unwrap().is_empty());
+    w.clock.advance_ms(DAY_MS);
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(summary.key_epochs_awaited.is_empty(), "{summary:?}");
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, NoticeKind::MessageGivenUp);
+    assert_eq!(notices[0].counterparty, w.bob_id());
+    // The key comes later: the receipt given up isn't taken again.
+    crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    let value = crate::outcome_record::record_value(&mut wallet, &request)
+        .await
+        .unwrap();
+    assert!(value["receipt"].is_null(), "{value}");
+}
