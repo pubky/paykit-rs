@@ -800,3 +800,42 @@ async fn test_replies_kept_from_another_identity_never_placed_nor_stop_the_recei
         PayeeStatus::ProofReceived
     );
 }
+
+#[tokio::test]
+async fn test_replies_with_their_record_in_one_read_placed() {
+    // Bob's newly joined till sends alice a request and writes its record; alice pays it.
+    // The shop reads the record and alice's acceptance and proof in one read: both replies
+    // go into the record, and none is taken unplaced (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let request = request_from(&mut till, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    let got = shop.receive(None).await.unwrap();
+    let records = got
+        .report
+        .events
+        .iter()
+        .filter(|e| matches!(e, pubky_switch_client::app::AppEvent::RecordChanged { .. }))
+        .count();
+    assert!(records >= 1, "{got:?}");
+    assert_eq!(got.applied.len(), 2, "{got:?}");
+    let sales = shop.payee_activity().await.unwrap();
+    assert_eq!(sales.len(), 1, "{sales:?}");
+    assert_eq!(sales[0].status, PayeeStatus::ProofReceived);
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert!(shop.app().protocol_scan(b"se/").await.unwrap().is_empty());
+    assert!(shop.app_mut().parked_entries().await.unwrap().is_empty());
+}
