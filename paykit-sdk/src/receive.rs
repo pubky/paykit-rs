@@ -562,15 +562,16 @@ fn receipt_effect(
     );
     // A claim the app keeps no view of is read from the switch first, so the receipt
     // settles it in the cursor's batch (Switch spec 10.2 row 3).
-    let view = match cx.claim_view(&obligation)? {
-        Some(view) => Some(view),
-        None => match cx.switch_claim(&obligation) {
-            None => return Err(Fail::Need(vec![Need::Claim(obligation)])),
-            Some(ClaimFetch::Read(read)) => Some(read.view.clone()),
-            Some(ClaimFetch::Absent) => None,
-            // Refused, such as without `claims.read`: nothing to settle here.
-            Some(_) => return Ok(()),
-        },
+    let read = cx.switch_claim(&obligation).map(|fetch| match fetch {
+        ClaimFetch::Read(read) => SwitchClaim::Read(Some(read.view.clone())),
+        ClaimFetch::Absent => SwitchClaim::Read(None),
+        // Refused, such as without `claims.read`.
+        _ => SwitchClaim::Refused,
+    });
+    let view = match failure_view(cx.claim_view(&obligation)?, read) {
+        FailureView::View(view) => view,
+        FailureView::Refused => return Ok(()),
+        FailureView::ReadSwitch => return Err(Fail::Need(vec![Need::Claim(obligation)])),
     };
     let settles = receipt_settles(&ReceiptClaim {
         stored,
@@ -601,6 +602,39 @@ fn receipt_effect(
         keep_local(cx, local(&key::journal(&attempt_id), &entry)?);
     }
     Ok(())
+}
+
+/// What the switch answered for a receipt's claim (Switch wire 7.4.8).
+pub(crate) enum SwitchClaim {
+    /// The claim as read, `None` when the switch holds none.
+    Read(Option<ClaimView>),
+    /// The read refused for good, such as without `claims.read`.
+    Refused,
+}
+
+/// The claim view a receipt decides on ([`failure_view`]).
+#[derive(Debug)]
+pub(crate) enum FailureView {
+    /// The view, `None` when the switch holds no claim and the app keeps none.
+    View(Option<ClaimView>),
+    /// The switch refused its read: the receipt settles nothing, and is still recorded.
+    Refused,
+    /// The app keeps no view: the switch's answer is needed first.
+    ReadSwitch,
+}
+
+/// The claim view a receipt's claim effect decides on ([`receipt_settles`]), the one rule
+/// for its first read (`receipt_effect`) and a stored entry's later write
+/// (`Paykit::place_receipt`): the view the app keeps, `kept`, which holds the failure after
+/// the service deletes the claim, or, only when it keeps none, the switch's answer, `read`,
+/// which the caller fetches once this asks for it.
+pub(crate) fn failure_view(kept: Option<ClaimView>, read: Option<SwitchClaim>) -> FailureView {
+    match (kept, read) {
+        (Some(view), _) => FailureView::View(Some(view)),
+        (None, Some(SwitchClaim::Read(view))) => FailureView::View(view),
+        (None, Some(SwitchClaim::Refused)) => FailureView::Refused,
+        (None, None) => FailureView::ReadSwitch,
+    }
 }
 
 /// The payer's record a receipt goes into: its request's, or for a payment without a
