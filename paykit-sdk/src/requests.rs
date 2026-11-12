@@ -1591,6 +1591,29 @@ impl Paykit {
         options: AcceptOptions,
     ) -> Result<SentMessage> {
         self.require_pay()?;
+        // No response goes while the request record can't be opened, sealed at a key the
+        // app doesn't hold yet or a value that doesn't read: what it holds is unknown, such
+        // as another own app's answer (Paykit spec 8.1). The copy's absence while it may
+        // lack records is refused before, by `records_known`.
+        if answer != Answer::Cancel {
+            let target = ActivityTarget::payer(natural_key::request_record(
+                &request.payee,
+                &request.request_hash,
+            ));
+            let held = self.app.shared_record(&self.activity_key(&target)?).await?;
+            match held.map(|held| held.content) {
+                Some(content) if crate::hold::awaits_key(&content) => {
+                    return Err(crate::hold::value_awaits_key());
+                }
+                Some(RecordContent::Unreadable(_)) => {
+                    return Err(Refusal::NotNow(
+                        "Paykit spec 8.1: the request record doesn't read".into(),
+                    )
+                    .into());
+                }
+                _ => {}
+            }
+        }
         let (target, record) = self.payer_request(request).await?;
         let (_, body) = request_of(&record).ok_or(Refusal::NotFound)?;
         let recurring = body.is_recurring();

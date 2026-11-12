@@ -2264,6 +2264,8 @@ async fn test_periods_details_over_a_corrupt_kept_stop_not_dropped() {
             .map_or(true, |s| !received(s, "paykit.payment_period_details")),
         "{summary:?}"
     );
+    // The entry is kept for the host, not consumed.
+    assert_eq!(wallet.app_mut().parked_entries().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -2315,4 +2317,68 @@ async fn test_periods_credit_never_given_when_a_record_read_fails() {
         failing.heal();
         assert!(!matches!(credited, Ok(Some(_))), "read {n}: {credited:?}");
     }
+}
+
+#[tokio::test]
+async fn test_periods_accept_after_a_rejection_or_a_cancellation_refused() {
+    // After a rejection the payer neither accepts nor cancels; after the payee's
+    // cancellation it sends no response.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let rejected = requested(&w, &mut shop, &mut wallet).await;
+    wallet.reject_request(&rejected, None).await.unwrap();
+    let refused = wallet.accept_subscription(&rejected).await.unwrap_err();
+    assert_eq!(refusal(&refused), Refusal::Rejected);
+    let cancelled = requested(&w, &mut shop, &mut wallet).await;
+    let sale = shop
+        .payee_activity()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.request_hash == Some(cancelled.request_hash))
+        .unwrap()
+        .record;
+    shop.cancel_sent_request(&sale, None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let refused = wallet.accept_subscription(&cancelled).await.unwrap_err();
+    assert_eq!(refusal(&refused), Refusal::Cancelled);
+    let refused = wallet.reject_request(&cancelled, None).await.unwrap_err();
+    assert_eq!(refusal(&refused), Refusal::Cancelled);
+}
+
+#[tokio::test]
+async fn test_periods_no_response_while_the_request_record_is_sealed() {
+    // The phone writes the request record again at a key the wallet doesn't hold, though it
+    // holds a later one: the wallet can't open it, so it sends no response for now.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let request = requested(&w, &mut shop, &mut wallet).await;
+    phone.receive(None).await.unwrap();
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    crate::unrequested::store_bundle(&w, phone.app_id(), &phone.app().cert().clone());
+    phone.receive(None).await.unwrap();
+    rewrites(&mut phone, &crate::outcome_record::payer_record(&request)).await;
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let cert = wallet.app().cert().clone();
+    crate::unrequested::store_bundle_from(&w, wallet.app_id(), &cert, newest);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let refused = wallet.accept_subscription(&request).await.unwrap_err();
+    assert!(
+        matches!(refusal(&refused), Refusal::NotNow(_)),
+        "{refused:?}"
+    );
+    let refused = wallet.reject_request(&request, None).await.unwrap_err();
+    assert!(
+        matches!(refusal(&refused), Refusal::NotNow(_)),
+        "{refused:?}"
+    );
+    crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.accept_subscription(&request).await.unwrap();
 }
