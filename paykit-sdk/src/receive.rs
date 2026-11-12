@@ -1135,18 +1135,15 @@ impl Paykit {
     }
 
     /// Whether the identity's deny list holds `pubky` (Paykit spec 8.1, "Blocked
-    /// counterparties"), read from the switch now (`GET /allow`), at an app holding
-    /// `contacts`; the copy kept for the views is replaced with it. An app without
-    /// `contacts` can't read the lists: `false`.
+    /// counterparties"), read from the switch now (`GET /allow`); the copy kept for the views
+    /// is replaced with it. Every paying app holds `contacts`, which reads the lists (Paykit
+    /// spec 3.1).
     ///
     /// # Errors
     ///
     /// [`crate::Refusal::SwitchUnavailable`] when the own switch doesn't answer; the
     /// client's errors: a read that fails is never taken as a payee not blocked.
     pub(crate) async fn denied(&mut self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
-        if !reads_lists(self.app.cert().scopes()) {
-            return Ok(false);
-        }
         let lists = self.app.allow_list().await.map_err(|error| {
             if crate::pay::switch_unavailable(&error) {
                 crate::error::Refusal::SwitchUnavailable(error.to_string()).into()
@@ -1170,9 +1167,6 @@ impl Paykit {
     ///
     /// As [`Paykit::denied`].
     pub(crate) async fn denied_for_user(&mut self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
-        if !reads_lists(self.app.cert().scopes()) {
-            return Ok(false);
-        }
         let now = self.now();
         let read = self.local_get::<u64>(key::LISTS_READ).await?;
         let copy = self.local_get::<Vec<[u8; 32]>>(key::DENIED).await?;
