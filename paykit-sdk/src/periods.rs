@@ -218,10 +218,10 @@ impl Paykit {
     /// record this app doesn't hold, or a period record; [`Refusal::Usage`] for a one-time
     /// request, or a period that holds 8 details already; [`Refusal::NotSubscribed`] before
     /// the payer's acceptance; [`Refusal::Rejected`] or [`Refusal::Cancelled`];
-    /// [`PaykitError::Lib`] with `Validation` for details that break Paykit wire 4.9 against
+    /// [`crate::PaykitError::Lib`] with `Validation` for details that break Paykit wire 4.9 against
     /// the request, such as a period that isn't one of its own, or that expired by the
     /// device clock; [`Refusal::NotNow`] while the period record's value waits for its scope
-    /// key; [`PaykitError::Conflict`] when the record kept changing; the client's errors.
+    /// key; [`crate::PaykitError::Conflict`] when the record kept changing; the client's errors.
     pub async fn send_period_details(
         &mut self,
         record: &[u8; 32],
