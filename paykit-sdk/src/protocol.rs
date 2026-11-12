@@ -813,6 +813,11 @@ impl Protocol for PaykitProtocol {
     /// [`Protocol::record_regression`], told what the write builds on: a write built on the
     /// version this app holds is judged as by a reader holding it, which also refuses a
     /// reassociation at or before a period it attempted (Paykit wire 5.3 "Seen Allowance").
+    /// The version is judged by the mark of what the app saw, the value it took last that
+    /// reads. The client counts a create over a record it holds deleted as built on what it
+    /// holds, so such a write is judged against the mark from before the delete: stricter
+    /// than the wire format's reader holding the version built on, which a delete leaves with
+    /// no attempted period.
     fn record_regression_on(
         &self,
         collection: &str,
