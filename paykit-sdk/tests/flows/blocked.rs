@@ -16,7 +16,7 @@ use crate::common::{btc, day_window, draft, endpoint, request_from, store, World
 /// bob blocked. Returns the wallet and the request.
 async fn blocked(w: &World) -> (Paykit, RequestRef) {
     let (mut wallet, _, request) = received(w, PaykitConfig::default()).await;
-    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    wallet.block(&w.bob_id()).await.unwrap();
     (wallet, request)
 }
 
@@ -119,7 +119,7 @@ async fn test_blocked_request_paid_only_once_the_user_confirms_it() {
 async fn test_blocked_pause_ends_when_the_payee_is_unblocked() {
     let w = World::new();
     let (mut wallet, request) = blocked(&w).await;
-    wallet.app_mut().undeny(&w.bob_id()).await.unwrap();
+    wallet.unblock(&w.bob_id()).await.unwrap();
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
@@ -135,6 +135,8 @@ async fn test_blocked_resume_repeats_a_dispatch_to_a_payee_not_blocked() {
 
 #[tokio::test]
 async fn test_blocked_resume_makes_no_repeat_to_a_blocked_payee() {
+    // Blocked through the client directly, which the copy doesn't see: the repeat reads the
+    // list fresh.
     let w = World::new();
     let calls = resumed_repeat(&w, async |wallet| {
         wallet.app_mut().deny(&w.bob_id()).await.unwrap();
@@ -151,25 +153,13 @@ async fn test_blocked_resume_makes_no_repeat_while_the_deny_list_fails() {
 }
 
 #[tokio::test]
-async fn test_blocked_payment_refused_while_the_deny_list_fails() {
-    let w = World::new();
-    let (mut wallet, request) = blocked(&w).await;
-    fail_list_read(&w);
-    assert!(wallet
-        .pay_request(&request, PayOptions::default())
-        .await
-        .is_err());
-    assert!(wallet.payments().await.unwrap().is_empty());
-}
-
-#[tokio::test]
 async fn test_blocked_payment_without_a_request_made_only_once_confirmed() {
     let w = World::new();
     let (mut wallet, mut shop, _) = received(&w, PaykitConfig::default()).await;
     w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
         .await;
     wallet.receive(None).await.unwrap();
-    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    wallet.block(&w.bob_id()).await.unwrap();
     let payment = || {
         UnrequestedPayment::new(w.bob_id(), btc("0.001"))
             .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")))
@@ -184,4 +174,64 @@ async fn test_blocked_payment_without_a_request_made_only_once_confirmed() {
     );
     let outcome = wallet.pay_without_request(confirmed).await.unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+}
+
+/// Bob's request received at a wallet whose copy of the lists is read now; bob is then
+/// blocked through the client directly, which the copy doesn't see, and the clock moves
+/// `ms` on.
+async fn blocked_unseen(w: &World, ms: u64) -> (Paykit, RequestRef) {
+    let (mut wallet, _, request) = received(w, PaykitConfig::default()).await;
+    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(ms);
+    (wallet, request)
+}
+
+#[tokio::test]
+async fn test_blocked_copy_read_within_10_minutes_makes_no_call() {
+    let w = World::new();
+    let (mut wallet, request) = blocked_unseen(&w, 9 * 60_000).await;
+    // A read now would fail: none is made, and the copy shows bob not blocked.
+    fail_list_read(&w);
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+}
+
+#[tokio::test]
+async fn test_blocked_copy_older_than_10_minutes_read_first() {
+    let w = World::new();
+    let (mut wallet, request) = blocked_unseen(&w, 11 * 60_000).await;
+    let error = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(shown(error).payee, w.bob_id());
+}
+
+#[tokio::test]
+async fn test_blocked_copy_older_than_10_minutes_fails_closed_on_a_failed_read() {
+    let w = World::new();
+    let (mut wallet, _, request) = received(&w, PaykitConfig::default()).await;
+    w.clock.advance_ms(11 * 60_000);
+    fail_list_read(&w);
+    assert!(wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .is_err());
+    assert!(wallet.payments().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_blocked_local_block_seen_with_no_read() {
+    let w = World::new();
+    let (mut wallet, request) = blocked(&w).await;
+    // A read would fail; the block this app wrote is in its copy already.
+    fail_list_read(&w);
+    let error = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(shown(error).payee, w.bob_id());
 }

@@ -993,6 +993,68 @@ impl Paykit {
         Ok(lists.deny.contains(pubky))
     }
 
+    /// Whether the identity's deny list holds `pubky`, for a payment the user starts (Paykit
+    /// spec 8.1): as read at most [`LISTS_REFRESH_MS`] ago, on the device clock, so the
+    /// payment makes no call of its own for it; read first ([`Paykit::denied`]) when the copy
+    /// is older or missing, and a read that fails then never counts as not blocked.
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::denied`].
+    pub(crate) async fn denied_for_user(&mut self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
+        if !reads_lists(self.app.cert().scopes()) {
+            return Ok(false);
+        }
+        let now = self.now();
+        let read = self.local_get::<u64>(key::LISTS_READ).await?;
+        let copy = self.local_get::<Vec<[u8; 32]>>(key::DENIED).await?;
+        match (read, copy) {
+            (Some(read), Some(denied)) if read <= now && now - read < LISTS_REFRESH_MS => {
+                Ok(denied.contains(pubky))
+            }
+            _ => self.denied(pubky).await,
+        }
+    }
+
+    /// Block `pubky`: the identity's deny list takes it (`deny.put`, the client's
+    /// [`pubky_switch_client::app::App::deny`]), and the copy of the list this app judges
+    /// payments by holds it at once, whatever its age (Paykit spec 8.1). A block made
+    /// through the client directly is seen at the next read of the lists.
+    ///
+    /// # Errors
+    ///
+    /// The client's errors, such as without `manage_contacts`; nothing is written then.
+    pub async fn block(&mut self, pubky: &[u8; 32]) -> crate::error::Result<()> {
+        self.refresh_own()?;
+        self.app.deny(pubky).await?;
+        self.copy_denied(pubky, true).await
+    }
+
+    /// Unblock `pubky`, as [`Paykit::block`] blocks: the deny list drops it, and the copy at
+    /// once. Unblocking ends the pause (Paykit spec 8.1).
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::block`].
+    pub async fn unblock(&mut self, pubky: &[u8; 32]) -> crate::error::Result<()> {
+        self.refresh_own()?;
+        self.app.undeny(pubky).await?;
+        self.copy_denied(pubky, false).await
+    }
+
+    /// The copy of the deny list with `pubky` held or not.
+    async fn copy_denied(&mut self, pubky: &[u8; 32], held: bool) -> crate::error::Result<()> {
+        let mut denied = self
+            .local_get::<Vec<[u8; 32]>>(key::DENIED)
+            .await?
+            .unwrap_or_default();
+        denied.retain(|other| other != pubky);
+        if held {
+            denied.push(*pubky);
+        }
+        self.local_put(key::DENIED, &denied).await
+    }
+
     /// Whether the copy of the deny list kept from the last read holds `pubky`, at an app
     /// holding `contacts`, for the views, which read nothing from the switch.
     pub(crate) async fn denied_as_last_read(&self, pubky: &[u8; 32]) -> crate::error::Result<bool> {

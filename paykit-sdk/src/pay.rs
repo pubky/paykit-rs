@@ -659,8 +659,9 @@ impl Paykit {
     /// written; [`PaykitError::Conflict`] when the request record changed
     /// meanwhile; the client's errors. A failure after money may have moved is never an
     /// error: it is [`PayOutcome::Pending`] or [`PayOutcome::Uncertain`]. At an app holding
-    /// `contacts`, the deny list is read first: a request from a blocked payee is
-    /// [`Refusal::Blocked`] until the user confirms paying it.
+    /// `contacts`, the deny list as read at most 10 minutes ago, or read first, decides: a
+    /// request from a blocked payee is [`Refusal::Blocked`] until the user confirms paying
+    /// it.
     pub async fn pay_request(
         &mut self,
         request: &RequestRef,
@@ -700,7 +701,7 @@ impl Paykit {
             None
         };
         // A blocked payee's request is paid only once the user confirms it (Paykit spec 8.1).
-        let blocked = self.denied(&request.payee).await?;
+        let blocked = self.denied_for_user(&request.payee).await?;
         let shown = BlockedPayment {
             payee: request.payee,
             request: Some(*request),
@@ -843,7 +844,7 @@ impl Paykit {
         let options = payment.options;
         // A payment to a blocked payee is made only once the user confirms it (Paykit spec
         // 8.1; v0.1 refused any payment to a blocked peer).
-        let blocked = self.denied(&payment.payee).await?;
+        let blocked = self.denied_for_user(&payment.payee).await?;
         let shown = BlockedPayment {
             payee: payment.payee,
             request: None,
