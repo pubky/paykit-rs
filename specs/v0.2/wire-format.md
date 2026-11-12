@@ -878,6 +878,7 @@ Example (alice's `payer_activity` record of bob's request, certificate and plain
 | `proposal` | Stored message | no | |
 | `response` | Stored message | no | acceptance or rejection |
 | `end` | Stored message | no | |
+| `conflicted` | Stored message | no | a second `allowance_proposal` under the record's `allowance_id`, from either side, with another hash than `proposal`, or a second `allowance_acceptance` or `allowance_rejection`, beside `response`, with another hash than it: the Allowance is conflicted (spec 8.3). Writers leave it out when absent |
 | `grant` | Executor grant | no | the current grant (3.3): the last entry of `grants` |
 | `grants` | `array<object>` | no | the grant history, below; default `[]` |
 | `msg_ids` | `array<uuid>` | no | bounded as in 5.3: those of the messages it stores and the 16 newest others |
@@ -886,12 +887,12 @@ Example (alice's `payer_activity` record of bob's request, certificate and plain
 
 - the key is the one derived from `counterparty` and `allowance_id`;
 - there is a `proposal`; a record with a `response` or an `end` but no proposal is invalid;
-- each member holds its kind: `proposal` an `allowance_proposal` with a `proposer_role` of `allower` or `allowee` and valid terms (4.15), `response` an `allowance_acceptance` or `allowance_rejection`, `end` an `allowance_end`;
-- every stored message names that `allowance_id` (the proposal's body, and the body of the acceptance, rejection or end, 4.15 and 4.16) and is between this identity and `counterparty`, with the sides its kind requires: the proposal from either side, the response from the proposal's recipient, the end from either side, each addressed to the other; the response and the end refer to the proposal in `refs`.
+- each member holds its kind: `proposal` an `allowance_proposal` with a `proposer_role` of `allower` or `allowee` and valid terms (4.15), `response` an `allowance_acceptance` or `allowance_rejection`, `end` an `allowance_end`, and `conflicted` either an `allowance_proposal` as `proposal` is, with another hash than `proposal`, or, beside a `response`, an `allowance_acceptance` or `allowance_rejection` as `response` is, with another hash than `response` (vectors: `sealed.json` `allowance_records`);
+- every stored message names that `allowance_id` (the proposal's body, and the body of the acceptance, rejection or end, 4.15 and 4.16) and is between this identity and `counterparty`, with the sides its kind requires: the proposal, and `conflicted` holding a proposal, from either side, the response, and `conflicted` holding a response, from the proposal's recipient, the end from either side, each addressed to the other; the response, a conflicting response and the end refer to the proposal in `refs`.
 
-A grant doesn't affect whether the record is valid. Grants are checked against the terms hash of the record's own proposal and acceptance (Switch wire 1.5); without an acceptance no grant is valid. `grant` is the current grant only if it is the last entry of a usable history and verifies for this identity, `counterparty` and the Allowance at that entry's version (3.3); otherwise the record has no current grant. A history entry that doesn't verify means "no valid grant from this version on" (Valid entries, below), and a history that isn't usable makes every ledger check against it fail closed.
+A grant doesn't affect whether the record is valid. Grants are checked against the terms hash of the record's own proposal and acceptance (Switch wire 1.5); without an acceptance no grant is valid. `grant` is the current grant only if it is the last entry of a usable history and verifies for this identity, `counterparty` and the Allowance at that entry's version (3.3), and the record holds no `conflicted`; otherwise the record has no current grant. A conflicted record still names the executor at each version (Grant history, below), by which its ledger's later writes are checked. A history entry that doesn't verify means "no valid grant from this version on" (Valid entries, below), and a history that isn't usable makes every ledger check against it fail closed.
 
-**Seen roles** (Switch spec 8.2, spec 6): an `allowances` record holds one proposal, one response and one end, so a reader that has seen one of them ignores, and shows with its writer, a later write that drops or replaces it, by hash.
+**Seen roles** (Switch spec 8.2, spec 6): an `allowances` record holds one proposal, one response, one end and one `conflicted`, so a reader that has seen one of them ignores, and shows with its writer, a later write that drops or replaces it, by hash. So no write clears a conflict: once a reader has seen `conflicted`, it ignores every later write without it.
 
 **Grant history** (spec 8.3 "Who wrote it"). `grants` holds every executor grant the record has held, oldest first, each with the record version the write adding it built on:
 
