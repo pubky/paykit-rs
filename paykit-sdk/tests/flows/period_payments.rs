@@ -1811,3 +1811,58 @@ async fn test_period_payments_period_past_the_details_window_paid_by_the_request
         assert_eq!(proof_of(&record).0.message().refs.len(), refs, "{period:?}");
     }
 }
+
+#[tokio::test]
+async fn test_period_payments_receipt_settles_its_periods_claim_by_evidence() {
+    // January's payment ran but its outcome isn't written yet when the shop's receipt of it
+    // comes: the receipt settles January's claim by evidence (Switch spec 10.2 row 3), on
+    // the period's own obligation, in the batch that moves the cursor past it.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    w.rail.next(Behaviour::Hang);
+    let attempt = by_user(&mut wallet, &request, january(), PayOptions::default())
+        .await
+        .unwrap()
+        .attempt_id();
+    w.rail.settle(&attempt, true);
+    let Some(RailOutcome::Paid(paid)) = w.rail.payment(attempt).await.unwrap() else {
+        panic!("not paid");
+    };
+    let body = PaymentProof {
+        attempt_id: attempt,
+        billing_period: Some(january()),
+        payment_endpoint_identifier: endpoint("btc-lightning-bolt11"),
+        payment_app_id: shop.app_id(),
+        list_version: None,
+        amount: None,
+        allowance_id: None,
+        label: None,
+        payment_reference: None,
+        proof: paid.proof,
+    }
+    .to_body(1)
+    .unwrap();
+    let proof = w.sign_as(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        body,
+    );
+    w.deliver(&w.alice, "wallet", &w.bob, &[shop.app_id()], &proof);
+    shop.receive(None).await.unwrap();
+    let period = shop.payee_activity().await.unwrap()[0].periods[0].record;
+    shop.confirm_payment(&period).await.unwrap().unwrap();
+    wallet.receive(None).await.unwrap();
+    let obligation = period_obligation(&wallet, january()).await;
+    let claim = wallet
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.view.status, ClaimStatus::Settled, "{:?}", claim.view);
+}
