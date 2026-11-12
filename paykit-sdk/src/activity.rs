@@ -7,10 +7,8 @@
 //! message for a role already held is still processed, but not stored: its `msg_id` joins
 //! the bounded list of others the record reflects (Paykit wire 5.3).
 
-use paykit_lib::collections::Collection;
-use std::cmp::Ordering;
-
 use paykit_lib::bodies::period_details_order;
+use paykit_lib::collections::Collection;
 use paykit_lib::records::{
     bounded_msg_ids, ActivityRecord, ActivitySide, StoredMessage, MAX_PERIOD_DETAILS,
 };
@@ -224,16 +222,13 @@ pub(crate) fn place(record: &mut ActivityRecord, role: Role, message: StoredMess
 /// each details stays, none replacing another, at most [`MAX_PERIOD_DETAILS`] for the
 /// period. `period_details` holds the latest, by `created_at` then `msg_id`, and
 /// `earlier_details` the others in that order; once the record holds a proof that names
-/// details, those stay in `period_details`. Returns `false` when it stores nothing: the
-/// record holds 8 already, or details as late with another hash, an equivocation, where
-/// the details held stay. The caller reflects the `msg_id` then.
+/// details, those stay in `period_details`. Returns `false` when it stores nothing, the
+/// record holding 8 already; the caller reflects the `msg_id` then. Details as late as held
+/// ones, the same `created_at` and `msg_id`, never reach here: [`place`] takes a message
+/// whose `msg_id` the record reflects as placed already, so other details as late, an
+/// equivocation, leave the held ones as they are (Paykit wire 4.9).
 fn place_details(record: &mut ActivityRecord, message: StoredMessage) -> bool {
-    let held = record.details();
-    let full = held.len() >= MAX_PERIOD_DETAILS;
-    let as_late = held
-        .iter()
-        .any(|h| period_details_order(h.message(), message.message()) == Ordering::Equal);
-    if full || as_late {
+    if record.details().len() >= MAX_PERIOD_DETAILS {
         return false;
     }
     // A period record names its request and period, from the details' own signed fields.
