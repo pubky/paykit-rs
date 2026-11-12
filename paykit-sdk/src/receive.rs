@@ -176,19 +176,29 @@ pub(crate) fn effect(
             };
             let payer_target =
                 ActivityTarget::payer(natural_key::request_record(&sender, &request));
+            // A payee's cancellation is kept, the kept-copy stop (Paykit spec 8.1): the
+            // receive step writes no record for it. The app places it in the request record
+            // itself, as a later write of its own, and every new attempt reads the kept copy,
+            // so a stop that can't be placed still refuses the payment. One for a request
+            // whose record the app holds, open or sealed under a scope key it doesn't hold
+            // yet, always applies and is kept at once: keeping it needs only the record's
+            // key, so the stop never waits for the value's key or a listing, and no give-up
+            // of the entry can lose it.
+            if pay && held_request(cx, &payer_target)? {
+                return keep_cancellation(cx, &payer_target, stored);
+            }
             if payee && payer_reply(cx, stored, &scopes, settlement)? {
                 // A payer's cancellation of a request this app sent.
-            } else if pay
-                && (held_or_unlisted(cx, &payer_target, RecordSide::Payer)?.is_some()
-                    || admits_new_state(cx, &sender, &scopes)?)
-            {
-                // A payee's cancellation is kept, the kept-copy stop (Paykit spec 8.1): the
-                // receive step writes no record for it. The app places it in the request
-                // record itself, as a later write of its own, and every new attempt reads
-                // the kept copy, so a stop that can't be placed still refuses the payment.
+            } else if pay {
                 // One for a request the app holds no record of is new state, which the spam
-                // rule gates; one for a held request always applies.
-                keep_cancellation(cx, &payer_target, stored)?;
+                // rule gates. While the copy of the payer's records may lack records, the
+                // absence decides nothing: the entry is held.
+                if cx.record(&payer_target.record_target())?.is_none() {
+                    hold_while_unlisted(cx, RecordSide::Payer)?;
+                }
+                if admits_new_state(cx, &sender, &scopes)? {
+                    keep_cancellation(cx, &payer_target, stored)?;
+                }
             }
         }
         Body::PaymentReceipt(receipt) if pay => {
@@ -356,6 +366,14 @@ pub(crate) fn key_wait_over(cx: &ReceiveContext<'_>, accepted_at: Option<u64>) -
         cx.highest_service_time()
             .is_some_and(|t| at.saturating_add(KEPT_MESSAGE_MS) <= t)
     })
+}
+
+/// Whether the app's copy holds the record at `target`, in any content but a delete: a value,
+/// one that doesn't read, or one sealed under a scope key the app doesn't hold yet.
+fn held_request(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<bool, Fail> {
+    Ok(cx
+        .record(&target.record_target())?
+        .is_some_and(|held| held.content != RecordContent::Deleted))
 }
 
 /// The value held at `target`, which is of `side`: `None` for none, or one that isn't

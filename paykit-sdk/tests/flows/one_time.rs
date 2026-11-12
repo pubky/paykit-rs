@@ -1214,3 +1214,84 @@ async fn test_one_time_expired_request_read_refused_by_the_switch_keeps_its_code
     );
     assert!(w.rail.all_executions().is_empty());
 }
+
+#[tokio::test]
+async fn test_one_time_cancellation_while_its_record_awaits_its_key_stops_it_past_30_days() {
+    // The wallet holds the request's record sealed under a key it doesn't hold yet: the phone
+    // wrote it again under an epoch's key the wallet never got. Bob cancels. The stop is kept
+    // at once, the entry waiting for no key, and 30 days on no give-up takes it: once the key
+    // comes, the request is cancelled and never payable (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let days = pubky_switch_core::records::DAY_MS;
+    let lasting =
+        draft("1", w.clock.now_ms()).with_proposal_expires_at_ms(w.clock.now_ms() + 90 * days);
+    let request = request_from(&mut shop, w.alice_id(), lasting).await;
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    crate::unrequested::store_bundle(&w, phone.app_id(), &phone.app().cert().clone());
+    phone.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let value = crate::outcome_record::record_value(&mut phone, &request)
+        .await
+        .unwrap();
+    crate::outcome_record::phone_writes(
+        &mut phone,
+        &request,
+        Some(&serde_json::to_vec(&value).unwrap()),
+    )
+    .await;
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let cert = wallet.app().cert().clone();
+    crate::unrequested::store_bundle_from(&w, wallet.app_id(), &cert, newest);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let key = wallet
+        .app()
+        .record_key(&crate::outcome_record::payer_record(&request))
+        .unwrap();
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            held.content,
+            pubky_switch_client::app::RecordContent::Unreadable(
+                pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+            )
+        ),
+        "{:?}",
+        held.content
+    );
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    shop.cancel_sent_request(&record, None).await.unwrap();
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.key_epochs_awaited.is_empty(), "{got:?}");
+    // Past 30 days from its acceptance, nothing is given up: the stop stands.
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS + days);
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(wallet.notices().await.unwrap().is_empty());
+    // The key comes: the record opens, and the stop goes into it.
+    crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
+    assert!(w.rail.all_executions().is_empty());
+    let value = crate::outcome_record::record_value(&mut wallet, &request)
+        .await
+        .unwrap();
+    assert!(!value["cancellation"].is_null(), "{value}");
+}
