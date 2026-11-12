@@ -109,6 +109,11 @@ fn not_automatic(error: &PaykitError) -> bool {
     matches!(error.refusal(), Some(Refusal::NotAutomatic(_)))
 }
 
+/// Whether `error` is the executor's refusal for the check whose rule says `why`.
+fn refused_for(error: &PaykitError, why: &str) -> bool {
+    matches!(error.refusal(), Some(Refusal::NotAutomatic(rule)) if rule.contains(why))
+}
+
 /// The wallet's Allowance record and ledger, as it holds them.
 async fn held(wallet: &Paykit, record: &[u8; 32]) -> (AllowanceRecord, Option<Ledger>) {
     let shared = wallet.app().shared_record(record).await.unwrap().unwrap();
@@ -162,7 +167,7 @@ async fn test_executor_refuses_a_payment_over_the_lifetime_limit() {
         .pay_under_allowance(&third, &record)
         .await
         .unwrap_err();
-    assert!(not_automatic(&refused), "{refused:?}");
+    assert!(refused_for(&refused, "lifetime limit"), "{refused:?}");
     // By hand, the user may still pay it.
     wallet
         .pay_request(&third, PayOptions::default())
@@ -336,7 +341,10 @@ async fn test_executor_refuses_a_request_naming_another_allowance() {
         .pay_under_allowance(&request, &second)
         .await
         .unwrap_err();
-    assert!(not_automatic(&refused), "{refused:?}");
+    assert!(
+        refused_for(&refused, "names another Allowance"),
+        "{refused:?}"
+    );
 }
 
 #[tokio::test]
@@ -354,7 +362,10 @@ async fn test_executor_refuses_a_request_in_another_asset() {
         .pay_under_allowance(&request, &record)
         .await
         .unwrap_err();
-    assert!(not_automatic(&refused), "{refused:?}");
+    assert!(
+        refused_for(&refused, "priced in another asset"),
+        "{refused:?}"
+    );
     assert!(w.rail.all_executions().is_empty());
 }
 
@@ -368,7 +379,7 @@ async fn test_executor_refuses_a_manual_only_request() {
         .pay_under_allowance(&request, &record)
         .await
         .unwrap_err();
-    assert!(not_automatic(&refused), "{refused:?}");
+    assert!(refused_for(&refused, "manual-only"), "{refused:?}");
     wallet
         .pay_request(&request, PayOptions::default())
         .await
@@ -398,7 +409,7 @@ async fn test_executor_refuses_a_blocked_payee_on_a_fresh_read() {
         .pay_under_allowance(&request, &record)
         .await
         .unwrap_err();
-    assert!(not_automatic(&refused), "{refused:?}");
+    assert!(refused_for(&refused, "blocked"), "{refused:?}");
     assert!(w.rail.all_executions().is_empty());
 }
 
@@ -430,7 +441,7 @@ async fn test_executor_refuses_an_expired_allowance() {
         .pay_under_allowance(&request, &record)
         .await
         .unwrap_err();
-    assert!(not_automatic(&refused), "{refused:?}");
+    assert!(refused_for(&refused, "terms refuse"), "{refused:?}");
 }
 
 #[tokio::test]
@@ -442,7 +453,7 @@ async fn test_executor_refuses_over_the_per_payment_range() {
         .pay_under_allowance(&request, &record)
         .await
         .unwrap_err();
-    assert!(not_automatic(&refused), "{refused:?}");
+    assert!(refused_for(&refused, "per_payment limit"), "{refused:?}");
 }
 
 #[tokio::test]
@@ -463,7 +474,7 @@ async fn test_executor_period_limit_holds_within_the_period_and_resets_after() {
         .pay_under_allowance(&second, &record)
         .await
         .unwrap_err();
-    assert!(not_automatic(&refused), "{refused:?}");
+    assert!(refused_for(&refused, "period_count limit"), "{refused:?}");
     w.clock.advance_ms(25 * 60 * 60_000);
     let third = request(&w, &mut shop, &mut wallet, "0.1").await;
     let paid = wallet.pay_under_allowance(&third, &record).await.unwrap();
@@ -493,7 +504,7 @@ async fn test_executor_refuses_after_a_restore_until_confirmed_again() {
         .pay_under_allowance(&request, &record)
         .await
         .unwrap_err();
-    assert!(not_automatic(&refused), "{refused:?}");
+    assert!(refused_for(&refused, "consent list"), "{refused:?}");
     // The user confirms the Allowance again, and the request held since the restore.
     wallet
         .confirm_allowance_again(&record, UserConfirmed::new())
@@ -503,7 +514,7 @@ async fn test_executor_refuses_after_a_restore_until_confirmed_again() {
         .pay_under_allowance(&request, &record)
         .await
         .unwrap_err();
-    assert!(not_automatic(&refused), "{refused:?}");
+    assert!(refused_for(&refused, "held"), "{refused:?}");
     wallet
         .confirm_possibly_cancelled(&request, UserConfirmed::new())
         .await
@@ -527,7 +538,10 @@ async fn test_executor_handoff_stops_the_previous_executor() {
     assert_eq!(allowance.grants.len(), 2);
     let second = request(&w, &mut shop, &mut old, "0.5").await;
     let refused = old.pay_under_allowance(&second, &record).await.unwrap_err();
-    assert!(not_automatic(&refused), "{refused:?}");
+    assert!(
+        refused_for(&refused, "another app is the Allowance's executor"),
+        "{refused:?}"
+    );
     // The notice takes the Allowance off the previous executor's consent list.
     old.receive(None).await.unwrap();
     assert!(!old.allowance(&record).await.unwrap().consented);
@@ -569,7 +583,7 @@ async fn test_executor_refuses_a_ledger_written_by_another_app() {
         .pay_under_allowance(&request, &record)
         .await
         .unwrap_err();
-    assert!(not_automatic(&refused), "{refused:?}");
+    assert!(refused_for(&refused, "writer"), "{refused:?}");
     assert!(w.rail.all_executions().is_empty());
 }
 
@@ -603,7 +617,7 @@ async fn test_executor_lost_batch_answer_counts_the_attempt_once() {
         .pay_under_allowance(&third, &record)
         .await
         .unwrap_err();
-    assert!(not_automatic(&refused), "{refused:?}");
+    assert!(refused_for(&refused, "lifetime limit"), "{refused:?}");
 }
 
 #[tokio::test]
@@ -668,5 +682,29 @@ async fn test_executor_paused_after_a_provider_loss() {
         .pay_under_allowance(&request, &record)
         .await
         .unwrap_err();
-    assert!(not_automatic(&refused), "{refused:?}");
+    assert!(refused_for(&refused, "provider loss"), "{refused:?}");
+}
+
+#[tokio::test]
+async fn test_executor_refuses_after_a_missed_item_until_confirmed_again() {
+    // A `missed` item may hide an end: the consent list is confirmed again first. A request
+    // sent well after the item isn't held, so the consent alone refuses it.
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let now = w.clock.now_ms();
+    w.alice.switch().push_missed(1, now - 1_000, now);
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(60 * 60_000);
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    let refused = wallet
+        .pay_under_allowance(&request, &record)
+        .await
+        .unwrap_err();
+    assert!(refused_for(&refused, "consent list"), "{refused:?}");
+    wallet
+        .confirm_allowance_again(&record, UserConfirmed::new())
+        .await
+        .unwrap();
+    let paid = wallet.pay_under_allowance(&request, &record).await.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
 }
