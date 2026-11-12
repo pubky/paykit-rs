@@ -1919,7 +1919,8 @@ async fn test_one_time_no_response_over_a_record_sealed_at_a_key_not_held() {
 }
 
 #[tokio::test]
-async fn test_one_time_payers_cancellation_before_its_record_placed_at_an_app_paying_and_requesting() {
+async fn test_one_time_payers_cancellation_before_its_record_placed_at_an_app_paying_and_requesting(
+) {
     // Bob's dual app holds `pay` and `request`. Bob's till sends alice a request and writes
     // its record; alice cancels it. The dual app reads the record and alice's cancellation
     // in one read: the payee's record shows alice's cancellation (Paykit spec 8.1, "Replies
@@ -1954,4 +1955,147 @@ async fn test_one_time_payers_cancellation_before_its_record_placed_at_an_app_pa
     assert_eq!(sales.len(), 1, "{sales:?}");
     assert_eq!(sales[0].status, PayeeStatus::Cancelled, "{sales:?}");
     assert!(dual.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+}
+
+/// Carol's shop, with a request to alice `wallet` takes at its next receive, each side
+/// admitting the other.
+async fn carols_request(w: &World, wallet: &mut paykit_sdk::Paykit) -> paykit_sdk::Paykit {
+    wallet.app_mut().invite(&w.carol_id()).await.unwrap();
+    let mut carol = w
+        .join(
+            &w.carol,
+            "shop",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    carol.app_mut().invite(&w.alice_id()).await.unwrap();
+    request_from(&mut carol, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    carol
+}
+
+#[tokio::test]
+async fn test_one_time_missed_item_asks_the_readable_now_and_the_sealed_once_open() {
+    // Carol's open request reads; bob's is sealed under a key the wallet doesn't hold yet.
+    // A `missed` item asks carol at once, and keeps its mark for the sealed record; once
+    // the key comes, bob is asked, and carol isn't asked again (Paykit spec 9).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let _carol = carols_request(&w, &mut wallet).await;
+    let (_, cert) = sealed_requests(&w, &mut wallet, &mut phone, &mut shop, 1).await;
+    let now = w.clock.now_ms();
+    w.alice.switch().push_missed(1, now - 1_000, now);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(crate::common::asked(&wallet, &w.carol_id()).await.len(), 1);
+    assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
+    assert_eq!(wallet.app().protocol_scan(b"mi/").await.unwrap().len(), 1);
+    crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(crate::common::asked(&wallet, &w.bob_id()).await.len(), 1);
+    assert_eq!(crate::common::asked(&wallet, &w.carol_id()).await.len(), 1);
+    assert!(wallet.app().protocol_scan(b"mi/").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_one_time_restore_asks_the_readable_now_and_the_sealed_once_open() {
+    // As after a `missed` item: restored, the wallet asks carol at once, and bob, whose
+    // record is sealed, once the key comes; carol once.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let _carol = carols_request(&w, &mut wallet).await;
+    let (_, cert) = sealed_requests(&w, &mut wallet, &mut phone, &mut shop, 1).await;
+    let backup = wallet.backup().await.unwrap();
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let mut restored = paykit_sdk::Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    restored.reconcile().await.unwrap();
+    restored
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    restored.receive(None).await.unwrap();
+    restored.receive(None).await.unwrap();
+    assert_eq!(
+        crate::common::asked(&restored, &w.carol_id()).await.len(),
+        1
+    );
+    assert!(crate::common::asked(&restored, &w.bob_id())
+        .await
+        .is_empty());
+    crate::unrequested::store_bundle(&w, app_id, &cert);
+    for _ in 0..3 {
+        restored.receive(None).await.unwrap();
+    }
+    assert_eq!(crate::common::asked(&restored, &w.bob_id()).await.len(), 1);
+    assert_eq!(
+        crate::common::asked(&restored, &w.carol_id()).await.len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn test_one_time_confirming_a_request_over_a_sealed_record_refused_as_not_now() {
+    // The user's confirmation that a request may be cancelled is refused as not now over a
+    // record sealed under a key the wallet doesn't hold yet, as a response is: the record
+    // may show a stop, so it isn't refused as no request either.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (requests, _) = sealed_requests(&w, &mut wallet, &mut phone, &mut shop, 1).await;
+    let refused = wallet
+        .confirm_possibly_cancelled(&requests[0], pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_one_time_cancellation_of_a_request_missing_from_a_copy_not_listed_held_until_listed()
+{
+    // After a `missed` item whose listing fails, bob cancels a request the copy holds no
+    // record of: its absence decides nothing, so the entry is held, no stop kept, until
+    // Paykit lists; then the stop is kept (Paykit spec 8.1, "Records not listed yet").
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    wallet.receive(None).await.unwrap();
+    let now = w.clock.now_ms();
+    w.alice.switch().push_missed(1, now - 1_000, now);
+    let hash = [7; 32];
+    let cancellation = cancel_to(&w, &[wallet.app_id()], hash);
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "records?collection".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.records_unlisted.is_some(), "{got:?}");
+    assert!(!got.applied.contains(&cancellation), "{got:?}");
+    assert!(!keeps_stop(&w, &wallet, hash).await);
+    let mut applied = Vec::new();
+    for _ in 0..2 {
+        applied.extend(wallet.receive(None).await.unwrap().applied);
+    }
+    assert!(applied.contains(&cancellation), "{applied:?}");
+    assert!(keeps_stop(&w, &wallet, hash).await);
 }

@@ -39,18 +39,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
-use crate::protocol::QueuedAsk;
 use crate::requests::{cancelled, rejected, RequestStatus};
 use crate::state::{key, Tx};
 
 /// The hold a restore set (`p/rh`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RestoreHold {
     /// From when the counterparties are asked to re-send: the acceptance time of the last
     /// entry the backup's cursor passed, less the clock tolerance.
     pub(crate) resend_from_ms: u64,
-    /// The re-sends are queued.
+    /// The re-sends are all queued.
     pub(crate) asks_queued: bool,
+    /// The counterparties asked already while a record of the copy was sealed, in
+    /// increasing order ([`Paykit::queue_restore_asks`]).
+    pub(crate) asked: Vec<[u8; 32]>,
 }
 
 impl RestoreHold {
@@ -60,6 +62,7 @@ impl RestoreHold {
         Self {
             resend_from_ms: cursor_time_ms.saturating_sub(CLOCK_TOLERANCE_MS),
             asks_queued: false,
+            asked: Vec::new(),
         }
     }
 }
@@ -390,10 +393,11 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotFound`] when the app holds no open record of the request: none, one
-    /// whose value doesn't read, one sealed under a scope key the app doesn't hold yet, or
-    /// one missing from a copy that may lack records. A later restore holds the request again
-    /// all the same. A store failure.
+    /// [`Refusal::NotNow`] while the app can't tell whether it holds the request: its record
+    /// is sealed under a scope key the app doesn't hold yet, or a value that doesn't read, or
+    /// it is missing from a copy that may lack records; [`Refusal::NotFound`] when the copy
+    /// holds no record of it. A later restore holds the request again all the same. A store
+    /// failure.
     pub async fn confirm_possibly_cancelled(
         &mut self,
         request: &crate::requests::RequestRef,
@@ -404,37 +408,82 @@ impl Paykit {
             paykit_lib::derive::natural_key::request_record(&request.payee, &request.request_hash),
         );
         if self.held_activity(&target).await?.is_none() {
-            return Err(Refusal::NotFound.into());
+            return Err(self.request_record_refusal(&target).await?);
         }
         let record_key = self.activity_key(&target)?;
         self.local_put(&key::hold_confirmed(&record_key), &true)
             .await
     }
 
-    /// A restored cursor time (`ct`) above the backup's highest verified service time plus
-    /// the clock tolerance is clamped to that bound, with the hold's re-send time: a time
-    /// ahead of any the backup verified would ask counterparties to re-send from the future,
-    /// so nothing would come back (Paykit spec 7.2, "What a restore loses"). Clamped, not
-    /// refused: the time decides only where the re-sends start, and a restore must not fail
-    /// on it. Without a verified time the device clock is the bound.
+    /// A restored time above the backup's highest verified service time plus the clock
+    /// tolerance is clamped to that bound: the cursor time (`ct`), with the hold's re-send
+    /// time, the two times of each mark of dropped messages (`pd/`, `ud/`), and the
+    /// acceptance time of each stop (`kc/`) and kept reply (`pr/`). A cursor time ahead of
+    /// any the backup verified would ask counterparties to re-send from the future, so
+    /// nothing would come back (Paykit spec 7.2, "What a restore loses"); a mark or a kept
+    /// message dated there would never expire. Clamped, not refused: the times decide only
+    /// where the re-sends start and when the items go, and a restore must not fail on them.
+    /// Without a verified time the device clock is the bound. Each value is read with its
+    /// restore check first.
     pub(crate) async fn bound_restored_cursor_time(&mut self) -> Result<()> {
-        let Some(cursor) = self.local_get::<u64>(key::CURSOR_TIME).await? else {
-            return Ok(());
-        };
         let bound = self
             .service_time()
             .unwrap_or_else(|| self.now())
             .saturating_add(CLOCK_TOLERANCE_MS);
-        if cursor <= bound {
-            return Ok(());
-        }
         let mut tx = Tx::default();
-        tx.put(key::CURSOR_TIME, &bound)?;
-        if let Some(mut hold) = self.local_get::<RestoreHold>(key::RESTORE_HOLD).await? {
-            hold.resend_from_ms = RestoreHold::of(bound).resend_from_ms;
-            tx.put(key::RESTORE_HOLD, &hold)?;
+        if let Some(cursor) = self.local_get::<u64>(key::CURSOR_TIME).await? {
+            if cursor > bound {
+                tx.put(key::CURSOR_TIME, &bound)?;
+                if let Some(mut hold) = self.local_get::<RestoreHold>(key::RESTORE_HOLD).await? {
+                    hold.resend_from_ms = RestoreHold::of(bound).resend_from_ms;
+                    tx.put(key::RESTORE_HOLD, &hold)?;
+                }
+            }
+        }
+        for family in [
+            crate::marks::MarkFamily::Replies,
+            crate::marks::MarkFamily::Unverified,
+        ] {
+            for (mark_key, value) in self.app.protocol_scan(family.prefix().as_bytes()).await? {
+                let mark_key = String::from_utf8(mark_key).map_err(|_| PaykitError::corrupt())?;
+                let mut mark = crate::marks::read_mark(family, &mark_key, &value)?;
+                if mark.latest_ms > bound {
+                    mark.latest_ms = bound;
+                    mark.earliest_ms = mark.earliest_ms.min(bound);
+                    tx.put(&mark_key, &mark)?;
+                }
+            }
+        }
+        let own = self.identity();
+        for (stop_key, value) in self
+            .app
+            .protocol_scan(key::KEPT_CANCELLATIONS.as_bytes())
+            .await?
+        {
+            crate::protocol::kept_cancellation_at(&stop_key, &value, &own, &|target| {
+                self.app
+                    .record_key(target)
+                    .map_err(|error| error.to_string())
+            })
+            .map_err(|_| PaykitError::corrupt())?;
+            self.bound_kept(&mut tx, stop_key, &value, bound)?;
+        }
+        for (reply_key, value) in self.app.protocol_scan(key::KEPT_REPLIES.as_bytes()).await? {
+            self.checked_reply(&reply_key, &value)?;
+            self.bound_kept(&mut tx, reply_key, &value, bound)?;
         }
         self.local_commit(tx).await
+    }
+
+    /// Put in `tx` the kept message `value` at `key`, already checked, with its acceptance
+    /// time bounded to `bound`, when it was later.
+    fn bound_kept(&self, tx: &mut Tx, key: Vec<u8>, value: &[u8], bound: u64) -> Result<()> {
+        let mut kept = crate::state::decode::<crate::records::KeptMessage>(value)?;
+        if kept.bound_acceptance(bound) {
+            let key = String::from_utf8(key).map_err(|_| PaykitError::corrupt())?;
+            tx.put(&key, &kept)?;
+        }
+        Ok(())
     }
 
     /// The shared records known, not an empty copy: after a restore the client's copy is
@@ -587,7 +636,11 @@ impl Paykit {
     /// Queue, once after a restore, a `resend_request` to every counterparty with an open
     /// request, from the restore's re-send time; [`Paykit::receive`] sends them. The start is
     /// bounded where it is used as well as at the restore and the load: no ordering of a
-    /// load, a renewal and a crash leaves the re-sends starting in the future.
+    /// load, a renewal and a crash leaves the re-sends starting in the future. A request
+    /// record sealed under a scope key the app doesn't hold yet shows no counterparty: the
+    /// counterparties the other records show are asked now, each once, and the hold names
+    /// them, so the one a sealed record shows is asked once it opens; the asks are all
+    /// queued once no record is sealed.
     pub(crate) async fn queue_restore_asks(&mut self) -> Result<()> {
         let Some(mut hold) = self.local_get::<RestoreHold>(key::RESTORE_HOLD).await? else {
             return Ok(());
@@ -600,11 +653,6 @@ impl Paykit {
             .resend_from_ms
             .min(RestoreHold::of(bound).resend_from_ms);
         if hold.asks_queued {
-            return Ok(());
-        }
-        // A request record sealed under a scope key the app doesn't hold yet shows no
-        // counterparty: the asks wait for the key, and are queued once every record opens.
-        if self.copy_awaits_key().await? {
             return Ok(());
         }
         let mut counterparties = std::collections::BTreeSet::new();
@@ -620,18 +668,20 @@ impl Paykit {
                 counterparties.insert(view.request.payee);
             }
         }
+        let mut asked: std::collections::BTreeSet<[u8; 32]> = hold.asked.iter().copied().collect();
         let mut tx = Tx::default();
         for counterparty in counterparties {
-            tx.put(
-                &key::ask(&counterparty, hold.resend_from_ms),
-                &QueuedAsk {
-                    sender: counterparty,
-                    from_ms: hold.resend_from_ms,
-                    until_ms: None,
-                },
-            )?;
+            if asked.insert(counterparty) {
+                self.queue_ask(&mut tx, counterparty, hold.resend_from_ms)
+                    .await?;
+            }
         }
-        hold.asks_queued = true;
+        if self.copy_awaits_key().await? {
+            hold.asked = asked.into_iter().collect();
+        } else {
+            hold.asks_queued = true;
+            hold.asked = Vec::new();
+        }
         tx.put(key::RESTORE_HOLD, &hold)?;
         self.local_commit(tx).await
     }
@@ -647,7 +697,7 @@ pub(crate) fn payer_pass_refusal() -> Refusal {
     )
 }
 
-fn unlisted() -> crate::error::PaykitError {
+pub(crate) fn unlisted() -> crate::error::PaykitError {
     Refusal::NotNow(
         "Switch spec 8.2, 8.3, 12.4 step 2.1: the shared records aren't listed since the \
          restore, the missed item or under the certificate held now"

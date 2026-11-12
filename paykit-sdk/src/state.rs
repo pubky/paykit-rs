@@ -22,10 +22,10 @@
 //!
 //! | Key (after `p/`) | Holds | Sensitive |
 //! |---|---|---|
-//! | `ask/<sender>/<from>` | a re-send to ask of a sender | |
+//! | `ask/<sender>/<from>` | a re-send to ask of a sender, kept while sends to it are held back (`resend.rs`) | |
 //! | `ans/<seq>/<msg_id>` | a `resend_request` received and still to be answered | |
 //! | `missed/<from>` | entries missed before a provider loss: every counterparty with Paykit activity is asked to re-send | |
-//! | `mi/<from>` | entries missed while lagging, a `missed` item's: the counterparties of open requests and unfinished payments are asked to re-send | |
+//! | `mi/<from>` | entries missed while lagging, a `missed` item's: the counterparties of open requests and unfinished payments are asked to re-send; kept, with those asked already, while a record whose counterparty it may ask is sealed | |
 //! | `j/<attempt_id>` | the payment journal: one payment, from before its `attempt` | yes |
 //! | `side/<msg_id>` | the side a cancellation is sent from, kept with the batch that queues it | |
 //! | `ar/<payee>/<app_id>` | a payee app's records that took part in its comparison, for its public endpoints | |
@@ -396,7 +396,7 @@ pub(crate) enum StateKey {
     DroppedReplies { sender: [u8; 32] },
     /// `ud/<sender>`: the mark of a sender's entries dropped unverified.
     DroppedUnverified { sender: [u8; 32] },
-    /// `pr/<record key>/<msg_id>`: a payer's reply kept for its record.
+    /// `pr/<sender>/<record key>/<msg_id>`: a payer's reply kept for its record.
     KeptReply {
         sender: [u8; 32],
         record: [u8; 32],

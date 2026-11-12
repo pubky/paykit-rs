@@ -542,15 +542,10 @@ fn keep_cancellation(
 /// bounded by the entries the client stores (Switch spec 8.2), one stop per request record;
 /// counted here, they would make the stops of other requests go first. One that is left
 /// out no longer counts again from then on, which can put its sender past the bound: the
-/// loop drops back to it. While the copy of the payer's records may lack records
-/// ([`side_may_lack`]) nothing is judged, so no stop counts or goes; a cancellation of a
-/// request absent or deleted from the copy is held then anyway ([`hold_while_unlisted`]).
+/// loop drops back to it. It is reached only once the copy of the payer's records lacks none:
+/// a cancellation of a request absent or deleted from a copy that may lack records is held
+/// before ([`hold_while_unlisted`]), so every stop is judged from a listed copy.
 fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<(), Fail> {
-    // While the copy of the payer's records may lack records, no stop is judged held or
-    // not: none counts and none goes.
-    if side_may_lack(cx, RecordSide::Payer)? {
-        return Ok(());
-    }
     let mut kept = Vec::new();
     let mut names = Vec::new();
     for (bytes, value) in cx.local_scan(key::KEPT_CANCELLATIONS.as_bytes())? {
@@ -1476,9 +1471,7 @@ impl Paykit {
             // A reply the record can't take, its sender not the record's counterparty, isn't
             // written: kept no longer than any other.
             let placed = match record {
-                Some(record) if record.counterparty != reply.sender() => {
-                    crate::stored::Placed::Not
-                }
+                Some(record) if record.counterparty != reply.sender() => crate::stored::Placed::Not,
                 _ => {
                     let mut tx = Tx::default();
                     tx.delete(&kept_key);
@@ -1497,7 +1490,11 @@ impl Paykit {
 
     /// The payer's reply `value` kept at `key`, read with the check a restore makes
     /// ([`crate::protocol::kept_reply_at`]): one that fails it is a corrupt store.
-    fn checked_reply(&self, key: &[u8], value: &[u8]) -> crate::error::Result<StoredMessage> {
+    pub(crate) fn checked_reply(
+        &self,
+        key: &[u8],
+        value: &[u8],
+    ) -> crate::error::Result<StoredMessage> {
         let Some(crate::state::StateKey::KeptReply {
             sender,
             record,
@@ -1710,11 +1707,31 @@ impl Paykit {
         Ok(())
     }
 
+    /// Whether every send to `pubky` is held back now (Paykit spec 8.1, "Blocked
+    /// counterparties"): no list, renewal, answer or re-send request goes to it while the
+    /// copy of the deny list holds it, nor while the copy isn't known, at an app holding
+    /// `contacts`: no read of the lists succeeded since the last that failed, or since a
+    /// restore (`lr` absent). An unknown copy decides nothing, so what is owed to that
+    /// counterparty is kept, never dropped, and goes once a read shows it not blocked.
+    pub(crate) async fn sends_held(&self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
+        Ok(!self.deny_copy_known().await? || self.denied_as_last_read(pubky).await?)
+    }
+
+    /// Whether the copy of the deny list is known ([`Paykit::sends_held`]): always at an app
+    /// that doesn't read the lists, which blocks no one.
+    pub(crate) async fn deny_copy_known(&self) -> crate::error::Result<bool> {
+        if !reads_lists(self.app.cert().scopes()) {
+            return Ok(true);
+        }
+        Ok(self.local_get::<u64>(key::LISTS_READ).await?.is_some())
+    }
+
     /// Whether the copy of the deny list kept from the last read holds `pubky`, at an app
     /// holding `contacts`, for the views, which read nothing from the switch, and for the
-    /// re-sends, which send a blocked counterparty nothing. The copy holds this app's own
-    /// blocks at once, a block kept unanswered included ([`Paykit::block`]), and a receive
-    /// reads it again first once it is [`LISTS_REFRESH_MS`] old.
+    /// re-sends, which send a blocked counterparty nothing ([`Paykit::sends_held`]). The copy
+    /// holds this app's own blocks and unblocks at once, kept unanswered included
+    /// ([`Paykit::block`]), and a receive reads it again first once it is
+    /// [`LISTS_REFRESH_MS`] old.
     pub(crate) async fn denied_as_last_read(&self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
         if !reads_lists(self.app.cert().scopes()) {
             return Ok(false);
@@ -1795,10 +1812,25 @@ impl Paykit {
     }
 
     /// Answer the `resend_request`s the receive step kept, oldest first, each once (Paykit
-    /// spec 9). Returns how many were answered.
+    /// spec 9). One from a requester the copy of the deny list holds is dropped unanswered,
+    /// as v0.1 ran no send for a blocked peer (Paykit spec 8.1); while the copy isn't known
+    /// ([`Paykit::deny_copy_known`]), none is answered or dropped: they wait for a read of
+    /// the lists. Returns how many were answered.
     pub(crate) async fn answer_kept_resends(&mut self) -> crate::error::Result<u64> {
         let mut answered = 0u64;
-        for (rest, queued) in self.local_scan::<QueuedAnswer>(key::ANSWERS).await? {
+        if !self.deny_copy_known().await? {
+            return Ok(answered);
+        }
+        for (answer_key, value) in self.app.protocol_scan(key::ANSWERS.as_bytes()).await? {
+            // Read with a restore's check, bound to its key: one that fails it is a corrupt
+            // store, never an answer dropped.
+            let Some(crate::state::StateKey::Answer { seq, msg_id }) =
+                crate::state::StateKey::parse(&answer_key)
+            else {
+                return Err(crate::error::PaykitError::corrupt());
+            };
+            let queued = crate::protocol::check_queued_answer(&value, seq, &msg_id)
+                .map_err(|_| crate::error::PaykitError::corrupt())?;
             // A requester blocked since the request was kept is sent nothing (Paykit spec 8.1).
             let blocked = self.denied_as_last_read(&queued.requester).await?;
             if let (false, Ok(request)) = (blocked, ResendRequest::from_body(&queued.body)) {
@@ -1806,9 +1838,9 @@ impl Paykit {
                     .await?;
                 answered = answered.saturating_add(1);
             }
-            let mut tx = Tx::default();
-            tx.delete(&format!("{}{rest}", key::ANSWERS));
-            self.local_commit(tx).await?;
+            let answer_key =
+                String::from_utf8(answer_key).map_err(|_| crate::error::PaykitError::corrupt())?;
+            self.local_delete(&answer_key).await?;
         }
         Ok(answered)
     }

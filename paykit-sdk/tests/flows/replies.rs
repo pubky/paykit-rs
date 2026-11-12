@@ -547,8 +547,10 @@ async fn test_replies_dropped_asked_for_from_the_marks_time() {
     w.clock.advance_ms(60_000);
     let n = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
     let (request, _) = kept_then_unmatched(&w, &mut wallet, &mut shop, n).await;
+    // The shop holds the earlier request's record, alice's: her mark asks at once.
+    assert_eq!(asked(&shop, &w.alice_id()).await.len(), 1);
     record_request(&w, &mut shop, &request).await;
-    assert_eq!(shop.receive(None).await.unwrap().resends, 1);
+    assert_eq!(shop.receive(None).await.unwrap().resends, 0);
     // Alice answers from the mark's time: the paid request's two replies come back, as
     // duplicates for now, and not the earlier payment's.
     wallet.receive(None).await.unwrap();
@@ -558,6 +560,22 @@ async fn test_replies_dropped_asked_for_from_the_marks_time() {
         .filter(|e| matches!(e, pubky_switch_client::app::AppEvent::Duplicate { .. }))
         .count();
     assert_eq!(again, 2, "{events:?}");
+}
+
+#[tokio::test]
+async fn test_replies_dropped_asked_at_once_while_a_request_of_their_sender_is_held() {
+    // The shop held alice's request's record before her replies past the bound came: the
+    // mark of the one dropped is due at once, though no record changes, and asks her.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    unmatched_replies(&w, &shop, paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER + 1);
+    shop.receive(None).await.unwrap();
+    assert_eq!(mark_senders(&shop, "pd/").await, vec![w.alice_id()]);
+    assert_eq!(asked(&shop, &w.alice_id()).await.len(), 1);
 }
 
 /// How many of the payer's acceptance and proof the shop's record at `record` holds.
@@ -956,4 +974,56 @@ async fn test_replies_kept_past_30_days_over_quota_given_up_with_the_notice() {
     assert!(notices
         .iter()
         .all(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp));
+}
+
+#[tokio::test]
+async fn test_replies_kept_and_marks_dated_past_the_backup_bounded_at_a_restore() {
+    // A backup carries kept replies and a mark of dropped replies dated two days past any
+    // service time it verified: a restore bounds them by that time plus the clock tolerance,
+    // as it bounds the cursor time, so they go 30 days on, not later.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let _request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    let ahead = w.clock.now_ms() + 2 * DAY_MS;
+    let mut writes = Vec::new();
+    for (key, value) in shop.app().protocol_scan(b"pr/").await.unwrap() {
+        let mut kept: serde_json::Value = serde_json::from_slice(&value).unwrap();
+        kept["d"]["accepted_at"] = json!(ahead);
+        writes.push(pubky_switch_client::app::LocalWrite::Put {
+            key,
+            value: serde_json::to_vec(&kept).unwrap(),
+        });
+    }
+    shop.app_mut().protocol_commit(&writes).await.unwrap();
+    seed_marks(&mut shop, "pd/", 1, ahead).await;
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let shop = Paykit::restore(
+        w.env(&w.bob, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    let bound = w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+    let kept = shop.app().protocol_scan(b"pr/").await.unwrap();
+    assert_eq!(kept.len(), 2);
+    for (_, value) in kept {
+        let kept: serde_json::Value = serde_json::from_slice(&value).unwrap();
+        assert!(
+            kept["d"]["accepted_at"].as_u64().unwrap() <= bound,
+            "{kept}"
+        );
+    }
+    let marks = shop.app().protocol_scan(b"pd/").await.unwrap();
+    assert_eq!(marks.len(), 1);
+    let mark: serde_json::Value = serde_json::from_slice(&marks[0].1).unwrap();
+    assert!(mark["d"]["latest_ms"].as_u64().unwrap() <= bound, "{mark}");
+    assert!(
+        mark["d"]["earliest_ms"].as_u64().unwrap() <= bound,
+        "{mark}"
+    );
 }
