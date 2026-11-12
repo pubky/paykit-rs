@@ -2,9 +2,9 @@
 //! 8.2; Paykit spec 8.1): the duty events that tell of them are taken at every receive and
 //! kept in Paykit's own state.
 //!
-//! - **An effect refused for good** (`EffectRefused`, or a `Parked` duty event of a reason
-//!   the client doesn't try again, but `Uncertain`), such as a record write the switch
-//!   refused (`403 permission_missing`): the message is kept (`p/se/<sender>/<msg_id>`)
+//! - **An effect refused for good** (`EffectRefused`, or a `Parked` duty event of any reason
+//!   but `Uncertain`), such as a record write the switch refused (`403
+//!   permission_missing`), or one over a quota: the message is kept (`p/se/<sender>/<msg_id>`)
 //!   and written into its record by a later write of the app's own, tried at every receive
 //!   until it lands, as room frees: a request, a payer's reply, a proof of a payment without
 //!   a request into the record of its settlement, a receipt beside the proof it names.
@@ -21,9 +21,6 @@
 //!   nothing. A copy of the entry the host released after that is declined, its message
 //!   processed, so its effect isn't applied twice (`PaykitProtocol`'s receive step).
 //! - **A released entry that ran as a duplicate** (`ReleasedDuplicate`): its note goes.
-//! - **An entry the client tries again at every read** (`Parked` as `Unverifiable`,
-//!   `Quota`, `StoreUnavailable`, `StoreRejected` or `Released`): nothing is kept, since the
-//!   receive step takes it again, as any entry.
 //! - **An entry dropped unverified** (`StoredEntryDropped`): it counts in its sender's mark
 //!   of entries dropped unverified (`ud/<sender>`, `marks.rs`), and the sender is asked at
 //!   once to send again what its inbox accepted from the mark's earliest time to its latest,
@@ -44,7 +41,7 @@
 use paykit_lib::derive::natural_key;
 use paykit_lib::records::StoredMessage;
 use paykit_lib::Body;
-use pubky_switch_client::app::{AppEvent, OpBatch, RecordContent};
+use pubky_switch_client::app::{AppEvent, OpBatch, ParkReason, RecordContent};
 use pubky_switch_core::enc::serde_b64;
 use serde::{Deserialize, Serialize};
 
@@ -89,8 +86,6 @@ pub(crate) struct StoredNote {
     pub(crate) placed: bool,
 }
 
-/// The request `stored` is, or names: a request's own hash, the first of a payer's reply's
-/// `refs`, the second of a receipt's.
 /// The write of the host's notice that `stored` was given up (`nt/<sender>/<msg_id>`),
 /// raised at `service`, the highest service time verified.
 pub(crate) fn given_up_write(
@@ -103,6 +98,8 @@ pub(crate) fn given_up_write(
     crate::state::local_put(&key::message_notice(&sender, msg_id), &notice)
 }
 
+/// The request `stored` is, or names: a request's own hash, the first of a payer's reply's
+/// `refs`, the second of a receipt's.
 fn named_request(stored: &StoredMessage) -> Option<[u8; 32]> {
     let refs = &stored.message().refs;
     match stored.body() {
@@ -210,12 +207,9 @@ impl Paykit {
     async fn take_stored_event(&mut self, event: &AppEvent, mark: &str) -> Result<bool> {
         let mut tx = Tx::default();
         let taken = match event {
-            // An entry the client tries again at every read goes through the receive step
-            // again, which takes it as any entry: nothing to keep here. Such as one held
-            // while its record's value waits for its key, given up there 30 days after its
-            // acceptance.
-            AppEvent::Parked { reason, .. } if reason.tried_again() => true,
-            AppEvent::Parked { stored_id, .. } => self.note_stored(*stored_id, &mut tx).await?,
+            AppEvent::Parked {
+                stored_id, reason, ..
+            } if *reason != ParkReason::Released => self.note_stored(*stored_id, &mut tx).await?,
             AppEvent::EffectRefused { stored_id, .. }
             | AppEvent::EffectUncertain { stored_id, .. } => {
                 self.note_stored(*stored_id, &mut tx).await?
