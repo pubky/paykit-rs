@@ -896,7 +896,7 @@ async fn test_unrequested_receipt_from_another_identity_refused() {
         .unwrap()
         .plaintext
         .hash();
-    w.inject(
+    let from_carol = w.inject(
         &w.carol,
         "shop",
         &w.alice,
@@ -905,8 +905,12 @@ async fn test_unrequested_receipt_from_another_identity_refused() {
         vec![proof],
         receipt_body(attempt_id),
     );
-    wallet.receive(None).await.unwrap();
+    // Taken with no effect: nothing is written, and nothing is kept to write later.
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.applied.contains(&from_carol), "{got:?}");
     assert!(wallet.payments().await.unwrap()[0].receipt.is_none());
+    assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
+    assert!(wallet.app().protocol_scan(b"se/").await.unwrap().is_empty());
     // Bob's receipt of the same payment goes beside the proof.
     w.inject(
         &w.bob,
