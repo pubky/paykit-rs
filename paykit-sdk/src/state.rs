@@ -24,7 +24,8 @@
 //! |---|---|---|
 //! | `ask/<sender>/<from>` | a re-send to ask of a sender | |
 //! | `ans/<seq>/<msg_id>` | a `resend_request` received and still to be answered | |
-//! | `missed/<from>` | entries missed while lagging, or before a provider loss | |
+//! | `missed/<from>` | entries missed before a provider loss: every counterparty with Paykit activity is asked to re-send | |
+//! | `mi/<from>` | entries missed while lagging, a `missed` item's: the counterparties of open requests and unfinished payments are asked to re-send | |
 //! | `j/<attempt_id>` | the payment journal: one payment, from before its `attempt` | yes |
 //! | `side/<msg_id>` | the side a cancellation is sent from, kept with the batch that queues it | |
 //! | `ar/<payee>/<app_id>` | a payee app's records that took part in its comparison, for its public endpoints | |
@@ -34,16 +35,17 @@
 //! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads | |
 //! | `kc/<record key>` | a payee's cancellation of a one-time request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
-//! | `lr` | when the app last read the lists, on the device clock; absent before the first read and after a due read failed, when new activity waits (Paykit wire 4.1) | |
+//! | `lr` | when the app last read the lists, on the device clock; absent before the first read and after a due read failed, when new activity waits (Paykit wire 4.1); never restored, so a restored app reads the deny list again before any payment | |
 //! | `spam/<pubky>` | how many messages from a blocked or flagged sender only were counted (Paykit wire 4.1) | |
 //! | `rs/<pubky>/<msg_id>` | when a message was last re-sent to a requester | |
 //! | `rsd/<pubky>/<day>` | how many messages were re-sent to a requester that day | |
 //! | `nl` | set by a restore: the shared records aren't listed since, so the client's copy is empty and a record's absence means nothing yet; cleared once they are listed; never restored | |
-//! | `lc` | the certificate the shared records were last listed under, signed: a certificate held now that reads more collections than it means the copy lacks their records until Paykit lists them (`hold.rs`); written at a join, a restore and each Paykit listing; never restored | |
+//! | `lc` | the certificate the shared records were last listed under, signed: a certificate held now other than it means the copy may lack records until Paykit lists them, since one held between may have read less (`hold.rs`); written only by a Paykit listing, in its commit; absent from a join or a restore until that listing, which leaves the records unlisted; never restored | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
-//! | `dl` | the deny list as the app last read it, for the views (Paykit spec 8.1) | |
+//! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
+//! | `bk/<pubky>` | this app's block (`true`) or unblock (`false`) of `pubky` whose `deny.put` or `deny.delete` the client keeps unanswered: a block counts at once, an unblock once the list shows it (Paykit spec 8.1); cleared once a read of the list shows it; never restored | |
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply to a request the app holds no record of yet, kept until it does (`receive.rs`) | |
@@ -191,15 +193,18 @@ pub(crate) mod key {
     pub(crate) const ASKS: &str = "ask/";
     pub(crate) const ANSWERS: &str = "ans/";
     pub(crate) const MISSED: &str = "missed/";
+    pub(crate) const MISSED_ITEMS: &str = "mi/";
     pub(crate) const JOURNAL: &str = "j/";
     pub(crate) const PEERS: &str = "peer/";
     pub(crate) const KEPT_CANCELLATIONS: &str = "kc/";
     pub(crate) const CURSOR_TIME: &str = "ct";
     pub(crate) const RESTORE_HOLD: &str = "rh";
+    pub(crate) const MISSED_HOLD: &str = "mh";
     pub(crate) const HOLD_CONFIRMED: &str = "hc/";
     pub(crate) const LISTS_READ: &str = "lr";
     pub(crate) const HELD_LISTS: &str = "lh/";
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
+    pub(crate) const MISSED_UNLISTED: &str = "ml";
     pub(crate) const PAYER_PASS_OWED: &str = "pp";
     pub(crate) const LISTED_CERT: &str = "lc";
     pub(crate) const NOTICES: &str = "nt/";
@@ -218,6 +223,7 @@ pub(crate) mod key {
         format!("{DROPPED_UNVERIFIED}{}", b64(sender))
     }
     pub(crate) const DENIED: &str = "dl";
+    pub(crate) const OWN_BLOCKS: &str = "bk/";
     pub(crate) const TAKEN: &str = "dt/";
 
     /// The mark of the duty event `id`, taken.
@@ -233,6 +239,11 @@ pub(crate) mod key {
     /// The prefix of the replies kept from `sender`.
     pub(crate) fn kept_replies_of(sender: &[u8; 32]) -> String {
         format!("{KEPT_REPLIES}{}/", b64(sender))
+    }
+
+    /// The prefix of the notes of stored entries' messages from `sender`.
+    pub(crate) fn stored_notes_of(sender: &[u8; 32]) -> String {
+        format!("{STORED_NOTES}{}/", b64(sender))
     }
 
     /// The note of a stored entry's message `msg_id` from `sender`.
@@ -262,6 +273,10 @@ pub(crate) mod key {
         format!("{MISSED}{}", num(from))
     }
 
+    pub(crate) fn missed_item(from: u64) -> String {
+        format!("{MISSED_ITEMS}{}", num(from))
+    }
+
     pub(crate) fn journal(attempt_id: &AttemptId) -> String {
         format!("{JOURNAL}{}", attempt_id.to_text())
     }
@@ -280,6 +295,11 @@ pub(crate) mod key {
 
     pub(crate) fn held_list(record_key: &[u8; 32]) -> String {
         format!("{HELD_LISTS}{}", b64(record_key))
+    }
+
+    /// This app's block (`true`) or unblock of `pubky` kept unanswered.
+    pub(crate) fn own_block(pubky: &[u8; 32]) -> String {
+        format!("{OWN_BLOCKS}{}", b64(pubky))
     }
 
     pub(crate) fn kept_cancellation(record_key: &[u8; 32]) -> String {
@@ -323,8 +343,10 @@ pub(crate) enum StateKey {
     Ask { sender: [u8; 32], from_ms: u64 },
     /// `ans/<seq>/<msg_id>`: a `resend_request` received, to answer.
     Answer { seq: u64, msg_id: String },
-    /// `missed/<from>`: a `missed` item's re-sends to ask for.
+    /// `missed/<from>`: the re-sends to ask for after a provider loss.
     Missed { from_ms: u64 },
+    /// `mi/<from>`: a `missed` item's re-sends to ask for.
+    MissedItem { from_ms: u64 },
     /// `peer/<pubky>`: a counterparty with Paykit activity.
     Peer([u8; 32]),
     /// `kc/<record key>`: a payee's cancellation kept to place.
@@ -333,8 +355,12 @@ pub(crate) enum StateKey {
     CursorTime,
     /// `rh`: the hold a restore set.
     RestoreHold,
+    /// `mh`: the hold a `missed` item set.
+    MissedHold,
     /// `nl`: the shared records aren't listed since a restore.
     RecordsUnlisted,
+    /// `ml`: the shared records aren't listed by Paykit since a `missed` item.
+    MissedUnlisted,
     /// `pp`: no reconcile ran the payer pass since a restore.
     PayerPassOwed,
     /// `lc`: the certificate the shared records were last listed under.
@@ -362,6 +388,8 @@ pub(crate) enum StateKey {
     },
     /// `dl`: the deny list as last read.
     Denied,
+    /// `bk/<pubky>`: this app's block or unblock of `pubky` kept unanswered.
+    OwnBlock([u8; 32]),
     /// `dt/<event ID>`: a duty event taken.
     Taken(String),
     /// `pd/<sender>`: the mark of a sender's replies dropped for the bounds.
@@ -414,7 +442,9 @@ impl StateKey {
         Some(match text {
             "ct" => Self::CursorTime,
             "rh" => Self::RestoreHold,
+            "mh" => Self::MissedHold,
             "nl" => Self::RecordsUnlisted,
+            "ml" => Self::MissedUnlisted,
             "pp" => Self::PayerPassOwed,
             "lc" => Self::ListedCert,
             "lr" => Self::ListsRead,
@@ -443,8 +473,12 @@ impl StateKey {
                     "missed" => Self::Missed {
                         from_ms: number(rest)?,
                     },
+                    "mi" => Self::MissedItem {
+                        from_ms: number(rest)?,
+                    },
                     "peer" => Self::Peer(b64_32(rest)?),
                     "kc" => Self::KeptCancellation(b64_32(rest)?),
+                    "bk" => Self::OwnBlock(b64_32(rest)?),
                     "hc" => Self::HoldConfirmed(b64_32(rest)?),
                     "lh" => Self::HeldList(b64_32(rest)?),
                     "side" => Self::Side(msg_id(rest)?),
@@ -598,6 +632,7 @@ mod tests {
                 },
             ),
             (key::missed(9), StateKey::Missed { from_ms: 9 }),
+            (key::missed_item(9), StateKey::MissedItem { from_ms: 9 }),
             (key::peer(&pubky), StateKey::Peer(pubky)),
             (
                 key::kept_cancellation(&pubky),
@@ -605,12 +640,15 @@ mod tests {
             ),
             (key::CURSOR_TIME.into(), StateKey::CursorTime),
             (key::RESTORE_HOLD.into(), StateKey::RestoreHold),
+            (key::MISSED_HOLD.into(), StateKey::MissedHold),
             (key::RECORDS_UNLISTED.into(), StateKey::RecordsUnlisted),
+            (key::MISSED_UNLISTED.into(), StateKey::MissedUnlisted),
             (key::PAYER_PASS_OWED.into(), StateKey::PayerPassOwed),
             (key::LISTED_CERT.into(), StateKey::ListedCert),
             (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),
             (key::LISTS_READ.into(), StateKey::ListsRead),
             (key::DENIED.into(), StateKey::Denied),
+            (key::own_block(&pubky), StateKey::OwnBlock(pubky)),
             (
                 format!("{}{}-7", key::TAKEN, "05".repeat(16)),
                 StateKey::Taken(format!("{}-7", "05".repeat(16))),
@@ -712,6 +750,7 @@ mod tests {
             "ask/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM/7",
             "ans/00000000000000000001/not-a-uuid",
             "missed/1",
+            "mi/1",
             "j/",
             "ctx",
             "side/123E4567-E89B-42D3-A456-426614174000",

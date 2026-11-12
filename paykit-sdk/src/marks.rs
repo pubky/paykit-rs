@@ -7,7 +7,9 @@
 //! - **Replies dropped for the bounds on kept replies** (`pd/<sender>`, `receive.rs`). Once
 //!   the app holds the record of a request whose counterparty holds such a mark, it asks
 //!   that sender to re-send what its inbox accepted from the mark's earliest time
-//!   (`resend_request` with `accepted_from`).
+//!   (`resend_request` with `accepted_from`). The client marked such a reply processed when
+//!   it was kept, so at this pin a re-sent copy arrives as a duplicate and isn't taken: the
+//!   client has no outcome yet for a message passed, not taken, that may come again.
 //! - **Entries dropped unverified** (`ud/<sender>`, `stored.rs`). The app asks that sender
 //!   at once to re-send what its inbox accepted from the mark's earliest time to its latest
 //!   (`accepted_from` and `accepted_until`).
@@ -253,7 +255,9 @@ impl Paykit {
                 let mark = read_mark(family, &key, &value)?;
                 if mark.expired(service) {
                     self.local_delete(&key).await?;
-                } else if mark.due {
+                } else if mark.due && !self.denied_as_last_read(&mark.sender).await? {
+                    // A sender blocked is asked nothing while it is (Paykit spec 8.1); its
+                    // mark stays until it expires.
                     asked = asked.saturating_add(self.ask_on_mark(family, &key, mark).await?);
                 }
             }

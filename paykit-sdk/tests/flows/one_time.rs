@@ -1214,3 +1214,698 @@ async fn test_one_time_expired_request_read_refused_by_the_switch_keeps_its_code
     );
     assert!(w.rail.all_executions().is_empty());
 }
+
+/// `n` requests from bob lasting 90 days, whose records the wallet holds sealed under a key
+/// it doesn't hold yet: the phone wrote them again under an epoch's key the wallet never got,
+/// and the wallet holds only a later one. Returns the requests and the wallet's certificate,
+/// for the key bundle that opens them.
+async fn sealed_requests(
+    w: &World,
+    wallet: &mut paykit_sdk::Paykit,
+    phone: &mut paykit_sdk::Paykit,
+    shop: &mut paykit_sdk::Paykit,
+    n: usize,
+) -> (
+    Vec<paykit_sdk::RequestRef>,
+    pubky_switch_core::records::AppCert,
+) {
+    let days = pubky_switch_core::records::DAY_MS;
+    let mut requests = Vec::new();
+    for i in 0..n {
+        let mut lasting =
+            draft("1", w.clock.now_ms()).with_proposal_expires_at_ms(w.clock.now_ms() + 90 * days);
+        lasting.payment_reference =
+            paykit_lib::PaymentReference::new(&format!("order-{}", i + 1)).unwrap();
+        requests.push(request_from(shop, w.alice_id(), lasting).await);
+    }
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    crate::unrequested::store_bundle(w, phone.app_id(), &phone.app().cert().clone());
+    phone.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    for request in &requests {
+        let value = crate::outcome_record::record_value(phone, request)
+            .await
+            .unwrap();
+        crate::outcome_record::phone_writes(
+            phone,
+            request,
+            Some(&serde_json::to_vec(&value).unwrap()),
+        )
+        .await;
+    }
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let cert = wallet.app().cert().clone();
+    crate::unrequested::store_bundle_from(w, wallet.app_id(), &cert, newest);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    for request in &requests {
+        let key = wallet
+            .app()
+            .record_key(&crate::outcome_record::payer_record(request))
+            .unwrap();
+        let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+        assert!(
+            matches!(
+                held.content,
+                pubky_switch_client::app::RecordContent::Unreadable(
+                    pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+                )
+            ),
+            "{:?}",
+            held.content
+        );
+    }
+    (requests, cert)
+}
+
+/// Bob's shop cancels `request`.
+async fn shop_cancels(shop: &mut paykit_sdk::Paykit, request: &paykit_sdk::RequestRef) {
+    let record = shop
+        .payee_activity()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|a| a.request_hash == Some(request.request_hash))
+        .unwrap()
+        .record;
+    shop.cancel_sent_request(&record, None).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_one_time_cancellation_while_its_record_awaits_its_key_stops_it_past_30_days() {
+    // The wallet holds the request's record sealed under a key it doesn't hold yet. Bob
+    // cancels. The stop is kept at once, the entry waiting for no key, and 30 days on no
+    // give-up or bound takes it: once the key comes, the request is cancelled and never
+    // payable (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (requests, cert) = sealed_requests(&w, &mut wallet, &mut phone, &mut shop, 1).await;
+    let request = requests[0];
+    shop_cancels(&mut shop, &request).await;
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.key_epochs_awaited.is_empty(), "{got:?}");
+    // Past 30 days from its acceptance, nothing is given up: the stop stands.
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(wallet.notices().await.unwrap().is_empty());
+    // The key comes: the record opens, and the stop goes into it.
+    crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
+    assert!(w.rail.all_executions().is_empty());
+    let value = crate::outcome_record::record_value(&mut wallet, &request)
+        .await
+        .unwrap();
+    assert!(!value["cancellation"].is_null(), "{value}");
+}
+
+/// Whether `wallet` keeps a stop for bob's request `hash`.
+async fn keeps_stop(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -> bool {
+    let request = paykit_sdk::RequestRef {
+        payee: w.bob_id(),
+        request_hash: hash,
+    };
+    let key = wallet
+        .app()
+        .record_key(&crate::outcome_record::payer_record(&request))
+        .unwrap();
+    let stop = format!("kc/{}", pubky_switch_core::enc::b64(&key));
+    wallet
+        .app()
+        .protocol_scan(stop.as_bytes())
+        .await
+        .unwrap()
+        .iter()
+        .any(|(found, _)| found == stop.as_bytes())
+}
+
+#[tokio::test]
+async fn test_one_time_stops_for_requests_not_held_bounded_per_sender() {
+    // Bob cancels a request the wallet holds sealed, then 64 it holds no record of, a
+    // millisecond apart, then a second one it holds sealed: all are kept, the stops for the
+    // requests held counting in no bound. A 65th cancellation of a request not held drops
+    // the earliest of those, never a stop for a request held (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (held, _) = sealed_requests(&w, &mut wallet, &mut phone, &mut shop, 2).await;
+    shop_cancels(&mut shop, &held[0]).await;
+    wallet.receive(None).await.unwrap();
+    let unknown = |i: usize| [u8::try_from(i + 1).unwrap(); 32];
+    for i in 0..paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER {
+        w.clock.advance_ms(1);
+        cancel_to(&w, &[wallet.app_id()], unknown(i));
+    }
+    wallet.receive(None).await.unwrap();
+    shop_cancels(&mut shop, &held[1]).await;
+    wallet.receive(None).await.unwrap();
+    let all = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER + 2;
+    assert_eq!(wallet.app().protocol_scan(b"kc/").await.unwrap().len(), all);
+    w.clock.advance_ms(1);
+    cancel_to(
+        &w,
+        &[wallet.app_id()],
+        unknown(paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER),
+    );
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"kc/").await.unwrap().len(), all);
+    for request in &held {
+        assert!(keeps_stop(&w, &wallet, request.request_hash).await);
+    }
+    assert!(!keeps_stop(&w, &wallet, unknown(0)).await);
+    assert!(keeps_stop(&w, &wallet, unknown(1)).await);
+    assert!(
+        keeps_stop(
+            &w,
+            &wallet,
+            unknown(paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER)
+        )
+        .await
+    );
+}
+
+#[tokio::test]
+async fn test_one_time_stop_for_a_request_not_held_goes_30_days_after_its_acceptance() {
+    // Bob cancels a request the wallet holds no record of: the stop is kept a day short of 30
+    // days from its acceptance, and goes at 30 days, on the service time verified.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let hash = [7; 32];
+    cancel_to(&w, &[wallet.app_id()], hash);
+    wallet.receive(None).await.unwrap();
+    assert!(keeps_stop(&w, &wallet, hash).await);
+    let day = pubky_switch_core::records::DAY_MS;
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - day);
+    wallet.receive(None).await.unwrap();
+    assert!(keeps_stop(&w, &wallet, hash).await);
+    w.clock.advance_ms(day);
+    wallet.receive(None).await.unwrap();
+    assert!(!keeps_stop(&w, &wallet, hash).await);
+}
+
+/// Send the wallet's own housekeeping now, its next receive key's registration and a
+/// deferred cursor move (Switch spec 3.6, 8.2), so that its next receive sends the switch
+/// only Paykit's writes, which the switch is set to refuse.
+async fn housekeeping(wallet: &mut paykit_sdk::Paykit) {
+    wallet.app_mut().rotate().await.unwrap();
+    wallet.app_mut().flush_cursor().await.unwrap();
+}
+
+/// Bob's cancellation of a request the wallet holds no record of yet, then, 20 days on, the
+/// request itself, whose write the switch refuses: the wallet keeps a stop for it and the
+/// request to write later. Returns the request.
+async fn stop_then_request_stored(w: &World, wallet: &mut paykit_sdk::Paykit) -> [u8; 32] {
+    let (request, hash) = unsent_request(w);
+    cancel_to(w, &[wallet.app_id()], hash);
+    wallet.receive(None).await.unwrap();
+    assert!(keeps_stop(w, wallet, hash).await);
+    w.clock.advance_ms(20 * pubky_switch_core::records::DAY_MS);
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &request);
+    // The receive step's write, and the app's first write of it, are refused.
+    housekeeping(wallet).await;
+    crate::common::refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.app().protocol_scan(b"se/").await.unwrap().len(),
+        1,
+        "the request is kept to write later"
+    );
+    hash
+}
+
+#[tokio::test]
+async fn test_one_time_stop_for_a_request_kept_to_write_stays_past_30_days() {
+    // 30 days after the cancellation's acceptance, the request still waits to be written:
+    // the stop stays, and once room frees the request is written cancelled, never payable
+    // (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let hash = stop_then_request_stored(&w, &mut wallet).await;
+    let day = pubky_switch_core::records::DAY_MS;
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS - 20 * day + day);
+    housekeeping(&mut wallet).await;
+    crate::common::refuse_writes(&w.alice, 1);
+    wallet.receive(None).await.unwrap();
+    assert!(keeps_stop(&w, &wallet, hash).await);
+    // Room frees: the request is written, the stop placed in its record.
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_scan(b"se/").await.unwrap().is_empty());
+    assert!(!keeps_stop(&w, &wallet, hash).await);
+    let request = paykit_sdk::RequestRef {
+        payee: w.bob_id(),
+        request_hash: hash,
+    };
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+    assert!(wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .is_err());
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_one_time_stop_for_a_request_given_up_goes_past_30_days() {
+    // The request arrives a day after its cancellation and is never written: 30 days after
+    // its acceptance it is given up, and the stop, no longer kept for a message to write,
+    // goes with it, 30 days having passed since its own acceptance.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let (request, hash) = unsent_request(&w);
+    cancel_to(&w, &[wallet.app_id()], hash);
+    wallet.receive(None).await.unwrap();
+    let day = pubky_switch_core::records::DAY_MS;
+    w.clock.advance_ms(day);
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &request);
+    housekeeping(&mut wallet).await;
+    crate::common::refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    // A day short of 30 days since the request's acceptance, both stay.
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - day);
+    housekeeping(&mut wallet).await;
+    crate::common::refuse_writes(&w.alice, 1);
+    wallet.receive(None).await.unwrap();
+    assert!(keeps_stop(&w, &wallet, hash).await);
+    assert_eq!(wallet.app().protocol_scan(b"se/").await.unwrap().len(), 1);
+    // At 30 days the request is given up, and the stop goes.
+    w.clock.advance_ms(day);
+    housekeeping(&mut wallet).await;
+    crate::common::refuse_writes(&w.alice, 1);
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_scan(b"se/").await.unwrap().is_empty());
+    assert!(!keeps_stop(&w, &wallet, hash).await);
+}
+
+#[tokio::test]
+async fn test_one_time_stops_bound_never_drops_a_stop_for_a_request_kept_to_write() {
+    // Bob's stop for a request kept to write is his earliest. 65 cancellations of requests
+    // the wallet holds no record of follow: the bound drops the earliest of those, never
+    // the stop kept for the request, which counts in no bound (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let hash = stop_then_request_stored(&w, &mut wallet).await;
+    let unknown = |i: usize| [u8::try_from(i + 1).unwrap(); 32];
+    let max = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    for i in 0..max {
+        w.clock.advance_ms(1);
+        cancel_to(&w, &[wallet.app_id()], unknown(i));
+    }
+    housekeeping(&mut wallet).await;
+    crate::common::refuse_writes(&w.alice, 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.app().protocol_scan(b"kc/").await.unwrap().len(),
+        max + 1
+    );
+    w.clock.advance_ms(1);
+    cancel_to(&w, &[wallet.app_id()], unknown(max));
+    housekeeping(&mut wallet).await;
+    crate::common::refuse_writes(&w.alice, 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.app().protocol_scan(b"kc/").await.unwrap().len(),
+        max + 1
+    );
+    assert!(keeps_stop(&w, &wallet, hash).await);
+    assert!(!keeps_stop(&w, &wallet, unknown(0)).await);
+    assert!(keeps_stop(&w, &wallet, unknown(max)).await);
+    assert_eq!(wallet.app().protocol_scan(b"se/").await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_one_time_cancellation_of_a_request_not_held_kept_once_at_an_app_paying_and_requesting(
+) {
+    // Alice's till both pays and requests. Bob cancels a request it holds on neither side:
+    // it keeps the cancellation once, as the stop, and no payer's reply of it.
+    let w = World::new();
+    let till = w
+        .join(
+            &w.alice,
+            "till",
+            paykit_sdk::AppScopes::new()
+                .pay()
+                .request()
+                .build()
+                .unwrap(),
+        )
+        .await;
+    let mut till = till;
+    till.app_mut().invite(&w.bob_id()).await.unwrap();
+    let _shop = w.shop().await;
+    let hash = [7; 32];
+    cancel_to(&w, &[till.app_id()], hash);
+    till.receive(None).await.unwrap();
+    assert!(keeps_stop(&w, &till, hash).await);
+    assert!(till.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+}
+
+/// `app` pays `request`: the acceptance goes with the dispatch, then the method reports the
+/// payment failed, so the claim is free again and the record keeps the acceptance.
+async fn failed_after_acceptance(
+    w: &World,
+    app: &mut paykit_sdk::Paykit,
+    request: &paykit_sdk::RequestRef,
+) {
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = app
+        .pay_request(request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    w.rail.settle(&attempt_id, false);
+    app.resume_payments().await.unwrap();
+}
+
+/// Whether `refused` is the refusal of a rejection of a request accepted.
+fn accepted_refusal(refused: &paykit_sdk::PaykitError) -> bool {
+    matches!(refused.refusal(), Some(Refusal::Usage(text)) if text == "accepted; cancel instead")
+}
+
+#[tokio::test]
+async fn test_one_time_rejection_after_the_apps_own_acceptance_refused() {
+    // The wallet's payment failed after its acceptance went: the request is open again, but
+    // no longer proposed, so a rejection is refused, the request cancelled instead (Paykit
+    // spec 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    failed_after_acceptance(&w, &mut wallet, &request).await;
+    let refused = wallet.reject_request(&request, None).await.unwrap_err();
+    assert!(accepted_refusal(&refused), "{refused:?}");
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        PayeeStatus::Accepted
+    );
+}
+
+#[tokio::test]
+async fn test_one_time_rejection_after_another_own_apps_acceptance_refused() {
+    // The phone's acceptance went; the wallet holds the record with it.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    phone.receive(None).await.unwrap();
+    failed_after_acceptance(&w, &mut phone, &request).await;
+    wallet.receive(None).await.unwrap();
+    let refused = wallet.reject_request(&request, None).await.unwrap_err();
+    assert!(accepted_refusal(&refused), "{refused:?}");
+    // Cancelling is what the payer does instead.
+    wallet.cancel_request(&request, None).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_one_time_rejection_of_a_request_not_accepted_sent() {
+    // A request with no acceptance is rejected as before; then no payment accepts it.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet.reject_request(&request, None).await.unwrap();
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::Rejected));
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_one_time_rejection_while_the_records_are_not_listed_refused_as_not_now() {
+    // After a `missed` item whose listing fails, the copy may lack the acceptance another
+    // app recorded: no response is decided from it.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let now = w.clock.now_ms();
+    w.alice.switch().push_missed(1, now - 1_000, now);
+    let unlisted = || pubky_switch_client::testing::Fault::Error {
+        path: "records?collection".into(),
+        code: pubky_switch_core::http::ErrorCode::Unavailable,
+        current: serde_json::Value::Null,
+    };
+    w.alice.switch().fail_next(unlisted());
+    assert!(wallet
+        .receive(None)
+        .await
+        .unwrap()
+        .records_unlisted
+        .is_some());
+    w.alice.switch().fail_next(unlisted());
+    let refused = wallet.reject_request(&request, None).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_one_time_missed_item_asks_wait_for_a_sealed_records_key() {
+    // The wallet's only record of bob's open request is sealed under a key it doesn't hold
+    // yet: after a `missed` item it can't tell bob is a counterparty to ask, so the asks and
+    // their mark wait; once the key comes, bob is asked (Paykit spec 9).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (_, cert) = sealed_requests(&w, &mut wallet, &mut phone, &mut shop, 1).await;
+    let now = w.clock.now_ms();
+    w.alice.switch().push_missed(1, now - 1_000, now);
+    wallet.receive(None).await.unwrap();
+    assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
+    assert_eq!(wallet.app().protocol_scan(b"mi/").await.unwrap().len(), 1);
+    crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(crate::common::asked(&wallet, &w.bob_id()).await.len(), 1);
+    assert!(wallet.app().protocol_scan(b"mi/").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_one_time_restore_asks_wait_for_a_sealed_records_key() {
+    // The wallet's only record of bob's open request is sealed under a key it doesn't hold
+    // yet. Restored, its reconcile can't tell bob is a counterparty to ask: the restore's
+    // asks wait, and go once the key comes (Paykit spec 7.2).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (_, cert) = sealed_requests(&w, &mut wallet, &mut phone, &mut shop, 1).await;
+    let backup = wallet.backup().await.unwrap();
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let mut restored = paykit_sdk::Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    restored.reconcile().await.unwrap();
+    restored
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    restored.receive(None).await.unwrap();
+    assert!(crate::common::asked(&restored, &w.bob_id())
+        .await
+        .is_empty());
+    crate::unrequested::store_bundle(&w, app_id, &cert);
+    for _ in 0..3 {
+        restored.receive(None).await.unwrap();
+    }
+    assert_eq!(crate::common::asked(&restored, &w.bob_id()).await.len(), 1);
+}
+
+/// The value Paykit keeps at `key` in `app`'s state.
+async fn state_value(app: &paykit_sdk::Paykit, key: &[u8]) -> Vec<u8> {
+    app.app()
+        .protocol_scan(key)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|(found, _)| found == key)
+        .unwrap()
+        .1
+}
+
+/// The stop key of bob's request `hash` at `wallet`.
+fn stop_key(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -> Vec<u8> {
+    let request = paykit_sdk::RequestRef {
+        payee: w.bob_id(),
+        request_hash: hash,
+    };
+    let key = wallet
+        .app()
+        .record_key(&crate::outcome_record::payer_record(&request))
+        .unwrap();
+    format!("kc/{}", pubky_switch_core::enc::b64(&key)).into_bytes()
+}
+
+#[tokio::test]
+async fn test_one_time_stop_naming_another_request_refused_as_corrupt() {
+    // The stop kept for one request is found at another request's key: a corrupt store. The
+    // receive fails rather than place it in the other request's record, and the request
+    // isn't shown cancelled by it (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let other = [7; 32];
+    cancel_to(&w, &[wallet.app_id()], other);
+    wallet.receive(None).await.unwrap();
+    let value = state_value(&wallet, &stop_key(&w, &wallet, other)).await;
+    let key = stop_key(&w, &wallet, request.request_hash);
+    wallet
+        .app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put { key, value }])
+        .await
+        .unwrap();
+    let failed = wallet.receive(None).await.unwrap_err();
+    assert!(crate::common::is_corrupt(&failed), "{failed:?}");
+    let failed = wallet.request(&request).await.unwrap_err();
+    assert!(crate::common::is_corrupt(&failed), "{failed:?}");
+    let value = crate::outcome_record::record_value(&mut wallet, &request)
+        .await
+        .unwrap();
+    assert!(value["cancellation"].is_null(), "{value}");
+}
+
+#[tokio::test]
+async fn test_one_time_stop_at_its_own_key_read_back() {
+    // The same stop at its own key reads back: the request it names shows cancelled.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let (request, hash) = unsent_request(&w);
+    cancel_to(&w, &[wallet.app_id()], hash);
+    wallet.receive(None).await.unwrap();
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &request);
+    wallet.receive(None).await.unwrap();
+    let request = paykit_sdk::RequestRef {
+        payee: w.bob_id(),
+        request_hash: hash,
+    };
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn test_one_time_no_response_after_the_payers_own_cancellation() {
+    // After the payer's cancellation, nothing more goes for the request: no rejection, no
+    // second cancellation, no payment (Paykit spec 8.1, one response per request).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet.cancel_request(&request, None).await.unwrap();
+    for refused in [
+        wallet.reject_request(&request, None).await.unwrap_err(),
+        wallet.cancel_request(&request, None).await.unwrap_err(),
+        wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap_err(),
+    ] {
+        assert_eq!(refused.refusal(), Some(&Refusal::Cancelled), "{refused:?}");
+    }
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_one_time_no_response_after_the_payees_cancellation() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    shop_cancels(&mut shop, &request).await;
+    wallet.receive(None).await.unwrap();
+    for refused in [
+        wallet.reject_request(&request, None).await.unwrap_err(),
+        wallet.cancel_request(&request, None).await.unwrap_err(),
+    ] {
+        assert_eq!(refused.refusal(), Some(&Refusal::Cancelled), "{refused:?}");
+    }
+}
+
+#[tokio::test]
+async fn test_one_time_no_cancellation_after_a_rejection() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet.reject_request(&request, None).await.unwrap();
+    let refused = wallet.cancel_request(&request, None).await.unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::Rejected), "{refused:?}");
+}
+
+#[tokio::test]
+async fn test_one_time_no_response_over_a_record_sealed_at_a_key_not_held() {
+    // The wallet holds the request's record sealed under a key it doesn't hold yet: it may
+    // hold a response or a cancellation, so no response and no payment is decided from it,
+    // refused as not now rather than as no request.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (requests, _) = sealed_requests(&w, &mut wallet, &mut phone, &mut shop, 1).await;
+    let request = requests[0];
+    for refused in [
+        wallet.reject_request(&request, None).await.unwrap_err(),
+        wallet.cancel_request(&request, None).await.unwrap_err(),
+        wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap_err(),
+    ] {
+        assert!(
+            matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+            "{refused:?}"
+        );
+    }
+    assert!(w.rail.all_executions().is_empty());
+}

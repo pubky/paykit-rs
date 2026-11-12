@@ -106,9 +106,9 @@ pub struct PayOptions {
     /// anyway ([`Refusal::IdentityUnconfirmed`]; Switch spec 4.3, Paykit spec 7.2).
     pub unconfirmed_identity_confirmed: Option<UserConfirmed>,
     /// The user has seen that the payee may have cancelled this request since the backup the
-    /// app was restored from, and pays it anyway ([`Refusal::HeldAfterRestore`]; Paykit spec
-    /// 7.2, "What a restore loses"). It ends the request's hold; it never overrides a
-    /// cancellation the app holds.
+    /// app was restored from, or a `missed` item, and pays it anyway
+    /// ([`Refusal::HeldAfterRestore`]; Paykit spec 7.2, "What a restore loses"). It ends the
+    /// request's hold; it never overrides a cancellation the app holds.
     pub possibly_cancelled_confirmed: Option<UserConfirmed>,
     /// The payment of a request from a blocked payee the user was shown and chose to make,
     /// as a [`Refusal::Blocked`] gave it (Paykit spec 8.1): only that same payment is made.
@@ -185,7 +185,8 @@ impl PayOptions {
 /// A payment to a payee the identity's deny list holds, as a [`Refusal::Blocked`] shows it
 /// to the user (Paykit spec 8.1, "Blocked counterparties"): the payee, the request paid, if
 /// any, and the amount. A payment the user then makes anyway carries it back
-/// ([`PayOptions::with_blocked_confirmed`]): the SDK reads the deny list again and pays only
+/// ([`PayOptions::with_blocked_confirmed`]): the SDK judges the payment again, by the deny
+/// list as read in the last 10 minutes or read first, as at the first try, and pays only
 /// when what it would show now is this, field for field.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -955,7 +956,8 @@ impl Paykit {
     }
 
     /// The payments in the journal, each with the payee's receipt of it, if the payer's
-    /// record holds one.
+    /// record holds one. A `Finished` or `Abandoned` payment leaves the journal once past its
+    /// claim's window ([`Paykit::resume_payments`], "Journal pruning").
     ///
     /// # Errors
     ///
@@ -966,9 +968,10 @@ impl Paykit {
             let mut view = entry.view()?;
             let target = ActivityTarget::payer(entry.natural_key.clone());
             if let Some(record) = self.held_activity(&target).await? {
-                view.receipt =
-                    crate::receipts::received_receipt(self.activity_key(&target)?, &record)
-                        .filter(|receipt| receipt.attempt_id == view.attempt_id);
+                view.receipt = self
+                    .received_receipt_of(self.activity_key(&target)?, &record)
+                    .await?
+                    .filter(|receipt| receipt.attempt_id == view.attempt_id);
             }
             out.push(view);
         }
@@ -995,6 +998,11 @@ impl Paykit {
     /// the record's value is sealed under a key the app doesn't hold yet, which opens once
     /// it comes and is never replaced meanwhile; the client's errors.
     pub async fn repair_activity_record(&mut self, attempt_id: &AttemptId) -> Result<PayOutcome> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.repair_activity_record_inner(attempt_id)).await
+    }
+
+    async fn repair_activity_record_inner(&mut self, attempt_id: &AttemptId) -> Result<PayOutcome> {
         self.refresh_own()?;
         // A repair writes over a value the app can't read, on the user's word: it waits for
         // the records to be listed, a wider certificate's keys included.
@@ -2496,8 +2504,8 @@ impl Paykit {
         if let Some(proof) = proof {
             changed |= activity::place(&mut record, Role::Proof, self.own_copy(proof)?);
         }
-        // A payment made after `failed` was written on its claim: the record shows it, for
-        // every own app that gets the receipt (Paykit spec 7.2).
+        // A payment made after `failed` was written on its claim: the record's informational
+        // `status` shows it for display; no reader decides by it (Paykit wire 5.3).
         let after_failed = Some(crate::receive::PAID_AFTER_FAILED);
         if paid && entry.failed_on_claim && record.status.as_deref() != after_failed {
             record.status = after_failed.map(str::to_owned);
@@ -2630,6 +2638,21 @@ impl Paykit {
     /// carried out again unless the method is idempotent on the attempt ID; a restored entry
     /// is resolved only from a history that survives a restore. A repeat on an idempotent
     /// method passes every check a first dispatch does.
+    ///
+    /// **Journal pruning** (Paykit spec 7.1, 7.2; Switch spec 6.3). After every payment's own
+    /// work, a resume drops the `Finished` and `Abandoned` entries past their claim's window:
+    /// one with a deadline from that deadline plus 30 days ([`RECONCILIATION_MS`]), the time
+    /// the switch keeps the claim's tombstone, and one without from 400 days after it was
+    /// journaled ([`MAX_CLAIM_AGE_MS`]). A bound passes only once it lies before the earlier
+    /// of the highest service time verified and the device clock plus 24 hours, so no
+    /// far-future signed time passes one early, and without a verified service time nothing
+    /// is dropped. What a later reconcile, a restore's included, needs is never dropped: an
+    /// entry still open or [`Stage::AcceptanceOwed`], one whose dispatch the payment method
+    /// reported failed while its history may still show it paid, and one paid after `failed`
+    /// was written, waiting for its receipt. A dropped payment leaves [`Paykit::payments`],
+    /// and its acknowledged notices go with it; the payer's activity record, not the
+    /// journal, shows it and stops a second one (Paykit spec 6, 7.2, "The record shows it
+    /// paid").
     ///
     /// # Errors
     ///
@@ -2981,8 +3004,10 @@ impl Paykit {
     /// be paid (Paykit spec 8.1): this app keeps a stop for it, or the request record the
     /// switch holds, read again, shows it cancelled or rejected, or isn't there (a `404`
     /// included, whatever copy this app keeps) or doesn't read as the request, a newer write
-    /// this app refused included, so nothing shows it still open. A payment without a request has
-    /// nothing a payee cancels.
+    /// this app refused included, so nothing shows it still open; or the request is held
+    /// after a restore or a `missed` item until the user confirms it (Paykit spec 7.2,
+    /// [`Paykit::confirm_possibly_cancelled`]). A payment without a request has nothing a
+    /// payee cancels.
     async fn repeat_withheld(&mut self, entry: &JournalEntry) -> Result<bool> {
         if entry.request_hash()?.is_none() {
             return Ok(false);
@@ -2992,7 +3017,11 @@ impl Paykit {
             return Ok(true);
         }
         Ok(match self.fresh_request(&target).await? {
-            Fresh::Held(fresh) => cancelled(&fresh) || rejected(&fresh),
+            Fresh::Held(fresh) => {
+                cancelled(&fresh)
+                    || rejected(&fresh)
+                    || self.held(&self.activity_key(&target)?, &fresh).await?
+            }
             Fresh::Missing | Fresh::Unreadable => true,
         })
     }

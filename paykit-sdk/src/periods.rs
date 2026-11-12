@@ -120,7 +120,8 @@ fn period_view(key: [u8; 32], record: &ActivityRecord) -> Option<([u8; 32], Peri
             details,
             paid: record.shows_paid(),
             credited: record.receipt.is_some(),
-            receipt: received_receipt(key, record),
+            // The request's reference stays on the request's view.
+            receipt: received_receipt(key, record, None),
         },
     ))
 }

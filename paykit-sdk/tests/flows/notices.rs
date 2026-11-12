@@ -7,7 +7,9 @@ use std::sync::Arc;
 use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{NoticeKind, PayOptions, PayOutcome, Paykit, PaykitConfig, Rail};
 use pubky_switch_client::clock::Clock;
+use pubky_switch_client::testing::Fault;
 use pubky_switch_core::claims::ClaimStatus;
+use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::records::DAY_MS;
 
 use crate::common::{draft, request_from, store, World};
@@ -103,6 +105,60 @@ async fn test_notices_late_receipt_of_a_payment_written_failed_raises_one() {
     assert!(kept.is_empty());
 }
 
+/// The next `n` batches at alice's switch are refused for good, `403 permission_missing`.
+fn refuse_writes(w: &World, n: usize) {
+    for _ in 0..n {
+        w.alice.switch().fail_next(Fault::Error {
+            path: "/ops".into(),
+            code: ErrorCode::PermissionMissing,
+            current: serde_json::Value::Null,
+        });
+    }
+}
+
+/// Whether the wallet's journal entry of `attempt_id` waits for a late receipt.
+async fn waits_for_receipt(wallet: &Paykit, attempt_id: paykit_lib::AttemptId) -> bool {
+    let key = format!("j/{}", attempt_id.to_text());
+    let bytes = wallet
+        .app()
+        .protocol_get(key.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    let entry: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    entry["d"]["failed_on_claim"] == serde_json::Value::Bool(true)
+}
+
+#[tokio::test]
+async fn test_notices_late_receipt_written_later_raises_one_and_ends_the_wait() {
+    let w = World::new();
+    let (mut wallet, mut shop, attempt_id) = paid_after_failed(&w).await;
+    w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    wallet.receive(None).await.unwrap();
+    wallet.resume_payments().await.unwrap();
+    receipt(&mut shop).await;
+    // The receipt's step is refused for good, and so is its first later write: its entry
+    // is stored, and the receipt is written later, with the same effects as at its first
+    // read.
+    refuse_writes(&w, 2);
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.notices().await.unwrap().is_empty());
+    assert!(waits_for_receipt(&wallet, attempt_id).await);
+    wallet.receive(None).await.unwrap();
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, NoticeKind::PaidAfterFailed);
+    assert_eq!(notices[0].attempt_id, Some(attempt_id));
+    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert!(!waits_for_receipt(&wallet, attempt_id).await);
+    assert!(wallet.payments().await.unwrap()[0].receipt.is_some());
+    // Raised once, and the entry goes past its window like any other.
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.notices().await.unwrap(), notices);
+    wallet.resume_payments().await.unwrap();
+    assert!(wallet.payments().await.unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn test_notices_receipt_within_the_claim_settles_it_and_raises_none() {
     let w = World::new();
@@ -188,6 +244,98 @@ async fn test_notices_late_receipt_raised_by_an_own_app_without_the_payment() {
 }
 
 #[tokio::test]
+async fn test_notices_late_receipt_raised_by_an_own_app_after_a_crossing_cancellation() {
+    // Alice's second wallet holds the payer's record, not the payment's journal entry.
+    // Bob's cancellation, sent before he saw the proof, reaches it after the proof and is
+    // placed in the record; the first receipt past the claim's window still tells the user
+    // the payment marked failed was paid.
+    let w = World::new();
+    let mut other = w.wallet("second").await;
+    let (_wallet, mut shop, attempt_id) = paid_after_failed(&w).await;
+    other.receive(None).await.unwrap();
+    let request = other.requests().await.unwrap().remove(0).request;
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[other.app_id()],
+        "paykit.payment_request_cancellation",
+        vec![request.request_hash],
+        serde_json::Map::new(),
+    );
+    other.receive(None).await.unwrap();
+    other.resume_payments().await.unwrap();
+    w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    receipt(&mut shop).await;
+    other.receive(None).await.unwrap();
+    let notices = other.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, NoticeKind::PaidAfterFailed);
+    assert_eq!(notices[0].attempt_id, Some(attempt_id));
+}
+
+/// Bob's receipt of the proof `other`'s record holds, signed anew, entered for `targets`.
+async fn receipt_again(
+    w: &World,
+    other: &Paykit,
+    attempt_id: paykit_lib::AttemptId,
+    targets: &[[u8; 16]],
+) {
+    let view = other.requests().await.unwrap().remove(0);
+    let held = other
+        .app()
+        .shared_record(&view.record)
+        .await
+        .unwrap()
+        .unwrap();
+    let record = paykit_lib::records::ActivityRecord::read(
+        held.content.value().unwrap(),
+        &w.alice_id(),
+        paykit_lib::records::ActivitySide::Payer,
+    )
+    .unwrap();
+    let body = paykit_lib::bodies::PaymentReceipt {
+        attempt_id,
+        billing_period: None,
+        metadata: None,
+        payment_reference: None,
+    }
+    .to_body(2)
+    .unwrap();
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        targets,
+        "paykit.payment_receipt",
+        vec![record.proof.unwrap().hash(), view.request.request_hash],
+        body,
+    );
+}
+
+#[tokio::test]
+async fn test_notices_later_receipt_raises_none_where_the_record_holds_one() {
+    // Two own apps without the journal entry hold the failure in their claim views. The
+    // first receipt past the window reaches one, which tells its user and records it; a
+    // later receipt of the same proof at the other finds a receipt in the record already,
+    // and raises nothing.
+    let w = World::new();
+    let mut first = w.wallet("second").await;
+    let mut later = w.wallet("third").await;
+    let (_wallet, _shop, attempt_id) = paid_after_failed(&w).await;
+    first.receive(None).await.unwrap();
+    later.receive(None).await.unwrap();
+    w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    receipt_again(&w, &first, attempt_id, &[first.app_id()]).await;
+    first.receive(None).await.unwrap();
+    assert_eq!(first.notices().await.unwrap().len(), 1);
+    later.receive(None).await.unwrap();
+    receipt_again(&w, &later, attempt_id, &[later.app_id()]).await;
+    later.receive(None).await.unwrap();
+    assert!(later.notices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn test_notices_second_receipt_after_the_window_raises_none_where_one_is_held() {
     let w = World::new();
     let mut other = w.wallet("second").await;
@@ -254,19 +402,24 @@ async fn test_notices_receipt_past_the_deadline_within_the_claim_settles_it_and_
 }
 
 #[tokio::test]
-async fn test_notices_late_receipt_raised_where_the_switch_holds_no_claim() {
+async fn test_notices_late_receipt_raises_none_at_an_app_without_the_claim_or_the_payment() {
     // An own app that joins once the claim is gone holds no view of it, and the switch no
-    // longer holds it: a claim the switch holds none of counts as gone.
+    // longer holds it: nothing stable tells it the payment was marked failed, since the
+    // record's `status` is informational (Paykit wire 5.3). It records the receipt and
+    // raises nothing; the app that made the payment raises the notice from its journal.
     let w = World::new();
-    let (_wallet, mut shop, attempt_id) = paid_after_failed(&w).await;
+    let (mut wallet, mut shop, attempt_id) = paid_after_failed(&w).await;
     w.clock.advance_ms(PAST_THE_CLAIM_MS);
     let mut late = w.wallet("late").await;
     late.receive(None).await.unwrap();
     receipt(&mut shop).await;
     late.receive(None).await.unwrap();
-    let notices = late.notices().await.unwrap();
+    assert!(late.notices().await.unwrap().is_empty());
+    let view = late.requests().await.unwrap().remove(0);
+    assert!(view.receipt.is_some());
+    wallet.receive(None).await.unwrap();
+    let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
-    assert_eq!(notices[0].kind, NoticeKind::PaidAfterFailed);
     assert_eq!(notices[0].attempt_id, Some(attempt_id));
 }
 
@@ -467,4 +620,64 @@ async fn test_notices_receipt_waiting_for_its_records_key_given_up_after_30_days
     // Stored locally while it waited, the entry was tried again by the receive step alone:
     // nothing of it is kept to write later.
     assert!(wallet.app().protocol_scan(b"se/").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_notices_receipt_waiting_for_its_key_never_shown_as_a_store_unavailable() {
+    // A receipt whose record is sealed under a key the wallet doesn't hold, over the whole
+    // wait: once the client stores the entry after its bounded wait to try it again later,
+    // the report shows it waiting for the key, never a store cause.
+    let w = World::new();
+    let mut phone = w.wallet("phone").await;
+    let (mut wallet, mut shop, _) = paid_after_failed(&w).await;
+    let request = paykit_sdk::RequestRef {
+        payee: w.bob_id(),
+        request_hash: wallet.payments().await.unwrap()[0].request_hash.unwrap(),
+    };
+    phone.receive(None).await.unwrap();
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    crate::unrequested::store_bundle(&w, phone.app_id(), &phone.app().cert().clone());
+    phone.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let value = crate::outcome_record::record_value(&mut phone, &request)
+        .await
+        .unwrap();
+    crate::outcome_record::phone_writes(
+        &mut phone,
+        &request,
+        Some(&serde_json::to_vec(&value).unwrap()),
+    )
+    .await;
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let cert = wallet.app().cert().clone();
+    crate::unrequested::store_bundle_from(&w, wallet.app_id(), &cert, newest);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    receipt(&mut shop).await;
+    let mut events = Vec::new();
+    for _ in 0..pubky_switch_client::app::RETRY_EVENT_READS + 2 {
+        let summary = wallet.receive(None).await.unwrap();
+        events.extend(summary.report.events);
+    }
+    for _ in 0..5 {
+        w.clock.advance_ms(DAY_MS);
+        let summary = wallet.receive(None).await.unwrap();
+        assert!(!summary.key_epochs_awaited.is_empty(), "{summary:?}");
+        events.extend(summary.report.events);
+    }
+    let store_causes: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                pubky_switch_client::app::AppEvent::StoreFailing { .. }
+                    | pubky_switch_client::app::AppEvent::Parked {
+                        reason: pubky_switch_client::app::ParkReason::StoreUnavailable,
+                        ..
+                    }
+            )
+        })
+        .collect();
+    assert!(store_causes.is_empty(), "{store_causes:?}");
 }

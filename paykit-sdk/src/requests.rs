@@ -43,7 +43,8 @@ use crate::paykit::Paykit;
 use crate::periods::PeriodView;
 use crate::rail::ProofCheck;
 use crate::receipts::{received_receipt, ReceiptDetails, ReceivedReceipt};
-use crate::records::{conflict, KeptMessage};
+use crate::receive::KEPT_MESSAGE_MS;
+use crate::records::conflict;
 use crate::state::{key, Tx};
 
 /// How many times a payee's write is built again after its record changed meanwhile.
@@ -375,9 +376,10 @@ pub enum RequestStatus {
     Cancelled,
     /// Its proposal expired unpaid.
     Expired,
-    /// Held after a restore: the payee may have cancelled it since the backup, and it is
-    /// paid only once the user has seen that (Paykit spec 7.2,
-    /// [`crate::PayOptions::possibly_cancelled_confirmed`]).
+    /// Held after a restore or a `missed` item: the payee may have cancelled it since the
+    /// backup, or among the entries the service deleted, and it is paid only once the user
+    /// has seen that (Paykit spec 7.2, [`crate::PayOptions::possibly_cancelled_confirmed`],
+    /// [`crate::Paykit::confirm_possibly_cancelled`]).
     Held,
     /// Received, but its record couldn't be written: the switch refused the write for good,
     /// such as over a quota (Switch spec 8.2). It is shown from the app's own copy and
@@ -504,6 +506,14 @@ pub(crate) fn request_of(record: &ActivityRecord) -> Option<(&StoredMessage, &Pa
     }
 }
 
+/// The record holds this identity's acceptance (Paykit spec 8.1).
+pub(crate) fn accepted(record: &ActivityRecord) -> bool {
+    matches!(
+        record.response.as_ref().map(StoredMessage::body),
+        Some(Body::PaymentRequestAcceptance(_))
+    )
+}
+
 /// The record holds this identity's rejection (Paykit spec 8.1). Status comes from the
 /// messages held, never from `status` (Paykit wire 5.3).
 pub(crate) fn rejected(record: &ActivityRecord) -> bool {
@@ -573,6 +583,15 @@ impl Paykit {
     /// host that retries after one reads [`Paykit::payee_activity`] after its next write
     /// first.
     pub async fn send_request(&mut self, to: [u8; 32], draft: RequestDraft) -> Result<SentRequest> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.send_request_inner(to, draft)).await
+    }
+
+    async fn send_request_inner(
+        &mut self,
+        to: [u8; 32],
+        draft: RequestDraft,
+    ) -> Result<SentRequest> {
         self.refresh_own()?;
         self.require_payee()?;
         let label = self.selling_label()?;
@@ -741,7 +760,7 @@ impl Paykit {
                             .binding()
                             .is_ok_and(|b| matches!(b, RecordBinding::Period { .. })) => {}
                 Ok((_, record)) => {
-                    let mut view = payee_view(held.key, &record);
+                    let mut view = payee_view(held.key, &record, None);
                     if let Some(hash) = view.request_hash {
                         view.periods = periods.remove(&hash).unwrap_or_default();
                     }
@@ -776,6 +795,11 @@ impl Paykit {
     /// [`Refusal::NotFound`] for a record without a proof; [`Refusal::MaybeCredited`] while
     /// whether another record credits the settlement can't be told; the rail's errors.
     pub async fn verify_payment(&mut self, record: &[u8; 32]) -> Result<Option<u64>> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.verify_payment_inner(record)).await
+    }
+
+    async fn verify_payment_inner(&mut self, record: &[u8; 32]) -> Result<Option<u64>> {
         self.refresh_own()?;
         self.records_known().await?;
         self.verified(record, false).await
@@ -943,6 +967,15 @@ impl Paykit {
         record: &[u8; 32],
         details: ReceiptDetails,
     ) -> Result<Option<String>> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.confirm_payment_with_inner(record, details)).await
+    }
+
+    async fn confirm_payment_with_inner(
+        &mut self,
+        record: &[u8; 32],
+        details: ReceiptDetails,
+    ) -> Result<Option<String>> {
         self.refresh_own()?;
         self.records_known().await?;
         let confirmed = details.maybe_credited_confirmed.is_some();
@@ -1001,6 +1034,15 @@ impl Paykit {
     ///
     /// [`Refusal::NotFound`]; [`Refusal::Cancelled`] if it was already; the client's errors.
     pub async fn cancel_sent_request(
+        &mut self,
+        record: &[u8; 32],
+        reason: Option<String>,
+    ) -> Result<String> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.cancel_sent_request_inner(record, reason)).await
+    }
+
+    async fn cancel_sent_request_inner(
         &mut self,
         record: &[u8; 32],
         reason: Option<String>,
@@ -1068,6 +1110,11 @@ impl Paykit {
     /// can be: another own app may have written the record from a copy of the request it got
     /// without the cancellation (Paykit spec 8.1). A placement that fails changes nothing
     /// here: the kept stop still stands, and [`Paykit::kept_stop`] refuses the payment.
+    ///
+    /// A record held that the app can't open, sealed under a scope key it doesn't hold yet
+    /// or a value that doesn't read, is refused as not now, never as no request: it may hold
+    /// a response or a cancellation, so no payment and no response is decided from it
+    /// (Paykit spec 8.1, one response per request).
     pub(crate) async fn payer_request(
         &mut self,
         request: &RequestRef,
@@ -1076,7 +1123,23 @@ impl Paykit {
             &request.payee,
             &request.request_hash,
         ));
-        let record = self.activity(&target).await?.ok_or(Refusal::NotFound)?;
+        let Some(record) = self.activity(&target).await? else {
+            let content = self
+                .app
+                .shared_record(&self.activity_key(&target)?)
+                .await?
+                .map(|held| held.content);
+            return Err(match content {
+                Some(content) if crate::hold::awaits_key(&content) => {
+                    crate::hold::value_awaits_key()
+                }
+                Some(RecordContent::Value(_) | RecordContent::Unreadable(_)) => {
+                    Refusal::NotNow("Paykit wire 5.3: the request record held doesn't read".into())
+                        .into()
+                }
+                _ => Refusal::NotFound.into(),
+            });
+        };
         if request_of(&record).is_none() {
             return Err(Refusal::NotFound.into());
         }
@@ -1092,10 +1155,9 @@ impl Paykit {
     /// kept copy, in one batch. Returns whether there was one.
     async fn place_kept_cancellation(&mut self, target: &ActivityTarget) -> Result<bool> {
         let kept_key = key::kept_cancellation(&self.activity_key(target)?);
-        let Some(kept) = self.local_get::<KeptMessage>(&kept_key).await? else {
+        let Some(cancellation) = self.kept_stop_message(target).await? else {
             return Ok(false);
         };
-        let cancellation = kept.stored(&self.identity())?;
         let write = self
             .placed_write(
                 target,
@@ -1126,23 +1188,52 @@ impl Paykit {
     /// kept-copy stop (Paykit spec 8.1): read by every path that makes a new attempt on the
     /// request, so a stop not yet placed in the record still refuses it.
     pub(crate) async fn kept_stop(&self, target: &ActivityTarget) -> Result<bool> {
+        Ok(self.kept_stop_message(target).await?.is_some())
+    }
+
+    /// The payee's cancellation kept as the stop for the request record at `target`, read
+    /// with the check a restore makes ([`crate::protocol::kept_cancellation_at`]): one that
+    /// fails it is a corrupt store, never no stop.
+    async fn kept_stop_message(&self, target: &ActivityTarget) -> Result<Option<StoredMessage>> {
         let kept_key = key::kept_cancellation(&self.activity_key(target)?);
-        Ok(self.local_get::<KeptMessage>(&kept_key).await?.is_some())
+        match self.app.protocol_get(kept_key.as_bytes()).await? {
+            None => Ok(None),
+            Some(value) => self.checked_stop(kept_key.as_bytes(), &value).map(Some),
+        }
+    }
+
+    /// A stop's value `value` at `key`, checked as [`Paykit::kept_stop_message`] checks it.
+    fn checked_stop(&self, key: &[u8], value: &[u8]) -> Result<StoredMessage> {
+        crate::protocol::kept_cancellation_at(key, value, &self.identity(), &|target| {
+            self.app
+                .record_key(target)
+                .map_err(|error| error.to_string())
+        })
+        .map_err(|_| PaykitError::corrupt())
     }
 
     /// Place every kept cancellation whose request record this app holds, each as a later
     /// write of its own with the kept copy dropped (Paykit spec 8.1). Run after each
     /// receive, at a resume, and before any payment. One that can't be placed now stays
-    /// kept, for the next run; its kept copy refuses every new attempt meanwhile.
+    /// kept, for the next run; its kept copy refuses every new attempt meanwhile. A stop
+    /// for a request the copy doesn't hold ([`crate::receive::holds_record`]) goes once
+    /// [`KEPT_MESSAGE_MS`] have passed since the cancellation's acceptance, on the highest
+    /// service time verified, but never while the copy of the payer's records may lack
+    /// records, when the absence decides nothing, nor while the app keeps a stored message
+    /// of that request to write ([`crate::stored::writes_request`]): the request's own entry
+    /// may be one, waiting for a write that failed or for a listing, and written without
+    /// the stop the request would be payable.
     pub(crate) async fn place_kept_cancellations(&mut self) -> Result<()> {
-        let own = self.identity();
-        for (_, kept) in self
-            .local_scan::<KeptMessage>(key::KEPT_CANCELLATIONS)
+        for (stop_key, value) in self
+            .app
+            .protocol_scan(key::KEPT_CANCELLATIONS.as_bytes())
             .await?
         {
-            let cancellation = kept.stored(&own)?;
+            // Read with a restore's check: a stop that fails it is a corrupt store, so the
+            // receive fails rather than drop or place it.
+            let cancellation = self.checked_stop(&stop_key, &value)?;
             let Some(request) = cancellation.message().refs.first().copied() else {
-                continue;
+                return Err(PaykitError::corrupt());
             };
             let target = ActivityTarget::payer(natural_key::request_record(
                 &cancellation.sender(),
@@ -1156,9 +1247,46 @@ impl Paykit {
                 // A placement that fails now is tried again at the next run; the kept stop
                 // stands meanwhile, so it can't let a payment through.
                 let _ = self.place_kept_cancellation(&target).await;
+                continue;
+            }
+            let content = self
+                .app
+                .shared_record(&self.activity_key(&target)?)
+                .await?
+                .map(|record| record.content);
+            // A kept stop always has its acceptance time (the check refuses one without).
+            let stale = cancellation.accepted_at().is_some_and(|at| {
+                self.service_time()
+                    .is_some_and(|t| at.saturating_add(KEPT_MESSAGE_MS) <= t)
+            });
+            if stale
+                && !crate::receive::holds_record(content.as_ref())
+                && !self.side_unlisted(crate::hold::RecordSide::Payer).await?
+                && !self
+                    .keeps_stored_of(&cancellation.sender(), &request)
+                    .await?
+            {
+                let stop_key = String::from_utf8(stop_key).map_err(|_| PaykitError::corrupt())?;
+                self.local_delete(&stop_key).await?;
             }
         }
         Ok(())
+    }
+
+    /// Whether the app keeps a stored message from `sender` of `request` still to write
+    /// ([`crate::stored::writes_request`]).
+    async fn keeps_stored_of(&self, sender: &[u8; 32], request: &[u8; 32]) -> Result<bool> {
+        let own = self.identity();
+        for (note_key, value) in self
+            .app
+            .protocol_scan(key::stored_notes_of(sender).as_bytes())
+            .await?
+        {
+            if crate::stored::writes_request(&note_key, &value, &own, request)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Every request the payer's apps received, from the `payer_activity` records this app
@@ -1177,6 +1305,11 @@ impl Paykit {
     ///
     /// A store failure.
     pub async fn requests(&self) -> Result<Vec<RequestView>> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.requests_inner()).await
+    }
+
+    async fn requests_inner(&self) -> Result<Vec<RequestView>> {
         self.refuse_while_unlisted().await?;
         let own = self.identity();
         let mut periods = self.periods_of(Collection::PayerActivity).await?;
@@ -1222,6 +1355,11 @@ impl Paykit {
     ///
     /// [`Refusal::NotFound`]; a store failure.
     pub async fn request(&self, request: &RequestRef) -> Result<RequestView> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.request_inner(request)).await
+    }
+
+    async fn request_inner(&self, request: &RequestRef) -> Result<RequestView> {
         self.refuse_while_unlisted().await?;
         let target = ActivityTarget::payer(natural_key::request_record(
             &request.payee,
@@ -1259,16 +1397,20 @@ impl Paykit {
         let hash = stored.hash();
         let mut status = self.request_status(record, request, &payee, &hash).await?;
         // A cancellation kept for the request and not placed yet is a cancellation all the
-        // same (Paykit spec 8.1), a subscription's included (Paykit spec 8.2).
+        // same (Paykit spec 8.1), a subscription's included (Paykit spec 8.2), read with a
+        // restore's check.
         let live = |status: &RequestStatus| {
             matches!(status, RequestStatus::Open | RequestStatus::Subscribed)
         };
-        if live(&status)
-            && self
-                .local_get::<KeptMessage>(&key::kept_cancellation(&record_key))
-                .await?
-                .is_some()
-        {
+        let stop = key::kept_cancellation(&record_key);
+        let stopped = match self.app.protocol_get(stop.as_bytes()).await? {
+            Some(value) => {
+                self.checked_stop(stop.as_bytes(), &value)?;
+                true
+            }
+            None => false,
+        };
+        if live(&status) && stopped {
             status = RequestStatus::Cancelled;
         }
         if live(&status) && self.held(&record_key, record).await? {
@@ -1290,7 +1432,7 @@ impl Paykit {
             recurring: request.is_recurring(),
             recurrence: request.recurrence,
             status,
-            receipt: received_receipt(record_key, record),
+            receipt: received_receipt(record_key, record, Some(request)),
             periods,
         }))
     }
@@ -1329,6 +1471,12 @@ impl Paykit {
                 "Paykit spec 8.1: a one-time request is accepted by paying it".into(),
             )
             .into()),
+            // A one-time request accepted, by this app or another own app whose acceptance
+            // the record holds, is no longer proposed: it is cancelled, not rejected (Paykit
+            // spec 8.1).
+            (false, Answer::Reject) if accepted(record) => {
+                Err(Refusal::Usage("accepted; cancel instead".into()).into())
+            }
             _ => Ok(()),
         }
     }
@@ -1503,8 +1651,10 @@ impl Paykit {
     /// request whose proposal expired, decided once the record the service holds shows it
     /// still unanswered: one another own app accepted meanwhile gives
     /// [`Refusal::Subscribed`], one rejected or cancelled gives that refusal;
-    /// [`PaykitError::Conflict`] when the record changed meanwhile, unless it now shows the
-    /// request answered, which gives what answered it; the client's errors.
+    /// [`Refusal::Usage`] for a one-time request the record shows accepted, by this app or
+    /// another own app, which is cancelled instead; [`PaykitError::Conflict`] when the
+    /// record changed meanwhile, unless it now shows the request answered, which gives what
+    /// answered it; the client's errors.
     pub async fn reject_request(
         &mut self,
         request: &RequestRef,
@@ -1512,10 +1662,15 @@ impl Paykit {
     ) -> Result<String> {
         self.refresh_own()?;
         self.records_known().await?;
-        Ok(self
-            .answer_request(request, Answer::Reject, reason, AcceptOptions::default())
-            .await?
-            .msg_id)
+        // The answer's future goes on the heap, as `receive`'s does: it nests deep.
+        let sent = Box::pin(self.answer_request(
+            request,
+            Answer::Reject,
+            reason,
+            AcceptOptions::default(),
+        ))
+        .await?;
+        Ok(sent.msg_id)
     }
 
     /// The payer cancels a one-time request (Paykit spec 8.1, Paykit wire 4.8), recorded and
@@ -1532,10 +1687,15 @@ impl Paykit {
     ) -> Result<String> {
         self.refresh_own()?;
         self.records_known().await?;
-        Ok(self
-            .answer_request(request, Answer::Cancel, reason, AcceptOptions::default())
-            .await?
-            .msg_id)
+        // The answer's future goes on the heap, as `receive`'s does: it nests deep.
+        let sent = Box::pin(self.answer_request(
+            request,
+            Answer::Cancel,
+            reason,
+            AcceptOptions::default(),
+        ))
+        .await?;
+        Ok(sent.msg_id)
     }
 
     /// The user accepts the subscription `request`, a recurring request (Paykit spec 8.2,
@@ -1579,8 +1739,8 @@ impl Paykit {
     ) -> Result<SentMessage> {
         self.refresh_own()?;
         self.records_known().await?;
-        self.answer_request(request, Answer::Accept, None, options)
-            .await
+        // The answer's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.answer_request(request, Answer::Accept, None, options)).await
     }
 
     async fn answer_request(
@@ -1591,29 +1751,6 @@ impl Paykit {
         options: AcceptOptions,
     ) -> Result<SentMessage> {
         self.require_pay()?;
-        // No response goes while the request record can't be opened, sealed at a key the
-        // app doesn't hold yet or a value that doesn't read: what it holds is unknown, such
-        // as another own app's answer (Paykit spec 8.1). The copy's absence while it may
-        // lack records is refused before, by `records_known`.
-        if answer != Answer::Cancel {
-            let target = ActivityTarget::payer(natural_key::request_record(
-                &request.payee,
-                &request.request_hash,
-            ));
-            let held = self.app.shared_record(&self.activity_key(&target)?).await?;
-            match held.map(|held| held.content) {
-                Some(content) if crate::hold::awaits_key(&content) => {
-                    return Err(crate::hold::value_awaits_key());
-                }
-                Some(RecordContent::Unreadable(_)) => {
-                    return Err(Refusal::NotNow(
-                        "Paykit spec 8.1: the request record doesn't read".into(),
-                    )
-                    .into());
-                }
-                _ => {}
-            }
-        }
         let (target, record) = self.payer_request(request).await?;
         let (_, body) = request_of(&record).ok_or(Refusal::NotFound)?;
         let recurring = body.is_recurring();
@@ -1855,8 +1992,14 @@ fn refuse_on_claim(view: &pubky_switch_core::claims::ClaimView) -> Result<()> {
     }
 }
 
-fn payee_view(record_key: [u8; 32], record: &ActivityRecord) -> PayeeActivity {
-    let request = request_of(record);
+/// The payee's view of `record`, held at `record_key`. `request` is the request record a
+/// period record names, which holds the request a period record doesn't (Paykit wire 5.3).
+fn payee_view(
+    record_key: [u8; 32],
+    record: &ActivityRecord,
+    request: Option<&ActivityRecord>,
+) -> PayeeActivity {
+    let request = request_of(record).or_else(|| request.and_then(request_of));
     let proof = match record.proof.as_ref().map(StoredMessage::body) {
         Some(Body::PaymentProof(proof)) => Some(proof),
         _ => None,
@@ -1881,7 +2024,9 @@ fn payee_view(record_key: [u8; 32], record: &ActivityRecord) -> PayeeActivity {
     PayeeActivity {
         record: record_key,
         payer: record.counterparty,
-        request_hash: request.map(|(stored, _)| stored.hash()),
+        request_hash: request
+            .map(|(stored, _)| stored.hash())
+            .or(record.request_hash),
         amount: request
             .map(|(_, r)| r.amount.clone())
             .or_else(|| proof.and_then(|p| p.amount.clone())),
@@ -1899,6 +2044,47 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// Bob's payee request record of his request to alice, and a payee period record of it,
+    /// as another own app wrote them: the period record holds no request.
+    fn payee_period_records() -> (ActivityRecord, ActivityRecord) {
+        use crate::testkit::{object, Party};
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let request = bob.message(
+            &alice,
+            "paykit.payment_request",
+            vec![],
+            object(json!({
+                "amount": { "asset": "btc", "value": "1" },
+                "payment_reference": "invoice-7",
+                "proposal_expires_at": null
+            })),
+        );
+        let mut request_record =
+            ActivityRecord::new(paykit_lib::records::ActivitySide::Payee, alice.id());
+        request_record.request = Some(request.clone());
+        let mut period_record =
+            ActivityRecord::new(paykit_lib::records::ActivitySide::Payee, alice.id());
+        period_record.request_hash = Some(request.hash());
+        period_record.billing_period = Some(paykit_lib::periods::PeriodRef {
+            starts_at: 1_000,
+            ends_at: 2_000,
+        });
+        (request_record, period_record)
+    }
+
+    #[test]
+    fn test_payee_view_of_a_period_shows_its_request() {
+        let (request_record, period_record) = payee_period_records();
+        let hash = period_record.request_hash.unwrap();
+        let view = payee_view([9; 32], &period_record, Some(&request_record));
+        assert_eq!(view.request_hash, Some(hash));
+        assert_eq!(
+            view.amount,
+            request_of(&request_record).map(|(_, r)| r.amount.clone())
+        );
+    }
 
     fn queued(since: Option<u64>, reason: Option<UndeliverableReason>) -> Delivery {
         Delivery::Queued {

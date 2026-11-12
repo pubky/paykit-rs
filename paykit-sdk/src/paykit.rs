@@ -20,7 +20,7 @@ use paykit_lib::{Asset, Decimal, Label};
 use pubky_switch_client::app::Protocol as _;
 use pubky_switch_client::app::{
     App, AppBackup, AppConfig, AppEnv, AppError, AppEvent, HomeserverReader, JoinRequest,
-    ReceiveReport,
+    ParkReason, ReceiveReport,
 };
 use pubky_switch_client::clock::Clock;
 use pubky_switch_core::records::{AppCert, Approval};
@@ -217,13 +217,13 @@ pub struct ReceiveSummary {
     /// gives it: the read went on, holding Paykit's entries unprocessed, and none of the
     /// Paykit steps after it ran.
     pub certificate_refused: Option<Refusal>,
-    /// A certificate taken reads collections the one the records were last listed under
-    /// didn't, and the listing this read made for them failed: the text says why, without
-    /// content. The records stay unlisted, so the calls that only read are refused as not
-    /// now, and the next receive or write lists them again.
+    /// A certificate taken is another than the one the records were last listed under, and
+    /// the listing this read made under it failed: the text says why, without content. The
+    /// records stay unlisted, so the calls that only read are refused as not now, and the
+    /// next receive or write lists them again.
     pub records_unlisted: Option<String>,
-    /// A certificate taken reads collections the one the records were last listed under
-    /// didn't, and the app waits for its scope keys, which the signer stores when it is next
+    /// A certificate taken is another than the one the records were last listed under, and
+    /// the app waits for its scope keys, which the signer stores when it is next
     /// online (Switch spec 3.5). The client asks the signer for a full bundle once, and asks
     /// again only after a later bundle part leaves a key still missing, or after a restore;
     /// it doesn't ask at every read. Until the keys come the records the certificate adds
@@ -327,6 +327,17 @@ impl Paykit {
         rail: Arc<dyn Rail>,
         timer: Arc<dyn Timer>,
     ) -> Result<Self> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(Self::join_inner(env, config, request, rail, timer)).await
+    }
+
+    async fn join_inner(
+        env: AppEnv,
+        config: PaykitConfig,
+        request: JoinRequest,
+        rail: Arc<dyn Rail>,
+        timer: Arc<dyn Timer>,
+    ) -> Result<Self> {
         check_orphan_window(&config, rail.as_ref())?;
         let protocol = Self::new_protocol(&rail);
         // The certificate passes Paykit's checks before the client writes anything: the
@@ -343,9 +354,11 @@ impl Paykit {
             check_own_certificate(&approved.cert)?;
         }
         let app = App::join(env.clone(), protocol.clone(), config.app.clone(), request).await?;
-        let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
-        // The client lists the collections at its first read, under this certificate.
-        paykit.follow_listed_cert(true).await?;
+        // No certificate is kept as listed under: the copy is empty until a listing has run
+        // with the keys held, the client's at its first read or one of Paykit's, so until then
+        // the records count as unlisted (Paykit spec 8.1, "Records not listed yet";
+        // `Paykit::unlisted`) and a call that reads them lists first or is refused.
+        let paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
         Ok(paykit)
     }
 
@@ -365,6 +378,17 @@ impl Paykit {
         rail: Arc<dyn Rail>,
         timer: Arc<dyn Timer>,
     ) -> Result<Self> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(Self::load_inner(env, config, app_id, rail, timer)).await
+    }
+
+    async fn load_inner(
+        env: AppEnv,
+        config: PaykitConfig,
+        app_id: [u8; 16],
+        rail: Arc<dyn Rail>,
+        timer: Arc<dyn Timer>,
+    ) -> Result<Self> {
         check_orphan_window(&config, rail.as_ref())?;
         let protocol = Self::new_protocol(&rail);
         let app = App::load(env.clone(), protocol.clone(), config.app.clone(), app_id).await?;
@@ -375,10 +399,9 @@ impl Paykit {
         if paykit.certificate_refused().is_none() {
             paykit.bound_restored_cursor_time().await?;
         }
-        // A load follows a narrowing only: with no certificate kept as listed under, as after
-        // a load under one Paykit refused or a store an earlier build wrote, the records
-        // count as unlisted until a listing (`Paykit::unlisted`).
-        paykit.follow_listed_cert(false).await?;
+        // A load keeps nothing as listed under: a certificate the client took since the last
+        // listing, a narrower one included, leaves the records unlisted until the next one
+        // (`hold::side_unlisted`).
         Ok(paykit)
     }
 
@@ -399,6 +422,17 @@ impl Paykit {
     /// made, or a journal with a malformed entry or two open entries for one obligation; a
     /// store failure.
     pub async fn restore(
+        env: AppEnv,
+        config: PaykitConfig,
+        backup: &PaykitBackup,
+        rail: Arc<dyn Rail>,
+        timer: Arc<dyn Timer>,
+    ) -> Result<Self> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(Self::restore_inner(env, config, backup, rail, timer)).await
+    }
+
+    async fn restore_inner(
         env: AppEnv,
         config: PaykitConfig,
         backup: &PaykitBackup,
@@ -566,12 +600,21 @@ impl Paykit {
     /// for the host. An entry dropped unverified (`AppEvent::StoredEntryDropped`) counts in
     /// its sender's mark, which asks that sender to send it again (`marks.rs`).
     ///
+    /// A receive that returns an error shows no report. When the client's read returned
+    /// before the error, the client counts the duty events the read raised as handed to the
+    /// host, so no later report shows them: after an error, the host takes them from
+    /// [`App::unacknowledged_events`] (through [`Paykit::app_mut`]), and acknowledges them
+    /// only once a later receive has returned, up to the last event its report shows, so the
+    /// SDK has taken those about stored entries first.
+    ///
     /// # Errors
     ///
     /// The client's errors; [`Refusal::SwitchUnavailable`] while the account may have been
     /// erased and the client's wait before it takes it as gone goes on, as for a switch that
     /// doesn't answer (Switch spec 12.7). A message whose effect couldn't be written yet
-    /// stays before the cursor, and the next call hands it over again.
+    /// stays before the cursor, and the next call hands it over again. One waiting for a
+    /// scope key the app doesn't hold yet waits in the client's store once the client's
+    /// bounded wait ends, not behind the cursor, and is read again once the key comes.
     pub async fn receive(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
         // The read's future goes on the heap: the client's read nests deep, and a host
         // polling it on a small stack, such as a test thread's 2 MiB, keeps room for it.
@@ -584,6 +627,8 @@ impl Paykit {
         self.refresh_lists_when_due().await?;
         // Whether the client may list at this read's start ([`Paykit::records_listed`]).
         let keys_held_before = self.holds_scope_keys();
+        // Only this read's key waits count: a read that returned an error left its own.
+        self.protocol.take_key_waits();
         let report = match self.app.receive(wait).await {
             Ok(report) => report,
             // The erasure's wait: the switch answers as for an account it doesn't host, and
@@ -594,11 +639,22 @@ impl Paykit {
             Err(error) => return Err(error.into()),
         };
         // The entries this read held for a key: shown as waiting for it, not as a store
-        // failing.
+        // failing, nor, once the client's bounded wait stores one to try again later
+        // (`id: None`), as a store unavailable.
         let key_waits = self.protocol.take_key_waits();
         let mut report = report;
         report.events.retain(|event| {
-            !matches!(event, AppEvent::StoreFailing { seq, .. } if key_waits.contains_key(seq))
+            let seq = match event {
+                AppEvent::StoreFailing { seq, .. }
+                | AppEvent::Parked {
+                    id: None,
+                    seq,
+                    reason: ParkReason::StoreUnavailable,
+                    ..
+                } => seq,
+                _ => return true,
+            };
+            !key_waits.contains_key(seq)
         });
         let mut key_epochs_awaited: Vec<u64> = key_waits.values().copied().collect();
         key_epochs_awaited.sort_unstable();
@@ -614,6 +670,9 @@ impl Paykit {
         // own marks and notes are kept here, and nothing is written at the switch
         // (`stored.rs`).
         self.take_stored_events(&duties).await?;
+        // A `missed` item the read took holds the open requests from a time on
+        // (`hold.rs`), bounded now that the read verified the service time.
+        self.bound_missed_hold().await?;
         if account_gone {
             // Nothing more is read or written there: the summary tells the host.
             return Ok(ReceiveSummary {
@@ -641,13 +700,10 @@ impl Paykit {
         if !report.stopped {
             self.records_listed(keys_held_before).await?;
         }
-        // A certificate the read took may read more than the one before: its records are
-        // listed now, or stay unlisted for the next receive or write (`Paykit::list_widened`).
-        let records_unlisted = self.list_widened().await?;
-        // A certificate the read took that reads no more than the one listed under, a
-        // narrowed one included, is followed; one that passes Paykit's checks only now, as
-        // after a refused one, too (`Paykit::follow_listed_cert`).
-        self.follow_listed_cert(false).await?;
+        // A certificate the read took, any other than the one the records were listed under,
+        // a narrower one included: they are listed now, or stay unlisted for the next
+        // receive or write (`Paykit::list_under_new_cert`).
+        let records_unlisted = self.list_under_new_cert().await?;
         let keys = self.scope_keys_awaited().await?;
         // The entries the client stored for good: their messages, kept above, written into
         // their records as room frees (`stored.rs`), unless the payer's side waits for its
@@ -681,6 +737,11 @@ impl Paykit {
             })
             .collect();
         let answered = self.answer_kept_resends().await?;
+        // A restore's asks that waited for a record's key are queued at the receive that
+        // opens it, once the records are listed (`hold.rs`).
+        if self.unlisted().await?.is_none() && self.scope_keys_awaited().await?.is_none() {
+            self.queue_restore_asks().await?;
+        }
         let asked = self.send_asks().await?;
         Ok(ReceiveSummary {
             report,
@@ -703,5 +764,104 @@ impl Paykit {
         self.refresh_own()?;
         self.app.flush_outbox().await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use paykit_lib::AttemptId;
+    use pubky_switch_client::app::{AppEnv, JoinRequest, UserConfirmed};
+
+    use super::{Paykit, PaykitBackup, PaykitConfig};
+    use crate::pay::{PayOptions, UnrequestedPayment};
+    use crate::rail::Rail;
+    use crate::receipts::{ReceiptDetails, ReceiptsOf};
+    use crate::reconcile::Resolution;
+    use crate::requests::{RequestDraft, RequestRef};
+    use crate::resend::ResendSelection;
+    use crate::timer::Timer;
+
+    fn assert_send<T: Send>(_: &T) {}
+
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    /// Every public async call's future is `Send`, so a host on a multi-threaded runtime
+    /// can spawn it. Only compiled: the futures are made and dropped, never polled.
+    #[allow(clippy::too_many_arguments)]
+    fn public_futures_are_send(
+        wallet: &mut Paykit,
+        env: AppEnv,
+        config: PaykitConfig,
+        join: JoinRequest,
+        backup: &PaykitBackup,
+        rail: Arc<dyn Rail>,
+        timer: Arc<dyn Timer>,
+        confirmed: UserConfirmed,
+        attempt: AttemptId,
+        resolution: Resolution,
+        draft: RequestDraft,
+        payment: UnrequestedPayment,
+    ) {
+        let key = [0; 32];
+        let request = RequestRef {
+            payee: key,
+            request_hash: key,
+        };
+        assert_send(&Paykit::join(
+            env.clone(),
+            config.clone(),
+            join,
+            Arc::clone(&rail),
+            Arc::clone(&timer),
+        ));
+        assert_send(&Paykit::load(
+            env.clone(),
+            config.clone(),
+            [0; 16],
+            Arc::clone(&rail),
+            Arc::clone(&timer),
+        ));
+        assert_send(&Paykit::restore(env, config, backup, rail, timer));
+        assert_send(&wallet.backup());
+        assert_send(&wallet.receive(None));
+        assert_send(&wallet.flush());
+        assert_send(&wallet.public_endpoints(&key, Some(confirmed)));
+        assert_send(&wallet.reconcile());
+        assert_send(&wallet.resolve_attempt(&key, attempt, resolution, confirmed));
+        assert_send(&wallet.end_reconcile(confirmed));
+        assert_send(&wallet.request_resend(key, ResendSelection::default()));
+        assert_send(&wallet.held_lists());
+        assert_send(&wallet.spam_count(&key));
+        assert_send(&wallet.place_held_list_without_marks(&key, &[0; 16], confirmed));
+        assert_send(&wallet.send_request(key, draft));
+        assert_send(&wallet.message_delivery(""));
+        assert_send(&wallet.payee_activity());
+        assert_send(&wallet.verify_payment(&key));
+        assert_send(&wallet.confirm_payment(&key));
+        assert_send(&wallet.confirm_payment_with(&key, ReceiptDetails::default()));
+        assert_send(&wallet.cancel_sent_request(&key, None));
+        assert_send(&wallet.requests());
+        assert_send(&wallet.request(&request));
+        assert_send(&wallet.reject_request(&request, None));
+        assert_send(&wallet.cancel_request(&request, None));
+        assert_send(&wallet.pay_request(&request, PayOptions::default()));
+        assert_send(&wallet.pay_without_request(payment));
+        assert_send(&wallet.payments());
+        assert_send(&wallet.repair_activity_record(&attempt));
+        assert_send(&wallet.resume_payments());
+        assert_send(&wallet.block(&key));
+        assert_send(&wallet.unblock(&key));
+        assert_send(&wallet.confirm_possibly_cancelled(&request, confirmed));
+        assert_send(&wallet.notices());
+        assert_send(&wallet.acknowledge_notice(""));
+        assert_send(&wallet.receipts(ReceiptsOf::All));
+    }
+
+    #[test]
+    fn test_paykit_futures_are_send() {
+        assert_send_sync::<Paykit>();
+        let _ = public_futures_are_send;
     }
 }

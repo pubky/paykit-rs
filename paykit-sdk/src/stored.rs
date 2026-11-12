@@ -13,10 +13,13 @@
 //!   Meanwhile a Private Payment List is held over its record (`lh/`), the newer kept, and a
 //!   request is shown unrecorded ([`crate::RequestStatus::Unrecorded`]). A payee's
 //!   cancellation needs nothing here: its stop is kept with the cursor move, with no write
-//!   at the switch (`kc/`, Paykit spec 8.1). Once written, the stored entry is forgotten,
-//!   its message staying processed. One not written within [`crate::KEPT_MESSAGE_MS`] of its
-//!   acceptance, such as a receipt naming a proof the record doesn't hold, is given up: its
-//!   note goes, its entry stays stored, and the host is told
+//!   at the switch (`kc/`, Paykit spec 8.1). A later write has the effects the message has
+//!   at its first read, in the batch that writes it: a receipt's on its claim and in the
+//!   journal, the notice "marked failed, was paid" included (`receive::receipt_settles`),
+//!   and a request's or a list's note of its sender (`receive::peer_note`). Once written,
+//!   the stored entry is forgotten, its message staying processed. One not written within
+//!   [`crate::KEPT_MESSAGE_MS`] of its acceptance, such as a reply whose record never comes,
+//!   is given up: its note goes, its entry stays stored, and the host is told
 //!   ([`crate::NoticeKind::MessageGivenUp`]).
 //! - **An effect of unknown fate** (`EffectUncertain`, or `Parked` as `Uncertain`): the same
 //!   write compensates for it, since placing a message a record already holds writes
@@ -41,16 +44,19 @@
 //! nothing.
 
 use paykit_lib::derive::natural_key;
-use paykit_lib::records::StoredMessage;
+use paykit_lib::records::{ActivityRecord, StoredMessage};
 use paykit_lib::Body;
 use pubky_switch_client::app::{AppEvent, OpBatch, ParkReason, RecordContent};
 use pubky_switch_core::enc::serde_b64;
+use pubky_switch_core::scopes::Permission;
 use serde::{Deserialize, Serialize};
 
 use crate::activity::{ActivityTarget, Role};
 use crate::error::Result;
-use crate::notices::KeptNotice;
+use crate::journal::JournalEntry;
+use crate::notices::{KeptNotice, NoticeKind, StoredHandle};
 use crate::paykit::Paykit;
+use crate::receive::{receipt_obligation, receipt_on_record, receipt_settles, ReceiptClaim};
 use crate::records::{list_target, KeptMessage};
 use crate::requests::{RequestRef, RequestStatus, RequestView};
 use crate::state::{key, Tx};
@@ -60,10 +66,11 @@ use crate::state::{key, Tx};
 pub(crate) enum Placed {
     /// Written now, or reflected already.
     Done,
-    /// Not written now: tried again at the next receive, and given up past its window.
+    /// Not written now: tried again at the next receive, and given up past its window, a
+    /// message waiting for a scope key included.
     Not,
-    /// Not written while the record's absence decides nothing yet, or its value waits for
-    /// its scope key: tried again at the next receive, and never given up meanwhile.
+    /// Not written while the record's absence decides nothing yet: tried again at the next
+    /// receive, and never given up meanwhile.
     Waits,
 }
 
@@ -96,8 +103,62 @@ pub(crate) fn given_up_write(
 ) -> Result<pubky_switch_client::app::LocalWrite> {
     let sender = stored.sender();
     let msg_id = &stored.message().msg_id;
-    let notice = KeptNotice::given_up(sender, msg_id, named_request(stored), service.unwrap_or(0));
-    crate::state::local_put(&key::message_notice(&sender, msg_id), &notice)
+    crate::state::local_put(
+        &key::message_notice(&sender, msg_id),
+        &given_up_notice(stored, service.unwrap_or(0)),
+    )
+}
+
+/// The host's notice that `stored` was given up, raised at `at`, service time.
+fn given_up_notice(stored: &StoredMessage, at: u64) -> KeptNotice {
+    KeptNotice::given_up(
+        stored.sender(),
+        &stored.message().msg_id,
+        named_request(stored),
+        at,
+        None,
+    )
+}
+
+/// Whether the stored note `value` at `key` keeps a message of `request` still to write:
+/// one not in its record yet, whether it waits for a write that failed or for a listing. A
+/// payee's cancellation of that request kept as a stop stays while one does
+/// ([`Paykit::place_kept_cancellations`]): the request's own entry may be among them, and
+/// written without the stop it would be payable. The note is read bound to its key
+/// ([`note_at`]).
+pub(crate) fn writes_request(
+    key: &[u8],
+    value: &[u8],
+    own: &[u8; 32],
+    request: &[u8; 32],
+) -> Result<bool> {
+    let (note, stored) = note_at(key, value, own)?;
+    Ok(!note.placed && named_request(&stored) == Some(*request))
+}
+
+/// The stored note `value` read back at `key` (`se/<sender>/<msg_id>`), bound to it: its
+/// sender and `msg_id`, and those of the message it keeps, are the ones the key names. One
+/// that doesn't read, or names another key, is a corrupt store, never an absent note.
+pub(crate) fn note_at(
+    key: &[u8],
+    value: &[u8],
+    own: &[u8; 32],
+) -> Result<(StoredNote, StoredMessage)> {
+    let Some(crate::state::StateKey::StoredNote { sender, msg_id }) =
+        crate::state::StateKey::parse(key)
+    else {
+        return Err(crate::error::PaykitError::corrupt());
+    };
+    let note = crate::state::decode::<StoredNote>(value)?;
+    let stored = note.message.stored(own)?;
+    if note.sender != sender
+        || note.msg_id != msg_id
+        || stored.sender() != sender
+        || stored.message().msg_id != msg_id
+    {
+        return Err(crate::error::PaykitError::corrupt());
+    }
+    Ok((note, stored))
 }
 
 /// The request `stored` is, or names: a request's own hash, the first of a payer's reply's
@@ -270,10 +331,16 @@ impl Paykit {
         }
         match self.place_of(&stored).await? {
             None => return Ok(false),
-            Some(Place::List(Some((held, kept)))) => {
-                tx.put(&held, &kept)?;
+            // Held as a list whose record doesn't read is held at its first read, and its
+            // sender noted with the hold, as there.
+            Some(Place::List(hold)) => {
+                if let Some((held, kept)) = hold {
+                    tx.put(&held, &kept)?;
+                }
+                let (peer, at) = crate::receive::peer_note(&entry.sender, &stored);
+                tx.put(&peer, &at)?;
             }
-            Some(_) => {}
+            Some(Place::Record { .. } | Place::AwaitsRequest(_) | Place::Taken) => {}
         }
         let note = StoredNote {
             stored_id,
@@ -347,13 +414,11 @@ impl Paykit {
                 Some(request) => self.period_place(stored, &request).await?,
                 None => None,
             },
-            Body::PaymentReceipt(receipt) if pay => {
-                let target = match stored.message().refs.get(1) {
-                    Some(request) => natural_key::request_record(&sender, request),
-                    None => natural_key::payer_payment_record(&own, &receipt.attempt_id),
-                };
-                record(ActivityTarget::payer(target), Role::Receipt, false)
-            }
+            Body::PaymentReceipt(receipt) if pay => record(
+                crate::receive::receipt_target(stored, &own, &receipt.attempt_id),
+                Role::Receipt,
+                false,
+            ),
             Body::PrivatePaymentList(_) if pay => {
                 let target = list_target(&sender, &stored.message().from.app_id);
                 let held = key::held_list(&self.app.record_key(&target)?);
@@ -450,8 +515,8 @@ impl Paykit {
                     Some(Place::Taken) => Placed::Done,
                     None => Placed::Not,
                 };
-                // A message whose record the copy may lack, or holds waiting for its key,
-                // waits: it is neither written nor given up meanwhile.
+                // A message whose record the copy may lack waits: it is neither written nor
+                // given up meanwhile.
                 if placed == Placed::Waits {
                     continue;
                 }
@@ -467,15 +532,30 @@ impl Paykit {
                         let mut tx = Tx::default();
                         tx.delete(&note_key);
                         let notice = key::message_notice(&note.sender, &note.msg_id);
-                        if self.local_get::<KeptNotice>(&notice).await?.is_none() {
-                            let at = self.service_time().unwrap_or(0);
-                            let given_up = KeptNotice::given_up(
-                                note.sender,
-                                &note.msg_id,
-                                named_request(&stored),
-                                at,
-                            );
-                            tx.put(&notice, &given_up)?;
+                        // The notice keeps the entry's handle, which its acknowledgement
+                        // forgets; one kept already, as after a restore onto another store,
+                        // takes the entry's handle here.
+                        let handle = StoredHandle {
+                            stored_id: note.stored_id,
+                            hash: stored.hash(),
+                        };
+                        match self.local_get::<KeptNotice>(&notice).await? {
+                            None => {
+                                let at = self.service_time().unwrap_or(0);
+                                let given_up = KeptNotice::given_up(
+                                    note.sender,
+                                    &note.msg_id,
+                                    named_request(&stored),
+                                    at,
+                                    Some(handle),
+                                );
+                                tx.put(&notice, &given_up)?;
+                            }
+                            Some(mut kept) if kept.stored.as_ref() != Some(&handle) => {
+                                kept.stored = Some(handle);
+                                tx.put(&notice, &kept)?;
+                            }
+                            Some(_) => {}
                         }
                         self.local_commit(tx).await?;
                     }
@@ -504,6 +584,19 @@ impl Paykit {
         Ok(())
     }
 
+    /// Give up `stored`, kept at `kept_key`: the kept copy goes and the host is told
+    /// ([`NoticeKind::MessageGivenUp`]), in one commit. The notice is raised once.
+    pub(crate) async fn give_up(&mut self, kept_key: &str, stored: &StoredMessage) -> Result<()> {
+        let mut tx = Tx::default();
+        tx.delete(kept_key);
+        let notice = key::message_notice(&stored.sender(), &stored.message().msg_id);
+        if self.local_get::<KeptNotice>(&notice).await?.is_none() {
+            let at = self.service_time().unwrap_or(0);
+            tx.put(&notice, &given_up_notice(stored, at))?;
+        }
+        self.local_commit(tx).await
+    }
+
     /// Place `stored` in its `role` of the record at `target`, as a write of the app's own.
     /// Whether it is in place: written now, or reflected already.
     ///
@@ -512,11 +605,13 @@ impl Paykit {
     /// record held as a value that doesn't read, or that the app can't open, is never
     /// written over (Switch spec 8.2: a reader doesn't act on a record it can't read, and a
     /// write over one that is only unopenable for now could drop what its writer stored). A
-    /// value sealed at a key the app doesn't hold yet (`Unopened::KeyNotHeld`), a record whose
-    /// scope's key at the current data epoch the app doesn't hold yet, and a record absent
-    /// while the copy of its side may lack records ([`Paykit::side_unlisted`]), wait:
-    /// tried again at each receive, never given up meanwhile, and placed once the key comes
-    /// or the records are listed. A value that never opens stays as it is.
+    /// value sealed at a key the app doesn't hold yet (`Unopened::KeyNotHeld`) and a record
+    /// whose scope's key at the current data epoch the app doesn't hold yet wait for the key:
+    /// tried again at each receive and placed once it comes, and given up as any other
+    /// message not written once [`crate::KEPT_MESSAGE_MS`] have passed since its acceptance
+    /// (Paykit spec 8.1). A record absent while the copy of its side may lack records
+    /// ([`Paykit::side_unlisted`]) waits, never given up meanwhile, and the message is placed
+    /// once the records are listed. A value that never opens stays as it is.
     async fn place_note(
         &mut self,
         target: &ActivityTarget,
@@ -525,34 +620,36 @@ impl Paykit {
         stored: StoredMessage,
     ) -> Result<Placed> {
         // Without the current data epoch's key of the record's scope, nothing can be sealed
-        // there yet: the message waits for it rather than count as not written.
+        // there yet: the message waits for it, within its window.
         let scope = target.record_target().collection.policy.read_scope;
         if self.app.scope_key(self.app.data_epoch(), &scope).is_none() {
-            return Ok(Placed::Waits);
+            return Ok(Placed::Not);
         }
         let key = self.activity_key(target)?;
         let content = self.app.shared_record(&key).await?.map(|held| held.content);
         match content {
-            // Absent while the copy of its side may lack records: the absence decides
+            // Absent or deleted while the copy of its side may lack records: the copy decides
             // nothing yet (Paykit spec 8.1, "Records not listed yet").
-            None if self.side_unlisted(record_side(target)).await? => return Ok(Placed::Waits),
+            None | Some(RecordContent::Deleted)
+                if self.side_unlisted(record_side(target)).await? =>
+            {
+                return Ok(Placed::Waits);
+            }
             None | Some(RecordContent::Deleted) => {
                 if !creates {
                     return Ok(Placed::Not);
                 }
             }
-            Some(content) if crate::hold::awaits_key(&content) => return Ok(Placed::Waits),
+            // A value sealed under a key the app doesn't hold yet: the message waits for it,
+            // within its window.
+            Some(content) if crate::hold::awaits_key(&content) => return Ok(Placed::Not),
             Some(RecordContent::Unreadable(_)) => return Ok(Placed::Not),
             Some(RecordContent::Value(_)) => {
                 let Some(record) = self.held_activity(target).await? else {
                     return Ok(Placed::Not);
                 };
-                let names_proof = record
-                    .proof
-                    .as_ref()
-                    .is_some_and(|proof| stored.message().refs.first() == Some(&proof.hash()));
-                if role == Role::Receipt && !names_proof {
-                    return Ok(Placed::Not);
+                if role == Role::Receipt {
+                    return self.place_receipt(target, &record, stored).await;
                 }
             }
         }
@@ -563,27 +660,125 @@ impl Paykit {
         })
     }
 
+    /// A stored receipt's later write, into `record`, the payer's record at `target` it
+    /// names, with the same effects as at its first read (`receive::receipt_effect`), in one
+    /// batch: beside the proof it names, the attempt settled by evidence, or once the claim
+    /// is gone the notice "marked failed, was paid", and the journal entry no longer waiting
+    /// for its receipt ([`crate::receive::receipt_settles`]). Done when the batch went, or
+    /// when the receipt does nothing here, as at its first read; a claim read or a batch
+    /// that fails now is tried again at the next receive.
+    async fn place_receipt(
+        &mut self,
+        target: &ActivityTarget,
+        record: &ActivityRecord,
+        stored: StoredMessage,
+    ) -> Result<Placed> {
+        let Body::PaymentReceipt(receipt) = stored.body() else {
+            return Ok(Placed::Not);
+        };
+        let attempt_id = receipt.attempt_id;
+        let Some(found) = receipt_on_record(record, &stored) else {
+            return Ok(Placed::Done);
+        };
+        let sender = stored.sender();
+        let mut batch = OpBatch::new();
+        let mut writes = false;
+        if found.names_held_proof {
+            if let Some(entry) = self
+                .placed_write(target, sender, Role::Receipt, stored.clone(), Vec::new())
+                .await?
+            {
+                batch = batch.entry(entry);
+                writes = true;
+            }
+        }
+        let mut tx = Tx::default();
+        if self.app.cert().has_permission(Permission::ClaimsWrite) {
+            let journaled = match self
+                .local_get::<JournalEntry>(&key::journal(&attempt_id))
+                .await?
+            {
+                Some(entry) => {
+                    entry.check()?;
+                    Some(entry)
+                }
+                None => None,
+            };
+            let (obligation, deadline) = receipt_obligation(
+                &stored,
+                record,
+                journaled.as_ref(),
+                &attempt_id,
+                |request| self.obligation(&sender, request, 0),
+            );
+            let view = self
+                .app
+                .read_claim(&obligation)
+                .await?
+                .map(|read| read.view);
+            let settles = receipt_settles(&ReceiptClaim {
+                stored: &stored,
+                attempt_id,
+                obligation,
+                deadline,
+                view: view.as_ref(),
+                service_time: self.service_time(),
+                journaled,
+                first_receipt: found.first_receipt,
+            })?;
+            if let Some((op, deadline)) = settles.claim {
+                batch = batch
+                    .op(op.kind())
+                    .obligation_deadline(obligation, deadline);
+                writes = true;
+            }
+            if let Some(late) = settles.notice {
+                let notice = key::notice(&attempt_id, NoticeKind::PaidAfterFailed);
+                if self.local_get::<KeptNotice>(&notice).await?.is_none() {
+                    tx.put(&notice, &late)?;
+                }
+            }
+            if let Some(entry) = settles.received {
+                tx.put(&key::journal(&attempt_id), &entry)?;
+            }
+        }
+        if !writes {
+            self.local_commit(tx).await?;
+            return Ok(Placed::Done);
+        }
+        Ok(
+            match self.app.submit_batch(batch.locals(tx.into_writes())).await {
+                Ok(_) => Placed::Done,
+                Err(_) => Placed::Not,
+            },
+        )
+    }
+
     async fn write_placed(
         &mut self,
         target: &ActivityTarget,
         stored: StoredMessage,
     ) -> Result<bool> {
         let role = Role::of(stored.body()).unwrap_or(Role::Response);
+        let sender = stored.sender();
+        // A request notes its sender in the batch that writes it, as at its first read.
+        let peer = (role == Role::Request).then(|| crate::receive::peer_note(&sender, &stored));
+        let mut tx = Tx::default();
+        if let Some((peer, at)) = peer {
+            tx.put(&peer, &at)?;
+        }
         let Some(entry) = self
-            .placed_write(target, stored.sender(), role, stored, Vec::new())
+            .placed_write(target, sender, role, stored, Vec::new())
             .await?
         else {
+            self.local_commit(tx).await?;
             return Ok(true);
         };
-        if self
+        Ok(self
             .app
-            .submit_batch(OpBatch::new().entry(entry))
+            .submit_batch(OpBatch::new().entry(entry).locals(tx.into_writes()))
             .await
-            .is_err()
-        {
-            return Ok(false);
-        }
-        Ok(true)
+            .is_ok())
     }
 }
 
