@@ -964,9 +964,10 @@ impl Paykit {
             let mut view = entry.view()?;
             let target = ActivityTarget::payer(entry.natural_key.clone());
             if let Some(record) = self.held_activity(&target).await? {
-                view.receipt =
-                    crate::receipts::received_receipt(self.activity_key(&target)?, &record)
-                        .filter(|receipt| receipt.attempt_id == view.attempt_id);
+                view.receipt = self
+                    .received_receipt_of(self.activity_key(&target)?, &record)
+                    .await?
+                    .filter(|receipt| receipt.attempt_id == view.attempt_id);
             }
             out.push(view);
         }
@@ -993,6 +994,11 @@ impl Paykit {
     /// the record's value is sealed under a key the app doesn't hold yet, which opens once
     /// it comes and is never replaced meanwhile; the client's errors.
     pub async fn repair_activity_record(&mut self, attempt_id: &AttemptId) -> Result<PayOutcome> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.repair_activity_record_inner(attempt_id)).await
+    }
+
+    async fn repair_activity_record_inner(&mut self, attempt_id: &AttemptId) -> Result<PayOutcome> {
         self.refresh_own()?;
         // A repair writes over a value the app can't read, on the user's word: it waits for
         // the records to be listed, a wider certificate's keys included.
@@ -2494,8 +2500,8 @@ impl Paykit {
         if let Some(proof) = proof {
             changed |= activity::place(&mut record, Role::Proof, self.own_copy(proof)?);
         }
-        // A payment made after `failed` was written on its claim: the record shows it, for
-        // every own app that gets the receipt (Paykit spec 7.2).
+        // A payment made after `failed` was written on its claim: the record's informational
+        // `status` shows it for display; no reader decides by it (Paykit wire 5.3).
         let after_failed = Some(crate::receive::PAID_AFTER_FAILED);
         if paid && entry.failed_on_claim && record.status.as_deref() != after_failed {
             record.status = after_failed.map(str::to_owned);
