@@ -34,9 +34,9 @@ use paykit_lib::{
     AttemptId, Body, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
 };
 use pubky_switch_client::app::{
-    claim_conflict, AppError, ClaimOp, Initiator, LocalWrite, ObligationDeadline, OpBatch,
-    PeerIdentity, RecordContent, Refusal as ClientRefusal, SignedMessage, UserConfirmed,
-    REVALIDATION_MS,
+    claim_conflict, AppError, ClaimAttempt, ClaimOp, Initiator, KeptBatch, KeptBatchStatus,
+    LocalWrite, ObligationDeadline, OpBatch, PeerIdentity, RecordContent, Refusal as ClientRefusal,
+    SignedMessage, UserConfirmed, REVALIDATION_MS,
 };
 use pubky_switch_core::chain::TransitionProof;
 use pubky_switch_core::claims::{Basis, ClaimStatus, ClaimView, Outcome};
@@ -1666,14 +1666,9 @@ impl Paykit {
             }
             // The answer may have been lost: the batch is kept and the journal says no money
             // moved, so a resume reads the claim and writes `failed` if the attempt is ours.
-            // A batch the client still keeps is noted: until it is sent or dropped, the claim
-            // can't show the attempt, and a resume leaves the entry as it is.
-            Err(error) => {
-                if let Some(batch_id) = error.kept_batch() {
-                    self.note_kept(batch_id, None, Some(&attempt_id)).await?;
-                }
-                return Err(error.into());
-            }
+            // While the client still keeps the batch, the claim can't show the attempt, and a
+            // resume leaves the entry as it is ([`Paykit::attempt_still_kept`]).
+            Err(error) => return Err(error.into()),
         };
         let proof = submitted.proofs.first();
         entry.step = proof.and_then(|proof| proof.body().step);
@@ -2464,6 +2459,26 @@ impl Paykit {
             .map(|a| (read.view.step, a.outcome)))
     }
 
+    /// Whether the client still keeps the batch that carries `entry`'s attempt, to send
+    /// again: its claim can't show the attempt until the batch is answered, so the entry is
+    /// left as it is. Anything else reads the claim: a batch applied or dropped, and an
+    /// attempt the client knows no batch of, which never says it was never written. A batch
+    /// ended past the client's retention, kept before a restore, or written another way is
+    /// unknown to the client, and only the claim tells whether the attempt is on it.
+    async fn attempt_still_kept(&self, entry: &JournalEntry) -> Result<bool> {
+        let attempt = ClaimAttempt {
+            claim_key: entry.obligation,
+            attempt_id: entry.attempt()?.to_bytes(),
+        };
+        Ok(matches!(
+            self.app.kept_attempt(attempt).await?,
+            Some(KeptBatch {
+                status: KeptBatchStatus::Kept { .. },
+                ..
+            })
+        ))
+    }
+
     /// The proof (Paykit spec 7.2 step 4, Paykit wire 4.10), signed for the outcome's batch.
     fn sign_proof(&self, entry: &JournalEntry) -> Result<SignedMessage> {
         let request_hash = entry.request_hash()?;
@@ -2513,9 +2528,8 @@ impl Paykit {
         // Batches kept from before go first, so the claim read below shows those sent and
         // the journal holds what their answers settled. One the client still can't send
         // stays kept: its attempt isn't on the claim yet, so its entry is left `Recorded`
-        // below, until the batch is sent or the client drops it (`kept.rs`).
+        // below, until the batch is sent or the client drops it.
         self.app.flush_outbox().await?;
-        self.note_unacknowledged().await?;
         // Cancellations kept and not yet placed go into their records (Paykit spec 8.1).
         self.place_kept_cancellations().await?;
         let mut out = Vec::new();
@@ -2554,7 +2568,7 @@ impl Paykit {
                         None => self.set_stage(&mut entry, Stage::Abandoned).await?,
                     }
                 }
-                Stage::Recorded if self.attempt_kept(&attempt_id).await? => {}
+                Stage::Recorded if self.attempt_still_kept(&entry).await? => {}
                 Stage::Recorded | Stage::Attempted => match self.attempt_state(&entry).await? {
                     // No payment started: the open attempt is written `failed`.
                     Some((step, Outcome::Open | Outcome::Unknown)) => {

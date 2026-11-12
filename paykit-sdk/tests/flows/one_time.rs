@@ -831,3 +831,233 @@ async fn test_one_time_request_kept_then_refused_at_a_read_reads_as_failed_once_
         shop.message_delivery(&sent.msg_id).await
     );
 }
+
+/// A request bob's shop sends to alice while his switch can't be reached: the client keeps
+/// its batch. Returns the request's `msg_id` and the kept batch's ID.
+async fn kept_request(w: &World, shop: &mut paykit_sdk::Paykit) -> (String, [u8; 16]) {
+    w.bob.switch().fail_next(unreachable_ops());
+    let sent = shop
+        .send_request(w.alice_id(), draft("1", w.clock.now_ms()))
+        .await
+        .unwrap();
+    let MessageDelivery::Kept { batch_id } = sent.delivery else {
+        panic!("{:?}", sent.delivery);
+    };
+    (sent.msg_id, batch_id)
+}
+
+#[tokio::test]
+async fn test_one_time_request_kept_reads_as_kept_after_a_store_failure_and_a_reload() {
+    // The call's commits are the client's own: the one that keeps the request's batch,
+    // indexing its message, and its send's. The store fails the first commit after them,
+    // as it would fail a write of the SDK's own, and the reloaded shop still reads the
+    // request kept. Its next flush sends it.
+    let w = World::new();
+    let _wallet = w.wallet("wallet").await;
+    let base = crate::common::store();
+    let shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+            paykit_sdk::PaykitConfig::default(),
+            std::sync::Arc::clone(&base),
+        )
+        .await;
+    let me = shop.app_id();
+    drop(shop);
+    let fault = std::sync::Arc::new(pubky_switch_client::store::FaultStore::new(
+        std::sync::Arc::clone(&base),
+        pubky_switch_client::store::Fault::FailBefore(3),
+    ));
+    let mut shop = w
+        .load_on_clock(
+            &w.bob,
+            std::sync::Arc::clone(&fault)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+            me,
+            std::sync::Arc::clone(&w.clock),
+        )
+        .await;
+    assert_eq!(fault.commits(), 0, "a load commits nothing here");
+    let (msg_id, batch_id) = kept_request(&w, &mut shop).await;
+    assert_eq!(fault.commits(), 2);
+    assert_eq!(
+        shop.message_delivery(&msg_id).await.unwrap(),
+        Some(MessageDelivery::Kept { batch_id })
+    );
+    drop(shop);
+    let mut shop = w
+        .load_on_clock(&w.bob, base, me, std::sync::Arc::clone(&w.clock))
+        .await;
+    assert_eq!(
+        shop.message_delivery(&msg_id).await.unwrap(),
+        Some(MessageDelivery::Kept { batch_id })
+    );
+    shop.flush().await.unwrap();
+    assert!(
+        matches!(
+            shop.message_delivery(&msg_id).await.unwrap(),
+            Some(MessageDelivery::Accepted { .. })
+        ),
+        "{:?}",
+        shop.message_delivery(&msg_id).await
+    );
+}
+
+#[tokio::test]
+async fn test_one_time_request_kept_past_the_retention_then_refused_reads_as_failed() {
+    // The request's batch stays kept longer than the sent-message retention, then is
+    // refused for good: the request reads as failed from the drop's time, for the
+    // retention after it, not as one delivered and forgotten.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let (msg_id, _) = kept_request(&w, &mut shop).await;
+    w.clock
+        .advance_ms(pubky_switch_client::app::SENT_RETENTION_MS + HOUR_MS);
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            current: serde_json::Value::Null,
+        });
+    shop.flush().await.unwrap();
+    let dropped_at = w.clock.now_ms();
+    shop.flush().await.unwrap();
+    assert!(
+        matches!(
+            shop.message_delivery(&msg_id).await.unwrap(),
+            Some(MessageDelivery::Failed { failed_at_ms, .. }) if failed_at_ms == dropped_at
+        ),
+        "{:?}",
+        shop.message_delivery(&msg_id).await
+    );
+}
+
+/// A request alice's wallet has received, open for 60 days.
+async fn long_request(
+    w: &World,
+    wallet: &mut paykit_sdk::Paykit,
+    shop: &mut paykit_sdk::Paykit,
+) -> paykit_sdk::RequestRef {
+    let draft = draft("1", w.clock.now_ms())
+        .with_proposal_expires_at_ms(w.clock.now_ms() + 60 * 24 * HOUR_MS);
+    let request = request_from(shop, w.alice_id(), draft).await;
+    wallet.receive(None).await.unwrap();
+    request
+}
+
+#[tokio::test]
+async fn test_one_time_attempt_kept_then_forgotten_reads_the_claim_and_pays_once() {
+    // The attempt's batch is kept, then refused for good, and its end forgotten past the
+    // retention: the client knows no batch of the attempt. That says nothing of the claim,
+    // so the resume reads it, finds no attempt and closes the entry. Nothing was paid, and
+    // the user's next payment pays once.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = long_request(&w, &mut wallet, &mut shop).await;
+    w.alice.switch().fail_next(unreachable_ops());
+    let kept = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    let batch_id = kept.kept_batch().expect("the attempt's batch is kept");
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            current: serde_json::Value::Null,
+        });
+    wallet.flush().await.unwrap();
+    assert!(
+        matches!(
+            wallet.app().kept_batch(batch_id).await.unwrap(),
+            Some(pubky_switch_client::app::KeptBatchStatus::Dropped { .. })
+        ),
+        "the refusal drops the batch"
+    );
+    w.clock
+        .advance_ms(pubky_switch_client::app::SENT_RETENTION_MS + HOUR_MS);
+    wallet.flush().await.unwrap();
+    assert_eq!(wallet.app().kept_batch(batch_id).await.unwrap(), None);
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Recorded
+    );
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Abandoned
+    );
+    assert!(w.rail.all_executions().is_empty());
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_one_time_attempt_kept_at_the_backup_restored_never_pays_again() {
+    // The backup is taken while the attempt's batch is kept. The wallet goes on: the batch
+    // goes, its attempt is written `failed`, and the user pays. The restored app's client
+    // knows no batch of the backup's attempt: it reads the claim, which shows the attempt
+    // ended, and pays nothing; the request reads paid.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = long_request(&w, &mut wallet, &mut shop).await;
+    w.alice.switch().fail_next(unreachable_ops());
+    let kept = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(kept.kept_batch().is_some(), "{kept:?}");
+    let backup = wallet.backup().await.unwrap();
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Failed { .. }]),
+        "{resumed:?}"
+    );
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    drop(wallet);
+    let mut restored = paykit_sdk::Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    restored.receive(None).await.unwrap();
+    restored.reconcile().await.unwrap();
+    restored
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    restored.resume_payments().await.unwrap();
+    assert!(
+        restored.payments().await.unwrap().iter().all(|p| !matches!(
+            p.stage,
+            paykit_sdk::Stage::Recorded | paykit_sdk::Stage::Attempted | paykit_sdk::Stage::Paying
+        )),
+        "{:?}",
+        restored.payments().await
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+    let again = restored
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(again.refusal(), Some(&Refusal::AlreadyPaid), "{again:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+}

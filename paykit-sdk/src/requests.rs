@@ -485,10 +485,8 @@ impl Paykit {
             let Some(batch_id) = error.kept_batch() else {
                 return Err(error.into());
             };
-            // The note lets `Paykit::message_delivery` tell the request kept, or dropped
-            // unsent, from one delivered long ago. The request is kept whatever the note's
-            // write does, so a failure to write it is no error of the call.
-            let _ = self.note_kept(batch_id, Some(&msg_id), None).await;
+            // The client indexes the request by its `msg_id` in the commit that keeps the
+            // batch, so `Paykit::message_delivery` answers it from there, after a reload too.
             return Ok(SentRequest {
                 msg_id,
                 delivery: MessageDelivery::Kept { batch_id },
@@ -515,30 +513,22 @@ impl Paykit {
 
     /// Where the message this app sent as `msg_id` is now, such as a request after the
     /// flushes since [`Paykit::send_request`], or a payment's proof: for example "waiting for
-    /// them to admit you" ([`MessageDelivery::WaitingForAdmission`]). A request whose batch
-    /// the client still keeps is [`MessageDelivery::Kept`]; one whose kept batch the client
-    /// dropped unsent is [`MessageDelivery::Failed`], once a receive or a flush has taken
-    /// the client's event about it (`AppEvent::BatchRefused` or
-    /// `AppEvent::KeptBatchDropped`, naming the same batch ID). `None` for a message neither
-    /// the outbox nor such a note holds, such as one delivered and past its retention.
+    /// them to admit you" ([`MessageDelivery::WaitingForAdmission`]), as the client answers
+    /// it. A request whose batch the client still keeps is [`MessageDelivery::Kept`]; one
+    /// whose kept batch it dropped is [`MessageDelivery::Failed`], with the drop's time,
+    /// for [`pubky_switch_client::app::SENT_RETENTION_MS`] from that time, whether or not
+    /// the host acknowledged the client's event about it.
+    ///
+    /// `None` is a message the client keeps nothing of: one accepted or ended longer ago
+    /// than that retention, or queued before a restore. It never says the message was never
+    /// sent, nor that sending it again is safe: the host reads the state it would change
+    /// first, such as [`Paykit::payee_activity`] for a request.
     ///
     /// # Errors
     ///
     /// A store failure.
     pub async fn message_delivery(&self, msg_id: &str) -> Result<Option<MessageDelivery>> {
-        if let Some(delivery) = self.app.delivery(msg_id).await? {
-            return Ok(Some(MessageDelivery::of(delivery)));
-        }
-        Ok(self
-            .kept_request(msg_id)
-            .await?
-            .map(|(batch_id, note)| match note.dropped {
-                Some(code) => MessageDelivery::Failed {
-                    reason: format!("the batch that queues it was dropped unsent: {code}"),
-                    failed_at_ms: note.kept_at_ms,
-                },
-                None => MessageDelivery::Kept { batch_id },
-            }))
+        Ok(self.app.delivery(msg_id).await?.map(MessageDelivery::of))
     }
 
     /// The payee's record at `record`, bound under its policy, with its target.

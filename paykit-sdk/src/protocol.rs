@@ -362,14 +362,12 @@ pub(crate) fn restore_paykit_layer(
             // So do the marks of records not yet listed and of the payer pass owed: this
             // restore sets its own.
             // The certificate last listed under is the backup's own: this restore sets it to
-            // the restored one, which its listing covers. The client's kept batches are its
-            // own; a restore keeps no note of them.
+            // the restored one, which its listing covers.
             StateKey::RestoreHold
             | StateKey::HoldConfirmed(_)
             | StateKey::RecordsUnlisted
             | StateKey::PayerPassOwed
-            | StateKey::ListedCert
-            | StateKey::KeptBatch(_) => continue,
+            | StateKey::ListedCert => continue,
             StateKey::Journal(attempt) => attempt,
             StateKey::CursorTime => {
                 cursor_time_ms = state::decode::<u64>(&value).map_err(|_| unread())?;

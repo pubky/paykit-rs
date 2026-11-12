@@ -568,9 +568,6 @@ impl Paykit {
             }
             Err(error) => return Err(error.into()),
         };
-        // The client's events about the app's kept batches, first: a request or an attempt
-        // whose batch it dropped is no longer kept (`kept.rs`).
-        self.note_kept_events(&report.events).await?;
         let account_gone = account_gone(&report.events)
             || (report.stopped && account_gone(&self.app.unacknowledged_events().await?));
         if account_gone {
@@ -641,7 +638,6 @@ impl Paykit {
     pub async fn flush(&mut self) -> Result<()> {
         self.refresh_own()?;
         self.app.flush_outbox().await?;
-        self.note_unacknowledged().await?;
         Ok(())
     }
 }

@@ -40,7 +40,6 @@
 //! | `rsd/<pubky>/<day>` | how many messages were re-sent to a requester that day | |
 //! | `nl` | set by a restore: the shared records aren't listed since, so the client's copy is empty and a record's absence means nothing yet; cleared once they are listed; never restored | |
 //! | `lc` | the certificate the shared records were last listed under, signed: a certificate held now that reads more collections than it means the copy lacks their records until Paykit lists them (`hold.rs`); written at a join, a restore and each Paykit listing; never restored | |
-//! | `kb/<batch_id>` | a batch of the app's the client keeps to send again, and what it carries: a request's `msg_id` or an attempt's ID, and the switch's refusal once it dropped it; never restored | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 
@@ -196,11 +195,6 @@ pub(crate) mod key {
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
     pub(crate) const PAYER_PASS_OWED: &str = "pp";
     pub(crate) const LISTED_CERT: &str = "lc";
-    pub(crate) const KEPT_BATCHES: &str = "kb/";
-
-    pub(crate) fn kept_batch(batch_id: &[u8; 16]) -> String {
-        format!("{KEPT_BATCHES}{}", b64(batch_id))
-    }
 
     pub(crate) fn ask(sender: &[u8; 32], from: u64) -> String {
         format!("{ASKS}{}/{}", b64(sender), num(from))
@@ -291,8 +285,6 @@ pub(crate) enum StateKey {
     PayerPassOwed,
     /// `lc`: the certificate the shared records were last listed under.
     ListedCert,
-    /// `kb/<batch_id>`: a batch the client keeps, and what it carries.
-    KeptBatch([u8; 16]),
     /// `hc/<record key>`: the user's confirmation of a held request.
     HoldConfirmed([u8; 32]),
     /// `lr`: when the lists were last read.
@@ -375,7 +367,6 @@ impl StateKey {
                     },
                     "peer" => Self::Peer(b64_32(rest)?),
                     "kc" => Self::KeptCancellation(b64_32(rest)?),
-                    "kb" => Self::KeptBatch(b64_16(rest)?),
                     "hc" => Self::HoldConfirmed(b64_32(rest)?),
                     "lh" => Self::HeldList(b64_32(rest)?),
                     "side" => Self::Side(msg_id(rest)?),
@@ -498,7 +489,6 @@ mod tests {
             (key::RECORDS_UNLISTED.into(), StateKey::RecordsUnlisted),
             (key::PAYER_PASS_OWED.into(), StateKey::PayerPassOwed),
             (key::LISTED_CERT.into(), StateKey::ListedCert),
-            (key::kept_batch(&app), StateKey::KeptBatch(app)),
             (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),
             (key::LISTS_READ.into(), StateKey::ListsRead),
             (key::held_list(&pubky), StateKey::HeldList(pubky)),
