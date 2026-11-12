@@ -2,8 +2,8 @@
 //! switch permissions `paykit-lib` derives for them, which the signer signs.
 //!
 //! A certificate lists every scope explicitly, including those another requires: asking for
-//! `allowance_execute` also asks for `allowance`, `pay` and `contacts`, and `manage_contacts`
-//! for `contacts`. A certificate holds `request` or labelled selling scopes, never both.
+//! `pay` also asks for `contacts`, `allowance_execute` for `allowance`, `pay` and `contacts`,
+//! and `manage_contacts` for `contacts`. A certificate holds `request` or labelled selling scopes, never both.
 
 use paykit_lib::scopes::{check_requested_scopes, permissions_for, ExtensionPrefix};
 use paykit_lib::Label;
@@ -52,10 +52,11 @@ impl AppScopes {
         self
     }
 
-    /// `pay`: act as payer.
+    /// `pay`, with the `contacts` it requires: every paying app reads the deny list
+    /// (Paykit spec 3.1).
     #[must_use]
     pub fn pay(self) -> Self {
-        self.with("pay")
+        self.with("pay").with("contacts")
     }
 
     /// `request`: act as payee, for every label.
@@ -127,15 +128,30 @@ mod tests {
     #[test]
     fn test_approval_wallet_scopes_and_permissions() {
         let wallet = AppScopes::new().pay().request().build().unwrap();
-        assert_eq!(wallet.scopes, vec!["pay".to_owned(), "request".to_owned()]);
+        assert_eq!(wallet.scopes, vec!["pay", "contacts", "request"]);
         assert_eq!(
             wallet.permissions,
             vec![
                 Permission::ClaimsRead,
                 Permission::ClaimsWrite,
+                Permission::ListsRead,
                 Permission::ConversationAdd
             ]
         );
+    }
+
+    #[test]
+    fn test_approval_pay_asks_for_contacts() {
+        // A paying app reads the deny list, so `pay` brings the `contacts` it requires and
+        // its `lists.read` (Paykit spec 3.1, 3.2).
+        let payer = AppScopes::new().pay().build().unwrap();
+        assert_eq!(payer.scopes, vec!["pay", "contacts"]);
+        assert!(payer.permissions.contains(&Permission::ListsRead));
+        // Asked for again, or after `contacts`, each scope is listed once.
+        let again = AppScopes::new().contacts().pay().pay().build().unwrap();
+        assert_eq!(again.scopes, vec!["contacts", "pay"]);
+        let phone = AppScopes::new().pay().allowance().build().unwrap();
+        assert_eq!(phone.scopes, vec!["pay", "contacts", "allowance"]);
     }
 
     #[test]

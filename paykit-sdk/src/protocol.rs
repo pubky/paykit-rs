@@ -968,7 +968,7 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_check_body_passes_a_valid_message_kept_as_stored() {
-        let alice = Party::new("alice", "wallet", &["pay"]);
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
         let bob = Party::new("bob", "shop", &["request"]);
         let stored = bob.message(&alice, "paykit.payment_request", vec![], request_body());
         let message = received(&stored);
@@ -980,7 +980,7 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_check_body_drops_an_unhandled_kind_and_a_bad_body() {
-        let alice = Party::new("alice", "wallet", &["pay", "allowance"]);
+        let alice = Party::new("alice", "wallet", &["pay", "allowance", "contacts"]);
         let bob = Party::new("bob", "shop", &["request", "allowance"]);
         let p = protocol_of(&alice);
         let stored = bob.message(&alice, "paykit.payment_request", vec![], request_body());
@@ -998,7 +998,7 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_sends_payer_replies_by_label() {
-        let alice = Party::new("alice", "wallet", &["pay"]);
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
         let bob = Party::new("bob", "shop", &["request"]);
         let shop1 = Party::new("bob", "shop1", &["request:shop1"]);
         let shop2 = Party::new("bob", "shop2", &["request:shop2"]);
@@ -1025,8 +1025,8 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_accepts_only_handled_kinds_its_scopes_receive() {
-        let p = protocol_of(&Party::new("alice", "wallet", &["pay"]));
-        let wallet = Party::new("alice", "wallet", &["pay", "allowance"]);
+        let p = protocol_of(&Party::new("alice", "wallet", &["pay", "contacts"]));
+        let wallet = Party::new("alice", "wallet", &["pay", "allowance", "contacts"]);
         let kinds = p.accepts(&wallet.cert);
         assert!(kinds.contains(&"paykit.payment_request".to_owned()));
         assert!(!kinds.contains(&"paykit.payment_proof".to_owned()));
@@ -1039,7 +1039,7 @@ mod receive_tests {
     #[test]
     fn test_protocol_cert_paykit_refuses_receives_and_accepts_nothing() {
         use pubky_switch_core::scopes::Permission;
-        let p = protocol_of(&Party::new("alice", "wallet", &["pay"]));
+        let p = protocol_of(&Party::new("alice", "wallet", &["pay", "contacts"]));
         // `request` needs exactly `conversation.add` (Paykit wire 3.1): one without it, or
         // with `lists.read` beside it, is a certificate the Switch takes and Paykit refuses.
         let missing = Party::with_permissions("bob", "shop", &["request"], &[]);
@@ -1059,10 +1059,67 @@ mod receive_tests {
     }
 
     #[test]
+    fn test_protocol_pay_certificate_without_contacts_refused() {
+        // A paying app reads the deny list (Paykit spec 3.1): a certificate holding `pay`
+        // without `contacts`, its permissions exactly what its scopes need, is one the
+        // Switch takes and Paykit's verifiers refuse, as a sender, a recipient and an own
+        // certificate.
+        let wallet = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let request = bob.message(&wallet, "paykit.payment_request", vec![], request_body());
+        let pay_only = Party::new("alice", "phone", &["pay"]);
+        let p = protocol_of(&wallet);
+        assert!(!p.receives("paykit.payment_request", &pay_only.cert));
+        assert!(p.accepts(&pay_only.cert).is_empty());
+        let proof = Message::new(
+            "paykit.payment_proof",
+            pubky_switch_core::message::Sender::of_app(pay_only.id(), &pay_only.keys),
+            bob.id(),
+            NOW,
+            vec![[1; 32]],
+            object(json!({})),
+        )
+        .unwrap();
+        let error = protocol_of(&bob)
+            .check_scopes(&proof, &pay_only.cert, &bob.cert)
+            .unwrap_err();
+        assert!(error.contains("pay requires contacts"), "{error}");
+        assert!(pay_only
+            .try_message(
+                &bob,
+                "paykit.payment_proof",
+                vec![[1; 32]],
+                object(json!({}))
+            )
+            .is_err());
+        // Under a pay-only own certificate no message is judged, and nothing is accepted.
+        assert_eq!(
+            protocol_of(&pay_only).check_scopes(request.message(), &bob.cert, &pay_only.cert),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_protocol_pay_certificate_with_contacts_accepted() {
+        let wallet = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let p = protocol_of(&bob);
+        assert!(p.receives("paykit.payment_request", &wallet.cert));
+        assert!(p
+            .accepts(&wallet.cert)
+            .contains(&"paykit.payment_request".to_owned()));
+        let request = bob.message(&wallet, "paykit.payment_request", vec![], request_body());
+        assert_eq!(
+            protocol_of(&wallet).check_scopes(request.message(), &bob.cert, &wallet.cert),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn test_protocol_record_regression_takes_a_reassociation_on_a_version_it_missed() {
         use paykit_lib::identifiers::AllowanceId;
         use paykit_lib::records::Reassociation;
-        let alice = Party::new("alice", "wallet", &["pay"]);
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
         let bob = Party::new("bob", "shop", &["request"]);
         let p = protocol_of(&alice);
         let mut body = request_body();
@@ -1107,7 +1164,7 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_record_regression_on_a_dropped_role() {
-        let alice = Party::new("alice", "wallet", &["pay"]);
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
         let bob = Party::new("bob", "shop", &["request"]);
         let p = protocol_of(&alice);
         let request = bob.message(&alice, "paykit.payment_request", vec![], request_body());

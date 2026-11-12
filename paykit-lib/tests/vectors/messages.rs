@@ -510,7 +510,8 @@ const CANCELLATION_DESCRIPTION: &str = "Wire 4.1 check 8, 4.3, 4.8, spec 3.3: me
 payment_request_cancellation, as the shop signs it, without a label, presented with a \
 certificate of the shop's keys (sender_cert) at a certificate of alice's wallet's keys \
 (recipient_cert), each with its scopes changed, its permissions those Paykit's scopes need, \
-and signed again. A cancellation's recipient holds the other role than its sender: the \
+and signed again; a certificate holding pay holds contacts too, which pay requires (spec \
+3.1). A cancellation's recipient holds the other role than its sender: the \
 payer's goes from pay to request, the payee's from request to pay. accepted are the two \
 pairings the recipient takes at check 8; refused are pay to pay and request to request, \
 which it drops there. reason is paykit-lib's wording, of the first check that refuses it.";
@@ -546,6 +547,10 @@ fn cancellation_at(
     PaykitKindRules::for_certificate(recipient).check_scopes(&message, sender)
 }
 
+/// The scopes of a payer's certificate in `cancellation_roles`: `pay`, with the `contacts` it
+/// requires (Paykit spec 3.1).
+const PAY: &[&str] = &["pay", "contacts"];
+
 /// `cancellation_roles`, as paykit-lib generates it.
 fn cancellation_roles(keys: &Keys) -> Value {
     let base = "payment_request_cancellation";
@@ -577,12 +582,12 @@ fn cancellation_roles(keys: &Keys) -> Value {
     };
     json!({
         "accepted": [
-            case("the payee's cancellation, from request to pay", &["request"], &["pay"], true),
-            case("the payer's cancellation, from pay to request", &["pay"], &["request"], true),
+            case("the payee's cancellation, from request to pay", &["request"], PAY, true),
+            case("the payer's cancellation, from pay to request", PAY, &["request"], true),
         ],
         "description": CANCELLATION_DESCRIPTION,
         "refused": [
-            case("a cancellation from pay to pay", &["pay"], &["pay"], false),
+            case("a cancellation from pay to pay", PAY, PAY, false),
             case("a cancellation from request to request", &["request"], &["request"], false),
         ],
     })
