@@ -108,9 +108,9 @@ impl Paykit {
     }
 
     /// The certificate the records were last listed under, when the one held now reads
-    /// collections, or members of one, it didn't. With none kept, which after a join or a
-    /// load happens only under a certificate Paykit refused, a certificate that passes now
-    /// counts as reading more than nothing: its records are listed once, as at a join.
+    /// collections, or members of one, it didn't. With none kept ([`Paykit::follow_listed_cert`]),
+    /// a certificate that passes now counts as reading more than nothing: its records are
+    /// listed once, as at a join.
     async fn widened_from(&self) -> Result<Option<Option<AppCert>>> {
         match self.listed_cert().await? {
             None if self.certificate_refused().is_none() => Ok(Some(None)),
@@ -146,7 +146,15 @@ impl Paykit {
             crate::activity::family(Collection::PayerActivity),
             crate::activity::family(Collection::PaymentLists),
         ];
+        // Without the current `pay` key the payer's records can't be written: a data epoch
+        // rotation besides a widening on the payee's side leaves the app so, the certificate
+        // reading no more of the payer's side.
         let pay_key = self.app.scope_key(self.app.data_epoch(), "pay").is_some();
+        // Claims read now and not under the certificate listed under. Today this follows from
+        // the payer collections' term or from `pay` not held, where a resume reads nothing:
+        // `claims.read` comes with `pay`, which reads `payer_activity`, or with `allowance`
+        // (paykit-lib `scopes.rs`), which doesn't hold `pay`. It is kept so the rule doesn't
+        // lean on that table.
         let claims = !listed.has_permission(Permission::ClaimsRead)
             && held.has_permission(Permission::ClaimsRead);
         let payer =
@@ -173,18 +181,18 @@ impl Paykit {
     }
 
     /// Keep the certificate held now as the one listed under, when nothing is lost by it:
-    /// when none is kept, or when the one kept reads everything the held one does. A
-    /// narrowed certificate is followed so, so a later certificate that reads more again is
-    /// seen as wider. Run at a join, a load and after each receive; one write, which a crash
-    /// leaves to the next load. Nothing is written under a certificate Paykit refuses.
+    /// when none is kept and `none_listed`, or when the one kept reads everything the held
+    /// one does. A narrowed certificate is followed so, so a later certificate that reads
+    /// more again is seen as wider. Run at a join, a load and after each receive; one write,
+    /// which a crash leaves to the next load. Nothing is written under a certificate Paykit
+    /// refuses.
     ///
-    /// A store that keeps none, at a join or a load (`none_listed`): after a join that is
-    /// right, the client's first read listing under the join's certificate. A store an
-    /// earlier build wrote has none either: its first load here takes the certificate it
-    /// holds as listed under, so a wider one an earlier build took before then, without a
-    /// listing since, isn't seen as wider. A load under a certificate Paykit refuses keeps
-    /// none, and a receive keeps none either: the records are then listed once a
-    /// certificate passes ([`Paykit::unlisted`]), and that listing keeps it.
+    /// Only a join takes the certificate when none is kept (`none_listed`): the client's
+    /// first read lists under the join's certificate. A load and a receive keep none then,
+    /// whatever the reason none is kept: a join that crashed before its write, a load
+    /// under a certificate Paykit refused, a receive that took a passing one after it, a
+    /// restart before the listing, or a store an earlier build wrote. The records then count
+    /// as unlisted ([`Paykit::unlisted`]) and are listed once, and that listing keeps it.
     pub(crate) async fn follow_listed_cert(&mut self, none_listed: bool) -> Result<()> {
         if self.certificate_refused().is_some() {
             return Ok(());

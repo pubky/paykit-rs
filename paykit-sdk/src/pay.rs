@@ -2532,18 +2532,26 @@ impl Paykit {
         // claims read as before, its writes are built on versions it holds. Otherwise it
         // asks the method's history only, journals what it says, and writes nothing to the
         // switch, as without `pay`, until the keys come.
+        // A restore's copy not listed yet lacks every record: while keys wait, which leaves it
+        // unlisted, the payer's side waits too.
         let keys = self.scope_keys_awaited().await?;
-        let payer_waits = keys == Some(crate::hold::KeysAwaited::PayerSide);
+        let payer_waits = keys == Some(crate::hold::KeysAwaited::PayerSide)
+            || (keys.is_some() && self.unlisted().await? == Some(crate::hold::Unlisted::Restore));
         if keys.is_none() {
             self.records_known().await?;
         }
         // Batches kept from before go first, so the claim read below shows those sent and
         // the journal holds what their answers settled. One the client still can't send
         // stays kept: its attempt isn't on the claim yet, so its entry is left `Recorded`
-        // below, until the batch is sent or the client drops it.
+        // below, until the batch is sent or the client drops it. The flush sends only bytes
+        // signed earlier, kept batches and queued messages, and builds nothing on the copy,
+        // so it goes while the payer's side waits too.
         self.app.flush_outbox().await?;
-        // Cancellations kept and not yet placed go into their records (Paykit spec 8.1).
-        self.place_kept_cancellations().await?;
+        // Cancellations kept and not yet placed go into their records (Paykit spec 8.1),
+        // which they build on: not while the payer's side waits.
+        if !payer_waits {
+            self.place_kept_cancellations().await?;
+        }
         let mut out = Vec::new();
         for mut entry in self.journal().await? {
             // An outcome written whose acceptance is still owed: queued and placed now.
