@@ -263,17 +263,20 @@ async fn test_blocked_own_block_kept_unanswered_counts_at_once() {
 }
 
 #[tokio::test]
-async fn test_blocked_own_unblock_kept_unanswered_unblocks_nothing_yet() {
-    // Bob is blocked; the wallet's unblock is kept unanswered: the list still holds him, and
-    // the resume makes no repeat until the list shows him dropped.
+async fn test_blocked_own_unblock_kept_unanswered_counts_at_once() {
+    // Bob is blocked; the wallet's unblock is kept unanswered: the list at the switch still
+    // holds him, but the resume's fresh read counts the wallet's own unblock at once, and
+    // makes the repeat (Paykit spec 8.1).
     let w = World::new();
     let calls = resumed_repeat(&w, async |wallet| {
         wallet.block(&w.bob_id()).await.unwrap();
         keep_ops(&w, 8);
         wallet.unblock(&w.bob_id()).await.unwrap();
+        let lists = wallet.app_mut().allow_list().await.unwrap();
+        assert!(lists.deny.contains(&w.bob_id()));
     })
     .await;
-    assert_eq!(calls, 1);
+    assert_eq!(calls, 2);
 }
 
 #[tokio::test]
@@ -333,21 +336,18 @@ async fn test_blocked_restore_reads_the_deny_list_again_before_a_payment() {
 }
 
 #[tokio::test]
-async fn test_blocked_own_unblock_kept_unanswered_still_refuses_the_users_payment() {
-    // The copy the user's payment is judged by keeps bob while the unblock is kept: the
-    // payment is still shown blocked.
+async fn test_blocked_own_unblock_kept_unanswered_lets_the_users_payment_go() {
+    // The copy the user's payment is judged by drops bob at once while the unblock is kept:
+    // the payment goes, with no confirmation.
     let w = World::new();
     let (mut wallet, request) = blocked(&w).await;
-    keep_ops(&w, 8);
+    keep_ops(&w, 1);
     wallet.unblock(&w.bob_id()).await.unwrap();
-    let refused = wallet
+    let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
-        .unwrap_err();
-    assert!(
-        matches!(refused.refusal(), Some(Refusal::Blocked { .. })),
-        "{refused:?}"
-    );
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
 
 /// A `resend_request` from bob's shop for `request`, kept by the wallet to answer, as a
@@ -436,4 +436,71 @@ async fn test_blocked_peer_not_blocked_asked_after_a_missed_item() {
     w.alice.switch().push_missed(1, now - 1_000, now);
     wallet.receive(None).await.unwrap();
     assert_eq!(crate::common::asked(&wallet, &w.bob_id()).await.len(), 1);
+}
+
+/// A store whose next commit writing the copy of the deny list (`p/dl`) fails, once armed.
+#[derive(Default)]
+struct FailingDenyCopy {
+    inner: pubky_switch_client::store::MemoryStore,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl pubky_switch_client::store::StateStore for FailingDenyCopy {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        let copy = batch.writes.iter().any(|write| {
+            matches!(write, pubky_switch_client::store::Write::Put { key, .. } if key == b"p/dl")
+        });
+        if copy && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(pubky_switch_client::error::StoreError::Unavailable);
+        }
+        self.inner.commit(batch)
+    }
+}
+
+#[tokio::test]
+async fn test_blocked_own_block_kept_mark_and_copy_written_together() {
+    // The wallet's block is kept unanswered and the store fails the commit of the copy: the
+    // mark of the kept block isn't left without the copy, so no payment the user starts
+    // within 10 minutes judges a copy that lacks a block the app counts.
+    let w = World::new();
+    let failing = std::sync::Arc::new(FailingDenyCopy::default());
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            std::sync::Arc::clone(&failing)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    wallet.receive(None).await.unwrap();
+    let before = wallet.app().protocol_get(b"dl").await.unwrap();
+    keep_ops(&w, 1);
+    failing.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(wallet.block(&w.bob_id()).await.is_err());
+    assert!(wallet.app().protocol_scan(b"bk/").await.unwrap().is_empty());
+    assert_eq!(wallet.app().protocol_get(b"dl").await.unwrap(), before);
 }

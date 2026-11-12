@@ -1592,10 +1592,10 @@ impl Paykit {
     }
 
     /// The deny list as this app judges payments by, from `deny` as read from the switch:
-    /// with this app's own blocks whose `deny.put` the client keeps unanswered (`bk/`), which
-    /// count at once (Paykit spec 8.1, "a block the app wrote itself counts at once"). A kept
-    /// unblock changes nothing until the list shows it. The marks the list shows landed go,
-    /// in the returned commit.
+    /// with this app's own blocks and unblocks whose batch the client keeps unanswered
+    /// (`bk/`), which count at once (Paykit spec 8.1, "a block or unblock the app wrote
+    /// counts at once"): a kept `deny.put` adds its counterparty, a kept `deny.delete` takes
+    /// it out. The marks the list shows landed go, in the returned commit.
     async fn judged_deny(
         &self,
         mut deny: Vec<[u8; 32]>,
@@ -1609,6 +1609,8 @@ impl Paykit {
                 tx.delete(&key::own_block(&pubky));
             } else if blocked {
                 deny.push(pubky);
+            } else {
+                deny.retain(|other| *other != pubky);
             }
         }
         Ok((deny, tx))
@@ -1653,9 +1655,10 @@ impl Paykit {
 
     /// Unblock `pubky`, as [`Paykit::block`] blocks: the deny list drops it, and the copy at
     /// once. Unblocking ends the pause (Paykit spec 8.1). A `deny.delete` the client keeps
-    /// unanswered unblocks nothing yet: `pubky` counts as blocked until a read of the list
-    /// shows it dropped. An unblock made through the client directly is seen at the next
-    /// read of the lists.
+    /// unanswered counts at once all the same, as a kept block does: the copy drops `pubky`,
+    /// and so does every fresh read of the list before an automatic payment until the list
+    /// shows it dropped (`bk/`). An unblock made through the client directly is seen at the
+    /// next read of the lists.
     ///
     /// # Errors
     ///
@@ -1666,31 +1669,35 @@ impl Paykit {
     }
 
     /// Write `pubky` to the deny list (`blocked`) or drop it, and the copy with it; a batch
-    /// the client keeps unanswered is marked (`bk/`) as [`Paykit::block`] says.
+    /// the client keeps unanswered is marked (`bk/`) as [`Paykit::block`] says. The mark and
+    /// the copy go in one commit, so no crash leaves the one without the other.
     async fn list_own(&mut self, pubky: &[u8; 32], blocked: bool) -> crate::error::Result<()> {
         let sent = if blocked {
             self.app.deny(pubky).await
         } else {
             self.app.undeny(pubky).await
         };
+        let mut tx = Tx::default();
         match sent {
             Ok(()) => {
-                self.local_delete(&key::own_block(pubky)).await?;
-                self.copy_denied(pubky, blocked).await
+                tx.delete(&key::own_block(pubky));
             }
             Err(error) if error.kept_batch().is_some() => {
-                self.local_put(&key::own_block(pubky), &blocked).await?;
-                if blocked {
-                    self.copy_denied(pubky, true).await?;
-                }
-                Ok(())
+                tx.put(&key::own_block(pubky), &blocked)?;
             }
-            Err(error) => Err(error.into()),
+            Err(error) => return Err(error.into()),
         }
+        self.copy_denied(&mut tx, pubky, blocked).await?;
+        self.local_commit(tx).await
     }
 
-    /// The copy of the deny list with `pubky` held or not.
-    async fn copy_denied(&mut self, pubky: &[u8; 32], held: bool) -> crate::error::Result<()> {
+    /// The copy of the deny list with `pubky` held or not, put in `tx`.
+    async fn copy_denied(
+        &self,
+        tx: &mut Tx,
+        pubky: &[u8; 32],
+        held: bool,
+    ) -> crate::error::Result<()> {
         let mut denied = self
             .local_get::<Vec<[u8; 32]>>(key::DENIED)
             .await?
@@ -1699,7 +1706,8 @@ impl Paykit {
         if held {
             denied.push(*pubky);
         }
-        self.local_put(key::DENIED, &denied).await
+        tx.put(key::DENIED, &denied)?;
+        Ok(())
     }
 
     /// Whether the copy of the deny list kept from the last read holds `pubky`, at an app
