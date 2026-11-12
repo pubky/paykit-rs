@@ -204,7 +204,9 @@ impl PaykitBackup {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ReceiveSummary {
-    /// The client's report of the feed read.
+    /// The client's report of the feed read. Once the receive has returned, the host may
+    /// acknowledge its duty events up to the last one the report shows
+    /// ([`Paykit::receive`]).
     pub report: ReceiveReport,
     /// The `msg_id`s of the messages received, each with its effect committed with the
     /// cursor move (Switch spec 8.2).
@@ -547,6 +549,17 @@ impl Paykit {
     /// cursor move, in the batch that carries it ([`crate::PaykitProtocol`]). Then the
     /// `resend_request`s received are answered and the re-sends the app needs are asked for
     /// (Paykit spec 9). `wait` is the long-poll wait in seconds.
+    ///
+    /// **Acknowledging duty events.** Once this call has returned, the host may acknowledge
+    /// the client's duty events up to the last one its summary's report shows
+    /// ([`pubky_switch_client::app::App::ack_events`]), whether the call returned early, under
+    /// a certificate Paykit refuses or an account gone, or not: the SDK has kept what it
+    /// needs of the events about stored entries before it returns. The SDK itself
+    /// acknowledges, in order, the events it took up to the first it didn't; the rest wait
+    /// for the host. An entry dropped unverified (`AppEvent::StoredEntryDropped`) is left to
+    /// the host: the re-send request for entries dropped unverified is not part of this
+    /// change, so once the host acknowledges that event nothing asks its sender to send the
+    /// entry again.
     ///
     /// # Errors
     ///
