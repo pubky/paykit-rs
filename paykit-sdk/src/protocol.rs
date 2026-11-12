@@ -607,11 +607,12 @@ pub(crate) fn check_kept_reply(
     kept_reply_at(value, own, at, msg_id, record_key).map(|_| ())
 }
 
-/// The payer's reply kept at `pr/<sender>/<record>/<msg_id>`, checked as a restore checks
-/// it and bound to its key: an acceptance, rejection, cancellation or proof from `sender`,
-/// of `msg_id`, accepted by its inbox, naming first a request whose payee record is
-/// `record`. The one check for a restore and for every read of a kept reply at runtime,
-/// where a value that fails it is a corrupt store.
+/// The message kept at `pr/<sender>/<record>/<msg_id>`, checked as a restore checks it and
+/// bound to its key: a payer's acceptance, rejection, cancellation or proof, or a payee's
+/// period details, from `sender`, of `msg_id`, accepted by its inbox, naming first a
+/// request whose record it waits for is `record`: the payee's, under its label, for a
+/// reply, the payer's for details. The one check for a restore and for every read of a
+/// kept message at runtime, where a value that fails it is a corrupt store.
 pub(crate) fn kept_reply_at(
     value: &[u8],
     own: &[u8; 32],
