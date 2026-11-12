@@ -24,6 +24,7 @@
 use paykit_lib::bodies::RequestDestination;
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::{natural_key, payment_obligation};
+use paykit_lib::periods::{BillingPeriod, PeriodRef};
 use paykit_lib::records::{ActivityRecord, ActivitySide, DestinationSource, RecordBinding};
 use paykit_lib::{AttemptId, Body};
 use pubky_switch_client::app::{
@@ -36,7 +37,7 @@ use crate::activity::{self, ActivityTarget};
 use crate::destination::Carrier;
 use crate::error::{Refusal, Result};
 use crate::hold::RestoreHold;
-use crate::journal::{Destination, JournalEntry, KeptAmount, Stage};
+use crate::journal::{Destination, JournalEntry, KeptAmount, KeptPeriod, Stage};
 use crate::pay::{own_deadline, PayOutcome, Written};
 use crate::paykit::Paykit;
 use crate::rail::{RailOutcome, RailPaid};
@@ -90,20 +91,53 @@ struct Obligation {
     claim_key: [u8; 32],
     payee: [u8; 32],
     request_hash: Option<[u8; 32]>,
+    /// The request record, or a payment without a request's record.
     record: ActivityRecord,
+    /// The Billing Period, for a recurring request.
+    period: Option<BillingPeriod>,
+    /// The natural key of the record its outcome writes: the request's, the period's, or
+    /// the payment's.
+    natural_key: Vec<u8>,
 }
 
 impl Paykit {
+    /// The obligations of the payer's `records` (Paykit spec 7.3): each one-time request's,
+    /// each payment without a request's, and, for a recurring request, every Billing Period
+    /// that may have an open attempt: those its request record lists in `attempted_periods`,
+    /// where every attempt on a period is listed from its own batch on (Paykit spec 8.2), and
+    /// those with a period record.
     fn obligations(&self, records: &[ActivityRecord]) -> Vec<Obligation> {
-        let mut out = Vec::new();
+        let mut out: Vec<Obligation> = Vec::new();
+        let mut periods: Vec<([u8; 32], [u8; 32], u64)> = Vec::new();
         for record in records {
             match record.binding() {
-                Ok(RecordBinding::Request { request_hash }) => out.push(Obligation {
-                    claim_key: self.obligation(&record.counterparty, &request_hash, 0),
-                    payee: record.counterparty,
-                    request_hash: Some(request_hash),
-                    record: record.clone(),
-                }),
+                Ok(RecordBinding::Request { request_hash }) => {
+                    let payee = record.counterparty;
+                    match request_of(record).and_then(|(_, body)| body.recurrence.as_ref()) {
+                        Some(_) => periods.extend(
+                            record
+                                .attempted_periods
+                                .iter()
+                                .map(|start| (payee, request_hash, *start)),
+                        ),
+                        None => out.push(Obligation {
+                            claim_key: self.obligation(&payee, &request_hash, 0),
+                            payee,
+                            request_hash: Some(request_hash),
+                            record: record.clone(),
+                            period: None,
+                            natural_key: natural_key::request_record(&payee, &request_hash),
+                        }),
+                    }
+                }
+                Ok(RecordBinding::Period {
+                    request_hash,
+                    billing_period,
+                }) => periods.push((
+                    record.counterparty,
+                    request_hash,
+                    billing_period.start_secs(),
+                )),
                 Ok(RecordBinding::Unrequested) => {
                     if let Some(attempt) = record.attempt_id {
                         out.push(Obligation {
@@ -111,11 +145,43 @@ impl Paykit {
                             payee: record.counterparty,
                             request_hash: None,
                             record: record.clone(),
+                            period: None,
+                            natural_key: natural_key::payer_payment_record(
+                                &self.identity(),
+                                &attempt,
+                            ),
                         });
                     }
                 }
-                _ => {}
+                Err(_) => {}
             }
+        }
+        periods.sort_unstable();
+        periods.dedup();
+        for (payee, request_hash, start) in periods {
+            // A period of a request whose record this app holds, by its recurrence.
+            let Some((record, period)) = records.iter().find_map(|record| {
+                let (stored, body) = request_of(record)?;
+                let period = body
+                    .recurrence
+                    .as_ref()?
+                    .lookup(start.checked_mul(1000)?)
+                    .ok()??;
+                (stored.hash() == request_hash
+                    && record.counterparty == payee
+                    && period.start_secs() == start)
+                    .then(|| (record.clone(), period))
+            }) else {
+                continue;
+            };
+            out.push(Obligation {
+                claim_key: self.obligation(&payee, &request_hash, start),
+                payee,
+                request_hash: Some(request_hash),
+                record,
+                natural_key: natural_key::period_record(&payee, &request_hash, start),
+                period: Some(period),
+            });
         }
         out
     }
@@ -297,8 +363,17 @@ impl Paykit {
         else {
             return Ok(None);
         };
-        if body.is_recurring() {
+        if body.is_recurring() != obligation.period.is_some() {
             return Ok(None);
+        }
+        // A period's request endpoints serve it unless the request has
+        // `per_period_endpoints` and it isn't the first; a destination from period details
+        // can't be told from the records (Paykit spec 8.2).
+        if let Some(period) = obligation.period {
+            let first = body.recurrence.as_ref().and_then(|r| r.first().ok());
+            if body.per_period_endpoints && first != Some(period) {
+                return Ok(None);
+            }
         }
         let (destination, carrier) = match &body.destination {
             RequestDestination::Endpoints(endpoints) => {
@@ -380,10 +455,10 @@ impl Paykit {
             obligation: obligation.claim_key,
             payee: obligation.payee,
             request_hash: Some(pubky_switch_core::enc::b64(&request_hash)),
-            natural_key: natural_key::request_record(&obligation.payee, &request_hash),
+            natural_key: obligation.natural_key.clone(),
             amount: KeptAmount::of(&body.amount),
             destination,
-            deadline: body.attempt_deadline(None)?,
+            deadline: body.attempt_deadline(obligation.period.as_ref())?,
             stage: Stage::Paying,
             step: None,
             label: body.label.as_ref().map(|l| l.as_str().to_owned()),
@@ -408,6 +483,9 @@ impl Paykit {
             record_held: false,
             transfer_bound: None,
             failed_on_claim: false,
+            billing_period: obligation
+                .period
+                .map(|period| KeptPeriod::of(&PeriodRef::from(period))),
         };
         entry.keep_carrier(&carrier);
         Ok(Some(entry))
@@ -581,10 +659,7 @@ impl Paykit {
                 self.obligations(&records)
                     .into_iter()
                     .find(|o| o.claim_key == *obligation)
-                    .and_then(|o| {
-                        o.request_hash
-                            .map(|h| natural_key::request_record(&o.payee, &h))
-                    })
+                    .map(|o| o.natural_key)
             }
         };
         let Some(natural) = natural else {

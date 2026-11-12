@@ -343,8 +343,8 @@ pub(crate) fn restore_paykit_layer(
     own_cert: &AppCert,
     blind: impl Fn(&[u8]) -> [u8; 32],
 ) -> Result<Vec<LocalWrite>, String> {
-    let request_obligation = |payee: &[u8; 32], request_hash: &[u8; 32]| {
-        request_obligation_blinded(&blind(payee), &blind(request_hash), 0)
+    let request_obligation = |payee: &[u8; 32], request_hash: &[u8; 32], period_start: u64| {
+        request_obligation_blinded(&blind(payee), &blind(request_hash), period_start)
     };
     let record_key = |target: &RecordTarget| -> Result<[u8; 32], String> {
         let policy = target
@@ -621,9 +621,10 @@ fn check_kept_reply(
             | Body::PaymentRequestCancellation(_)
             | Body::PaymentProof(_)
             | Body::PaymentPeriodDetails(_)
+            | Body::PaymentReceipt(_)
     );
-    let request = reply.message().refs.first().ok_or_else(bad)?;
-    let target = receive::kept_request_target(own, &reply, request);
+    let request = receive::kept_request(&reply).ok_or_else(bad)?;
+    let target = receive::kept_request_target(own, &reply, &request);
     if !replies
         || reply.sender() != sender
         || reply.message().msg_id != msg_id

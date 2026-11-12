@@ -9,9 +9,12 @@
 //!
 //! - the message carrying the destination is from the payee, from the app that owns the
 //!   destination, and names the obligation paid by its signed fields (a request is the one
-//!   paid);
+//!   paid; period details name it first in `refs`, and the Billing Period paid);
 //! - it carries the destination, and hasn't expired: a Private Payment List is used until the
-//!   earlier of its `expires_at` and 30 days after its inbox accepted it (Paykit spec 5);
+//!   earlier of its `expires_at` and 30 days after its inbox accepted it (Paykit spec 5),
+//!   period details until their `expires_at` (Paykit wire 4.9); a request with
+//!   `per_period_endpoints` carries a destination for its first Billing Period only (Paykit
+//!   spec 8.2);
 //! - the sending app's certificate allows `request` (a labelled selling scope counts), a
 //!   listed certificate hasn't expired, and the app is current in the payee's
 //!   `identity.json`, its certificate counting at the time the message was accepted.
@@ -46,6 +49,7 @@
 
 use paykit_lib::app_record::PaykitMember;
 use paykit_lib::bodies::RequestDestination;
+use paykit_lib::periods::PeriodRef;
 use paykit_lib::records::{DestinationSource, StoredMessage};
 use paykit_lib::scopes::{acts_as_payee, check_certificate};
 use paykit_lib::Body;
@@ -56,7 +60,7 @@ use pubky_switch_client::transport::BoxFuture;
 use pubky_switch_core::records::{AppCert, AppRecord, IdentityDoc, Standing};
 
 use crate::error::{Refusal, Result};
-use crate::journal::Destination;
+use crate::journal::{Destination, JournalEntry};
 use crate::paykit::Paykit;
 
 /// How long a payment waits for the payee's switch to answer a lookup that is still running
@@ -220,14 +224,15 @@ impl Paykit {
     /// `identity.json` that passed them, as the lookup found it, or the refusal.
     pub(crate) async fn check_destination(
         &mut self,
-        payee: &[u8; 32],
-        destination: &Destination,
+        entry: &JournalEntry,
         carrier: &Carrier,
-        request_hash: Option<&[u8; 32]>,
         by: Initiator,
         confirmed: Option<UserConfirmed>,
     ) -> Result<std::result::Result<PeerIdentity, Refusal>> {
-        if let Err(why) = carries(payee, destination, carrier, request_hash, self.now()) {
+        let payee = &entry.payee;
+        let (request_hash, period) = (entry.request_hash()?, entry.period()?);
+        let named = (request_hash.as_ref(), period.as_ref());
+        if let Err(why) = carries(payee, &entry.destination, carrier, named, self.now()) {
             return Ok(Err(Refusal::Destination(why)));
         }
         // Switch spec 4.3 asks for the switch's confirmation for public endpoints only; a
@@ -241,7 +246,7 @@ impl Paykit {
         };
         // The lookup awaited the network: the destination is judged again on the clock now.
         Ok(self
-            .destination_valid(payee, destination, carrier, request_hash, &identity.doc)
+            .destination_valid(entry, carrier, &identity.doc)?
             .map(|()| identity))
     }
 
@@ -322,17 +327,24 @@ impl Paykit {
     /// The checks of a destination that need no network, on the clock now and the payee's
     /// `identity.json` taken (Paykit spec 4, 5, 7.2): the carrier carries it and hasn't
     /// expired, and its app is current. Run again after every await before money moves.
+    ///
+    /// # Errors
+    ///
+    /// An entry whose request hash or Billing Period doesn't read: a corrupt store.
     pub(crate) fn destination_valid(
         &self,
-        payee: &[u8; 32],
-        destination: &Destination,
+        entry: &JournalEntry,
         carrier: &Carrier,
-        request_hash: Option<&[u8; 32]>,
         doc: &IdentityDoc,
-    ) -> std::result::Result<(), Refusal> {
+    ) -> Result<std::result::Result<(), Refusal>> {
         let now = self.now();
-        carries(payee, destination, carrier, request_hash, now).map_err(Refusal::Destination)?;
-        current(doc, &destination.app_id, carrier, now).map_err(Refusal::Destination)
+        let (request_hash, period) = (entry.request_hash()?, entry.period()?);
+        let named = (request_hash.as_ref(), period.as_ref());
+        Ok(
+            carries(&entry.payee, &entry.destination, carrier, named, now)
+                .and_then(|()| current(doc, &entry.destination.app_id, carrier, now))
+                .map_err(Refusal::Destination),
+        )
     }
 }
 
@@ -459,14 +471,18 @@ impl Carrier {
     }
 }
 
-/// The carrier carries the destination, names the obligation, and hasn't expired (Paykit
-/// spec 4, 5, 7.2). A record's age limit needs the identity's `identity.json`, and is checked
-/// with the app's standing ([`current`]).
+/// What a payment pays, as the message carrying its destination must name it: the request,
+/// and for a recurring one the Billing Period (Paykit spec 7.2).
+pub(crate) type Named<'a> = (Option<&'a [u8; 32]>, Option<&'a PeriodRef>);
+
+/// The carrier carries the destination, names the obligation, `named`, and hasn't expired
+/// (Paykit spec 4, 5, 7.2, 8.2). A record's age limit needs the identity's `identity.json`,
+/// and is checked with the app's standing ([`current`]).
 pub(crate) fn carries(
     payee: &[u8; 32],
     destination: &Destination,
     carrier: &Carrier,
-    request_hash: Option<&[u8; 32]>,
+    (request_hash, period): Named<'_>,
     now: u64,
 ) -> std::result::Result<(), String> {
     let carrier = match carrier {
@@ -496,6 +512,44 @@ pub(crate) fn carries(
                 .is_none_or(|p| p.as_str() != destination.payload)
             {
                 return Err("Paykit spec 7.2: the request doesn't carry the destination".into());
+            }
+            // With `per_period_endpoints`, the request's endpoints serve its first Billing
+            // Period only (Paykit spec 8.2).
+            if let Some(period) = period.filter(|_| request.per_period_endpoints) {
+                let first = request.recurrence.as_ref().and_then(|r| r.first().ok());
+                if first.map(PeriodRef::from).as_ref() != Some(period) {
+                    return Err(
+                        "Paykit spec 8.2: the request's endpoints serve only its first Billing \
+                         Period"
+                            .into(),
+                    );
+                }
+            }
+            Ok(())
+        }
+        (DestinationSource::Request, Body::PaymentPeriodDetails(details)) => {
+            // Period details name the request first in `refs`, and the Billing Period paid
+            // (Paykit spec 7.2, Paykit wire 4.9).
+            if request_hash.is_none_or(|h| carrier.message().refs.first() != Some(h)) {
+                return Err("Paykit spec 7.2: the period details name another request".into());
+            }
+            if period != Some(&details.billing_period) {
+                return Err(
+                    "Paykit spec 7.2: the period details name another Billing Period".into(),
+                );
+            }
+            let carried = details
+                .payment_endpoints
+                .as_ref()
+                .and_then(|endpoints| endpoints.get(&endpoint_id))
+                .is_some_and(|p| p.as_str() == destination.payload);
+            if !carried {
+                return Err(
+                    "Paykit spec 7.2: the period details don't carry the destination".into(),
+                );
+            }
+            if now >= details.expires_at {
+                return Err("Paykit wire 4.9: the period details have expired".into());
             }
             Ok(())
         }
@@ -650,7 +704,7 @@ mod tests {
                 &bob.id(),
                 &dest,
                 &Carrier::Message(Box::new(request.clone())),
-                Some(&request.hash()),
+                (Some(&request.hash()), None),
                 NOW
             ),
             Ok(())
@@ -672,7 +726,7 @@ mod tests {
             &carol.id(),
             &dest,
             &Carrier::Message(Box::new(request.clone())),
-            None,
+            (None, None),
             NOW
         )
         .is_err());
@@ -686,7 +740,7 @@ mod tests {
             &bob.id(),
             &other_app,
             &Carrier::Message(Box::new(request.clone())),
-            None,
+            (None, None),
             NOW
         )
         .is_err());
@@ -700,7 +754,7 @@ mod tests {
             &bob.id(),
             &other_payload,
             &Carrier::Message(Box::new(request.clone())),
-            None,
+            (None, None),
             NOW
         )
         .is_err());
@@ -708,7 +762,7 @@ mod tests {
             &bob.id(),
             &dest,
             &Carrier::Message(Box::new(request.clone())),
-            Some(&[9; 32]),
+            (Some(&[9; 32]), None),
             NOW
         )
         .is_err());
@@ -729,7 +783,7 @@ mod tests {
                 &bob.id(),
                 &dest,
                 &Carrier::Message(Box::new(list.clone())),
-                None,
+                (None, None),
                 NOW
             ),
             Ok(())
@@ -738,7 +792,7 @@ mod tests {
             &bob.id(),
             &dest,
             &Carrier::Message(Box::new(list.clone())),
-            None,
+            (None, None),
             NOW + 3_600_000
         )
         .is_err());
@@ -748,7 +802,7 @@ mod tests {
             &bob.id(),
             &other_version,
             &Carrier::Message(Box::new(list.clone())),
-            None,
+            (None, None),
             NOW
         )
         .is_err());

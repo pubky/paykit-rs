@@ -210,6 +210,9 @@ pub(crate) fn place(record: &mut ActivityRecord, role: Role, message: StoredMess
     };
     if slot.is_none() {
         *slot = Some(message);
+        if role == Role::Proof {
+            point_at_used_details(record);
+        }
     } else {
         others.push(msg_id);
     }
@@ -256,6 +259,31 @@ fn place_details(record: &mut ActivityRecord, message: StoredMessage) -> bool {
     record.period_details = Some(all.remove(current));
     record.earlier_details = all;
     true
+}
+
+/// In a period record whose proof names the period details it used, second in `refs`,
+/// make those the record's `period_details`, the others staying in `earlier_details` in
+/// order: the write that stores the proof is the one that may point `period_details` back at
+/// older details (Paykit wire 5.3, "Seen roles"). Nothing changes when the record doesn't
+/// hold them.
+fn point_at_used_details(record: &mut ActivityRecord) {
+    let Some(used) = record
+        .proof
+        .as_ref()
+        .and_then(|proof| proof.message().refs.get(1).copied())
+    else {
+        return;
+    };
+    let Some(at) = record.earlier_details.iter().position(|d| d.hash() == used) else {
+        return;
+    };
+    let named = record.earlier_details.remove(at);
+    if let Some(latest) = record.period_details.replace(named) {
+        record.earlier_details.push(latest);
+        record
+            .earlier_details
+            .sort_by(|a, b| period_details_order(a.message(), b.message()));
+    }
 }
 
 /// The informational `status` a writer sets (Paykit wire 5.3): written by the last writer,

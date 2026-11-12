@@ -63,10 +63,21 @@ pub enum Refusal {
     /// The attempt's deadline has passed, or the request's proposal expired (Paykit spec 7.1).
     #[error("Paykit spec 7.1: the deadline has passed")]
     DeadlinePassed,
-    /// A recurring request is paid, and cancelled by its payer, per Billing Period, which
-    /// this version of the SDK doesn't do yet (Paykit spec 8.2).
+    /// A recurring request is paid per Billing Period ([`crate::Paykit::pay_period`]),
+    /// never as a whole (Paykit spec 8.2).
     #[error("Paykit spec 8.2: a recurring request is paid per Billing Period")]
     Recurring,
+    /// The Billing Period hasn't started on the latest service time the app verified: it is
+    /// paid before its start only once the user confirms paying it early
+    /// ([`crate::PayOptions::with_early_payment_confirmed`]; Paykit spec 8.2, "Not before its
+    /// start"). Nothing was written.
+    #[error("Paykit spec 8.2: the Billing Period hasn't started")]
+    PeriodNotStarted,
+    /// The request record lists 16 Billing Periods that may have an open attempt, none of
+    /// them finished: no other period is attempted until one is (Paykit spec 8.2, "Attempted
+    /// periods"). Nothing was written.
+    #[error("Paykit spec 8.2: 16 Billing Periods may have an open attempt")]
+    AttemptedPeriodsFull,
     /// The recurring request is accepted already, by this app or another own app (Paykit
     /// spec 8.2): it is neither accepted nor rejected again, only cancelled.
     #[error("Paykit spec 8.2: the subscription is accepted already")]

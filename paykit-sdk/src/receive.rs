@@ -195,7 +195,7 @@ pub(crate) fn effect(
             }
         }
         Body::PaymentReceipt(receipt) if pay => {
-            receipt_effect(cx, stored, receipt.attempt_id)?;
+            receipt_effect(cx, stored, receipt.attempt_id, &scopes)?;
         }
         Body::PaymentPeriodDetails(_) if pay => {
             period_details_effect(cx, stored, &scopes)?;
@@ -613,24 +613,60 @@ fn receipt_effect(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
     attempt_id: AttemptId,
+    scopes: &[String],
 ) -> Result<(), Fail> {
     let sender = stored.sender();
     let own = cx.identity();
-    let target = match stored.message().refs.get(1) {
+    let request = stored.message().refs.get(1).copied();
+    let target = match &request {
         Some(request) => ActivityTarget::payer(natural_key::request_record(&sender, request)),
         None => ActivityTarget::payer(natural_key::payer_payment_record(&own, &attempt_id)),
     };
     // The payer matches a receipt through its record, whose counterparty must be the
-    // receipt's sender (Paykit spec 8.4).
+    // receipt's sender (Paykit spec 8.4). A receipt of a request this app holds no record
+    // of yet is kept until it does (Paykit spec 8.1, "Messages before their record").
     let Some(value) = held_or_unlisted(cx, &target, RecordSide::Payer)? else {
+        if request.is_some() {
+            keep_before_record(cx, stored, scopes, &target)?;
+        }
         return Ok(());
     };
-    let Some(record) = activity::read(Some(&value), &own, target.side.side()) else {
+    let Some(request_record) = activity::read(Some(&value), &own, target.side.side()) else {
         return Ok(());
     };
-    if record.counterparty != sender {
+    if request_record.counterparty != sender {
         return Ok(());
     }
+    // A Billing Period's receipt goes into its period record, of the request record's side
+    // whose hold was judged above (Paykit wire 4.11, 5.3), once checked against the request;
+    // one naming a period that isn't the request's is dropped.
+    let request_target = target.clone();
+    let (target, record, period) = match &request {
+        Some(hash) => {
+            let named = period_or_request(&own, &target, &request_record, stored, hash)
+                .ok_or_else(|| {
+                    Fail::Drop("Paykit wire 4.4: a receipt naming another period".into())
+                })?;
+            if named == target {
+                (target, Some(request_record.clone()), None)
+            } else {
+                let held = held_or_unlisted(cx, &named, RecordSide::Payer)?;
+                let record = held.and_then(|v| activity::read(Some(&v), &own, ActivitySide::Payer));
+                let period = crate::requests::request_of(&request_record)
+                    .zip(stored.body().billing_period())
+                    .and_then(|((_, body), named)| body.named_period(named).ok());
+                (named, record, period)
+            }
+        }
+        None => (target, Some(request_record.clone()), None),
+    };
+    // A receipt of a payment whose record doesn't hold its proof yet, such as one another
+    // own app made whose outcome this app hasn't read, is kept until it does, as a message
+    // before its record, and still settles the attempt below.
+    if request.is_some() && record.as_ref().is_none_or(|r| r.proof.is_none()) {
+        keep_before_record(cx, stored, scopes, &request_target)?;
+    }
+    let record = record.unwrap_or_else(|| activity::empty(ActivitySide::Payer, sender));
     // A receipt names the proof it confirms first (Paykit wire 4.11), and the record holds a
     // receipt only beside that proof (Paykit wire 5.3): the payer's proof goes into the
     // record in the batch that sends it, so a receipt for a record without it, or naming
@@ -668,10 +704,12 @@ fn receipt_effect(
     }
     let (obligation, deadline) = match stored.message().refs.get(1) {
         Some(request) => {
-            let deadline = crate::requests::request_of(&record)
-                .and_then(|(_, body)| body.attempt_deadline(None).ok())
+            // A Billing Period's obligation and deadline are the period's (Paykit spec 7.1).
+            let deadline = crate::requests::request_of(&request_record)
+                .and_then(|(_, body)| body.attempt_deadline(period.as_ref()).ok())
                 .map_or(ObligationDeadline::NotKnown, crate::pay::own_deadline);
-            (obligation(cx, &sender, request, 0), deadline)
+            let start = period.map_or(0, |p| p.start_secs());
+            (obligation(cx, &sender, request, start), deadline)
         }
         None => {
             // The deadline of a payment without a request is the one its journal kept.
@@ -1138,19 +1176,21 @@ impl Paykit {
             let kept_key = format!("{}{rest}", key::KEPT_REPLIES);
             let reply = kept.stored(&own)?;
             let (Some(request), Some(role)) = (
-                reply.message().refs.first().copied(),
+                kept_request(&reply),
                 crate::activity::Role::of(reply.body()),
             ) else {
                 self.local_delete(&kept_key).await?;
                 continue;
             };
             let target = kept_request_target(&own, &reply, &request);
-            let Some(record) = self.held_activity(&target).await? else {
-                let stale = reply.accepted_at().is_none_or(|at| {
+            let stale = |reply: &StoredMessage| {
+                reply.accepted_at().is_none_or(|at| {
                     self.service_time()
                         .is_some_and(|t| at.saturating_add(KEPT_MESSAGE_MS) <= t)
-                });
-                if stale {
+                })
+            };
+            let Some(record) = self.held_activity(&target).await? else {
+                if stale(&reply) {
                     self.local_delete(&kept_key).await?;
                 }
                 continue;
@@ -1159,6 +1199,27 @@ impl Paykit {
                 self.local_delete(&kept_key).await?;
                 continue;
             };
+            // A receipt goes only beside the proof it names (Paykit wire 5.3): it waits for
+            // that, and a record holding another proof never takes it.
+            if role == crate::activity::Role::Receipt {
+                let proof = self
+                    .held_activity(&target)
+                    .await?
+                    .and_then(|record| record.proof.map(|proof| proof.hash()));
+                match proof {
+                    Some(proof) if reply.message().refs.first() == Some(&proof) => {}
+                    Some(_) => {
+                        self.local_delete(&kept_key).await?;
+                        continue;
+                    }
+                    None => {
+                        if stale(&reply) {
+                            self.local_delete(&kept_key).await?;
+                        }
+                        continue;
+                    }
+                }
+            }
             let mut tx = Tx::default();
             tx.delete(&kept_key);
             let sender = reply.sender();
@@ -1409,16 +1470,23 @@ impl Paykit {
     }
 }
 
+/// The request a message kept before its record names (Paykit wire 4.6 to 4.11): second in
+/// a receipt's `refs`, after the proof it confirms; first in every other message's.
+pub(crate) fn kept_request(kept: &StoredMessage) -> Option<[u8; 32]> {
+    let at = usize::from(matches!(kept.body(), Body::PaymentReceipt(_)));
+    kept.message().refs.get(at).copied()
+}
+
 /// The request record a message kept before its record waits for (Paykit spec 8.1): the
-/// payer's, of the sender's request, for period details; the payee's, under the message's
-/// label, for a payer's reply.
+/// payer's, of the sender's request, for period details and a receipt; the payee's, under
+/// the message's label, for a payer's reply.
 pub(crate) fn kept_request_target(
     own: &[u8; 32],
     kept: &StoredMessage,
     request: &[u8; 32],
 ) -> ActivityTarget {
     match kept.body() {
-        Body::PaymentPeriodDetails(_) => {
+        Body::PaymentPeriodDetails(_) | Body::PaymentReceipt(_) => {
             ActivityTarget::payer(natural_key::request_record(&kept.sender(), request))
         }
         body => ActivityTarget::payee(natural_key::request_record(own, request), body.label()),
