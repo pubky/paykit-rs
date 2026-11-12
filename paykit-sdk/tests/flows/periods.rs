@@ -382,6 +382,19 @@ async fn test_periods_draft_with_both_deadlines_refused_period_deadline_sent() {
     let held = wallet.requests().await.unwrap();
     assert_eq!(held.len(), 1);
     assert_eq!(Some(held[0].request), sent.request);
+    let value = crate::outcome_record::record_value(&mut wallet, &held[0].request)
+        .await
+        .unwrap();
+    let stored =
+        paykit_lib::records::StoredMessage::read(&value["request"], &w.alice_id()).unwrap();
+    let paykit_lib::Body::PaymentRequest(body) = stored.body() else {
+        panic!("{value}");
+    };
+    assert_eq!(
+        body.payment_deadline,
+        Some(paykit_lib::bodies::PaymentDeadline::PeriodStart { seconds: 86_400 })
+    );
+    assert!(body.per_period_endpoints);
 }
 
 /// Bob's signed monthly request to alice's apps, not delivered yet, and its hash.
