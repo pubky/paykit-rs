@@ -2721,6 +2721,11 @@ impl Paykit {
     /// its history may still show it paid, and one paid after `failed` was written, whose
     /// receipt the user is told about. A bound passes as [`bound_passed`] says. An entry's
     /// acknowledged notices go with it.
+    ///
+    /// Two of those have no bound of their own: a payment made after `failed` was written
+    /// waits for its receipt for as long as no receipt comes, and a dispatch the method
+    /// reported failed is asked about for as long as the method's history keeps it, without
+    /// end for a method whose history is kept for good. Each is one small entry.
     async fn prune_journal(&mut self) -> Result<()> {
         let service = self.service_time();
         let now = self.now();

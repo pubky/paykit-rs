@@ -484,6 +484,9 @@ fn receipt_effect(
         ),
         None => None,
     };
+    // A receipt reaches only an app holding `pay`, which carries `claims.write`, and an entry
+    // that comes under a certificate without it is held unprocessed: this returns only for a
+    // certificate Paykit's checks would refuse.
     if !cx.cert().has_permission(Permission::ClaimsWrite) {
         return Ok(());
     }
@@ -790,7 +793,8 @@ impl Paykit {
     /// built on the version held with its marks kept, and the notice's delete, in one batch.
     /// A record that still doesn't read, or is still deleted, keeps its list held; a list no
     /// newer than the record's is dropped. A placement that fails now is tried again at the
-    /// next receive.
+    /// next receive, with no bound in time: one held list per payee app, replaced by a
+    /// newer one, and one write of it per receive.
     pub(crate) async fn place_held_lists(&mut self) -> crate::error::Result<()> {
         for (rest, kept) in self.local_scan::<KeptMessage>(key::HELD_LISTS).await? {
             // One that can't be placed now stays held, for the next receive; the others are

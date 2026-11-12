@@ -35,7 +35,10 @@ pub enum NoticeKind {
     /// later, wasn't written within [`crate::KEPT_MESSAGE_MS`] of its acceptance: the SDK gave
     /// it up (Switch spec 8.2). Its entry stays stored, for the host
     /// ([`pubky_switch_client::app::App::parked_entries`]), and a request it was no longer
-    /// shows as [`crate::RequestStatus::Unrecorded`].
+    /// shows as [`crate::RequestStatus::Unrecorded`]. Once the host has dealt with it, it
+    /// forgets the entry ([`pubky_switch_client::app::App::forget_parked`]) as it
+    /// acknowledges the notice: an entry left stored is told of again by a restore onto
+    /// another store, and given up, and this notice raised, again there.
     MessageGivenUp,
 }
 
