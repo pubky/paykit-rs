@@ -159,6 +159,11 @@ impl Paykit {
     /// pass would miss them. [`Paykit::resume_payments`] still finishes the payments already
     /// dispatched meanwhile.
     pub async fn reconcile(&mut self) -> Result<ReconcileReport> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.reconcile_inner()).await
+    }
+
+    async fn reconcile_inner(&mut self) -> Result<ReconcileReport> {
         self.refresh_own()?;
         self.list_records().await?;
         // After a restore, the counterparties of the open requests the records now show are
@@ -435,6 +440,17 @@ impl Paykit {
     /// `done` whose record can't be updated, with nothing written; the switch's refusal, such
     /// as `409 conflict`, for a resolution its rows don't allow now.
     pub async fn resolve_attempt(
+        &mut self,
+        obligation: &[u8; 32],
+        attempt: AttemptId,
+        resolution: Resolution,
+        _confirmed: UserConfirmed,
+    ) -> Result<()> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.resolve_attempt_inner(obligation, attempt, resolution, _confirmed)).await
+    }
+
+    async fn resolve_attempt_inner(
         &mut self,
         obligation: &[u8; 32],
         attempt: AttemptId,

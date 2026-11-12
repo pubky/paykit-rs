@@ -455,6 +455,15 @@ impl Paykit {
     /// host that retries after one reads [`Paykit::payee_activity`] after its next write
     /// first.
     pub async fn send_request(&mut self, to: [u8; 32], draft: RequestDraft) -> Result<SentRequest> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.send_request_inner(to, draft)).await
+    }
+
+    async fn send_request_inner(
+        &mut self,
+        to: [u8; 32],
+        draft: RequestDraft,
+    ) -> Result<SentRequest> {
         self.refresh_own()?;
         self.require_payee()?;
         let label = self.selling_label()?;
@@ -610,6 +619,11 @@ impl Paykit {
     /// [`Refusal::CertificateRefused`] while the app's certificate fails Paykit's checks;
     /// [`Refusal::NotFound`] for a record without a proof; the rail's errors.
     pub async fn verify_payment(&mut self, record: &[u8; 32]) -> Result<Option<u64>> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.verify_payment_inner(record)).await
+    }
+
+    async fn verify_payment_inner(&mut self, record: &[u8; 32]) -> Result<Option<u64>> {
         self.refresh_own()?;
         self.records_known().await?;
         let (_, bound) = self.payee_record(record).await?;
@@ -660,6 +674,15 @@ impl Paykit {
     /// As [`Paykit::confirm_payment`]; [`PaykitError::Lib`] for a `payment_reference` on a
     /// receipt of a request, whose reference applies, with nothing sent.
     pub async fn confirm_payment_with(
+        &mut self,
+        record: &[u8; 32],
+        details: ReceiptDetails,
+    ) -> Result<Option<String>> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.confirm_payment_with_inner(record, details)).await
+    }
+
+    async fn confirm_payment_with_inner(
         &mut self,
         record: &[u8; 32],
         details: ReceiptDetails,
@@ -719,6 +742,15 @@ impl Paykit {
     ///
     /// [`Refusal::NotFound`]; [`Refusal::Cancelled`] if it was already; the client's errors.
     pub async fn cancel_sent_request(
+        &mut self,
+        record: &[u8; 32],
+        reason: Option<String>,
+    ) -> Result<String> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.cancel_sent_request_inner(record, reason)).await
+    }
+
+    async fn cancel_sent_request_inner(
         &mut self,
         record: &[u8; 32],
         reason: Option<String>,
@@ -895,6 +927,11 @@ impl Paykit {
     ///
     /// A store failure.
     pub async fn requests(&self) -> Result<Vec<RequestView>> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.requests_inner()).await
+    }
+
+    async fn requests_inner(&self) -> Result<Vec<RequestView>> {
         self.refuse_while_unlisted().await?;
         let own = self.identity();
         let mut out = Vec::new();
@@ -935,6 +972,11 @@ impl Paykit {
     ///
     /// [`Refusal::NotFound`]; a store failure.
     pub async fn request(&self, request: &RequestRef) -> Result<RequestView> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.request_inner(request)).await
+    }
+
+    async fn request_inner(&self, request: &RequestRef) -> Result<RequestView> {
         self.refuse_while_unlisted().await?;
         let target = ActivityTarget::payer(natural_key::request_record(
             &request.payee,
@@ -1175,7 +1217,8 @@ impl Paykit {
     ) -> Result<String> {
         self.refresh_own()?;
         self.records_known().await?;
-        self.answer_request(request, false, reason).await
+        // The answer's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.answer_request(request, false, reason)).await
     }
 
     /// The payer cancels a request (Paykit spec 8.1, Paykit wire 4.8), recorded and sent as
@@ -1191,7 +1234,8 @@ impl Paykit {
     ) -> Result<String> {
         self.refresh_own()?;
         self.records_known().await?;
-        self.answer_request(request, true, reason).await
+        // The answer's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.answer_request(request, true, reason)).await
     }
 
     async fn answer_request(

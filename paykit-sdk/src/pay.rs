@@ -625,6 +625,15 @@ impl Paykit {
         request: &RequestRef,
         options: PayOptions,
     ) -> Result<PayOutcome> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.pay_request_inner(request, options)).await
+    }
+
+    async fn pay_request_inner(
+        &mut self,
+        request: &RequestRef,
+        options: PayOptions,
+    ) -> Result<PayOutcome> {
         self.refresh_own()?;
         self.records_known().await?;
         self.require_pay()?;
@@ -786,6 +795,14 @@ impl Paykit {
     /// As [`Paykit::pay_request`]; [`PaykitError::Conflict`] when the `payment_lists` record
     /// changed meanwhile, after which the caller pays to the next usable endpoint.
     pub async fn pay_without_request(&mut self, payment: UnrequestedPayment) -> Result<PayOutcome> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.pay_without_request_inner(payment)).await
+    }
+
+    async fn pay_without_request_inner(
+        &mut self,
+        payment: UnrequestedPayment,
+    ) -> Result<PayOutcome> {
         self.refresh_own()?;
         self.records_known().await?;
         self.require_pay()?;
@@ -916,6 +933,11 @@ impl Paykit {
     /// the record's value is sealed under a key the app doesn't hold yet, which opens once
     /// it comes and is never replaced meanwhile; the client's errors.
     pub async fn repair_activity_record(&mut self, attempt_id: &AttemptId) -> Result<PayOutcome> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.repair_activity_record_inner(attempt_id)).await
+    }
+
+    async fn repair_activity_record_inner(&mut self, attempt_id: &AttemptId) -> Result<PayOutcome> {
         self.refresh_own()?;
         // A repair writes over a value the app can't read, on the user's word: it waits for
         // the records to be listed, a wider certificate's keys included.
@@ -2572,6 +2594,11 @@ impl Paykit {
     /// [`Refusal::IdentityUnavailable`] when a repeat is due and the own `identity.json`
     /// isn't confirmed in the last 60 s; the client's errors; the rail's errors.
     pub async fn resume_payments(&mut self) -> Result<Vec<PayOutcome>> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.resume_payments_inner()).await
+    }
+
+    async fn resume_payments_inner(&mut self) -> Result<Vec<PayOutcome>> {
         self.refresh_own()?;
         // While a wider certificate's scope keys are missing, the resume goes on only on the
         // payer's side it can read: with the `pay` key held and the payer's records and

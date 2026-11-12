@@ -320,6 +320,17 @@ impl Paykit {
         rail: Arc<dyn Rail>,
         timer: Arc<dyn Timer>,
     ) -> Result<Self> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(Self::join_inner(env, config, request, rail, timer)).await
+    }
+
+    async fn join_inner(
+        env: AppEnv,
+        config: PaykitConfig,
+        request: JoinRequest,
+        rail: Arc<dyn Rail>,
+        timer: Arc<dyn Timer>,
+    ) -> Result<Self> {
         check_orphan_window(&config, rail.as_ref())?;
         let protocol = Self::new_protocol(&rail);
         // The certificate passes Paykit's checks before the client writes anything: the
@@ -360,6 +371,17 @@ impl Paykit {
         rail: Arc<dyn Rail>,
         timer: Arc<dyn Timer>,
     ) -> Result<Self> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(Self::load_inner(env, config, app_id, rail, timer)).await
+    }
+
+    async fn load_inner(
+        env: AppEnv,
+        config: PaykitConfig,
+        app_id: [u8; 16],
+        rail: Arc<dyn Rail>,
+        timer: Arc<dyn Timer>,
+    ) -> Result<Self> {
         check_orphan_window(&config, rail.as_ref())?;
         let protocol = Self::new_protocol(&rail);
         let app = App::load(env.clone(), protocol.clone(), config.app.clone(), app_id).await?;
@@ -394,6 +416,17 @@ impl Paykit {
     /// made, or a journal with a malformed entry or two open entries for one obligation; a
     /// store failure.
     pub async fn restore(
+        env: AppEnv,
+        config: PaykitConfig,
+        backup: &PaykitBackup,
+        rail: Arc<dyn Rail>,
+        timer: Arc<dyn Timer>,
+    ) -> Result<Self> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(Self::restore_inner(env, config, backup, rail, timer)).await
+    }
+
+    async fn restore_inner(
         env: AppEnv,
         config: PaykitConfig,
         backup: &PaykitBackup,
