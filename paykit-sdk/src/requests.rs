@@ -462,9 +462,10 @@ pub enum PayeeStatus {
     Rejected,
     /// Cancelled by either side.
     Cancelled,
-    /// A proof arrived; the payee verifies it by its own method.
+    /// A proof is held, not credited: the payee verifies it by its own method. One whose
+    /// settlement credits another occurrence already stays so (Paykit spec 8.4).
     ProofReceived,
-    /// The payee sent its receipt.
+    /// Credited: the record holds the payee's receipt, which it sent.
     Receipted,
 }
 

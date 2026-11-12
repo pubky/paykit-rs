@@ -1337,8 +1337,11 @@ async fn test_periods_one_payment_credits_one_period() {
     // The other occurrence, paid in the same transaction, keeps its proof, shows no
     // receipt, and isn't credited when asked again.
     let sale = &shop.payee_activity().await.unwrap()[0];
+    let credited = sale.periods.iter().find(|p| p.receipt.is_some()).unwrap();
+    assert!(credited.paid && credited.credited);
     let other = sale.periods.iter().find(|p| p.receipt.is_none()).unwrap();
     assert!(other.paid);
+    assert!(!other.credited);
     assert!(shop.verify_payment(&other.record).await.unwrap().is_none());
     assert!(shop.confirm_payment(&other.record).await.unwrap().is_none());
 }

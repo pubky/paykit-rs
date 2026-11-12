@@ -70,8 +70,12 @@ pub struct PeriodView {
     /// Every period details the record holds, latest first (Paykit wire 4.9): the latest is
     /// the payer's default, and each stays valid until its own expiry.
     pub details: Vec<PeriodDetailsView>,
-    /// The record holds the proof of the period's payment.
+    /// The record holds a proof of the period's payment, credited or not.
     pub paid: bool,
+    /// The record holds the payee's receipt: the payment is credited to this period. A
+    /// proof held without it is `paid` and not `credited`, such as one whose settlement
+    /// credits another occurrence already, or one not confirmed yet.
+    pub credited: bool,
     /// The payee's receipt of the period, if the record holds one.
     pub receipt: Option<ReceivedReceipt>,
 }
@@ -115,6 +119,7 @@ fn period_view(key: [u8; 32], record: &ActivityRecord) -> Option<([u8; 32], Peri
             billing_period,
             details,
             paid: record.shows_paid(),
+            credited: record.receipt.is_some(),
             receipt: received_receipt(key, record),
         },
     ))
