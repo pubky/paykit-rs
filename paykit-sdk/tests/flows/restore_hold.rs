@@ -12,7 +12,8 @@ use paykit_sdk::{
 use pubky_switch_client::app::UserConfirmed;
 use pubky_switch_client::clock::Clock;
 
-use crate::common::{draft, request_from, store, World};
+use crate::common::{draft, request_from, store, World, HOUR_MS};
+use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
 
 async fn restored(w: &World, backup: &PaykitBackup) -> Paykit {
     let mut app = Paykit::restore(
@@ -499,4 +500,95 @@ async fn test_restore_hold_missed_item_keeps_a_stop_past_30_days_until_paykit_li
     assert_eq!(stops(&wallet).await, 1);
     wallet.receive(None).await.unwrap();
     assert_eq!(stops(&wallet).await, 0);
+}
+
+/// Bob's request of `reference`, signed now by his shop for alice, not sent yet.
+fn signed_request(w: &World, reference: &str) -> pubky_switch_core::message::MessagePlaintext {
+    let body = serde_json::json!({
+        "amount": { "asset": "btc", "value": "1" },
+        "payment_reference": reference,
+        "proposal_expires_at": null,
+        "payment_endpoints": { "btc-lightning-bolt11": "lnbc1invoice" }
+    });
+    let serde_json::Value::Object(body) = body else {
+        unreachable!()
+    };
+    w.sign_as(
+        &w.bob,
+        "shop",
+        &w.alice,
+        "paykit.payment_request",
+        vec![],
+        body,
+    )
+}
+
+/// The status the wallet shows for bob's request `plaintext`.
+async fn status_of(
+    w: &World,
+    wallet: &Paykit,
+    plaintext: &pubky_switch_core::message::MessagePlaintext,
+) -> RequestStatus {
+    let request = RequestRef {
+        payee: w.bob_id(),
+        request_hash: plaintext.hash(),
+    };
+    wallet.request(&request).await.unwrap().status
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_holds_a_request_created_before_it_seen_after() {
+    // A request bob created before a `missed` item reaches the wallet only after it: its
+    // cancellation may have been among the entries missed, so it is held (Paykit spec 9).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let request = signed_request(&w, "order-1");
+    missed(&w);
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(HOUR_MS);
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &request);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(status_of(&w, &wallet, &request).await, RequestStatus::Held);
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_holds_no_request_created_after_it() {
+    // A request bob created past the item's last acceptance time plus the clock tolerance
+    // can't have had its cancellation among the entries missed: it isn't held. One created
+    // within the tolerance is.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    missed(&w);
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(CLOCK_TOLERANCE_MS - 1_000);
+    let within = signed_request(&w, "order-1");
+    w.clock.advance_ms(2_000);
+    let after = signed_request(&w, "order-2");
+    for request in [&within, &after] {
+        w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], request);
+    }
+    wallet.receive(None).await.unwrap();
+    assert_eq!(status_of(&w, &wallet, &within).await, RequestStatus::Held);
+    assert_eq!(status_of(&w, &wallet, &after).await, RequestStatus::Open);
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_holds_a_request_held_at_it_whatever_its_creation_time() {
+    // A request the wallet held when the item came stays held, even one whose payee's clock
+    // ran ahead, its creation time later than the item's.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let now = w.clock.now_ms();
+    w.clock.set_ms(now + pubky_switch_core::records::DAY_MS);
+    let ahead = signed_request(&w, "order-1");
+    w.clock.set_ms(now);
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &ahead);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(status_of(&w, &wallet, &ahead).await, RequestStatus::Open);
+    missed(&w);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(status_of(&w, &wallet, &ahead).await, RequestStatus::Held);
 }
