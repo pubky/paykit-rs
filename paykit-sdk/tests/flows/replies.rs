@@ -902,3 +902,27 @@ async fn test_replies_kept_past_30_days_whose_write_fails_stay_kept() {
         PayeeStatus::ProofReceived
     );
 }
+
+#[tokio::test]
+async fn test_replies_kept_past_30_days_refused_by_the_switch_given_up_with_the_notice() {
+    // Past 30 days the record comes, and the switch refuses for good the writes placing the
+    // replies: that refusal is the record's, so the replies are given up, the host told.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - DAY_MS);
+    shop.receive(None).await.unwrap();
+    record_request(&w, &mut shop, &request).await;
+    w.clock.advance_ms(2 * DAY_MS);
+    shop.app_mut().rotate().await.unwrap();
+    shop.app_mut().flush_cursor().await.unwrap();
+    crate::common::refuse_writes(&w.bob, 2);
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    let notices = shop.notices().await.unwrap();
+    assert_eq!(notices.len(), 2, "{notices:?}");
+    assert!(notices
+        .iter()
+        .all(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp));
+}
