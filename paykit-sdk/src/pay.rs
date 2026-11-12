@@ -888,7 +888,9 @@ impl Paykit {
     /// # Errors
     ///
     /// [`Refusal::NotFound`] for an attempt whose outcome doesn't wait on its record;
-    /// [`PaykitError::Conflict`] as above; the client's errors.
+    /// [`PaykitError::Conflict`] as above; [`Refusal::NotNow`] naming the scope keys while
+    /// the record's value is sealed under a key the app doesn't hold yet, which opens once
+    /// it comes and is never replaced meanwhile; the client's errors.
     pub async fn repair_activity_record(&mut self, attempt_id: &AttemptId) -> Result<PayOutcome> {
         self.refresh_own()?;
         // A repair writes over a value the app can't read, on the user's word: it waits for
@@ -2361,6 +2363,14 @@ impl Paykit {
         let own = self.identity();
         let key = self.activity_key(target)?;
         let held = self.app.shared_record(&key).await?;
+        // A value only waiting for its scope key opens once the key comes: the outcome waits
+        // for it, never offered as a repair over a value that only isn't open yet.
+        if held
+            .as_ref()
+            .is_some_and(|r| crate::hold::awaits_key(&r.content))
+        {
+            return Err(crate::hold::value_awaits_key());
+        }
         let read = match held.as_ref().map(|r| &r.content) {
             None | Some(RecordContent::Deleted) => None,
             Some(content) => match activity::read(content.value(), &own, ActivitySide::Payer) {

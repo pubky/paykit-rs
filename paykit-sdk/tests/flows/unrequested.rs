@@ -723,3 +723,116 @@ async fn test_review_list_ask_mark_backs_up_and_restores() {
     .expect("restore of a backup with an lq/ mark");
     let _ = restored.backup().await.expect("backup after restore");
 }
+
+/// The signer stores app `app`'s key bundle for `cert`, every data epoch up to the current.
+pub(crate) fn store_bundle(w: &World, app: [u8; 16], cert: &pubky_switch_core::records::AppCert) {
+    use pubky_switch_client::app::Protocol as _;
+    let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let protocol = paykit_sdk::PaykitProtocol::new();
+    let parts = pubky_switch_core::records::seal_bundle_parts(
+        w.alice.identity().key(),
+        cert,
+        1,
+        epoch,
+        &|scope| protocol.has_keys(scope),
+    )
+    .unwrap();
+    for part in parts {
+        w.alice
+            .switch()
+            .signer_op(pubky_switch_core::ops::OpKind::KeyBundlePut(
+                pubky_switch_core::ops::KeyBundlePut {
+                    target_app_id: app,
+                    bundle: part.bundle,
+                    first_epoch: part.first_epoch,
+                    last_epoch: part.last_epoch,
+                },
+            ))
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_unrequested_list_over_a_value_awaiting_its_epoch_key_keeps_single_use_marks() {
+    // The wallet paid the single-use endpoint, marked used in the record. The data epoch
+    // rotates; the phone gets the new key and writes the record again, sealed at the new
+    // epoch, which the wallet holds unopened for now. A newer list is held, not offered to
+    // be placed without the marks: a placement is refused as waiting for the keys. Once the
+    // wallet's key comes, late, the record opens and the list is placed with the mark.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id(), phone.app_id()], 1)
+        .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    phone.receive(None).await.unwrap();
+    assert_eq!(
+        list_record(&phone, &w).await.1["used"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    store_bundle(&w, phone.app_id(), &phone.app().cert().clone());
+    phone.receive(None).await.unwrap();
+    let (target, value) = list_record(&phone, &w).await;
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let op = phone
+        .app_mut()
+        .record_op(&target, Some(&bytes), Vec::new())
+        .await
+        .unwrap();
+    phone
+        .app_mut()
+        .submit_batch(pubky_switch_client::app::OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let record_key = wallet.app().record_key(&target).unwrap();
+    let held = wallet
+        .app()
+        .shared_record(&record_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(
+            held.content,
+            pubky_switch_client::app::RecordContent::Unreadable(
+                pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+            )
+        ),
+        "{:?}",
+        held.content
+    );
+    w.list_to_alice(&mut shop, &[wallet.app_id()], 2).await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.held_lists().await.unwrap().is_empty());
+    let refused = wallet
+        .place_held_list_without_marks(
+            &w.bob_id(),
+            &shop.app_id(),
+            pubky_switch_client::app::UserConfirmed::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(why)) if why.contains("scope keys")),
+        "{refused:?}"
+    );
+    // The key comes late: the record opens with its mark, and the list is placed on it.
+    store_bundle(&w, wallet.app_id(), &wallet.app().cert().clone());
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let (_, value) = list_record(&wallet, &w).await;
+    assert_eq!(value["used"].as_array().unwrap().len(), 1, "{value}");
+    assert_eq!(value["msg_ids"].as_array().unwrap().len(), 2, "{value}");
+    assert!(wallet.held_lists().await.unwrap().is_empty());
+}

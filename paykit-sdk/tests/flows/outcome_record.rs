@@ -501,3 +501,64 @@ async fn test_outcome_record_kept_after_a_refusal_about_the_caller_stays_unwritt
     outcome_refused_when_sent_again(&w, &mut wallet, &attempt_id, not_current).await;
     outcome_written_again(&w, &mut wallet, &request, &attempt_id).await;
 }
+
+#[tokio::test]
+async fn test_outcome_record_value_awaiting_its_epoch_key_is_never_repaired_over() {
+    // The record held a value that doesn't read, and the outcome waits on it. The data epoch
+    // rotates and the phone writes the record again, a value that reads, sealed under the
+    // new epoch's key, which the wallet doesn't hold yet. The repair isn't offered over a
+    // value that only isn't open yet: it waits for the keys, and so does the outcome,
+    // nothing written. Once the key comes, the outcome goes with the phone's record.
+    let w = World::new();
+    let store = Arc::new(NoSeenMarks::default());
+    let (mut wallet, mut phone, request, attempt_id) =
+        in_flight_on(&w, Arc::clone(&store) as Arc<dyn StateStore>).await;
+    let valid = record_value(&mut phone, &request).await.unwrap();
+    store.armed.store(true, Ordering::SeqCst);
+    phone_writes(&mut phone, &request, Some(INVALID)).await;
+    w.rail.settle(&attempt_id, true);
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::RecordHeld { .. }]),
+        "{resumed:?}"
+    );
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    crate::unrequested::store_bundle(&w, phone.app_id(), &phone.app().cert().clone());
+    phone.receive(None).await.unwrap();
+    phone_writes(
+        &mut phone,
+        &request,
+        Some(&serde_json::to_vec(&valid).unwrap()),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    let refused = wallet
+        .repair_activity_record(&attempt_id)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(paykit_sdk::Refusal::NotNow(why)) if why.contains("scope keys")),
+        "{refused:?}"
+    );
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            resumed.as_slice(),
+            [PayOutcome::PaidOutcomeUnwritten { .. }]
+        ),
+        "{resumed:?}"
+    );
+    assert_eq!(claim_outcome(&mut wallet, &attempt_id).await, Outcome::Open);
+    crate::unrequested::store_bundle(&w, wallet.app_id(), &wallet.app().cert().clone());
+    wallet.receive(None).await.unwrap();
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Paid { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(claim_outcome(&mut wallet, &attempt_id).await, Outcome::Done);
+    let value = record_value(&mut wallet, &request).await.unwrap();
+    assert!(!value["request"].is_null(), "{value}");
+    assert!(!value["proof"].is_null(), "{value}");
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}

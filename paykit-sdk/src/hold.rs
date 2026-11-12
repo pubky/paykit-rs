@@ -22,8 +22,8 @@
 
 use paykit_lib::collections::Collection;
 use paykit_lib::records::ActivityRecord;
-use pubky_switch_client::app::AppError;
 use pubky_switch_client::app::Protocol as _;
+use pubky_switch_client::app::{AppError, RecordContent, Unopened};
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::records::{AppCert, CLOCK_TOLERANCE_MS};
 use pubky_switch_core::scopes::Permission;
@@ -447,6 +447,28 @@ fn keys_awaited() -> crate::error::PaykitError {
     Refusal::NotNow(
         "Switch spec 3.5: waiting for the scope keys of the certificate taken, which the \
          signer stores when it is next online"
+            .into(),
+    )
+    .into()
+}
+
+/// Whether a record's value isn't open for now only: sealed under a scope key the app
+/// doesn't hold yet (Switch spec 3.5). The client opens it once the key comes, so a value
+/// that is only waiting is never treated as one that doesn't read: nothing offers to write
+/// over it, which would drop what it holds unseen, such as single-use marks.
+pub(crate) fn awaits_key(content: &RecordContent) -> bool {
+    matches!(
+        content,
+        RecordContent::Unreadable(Unopened::KeyNotHeld { .. })
+    )
+}
+
+/// The refusal of a write over a value that is only waiting for its scope key
+/// ([`awaits_key`]).
+pub(crate) fn value_awaits_key() -> crate::error::PaykitError {
+    Refusal::NotNow(
+        "Switch spec 3.5: waiting for the scope keys the record's value is sealed under, which \
+         the signer stores when it is next online"
             .into(),
     )
     .into()
