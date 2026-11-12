@@ -1354,3 +1354,30 @@ async fn test_period_payments_period_marked_manual_only_paid_only_by_hand() {
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
+
+#[tokio::test]
+async fn test_period_payments_two_due_periods_are_two_rail_payments() {
+    // One attempt is one payment of the method, for one occurrence: two due periods are
+    // paid by two payments, never one transaction for both (one settlement, one occurrence).
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    w.clock.set_ms(february().starts_at);
+    let first = by_policy(&mut wallet, &request, january()).await.unwrap();
+    let second = by_policy(&mut wallet, &request, february()).await.unwrap();
+    assert_ne!(first.attempt_id(), second.attempt_id());
+    let executions = w.rail.all_executions();
+    assert_eq!(executions.len(), 2, "{executions:?}");
+    assert!(executions.values().all(|n| *n == 1));
+    assert_ne!(
+        period_obligation(&wallet, january()).await,
+        period_obligation(&wallet, february()).await
+    );
+    shop.receive(None).await.unwrap();
+    let sale = &shop.payee_activity().await.unwrap()[0];
+    assert!(
+        sale.periods.iter().all(|p| p.paid) && sale.periods.len() == 2,
+        "{sale:?}"
+    );
+}
