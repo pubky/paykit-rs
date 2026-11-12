@@ -44,6 +44,11 @@
 //!
 //! [`PeerIdentity::may_act`]: pubky_switch_client::app::PeerIdentity::may_act
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Mutex, PoisonError};
+use std::task::{Context, Poll};
+
 use paykit_lib::app_record::PaykitMember;
 use paykit_lib::bodies::RequestDestination;
 use paykit_lib::records::{DestinationSource, StoredMessage};
@@ -115,10 +120,7 @@ impl Paykit {
             let (identity, switch) = match kept {
                 Some(kept) => (kept.identity, Some(kept.switch)),
                 None => match self.app.begin_identity_lookup(payee, refresh).await {
-                    Ok(lookup) => (
-                        lookup.identity,
-                        lookup.switch.map(|s| Box::pin(s) as PendingLookup),
-                    ),
+                    Ok(lookup) => (lookup.identity, lookup.switch.map(PendingLookup::new)),
                     Err(error) => {
                         return Ok((
                             Err(Refusal::IdentityUnavailable(format!(
@@ -305,14 +307,14 @@ impl Paykit {
     /// (the payment fence, [`Paykit::payment_fence`]). An answer is kept, for the next check
     /// to take: taking it is an await.
     pub(crate) fn kept_lookup_answered(&mut self, payee: &[u8; 32]) -> bool {
-        use std::task::{Context, Poll, Waker};
+        use std::task::Waker;
         let Some(kept) = self.lookups.get_mut(payee) else {
             return false;
         };
         let mut cx = Context::from_waker(Waker::noop());
-        match kept.switch.as_mut().poll(&mut cx) {
+        match Pin::new(&mut kept.switch).poll(&mut cx) {
             Poll::Ready(answer) => {
-                kept.switch = Box::pin(std::future::ready(answer));
+                kept.switch = PendingLookup::new(std::future::ready(answer));
                 true
             }
             Poll::Pending => false,
@@ -375,7 +377,32 @@ pub(crate) struct KeptLookup {
 }
 
 /// A switch lookup's answer to come.
-pub(crate) type PendingLookup = BoxFuture<'static, SwitchAnswer>;
+///
+/// The boxed future is `Send` but not `Sync`, and [`Paykit`] keeps it, so it sits in a
+/// `Mutex`: `Paykit` is then `Sync`, and the future of a call awaiting a `&self` method is
+/// `Send`, for a host to spawn on a multi-threaded runtime. The `Mutex` is never locked: the
+/// future is polled only through `&mut`.
+pub(crate) struct PendingLookup(Mutex<BoxFuture<'static, SwitchAnswer>>);
+
+impl PendingLookup {
+    fn new(future: impl Future<Output = SwitchAnswer> + Send + 'static) -> Self {
+        Self(Mutex::new(Box::pin(future)))
+    }
+}
+
+impl Future for PendingLookup {
+    type Output = SwitchAnswer;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<SwitchAnswer> {
+        // Never locked, so never poisoned; a poisoned `Mutex` would still hold the future.
+        let future = self
+            .get_mut()
+            .0
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        future.as_mut().poll(cx)
+    }
+}
 
 /// Where a switch lookup stands after [`race`].
 enum Lookup {
@@ -391,9 +418,6 @@ async fn race<R>(
     reads: Option<BoxFuture<'static, R>>,
     mut grace: BoxFuture<'static, ()>,
 ) -> (Lookup, Option<R>) {
-    use std::future::Future;
-    use std::pin::Pin;
-    use std::task::Poll;
     let mut answer = None;
     let mut done = None;
     if let Some(mut reads) = reads {

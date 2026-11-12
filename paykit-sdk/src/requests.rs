@@ -24,7 +24,11 @@ use paykit_lib::scopes::{PaykitScope, ScopeName};
 use paykit_lib::{
     AttemptId, Body, Label, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
 };
-use pubky_switch_client::app::{claim_conflict, Delivery, OpBatch, RecordContent};
+use pubky_switch_client::app::{
+    claim_conflict, AppError, Delivery, KeptReason, OpBatch, RecordContent, RecordRead,
+    UndeliverableReason,
+};
+use pubky_switch_client::error::ClientError;
 use pubky_switch_core::claims::{ClaimStatus, Outcome};
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::ops::Condition;
@@ -145,6 +149,105 @@ impl RequestDraft {
     }
 }
 
+/// Where a message this app sent is, such as a request, a proof or an acceptance, as the
+/// user sees it (Switch spec 11).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MessageDelivery {
+    /// The batch that records and queues it was signed and kept, the switch not answering
+    /// now: it is sent again, the same bytes, at the app's next write or read, and the
+    /// message is queued once it is answered (Switch wire 6.4 step 5). Calling again would
+    /// send a second message.
+    Kept {
+        /// The kept batch's ID.
+        batch_id: [u8; 16],
+    },
+    /// In the outbox, to be tried again.
+    Queued {
+        /// How many times it was tried.
+        tries: u64,
+        /// The last failure, without content.
+        last_error: Option<String>,
+    },
+    /// "Waiting for them to admit you": the recipient's switch answered `403 not_admitted`,
+    /// first at `since_ms` (app clock), as a payee's does to a payer it doesn't admit yet,
+    /// or a payer's to a payee it hasn't invited. The message stays queued, and goes once
+    /// the recipient adds this identity as a contact or invites it (Switch spec 7), or is
+    /// given up after [`pubky_switch_client::app::UNDELIVERABLE_MS`] (Switch spec 11).
+    WaitingForAdmission {
+        /// The first such answer, app clock, in Unix milliseconds.
+        since_ms: u64,
+        /// How many times it was tried.
+        tries: u64,
+    },
+    /// This app's own certificate isn't current: a delivery was answered `403 not_current`,
+    /// first at `since_ms` (app clock). Nothing about the recipient: the message stays
+    /// queued until a renewal makes the certificate current again (Switch wire 3.8), or is given up
+    /// after [`pubky_switch_client::app::UNDELIVERABLE_MS`] (Switch spec 11).
+    CertificateNotCurrent {
+        /// The first such answer, app clock, in Unix milliseconds.
+        since_ms: u64,
+        /// How many times it was tried.
+        tries: u64,
+    },
+    /// The recipient's inbox accepted it.
+    Accepted {
+        /// The acceptance time.
+        accepted_at_ms: u64,
+    },
+    /// Refused for good, given up, or never queued: the kept batch that would have queued
+    /// it was dropped. A batch dropped after a send whose answer can't tell whether it was
+    /// applied may have been applied all the same: the request's record may then be at the
+    /// switch although the message was never sent, and the host reads the request's state
+    /// ([`Paykit::payee_activity`]) before it sends it again.
+    Failed {
+        /// Why, without content.
+        reason: String,
+        /// When, app clock: when it was refused or given up, or its batch dropped.
+        failed_at_ms: u64,
+    },
+    /// A state of the client's this version of the SDK doesn't name, as the client reports
+    /// it.
+    Other(Delivery),
+}
+
+impl MessageDelivery {
+    /// The client's [`Delivery`] as the user sees it. The last answer that made a delivery
+    /// wait names which wait it is: the payee not admitting this identity, or this app's
+    /// certificate not current.
+    pub(crate) fn of(delivery: Delivery) -> Self {
+        match delivery {
+            Delivery::Queued {
+                tries,
+                last_error,
+                undeliverable_since_ms,
+                undeliverable_reason,
+                ..
+            } => match (undeliverable_since_ms, undeliverable_reason) {
+                (Some(since_ms), Some(UndeliverableReason::NotAdmitted)) => {
+                    Self::WaitingForAdmission { since_ms, tries }
+                }
+                (Some(since_ms), Some(UndeliverableReason::NotCurrent)) => {
+                    Self::CertificateNotCurrent { since_ms, tries }
+                }
+                _ => Self::Queued { tries, last_error },
+            },
+            Delivery::Accepted { accepted_at_ms, .. } => Self::Accepted { accepted_at_ms },
+            Delivery::Failed {
+                reason,
+                failed_at_ms,
+                ..
+            } => Self::Failed {
+                reason,
+                failed_at_ms,
+            },
+            Delivery::Kept { batch_id, .. } => Self::Kept { batch_id },
+            // A state a later client adds, which this SDK doesn't name.
+            other => Self::Other(other),
+        }
+    }
+}
+
 /// A request this app sent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -152,9 +255,9 @@ pub struct SentRequest {
     /// The message ID.
     pub msg_id: String,
     /// Where the message is.
-    pub delivery: Delivery,
+    pub delivery: MessageDelivery,
     /// The request: its record is written in the batch that queues it, so it is known once
-    /// the call returns.
+    /// the call returns, and written once that batch is answered.
     pub request: Option<RequestRef>,
 }
 
@@ -331,10 +434,13 @@ impl Paykit {
     ///
     /// [`Refusal::ScopeMissing`] without `request` or a label; [`Refusal::Label`];
     /// [`PaykitError::Lib`] with `Validation` for a draft that breaks Paykit wire 4.5; the
-    /// client's errors. After a failure the client keeps a batch for (the network, `429`,
-    /// `503`), this request may still be recorded and sent, by the app's next write: the
-    /// error doesn't say whether the batch was kept, so a second call can send a second
-    /// request. A host that retries reads [`Paykit::payee_activity`] after its next write
+    /// client's errors. A failure that leaves the request's batch kept (the network, `429`,
+    /// `503`) is no error: the request is reported sent, [`MessageDelivery::Kept`], recorded
+    /// and queued by the app's next write or read, so the host doesn't send a second one.
+    /// After any other error but a store failure nothing of the request was kept, and the
+    /// host may send it again. A store failure is returned bare when the client can't tell
+    /// whether it kept the batch, which may still go out with the next write or read: a
+    /// host that retries after one reads [`Paykit::payee_activity`] after its next write
     /// first.
     pub async fn send_request(&mut self, to: [u8; 32], draft: RequestDraft) -> Result<SentRequest> {
         self.refresh_own()?;
@@ -376,7 +482,22 @@ impl Paykit {
             .entry(write)
             .queue(signed)
             .locals(tx.into_writes());
-        self.app.submit_batch(batch).await?;
+        let request = Some(RequestRef {
+            payee: own,
+            request_hash: hash,
+        });
+        if let Err(error) = self.app.submit_batch(batch).await {
+            let Some(batch_id) = error.kept_batch() else {
+                return Err(error.into());
+            };
+            // The client indexes the request by its `msg_id` in the commit that keeps the
+            // batch, so `Paykit::message_delivery` answers it from there, after a reload too.
+            return Ok(SentRequest {
+                msg_id,
+                delivery: MessageDelivery::Kept { batch_id },
+                request,
+            });
+        }
         // The request is recorded and queued: a try to deliver it now that fails leaves it
         // queued for the next flush, and the call still reports it sent, so the caller
         // doesn't send a second request.
@@ -390,12 +511,29 @@ impl Paykit {
         };
         Ok(SentRequest {
             msg_id,
-            delivery,
-            request: Some(RequestRef {
-                payee: own,
-                request_hash: hash,
-            }),
+            delivery: MessageDelivery::of(delivery),
+            request,
         })
+    }
+
+    /// Where the message this app sent as `msg_id` is now, such as a request after the
+    /// flushes since [`Paykit::send_request`], or a payment's proof: for example "waiting for
+    /// them to admit you" ([`MessageDelivery::WaitingForAdmission`]), as the client answers
+    /// it. A request whose batch the client still keeps is [`MessageDelivery::Kept`]; one
+    /// whose kept batch it dropped is [`MessageDelivery::Failed`], with the drop's time,
+    /// for [`pubky_switch_client::app::SENT_RETENTION_MS`] from that time, whether or not
+    /// the host acknowledged the client's event about it.
+    ///
+    /// `None` is a message the client keeps nothing of: one accepted or ended longer ago
+    /// than that retention, or queued before a restore. It never says the message was never
+    /// sent, nor that sending it again is safe: the host reads the state it would change
+    /// first, such as [`Paykit::payee_activity`] for a request.
+    ///
+    /// # Errors
+    ///
+    /// A store failure.
+    pub async fn message_delivery(&self, msg_id: &str) -> Result<Option<MessageDelivery>> {
+        Ok(self.app.delivery(msg_id).await?.map(MessageDelivery::of))
     }
 
     /// The payee's record at `record`, bound under its policy, with its target.
@@ -847,21 +985,32 @@ impl Paykit {
         Ok(())
     }
 
-    /// The request record at `target` as the switch holds it, read again: a read that fails
-    /// is the error, never taken as the record unchanged. A value is held only when it reads
-    /// and is bound to the key it was read at, whose natural key the request derives, so it
-    /// holds that same request (Paykit wire 5.3).
+    /// The request record at `target` as the switch holds it now, read again (Switch wire
+    /// 7.4.9): only a write the read shows current is evidence, never a copy the app keeps
+    /// from before. A value is held only when it reads and is bound to the key it was read
+    /// at, whose natural key the request derives, so it holds that same request (Paykit wire
+    /// 5.3). The switch holding none (`404`) is [`Fresh::Missing`]; a newer write the app
+    /// refused, or one no newer than what it holds, is [`Fresh::Unreadable`]: the copy kept
+    /// then shows nothing of the request now.
+    ///
+    /// # Errors
+    ///
+    /// A read that fails: [`Refusal::SwitchUnavailable`] for a switch that couldn't be read
+    /// now, the switch's refusal for one it refused; never taken as the record unchanged.
     pub(crate) async fn fresh_request(&mut self, target: &ActivityTarget) -> Result<Fresh> {
-        self.app.read_record(&target.record_target()).await?;
-        let key = self.activity_key(target)?;
-        let content = self.app.shared_record(&key).await?.map(|held| held.content);
-        Ok(match content {
-            None | Some(RecordContent::Deleted) => Fresh::Missing,
-            Some(RecordContent::Unreadable) => Fresh::Unreadable,
-            Some(RecordContent::Value(_)) => match self.held_activity(target).await? {
+        let record = match self.app.read_record_fresh(&target.record_target()).await? {
+            RecordRead::Fresh(record) => record,
+            RecordRead::Kept { reason, .. } => return fresh_kept(reason),
+            // A read a later client names: nothing shows the switch's write held now.
+            _ => return Ok(Fresh::Unreadable),
+        };
+        Ok(match record.content {
+            RecordContent::Deleted => Fresh::Missing,
+            RecordContent::Value(_) => match self.held_activity(target).await? {
                 Some(record) => Fresh::Held(Box::new(record)),
                 None => Fresh::Unreadable,
             },
+            _ => Fresh::Unreadable,
         })
     }
 
@@ -1076,7 +1225,7 @@ impl Paykit {
             Ok(msg_id) => msg_id,
             Err(error) => {
                 if let PaykitError::Client(client) = &error {
-                    if let Some(view) = claim_conflict(client) {
+                    if let Some(view) = claim_conflict(client.unkept()) {
                         refuse_on_claim(&view)?;
                     }
                 }
@@ -1102,8 +1251,30 @@ pub(crate) enum Fresh {
     Held(Box<ActivityRecord>),
     /// There is none, or it was deleted.
     Missing,
-    /// It doesn't read, isn't bound to its key, or holds another request.
+    /// It doesn't read, isn't bound to its key, or holds another request; or the switch's
+    /// write was refused, or is no newer than the one held, so nothing read now shows it.
     Unreadable,
+}
+
+/// What a read that kept the earlier copy says of the request record now
+/// ([`Paykit::fresh_request`]).
+fn fresh_kept(reason: KeptReason) -> Result<Fresh> {
+    match reason {
+        KeptReason::NotFound => Ok(Fresh::Missing),
+        KeptReason::Unreachable(why) => Err(Refusal::SwitchUnavailable(why).into()),
+        KeptReason::SwitchRefused { code } => {
+            Err(PaykitError::Client(AppError::Switch(ClientError::Switch {
+                status: code.status(),
+                code,
+                message: "the switch refused the record's read".into(),
+                current: serde_json::Value::Null,
+                known_version: None,
+                retry_after: None,
+            })))
+        }
+        // Refused, no newer than the write held, or a reason a later client names.
+        _ => Ok(Fresh::Unreadable),
+    }
 }
 
 /// The refusal of a request record that doesn't read as the request it should hold.
@@ -1193,6 +1364,44 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    fn queued(since: Option<u64>, reason: Option<UndeliverableReason>) -> Delivery {
+        Delivery::Queued {
+            tries: 2,
+            last_error: Some("403".into()),
+            undeliverable_since_ms: since,
+            undeliverable_reason: reason,
+        }
+    }
+
+    #[test]
+    fn test_message_delivery_names_the_wait_for_admission() {
+        assert_eq!(
+            MessageDelivery::of(queued(Some(7), Some(UndeliverableReason::NotAdmitted))),
+            MessageDelivery::WaitingForAdmission {
+                since_ms: 7,
+                tries: 2
+            }
+        );
+    }
+
+    #[test]
+    fn test_message_delivery_keeps_a_certificate_not_current_apart() {
+        assert_eq!(
+            MessageDelivery::of(queued(Some(7), Some(UndeliverableReason::NotCurrent))),
+            MessageDelivery::CertificateNotCurrent {
+                since_ms: 7,
+                tries: 2
+            }
+        );
+        assert_eq!(
+            MessageDelivery::of(queued(None, None)),
+            MessageDelivery::Queued {
+                tries: 2,
+                last_error: Some("403".into())
+            }
+        );
+    }
 
     fn view(state: &str, outcome: &str) -> ClaimView {
         let attempt = json!({ "attempt_id": "1OjeFqsP4dPATeMe9xu5-Q", "duplicate": false,

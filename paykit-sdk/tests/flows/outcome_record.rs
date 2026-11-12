@@ -407,3 +407,262 @@ async fn test_outcome_record_user_done_sends_the_acceptance_still_owed() {
     assert!(!value["response"].is_null(), "{value}");
     assert!(!value["proof"].is_null(), "{value}");
 }
+
+/// Pay `attempt_id` through, with the outcome batch's first try failing as `first` says and
+/// the switch refusing it for good when it is sent again: the resume reports the payment
+/// made and its outcome unwritten.
+async fn outcome_refused_when_sent_again(
+    w: &World,
+    wallet: &mut Paykit,
+    attempt_id: &AttemptId,
+    first: pubky_switch_client::testing::Fault,
+) {
+    w.rail.settle(attempt_id, true);
+    let switch = w.alice.switch();
+    switch.fail_next(first);
+    switch.fail_next(pubky_switch_client::testing::Fault::Error {
+        path: "/ops".into(),
+        code: pubky_switch_core::http::ErrorCode::Conflict,
+        current: serde_json::Value::Null,
+    });
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            resumed.as_slice(),
+            [PayOutcome::PaidOutcomeUnwritten { .. }]
+        ),
+        "{resumed:?}"
+    );
+}
+
+/// The entry is where the refused batch left it, and a resume under `pay` writes the outcome
+/// once: `done`, the acceptance and the proof, paying nothing again.
+async fn outcome_written_again(
+    w: &World,
+    wallet: &mut Paykit,
+    request: &RequestRef,
+    attempt_id: &AttemptId,
+) {
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::RailPaid
+    );
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Paid { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(claim_outcome(wallet, attempt_id).await, Outcome::Done);
+    let value = record_value(wallet, request).await.unwrap();
+    assert!(!value["response"].is_null(), "{value}");
+    assert!(!value["proof"].is_null(), "{value}");
+    assert_eq!(w.rail.executions(attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_outcome_record_batch_refused_when_sent_again_is_written_again() {
+    // The outcome's batch (`done`, the record and the proof) can't connect and is kept. The
+    // resume's last flush sends it again and the switch refuses it for good, so the client
+    // drops it with its local writes, the journal's move to `Finished` included, and reports
+    // it (`BatchRefused`).
+    let w = World::new();
+    let (mut wallet, _phone, request, attempt_id) = in_flight(&w).await;
+    let unreachable = pubky_switch_client::testing::Fault::Unreachable {
+        path: "/ops".into(),
+        after: 0,
+    };
+    outcome_refused_when_sent_again(&w, &mut wallet, &attempt_id, unreachable).await;
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(
+        summary
+            .report
+            .events
+            .iter()
+            .any(|e| matches!(e, pubky_switch_client::app::AppEvent::BatchRefused { .. })),
+        "{summary:?}"
+    );
+    outcome_written_again(&w, &mut wallet, &request, &attempt_id).await;
+}
+
+#[tokio::test]
+async fn test_outcome_record_kept_after_a_refusal_about_the_caller_stays_unwritten() {
+    // The outcome's batch is signed and kept, and the service time read before its first
+    // send is refused `403 not_current`. The batch still goes once the app is current, so
+    // the entry isn't finished as unreportable: when the switch then refuses the batch for
+    // good, the entry is still there for a resume.
+    let w = World::new();
+    let (mut wallet, _phone, request, attempt_id) = in_flight(&w).await;
+    w.clock.advance_ms(11 * 60_000);
+    let not_current = pubky_switch_client::testing::Fault::Error {
+        path: "/feed".into(),
+        code: pubky_switch_core::http::ErrorCode::NotCurrent,
+        current: serde_json::Value::Null,
+    };
+    outcome_refused_when_sent_again(&w, &mut wallet, &attempt_id, not_current).await;
+    outcome_written_again(&w, &mut wallet, &request, &attempt_id).await;
+}
+
+#[tokio::test]
+async fn test_outcome_record_value_awaiting_its_epoch_key_is_never_repaired_over() {
+    // The record held a value that doesn't read, and the outcome waits on it. The data epoch
+    // rotates and the phone writes the record again, a value that reads, sealed under the
+    // new epoch's key, which the wallet doesn't hold yet. The repair isn't offered over a
+    // value that only isn't open yet: it waits for the keys, and so does the outcome,
+    // nothing written. Once the key comes, the outcome goes with the phone's record.
+    let w = World::new();
+    let store = Arc::new(NoSeenMarks::default());
+    let (mut wallet, mut phone, request, attempt_id) =
+        in_flight_on(&w, Arc::clone(&store) as Arc<dyn StateStore>).await;
+    let valid = record_value(&mut phone, &request).await.unwrap();
+    store.armed.store(true, Ordering::SeqCst);
+    phone_writes(&mut phone, &request, Some(INVALID)).await;
+    w.rail.settle(&attempt_id, true);
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::RecordHeld { .. }]),
+        "{resumed:?}"
+    );
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    crate::unrequested::store_bundle(&w, phone.app_id(), &phone.app().cert().clone());
+    phone.receive(None).await.unwrap();
+    phone_writes(
+        &mut phone,
+        &request,
+        Some(&serde_json::to_vec(&valid).unwrap()),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    let refused = wallet
+        .repair_activity_record(&attempt_id)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(paykit_sdk::Refusal::NotNow(why)) if why.contains("scope keys")),
+        "{refused:?}"
+    );
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            resumed.as_slice(),
+            [PayOutcome::PaidOutcomeUnwritten { .. }]
+        ),
+        "{resumed:?}"
+    );
+    assert_eq!(claim_outcome(&mut wallet, &attempt_id).await, Outcome::Open);
+    crate::unrequested::store_bundle(&w, wallet.app_id(), &wallet.app().cert().clone());
+    wallet.receive(None).await.unwrap();
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Paid { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(claim_outcome(&mut wallet, &attempt_id).await, Outcome::Done);
+    let value = record_value(&mut wallet, &request).await.unwrap();
+    assert!(!value["request"].is_null(), "{value}");
+    assert!(!value["proof"].is_null(), "{value}");
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}
+
+/// The wallet's payment of `request` in flight, its payer record then written again by
+/// the phone after a data epoch rotation, sealed under the new epoch's key, which the
+/// wallet doesn't hold: it holds the value unopened for now.
+async fn record_awaiting_its_epoch_key(
+    w: &World,
+    phone: &mut Paykit,
+    wallet: &mut Paykit,
+    request: &RequestRef,
+) {
+    let valid = record_value(phone, request).await.unwrap();
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    crate::unrequested::store_bundle(w, phone.app_id(), &phone.app().cert().clone());
+    phone.receive(None).await.unwrap();
+    phone_writes(phone, request, Some(&serde_json::to_vec(&valid).unwrap())).await;
+    wallet.receive(None).await.unwrap();
+    let key = wallet.app().record_key(&payer_record(request)).unwrap();
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            held.content,
+            pubky_switch_client::app::RecordContent::Unreadable(
+                pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+            )
+        ),
+        "{:?}",
+        held.content
+    );
+}
+
+#[tokio::test]
+async fn test_outcome_record_user_done_over_a_value_awaiting_its_epoch_key_waits() {
+    // No proof: the user's `done` builds on the payer record, which the wallet holds
+    // unopened for now. It waits for the keys, never held as a value that doesn't read,
+    // and nothing is written; once the key comes, `done` goes with the record.
+    let w = World::new();
+    let (mut wallet, mut phone, request, attempt_id) = in_flight(&w).await;
+    record_awaiting_its_epoch_key(&w, &mut phone, &mut wallet, &request).await;
+    let refused = resolve_done(&mut wallet, attempt_id).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(paykit_sdk::Refusal::NotNow(why)) if why.contains("scope keys")),
+        "{refused:?}"
+    );
+    assert_eq!(claim_outcome(&mut wallet, &attempt_id).await, Outcome::Open);
+    crate::unrequested::store_bundle(&w, wallet.app_id(), &wallet.app().cert().clone());
+    wallet.receive(None).await.unwrap();
+    resolve_done(&mut wallet, attempt_id).await.unwrap();
+    assert_eq!(claim_outcome(&mut wallet, &attempt_id).await, Outcome::Done);
+    let value = record_value(&mut wallet, &request).await.unwrap();
+    assert_eq!(value["status"], "paid", "{value}");
+}
+
+#[tokio::test]
+async fn test_outcome_record_receipt_over_a_value_awaiting_its_epoch_key_is_held_until_it_opens() {
+    // The wallet paid. The data epoch rotates and the phone writes the payer record again
+    // at the new epoch, which the wallet holds unopened for now; bob's receipt then comes.
+    // The wallet holds the receipt's entry rather than read the record as absent, and
+    // stores the receipt once its key comes and the record opens.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    phone.receive(None).await.unwrap();
+    let valid = record_value(&mut phone, &request).await.unwrap();
+    assert!(!valid["proof"].is_null(), "{valid}");
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    crate::unrequested::store_bundle(&w, phone.app_id(), &phone.app().cert().clone());
+    phone.receive(None).await.unwrap();
+    phone_writes(
+        &mut phone,
+        &request,
+        Some(&serde_json::to_vec(&valid).unwrap()),
+    )
+    .await;
+    shop.receive(None).await.unwrap();
+    let sale = shop.payee_activity().await.unwrap()[0].record;
+    assert!(shop.confirm_payment(&sale).await.unwrap().is_some());
+    wallet.receive(None).await.unwrap();
+    let key = wallet.app().record_key(&payer_record(&request)).unwrap();
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            held.content,
+            pubky_switch_client::app::RecordContent::Unreadable(
+                pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+            )
+        ),
+        "{:?}",
+        held.content
+    );
+    crate::unrequested::store_bundle(&w, wallet.app_id(), &wallet.app().cert().clone());
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let value = record_value(&mut wallet, &request).await.unwrap();
+    assert!(!value["receipt"].is_null(), "{value}");
+}

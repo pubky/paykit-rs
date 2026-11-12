@@ -9,6 +9,7 @@ mod common;
 mod crash;
 mod custom_rail;
 mod destinations;
+mod erasure;
 mod final_check;
 mod labels;
 mod mixed_versions;

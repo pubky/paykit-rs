@@ -37,7 +37,7 @@ use paykit_lib::{Label, PaykitKindRules};
 use pubky_switch_client::app::{
     decode_local_state, Collection as SwitchCollection, Effect, LocalView, LocalWrite, LossActions,
     MissedEntries, OpaqueRule, Outcome, Protocol, ProtocolLayer, ProviderLoss, ReceiveContext,
-    ReceivedMessage, RecordTarget, ResendNeeded, RestoreContext, StoreFailure,
+    ReceivedMessage, RecordTarget, ResendNeeded, RestoreContext, StoreFailure, WriteBase,
 };
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
@@ -193,6 +193,30 @@ impl PaykitProtocol {
     }
 }
 
+/// Whether `new` reads a record of `collections` that `old` doesn't (Switch spec 8.3, Paykit
+/// spec 6): a collection `old` lists none of, or, in a family with a policy per sub-scope,
+/// a sub-scope's records `old` reads neither by that sub-scope nor by the family's own read
+/// scope, which reads every member, such as `request:<label>` after `request` alone.
+pub(crate) fn reads_more(collections: &[SwitchCollection], old: &AppCert, new: &AppCert) -> bool {
+    collections.iter().any(|collection| {
+        if !collection.readable_by(new) {
+            return false;
+        }
+        if !collection.readable_by(old) {
+            return true;
+        }
+        let name = collection.policy.read_scope.as_str();
+        if old.holds_scope(name) {
+            return false;
+        }
+        new.holds_scope(name)
+            || new.scopes().iter().any(|scope| {
+                switch_scopes::split(scope).is_some_and(|(held, sub)| sub.is_some() && held == name)
+                    && !old.scopes().contains(scope)
+            })
+    })
+}
+
 /// A record of Paykit's local state, read through a [`LocalView`]: `Err` when the store
 /// can't be read or the record doesn't read, which the caller never takes as an absent one.
 fn view_get<T: serde::de::DeserializeOwned>(
@@ -337,10 +361,13 @@ pub(crate) fn restore_paykit_layer(
             // sets its own (`hold.rs`).
             // So do the marks of records not yet listed and of the payer pass owed: this
             // restore sets its own.
+            // The certificate last listed under is the backup's own: this restore sets it to
+            // the restored one, which its listing covers.
             StateKey::RestoreHold
             | StateKey::HoldConfirmed(_)
             | StateKey::RecordsUnlisted
-            | StateKey::PayerPassOwed => continue,
+            | StateKey::PayerPassOwed
+            | StateKey::ListedCert => continue,
             StateKey::Journal(attempt) => attempt,
             StateKey::CursorTime => {
                 cursor_time_ms = state::decode::<u64>(&value).map_err(|_| unread())?;
@@ -438,6 +465,9 @@ pub(crate) fn restore_paykit_layer(
     let unlisted = state::local_put(key::RECORDS_UNLISTED, &true)
         .map_err(|_| String::from("the restore's records mark can't be written"))?;
     writes.push(unlisted);
+    // No certificate is kept as listed under, a backup's included: only a listing Paykit
+    // makes keeps one (`Paykit::list_records`), so the restored copy counts as unlisted
+    // until then, whichever certificate the client lists under.
     // No new attempt until a reconcile has run the payer pass, under `pay`: the backup
     // doesn't hold the attempts made after it (`Paykit::payer_pass_owed`).
     let owed = state::local_put(key::PAYER_PASS_OWED, &true)
@@ -728,11 +758,7 @@ impl Protocol for PaykitProtocol {
     /// `payee_activity` with one policy per label, so an app holding `request` lists and
     /// takes every label's records, and one holding `request:<label>` its label's.
     fn collections(&self) -> Vec<SwitchCollection> {
-        vec![
-            activity::family(Collection::PayerActivity),
-            activity::family(Collection::PayeeActivity),
-            activity::family(Collection::PaymentLists),
-        ]
+        crate::hold::RecordSide::All.collections()
     }
 
     /// The mark of what the app has seen in a record: the newest value it took that reads
@@ -766,12 +792,46 @@ impl Protocol for PaykitProtocol {
     /// Whether a newer write goes back on what the app saw (Paykit wire 5.3, 5.4): drops or
     /// replaces a message in a role seen, or changes the Allowance seen; for a
     /// `payment_lists` record, holds an older list or drops a single-use endpoint marked
-    /// used. A value that doesn't read is refused too. A delete isn't such a write.
+    /// used. A value that doesn't read is refused too. A delete isn't such a write. Judged
+    /// as a reader that doesn't hold the version the write builds on
+    /// ([`Protocol::record_regression_on`] is told).
     fn record_regression(
         &self,
         collection: &str,
         seen: &[u8],
         value: Option<&[u8]>,
+    ) -> Option<String> {
+        self.regression(collection, seen, value, false)
+    }
+
+    /// [`Protocol::record_regression`], told what the write builds on: a write built on the
+    /// version this app holds is judged as by a reader holding it, which also refuses a
+    /// reassociation at or before a period it attempted (Paykit wire 5.3 "Seen Allowance").
+    /// The version is judged by the mark of what the app saw, the value it took last that
+    /// reads. The client counts a create over a record it holds deleted as built on what it
+    /// holds, so such a write is judged against the mark from before the delete: stricter
+    /// than the wire format's reader holding the version built on, which a delete leaves with
+    /// no attempted period.
+    fn record_regression_on(
+        &self,
+        collection: &str,
+        seen: &[u8],
+        value: Option<&[u8]>,
+        base: WriteBase,
+    ) -> Option<String> {
+        self.regression(collection, seen, value, base.held)
+    }
+}
+
+impl PaykitProtocol {
+    /// [`Protocol::record_regression`]'s rules; `built_on` when the write builds on the
+    /// version this app holds.
+    fn regression(
+        &self,
+        collection: &str,
+        seen: &[u8],
+        value: Option<&[u8]>,
+        built_on: bool,
     ) -> Option<String> {
         let own = self.own()?;
         let value = value?;
@@ -786,12 +846,18 @@ impl Protocol for PaykitProtocol {
                 let Some(later) = activity::read(Some(value), &own.identity, side) else {
                     return Some("Paykit wire 5.3: an activity record that doesn't read".into());
                 };
-                // The client names the value the app saw, not the version the write builds on,
-                // which may be a later one the app never saw (after a `missed` item it lists
-                // only the latest values). So the app checks as a reader that doesn't hold it:
-                // the seen rules that hold whatever the base, without the reassociation rule
-                // of the version a write builds on (Paykit wire 5.3 "Seen Allowance").
-                held.check_later_write(&later).err().map(|e| e.to_string())
+                // The mark is the value the app saw. A write built on the version the app
+                // holds is checked as by a reader holding it, the reassociation rule of that
+                // version included; one built on a version it never took, such as one it
+                // skipped by listing only the latest values after a `missed` item, is checked
+                // only by the seen rules that hold whatever the base (Paykit wire 5.3 "Seen
+                // Allowance").
+                let checked = if built_on {
+                    held.check_later_write_built_on(&later)
+                } else {
+                    held.check_later_write(&later)
+                };
+                checked.err().map(|e| e.to_string())
             }
             Collection::PaymentLists => {
                 let held = PaymentListRecord::read(seen, &own.identity).ok()?;
@@ -824,6 +890,26 @@ mod tests {
 
     fn protocol() -> PaykitProtocol {
         PaykitProtocol::new()
+    }
+
+    fn cert(scopes: &[&str]) -> AppCert {
+        crate::testkit::Party::new("alice", "wallet", scopes).cert
+    }
+
+    #[test]
+    fn test_protocol_reads_more_with_a_collection_or_a_label_added() {
+        let collections = protocol().collections();
+        let reads_more =
+            |old: &[&str], new: &[&str]| reads_more(&collections, &cert(old), &cert(new));
+        assert!(reads_more(&["pay"], &["pay", "request"]));
+        assert!(reads_more(
+            &["request:shop"],
+            &["request:shop", "request:cafe"]
+        ));
+        assert!(reads_more(&["request:shop"], &["request"]));
+        assert!(!reads_more(&["pay", "request"], &["pay"]));
+        assert!(!reads_more(&["request"], &["request:shop"]));
+        assert!(!reads_more(&["pay"], &["pay", "contacts"]));
     }
 
     #[test]
@@ -893,6 +979,7 @@ mod receive_tests {
             standing: Standing::Listed,
             context: None,
             parked: false,
+            released: false,
             conflict: None,
         }
     }
@@ -1061,7 +1148,7 @@ mod receive_tests {
     }
 
     #[test]
-    fn test_protocol_record_regression_takes_a_reassociation_on_a_version_it_missed() {
+    fn test_protocol_record_regression_judges_a_reassociation_by_the_version_built_on() {
         use paykit_lib::identifiers::AllowanceId;
         use paykit_lib::records::Reassociation;
         let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
@@ -1099,6 +1186,15 @@ mod receive_tests {
         let (seen, moved) = (seen.to_json().unwrap(), moved.to_json().unwrap());
         assert_eq!(
             p.record_regression("payer_activity", &seen, Some(&moved)),
+            None
+        );
+        // Built on the version the app holds, the one that attempted the period, the same
+        // write moves an attempted period: a regression.
+        assert!(p
+            .regression("payer_activity", &seen, Some(&moved), true)
+            .is_some());
+        assert_eq!(
+            p.regression("payer_activity", &seen, Some(&moved), false),
             None
         );
         // Dropping the entry again is a regression.

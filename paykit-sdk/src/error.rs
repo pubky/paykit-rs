@@ -149,9 +149,11 @@ pub enum Refusal {
     /// Nothing was written.
     #[error("Paykit wire 3.1: the app's certificate fails Paykit's checks: {0}")]
     CertificateRefused(String),
-    /// The app's own switch doesn't answer. Paykit spec 8.4 lets a payment without a request
-    /// to a reusable public endpoint go ahead without it; this SDK doesn't make one, and pays
-    /// only attempt-first (Paykit spec 7.2). Nothing was written or paid.
+    /// The app's own switch doesn't answer: the network, a `503`, a `5xx` its key didn't sign,
+    /// or, while the account may have been erased, the wait before the app takes it as gone
+    /// (`AppError::NotAnsweringAsAccount`, Switch spec 12.7). Paykit spec 8.4 lets a payment
+    /// without a request to a reusable public endpoint go ahead without it; this SDK doesn't
+    /// make one, and pays only attempt-first (Paykit spec 7.2). Nothing was written or paid.
     #[error("Paykit spec 8.4: the own switch doesn't answer: {0}")]
     SwitchUnavailable(String),
 }
@@ -186,10 +188,28 @@ pub enum PaykitError {
 }
 
 impl PaykitError {
-    /// The switch's error code, when the failure is an answer of the switch.
+    /// The switch's error code, when the failure is an answer of the switch, also one that
+    /// left the call's batch kept ([`AppError::Kept`]).
     pub fn code(&self) -> Option<ErrorCode> {
         match self {
             Self::Client(error) => error.code(),
+            _ => None,
+        }
+    }
+
+    /// The ID of the call's own batch, when the client kept it to send again
+    /// ([`AppError::Kept`]): what it writes and sends goes, the same bytes, at the app's next
+    /// write or read, so the caller doesn't make the call again. The batch keeps this ID for
+    /// its whole life, signed again or not, and the client's `App::kept_batch` (through
+    /// [`crate::Paykit::app`]) tells what became of it: still kept, applied, or dropped and
+    /// why, for `SENT_RETENTION_MS` after it ended. `None` from there never says the batch
+    /// was never sent. `None` here when nothing of the
+    /// call was kept, but for a store failure: the client returns that bare when it can't
+    /// read whether it kept the batch, which may still go with the next write or read, so a
+    /// caller reads the state the call would change after that write before it calls again.
+    pub fn kept_batch(&self) -> Option<[u8; 16]> {
+        match self {
+            Self::Client(error) => error.kept_batch(),
             _ => None,
         }
     }
