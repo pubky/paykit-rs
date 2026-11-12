@@ -13,6 +13,12 @@
 //!   (`held_version: null`);
 //! - at a receive once less than half of its current version's lifetime remains (Renewal).
 //!
+//! **Blocked counterparties** (Paykit spec 8.1; v0.1 "Block A Peer"). At an app holding
+//! `contacts`, no list goes to a counterparty the deny list holds, judged as for a payment
+//! the user starts ([`Paykit::deny_list`]: the copy read in the last 10 minutes, or read
+//! first), nor to anyone when that read fails: no renewal, answer or re-send of a changed
+//! list. What is owed it goes at the first receive after it is unblocked.
+//!
 //! Each version is the later of the device clock and one past the last version published
 //! ([`key::LAST_VERSION`]), so it is above every earlier one, also after a restore; its
 //! `expires_at` is [`LIST_LIFETIME_MS`] after the device clock.
@@ -44,7 +50,7 @@ use std::collections::BTreeMap;
 
 use paykit_lib::bodies::{ListEndpoint, PrivatePaymentList, PrivatePaymentListRequest};
 use paykit_lib::{Body, Kind, PaymentEndpointIdentifier, PaymentEndpointPayload};
-use pubky_switch_client::app::{AppEvent, Delivery, ReceiveContext, SENT_RETENTION_MS};
+use pubky_switch_client::app::{AppError, AppEvent, Delivery, ReceiveContext, SENT_RETENTION_MS};
 use pubky_switch_core::enc::serde_b64;
 use pubky_switch_core::records::DAY_MS;
 use serde::{Deserialize, Serialize};
@@ -442,7 +448,8 @@ impl Paykit {
                 active.push(recipient.counterparty);
             }
         }
-        self.publish_to(&active, false, None).await
+        let paused = self.paused().await?;
+        self.publish_to(&active, false, &paused, None).await
     }
 
     /// Send each of `counterparties` a newer version of the app's list (Paykit spec 8.4), for
@@ -453,8 +460,9 @@ impl Paykit {
     /// # Errors
     ///
     /// [`Refusal::CertificateRefused`]; [`Refusal::ScopeMissing`] without `request` or a
-    /// label; [`Refusal::Usage`] before any list is set, or for the app's own identity; a
-    /// store failure.
+    /// label; [`Refusal::Usage`] before any list is set, or for the app's own identity;
+    /// [`Refusal::CounterpartyBlocked`] when the deny list holds one of them, or can't be read,
+    /// with nothing sent to any; a store failure.
     pub async fn publish_list_to(&mut self, counterparties: &[[u8; 32]]) -> Result<ListsPublished> {
         self.refresh_own()?;
         self.require_payee()?;
@@ -466,7 +474,8 @@ impl Paykit {
                 Refusal::Usage("Paykit spec 8.4: a list goes to another identity".into()).into(),
             );
         }
-        self.publish_to(counterparties, false, None).await
+        let paused = self.refuse_paused(counterparties).await?;
+        self.publish_to(counterparties, false, &paused, None).await
     }
 
     /// Stop sending `counterparty` the app's lists, as when it is no longer a contact: it is
@@ -490,7 +499,8 @@ impl Paykit {
         {
             return Err(Refusal::NotFound.into());
         }
-        self.publish_to(&[*counterparty], true, None).await
+        let paused = self.refuse_paused(&[*counterparty]).await?;
+        self.publish_to(&[*counterparty], true, &paused, None).await
     }
 
     /// Every counterparty this app sends its lists to, or did, with the newest version sent.
@@ -559,16 +569,62 @@ impl Paykit {
             })
     }
 
+    /// Whom the app sends no list now (Paykit spec 8.1, "Blocked counterparties"; v0.1
+    /// "Block A Peer"): at an app holding `contacts`, the deny list as a payment the user
+    /// starts reads it ([`Paykit::deny_list`]), and everyone when that read fails, so nothing
+    /// is sent on a list not read. An app without `contacts` can't read the lists, and pauses
+    /// no one.
+    ///
+    /// # Errors
+    ///
+    /// A store failure or an alarm.
+    async fn paused(&mut self) -> Result<Paused> {
+        if !crate::receive::reads_lists(self.app.cert().scopes()) {
+            return Ok(Paused::NoOne);
+        }
+        match self.deny_list().await? {
+            Ok(denied) => Ok(Paused::Denied(denied)),
+            Err(error @ (AppError::Alarm(_) | AppError::Store(_))) => Err(error.into()),
+            Err(_) => Ok(Paused::Everyone),
+        }
+    }
+
+    /// Refuse a call that sends `counterparties` a list while one of them is paused
+    /// ([`Paykit::paused`]), with nothing sent.
+    async fn refuse_paused(&mut self, counterparties: &[[u8; 32]]) -> Result<Paused> {
+        let paused = self.paused().await?;
+        if counterparties.iter().any(|c| paused.holds(c)) {
+            return Err(Refusal::CounterpartyBlocked.into());
+        }
+        Ok(paused)
+    }
+
     /// Send each of `counterparties` a newer version, empty when `withdraw`, each on its own.
-    /// `undelivered` is as for [`Paykit::settled`].
+    /// One `paused` holds is sent nothing: a newer version is owed it, which goes once the
+    /// pause ends. `undelivered` is as for [`Paykit::settled`].
     async fn publish_to(
         &mut self,
         counterparties: &[[u8; 32]],
         withdraw: bool,
+        paused: &Paused,
         undelivered: Option<&[String]>,
     ) -> Result<ListsPublished> {
         let mut out = ListsPublished::default();
         for counterparty in counterparties {
+            if paused.holds(counterparty) {
+                let rkey = key::list_recipient(counterparty);
+                if let Some(mut recipient) = self.local_get::<Recipient>(&rkey).await? {
+                    if !recipient.owed {
+                        recipient.owed = true;
+                        self.local_put(&rkey, &recipient).await?;
+                    }
+                }
+                out.not_sent.push(ListNotSent {
+                    counterparty: *counterparty,
+                    reason: Refusal::CounterpartyBlocked.to_string(),
+                });
+                continue;
+            }
             match self.send_list(*counterparty, withdraw, undelivered).await {
                 Ok(sent) => out.sent.push(sent),
                 Err(error) => out.not_sent.push(ListNotSent {
@@ -846,7 +902,9 @@ impl Paykit {
             self.run_releases().await?;
             return Ok(ListsPublished::default());
         }
-        self.publish_to(&owed, false, Some(&undelivered)).await
+        let paused = self.paused().await?;
+        self.publish_to(&owed, false, &paused, Some(&undelivered))
+            .await
     }
 
     /// Ask the payment method to take back every single-use payload kept to release
@@ -881,6 +939,26 @@ impl Paykit {
 /// `(version, accepted_at)` in `accepted`: the payer then ignores it (Paykit wire 4.13).
 fn overtaken(accepted: &[(u64, u64)], version: u64, at: u64) -> bool {
     accepted.iter().any(|(v, t)| *v > version && *t < at)
+}
+
+/// Whom no list goes to now ([`Paykit::paused`]).
+enum Paused {
+    /// No one: the app can't read the lists.
+    NoOne,
+    /// The counterparties the deny list holds.
+    Denied(Vec<[u8; 32]>),
+    /// Everyone: the lists couldn't be read.
+    Everyone,
+}
+
+impl Paused {
+    fn holds(&self, counterparty: &[u8; 32]) -> bool {
+        match self {
+            Self::NoOne => false,
+            Self::Denied(denied) => denied.contains(counterparty),
+            Self::Everyone => true,
+        }
+    }
 }
 
 /// The fate `version` had in `before`; `Pending` for one it didn't hold.

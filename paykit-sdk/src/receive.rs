@@ -311,6 +311,20 @@ fn admits_new_state(
     Ok(false)
 }
 
+/// The deny list a read gave, or its failure as the payer's error:
+/// [`crate::Refusal::SwitchUnavailable`] when the own switch doesn't answer.
+fn denial(
+    read: std::result::Result<Vec<[u8; 32]>, AppError>,
+) -> crate::error::Result<Vec<[u8; 32]>> {
+    read.map_err(|error| {
+        if crate::pay::switch_unavailable(&error) {
+            crate::error::Refusal::SwitchUnavailable(error.to_string()).into()
+        } else {
+            crate::error::PaykitError::from(error)
+        }
+    })
+}
+
 /// Whether an app with `scopes` reads the lists: `contacts` gives `lists.read`.
 pub(crate) fn reads_lists(scopes: &[String]) -> bool {
     scopes.iter().any(|s| s == "contacts")
@@ -1138,66 +1152,86 @@ impl Paykit {
         if last.is_some_and(|last| last <= now && now - last < LISTS_REFRESH_MS) {
             return Ok(());
         }
-        match self.app.allow_list().await {
-            Ok(lists) => {
-                let mut tx = Tx::default();
-                tx.put(key::LISTS_READ, &now)?
-                    .put(key::DENIED, &lists.deny)?;
-                self.local_commit(tx).await
-            }
+        match self.read_deny_list().await? {
+            Ok(_) => Ok(()),
             Err(error @ (AppError::Alarm(_) | AppError::Store(_))) => Err(error.into()),
             Err(_) if last.is_some() => self.local_delete(key::LISTS_READ).await,
             Err(_) => Ok(()),
         }
     }
 
-    /// Whether the identity's deny list holds `pubky` (Paykit spec 8.1, "Blocked
-    /// counterparties"), read from the switch now (`GET /allow`); the copy kept for the views
-    /// is replaced with it. Every paying app holds `contacts`, which reads the lists (Paykit
-    /// spec 3.1).
+    /// The identity's deny list read from the switch now (`GET /allow`), with the time of
+    /// the read ([`key::LISTS_READ`]) and the copy kept for the views replaced; the client's
+    /// error, with nothing written, when the read fails.
     ///
     /// # Errors
     ///
-    /// [`crate::Refusal::SwitchUnavailable`] when the own switch doesn't answer; the
-    /// client's errors: a read that fails is never taken as a payee not blocked.
-    pub(crate) async fn denied(&mut self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
-        let lists = self.app.allow_list().await.map_err(|error| {
-            if crate::pay::switch_unavailable(&error) {
-                crate::error::Refusal::SwitchUnavailable(error.to_string()).into()
-            } else {
-                crate::error::PaykitError::from(error)
-            }
-        })?;
+    /// A store failure writing the copy.
+    async fn read_deny_list(
+        &mut self,
+    ) -> crate::error::Result<std::result::Result<Vec<[u8; 32]>, AppError>> {
+        let lists = match self.app.allow_list().await {
+            Ok(lists) => lists,
+            Err(error) => return Ok(Err(error)),
+        };
         let mut tx = Tx::default();
         tx.put(key::LISTS_READ, &self.now())?
             .put(key::DENIED, &lists.deny)?;
         self.local_commit(tx).await?;
-        Ok(lists.deny.contains(pubky))
+        Ok(Ok(lists.deny))
     }
 
-    /// Whether the identity's deny list holds `pubky`, for a payment the user starts (Paykit
-    /// spec 8.1): as read at most [`LISTS_REFRESH_MS`] ago, on the device clock, so the
-    /// payment makes no call of its own for it; read first ([`Paykit::denied`]) when the copy
-    /// is older or missing, and a read that fails then never counts as not blocked.
+    /// The identity's deny list as the user's payments and the lists this app sends judge
+    /// it (Paykit spec 8.1): the copy read at most [`LISTS_REFRESH_MS`] ago, on the device
+    /// clock, so the caller makes no call of its own for it; read first
+    /// ([`Paykit::read_deny_list`]) when the copy is older or missing, with the client's
+    /// error when that read fails.
     ///
     /// # Errors
     ///
-    /// As [`Paykit::denied`].
-    pub(crate) async fn denied_for_user(&mut self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
+    /// A store failure.
+    pub(crate) async fn deny_list(
+        &mut self,
+    ) -> crate::error::Result<std::result::Result<Vec<[u8; 32]>, AppError>> {
         let now = self.now();
         let read = self.local_get::<u64>(key::LISTS_READ).await?;
         let copy = self.local_get::<Vec<[u8; 32]>>(key::DENIED).await?;
         match (read, copy) {
             (Some(read), Some(denied)) if read <= now && now - read < LISTS_REFRESH_MS => {
-                Ok(denied.contains(pubky))
+                Ok(Ok(denied))
             }
-            _ => self.denied(pubky).await,
+            _ => self.read_deny_list().await,
         }
+    }
+
+    /// Whether the identity's deny list holds `pubky` (Paykit spec 8.1, "Blocked
+    /// counterparties"), read from the switch now ([`Paykit::read_deny_list`]). Every paying
+    /// app holds `contacts`, which reads the lists (Paykit spec 3.1).
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::denied_for_user`].
+    pub(crate) async fn denied(&mut self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
+        let read = self.read_deny_list().await?;
+        Ok(denial(read)?.contains(pubky))
+    }
+
+    /// Whether the identity's deny list holds `pubky`, for a payment the user starts (Paykit
+    /// spec 8.1), as [`Paykit::deny_list`] gives it.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Refusal::SwitchUnavailable`] when the own switch doesn't answer; the
+    /// client's errors: a read that fails is never taken as a payee not blocked.
+    pub(crate) async fn denied_for_user(&mut self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
+        let read = self.deny_list().await?;
+        Ok(denial(read)?.contains(pubky))
     }
 
     /// Block `pubky`: the identity's deny list takes it (`deny.put`, the client's
     /// [`pubky_switch_client::app::App::deny`]), and the copy of the list this app judges
-    /// payments by holds it at once, whatever its age (Paykit spec 8.1). A block made
+    /// payments and the Private Payment Lists it sends by holds it at once, whatever its age
+    /// (Paykit spec 8.1, 8.4): `pubky` is sent no list until it is unblocked. A block made
     /// through the client directly is seen at the next read of the lists.
     ///
     /// # Errors

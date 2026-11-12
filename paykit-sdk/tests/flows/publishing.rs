@@ -9,7 +9,7 @@ use std::sync::Arc;
 use paykit_lib::PaymentEndpointPayload;
 use paykit_sdk::{
     AppScopes, OfferedEndpoint, PayOptions, PayOutcome, Paykit, PaykitConfig, PaykitError, Rail,
-    Refusal, SentList, UnrequestedPayment, LIST_LIFETIME_MS,
+    Refusal, SentList, UnrequestedPayment, LISTS_REFRESH_MS, LIST_LIFETIME_MS,
 };
 use pubky_switch_client::app::AppEvent;
 use pubky_switch_client::clock::Clock;
@@ -736,6 +736,148 @@ async fn test_publishing_payloads_of_a_version_that_reached_the_payer_kept() {
     shop.receive(None).await.unwrap();
     assert!(released(&w).is_empty(), "{:?}", released(&w));
     assert_eq!(lists_taken(&mut wallet).await, 2);
+}
+
+/// Bob's shop holding `request` and `manage_contacts`, so it reads the deny list, with its
+/// list published to alice and taken by `wallet`.
+async fn shop_reading_lists(w: &World, wallet: &mut Paykit) -> Paykit {
+    let mut shop = w
+        .join(
+            &w.bob,
+            "shop",
+            AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+        )
+        .await;
+    w.publish_to_alice(&mut shop).await;
+    assert_eq!(lists_taken(wallet).await, 1);
+    shop
+}
+
+/// Whether `published` names alice as not sent for being blocked.
+fn blocked_for_alice(w: &World, published: &paykit_sdk::ListsPublished) -> bool {
+    published.sent.is_empty()
+        && published.not_sent.len() == 1
+        && published.not_sent[0].counterparty == w.alice_id()
+        && published.not_sent[0].reason == Refusal::CounterpartyBlocked.to_string()
+}
+
+#[tokio::test]
+async fn test_publishing_blocked_counterparty_gets_no_renewal_answer_or_resend() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_reading_lists(&w, &mut wallet).await;
+    shop.block(&w.alice_id()).await.unwrap();
+    w.clock.advance_ms(LIST_LIFETIME_MS / 2);
+    let got = shop.receive(None).await.unwrap();
+    assert!(blocked_for_alice(&w, &got.lists), "{:?}", got.lists);
+    ask_for_the_list(&w, &shop, None, shop.app_id());
+    let got = shop.receive(None).await.unwrap();
+    assert!(blocked_for_alice(&w, &got.lists), "{:?}", got.lists);
+    let changed = shop.set_list_endpoints(list("lno1changed")).await.unwrap();
+    assert!(blocked_for_alice(&w, &changed), "{changed:?}");
+    assert_eq!(lists_taken(&mut wallet).await, 0);
+    assert_eq!(w.rail.issued().len(), 1);
+}
+
+#[tokio::test]
+async fn test_publishing_to_a_blocked_counterparty_refused() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_reading_lists(&w, &mut wallet).await;
+    shop.block(&w.alice_id()).await.unwrap();
+    let refused = shop.publish_list_to(&[w.alice_id()]).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::CounterpartyBlocked)),
+        "{refused:?}"
+    );
+    let refused = shop.withdraw_list_from(&w.alice_id()).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::CounterpartyBlocked)),
+        "{refused:?}"
+    );
+    assert_eq!(lists_taken(&mut wallet).await, 0);
+    assert_eq!(w.rail.issued().len(), 1);
+}
+
+#[tokio::test]
+async fn test_publishing_unblocked_counterparty_renewed_at_the_next_receive() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_reading_lists(&w, &mut wallet).await;
+    shop.block(&w.alice_id()).await.unwrap();
+    shop.set_list_endpoints(list("lno1changed")).await.unwrap();
+    assert!(shop.receive(None).await.unwrap().lists.sent.is_empty());
+    shop.unblock(&w.alice_id()).await.unwrap();
+    // The changed list was owed her: it goes once she is unblocked.
+    let got = shop.receive(None).await.unwrap();
+    assert_eq!(got.lists.sent.len(), 1, "{:?}", got.lists);
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    wallet
+        .pay_without_request(to_bob(&w, "btc-lightning-bolt12"))
+        .await
+        .unwrap();
+    assert_eq!(last_offered(&w, "btc-lightning-bolt12"), "lno1changed");
+}
+
+/// The next `n` reads of bob's lists fail.
+fn fail_list_reads(w: &World, n: usize) {
+    for _ in 0..n {
+        w.bob
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/allow".into(),
+                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                current: serde_json::Value::Null,
+            });
+    }
+}
+
+#[tokio::test]
+async fn test_publishing_with_the_deny_list_unread_sends_nothing() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_reading_lists(&w, &mut wallet).await;
+    // The copy of the lists is too old to judge by, and reading them again fails.
+    w.clock.advance_ms(LISTS_REFRESH_MS);
+    fail_list_reads(&w, 1);
+    let refused = shop.publish_list_to(&[w.alice_id()]).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::CounterpartyBlocked)),
+        "{refused:?}"
+    );
+    // Its renewal due, the receive's own read of the lists and the one before sending fail.
+    w.clock.advance_ms(LIST_LIFETIME_MS / 2);
+    fail_list_reads(&w, 2);
+    let got = shop.receive(None).await.unwrap();
+    assert!(blocked_for_alice(&w, &got.lists), "{:?}", got.lists);
+    assert_eq!(lists_taken(&mut wallet).await, 0);
+    // Read again, the renewal goes.
+    let got = shop.receive(None).await.unwrap();
+    assert_eq!(got.lists.sent.len(), 1, "{:?}", got.lists);
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+}
+
+#[tokio::test]
+async fn test_publishing_block_through_the_client_seen_at_the_next_lists_read() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_reading_lists(&w, &mut wallet).await;
+    shop.app_mut().deny(&w.alice_id()).await.unwrap();
+    // The copy read when the list was sent is judged by for 10 minutes.
+    w.clock.advance_ms(LISTS_REFRESH_MS - 1);
+    shop.publish_list_to(&[w.alice_id()]).await.unwrap();
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    w.clock.advance_ms(1);
+    let refused = shop.publish_list_to(&[w.alice_id()]).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::CounterpartyBlocked)),
+        "{refused:?}"
+    );
+    assert_eq!(lists_taken(&mut wallet).await, 0);
 }
 
 /// Bob revokes the shop.
