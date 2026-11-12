@@ -93,9 +93,11 @@ pub enum Refusal {
     /// usable list"). The app asked the payee for its current list with a
     /// `paykit.private_payment_list_request`; the payee can't be forced to answer, so the
     /// user is told the app is waiting for the payee's list. A payee answers a request
-    /// naming the version the app holds within its own daily bound; past it, the app waits
-    /// for the payee's renewal, sent once less than half of the list's lifetime is left, and
-    /// asks again a day on. The user may choose to pay to
+    /// naming the version the app holds within its own bounds; past them, the app waits for
+    /// the payee's renewal, sent once less than half of the list's lifetime is left, and a
+    /// later payment asks again at most once in any 24 hours. A request that didn't reach the
+    /// payee's inbox counts as not sent, and goes again at the next receive. The user may
+    /// choose to pay to
     /// the payee's public endpoints instead ([`crate::PaymentMode::Public`]); the app never
     /// switches on its own.
     #[error("Paykit spec 8.4: waiting for the payee's Private Payment List")]

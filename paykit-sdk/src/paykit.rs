@@ -702,6 +702,9 @@ impl Paykit {
         self.place_kept_replies().await?;
         // Lists held over a `payment_lists` record that didn't read, once it reads.
         self.place_held_lists().await?;
+        // The list requests that didn't reach their payees' inboxes go again (Paykit spec
+        // 8.4, "No usable list").
+        self.ask_again_for_lists().await?;
         let applied = report
             .events
             .iter()

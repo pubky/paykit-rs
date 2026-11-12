@@ -41,7 +41,7 @@
 //! | `nl` | set by a restore: the shared records aren't listed since, so the client's copy is empty and a record's absence means nothing yet; cleared once they are listed; never restored | |
 //! | `lc` | the certificate the shared records were last listed under, signed: a certificate held now that reads more collections than it means the copy lacks their records until Paykit lists them (`hold.rs`); written at a join, a restore and each Paykit listing; never restored | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
-//! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
+//! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named, when, and its `msg_id`, to ask again for one that didn't reach the payee's inbox (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
 //! | `dl` | the deny list as the app last read it, for the views (Paykit spec 8.1) | |
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
@@ -211,6 +211,7 @@ pub(crate) mod key {
     pub(crate) const KEPT_REPLIES: &str = "pr/";
     pub(crate) const DROPPED_REPLIES: &str = "pd/";
     pub(crate) const DROPPED_UNVERIFIED: &str = "ud/";
+    pub(crate) const LIST_ASKS: &str = "lq/";
 
     /// The mark of replies from `sender` dropped for the bounds.
     pub(crate) fn dropped_replies(sender: &[u8; 32]) -> String {
@@ -323,8 +324,8 @@ pub(crate) mod key {
     /// A list request asked of `payee`, of its app `app_id` or of none.
     pub(crate) fn list_ask(payee: &[u8; 32], app_id: Option<&[u8; 16]>) -> String {
         match app_id {
-            Some(app) => format!("lq/{}/{}", b64(payee), b64(app)),
-            None => format!("lq/{}", b64(payee)),
+            Some(app) => format!("{LIST_ASKS}{}/{}", b64(payee), b64(app)),
+            None => format!("{LIST_ASKS}{}", b64(payee)),
         }
     }
 }

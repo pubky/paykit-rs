@@ -34,9 +34,9 @@ use paykit_lib::{
     AttemptId, Body, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
 };
 use pubky_switch_client::app::{
-    claim_conflict, AppError, ClaimAttempt, ClaimOp, Initiator, KeptBatch, KeptBatchStatus,
-    LocalWrite, ObligationDeadline, OpBatch, PeerIdentity, RecordContent, Refusal as ClientRefusal,
-    SignedMessage, UserConfirmed, REVALIDATION_MS,
+    claim_conflict, AppError, ClaimAttempt, ClaimOp, Delivery, Initiator, KeptBatch,
+    KeptBatchStatus, LocalWrite, ObligationDeadline, OpBatch, PeerIdentity, RecordContent,
+    Refusal as ClientRefusal, SignedMessage, UserConfirmed, REVALIDATION_MS,
 };
 use pubky_switch_core::chain::TransitionProof;
 use pubky_switch_core::claims::{
@@ -626,8 +626,9 @@ pub(crate) fn own_deadline(deadline: Option<u64>) -> ObligationDeadline {
 }
 
 /// A `private_payment_list_request` asked of a payee's app (`lq/<payee>[/<app>]`, Paykit
-/// spec 8.4): whom it asked, the version it named, and when. The payee and app repeat the
-/// key's, so a restore binds the value to its key.
+/// spec 8.4): whom it asked, the version it named, when, and the request's `msg_id`, to
+/// tell whether it reached the payee's inbox. The payee and app repeat the key's, so a
+/// restore binds the value to its key.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ListAsk {
     #[serde(with = "pubky_switch_core::enc::serde_b64")]
@@ -635,6 +636,18 @@ pub(crate) struct ListAsk {
     pub(crate) app_id: Option<[u8; 16]>,
     pub(crate) held_version: Option<u64>,
     pub(crate) asked_at_ms: u64,
+    /// Absent from a mark kept before it was recorded: that request counts as sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) msg_id: Option<String>,
+}
+
+impl ListAsk {
+    /// Whether it was asked in the 24 hours before `now`: a mark ahead of the clock
+    /// (restored, or the clock set back) isn't, as a lists read isn't, so it never holds the
+    /// next request back for longer than that.
+    fn within_a_day(&self, now: u64) -> bool {
+        self.asked_at_ms <= now && now - self.asked_at_ms < DAY_MS
+    }
 }
 
 /// The local write that journals `entry` in a batch. The entry is checked first
@@ -1471,10 +1484,11 @@ impl Paykit {
     /// `paykit.private_payment_list_request` naming the version held (Paykit wire 4.14). With
     /// `app`, of that app; without, of each app whose list is held, or one request naming no
     /// app when none is. A request already asked of the same app at the same held version is
-    /// outstanding, and not asked again, until a day has passed: the payee can't be forced to
-    /// answer, and a request it dropped is asked once more after that, so a payer waits at
-    /// most a day for one more chance. The request is queued before its mark is kept: a crash
-    /// between the two asks again, rather than never.
+    /// outstanding, and not asked again, for 24 hours: the payee can't be forced to answer,
+    /// and a request it dropped is asked once more after that, so a payer waits at most 24
+    /// hours for one more chance. A request that didn't reach the payee's inbox
+    /// ([`Paykit::ask_not_sent`]) counts as not sent, and is asked again now, as at the next
+    /// receive ([`Paykit::ask_again_for_lists`]).
     async fn ask_for_lists(
         &mut self,
         payee: &[u8; 32],
@@ -1491,38 +1505,109 @@ impl Paykit {
         for (app_id, held_version) in asks {
             let mark = key::list_ask(payee, app_id.as_ref());
             if let Some(asked) = self.local_get::<ListAsk>(&mark).await? {
-                // A mark ahead of the clock (restored, or the clock set back) is due, as a
-                // lists read is: it never holds the next request back for longer than a day.
                 // One that names another payee or app than its key is no mark of this ask.
                 if asked.payee == *payee
                     && asked.app_id == app_id
                     && asked.held_version == held_version
-                    && asked.asked_at_ms <= now
-                    && now - asked.asked_at_ms < DAY_MS
+                    && asked.within_a_day(now)
+                    && !self.ask_not_sent(&asked).await?
                 {
                     continue;
                 }
             }
-            let body = PrivatePaymentListRequest {
-                held_version,
-                app_id,
-            }
-            .to_body()?;
-            let signed = self.sign(*payee, Kind::PrivatePaymentListRequest, Vec::new(), body)?;
-            let msg_id = self.app.queue_signed(signed).await?;
-            self.local_put(
-                &mark,
-                &ListAsk {
-                    payee: *payee,
-                    app_id,
-                    held_version,
-                    asked_at_ms: now,
-                },
-            )
+            self.send_list_ask(*payee, app_id, held_version).await?;
+        }
+        Ok(())
+    }
+
+    /// Ask `payee`'s app `app_id`, or none, for its list, naming `held_version`, and keep the
+    /// mark of it. The request is queued before its mark is kept: a crash between the two
+    /// asks again, rather than never.
+    async fn send_list_ask(
+        &mut self,
+        payee: [u8; 32],
+        app_id: Option<[u8; 16]>,
+        held_version: Option<u64>,
+    ) -> Result<()> {
+        let body = PrivatePaymentListRequest {
+            held_version,
+            app_id,
+        }
+        .to_body()?;
+        let signed = self.sign(payee, Kind::PrivatePaymentListRequest, Vec::new(), body)?;
+        let msg_id = self.app.queue_signed(signed).await?;
+        let asked = ListAsk {
+            payee,
+            app_id,
+            held_version,
+            asked_at_ms: self.now(),
+            msg_id: Some(msg_id.clone()),
+        };
+        self.local_put(&key::list_ask(&payee, app_id.as_ref()), &asked)
             .await?;
-            // Queued, the request goes at the next flush if this one fails: the refusal still
-            // tells the user the app waits for the payee.
-            let _ = self.app.flush_message(&msg_id).await;
+        // Queued, the request goes at the next flush if this one fails: the refusal still
+        // tells the user the app waits for the payee.
+        let _ = self.app.flush_message(&msg_id).await;
+        Ok(())
+    }
+
+    /// Whether the list request `asked` marks didn't reach the payee's inbox (Paykit spec
+    /// 8.4, "No usable list"): refused for good, or not kept by the outbox, which keeps a
+    /// request it delivered for 30 days, so it never left or was given up. It counts as not
+    /// sent. One still queued is on its way.
+    ///
+    /// # Errors
+    ///
+    /// A store failure.
+    async fn ask_not_sent(&self, asked: &ListAsk) -> Result<bool> {
+        let Some(msg_id) = &asked.msg_id else {
+            return Ok(false);
+        };
+        Ok(matches!(
+            self.app.delivery(msg_id).await?,
+            None | Some(Delivery::Failed { .. })
+        ))
+    }
+
+    /// The receive's part of "No usable list" (Paykit spec 8.4): a list request asked in the
+    /// last 24 hours that didn't reach the payee's inbox ([`Paykit::ask_not_sent`]) counts as
+    /// not sent, and goes again, while the payer still holds the version it named of that
+    /// app's list, or, for a request naming no app, none of the payee's lists. Its mark is
+    /// dropped once a list held since answers it. An app without `pay` asks nothing.
+    ///
+    /// # Errors
+    ///
+    /// A store failure; the client's errors.
+    pub(crate) async fn ask_again_for_lists(&mut self) -> Result<()> {
+        if self.require_pay().is_err() {
+            return Ok(());
+        }
+        let now = self.now();
+        for (rest, asked) in self.local_scan::<ListAsk>(key::LIST_ASKS).await? {
+            let mark = format!("{}{rest}", key::LIST_ASKS);
+            if mark != key::list_ask(&asked.payee, asked.app_id.as_ref())
+                || !asked.within_a_day(now)
+                || !self.ask_not_sent(&asked).await?
+            {
+                continue;
+            }
+            let versions = self
+                .lists_of(&asked.payee)
+                .await?
+                .into_iter()
+                .filter_map(|l| {
+                    let of_app = asked.app_id.is_none_or(|app| app == l.app_id);
+                    match l.list.body() {
+                        Body::PrivatePaymentList(list) if of_app => Some(list.version),
+                        _ => None,
+                    }
+                });
+            if versions.max() == asked.held_version {
+                self.send_list_ask(asked.payee, asked.app_id, asked.held_version)
+                    .await?;
+            } else {
+                self.local_delete(&mark).await?;
+            }
         }
         Ok(())
     }

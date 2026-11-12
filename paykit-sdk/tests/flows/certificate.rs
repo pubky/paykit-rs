@@ -777,6 +777,46 @@ async fn test_certificate_acceptance_kept_under_an_expired_certificate_backs_up(
 }
 
 #[tokio::test]
+async fn test_certificate_renewal_dropping_pay_asks_for_no_list_again() {
+    // A list request didn't reach the payee's inbox, and the app is renewed to `contacts`
+    // before the next receive: the certificate sends no list request, and that receive asks
+    // nothing.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let me = wallet.app_id();
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "inbox".into(),
+            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            current: serde_json::Value::Null,
+        });
+    let refused = wallet
+        .pay_without_request(
+            paykit_sdk::UnrequestedPayment::new(w.bob_id(), crate::common::btc("1")).with_options(
+                paykit_sdk::PayOptions::default()
+                    .with_endpoint(crate::common::endpoint("btc-lightning-bolt12")),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        "{refused:?}"
+    );
+    let old = wallet.app().cert().clone();
+    let reduced = renew(&w, me, &AppScopes::new().contacts().build().unwrap(), 1_000);
+    list(&w, me, &old, &reduced);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().cert().hash(), reduced.hash());
+    // Nothing goes to bob: a request under it would be dropped as one it can't send.
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.report.events.is_empty(), "{:?}", got.report.events);
+}
+
+#[tokio::test]
 async fn test_certificate_renewal_dropping_pay_makes_no_rail_call() {
     // A dispatch's answer is lost, so a resume would repeat it on an idempotent method. The
     // app is renewed to `contacts` first: no path calls the payment method again, the
