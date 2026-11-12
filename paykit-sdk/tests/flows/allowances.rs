@@ -476,6 +476,11 @@ async fn test_allowances_end_notifies_the_executor_only() {
     assert!(!exec.allowance(&mine).await.unwrap().consented);
     let summary = phone.receive(None).await.unwrap();
     assert!(!received(&summary, "paykit.executor_notice"), "{summary:?}");
+    // The phone still drops it, for good, once it sees the record ended.
+    assert_eq!(
+        consent_entry(&phone, &mine).await,
+        Some(json!({ "removed": { "reason": "ended" } }))
+    );
 }
 
 #[tokio::test]
@@ -568,4 +573,177 @@ async fn test_allowances_app_without_allowance_takes_none_of_the_messages() {
     );
     assert!(plain.allowances().await.unwrap().is_empty());
     assert_eq!(w.record_writes(&w.alice, &mine), 1);
+}
+
+#[tokio::test]
+async fn test_allowances_kept_stop_refuses_an_answer_before_it_is_recorded() {
+    // Bob's end names an acceptance alice's record doesn't hold: it can't be recorded yet,
+    // and is kept as the stop. Nothing is answered under it meanwhile.
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    let (_, mine) = proposed(&w, &mut shop, &mut wallet).await;
+    let record = AllowanceRecord::read(
+        &serde_json::to_vec(&value(&wallet, &mine).await).unwrap(),
+        &w.alice_id(),
+    )
+    .unwrap();
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.allowance_end",
+        vec![record.proposal.hash(), [8; 32]],
+        json!({ "allowance_id": record.allowance_id.as_str() })
+            .as_object()
+            .cloned()
+            .unwrap(),
+    );
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"ae/").await.unwrap().len(), 1);
+    assert!(value(&wallet, &mine).await["end"].is_null());
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Ended
+    );
+    let error = wallet.accept_allowance(&mine).await.unwrap_err();
+    assert!(
+        matches!(refusal(&error), Some(Refusal::AllowanceEnded)),
+        "{error:?}"
+    );
+}
+
+/// The re-sends `app` asked of bob.
+async fn asked_bob(w: &World, app: &Paykit) -> usize {
+    crate::common::asked(app, &w.bob_id()).await.len()
+}
+
+/// Alice's wallet restored from a backup taken while it held bob's Allowance, accepted and,
+/// with `ended`, ended since; the restored app's first read done.
+async fn restored_with_allowance(w: &World, ended: bool) -> Paykit {
+    let mut shop = shop(w).await;
+    let mut wallet = wallet(w).await;
+    let (_, mine) = proposed(w, &mut shop, &mut wallet).await;
+    wallet.accept_allowance(&mine).await.unwrap();
+    if ended {
+        wallet.end_allowance(&mine).await.unwrap();
+    }
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    restored.receive(None).await.unwrap();
+    restored.reconcile().await.unwrap();
+    restored.receive(None).await.unwrap();
+    restored
+}
+
+#[tokio::test]
+async fn test_allowances_restore_asks_the_counterparty_of_an_open_one_to_resend() {
+    // The backup may predate bob's end: he is asked to send again.
+    let w = World::new();
+    let restored = restored_with_allowance(&w, false).await;
+    assert!(asked_bob(&w, &restored).await > 0);
+}
+
+#[tokio::test]
+async fn test_allowances_restore_asks_nothing_for_an_ended_one() {
+    let w = World::new();
+    let restored = restored_with_allowance(&w, true).await;
+    assert_eq!(asked_bob(&w, &restored).await, 0);
+}
+
+/// An `executor_notice` with `reason` naming `record`, from `signer`'s app `from` to alice's
+/// app `to`.
+fn notice(
+    w: &World,
+    signer: &pubky_switch_client::testing::TestSigner,
+    from: &str,
+    to: [u8; 16],
+    record: &[u8; 32],
+    reason: &str,
+) {
+    w.inject(
+        signer,
+        from,
+        &w.alice,
+        &[to],
+        "paykit.executor_notice",
+        Vec::new(),
+        json!({
+            "allowance_record": pubky_switch_core::enc::b64(record),
+            "reason": reason
+        })
+        .as_object()
+        .cloned()
+        .unwrap(),
+    );
+}
+
+#[tokio::test]
+async fn test_allowances_executor_notice_removes_consent_for_good() {
+    // A handoff's notice from an own app changes only the consent list: the Allowance stays
+    // accepted, and this executor no longer pays under it.
+    let w = World::new();
+    let (_shop, _wallet, mut exec, _phone, _, mine) = executed(&w).await;
+    notice(&w, &w.alice, "wallet", exec.app_id(), &mine, "handed_off");
+    let summary = exec.receive(None).await.unwrap();
+    assert!(received(&summary, "paykit.executor_notice"), "{summary:?}");
+    assert_eq!(
+        consent_entry(&exec, &mine).await,
+        Some(json!({ "removed": { "reason": "handed_off" } }))
+    );
+    let view = exec.allowance(&mine).await.unwrap();
+    assert_eq!(view.status, AllowanceStatus::Accepted);
+    assert!(!view.consented);
+}
+
+#[tokio::test]
+async fn test_allowances_executor_notice_from_another_identity_dropped() {
+    let w = World::new();
+    let (_shop, _wallet, mut exec, _phone, _, mine) = executed(&w).await;
+    notice(&w, &w.bob, "shop", exec.app_id(), &mine, "ended");
+    let summary = exec.receive(None).await.unwrap();
+    assert!(!received(&summary, "paykit.executor_notice"), "{summary:?}");
+    assert!(exec.allowance(&mine).await.unwrap().consented);
+}
+
+/// The next `n` batches at alice's switch are refused for good, `403 permission_missing`.
+fn refuse_writes(w: &World, n: usize) {
+    for _ in 0..n {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/ops".into(),
+                code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+                current: Value::Null,
+            });
+    }
+}
+
+#[tokio::test]
+async fn test_allowances_stored_proposal_written_later() {
+    // The receive step's write of bob's proposal is refused for good: the entry is stored,
+    // and the wallet writes the proposal into its record by a later write of its own.
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    shop.propose_allowance(w.alice_id(), AllowanceRole::Allowee, terms())
+        .await
+        .unwrap();
+    refuse_writes(&w, 2);
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.allowances().await.unwrap().is_empty());
+    wallet.receive(None).await.unwrap();
+    let views = wallet.allowances().await.unwrap();
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0].status, AllowanceStatus::Proposed);
 }
