@@ -1693,3 +1693,64 @@ async fn test_one_time_rejection_while_the_records_are_not_listed_refused_as_not
         "{refused:?}"
     );
 }
+
+#[tokio::test]
+async fn test_one_time_missed_item_asks_wait_for_a_sealed_records_key() {
+    // The wallet's only record of bob's open request is sealed under a key it doesn't hold
+    // yet: after a `missed` item it can't tell bob is a counterparty to ask, so the asks and
+    // their mark wait; once the key comes, bob is asked (Paykit spec 9).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (_, cert) = sealed_requests(&w, &mut wallet, &mut phone, &mut shop, 1).await;
+    let now = w.clock.now_ms();
+    w.alice.switch().push_missed(1, now - 1_000, now);
+    wallet.receive(None).await.unwrap();
+    assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
+    assert_eq!(wallet.app().protocol_scan(b"mi/").await.unwrap().len(), 1);
+    crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(crate::common::asked(&wallet, &w.bob_id()).await.len(), 1);
+    assert!(wallet.app().protocol_scan(b"mi/").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_one_time_restore_asks_wait_for_a_sealed_records_key() {
+    // The wallet's only record of bob's open request is sealed under a key it doesn't hold
+    // yet. Restored, its reconcile can't tell bob is a counterparty to ask: the restore's
+    // asks wait, and go once the key comes (Paykit spec 7.2).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (_, cert) = sealed_requests(&w, &mut wallet, &mut phone, &mut shop, 1).await;
+    let backup = wallet.backup().await.unwrap();
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let mut restored = paykit_sdk::Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    restored.reconcile().await.unwrap();
+    restored
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    restored.receive(None).await.unwrap();
+    assert!(crate::common::asked(&restored, &w.bob_id())
+        .await
+        .is_empty());
+    crate::unrequested::store_bundle(&w, app_id, &cert);
+    for _ in 0..3 {
+        restored.receive(None).await.unwrap();
+    }
+    assert_eq!(crate::common::asked(&restored, &w.bob_id()).await.len(), 1);
+}

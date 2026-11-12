@@ -147,11 +147,13 @@ impl Paykit {
             sent = sent.saturating_add(self.ask_from_marks(key::MISSED, lost, peers).await?);
         }
         let items = self.local_scan::<u64>(key::MISSED_ITEMS).await?;
-        // The counterparties come from the copy of the records, so the asks wait while it may
-        // lack records, or waits for scope keys, for the receive whose listing completes it.
+        // The counterparties come from the copy of the records, so the asks and their marks
+        // wait while it may lack records, waits for scope keys, or holds a record sealed under
+        // a key not held yet, for the receive that completes it.
         if !items.is_empty()
             && self.unlisted().await?.is_none()
             && self.scope_keys_awaited().await?.is_none()
+            && !self.copy_awaits_key().await?
         {
             let counterparties = self.missed_counterparties().await?.into_iter().collect();
             sent = sent.saturating_add(

@@ -589,6 +589,20 @@ impl Paykit {
         Ok(())
     }
 
+    /// Whether a payer's or payee's activity record in the copy holds a value sealed under
+    /// a scope key the app doesn't hold yet ([`awaits_key`]): its counterparty and status
+    /// can't be read, so the re-sends a restore or a `missed` item asks for wait for it.
+    pub(crate) async fn copy_awaits_key(&self) -> Result<bool> {
+        for collection in [Collection::PayerActivity, Collection::PayeeActivity] {
+            for held in self.app.records_of(collection.name()).await? {
+                if awaits_key(&held.content) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// Queue, once after a restore, a `resend_request` to every counterparty with an open
     /// request, from the restore's re-send time; [`Paykit::receive`] sends them. The start is
     /// bounded where it is used as well as at the restore and the load: no ordering of a
@@ -605,6 +619,11 @@ impl Paykit {
             .resend_from_ms
             .min(RestoreHold::of(bound).resend_from_ms);
         if hold.asks_queued {
+            return Ok(());
+        }
+        // A request record sealed under a scope key the app doesn't hold yet shows no
+        // counterparty: the asks wait for the key, and are queued once every record opens.
+        if self.copy_awaits_key().await? {
             return Ok(());
         }
         let mut counterparties = std::collections::BTreeSet::new();

@@ -690,3 +690,53 @@ async fn test_restore_hold_missed_item_asks_wait_while_the_records_are_not_liste
     wallet.receive(None).await.unwrap();
     assert_eq!(asks_to(&wallet, &w.bob_id()).await, 1);
 }
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_deleted_record_decides_nothing_until_the_listing() {
+    // The phone deleted the wallet's record of bob's request. A `missed` item comes, Paykit's
+    // listing fails, and bob's cancellation of the request follows in the same read: the
+    // delete the copy holds decides nothing while the copy may lack records, so the
+    // cancellation is held, then taken once Paykit lists (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    crate::outcome_record::phone_writes(&mut phone, &request, None).await;
+    wallet.receive(None).await.unwrap();
+    missed(&w);
+    let body = paykit_lib::bodies::RequestReply {
+        reason: None,
+        label: None,
+    }
+    .to_body()
+    .unwrap();
+    let cancellation = w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.payment_request_cancellation",
+        vec![request.request_hash],
+        body,
+    );
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "records?collection".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.records_unlisted.is_some(), "{got:?}");
+    assert!(!got.applied.contains(&cancellation), "{got:?}");
+    assert!(wallet.app().protocol_scan(b"kc/").await.unwrap().is_empty());
+    // The next receive's read still holds it, and its end lists; the one after takes it.
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.records_unlisted.is_none(), "{got:?}");
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.applied.contains(&cancellation), "{got:?}");
+    assert_eq!(wallet.app().protocol_scan(b"kc/").await.unwrap().len(), 1);
+}

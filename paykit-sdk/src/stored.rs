@@ -514,9 +514,13 @@ impl Paykit {
         let key = self.activity_key(target)?;
         let content = self.app.shared_record(&key).await?.map(|held| held.content);
         match content {
-            // Absent while the copy of its side may lack records: the absence decides
+            // Absent or deleted while the copy of its side may lack records: the copy decides
             // nothing yet (Paykit spec 8.1, "Records not listed yet").
-            None if self.side_unlisted(record_side(target)).await? => return Ok(Placed::Waits),
+            None | Some(RecordContent::Deleted)
+                if self.side_unlisted(record_side(target)).await? =>
+            {
+                return Ok(Placed::Waits);
+            }
             None | Some(RecordContent::Deleted) => {
                 if !creates {
                     return Ok(Placed::Not);
