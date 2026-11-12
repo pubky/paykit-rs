@@ -2068,7 +2068,7 @@ async fn test_certificate_narrowed_then_stopped_taking_the_wider_one_holds_a_rep
 
 #[tokio::test]
 async fn test_certificate_narrowed_on_one_side_widened_on_another_then_back_holds_a_receipt() {
-    // `request` reads the payee's side, whose keys wait, and no longer the payer's.
+    // `request` reads the payee's side, and no longer the payer's.
     narrowed_on_the_payer_side_then_back(AppScopes::new().request().build().unwrap()).await;
 }
 
@@ -2091,6 +2091,9 @@ async fn narrowed_on_the_payer_side_then_back(narrowed: RequestedScopes) {
     let mut shop = w.shop().await;
     let first = wallet.app().cert().clone();
     let mixed = renew(&w, me, &narrowed, 1_000);
+    // The narrowed certificate's keys are stored, so the listing it owes isn't left waiting,
+    // which would hold the feed and the renewal back behind it.
+    store_bundle(&w, me, &mixed);
     wallet.receive(None).await.unwrap();
     list(&w, me, &first, &mixed);
     // The shop reads alice's directory while it still lists the wallet under `pay`, so its

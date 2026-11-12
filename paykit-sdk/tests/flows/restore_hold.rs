@@ -676,13 +676,7 @@ async fn test_restore_hold_missed_item_asks_wait_while_the_records_are_not_liste
     request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     missed(&w);
-    w.alice
-        .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
-            path: "records?collection".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
-            current: serde_json::Value::Null,
-        });
+    fail_paykit_listing(&w);
     let got = wallet.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
     assert_eq!(asks_to(&wallet, &w.bob_id()).await, 0);
@@ -721,13 +715,7 @@ async fn test_restore_hold_missed_item_deleted_record_decides_nothing_until_the_
         vec![request.request_hash],
         body,
     );
-    w.alice
-        .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
-            path: "records?collection".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
-            current: serde_json::Value::Null,
-        });
+    fail_paykit_listing(&w);
     let got = wallet.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
     assert!(!got.applied.contains(&cancellation), "{got:?}");

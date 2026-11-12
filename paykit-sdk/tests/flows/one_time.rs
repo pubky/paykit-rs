@@ -1687,7 +1687,14 @@ async fn test_one_time_rejection_while_the_records_are_not_listed_refused_as_not
         code: pubky_switch_core::http::ErrorCode::Unavailable,
         current: serde_json::Value::Null,
     };
-    w.alice.switch().fail_next(unlisted());
+    // The client lists right after the item, the wallet's two collections, before Paykit's
+    // own listing at the end of the receive, which fails.
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "records?collection".into(),
+            after: 2,
+        });
     assert!(wallet
         .receive(None)
         .await
@@ -1919,7 +1926,8 @@ async fn test_one_time_no_response_over_a_record_sealed_at_a_key_not_held() {
 }
 
 #[tokio::test]
-async fn test_one_time_payers_cancellation_before_its_record_placed_at_an_app_paying_and_requesting() {
+async fn test_one_time_payers_cancellation_before_its_record_placed_at_an_app_paying_and_requesting(
+) {
     // Bob's dual app holds `pay` and `request`. Bob's till sends alice a request and writes
     // its record; alice cancels it. The dual app reads the record and alice's cancellation
     // in one read: the payee's record shows alice's cancellation (Paykit spec 8.1, "Replies
