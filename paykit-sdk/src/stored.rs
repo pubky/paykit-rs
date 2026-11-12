@@ -54,7 +54,9 @@ use crate::activity::{ActivityTarget, Role};
 use crate::error::{PaykitError, Result};
 use crate::notices::{KeptNotice, NoticeKind, StoredHandle};
 use crate::paykit::Paykit;
-use crate::receive::{receipt_obligation, receipt_on_record, receipt_settles, ReceiptClaim};
+use crate::receive::{
+    receipt_obligation, receipt_on_record, receipt_settles, ReceiptClaim, ReceiptSettles,
+};
 use crate::records::{list_target, KeptMessage};
 use crate::requests::{RequestRef, RequestStatus, RequestView};
 
@@ -80,13 +82,15 @@ fn submitted<T>(result: std::result::Result<T, AppError>) -> Result<Placed> {
     match result {
         Ok(_) => Ok(Placed::Done),
         Err(AppError::Refused(ClientRefusal::NotNow(_))) => Ok(Placed::Waits),
-        Err(error)
-            if !crate::pay::switch_unavailable(&error) && error.unkept().code().is_some() =>
-        {
-            Ok(Placed::Not)
-        }
+        Err(error) if refused(&error) => Ok(Placed::Not),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Whether `error` is the switch's refusal of a request, an answer with its error code,
+/// rather than a switch that doesn't answer or a failure of the app's own.
+fn refused(error: &AppError) -> bool {
+    !crate::pay::switch_unavailable(error) && error.unkept().code().is_some()
 }
 
 /// The side of the shared records `target` is of.
@@ -596,21 +600,30 @@ impl Paykit {
                 &attempt_id,
                 |request| self.obligation(&sender, request, 0),
             );
-            let view = self
-                .app
-                .read_claim(&obligation)
-                .await?
-                .map(|read| read.view);
-            let settles = receipt_settles(&ReceiptClaim {
-                stored: &stored,
-                attempt_id,
-                obligation,
-                deadline,
-                view: view.as_ref(),
-                service_time: self.service_time(),
-                journaled,
-                first_receipt: found.first_receipt,
-            })?;
+            // The claim as the first read takes it (`receive::receipt_effect`): the view the
+            // app keeps, which holds the failure past the service's deletion of the claim,
+            // or else the switch's. A read the switch refuses settles nothing, as there.
+            let view = match self.app.claim_evidence(&obligation).await? {
+                Some(kept) => Some(Some(kept.view)),
+                None => match self.app.read_claim(&obligation).await {
+                    Ok(read) => Some(read.map(|read| read.view)),
+                    Err(error) if refused(&error) => None,
+                    Err(error) => return Err(error.into()),
+                },
+            };
+            let settles = match view {
+                Some(view) => receipt_settles(&ReceiptClaim {
+                    stored: &stored,
+                    attempt_id,
+                    obligation,
+                    deadline,
+                    view: view.as_ref(),
+                    service_time: self.service_time(),
+                    journaled,
+                    first_receipt: found.first_receipt,
+                })?,
+                None => ReceiptSettles::default(),
+            };
             if let Some((op, deadline)) = settles.claim {
                 batch = batch
                     .op(op.kind())
