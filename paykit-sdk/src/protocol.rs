@@ -760,11 +760,7 @@ impl Protocol for PaykitProtocol {
     /// `payee_activity` with one policy per label, so an app holding `request` lists and
     /// takes every label's records, and one holding `request:<label>` its label's.
     fn collections(&self) -> Vec<SwitchCollection> {
-        vec![
-            activity::family(Collection::PayerActivity),
-            activity::family(Collection::PayeeActivity),
-            activity::family(Collection::PaymentLists),
-        ]
+        crate::hold::RecordSide::All.collections()
     }
 
     /// The mark of what the app has seen in a record: the newest value it took that reads
