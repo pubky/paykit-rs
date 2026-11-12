@@ -403,10 +403,10 @@ fn held_or_unlisted(
 }
 
 /// Hold the entry while the app's copy of `side`'s records may lack records (Paykit spec
-/// 8.1, "Records not listed yet"): after a restore, or a certificate that reads more, until
-/// Paykit has listed them. The rule is [`crate::hold::side_unlisted`], read per entry from
-/// the context's certificate and Paykit's state (`nl`, `lc`), so an entry after a wider
-/// certificate the same read took is held too. The entry is held as for a store
+/// 8.1, "Records not listed yet"): after a restore, a `missed` item, or a certificate that
+/// reads more, until Paykit has listed them. The rule is [`crate::hold::side_unlisted`], read
+/// per entry from the context's certificate and Paykit's state (`nl`, `ml`, `lc`), so an
+/// entry after a wider certificate or a `missed` item the same read took is held too. The entry is held as for a store
 /// unavailable for now (Paykit spec 17, question 27), and read again at a later read.
 ///
 /// [`Paykit::side_unlisted`] counts the records as listed under a certificate Paykit
@@ -414,7 +414,8 @@ fn held_or_unlisted(
 /// entry under a certificate that fails the same check before any branch reaches here, so
 /// the two agree wherever this runs.
 fn hold_while_unlisted(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<(), Fail> {
-    let restore = cx.local_get(key::RECORDS_UNLISTED.as_bytes())?.is_some();
+    let marked = cx.local_get(key::RECORDS_UNLISTED.as_bytes())?.is_some()
+        || cx.local_get(key::MISSED_UNLISTED.as_bytes())?.is_some();
     let listed = match cx.local_get(key::LISTED_CERT.as_bytes())? {
         None => None,
         Some(bytes) => {
@@ -422,7 +423,7 @@ fn hold_while_unlisted(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<(), 
             Some(AppCert::verify(&signed, &cx.identity()).map_err(|_| Fail::corrupt())?)
         }
     };
-    if crate::hold::side_unlisted(side, restore, listed.as_ref(), cx.cert()) {
+    if crate::hold::side_unlisted(side, marked, listed.as_ref(), cx.cert()) {
         return Err(Fail::Store(StoreFailure::unavailable(
             StoreError::Unavailable,
         )));
