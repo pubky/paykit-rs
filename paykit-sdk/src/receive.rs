@@ -208,7 +208,10 @@ pub(crate) fn effect(
                 // One for a request the app holds no record of is new state, which the spam
                 // rule gates. While the copy of the payer's records may lack records, the
                 // absence decides nothing: the entry is held.
-                if cx.record(&payer_target.record_target())?.is_none() {
+                let content = cx
+                    .record(&payer_target.record_target())?
+                    .map(|held| held.content);
+                if !holds_record(content.as_ref()) {
                     hold_while_unlisted(cx, RecordSide::Payer)?;
                 }
                 if admits_new_state(cx, &sender, &scopes)? {
@@ -222,7 +225,7 @@ pub(crate) fn effect(
         Body::PrivatePaymentList(_) if pay => {
             let target = list_target(&sender, &stored.message().from.app_id);
             let record = cx.record(&target)?;
-            if record.is_none() {
+            if !holds_record(record.as_ref().map(|held| &held.content)) {
                 hold_while_unlisted(cx, RecordSide::Payer)?;
             }
             let held = record.is_some_and(|held| held.content.value().is_some());
@@ -408,8 +411,9 @@ pub(crate) fn holds_record(content: Option<&RecordContent>) -> bool {
 
 /// The value held at `target`, which is of `side`: `None` for none, or one that isn't
 /// open or is deleted. The entry is held instead while the value waits for its scope key
-/// ([`wait_for_key`]), and while the record is absent and the app's copy of `side` may
-/// lack records ([`hold_while_unlisted`]): the absence decides nothing then.
+/// ([`wait_for_key`]), and while the record is absent or deleted and the app's copy of
+/// `side` may lack records ([`hold_while_unlisted`]): the copy decides nothing then, a
+/// delete it holds included, which a later write at the switch may have replaced.
 fn held_or_unlisted(
     cx: &ReceiveContext<'_>,
     target: &ActivityTarget,
@@ -417,7 +421,7 @@ fn held_or_unlisted(
 ) -> Result<Option<Vec<u8>>, Fail> {
     wait_for_key(cx, target)?;
     let record = cx.record(&target.record_target())?;
-    if record.is_none() {
+    if !holds_record(record.as_ref().map(|held| &held.content)) {
         hold_while_unlisted(cx, side)?;
     }
     Ok(record.and_then(|held| held.content.value().map(<[u8]>::to_vec)))
@@ -522,16 +526,21 @@ fn keep_cancellation(
 /// Make room for a new stop from `sender` among the stops kept for requests not held, in the
 /// step: those the bounds drop ([`kept_reply_evicted`]) go, until there is room. Left out of
 /// the bounds, neither counted nor dropped, are the stops for a request the copy holds
-/// ([`holds_record`]), those whose record is absent while the copy of the payer's records
-/// may lack records ([`side_may_lack`]), when the request may be held, and those for a
-/// request the app keeps a stored message of to write ([`crate::stored::writes_request`]),
-/// the request's own entry among them. These last are bounded by the entries the client
-/// stores (Switch spec 8.2), one stop per request record; counted here, they would make the
-/// stops of other requests go first. One that is left out no longer counts again from then
-/// on, which can put its sender past the bound: the loop drops back to it.
+/// ([`holds_record`]) and those for a request the app keeps a stored message of to write
+/// ([`crate::stored::writes_request`]), the request's own entry among them. These last are
+/// bounded by the entries the client stores (Switch spec 8.2), one stop per request record;
+/// counted here, they would make the stops of other requests go first. One that is left
+/// out no longer counts again from then on, which can put its sender past the bound: the
+/// loop drops back to it. While the copy of the payer's records may lack records
+/// ([`side_may_lack`]) nothing is judged, so no stop counts or goes; a cancellation of a
+/// request absent or deleted from the copy is held then anyway ([`hold_while_unlisted`]).
 fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<(), Fail> {
+    // While the copy of the payer's records may lack records, no stop is judged held or
+    // not: none counts and none goes.
+    if side_may_lack(cx, RecordSide::Payer)? {
+        return Ok(());
+    }
     let own = cx.identity();
-    let unlisted = side_may_lack(cx, RecordSide::Payer)?;
     let mut kept = Vec::new();
     let mut names = Vec::new();
     for (bytes, value) in cx.local_scan(key::KEPT_CANCELLATIONS.as_bytes())? {
@@ -542,7 +551,7 @@ fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<
         };
         let stop = state::decode::<KeptMessage>(&value).map_err(|_| Fail::corrupt())?;
         let content = cx.record_at(&record)?.map(|held| held.content);
-        if holds_record(content.as_ref()) || (content.is_none() && unlisted) {
+        if holds_record(content.as_ref()) {
             continue;
         }
         let from = stop.sender();

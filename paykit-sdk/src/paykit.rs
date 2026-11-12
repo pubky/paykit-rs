@@ -703,6 +703,11 @@ impl Paykit {
             })
             .collect();
         let answered = self.answer_kept_resends().await?;
+        // A restore's asks that waited for a record's key are queued at the receive that
+        // opens it, once the records are listed (`hold.rs`).
+        if self.unlisted().await?.is_none() && self.scope_keys_awaited().await?.is_none() {
+            self.queue_restore_asks().await?;
+        }
         let asked = self.send_asks().await?;
         Ok(ReceiveSummary {
             report,
