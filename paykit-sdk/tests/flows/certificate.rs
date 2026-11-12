@@ -1437,14 +1437,15 @@ async fn test_certificate_renewal_reading_more_listing_refused_holds_reads_until
 }
 
 #[tokio::test]
-async fn test_certificate_restore_keeps_the_restored_one_as_listed_under() {
-    // A restore's listing covers what the restored certificate reads, so the restore keeps
-    // it as the one listed under: a wider one taken later is seen against it.
+async fn test_certificate_restore_keeps_none_listed_under_until_a_listing() {
+    // A restore keeps no certificate as listed under: its copy is empty until a listing
+    // runs, so a call that only reads is refused until then. The first read lists, and that
+    // listing keeps the certificate.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let backup = wallet.backup().await.unwrap();
     drop(wallet);
-    let restored = Paykit::restore(
+    let mut restored = Paykit::restore(
         w.env(&w.alice, store()),
         PaykitConfig::default(),
         &backup,
@@ -1453,7 +1454,132 @@ async fn test_certificate_restore_keeps_the_restored_one_as_listed_under() {
     )
     .await
     .unwrap();
+    assert!(restored.app().protocol_get(b"lc").await.unwrap().is_none());
+    let refused = restored.requests().await.unwrap_err();
+    assert!(is_not_now(&refused), "{refused:?}");
+    restored.receive(None).await.unwrap();
     assert!(restored.app().protocol_get(b"lc").await.unwrap().is_some());
+    assert!(restored.requests().await.unwrap().is_empty());
+}
+
+/// Alice's wallet, joined on `base` after her phone received bob's request and wrote its
+/// record: nothing is read before the call returns. Returns the wallet and the request.
+async fn joined_after_a_record_was_written(
+    w: &World,
+    base: Arc<dyn StateStore>,
+) -> (Paykit, paykit_sdk::RequestRef) {
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = crate::common::request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::common::draft("1", w.clock.now_ms()),
+    )
+    .await;
+    phone.receive(None).await.unwrap();
+    assert_eq!(phone.requests().await.unwrap().len(), 1);
+    let wallet = Paykit::join(
+        w.env(&w.alice, base),
+        PaykitConfig::default(),
+        w.approve(&w.alice, "wallet", &AppScopes::new().pay().build().unwrap()),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    (wallet, request)
+}
+
+/// Before any listing: a call that only reads is refused rather than show the empty copy,
+/// and one that acts lists first, so it acts on the record another own app wrote.
+async fn reads_and_acts_on_what_was_written(wallet: &mut Paykit, request: &paykit_sdk::RequestRef) {
+    let refused = wallet.requests().await.unwrap_err();
+    assert!(is_not_now(&refused), "{refused:?}");
+    let refused = wallet.request(request).await.unwrap_err();
+    assert!(is_not_now(&refused), "{refused:?}");
+    wallet.reject_request(request, None).await.unwrap();
+    assert_eq!(
+        wallet.request(request).await.unwrap().status,
+        paykit_sdk::RequestStatus::Rejected
+    );
+}
+
+#[tokio::test]
+async fn test_certificate_join_reads_nothing_from_its_copy_before_a_listing() {
+    // Another own app wrote the request record before the join. Until a listing, the new
+    // app's copy lacks it: a read is refused, and an action lists first and finds it.
+    let w = World::new();
+    let (mut wallet, request) = joined_after_a_record_was_written(&w, store()).await;
+    assert!(wallet.app().protocol_get(b"lc").await.unwrap().is_none());
+    reads_and_acts_on_what_was_written(&mut wallet, &request).await;
+}
+
+#[tokio::test]
+async fn test_certificate_join_reloaded_before_a_listing_reads_nothing_from_its_copy() {
+    // As above, with the app reloaded before its first listing.
+    let w = World::new();
+    let base = store();
+    let (wallet, request) = joined_after_a_record_was_written(&w, Arc::clone(&base)).await;
+    let me = wallet.app_id();
+    drop(wallet);
+    let mut wallet = w
+        .load_on_clock(&w.alice, Arc::clone(&base), me, Arc::clone(&w.clock))
+        .await;
+    assert!(wallet.app().protocol_get(b"lc").await.unwrap().is_none());
+    reads_and_acts_on_what_was_written(&mut wallet, &request).await;
+}
+
+#[tokio::test]
+async fn test_certificate_join_first_receive_lists_before_taking_its_entries() {
+    // Bob's receipt for a payment the phone made before the wallet joined comes to the new
+    // wallet, whose copy lacks the payer record until a listing.
+    let w = World::new();
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = crate::common::request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::common::draft("1", w.clock.now_ms()),
+    )
+    .await;
+    phone.receive(None).await.unwrap();
+    let paid = phone
+        .pay_request(&request, paykit_sdk::PayOptions::default())
+        .await
+        .unwrap();
+    assert!(
+        matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
+        "{paid:?}"
+    );
+    drop(phone);
+    let mut wallet = Paykit::join(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        w.approve(&w.alice, "wallet", &AppScopes::new().pay().build().unwrap()),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    // Bob's shop reads alice's directory again, which lists the new wallet.
+    w.clock.advance_ms(11 * 60_000);
+    shop.receive(None).await.unwrap();
+    let sale = shop.payee_activity().await.unwrap()[0].record;
+    assert!(shop.confirm_payment(&sale).await.unwrap().is_some());
+    // The client's first read lists before it reads the feed, so the receipt's record is
+    // there when its entry comes: taken at that read, once, and the listing kept.
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(received(&summary, "paykit.payment_receipt"), "{summary:?}");
+    assert!(wallet.app().protocol_get(b"lc").await.unwrap().is_some());
+    for _ in 0..2 {
+        let summary = wallet.receive(None).await.unwrap();
+        assert!(!received(&summary, "paykit.payment_receipt"), "{summary:?}");
+    }
+    let value = crate::outcome_record::record_value(&mut wallet, &request)
+        .await
+        .unwrap();
+    assert!(!value["receipt"].is_null(), "{value}");
 }
 
 #[tokio::test]
@@ -2638,4 +2764,31 @@ async fn test_certificate_late_receipt_for_a_record_not_listed_yet_is_held_then_
         .await
         .unwrap();
     assert!(!value["receipt"].is_null(), "{value}");
+}
+
+#[tokio::test]
+async fn test_certificate_refused_before_any_listing_of_paykit_reads_nothing() {
+    // A new wallet's first read takes a renewal Paykit refuses: Paykit lists nothing under
+    // it and keeps no certificate as listed under, so a call that only reads is refused
+    // rather than answer from a copy it never saw listed.
+    let w = World::new();
+    let mut wallet = Paykit::join(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        w.approve(&w.alice, "wallet", &AppScopes::new().pay().build().unwrap()),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    let me = wallet.app_id();
+    let first = wallet.app().cert().clone();
+    let refused = renew(&w, me, &refused_scopes(), 1_000);
+    list(&w, me, &first, &refused);
+    let _ = wallet.receive(None).await;
+    let _ = wallet.receive(None).await;
+    assert_eq!(wallet.app().cert().hash(), refused.hash());
+    assert!(wallet.app().protocol_get(b"lc").await.unwrap().is_none());
+    let error = wallet.requests().await.unwrap_err();
+    assert!(is_not_now(&error), "{error:?}");
 }

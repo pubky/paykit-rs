@@ -163,18 +163,15 @@ impl Paykit {
             .then_some(Unlisted::Certificate))
     }
 
-    /// [`side_unlisted`] for `side`, from what the store holds. With none kept as listed
-    /// under, a certificate Paykit refuses lists nothing for Paykit: the records count as
-    /// listed until one passes.
+    /// [`side_unlisted`] for `side`, from what the store holds. Under a certificate Paykit
+    /// refuses too: with none kept as listed under, as after a join, the copy may be empty,
+    /// and a call that only reads is refused rather than answer from it.
     pub(crate) async fn side_unlisted(&self, side: RecordSide) -> Result<bool> {
         let restore = self
             .local_get::<bool>(key::RECORDS_UNLISTED)
             .await?
             .is_some();
         let listed = self.listed_cert().await?;
-        if !restore && listed.is_none() && self.certificate_refused().is_some() {
-            return Ok(false);
-        }
         Ok(side_unlisted(
             side,
             restore,
@@ -266,26 +263,25 @@ impl Paykit {
             .all(|scope| self.app.scope_key(epoch, scope).is_some())
     }
 
-    /// Keep the certificate held now as the one listed under, when nothing is lost by it:
-    /// when none is kept and `none_listed`, or when the one kept reads everything the held
-    /// one does. A narrowed certificate is followed so, so a later certificate that reads
-    /// more again is seen as wider. Run at a join, a load and after each receive; one write,
-    /// which a crash leaves to the next load. Nothing is written under a certificate Paykit
-    /// refuses.
+    /// Follow a narrowing: keep the certificate held now as the one listed under when the
+    /// one kept reads everything it does and differs from it. Every record the held one
+    /// reads was listed under the one kept, so the listing covers it, and a later
+    /// certificate that reads more again is seen as wider. Run at a load and after each
+    /// receive; one write, which a crash leaves to the next load. Nothing is written under
+    /// a certificate Paykit refuses.
     ///
-    /// Only a join takes the certificate when none is kept (`none_listed`): the client's
-    /// first read lists under the join's certificate. A load and a receive keep none then,
-    /// whatever the reason none is kept: a join that crashed before its write, a load
-    /// under a certificate Paykit refused, a receive that took a passing one after it, a
-    /// restart before the listing, or a store an earlier build wrote. The records then count
-    /// as unlisted ([`Paykit::unlisted`]) and are listed once, and that listing keeps it.
-    pub(crate) async fn follow_listed_cert(&mut self, none_listed: bool) -> Result<()> {
+    /// With none kept, nothing is followed: only a listing Paykit makes keeps a certificate
+    /// ([`Paykit::list_records`]). None is kept from a join or a restore until that
+    /// listing, nor after a load under a certificate Paykit refused or a store an earlier
+    /// build wrote: the records count as unlisted ([`Paykit::unlisted`]) and are listed
+    /// once.
+    pub(crate) async fn follow_listed_cert(&mut self) -> Result<()> {
         if self.certificate_refused().is_some() {
             return Ok(());
         }
         let held = self.app.cert();
         let follow = match self.listed_cert().await? {
-            None => none_listed,
+            None => false,
             Some(listed) => {
                 listed.hash() != held.hash()
                     && !crate::protocol::reads_more(&self.protocol.collections(), &listed, held)
