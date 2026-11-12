@@ -24,7 +24,8 @@ use pubky_switch_client::app::{
 use pubky_switch_client::clock::Clock;
 use pubky_switch_client::clock::TestClock;
 use pubky_switch_client::testing::START_MS;
-use pubky_switch_core::claims::ClaimStatus;
+use pubky_switch_core::claims::{ClaimStatus, ClaimType};
+use pubky_switch_core::ops::{Condition, OpKind};
 
 use crate::common::{btc, endpoint, store, World, HOUR_MS};
 
@@ -198,6 +199,57 @@ fn proof_of(record: &ActivityRecord) -> (&StoredMessage, &PaymentProof) {
     (stored, proof)
 }
 
+/// The conditions of every `attempt` alice's switch applied on the claim of `obligation`.
+fn attempt_conditions(w: &World, obligation: &[u8; 32]) -> Vec<Vec<Condition>> {
+    w.alice
+        .switch()
+        .applied()
+        .iter()
+        .filter(|op| {
+            matches!(&op.body().kind, OpKind::Claim(fields)
+                if fields.kind == ClaimType::Attempt && fields.claim_key == obligation.to_vec())
+        })
+        .map(|op| op.body().conditions.clone())
+        .collect()
+}
+
+/// The conditions of the last `record.put` alice's switch applied to the payer's request
+/// record of `request`, as `app` keys it.
+fn last_request_put(w: &World, app: &Paykit, request: &RequestRef) -> Vec<Condition> {
+    let collection = Collection::PayerActivity;
+    let target = RecordTarget::new(
+        SwitchCollection::new(collection.name(), collection.policy(None)),
+        &natural_key::request_record(&request.payee, &request.request_hash),
+    );
+    let key = app.app().record_key(&target).unwrap();
+    w.alice
+        .switch()
+        .applied()
+        .iter()
+        .rev()
+        .find(|op| matches!(&op.body().kind, OpKind::RecordPut(put) if put.key == key))
+        .map(|op| op.body().conditions.clone())
+        .unwrap()
+}
+
+/// The claim key of `app`'s payment of `period`.
+async fn period_obligation(app: &Paykit, period: PeriodRef) -> [u8; 32] {
+    app.payments()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|p| p.billing_period == Some(period))
+        .unwrap()
+        .obligation
+}
+
+fn starts_at(conditions: &[Condition]) -> Option<u64> {
+    conditions.iter().find_map(|c| match c {
+        Condition::ServerTimeIn { start, end: None } => *start,
+        _ => None,
+    })
+}
+
 #[tokio::test]
 async fn test_period_payments_pays_a_period_by_the_requests_endpoint() {
     let w = World::new();
@@ -225,6 +277,14 @@ async fn test_period_payments_pays_a_period_by_the_requests_endpoint() {
     assert!(view.periods[0].paid, "{view:?}");
     let payment = &wallet.payments().await.unwrap()[0];
     assert_eq!(payment.billing_period, Some(january()));
+    // The attempt is conditioned on the request record and applied only from the period's
+    // start, on the service's clock (Paykit spec 8.2, "Not before its start").
+    let conditions = attempt_conditions(&w, &payment.obligation);
+    assert_eq!(conditions.len(), 1);
+    assert_eq!(starts_at(&conditions[0]), Some(january().starts_at));
+    assert!(conditions[0]
+        .iter()
+        .any(|c| matches!(c, Condition::RecordVersion { .. })));
     // The payee credits the period, not the request.
     shop.receive(None).await.unwrap();
     let sale = &shop.payee_activity().await.unwrap()[0];
@@ -471,6 +531,10 @@ async fn test_period_payments_before_its_start_only_by_the_users_early_confirmat
         .await
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    // Applied from the time the user confirmed, the latest service time verified then.
+    let obligation = period_obligation(&wallet, february()).await;
+    let start = starts_at(&attempt_conditions(&w, &obligation)[0]).unwrap();
+    assert!(start < february().starts_at && start >= START_MS, "{start}");
 }
 
 #[tokio::test]
@@ -491,6 +555,14 @@ async fn test_period_payments_attempted_periods_drop_finished_and_keep_open_ones
     // January finished: the write that adds February drops it.
     let record = request_record(&w, &wallet, &request).await;
     assert_eq!(record.attempted_periods, [all[1].start_secs()]);
+    // The drop is conditioned on January's claim at the step read (Paykit wire 5.3).
+    let january_claim = period_obligation(&wallet, all[0]).await;
+    assert!(last_request_put(&w, &wallet, &request)
+        .iter()
+        .any(|c| matches!(
+            c,
+            Condition::ClaimStep { claim_key, step } if *claim_key == january_claim && *step == 2
+        )));
     by_user(&mut wallet, &request, all[2], early())
         .await
         .unwrap();
@@ -568,6 +640,14 @@ async fn test_period_payments_payer_cancellation_ends_the_subscription() {
         .unwrap();
     // A paid period doesn't hold the cancellation back.
     wallet.cancel_request(&request, None).await.unwrap();
+    // It is conditioned on the listed period's claim (Paykit spec 8.2, "Ending").
+    let january_claim = period_obligation(&wallet, january()).await;
+    assert!(last_request_put(&w, &wallet, &request)
+        .iter()
+        .any(|c| matches!(
+            c,
+            Condition::ClaimStep { claim_key, .. } if *claim_key == january_claim
+        )));
     assert_eq!(
         wallet.request(&request).await.unwrap().status,
         RequestStatus::Cancelled
