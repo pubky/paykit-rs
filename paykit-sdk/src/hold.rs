@@ -23,7 +23,9 @@
 use paykit_lib::collections::Collection;
 use paykit_lib::records::ActivityRecord;
 use pubky_switch_client::app::Protocol as _;
-use pubky_switch_client::app::{AppError, RecordContent, Unopened};
+use pubky_switch_client::app::{
+    AppError, Collection as SwitchCollection, PolicyFamily, RecordContent, Unopened,
+};
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::records::{AppCert, CLOCK_TOLERANCE_MS};
 use pubky_switch_core::scopes::Permission;
@@ -66,6 +68,57 @@ pub(crate) enum KeysAwaited {
     PayeeSideOnly,
 }
 
+/// A side of the shared records, by the collections it reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecordSide {
+    /// `payer_activity` and `payment_lists`.
+    Payer,
+    /// `payee_activity`, every label's.
+    Payee,
+    /// Every collection of Paykit's.
+    All,
+}
+
+impl RecordSide {
+    /// The collections of the side.
+    pub(crate) fn collections(self) -> Vec<SwitchCollection> {
+        let payer = crate::activity::family(Collection::PayerActivity);
+        let payee = crate::activity::family(Collection::PayeeActivity);
+        let lists = crate::activity::family(Collection::PaymentLists);
+        match self {
+            Self::Payer => vec![payer, lists],
+            Self::Payee => vec![payee],
+            Self::All => vec![payer, payee, lists],
+        }
+    }
+}
+
+/// Whether `scope` reads `collection`, or a member of it: its read scope, or, in a sub-scope
+/// family, one of its sub-scopes (Switch spec 3.3, 10.3).
+fn read_by_scope(collection: &SwitchCollection, scope: &str) -> bool {
+    scope == collection.policy.read_scope
+        || (collection.family == PolicyFamily::SubScopes
+            && pubky_switch_core::scopes::split(scope)
+                .is_some_and(|(name, sub)| sub.is_some() && name == collection.policy.read_scope))
+}
+
+/// Whether the app's copy of `side`'s records may lack records, so a record's absence there
+/// decides nothing yet (Paykit spec 8.1, "Records not listed yet"): a restore's mark
+/// (`restore`, `p/nl`), no certificate kept as listed under (`p/lc`), or `held`, the
+/// certificate held now, reading collections of the side, or members of one, that `listed`
+/// didn't. The one rule for every caller: [`Paykit::unlisted`], [`Paykit::payer_waits`],
+/// and the receive step, which reads the same state through its context.
+pub(crate) fn side_unlisted(
+    side: RecordSide,
+    restore: bool,
+    listed: Option<&AppCert>,
+    held: &AppCert,
+) -> bool {
+    restore
+        || listed
+            .is_none_or(|listed| crate::protocol::reads_more(&side.collections(), listed, held))
+}
+
 /// Why the shared records aren't listed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Unlisted {
@@ -104,7 +157,30 @@ impl Paykit {
         {
             return Ok(Some(Unlisted::Restore));
         }
-        Ok(self.widened_from().await?.map(|_| Unlisted::Certificate))
+        Ok(self
+            .side_unlisted(RecordSide::All)
+            .await?
+            .then_some(Unlisted::Certificate))
+    }
+
+    /// [`side_unlisted`] for `side`, from what the store holds. With none kept as listed
+    /// under, a certificate Paykit refuses lists nothing for Paykit: the records count as
+    /// listed until one passes.
+    pub(crate) async fn side_unlisted(&self, side: RecordSide) -> Result<bool> {
+        let restore = self
+            .local_get::<bool>(key::RECORDS_UNLISTED)
+            .await?
+            .is_some();
+        let listed = self.listed_cert().await?;
+        if !restore && listed.is_none() && self.certificate_refused().is_some() {
+            return Ok(false);
+        }
+        Ok(side_unlisted(
+            side,
+            restore,
+            listed.as_ref(),
+            self.app.cert(),
+        ))
     }
 
     /// The certificate the records were last listed under, when the one held now reads
@@ -115,12 +191,12 @@ impl Paykit {
         match self.listed_cert().await? {
             None if self.certificate_refused().is_none() => Ok(Some(None)),
             None => Ok(None),
-            Some(listed) => Ok(crate::protocol::reads_more(
-                &self.protocol.collections(),
-                &listed,
-                self.app.cert(),
-            )
-            .then_some(Some(listed))),
+            Some(listed) => {
+                Ok(
+                    side_unlisted(RecordSide::All, false, Some(&listed), self.app.cert())
+                        .then_some(Some(listed)),
+                )
+            }
         }
     }
 
@@ -142,10 +218,6 @@ impl Paykit {
         let Some(listed) = widened else {
             return Ok(Some(KeysAwaited::PayerSide));
         };
-        let payer_collections = [
-            crate::activity::family(Collection::PayerActivity),
-            crate::activity::family(Collection::PaymentLists),
-        ];
         // Without the current `pay` key the payer's records can't be written: a data epoch
         // rotation besides a widening on the payee's side leaves the app so, the certificate
         // reading no more of the payer's side.
@@ -158,7 +230,7 @@ impl Paykit {
         let claims = !listed.has_permission(Permission::ClaimsRead)
             && held.has_permission(Permission::ClaimsRead);
         let payer =
-            !pay_key || claims || crate::protocol::reads_more(&payer_collections, &listed, held);
+            !pay_key || claims || side_unlisted(RecordSide::Payer, false, Some(&listed), held);
         Ok(Some(if payer {
             KeysAwaited::PayerSide
         } else {
@@ -166,17 +238,31 @@ impl Paykit {
         }))
     }
 
-    /// Whether the app holds the scope keys its certificate's scopes have, at the current
-    /// data epoch: a certificate just taken that reads more gets them with the key bundle
-    /// the next read fetches (Switch spec 3.5), and a listing before then keeps values it
-    /// can't open, so it waits for them.
-    fn holds_scope_keys(&self) -> bool {
+    /// Whether the payer's side waits ([`KeysAwaited`], `keys` as
+    /// [`Paykit::scope_keys_awaited`] gave it): the payer's records, claims or `pay` key
+    /// wait, or keys wait while the payer's side of the copy isn't listed yet
+    /// ([`side_unlisted`]), as a restore's isn't. Nothing built on the payer's records is
+    /// written then, at a resume or a receive.
+    pub(crate) async fn payer_waits(&self, keys: Option<KeysAwaited>) -> Result<bool> {
+        Ok(keys == Some(KeysAwaited::PayerSide)
+            || (keys.is_some() && self.side_unlisted(RecordSide::Payer).await?))
+    }
+
+    /// Whether the app holds, at the current data epoch, the key of every scope of its
+    /// certificate that reads a collection of Paykit's (Switch spec 3.5): a certificate
+    /// just taken that reads more gets them with the key bundle the next read fetches, and
+    /// a listing before then keeps values it can't open, so it waits for them. The client
+    /// skips its own listing exactly while this doesn't hold, so it also tells whether a
+    /// read listed ([`Paykit::records_listed`]).
+    pub(crate) fn holds_scope_keys(&self) -> bool {
         let epoch = self.app.data_epoch();
+        let collections = RecordSide::All.collections();
         self.app
             .cert()
             .scopes()
             .iter()
             .filter(|scope| self.protocol.has_keys(scope))
+            .filter(|scope| collections.iter().any(|c| read_by_scope(c, scope)))
             .all(|scope| self.app.scope_key(epoch, scope).is_some())
     }
 
@@ -313,10 +399,18 @@ impl Paykit {
         self.local_commit(tx).await
     }
 
-    /// The client listed the shared records at a receive, a restore's listing included: the
-    /// restore's mark goes. The certificate listed under stays as it was, since the read
-    /// may have taken a wider one after its listing ([`Unlisted::Certificate`]).
-    pub(crate) async fn records_listed(&mut self) -> Result<()> {
+    /// A read that wasn't stopped got past the client's listing, a restore's included, which
+    /// the client makes only while it holds the keys of the scopes that read the records
+    /// ([`Paykit::holds_scope_keys`]): so the restore's mark goes when those keys were held
+    /// at the read's start, `keys_held_before`, and are under the certificate held after it,
+    /// which a restore's first read may have widened before its listing. Otherwise the
+    /// listing was skipped, and the mark stays until a read that lists. The certificate
+    /// listed under stays as it was, since the read may have taken a wider one after its
+    /// listing ([`Unlisted::Certificate`]).
+    pub(crate) async fn records_listed(&mut self, keys_held_before: bool) -> Result<()> {
+        if !keys_held_before || !self.holds_scope_keys() {
+            return Ok(());
+        }
         if self
             .local_get::<bool>(key::RECORDS_UNLISTED)
             .await?

@@ -502,6 +502,16 @@ impl Paykit {
         // now refuses the call with nothing written; the user tries again. The entry can't
         // wait in `AcceptanceOwed`: that stage holds a proof. An entry known unsubmitted, or
         // one the method reported failed, sends none.
+        // The record `done` goes with is found first, and a value there only waiting for its
+        // scope key refuses the call before anything is released: the acceptance goes only
+        // with a `done` that can be written now.
+        let done_target = match resolution {
+            Resolution::Done => Some(
+                self.done_target(obligation, &attempt, entry.as_ref())
+                    .await?,
+            ),
+            _ => None,
+        };
         if resolution == Resolution::Done && basis == Basis::Owner {
             if let Some(owed) = entry.as_mut().filter(|e| e.may_have_dispatched()) {
                 if owed.owes_acceptance()? {
@@ -515,10 +525,8 @@ impl Paykit {
         let mut batch = OpBatch::new()
             .op(op.kind())
             .obligation_deadline(*obligation, deadline);
-        if resolution == Resolution::Done {
-            let write = self
-                .done_record(obligation, &attempt, entry.as_ref())
-                .await?;
+        if let Some(target) = &done_target {
+            let write = self.done_record(target, entry.as_ref()).await?;
             batch = batch.entry(write);
         }
         if let Some(mut entry) = entry.filter(JournalEntry::open) {
@@ -529,19 +537,21 @@ impl Paykit {
         Ok(())
     }
 
-    /// The payer's activity record's update for a user's `done` without a proof (Paykit spec
-    /// 7.2 step 3, as [`Paykit::resolve_attempt`] says): the record of `obligation`, from the
-    /// journal entry, the attempt of a payment without a request, or the request records this
-    /// app holds; with the journaled acceptance placed and `status` `paid`, built on the
-    /// version held, so `done` and the update are applied together or not at all. An absent
-    /// or deleted record is rebuilt from `entry`; one that doesn't read, with no copy this app
-    /// trusts, or one that can't be found or rebuilt, holds.
-    async fn done_record(
+    /// The payer's activity record a user's `done` without a proof updates
+    /// ([`Paykit::done_record`]): the record of `obligation`, from the journal entry, the
+    /// attempt of a payment without a request, or the request records this app holds.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::RecordHeld`] when no record can be found; [`Refusal::NotNow`] naming the
+    /// scope keys while the record's value is sealed under a key the app doesn't hold yet:
+    /// it opens once the key comes, and is never written over meanwhile.
+    async fn done_target(
         &mut self,
         obligation: &[u8; 32],
         attempt: &AttemptId,
         entry: Option<&JournalEntry>,
-    ) -> Result<(Vec<Condition>, OpKind)> {
+    ) -> Result<ActivityTarget> {
         let own = self.identity();
         let held =
             |why: &str| -> crate::error::PaykitError { Refusal::RecordHeld(why.into()).into() };
@@ -566,6 +576,32 @@ impl Paykit {
         };
         let target = ActivityTarget::payer(natural);
         let key = self.activity_key(&target)?;
+        if self
+            .app
+            .shared_record(&key)
+            .await?
+            .is_some_and(|r| crate::hold::awaits_key(&r.content))
+        {
+            return Err(crate::hold::value_awaits_key());
+        }
+        Ok(target)
+    }
+
+    /// The payer's activity record's update for a user's `done` without a proof (Paykit spec
+    /// 7.2 step 3, as [`Paykit::resolve_attempt`] says) at `target` ([`Paykit::done_target`]):
+    /// with the journaled acceptance placed and `status` `paid`, built on the version held, so
+    /// `done` and the update are applied together or not at all. An absent or deleted record
+    /// is rebuilt from `entry`; one that doesn't read, with no copy this app trusts, or one
+    /// that can't be rebuilt, holds.
+    async fn done_record(
+        &mut self,
+        target: &ActivityTarget,
+        entry: Option<&JournalEntry>,
+    ) -> Result<(Vec<Condition>, OpKind)> {
+        let own = self.identity();
+        let held =
+            |why: &str| -> crate::error::PaykitError { Refusal::RecordHeld(why.into()).into() };
+        let key = self.activity_key(target)?;
         let current = self.app.shared_record(&key).await?;
         let read = match current.as_ref().map(|r| &r.content) {
             None | Some(RecordContent::Deleted) => None,

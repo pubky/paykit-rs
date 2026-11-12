@@ -1090,3 +1090,127 @@ async fn test_one_time_expired_request_not_found_at_the_switch_is_not_found() {
     assert_eq!(refused.refusal(), Some(&Refusal::NotFound), "{refused:?}");
     assert!(w.rail.all_executions().is_empty());
 }
+
+#[tokio::test]
+async fn test_one_time_attempt_kept_then_refused_reads_the_claim_while_its_end_is_known() {
+    // The attempt's batch is kept, then refused for good: the client answers it `Dropped`
+    // within the retention. A dropped batch is no batch still kept, so the resume reads the
+    // claim at once, finds no attempt and closes the entry, rather than leave it waiting for
+    // a batch that never goes; the user's next payment pays once.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = long_request(&w, &mut wallet, &mut shop).await;
+    w.alice.switch().fail_next(unreachable_ops());
+    let batch_id = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err()
+        .kept_batch()
+        .expect("the attempt's batch is kept");
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            current: serde_json::Value::Null,
+        });
+    wallet.flush().await.unwrap();
+    wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            wallet.app().kept_batch(batch_id).await.unwrap(),
+            Some(pubky_switch_client::app::KeptBatchStatus::Dropped { .. })
+        ),
+        "the client still knows the batch dropped"
+    );
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Abandoned
+    );
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_one_time_attempt_kept_then_applied_writes_failed_and_pays_once() {
+    // The attempt's batch is kept and applied by the next flush: the attempt is open with
+    // no payment started, a payment in progress until the resume reads the claim and
+    // writes `failed`. The next payment pays once.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = long_request(&w, &mut wallet, &mut shop).await;
+    w.alice.switch().fail_next(unreachable_ops());
+    let batch_id = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err()
+        .kept_batch()
+        .expect("the attempt's batch is kept");
+    wallet.flush().await.unwrap();
+    assert!(
+        matches!(
+            wallet.app().kept_batch(batch_id).await.unwrap(),
+            Some(pubky_switch_client::app::KeptBatchStatus::Applied { .. })
+        ),
+        "{:?}",
+        wallet.app().kept_batch(batch_id).await
+    );
+    let busy = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        busy.refusal(),
+        Some(&Refusal::PaymentInProgress),
+        "{busy:?}"
+    );
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Failed { .. }]),
+        "{resumed:?}"
+    );
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_one_time_expired_request_read_refused_by_the_switch_keeps_its_code() {
+    // Past the request's expiry the switch refuses the record's read for good: the
+    // refusal is the answer, with the switch's code, never taken as the record unchanged.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let mut short = draft("1", w.clock.now_ms());
+    short.proposal_expires_at_ms = Some(w.clock.now_ms() + HOUR_MS);
+    let request = request_from(&mut shop, w.alice_id(), short).await;
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(2 * HOUR_MS);
+    wallet.receive(None).await.unwrap();
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/records/".into(),
+            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            current: serde_json::Value::Null,
+        });
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused.code(),
+        Some(pubky_switch_core::http::ErrorCode::PermissionMissing),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}

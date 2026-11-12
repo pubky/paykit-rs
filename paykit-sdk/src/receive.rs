@@ -45,12 +45,14 @@ use pubky_switch_client::app::{
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::claims::{Basis, ClaimStatus, Outcome, RECONCILIATION_MS};
 use pubky_switch_core::enc::serde_b64;
+use pubky_switch_core::records::AppCert;
 use pubky_switch_core::scopes::Permission;
 use pubky_switch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::activity::{self, ActivityTarget, Role};
+use crate::hold::RecordSide;
 use crate::journal::JournalEntry;
 use crate::notices::{KeptNotice, NoticeKind};
 use crate::paykit::Paykit;
@@ -145,7 +147,8 @@ pub(crate) fn effect(
         Body::PaymentRequest(_) if pay => {
             let target =
                 ActivityTarget::payer(natural_key::request_record(&sender, &stored.hash()));
-            if held_value(cx, &target)?.is_some() || admits_new_state(cx, &sender, &scopes)? {
+            let held = held_or_unlisted(cx, &target, RecordSide::Payer)?;
+            if held.is_some() || admits_new_state(cx, &sender, &scopes)? {
                 place(cx, &target, sender, Role::Request, stored)?;
                 note_peer(cx, &sender, stored)?;
             }
@@ -166,7 +169,7 @@ pub(crate) fn effect(
             if payee && payer_reply(cx, stored, &scopes, settlement)? {
                 // A payer's cancellation of a request this app sent.
             } else if pay
-                && (held_value(cx, &payer_target)?.is_some()
+                && (held_or_unlisted(cx, &payer_target, RecordSide::Payer)?.is_some()
                     || admits_new_state(cx, &sender, &scopes)?)
             {
                 // A payee's cancellation is kept, the kept-copy stop (Paykit spec 8.1): the
@@ -183,9 +186,11 @@ pub(crate) fn effect(
         }
         Body::PrivatePaymentList(_) if pay => {
             let target = list_target(&sender, &stored.message().from.app_id);
-            let held = cx
-                .record(&target)?
-                .is_some_and(|held| held.content.value().is_some());
+            let record = cx.record(&target)?;
+            if record.is_none() {
+                hold_while_unlisted(cx, RecordSide::Payer)?;
+            }
+            let held = record.is_some_and(|held| held.content.value().is_some());
             if held || admits_new_state(cx, &sender, &scopes)? {
                 list_effect(cx, stored)?;
                 note_peer(cx, &sender, stored)?;
@@ -316,6 +321,71 @@ fn held_value(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<Option
         .and_then(|held| held.content.value().map(<[u8]>::to_vec)))
 }
 
+/// Hold the entry while the record at `target` holds a value not open only for want of its
+/// scope key (Switch spec 3.5), as the client holds one whose write it can't seal yet: such
+/// a value opens once the key comes, so it is neither absent nor a value that doesn't read,
+/// and a message about it is read again then. Written over now, it would lose what it holds
+/// unseen. The app may hold the current epoch's key and not the one the value is sealed at,
+/// as with a bundle that came in parts, so the context's own wait doesn't cover it. The
+/// entry is held as for a store unavailable for now, the way the receive step holds one
+/// under a certificate Paykit refuses.
+fn wait_for_key(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<(), Fail> {
+    let waits = cx
+        .record(&target.record_target())?
+        .is_some_and(|held| crate::hold::awaits_key(&held.content));
+    if waits {
+        return Err(Fail::Store(StoreFailure::unavailable(
+            StoreError::Unavailable,
+        )));
+    }
+    Ok(())
+}
+
+/// The value held at `target`, which is of `side`: `None` for none, or one that isn't
+/// open or is deleted. The entry is held instead while the value waits for its scope key
+/// ([`wait_for_key`]), and while the record is absent and the app's copy of `side` may
+/// lack records ([`hold_while_unlisted`]): the absence decides nothing then.
+fn held_or_unlisted(
+    cx: &ReceiveContext<'_>,
+    target: &ActivityTarget,
+    side: RecordSide,
+) -> Result<Option<Vec<u8>>, Fail> {
+    wait_for_key(cx, target)?;
+    let record = cx.record(&target.record_target())?;
+    if record.is_none() {
+        hold_while_unlisted(cx, side)?;
+    }
+    Ok(record.and_then(|held| held.content.value().map(<[u8]>::to_vec)))
+}
+
+/// Hold the entry while the app's copy of `side`'s records may lack records (Paykit spec
+/// 8.1, "Records not listed yet"): after a restore, or a certificate that reads more, until
+/// Paykit has listed them. The rule is [`crate::hold::side_unlisted`], read per entry from
+/// the context's certificate and Paykit's state (`nl`, `lc`), so an entry after a wider
+/// certificate the same read took is held too. The entry is held as for a store
+/// unavailable for now (Paykit spec 17, question 27), and read again at a later read.
+///
+/// [`Paykit::side_unlisted`] counts the records as listed under a certificate Paykit
+/// refuses with none kept as listed under; this needs no such case: [`effect`] holds every
+/// entry under a certificate that fails the same check before any branch reaches here, so
+/// the two agree wherever this runs.
+fn hold_while_unlisted(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<(), Fail> {
+    let restore = cx.local_get(key::RECORDS_UNLISTED.as_bytes())?.is_some();
+    let listed = match cx.local_get(key::LISTED_CERT.as_bytes())? {
+        None => None,
+        Some(bytes) => {
+            let signed: SignedDoc = state::decode(&bytes).map_err(|_| Fail::corrupt())?;
+            Some(AppCert::verify(&signed, &cx.identity()).map_err(|_| Fail::corrupt())?)
+        }
+    };
+    if crate::hold::side_unlisted(side, restore, listed.as_ref(), cx.cert()) {
+        return Err(Fail::Store(StoreFailure::unavailable(
+            StoreError::Unavailable,
+        )));
+    }
+    Ok(())
+}
+
 /// Place `stored` in its `role` of the record at `target`, in the effect's batch, built on
 /// the version the app holds. A record that doesn't read is written again with the message
 /// (the reader doesn't act on an invalid record, Paykit wire 5.3). Nothing is written when
@@ -327,6 +397,7 @@ fn place(
     role: Role,
     stored: &StoredMessage,
 ) -> Result<(), Fail> {
+    wait_for_key(cx, target)?;
     let own = cx.identity();
     let side = target.side.side();
     let current = held_value(cx, target)?;
@@ -397,7 +468,7 @@ fn payer_reply(
             // The request's record goes in the batch that queues the request, so it comes
             // before any reply in the feed: a reply to a request this app holds no record of
             // isn't about one of its scopes' requests.
-            if held_value(cx, &target)?.is_none() {
+            if held_or_unlisted(cx, &target, RecordSide::Payee)?.is_none() {
                 return Ok(false);
             }
             place(cx, &target, sender, role, stored)?;
@@ -419,7 +490,8 @@ fn payer_reply(
                 None,
             );
             // A proof no held record matches is new state, which the spam rule gates.
-            if held_value(cx, &target)?.is_some() || admits_new_state(cx, &sender, scopes)? {
+            let held = held_or_unlisted(cx, &target, RecordSide::Payee)?;
+            if held.is_some() || admits_new_state(cx, &sender, scopes)? {
                 place(cx, &target, sender, role, stored)?;
             }
             Ok(true)
@@ -445,7 +517,7 @@ fn receipt_effect(
     };
     // The payer matches a receipt through its record, whose counterparty must be the
     // receipt's sender (Paykit spec 8.4).
-    let Some(value) = held_value(cx, &target)? else {
+    let Some(value) = held_or_unlisted(cx, &target, RecordSide::Payer)? else {
         return Ok(());
     };
     let Some(record) = activity::read(Some(&value), &own, target.side.side()) else {

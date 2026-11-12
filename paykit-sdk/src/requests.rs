@@ -197,7 +197,10 @@ pub enum MessageDelivery {
         accepted_at_ms: u64,
     },
     /// Refused for good, given up, or never queued: the kept batch that would have queued
-    /// it was dropped.
+    /// it was dropped. A batch dropped after a send whose answer can't tell whether it was
+    /// applied may have been applied all the same: the request's record may then be at the
+    /// switch although the message was never sent, and the host reads the request's state
+    /// ([`Paykit::payee_activity`]) before it sends it again.
     Failed {
         /// Why, without content.
         reason: String,
