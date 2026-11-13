@@ -656,7 +656,8 @@ impl Paykit {
         // An app holding `contacts` reads the flagged senders again first, at most every 10
         // minutes, for the spam rule (Paykit wire 4.1).
         Box::pin(self.refresh_lists_when_due()).await?;
-        // After a restore, this app's blocks the backup kept unanswered are written again.
+        // This app's blocks that may not reach the switch otherwise are written again: one
+        // whose batch the client neither keeps nor applied, a restored one among them.
         if self.certificate_refused().is_none() {
             Box::pin(self.send_own_blocks_again()).await?;
         }

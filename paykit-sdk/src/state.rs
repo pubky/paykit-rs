@@ -48,7 +48,7 @@
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
-//! | `bk/<pubky>` | this app's block or unblock of `pubky` not yet shown by the list (`OwnBlockMark`): a block from before the switch is asked, an unblock only with the batch the client keeps; a block counts until a read of the list shows it, an unblock only while the client still keeps its batch (Paykit spec 8.1); a block is restored, and written again once after the restore, since the kept batch stays with the device that kept it; an unblock isn't | |
+//! | `bk/<pubky>` | this app's block or unblock of `pubky` not yet shown by the list (`OwnBlockMark`): a block from before the switch is asked, an unblock only with the batch the client keeps; a block counts until a read of the list shows it, and is written again at a receive while the client neither keeps nor applied its batch, a restored one too, since the kept batch stays with the device that kept it; an unblock counts only while the client still keeps its batch, and isn't restored (Paykit spec 8.1) | |
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `kw/<sender>` | a mark of a sender's entries the client dropped while they waited for a scope key, as `pd/` holds, with the data epochs they waited for; it asks only while the app holds every key of those epochs (`marks.rs`) | |
@@ -382,8 +382,8 @@ impl Stored for u64 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub(crate) enum OwnBlockMark {
-    /// A block or unblock with the client's kept batch it rides on: `None` for a block not
-    /// yet answered or kept, which needs none.
+    /// A block or unblock with the client's kept batch it rides on: `None` only for a
+    /// block, not yet answered, or answered with no batch kept.
     Sent {
         /// A block (`true`) or an unblock.
         blocked: bool,
@@ -399,6 +399,14 @@ impl OwnBlockMark {
     pub(crate) fn blocked(&self) -> bool {
         match self {
             Self::Sent { blocked, .. } | Self::Bare(blocked) => *blocked,
+        }
+    }
+
+    /// The batch the client keeps it in, if it named one.
+    pub(crate) fn batch(&self) -> Option<[u8; 16]> {
+        match self {
+            Self::Sent { batch, .. } => *batch,
+            Self::Bare(_) => None,
         }
     }
 
@@ -428,10 +436,19 @@ impl OwnBlockMark {
 
 impl sealed::Sealed for OwnBlockMark {}
 
+/// Every form a run writes; an unblock with no batch is no such form: an unblock is marked
+/// only with the batch the client keeps it in.
 impl Stored for OwnBlockMark {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
-        match family {
-            StateKey::OwnBlock(_) => Ok(()),
+        match (family, self) {
+            (
+                StateKey::OwnBlock(_),
+                Self::Sent {
+                    blocked: false,
+                    batch: None,
+                },
+            ) => corrupt(),
+            (StateKey::OwnBlock(_), _) => Ok(()),
             _ => corrupt(),
         }
     }
@@ -911,8 +928,9 @@ pub(crate) mod key {
     /// This app's block or unblock of `pubky` not yet shown by a read of the lists
     /// ([`OwnBlockMark`]). A block is marked before the switch is asked, so a crash before
     /// the call leaves it counted; its mark goes once the switch took it, or once a read of
-    /// the lists shows it, and a block whose kept batch the client drops keeps counting until
-    /// then, failing closed. An unblock counts only while the client keeps its batch.
+    /// the lists shows it, and until then a block whose batch the client neither keeps nor
+    /// applied is written again at each receive. An unblock counts only while the client
+    /// keeps its batch.
     pub(crate) fn own_block(pubky: &[u8; 32]) -> String {
         format!("{OWN_BLOCKS}{}", b64(pubky))
     }
@@ -1375,6 +1393,15 @@ mod tests {
         assert!(!reads::<bool>(
             &key::own_block(&[1; 32]),
             serde_json::json!(false)
+        ));
+        // An unblock is marked only with its batch: one without is no run's.
+        assert!(!reads::<OwnBlockMark>(
+            &key::own_block(&[1; 32]),
+            serde_json::json!({ "blocked": false, "batch": null })
+        ));
+        assert!(reads::<OwnBlockMark>(
+            &key::own_block(&[1; 32]),
+            serde_json::json!({ "blocked": true, "batch": vec![7u8; 16] })
         ));
         assert!(reads::<Vec<[u8; 32]>>(key::DENIED, serde_json::json!([])));
         assert!(!reads::<Vec<[u8; 32]>>(

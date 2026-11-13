@@ -2416,3 +2416,24 @@ async fn test_restore_own_rejection_in_a_record_sealed_under_a_key_not_held_wait
         paykit_sdk::PayeeStatus::Rejected
     );
 }
+
+#[tokio::test]
+async fn test_restore_own_unblock_mark_without_its_batch_refused() {
+    // An unblock is marked only with the batch the client keeps it in: a backup holding one
+    // without is no run's state, and is refused, writing nothing.
+    let w = World::new();
+    let (good, app_id) = backup_with_a_payment(&w).await;
+    let mut layer = layer_of(&good);
+    layer.push((
+        format!("bk/{}", pubky_switch_core::enc::b64(&w.bob_id())).into_bytes(),
+        serde_json::json!({ "v": 1, "d": { "blocked": false, "batch": null } }),
+    ));
+    layer.sort_by(|a, b| a.0.cmp(&b.0));
+    refused_writing_nothing(
+        &w,
+        with_layer(&good, layer),
+        app_id,
+        "an unblock without its batch",
+    )
+    .await;
+}

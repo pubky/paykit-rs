@@ -1023,3 +1023,161 @@ async fn test_blocked_own_unblock_kept_unanswered_not_restored() {
     let error = wallet.pay_request(&request, held).await.unwrap_err();
     assert_eq!(shown(error).payee, w.bob_id());
 }
+
+/// A store whose commit of the client's applied block (`lc/deny/<pubky>`) lands but answers
+/// `Unknown`, once.
+#[derive(Default)]
+struct UnknownBlockCommit {
+    inner: pubky_switch_client::store::MemoryStore,
+    used: std::sync::atomic::AtomicBool,
+}
+
+impl pubky_switch_client::store::StateStore for UnknownBlockCommit {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        use pubky_switch_client::store::Write;
+        use std::sync::atomic::Ordering;
+        let blocked = batch
+            .writes
+            .iter()
+            .any(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"lc/deny/")));
+        self.inner.commit(batch)?;
+        if blocked && !self.used.swap(true, Ordering::SeqCst) {
+            return Err(pubky_switch_client::error::StoreError::Unknown);
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_blocked_block_applied_whose_answer_is_of_unknown_fate_still_counts() {
+    // The switch applies the wallet's block and the client's commit of it lands but answers
+    // `Unknown`: the call fails with the store's error, of unknown fate. The block stays
+    // counted, so the user's payment to bob needs the confirmation (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            std::sync::Arc::new(UnknownBlockCommit::default()),
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.block(&w.bob_id()).await.is_err());
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(lists.deny.contains(&w.bob_id()));
+    let error = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(shown(error).payee, w.bob_id());
+    assert!(w.rail.all_executions().is_empty());
+}
+
+/// A store that, once armed, fails the client's next commit that keeps a batch
+/// (`opq/<batch_id>`), once, applying nothing.
+#[derive(Default)]
+struct FailNextKeep {
+    inner: pubky_switch_client::store::MemoryStore,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl pubky_switch_client::store::StateStore for FailNextKeep {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        use pubky_switch_client::store::Write;
+        use std::sync::atomic::Ordering;
+        let keeps = batch
+            .writes
+            .iter()
+            .any(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"opq/")));
+        if keeps && self.armed.swap(false, Ordering::SeqCst) {
+            return Err(pubky_switch_client::error::StoreError::Unavailable);
+        }
+        self.inner.commit(batch)
+    }
+}
+
+#[tokio::test]
+async fn test_blocked_block_counted_but_never_kept_written_at_the_next_receive() {
+    // The client's commit that keeps the wallet's block fails, so the block is neither sent
+    // nor kept, though it counts here. The next receive writes it, and the identity's list
+    // holds bob, so the other own apps pause for him too (Paykit spec 8.1).
+    let w = World::new();
+    let target = std::sync::Arc::new(FailNextKeep::default());
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            std::sync::Arc::clone(&target)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    target
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(wallet.block(&w.bob_id()).await.is_err());
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(!lists.deny.contains(&w.bob_id()));
+    let error = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(shown(error).payee, w.bob_id());
+    wallet.receive(None).await.unwrap();
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(lists.deny.contains(&w.bob_id()));
+}
