@@ -51,7 +51,9 @@ pub(crate) struct RestoreHold {
     /// The re-sends are all queued.
     pub(crate) asks_queued: bool,
     /// The counterparties asked already while a record of the copy was sealed, in
-    /// increasing order ([`Paykit::queue_restore_asks`]).
+    /// increasing order ([`Paykit::queue_restore_asks`]). A hold written before this member
+    /// existed, a valid run's form, reads as having asked none.
+    #[serde(default)]
     pub(crate) asked: Vec<[u8; 32]>,
 }
 

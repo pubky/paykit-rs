@@ -1171,6 +1171,14 @@ mod tests {
     }
 
     #[test]
+    fn test_state_restore_hold_written_without_its_asked_reads() {
+        // A restore's hold as a run before the `asked` member wrote it, mid-hold when the
+        // store is upgraded: a valid run's form, so it reads, having asked none.
+        let hold = serde_json::json!({ "resend_from_ms": 1, "asks_queued": false });
+        assert!(reads::<RestoreHold>(key::RESTORE_HOLD, hold));
+    }
+
+    #[test]
     fn test_state_marks_bound_to_their_sender_with_times_not_crossed() {
         let mark = |sender: u8, earliest: u64, latest: u64| {
             serde_json::json!({

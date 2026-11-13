@@ -696,3 +696,33 @@ async fn test_blocked_mark_queued_request_naming_another_message_refused_as_corr
     assert!(crate::common::is_corrupt(&failed), "{failed:?}");
     assert!(crate::common::asked(&shop, &w.alice_id()).await.is_empty());
 }
+
+#[tokio::test]
+async fn test_blocked_peer_ask_held_goes_30_days_after_its_time() {
+    // Bob is blocked when a `missed` item asks him: the ask is held, and stays a day short of
+    // 30 days after the item's time; past them bob keeps nothing it asks for, so it goes
+    // unsent, and an unblock then asks him nothing.
+    let w = World::new();
+    let (mut wallet, _, _) = received(&w, PaykitConfig::default()).await;
+    wallet.block(&w.bob_id()).await.unwrap();
+    let now = w.clock.now_ms();
+    w.alice.switch().push_missed(1, now - 1_000, now);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"ask/").await.unwrap().len(), 1);
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS - pubky_switch_core::records::DAY_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"ask/").await.unwrap().len(), 1);
+    w.clock.advance_ms(2 * pubky_switch_core::records::DAY_MS);
+    wallet.receive(None).await.unwrap();
+    assert!(wallet
+        .app()
+        .protocol_scan(b"ask/")
+        .await
+        .unwrap()
+        .is_empty());
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
+}
