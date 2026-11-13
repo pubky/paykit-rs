@@ -1673,3 +1673,47 @@ async fn test_blocked_request_from_an_app_without_contacts_sent_while_the_lists_
         RequestStatus::Open
     );
 }
+
+#[tokio::test]
+async fn test_blocked_payees_cancellation_to_a_blocked_payer_delivered() {
+    // A payee's cancellation stops a payment: bob's till, holding `contacts`, cancels its
+    // request to alice after blocking her, and the cancellation reaches her wallet.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut till = contacts_till(&w, store()).await;
+    let request = request_from(&mut till, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    till.block(&w.alice_id()).await.unwrap();
+    let record = till.payee_activity().await.unwrap()[0].record;
+    till.cancel_sent_request(&record, None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn test_blocked_receipt_to_a_blocked_payer_delivered() {
+    // A receipt settles a payment already made: bob's till, holding `contacts`, confirms
+    // alice's payment after blocking her, and the receipt reaches her wallet's record.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut till = contacts_till(&w, store()).await;
+    let request = request_from(&mut till, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    till.receive(None).await.unwrap();
+    till.block(&w.alice_id()).await.unwrap();
+    let record = till.payee_activity().await.unwrap()[0].record;
+    assert!(till.confirm_payment(&record).await.unwrap().is_some());
+    wallet.receive(None).await.unwrap();
+    let key = wallet.request(&request).await.unwrap().record;
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    assert!(!value["receipt"].is_null(), "{value}");
+}
