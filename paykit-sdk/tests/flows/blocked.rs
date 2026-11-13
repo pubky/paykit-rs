@@ -1551,6 +1551,83 @@ async fn test_blocked_recurring_rejection_while_the_deny_list_is_unknown_recorde
 }
 
 #[tokio::test]
+async fn test_blocked_held_rejection_kept_unanswered_resumed_with_nothing_sent() {
+    // The held rejection's batch is applied with its answer lost: the client keeps it. The
+    // receives that settle it while bob is still blocked send him nothing, as the batch
+    // queues nothing; once he is unblocked the rejection goes, once (Paykit spec 8.1,
+    // "Blocked counterparties").
+    let w = World::new();
+    let (mut wallet, mut shop, request) = received(&w, PaykitConfig::default()).await;
+    wallet.block(&w.bob_id()).await.unwrap();
+    let entries = w.bob.switch().entries_from(&w.alice_id());
+    w.alice.switch().fail_next(Fault::LoseAnswer {
+        path: "/ops".into(),
+    });
+    let kept = wallet.reject_request(&request, None).await;
+    assert!(kept.is_err(), "{kept:?}");
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+        wallet.flush().await.unwrap();
+    }
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Rejected
+    );
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries + 1);
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        paykit_sdk::PayeeStatus::Rejected
+    );
+}
+
+#[tokio::test]
+async fn test_blocked_held_rejection_past_its_window_given_up_with_a_notice() {
+    // Bob stays blocked for more than the rejection's replay window of 30 days: once he is
+    // unblocked the client refuses to queue it, so it never goes, and a notice tells the
+    // host. The request record still holds it, so no own app pays the request (Paykit spec
+    // 8.1, "Blocked counterparties"; Switch spec 11).
+    let w = World::new();
+    let (mut wallet, _shop, request) = received(&w, PaykitConfig::default()).await;
+    let mut phone = w.wallet("phone").await;
+    wallet.block(&w.bob_id()).await.unwrap();
+    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let msg_id = wallet.reject_request(&request, None).await.unwrap();
+    w.clock.advance_ms(31 * 24 * crate::common::HOUR_MS);
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.notices().await.unwrap().is_empty());
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.flush().await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].msg_id.as_deref(), Some(msg_id.as_str()));
+    assert_eq!(notices[0].request_hash, Some(request.request_hash));
+    // Raised once: a later receive neither raises it again nor sends anything.
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.notices().await.unwrap().len(), 1);
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    let record = wallet.request(&request).await.unwrap().record;
+    let held = wallet.app().shared_record(&record).await.unwrap().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    assert!(!value["response"].is_null(), "{value}");
+    phone.receive(None).await.unwrap();
+    assert!(phone
+        .pay_request(&request, PayOptions::default())
+        .await
+        .is_err());
+    wallet.acknowledge_notice(&notices[0].id).await.unwrap();
+    assert!(wallet.notices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn test_blocked_held_rejection_sent_once_after_a_restart() {
     answer_held(Held::Blocked, Answer::Reject, Between::Restart).await;
 }
