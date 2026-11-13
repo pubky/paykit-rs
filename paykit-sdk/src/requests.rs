@@ -1879,6 +1879,10 @@ impl Paykit {
         let mut end_hold = None;
         if answer == Answer::Accept {
             let record_key = self.activity_key(&target)?;
+            // An acceptance by hand of a request whose record is paused as divergent, or whose
+            // kept messages wait, waits for the user's confirmation: the payee may have
+            // cancelled it (Paykit spec 6). Refused naming the record, nothing recorded.
+            Box::pin(self.refuse_while_paused(&[record_key])).await?;
             if self.held(&record_key, &record).await? {
                 if options.possibly_cancelled_confirmed.is_none() {
                     return Err(Refusal::HeldAfterRestore.into());

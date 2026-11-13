@@ -1020,8 +1020,21 @@ pub(crate) fn step_keep(
     settlement: Settlement<'_>,
     reads: bool,
 ) -> std::result::Result<(), Fail> {
-    let (Some(role), Some(view)) = (WriteRole::of(stored), View::of(held)) else {
-        return Ok(());
+    // A message no kept write holds for this record, such as period details, or a period's
+    // proof, whose period record a kept write can't name, is held on the feed instead, never
+    // written past the pause nor lost, until the user confirms the record or its 30 days
+    // pass, when it is given up with the host's notice.
+    let names_record = write_target(stored, &cx.identity(), settlement)
+        .map(|target| cx.record_key(&target.record_target()))
+        .transpose()?
+        .is_some_and(|key| key == held.key);
+    let (Some(role), Some(view), true) = (WriteRole::of(stored), View::of(held), names_record)
+    else {
+        return crate::receive::hold_entry_for(
+            cx,
+            stored,
+            crate::notices::GivenUpOrigin::Divergent,
+        );
     };
     let record = held.key;
     // The messages kept already for the record and role are read bound, and checked against
