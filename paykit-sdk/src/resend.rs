@@ -278,10 +278,11 @@ impl Paykit {
     /// - as the payer, each payee of a request not paid, cancelled, rejected or expired;
     /// - as the payee, each payer of a request not rejected, cancelled or receipted, and of
     ///   a proof without a request not receipted yet;
-    /// - each payee of a payment in the journal not finished or abandoned.
+    /// - each payee of a payment in the journal not finished or abandoned;
+    /// - each counterparty of an Allowance not ended, rejected or conflicted, whose end may
+    ///   be among the deleted entries (Paykit spec 8.3).
     ///
-    /// Called once the copy is listed: the copy it reads must not lack records. Allowances
-    /// add theirs here.
+    /// Called once the copy is listed: the copy it reads must not lack records.
     pub(crate) async fn missed_counterparties(
         &self,
     ) -> Result<std::collections::BTreeSet<[u8; 32]>> {
@@ -312,6 +313,7 @@ impl Paykit {
                 counterparties.insert(payment.payee);
             }
         }
+        counterparties.extend(self.open_allowance_counterparties().await?);
         Ok(counterparties)
     }
 

@@ -43,7 +43,7 @@
 //! | `rsd/<pubky>/<day>` | how many messages were re-sent to a requester that day | |
 //! | `nl` | set by a restore: the shared records aren't listed since, so the client's copy is empty and a record's absence means nothing yet; cleared once they are listed; never restored | |
 //! | `lc` | the certificate the shared records were last listed under, signed: a certificate held now other than it means the copy may lack records until Paykit lists them, since one held between may have read less (`hold.rs`); written only by a Paykit listing, in its commit; absent from a join or a restore until that listing, which leaves the records unlisted; never restored | |
-//! | `ro` | set by a restore: this app's own messages its activity records store to be sent are queued again once the records are listed (`hold.rs`, `Paykit::queue_own_again`); after a pass, the counterparties whose messages wait: those whose sends were held then, and those whose period details wait for their request record to show whether a later stop covers them; or none named, every record judged again at the next receive, after a pass that found an activity record it couldn't read within 30 days of the restore; and the restore's time, which `Paykit::restore` writes right after the restore and the mark keeps; never restored | |
+//! | `ro` | set by a restore: this app's own messages its activity and Allowance records store to be sent are queued again once the records are listed (`hold.rs`, `Paykit::queue_own_again`); after a pass, the counterparties whose messages wait: those whose sends were held then, and those whose period details wait for their request record to show whether a later stop covers them; or none named, every record judged again at the next receive, after a pass that found an activity or Allowance record it couldn't read within 30 days of the restore; and the restore's time, which `Paykit::restore` writes right after the restore and the mark keeps; never restored | |
 //! | `ha/<payee>/<msg_id>` | a rejection or payer's cancellation recorded while sends to its payee were held, its message stored in the request record and not queued, written with the record's batch: queued from the record once sends to the payee aren't held, or given up with a notice past its window (`hold.rs`, `Paykit::queue_own_again`) | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
@@ -53,9 +53,15 @@
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `kw/<sender>` | a mark of a sender's entries the client dropped while they waited for a scope key, as `pd/` holds, with the data epochs they waited for; it asks only while the app holds every key of those epochs (`marks.rs`) | |
-//! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply, or a payee's period details, for a request the app holds no record of yet, kept until it does, or a receipt for a payer record the app holds but can't read, kept until it reads (`receive.rs`) | |
+//! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply, or a payee's period details, for a request the app holds no record of yet, kept until it does, or a receipt for a payer record the app holds but can't read, kept until it reads (`receive.rs`), or a counterparty's Allowance answer before the app holds its Allowance record (`allowances.rs`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing, since a dropped entry's time is already in its sender's mark | |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, with the entry's ID and message hash, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
+//! | `ae/<record key>/<msg_id>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection; every distinct end is kept, each under its `msg_id`, until the record shows which one names what it holds (`allowances.rs`, Paykit spec 8.3) | |
+//! | `ac/<record key>` | the consent list: an Allowance this app may pay under, or removed from it for good (`allowances.rs`, Paykit spec 8.3); a restore marks every entry to confirm again | |
+//! | `cf/<record key>` | a second, different proposal or response of an Allowance, kept as the stop until the Allowance record holds `conflicted` (`allowances.rs`, Paykit spec 8.3) | |
+//! | `mc` | set by a `missed` item: every entry of the consent list is to be confirmed again, as after a restore; nothing is consented while it is set, and the next receive marks each entry so and clears it (`allowances.rs`); never restored | |
+//! | `en/<msg_id>` | the executor app an `executor_notice` is wrapped to, kept with the batch that queues it | |
+//! | `eo/<record key>` | this app's own crossing end of an Allowance, recorded while sends to its counterparty were held, whose message is sent from the record once they aren't (`allowances.rs`, `Paykit::send_owed_ends`); never restored | |
 
 use paykit_lib::bodies::ResendRequest;
 use paykit_lib::derive::{natural_key, request_obligation_blinded};
@@ -69,6 +75,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::activity::{ActivityTarget, KeptSide};
+use crate::allowances::{allowance_target, ConsentEntry, NoticeTarget, OwedEnd};
 use crate::app_records::SeenRecords;
 use crate::error::{PaykitError, Result};
 use crate::hold::HeldAnswer;
@@ -466,6 +473,7 @@ impl Stored for bool {
         match family {
             StateKey::RecordsUnlisted
             | StateKey::MissedUnlisted
+            | StateKey::MissedConsents
             | StateKey::PayerPassOwed
             | StateKey::HoldConfirmed(_)
             | StateKey::Taken(_)
@@ -596,6 +604,18 @@ impl sealed::Sealed for KeptMessage {}
 ///   ([`crate::receive::receipt_target`]).
 /// - At `lh/<record key>`, a `paykit.private_payment_list`, kept under the record key of its
 ///   payee app's `payment_lists` record, from its sender and App ID (Paykit wire 5.4).
+/// - At `pr/<sender>/<record key>/<msg_id>` too, an Allowance's acceptance or rejection its
+///   inbox accepted before this app held the proposal's record, from that sender and of that
+///   `msg_id`, kept under the record key of the Allowance record it names (Paykit spec 8.1,
+///   8.3).
+/// - At `ae/<record key>/<msg_id>`, a counterparty's `paykit.allowance_end` its inbox
+///   accepted, of that `msg_id`, kept as the stop under the record key of the Allowance
+///   record of its sender and the Allowance it names (Paykit spec 8.3, "Ends reach the
+///   executor").
+/// - At `cf/<record key>`, a second, different proposal, acceptance or rejection its inbox
+///   accepted, with its acceptance time, kept as the stop under the record key of the
+///   Allowance record of its sender and the Allowance it names (Paykit spec 8.3,
+///   "Conflicted").
 impl Stored for KeptMessage {
     fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
         let message = self.stored(&binder.own)?;
@@ -653,6 +673,44 @@ impl Stored for KeptMessage {
             }
             (StateKey::HeldList(record_key), Body::PrivatePaymentList(_)) => (
                 list_target(&message.sender(), &message.message().from.app_id),
+                record_key,
+            ),
+            (
+                StateKey::KeptReply {
+                    sender,
+                    record,
+                    msg_id,
+                },
+                Body::AllowanceAcceptance(answer) | Body::AllowanceRejection(answer),
+            ) if message.sender() == *sender
+                && message.message().msg_id == *msg_id
+                && message.accepted_at().is_some() =>
+            {
+                (allowance_target(sender, &answer.allowance_id), record)
+            }
+            (
+                StateKey::AllowanceEnd {
+                    record: record_key,
+                    msg_id,
+                },
+                Body::AllowanceEnd(end),
+            ) if message.message().msg_id == *msg_id && message.accepted_at().is_some() => (
+                allowance_target(&message.sender(), &end.allowance_id),
+                record_key,
+            ),
+            (StateKey::Conflict(record_key), Body::AllowanceProposal(proposal))
+                if message.accepted_at().is_some() =>
+            {
+                (
+                    allowance_target(&message.sender(), &proposal.allowance_id),
+                    record_key,
+                )
+            }
+            (
+                StateKey::Conflict(record_key),
+                Body::AllowanceAcceptance(answer) | Body::AllowanceRejection(answer),
+            ) if message.accepted_at().is_some() => (
+                allowance_target(&message.sender(), &answer.allowance_id),
                 record_key,
             ),
             _ => return corrupt(),
@@ -836,6 +894,55 @@ impl Stored for KeyWaitMark {
     }
 }
 
+impl sealed::Sealed for ConsentEntry {}
+
+/// An entry of the consent list: of the Allowance record its key names, which its
+/// counterparty and Allowance ID derive (Paykit spec 8.3). An entry naming another
+/// Allowance would let the executor pay under one its user never consented to.
+impl Stored for ConsentEntry {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::Consent(record) = family else {
+            return corrupt();
+        };
+        let allowance_id = self.allowance_id()?;
+        if binder.record_key(&allowance_target(&self.counterparty, &allowance_id))? != *record {
+            return corrupt();
+        }
+        Ok(())
+    }
+}
+
+impl sealed::Sealed for OwedEnd {}
+
+/// An own crossing end owed while sends were held: of the Allowance record its key names,
+/// with a `msg_id` a message carries (`allowances.rs`, [`OwedEnd`]).
+impl Stored for OwedEnd {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::OwedEnd(record)
+                if self.record == *record
+                    && pubky_switch_core::json::check_uuid_v4(&self.msg_id).is_ok() =>
+            {
+                Ok(())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for NoticeTarget {}
+
+/// The executor app an `executor_notice` is wrapped to: of the notice's `msg_id` its key
+/// names, written in the batch that queues that notice (`allowances.rs`).
+impl Stored for NoticeTarget {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::NoticeTarget(msg_id) if self.msg_id == *msg_id => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
 /// A number in a key, zero-padded to 20 digits so keys sort numerically.
 pub(crate) fn num(n: u64) -> String {
     format!("{n:020}")
@@ -863,6 +970,7 @@ pub(crate) mod key {
     pub(crate) const HELD_LISTS: &str = "lh/";
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
     pub(crate) const MISSED_UNLISTED: &str = "ml";
+    pub(crate) const MISSED_CONSENTS: &str = "mc";
     pub(crate) const PAYER_PASS_OWED: &str = "pp";
     pub(crate) const OWN_RESEND_OWED: &str = "ro";
     pub(crate) const HELD_ANSWERS: &str = "ha/";
@@ -873,6 +981,45 @@ pub(crate) mod key {
     pub(crate) const DROPPED_REPLIES: &str = "pd/";
     pub(crate) const DROPPED_UNVERIFIED: &str = "ud/";
     pub(crate) const KEY_WAITS: &str = "kw/";
+    pub(crate) const ALLOWANCE_ENDS: &str = "ae/";
+    pub(crate) const CONFLICTS: &str = "cf/";
+    pub(crate) const CONSENTS: &str = "ac/";
+    pub(crate) const NOTICE_TARGETS: &str = "en/";
+    pub(crate) const OWED_ENDS: &str = "eo/";
+
+    /// This app's own crossing end of the Allowance whose record is `record_key`, recorded
+    /// while sends to the counterparty were held, whose message is owed.
+    pub(crate) fn owed_end(record_key: &[u8; 32]) -> String {
+        format!("{OWED_ENDS}{}", b64(record_key))
+    }
+
+    /// A counterparty's end `msg_id` of the Allowance whose record is `record_key`, kept as
+    /// the stop.
+    pub(crate) fn allowance_end(record_key: &[u8; 32], msg_id: &str) -> String {
+        format!("{}{msg_id}", allowance_ends(record_key))
+    }
+
+    /// The prefix of every end kept as the stop of the Allowance whose record is
+    /// `record_key`.
+    pub(crate) fn allowance_ends(record_key: &[u8; 32]) -> String {
+        format!("{ALLOWANCE_ENDS}{}/", b64(record_key))
+    }
+
+    /// A conflicting proposal or response of the Allowance whose record is `record_key`,
+    /// kept as the stop.
+    pub(crate) fn conflict(record_key: &[u8; 32]) -> String {
+        format!("{CONFLICTS}{}", b64(record_key))
+    }
+
+    /// The consent list's entry of the Allowance whose record is `record_key`.
+    pub(crate) fn consent(record_key: &[u8; 32]) -> String {
+        format!("{CONSENTS}{}", b64(record_key))
+    }
+
+    /// The executor app the `executor_notice` `msg_id` is wrapped to.
+    pub(crate) fn notice_target(msg_id: &str) -> String {
+        format!("{NOTICE_TARGETS}{msg_id}")
+    }
 
     /// The mark of replies from `sender` dropped for the bounds.
     pub(crate) fn dropped_replies(sender: &[u8; 32]) -> String {
@@ -1038,6 +1185,8 @@ pub(crate) enum StateKey {
     RecordsUnlisted,
     /// `ml`: the shared records aren't listed by Paykit since a `missed` item.
     MissedUnlisted,
+    /// `mc`: the consent list is to be confirmed again since a `missed` item.
+    MissedConsents,
     /// `pp`: no reconcile ran the payer pass since a restore.
     PayerPassOwed,
     /// `ro`: the restore's re-send of this app's own messages is owed.
@@ -1094,6 +1243,17 @@ pub(crate) enum StateKey {
         attempt: AttemptId,
         kind: crate::notices::NoticeKind,
     },
+    /// `ae/<record key>/<msg_id>`: a counterparty's Allowance end kept as the stop.
+    AllowanceEnd { record: [u8; 32], msg_id: String },
+    /// `ac/<record key>`: an entry of the consent list.
+    Consent([u8; 32]),
+    /// `cf/<record key>`: a conflicting proposal or response kept as the stop.
+    Conflict([u8; 32]),
+    /// `en/<msg_id>`: the executor app an `executor_notice` is wrapped to.
+    NoticeTarget(String),
+    /// `eo/<record key>`: this app's own crossing end, recorded while sends were held, whose
+    /// message is owed.
+    OwedEnd([u8; 32]),
 }
 
 impl StateKey {
@@ -1128,6 +1288,7 @@ impl StateKey {
             "mh" => Self::MissedHold,
             "nl" => Self::RecordsUnlisted,
             "ml" => Self::MissedUnlisted,
+            "mc" => Self::MissedConsents,
             "pp" => Self::PayerPassOwed,
             "ro" => Self::OwnResendOwed,
             "lc" => Self::ListedCert,
@@ -1181,6 +1342,17 @@ impl StateKey {
                         }
                     }
                     "spam" => Self::Spam(b64_32(rest)?),
+                    "ae" => {
+                        let (record, id) = rest.split_once('/')?;
+                        Self::AllowanceEnd {
+                            record: b64_32(record)?,
+                            msg_id: msg_id(id)?,
+                        }
+                    }
+                    "ac" => Self::Consent(b64_32(rest)?),
+                    "cf" => Self::Conflict(b64_32(rest)?),
+                    "en" => Self::NoticeTarget(msg_id(rest)?),
+                    "eo" => Self::OwedEnd(b64_32(rest)?),
                     "rs" => {
                         let (requester, id) = rest.split_once('/')?;
                         Self::Resent {
@@ -1566,6 +1738,38 @@ mod tests {
             &key::list_ask(&[4; 32], None),
             asked(None)
         ));
+        // The `missed` item's consent mark, set only `true`.
+        assert!(reads::<bool>(key::MISSED_CONSENTS, serde_json::json!(true)));
+        assert!(!reads::<bool>(
+            key::MISSED_CONSENTS,
+            serde_json::json!(false)
+        ));
+        // An executor notice's target, of the notice its key names.
+        let target = |msg_id: &str| serde_json::json!({ "msg_id": msg_id, "app_id": "AAAAAAAAAAAAAAAAAAAAAA" });
+        assert!(reads::<NoticeTarget>(&key::notice_target(id), target(id)));
+        assert!(!reads::<NoticeTarget>(
+            &key::notice_target(id),
+            target(other)
+        ));
+        assert!(!reads::<NoticeTarget>(&key::side(id), target(id)));
+        // An owed crossing end, of the record its key names, with a `msg_id`.
+        let owed = |record: [u8; 32], msg_id: &str| serde_json::json!({ "record": pubky_switch_core::enc::b64(&record), "msg_id": msg_id });
+        assert!(reads::<OwedEnd>(
+            &key::owed_end(&[6; 32]),
+            owed([6; 32], id)
+        ));
+        assert!(!reads::<OwedEnd>(
+            &key::owed_end(&[6; 32]),
+            owed([7; 32], id)
+        ));
+        assert!(!reads::<OwedEnd>(
+            &key::owed_end(&[6; 32]),
+            owed([6; 32], "not-a-msg-id")
+        ));
+        assert!(!reads::<OwedEnd>(
+            &key::consent(&[6; 32]),
+            owed([6; 32], id)
+        ));
         // A key the SDK doesn't write reads nothing, nor does a certificate that isn't one.
         assert!(!reads::<u64>("zz/1", serde_json::json!(1)));
         assert!(!reads::<SignedDoc>(
@@ -1646,6 +1850,7 @@ mod tests {
             (key::MISSED_HOLD.into(), StateKey::MissedHold),
             (key::RECORDS_UNLISTED.into(), StateKey::RecordsUnlisted),
             (key::MISSED_UNLISTED.into(), StateKey::MissedUnlisted),
+            (key::MISSED_CONSENTS.into(), StateKey::MissedConsents),
             (key::PAYER_PASS_OWED.into(), StateKey::PayerPassOwed),
             (key::OWN_RESEND_OWED.into(), StateKey::OwnResendOwed),
             (key::LISTED_CERT.into(), StateKey::ListedCert),
@@ -1747,6 +1952,16 @@ mod tests {
                     kind: crate::notices::NoticeKind::HeldWithoutPay,
                 },
             ),
+            (
+                key::allowance_end(&pubky, id),
+                StateKey::AllowanceEnd {
+                    record: pubky,
+                    msg_id: id.into(),
+                },
+            ),
+            (key::consent(&pubky), StateKey::Consent(pubky)),
+            (key::conflict(&pubky), StateKey::Conflict(pubky)),
+            (key::notice_target(id), StateKey::NoticeTarget(id.into())),
         ];
         for (built, family) in cases {
             assert_eq!(StateKey::parse(built.as_bytes()), Some(family), "{built}");
@@ -1771,6 +1986,10 @@ mod tests {
             "nt/BQUFBQUFBQUFBQUFBQUFBQ/paid",
             "dt/05-7",
             "nt/BQUFBQUFBQUFBQUFBQUFBQ",
+            "ae/not-base64",
+            "ac/",
+            "cf/not-base64",
+            "en/not-a-uuid",
         ] {
             assert_eq!(StateKey::parse(key.as_bytes()), None, "{key}");
         }
