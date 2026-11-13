@@ -119,12 +119,14 @@ pub struct AllowanceView {
     pub counterparty: [u8; 32],
     /// The Allowance ID.
     pub allowance_id: AllowanceId,
-    /// This identity's role.
-    pub role: AllowanceRole,
+    /// This identity's role. `None` only for a conflicted Allowance whose record is held as
+    /// deleted and whose kept conflicting message is a response: the proposal that names
+    /// the roles isn't held then.
+    pub role: Option<AllowanceRole>,
     /// Whether this identity proposed it.
     pub proposed_here: bool,
-    /// The proposed terms.
-    pub terms: AllowanceTerms,
+    /// The proposed terms. `None` only when [`AllowanceView::role`] is.
+    pub terms: Option<AllowanceTerms>,
     /// Where it stands.
     pub status: AllowanceStatus,
     /// The executor app the record's current grant names, if it holds one that verifies.
@@ -133,9 +135,12 @@ pub struct AllowanceView {
     /// pays under an Allowance only then (Paykit spec 8.3).
     pub consented: bool,
     /// Whether the counterparty is on the identity's deny list, as the app last read it
-    /// (Paykit spec 8.1, "Blocked counterparties"): nothing new from it is taken, and its
-    /// requests are paused, so the host shows the Allowance as blocked.
-    pub blocked: bool,
+    /// (Paykit spec 8.1, "Blocked counterparties"): nothing new from it is taken, its
+    /// requests are paused and nothing is sent to it, so the host shows the Allowance as
+    /// blocked. `None` while the copy of the deny list isn't known, at an app holding
+    /// `contacts` after a failed read of the lists or a restore: sends are held then too,
+    /// and the host can't show it as not blocked.
+    pub blocked: Option<bool>,
 }
 
 /// An Allowance proposal this app sent.
@@ -954,8 +959,11 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::ScopeMissing`] without `allowance`; [`PaykitError::Lib`] with `Validation`
-    /// for terms that break Paykit wire 4.15, with nothing sent; the client's errors. A
+    /// [`Refusal::ScopeMissing`] without `allowance`; [`Refusal::NotNow`] while sends to `to`
+    /// are held, at an app holding `contacts`: the deny list holds it, or the copy of the
+    /// lists isn't known after a read tried now (Paykit spec 8.1, "Blocked counterparties"),
+    /// with nothing signed, written or queued; [`PaykitError::Lib`] with `Validation` for
+    /// terms that break Paykit wire 4.15, with nothing sent; the client's errors. A
     /// failure that leaves the batch kept (the network, `429`, `503`) is no error: the
     /// proposal is reported sent, [`MessageDelivery::Kept`], and goes with the app's next
     /// write or read.
@@ -967,6 +975,7 @@ impl Paykit {
     ) -> Result<SentAllowance> {
         self.refresh_own()?;
         self.require_allowance()?;
+        self.refuse_while_sends_held(&to).await?;
         let allowance_id = AllowanceId::generate()?;
         let proposer_role = match role {
             AllowanceRole::Allower => ProposerRole::Allower,
@@ -1041,9 +1050,10 @@ impl Paykit {
     /// [`Refusal::NotFound`], also for a record held as deleted; [`Refusal::AllowanceEnded`]
     /// once it ended, or while this app keeps the counterparty's end;
     /// [`Refusal::AllowanceConflicted`] for a conflicted one, for good; [`Refusal::NotNow`]
-    /// while the shared records aren't listed or the record waits for its scope key;
-    /// [`Refusal::Usage`] for a proposal this identity sent or one answered already; as
-    /// [`Paykit::propose_allowance`].
+    /// while the shared records aren't listed, the record waits for its scope key, or sends
+    /// to the counterparty are held, as [`Paykit::propose_allowance`] says, with nothing
+    /// changed; [`Refusal::Usage`] for a proposal this identity sent or one answered already;
+    /// as [`Paykit::propose_allowance`].
     pub async fn accept_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
         self.answer_allowance(record, Kind::AllowanceAcceptance)
             .await
@@ -1073,9 +1083,12 @@ impl Paykit {
     /// [`Refusal::NotFound`], also for a record held as deleted; [`Refusal::AllowanceEnded`]
     /// once it ended, or while this app keeps the counterparty's end; [`Refusal::Rejected`]
     /// for a rejected one; [`Refusal::AllowanceConflicted`] for a conflicted one, for good;
-    /// [`Refusal::NotNow`] while the shared records aren't listed or the record waits for its
-    /// scope key; [`Refusal::Usage`] for a proposal to this identity not yet answered, which
-    /// is rejected instead; as [`Paykit::propose_allowance`].
+    /// [`Refusal::NotNow`] while the shared records aren't listed, the record waits for its
+    /// scope key, or sends to the counterparty are held, as [`Paykit::propose_allowance`]
+    /// says, with nothing changed: the user ends it once the counterparty is unblocked, and
+    /// meanwhile nothing is paid to it automatically; [`Refusal::Usage`] for a proposal to
+    /// this identity not yet answered, which is rejected instead; as
+    /// [`Paykit::propose_allowance`].
     pub async fn end_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
         self.answer_allowance(record, Kind::AllowanceEnd).await
     }
@@ -1103,6 +1116,7 @@ impl Paykit {
             if held.end.is_some() || self.allowance_stopped(record).await? {
                 return Err(Refusal::AllowanceEnded.into());
             }
+            self.refuse_while_sends_held(&held.counterparty).await?;
             let proposal = held.proposal.hash();
             let to_here = held.proposal.message().to == own;
             let refs = match kind {
@@ -1312,11 +1326,13 @@ impl Paykit {
     }
 
     /// The Allowance whose record this app holds as deleted and over which it keeps a
-    /// conflicting proposal as the stop (Paykit spec 8.3, "Ending"), as the host shows it:
-    /// conflicted, from the kept proposal alone. No record is behind this view: the
-    /// counterparty, Allowance ID, role and terms are the kept proposal's, nothing is
-    /// consented, no executor is named, and nothing is answered, ended or paid under it.
-    /// `None` for a record not held as deleted, or with no such stop.
+    /// conflicting proposal or response as the stop (Paykit spec 8.3, "Conflicted",
+    /// "Ending"), as the host shows it: conflicted, from the kept message alone. No record is
+    /// behind this view: the counterparty and Allowance ID are the kept message's, nothing
+    /// is consented, no executor is named, and nothing is answered, ended or paid under it.
+    /// A kept proposal gives the role and terms; a kept response, the counterparty's answer
+    /// to this identity's proposal, gives neither, since the proposal isn't held. `None` for
+    /// a record not held as deleted, or with no such stop.
     async fn deleted_conflict_view(
         &self,
         record: &[u8; 32],
@@ -1325,8 +1341,8 @@ impl Paykit {
         if *content != RecordContent::Deleted {
             return Ok(None);
         }
-        // Read bound to its key (`state::Stored`): a proposal of the Allowance this record
-        // key derives from.
+        // Read bound to its key (`state::Stored`): a message of the Allowance this record key
+        // derives from.
         let Some(kept) = self
             .local_get::<KeptMessage>(&key::conflict(record))
             .await?
@@ -1334,24 +1350,35 @@ impl Paykit {
             return Ok(None);
         };
         let stored = kept.stored(&self.identity())?;
-        let Body::AllowanceProposal(proposal) = stored.body() else {
-            return Ok(None);
-        };
-        let role = match proposal.proposer_role {
-            ProposerRole::Allower => AllowanceRole::Allowee,
-            ProposerRole::Allowee => AllowanceRole::Allower,
+        let (allowance_id, role, terms, proposed_here) = match stored.body() {
+            Body::AllowanceProposal(proposal) => {
+                let role = match proposal.proposer_role {
+                    ProposerRole::Allower => AllowanceRole::Allowee,
+                    ProposerRole::Allowee => AllowanceRole::Allower,
+                };
+                (
+                    proposal.allowance_id.clone(),
+                    Some(role),
+                    Some(proposal.terms.clone()),
+                    false,
+                )
+            }
+            Body::AllowanceAcceptance(reply) | Body::AllowanceRejection(reply) => {
+                (reply.allowance_id.clone(), None, None, true)
+            }
+            _ => return Ok(None),
         };
         Ok(Some(AllowanceView {
             record: *record,
             counterparty: stored.sender(),
-            allowance_id: proposal.allowance_id.clone(),
+            allowance_id,
             role,
-            proposed_here: false,
-            terms: proposal.terms.clone(),
+            proposed_here,
+            terms,
             status: AllowanceStatus::Conflicted,
             executor_app_id: None,
             consented: false,
-            blocked: self.denied_as_last_read(&stored.sender()).await?,
+            blocked: self.blocked_as_known(&stored.sender()).await?,
         }))
     }
 
@@ -1375,9 +1402,9 @@ impl Paykit {
             record,
             counterparty: held.counterparty,
             allowance_id: held.allowance_id.clone(),
-            role,
+            role: Some(role),
             proposed_here,
-            terms: proposal.terms.clone(),
+            terms: Some(proposal.terms.clone()),
             status: status(
                 held,
                 self.allowance_stopped(&record).await?,
@@ -1385,8 +1412,39 @@ impl Paykit {
             ),
             executor_app_id: held.current_grant(&own).map(|(grant, _)| grant.app_id),
             consented: self.consents(&record).await?,
-            blocked: self.denied_as_last_read(&held.counterparty).await?,
+            blocked: self.blocked_as_known(&held.counterparty).await?,
         })
+    }
+
+    /// Whether the copy of the deny list holds `pubky`, for the views: `None` while the copy
+    /// isn't known ([`Paykit::deny_copy_known`]).
+    async fn blocked_as_known(&self, pubky: &[u8; 32]) -> Result<Option<bool>> {
+        if !self.deny_copy_known().await? {
+            return Ok(None);
+        }
+        Ok(Some(self.denied_as_last_read(pubky).await?))
+    }
+
+    /// [`Refusal::NotNow`] while sends to `counterparty` are held ([`Paykit::sends_held`]):
+    /// the copy of the deny list holds it, an own block included, or the copy isn't known,
+    /// which a read of the lists is tried for first (Paykit spec 8.1, "Blocked
+    /// counterparties"). Asked before anything is signed, written or queued, so a refused
+    /// proposal, answer or end changes nothing. Refusing an end moves no money: no
+    /// automatic payment goes to a counterparty whose sends are held, and the user ends the
+    /// Allowance once it is unblocked.
+    async fn refuse_while_sends_held(&mut self, counterparty: &[u8; 32]) -> Result<()> {
+        if !self.deny_copy_known().await? {
+            self.refresh_lists_when_due().await?;
+        }
+        if self.sends_held(counterparty).await? {
+            return Err(Refusal::NotNow(
+                "Paykit spec 8.1: sends to the counterparty are held while the deny list holds \
+                 it or its copy isn't known"
+                    .into(),
+            )
+            .into());
+        }
+        Ok(())
     }
 
     /// [`Refusal::NotNow`] while the record at `record` waits for its scope key: the app
@@ -1425,14 +1483,6 @@ impl Paykit {
     // ---------------------------------------------------------------------------------
     // The consent list
 
-    /// Whether the user confirmed paying under the Allowance at `record` since its current
-    /// write the app ignores. No path confirms one yet: the executor's confirmation comes
-    /// with it, so until then an ignored current write pays nothing.
-    pub(crate) async fn ignored_write_confirmed(&self, record: &[u8; 32]) -> Result<bool> {
-        let _ = record;
-        Ok(false)
-    }
-
     /// Whether this app's consent list holds the Allowance at `record`, confirmed since any
     /// restore or `missed` item (Paykit spec 8.3, "Executor"). None is confirmed while a
     /// `missed` item's mark (`mc`) waits for [`Paykit::confirm_consents_again`], nor while
@@ -1442,8 +1492,8 @@ impl Paykit {
     /// now as a value that reads and binds and shows no end, rejection or conflict, read
     /// here, so a record that changed outside a receive counts at once: one held as deleted
     /// pays nothing, and neither does one whose current write the app ignores (Switch spec
-    /// 8.2), until its user confirms it ([`Paykit::ignored_write_confirmed`]; Paykit spec
-    /// 8.3, "Executor", "Ending").
+    /// 8.2; Paykit spec 8.3, "Executor", "Ending"): the user's confirmation of such a write
+    /// comes with the executor, so until then it pays nothing.
     pub(crate) async fn consents(&self, record: &[u8; 32]) -> Result<bool> {
         if self.consents_unconfirmed().await?
             || self.allowance_stopped(record).await?
@@ -1454,7 +1504,7 @@ impl Paykit {
         let Some(shared) = self.app.shared_record(record).await? else {
             return Ok(false);
         };
-        if shared.flagged && !self.ignored_write_confirmed(record).await? {
+        if shared.flagged {
             return Ok(false);
         }
         match self.held_allowance(record).await? {
@@ -1602,8 +1652,9 @@ impl Paykit {
     /// roles). One whose record isn't held as a value that reads and binds, or that can't be
     /// written now, stays: the Allowance shows conflicted meanwhile, and nothing is paid or
     /// sent under it. One over a record held as deleted, a proposal there, stays for good and
-    /// is written nowhere: a record can't hold `conflicted` without its proposal (Paykit
-    /// spec 8.3, "Ending").
+    /// is written nowhere: a record can't hold `conflicted` without its proposal, and one
+    /// written back since with that same proposal doesn't conflict with it, so it isn't
+    /// cleared then either (Paykit spec 8.3, "Conflicted", "Ending").
     async fn place_conflicts(&mut self) -> Result<()> {
         let own = self.identity();
         for (rest, kept) in self.local_scan::<KeptMessage>(key::CONFLICTS).await? {
@@ -1623,6 +1674,13 @@ impl Paykit {
             }];
             if held.conflicted.is_some() {
                 self.app.protocol_commit(&locals).await?;
+                continue;
+            }
+            // A kept message the record doesn't conflict with stays the stop for good: a
+            // proposal taken over a delete, its record since written back with that same
+            // proposal, is still conflicted, and `conflicted` can't hold the record's own
+            // proposal (Paykit spec 8.3, "Conflicted", "Ending").
+            if !conflicts(&held, &message) {
                 continue;
             }
             let mut next = held;
@@ -1688,6 +1746,13 @@ impl Paykit {
                     place(&mut next, end.clone());
                 }
                 Some(accepted) if refs == [proposal] && end.sender() == held.proposal.sender() => {
+                    // Nothing goes to a counterparty whose sends are held (Paykit spec 8.1,
+                    // "Blocked counterparties"): the withdrawal's stop stays, so nothing is
+                    // paid under the Allowance, and this end is owed by that stop, made at
+                    // the first run after sends to it are no longer held.
+                    if self.sends_held(&held.counterparty).await? {
+                        return Ok(());
+                    }
                     let body = AllowanceReply {
                         allowance_id: held.allowance_id.clone(),
                         executor_app_id: None,
