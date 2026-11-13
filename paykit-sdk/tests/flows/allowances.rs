@@ -2501,3 +2501,287 @@ async fn test_allowances_kept_end_survives_a_restore_and_its_resent_copy() {
     );
     assert!(restored.accept_allowance(&mine).await.is_err());
 }
+
+/// An end over a record the wallet's copy doesn't hold yet, held while unlisted past the
+/// client's bounded wait: the client stores the entry for the store, Paykit notes it, and
+/// the end must still be taken once the records are listed.
+#[tokio::test]
+async fn test_allowances_end_held_past_the_bounded_wait_still_taken() {
+    let w = World::new();
+    let mut wallet = alice_app(&w, "wallet", AppScopes::new().pay().build().unwrap()).await;
+    let me = wallet.app_id();
+    let mut phone = alice_app(
+        &w,
+        "phone",
+        AppScopes::new().pay().allowance().build().unwrap(),
+    )
+    .await;
+    let mut shop = shop(&w).await;
+    let (theirs, mine) = proposed(&w, &mut shop, &mut phone).await;
+    phone.accept_allowance(&mine).await.unwrap();
+    shop.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let old = wallet.app().cert().clone();
+    let wider = renew(
+        &w,
+        me,
+        &AppScopes::new().pay().allowance().build().unwrap(),
+        1_000,
+    );
+    wallet.receive(None).await.unwrap();
+    list(&w, me, &old, &wider);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(11 * 60_000);
+    shop.receive(None).await.unwrap();
+    shop.end_allowance(&theirs).await.unwrap();
+    let mut parked = 0;
+    for _ in 0..3 {
+        let s = wallet.receive(None).await.unwrap();
+        assert!(!received(&s, "paykit.allowance_end"), "{s:?}");
+    }
+    w.clock.advance_ms(pubky_switch_core::records::DAY_MS + 1);
+    for _ in 0..3 {
+        let s = wallet.receive(None).await.unwrap();
+        parked += s
+            .report
+            .events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::Parked { .. }))
+            .count();
+    }
+    store_bundle(&w, me, &wider);
+    for _ in 0..4 {
+        wallet.receive(None).await.unwrap();
+    }
+    let status = wallet.allowance(&mine).await.unwrap().status;
+    let ends = wallet.app().protocol_scan(b"ae/").await.unwrap().len();
+    let end = value(&wallet, &mine).await["end"].clone();
+    assert!(
+        status == AllowanceStatus::Ended,
+        "status {status:?}, ae/ {ends}, end {end}, parked {parked}"
+    );
+}
+/// A delete is taken as any delete; a later write that brings the record back with the
+/// proposal alone drops the acceptance the wallet saw, so the wallet ignores it.
+#[tokio::test]
+async fn test_allowances_write_back_after_a_delete_without_what_was_seen_ignored() {
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    let (_, mine) = proposed(&w, &mut shop, &mut wallet).await;
+    let proposed_only = serde_json::to_vec(&value(&wallet, &mine).await).unwrap();
+    wallet.accept_allowance(&mine).await.unwrap();
+    let id = wallet.allowance(&mine).await.unwrap().allowance_id;
+    let mut tool = alice_app(
+        &w,
+        "tool",
+        AppScopes::new().pay().allowance().build().unwrap(),
+    )
+    .await;
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "allowances",
+            paykit_lib::Collection::Allowances.fixed_policy(),
+        ),
+        &paykit_lib::derive::natural_key::allowance(&w.bob_id(), &id),
+    );
+    tool.app_mut().read_record(&target).await.unwrap();
+    let op = tool
+        .app_mut()
+        .record_op(&target, None, Vec::new())
+        .await
+        .unwrap();
+    tool.app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    wallet.app_mut().read_record(&target).await.unwrap();
+    assert!(held_deleted(&wallet, &mine).await);
+    tool.app_mut().read_record(&target).await.unwrap();
+    let op = tool
+        .app_mut()
+        .record_op(&target, Some(&proposed_only), Vec::new())
+        .await
+        .unwrap();
+    tool.app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    wallet.app_mut().read_record(&target).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let held = wallet.app().shared_record(&mine).await.unwrap().unwrap();
+    assert!(
+        held.flagged && held.content == pubky_switch_client::app::RecordContent::Deleted,
+        "write back taken: flagged {}, value {:?}",
+        held.flagged,
+        held.content
+            .value()
+            .map(|v| String::from_utf8_lossy(v).into_owned())
+    );
+    let accept = wallet.accept_allowance(&mine).await;
+    assert!(accept.is_err(), "accepted again: {accept:?}");
+}
+
+/// The `allowances` record at `target` written by `app` to `value`, `None` for a delete,
+/// as a faulty own app could.
+async fn write_record(
+    app: &mut Paykit,
+    target: &pubky_switch_client::app::RecordTarget,
+    value: Option<&[u8]>,
+) {
+    app.app_mut().read_record(target).await.unwrap();
+    let op = app
+        .app_mut()
+        .record_op(target, value, Vec::new())
+        .await
+        .unwrap();
+    app.app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+}
+
+/// The target of `owner`'s record of `counterparty`'s Allowance `id`.
+fn allowances_target(
+    counterparty: &[u8; 32],
+    id: &paykit_lib::AllowanceId,
+) -> pubky_switch_client::app::RecordTarget {
+    pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "allowances",
+            paykit_lib::Collection::Allowances.fixed_policy(),
+        ),
+        &paykit_lib::derive::natural_key::allowance(counterparty, id),
+    )
+}
+
+#[tokio::test]
+async fn test_allowances_stored_proposal_over_a_record_deleted_since_is_conflicted() {
+    // The wallet's write of bob's proposal is refused for good, so the entry is stored. Another
+    // own app then writes the record and deletes it, so the wallet holds it as deleted, never
+    // having seen it. The later write finds the record held as deleted: the proposal is kept
+    // as the conflict's stop and nothing is written at the key (Paykit spec 8.3, "Ending").
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    let sent = shop
+        .propose_allowance(w.alice_id(), AllowanceRole::Allowee, terms())
+        .await
+        .unwrap();
+    refuse_writes(&w, 2);
+    let got = wallet.receive(None).await.unwrap();
+    assert!(stored_locally(&got), "{got:?}");
+    let target = allowances_target(&w.bob_id(), &sent.allowance_id);
+    let mine = wallet.app().record_key(&target).unwrap();
+    let mut tool = alice_app(
+        &w,
+        "tool",
+        AppScopes::new().pay().allowance().build().unwrap(),
+    )
+    .await;
+    write_record(
+        &mut tool,
+        &target,
+        Some(b"{\"not\":\"an allowance record\"}"),
+    )
+    .await;
+    write_record(&mut tool, &target, None).await;
+    let writes = w.record_writes(&w.alice, &mine);
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(held_deleted(&wallet, &mine).await);
+    assert_eq!(wallet.app().protocol_scan(b"cf/").await.unwrap().len(), 1);
+    assert_eq!(w.record_writes(&w.alice, &mine), writes);
+    assert!(wallet.allowances().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_allowances_end_over_a_deleted_record_kept_as_a_stop_once_listed() {
+    // Another own app deletes the record of an accepted Allowance. Bob's end then comes while
+    // the copy of the records isn't listed: the delete decides nothing, so the end is held;
+    // once listed, the end is kept as the stop for an Allowance whose record the app doesn't
+    // hold, and nothing is answered under it (Paykit spec 8.3, "Ending").
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    let (theirs, mine) = proposed(&w, &mut shop, &mut wallet).await;
+    wallet.accept_allowance(&mine).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let id = wallet.allowance(&mine).await.unwrap().allowance_id;
+    delete_allowance_record(&w, &id).await;
+    wallet.receive(None).await.unwrap();
+    assert!(held_deleted(&wallet, &mine).await);
+    missed_and_listing_fails(&w);
+    shop.end_allowance(&theirs).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_scan(b"ae/").await.unwrap().is_empty());
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"ae/").await.unwrap().len(), 1);
+    assert!(wallet.end_allowance(&mine).await.is_err());
+}
+
+#[tokio::test]
+async fn test_allowances_answer_over_a_deleted_record_kept_before_its_record() {
+    // Bob's tool app deletes his record of the Allowance he proposed; alice's acceptance then
+    // comes. Over a record held as deleted it is kept as a reply before its record, under
+    // those bounds, and the record isn't written (Paykit spec 8.3, "Ending").
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    let (theirs, mine) = proposed(&w, &mut shop, &mut wallet).await;
+    let id = wallet.allowance(&mine).await.unwrap().allowance_id;
+    let mut tool = w
+        .join(
+            &w.bob,
+            "tool",
+            AppScopes::new().request().allowance().build().unwrap(),
+        )
+        .await;
+    write_record(&mut tool, &allowances_target(&w.alice_id(), &id), None).await;
+    shop.receive(None).await.unwrap();
+    assert!(held_deleted(&shop, &theirs).await);
+    wallet.accept_allowance(&mine).await.unwrap();
+    let writes = w.record_writes(&w.bob, &theirs);
+    shop.receive(None).await.unwrap();
+    assert!(held_deleted(&shop, &theirs).await);
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    assert_eq!(w.record_writes(&w.bob, &theirs), writes);
+}
+
+#[tokio::test]
+async fn test_allowances_consent_paused_under_an_ignored_current_write() {
+    // Another own app writes the accepted Allowance's record without its acceptance: the
+    // executor-capable phone ignores that write, as it saw the acceptance, and its consent
+    // no longer counts while that write is current, though its entry stays (Paykit spec 8.3,
+    // "Executor").
+    let w = World::new();
+    let (_shop, _wallet, _exec, mut phone, _, mine) = executed(&w).await;
+    assert!(phone.allowance(&mine).await.unwrap().consented);
+    let id = phone.allowance(&mine).await.unwrap().allowance_id;
+    let mut record = value(&phone, &mine).await;
+    record.as_object_mut().unwrap().remove("response");
+    let mut tool = alice_app(
+        &w,
+        "tool",
+        AppScopes::new().pay().allowance().build().unwrap(),
+    )
+    .await;
+    write_record(
+        &mut tool,
+        &allowances_target(&w.bob_id(), &id),
+        Some(&serde_json::to_vec(&record).unwrap()),
+    )
+    .await;
+    phone.receive(None).await.unwrap();
+    let held = phone.app().shared_record(&mine).await.unwrap().unwrap();
+    assert!(held.flagged);
+    assert!(!value(&phone, &mine).await["response"].is_null());
+    assert!(!phone.allowance(&mine).await.unwrap().consented);
+    assert_eq!(
+        consent_entry(&phone, &mine).await,
+        Some(json!({ "held": { "confirm_again": false } }))
+    );
+}
