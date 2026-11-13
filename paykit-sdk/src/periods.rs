@@ -331,7 +331,7 @@ impl Paykit {
     /// [`Refusal::AlreadyPaid`] for a period whose record shows it paid;
     /// [`crate::PaykitError::Lib`] with `Validation` for details that break Paykit wire 4.9
     /// against the request, such as a period that isn't one of its own, one that doesn't
-    /// take details now, or details that expired by the device clock;
+    /// take details now, or details expired on the highest service time verified;
     /// [`Refusal::NotNow`] while the period record's value waits for its scope key;
     /// [`crate::PaykitError::Conflict`] when the record kept changing; the client's errors. A failure that leaves the batch kept
     /// (the network, `429`, `503`) is no error: the details are reported sent,
@@ -396,7 +396,8 @@ impl Paykit {
                 )
                 .into());
             }
-            if details.expires_at <= self.now() {
+            // Expired on the highest service time verified, as every time the SDK judges.
+            if self.service_time().is_some_and(|t| details.expires_at <= t) {
                 return Err(paykit_lib::Error::Validation(
                     "Paykit wire 4.9: period details that expired".into(),
                 )

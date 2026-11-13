@@ -2467,3 +2467,41 @@ async fn test_periods_another_payers_credit_of_a_settlement_leaves_the_payment_c
         .unwrap()
         .is_some());
 }
+
+#[tokio::test]
+async fn test_periods_details_expiry_judged_on_the_verified_service_time() {
+    // The shop's device clock runs two hours ahead of the service's. Details valid for an
+    // hour more on the service time it verified are sent: the device clock never decides.
+    let w = World::new();
+    let shop_store = store();
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            Arc::clone(&shop_store),
+        )
+        .await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    let app_id = shop.app_id();
+    drop(shop);
+    let ahead = Arc::new(pubky_switch_client::clock::TestClock::new(
+        w.clock.now_ms() + 2 * HOUR_MS,
+    ));
+    let mut shop = w.load_on_clock(&w.bob, shop_store, app_id, ahead).await;
+    let expires_at = w.clock.now_ms() + HOUR_MS;
+    let sent = shop
+        .send_period_details(&sale, details(january(), "lnbc1p", expires_at))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let view = wallet.request(&request).await.unwrap();
+    assert!(
+        view.periods
+            .iter()
+            .any(|p| p.details.iter().any(|d| d.msg_id == sent.msg_id)),
+        "{view:?}"
+    );
+}
