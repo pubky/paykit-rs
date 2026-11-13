@@ -2066,3 +2066,50 @@ async fn test_divergent_credit_waits_for_a_deleted_record_seen_divergent() {
     confirm_refused(&mut shop, &refused).await;
     assert!(shop.confirm_payment(&paid).await.unwrap().is_some());
 }
+
+#[tokio::test]
+async fn test_divergent_failure_goes_on_the_claim_alone_while_divergent() {
+    // A payment dispatched before the record turned divergent fails: its `failed` goes on the
+    // claim at once, alone, and the payer's record, divergent and unconfirmed, is left as it
+    // is (Paykit spec 7.2 step 4, 6).
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    let record = wallet.request(&request).await.unwrap().record;
+    set_divergent(&base, &wallet, &record, true);
+    let before = wallet.app().shared_record(&record).await.unwrap().unwrap();
+    w.rail.settle(&attempt_id, false);
+    w.rail.set_declaration(
+        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true)
+            .with_history(true),
+    );
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Failed { .. }]),
+        "{resumed:?}"
+    );
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    let claim = wallet
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap()
+        .view;
+    assert_ne!(claim.status, ClaimStatus::Attempting, "{claim:?}");
+    let after = wallet.app().shared_record(&record).await.unwrap().unwrap();
+    assert_eq!(after.version, before.version);
+    assert!(wallet.divergent_records().await.unwrap()[0].paused);
+}
