@@ -151,6 +151,9 @@ pub(crate) enum GivenUpOrigin {
     /// A payer's reply kept for its record, or a receipt kept for a payer record that
     /// didn't read (`pr/`), was given up.
     KeptReply,
+    /// The receive step gave up an Allowance proposal or answer over a record value that
+    /// doesn't read, past its window (`allowances.rs`): it was processed.
+    ReceiveStep,
     /// This app's own rejection or payer's cancellation, recorded while sends to the payee
     /// were held (`ha/`), passed its replay window unsent.
     HeldAnswer,

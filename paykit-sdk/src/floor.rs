@@ -265,8 +265,10 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotNow`] while a raise is needed and the floor can't be read, with nothing
-    /// queued; the client's errors, a `409 conflict` after the floor is read again.
+    /// [`Refusal::NotNow`] while a raise is needed and the floor can't be read, or its write
+    /// fails other than by a conflict, with nothing queued and the raise still owed; a `409
+    /// conflict` after the floor is read again; the client's errors queuing an ask that needs
+    /// no raise.
     pub(crate) async fn queue_resend_request(
         &mut self,
         signed: SignedMessage,
@@ -278,7 +280,13 @@ impl Paykit {
             None => None,
         };
         match batch {
-            Some(batch) => self.submit_floor(batch.queue(signed)).await?,
+            Some(batch) => match self.submit_floor(batch.queue(signed)).await {
+                Ok(()) => {}
+                Err(error) if error.code() == Some(ErrorCode::Conflict) => return Err(error),
+                // Any other failure of the raise queues nothing: the ask waits as for a floor
+                // it can't read, and the raise stays owed.
+                Err(_) => return Err(unreadable_floor()),
+            },
             None => {
                 self.app.queue_signed(signed).await?;
             }
@@ -287,24 +295,19 @@ impl Paykit {
     }
 
     /// Write the raise owed, when one is kept and the floor can be read, before the block
-    /// marks ask (module docs, "The raise owed"). One that can't be written now stays owed,
-    /// for the next pass or the next ask, which waits for it.
+    /// marks ask (module docs, "The raise owed"). One that can't be written now, for any
+    /// reason, stays owed, for the next pass or the next ask, which waits for it: this pass
+    /// marks nothing done.
     pub(crate) async fn write_floor_owed(&mut self) -> Result<()> {
         let Some(owed) = self.floor_owed_for(None).await? else {
             return Ok(());
         };
-        let batch = match self.floor_batch(owed).await {
-            Ok(batch) => batch,
-            Err(error) if is_unreadable_floor(&error) => return Ok(()),
-            Err(error) => return Err(error),
+        // A raise that can't be built or written now stays owed: every ask waits for it
+        // (`Paykit::queue_resend_request`), so nothing the floor must cover goes first.
+        let Ok(Some(batch)) = self.floor_batch(owed).await else {
+            return Ok(());
         };
-        if let Some(batch) = batch {
-            match self.submit_floor(batch).await {
-                // The floor was read again; the raise stays owed.
-                Err(error) if error.code() == Some(ErrorCode::Conflict) => {}
-                other => other?,
-            }
-        }
+        let _ = self.submit_floor(batch).await;
         Ok(())
     }
 }

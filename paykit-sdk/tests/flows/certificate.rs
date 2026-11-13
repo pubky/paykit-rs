@@ -1257,7 +1257,7 @@ async fn reloaded_after_a_failed_read(w: &World, base: &Arc<dyn StateStore>) -> 
     wallet
 }
 
-fn is_not_now(error: &PaykitError) -> bool {
+pub(crate) fn is_not_now(error: &PaykitError) -> bool {
     matches!(error.refusal(), Some(Refusal::NotNow(_)))
 }
 
@@ -2274,6 +2274,9 @@ async fn payer_side_widened(narrowed: RequestedScopes, cancelled: bool) {
     };
     let first = wallet.app().cert().clone();
     let narrow = renew(&w, me, &narrowed, 1_000);
+    // The narrowed certificate's keys are stored, so a listing it owes, such as that of
+    // `allowances` under `allowance`, isn't left waiting behind its key.
+    store_bundle(&w, me, &narrow);
     let _ = wallet.receive(None).await;
     list(&w, me, &first, &narrow);
     wallet.receive(None).await.unwrap();
@@ -2906,10 +2909,11 @@ async fn test_certificate_restore_taking_a_wider_one_without_keys_stays_unlisted
 }
 
 #[tokio::test]
-async fn test_certificate_restore_taking_one_without_a_key_no_listing_needs_is_listed() {
-    // The renewal after the backup adds `allowance`, whose key the restored app lacks but
-    // which reads none of the records the client lists: the client lists at the restore's
-    // first read all the same, so the restore's mark goes and the requests show.
+async fn test_certificate_restore_taking_allowance_without_its_key_lists_once_it_comes() {
+    // The renewal after the backup adds `allowance`, whose key the restored app lacks and
+    // which reads `allowances`: the client skips the restore's listing, so the restore's
+    // mark stays and the Allowances aren't shown. Once the key comes, a read lists, the
+    // mark goes and the requests and Allowances show.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let me = wallet.app_id();
@@ -2936,8 +2940,16 @@ async fn test_certificate_restore_taking_one_without_a_key_no_listing_needs_is_l
     .unwrap();
     restored.receive(None).await.unwrap();
     assert_eq!(restored.app().cert().hash(), wider.hash());
+    assert!(restored.app().protocol_get(b"nl").await.unwrap().is_some());
+    let unlisted = restored.allowances().await.unwrap_err();
+    assert!(is_not_now(&unlisted), "{unlisted:?}");
+    store_bundle(&w, me, &wider);
+    for _ in 0..3 {
+        restored.receive(None).await.unwrap();
+    }
     assert!(restored.app().protocol_get(b"nl").await.unwrap().is_none());
     assert!(restored.requests().await.unwrap().is_empty());
+    assert!(restored.allowances().await.unwrap().is_empty());
 }
 
 #[tokio::test]

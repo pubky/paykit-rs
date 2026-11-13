@@ -355,7 +355,7 @@ fn unsent_request(w: &World) -> (pubky_switch_core::message::MessagePlaintext, [
 }
 
 /// Bob's cancellation of the request `hash`, entered for alice's apps `targets`.
-fn cancel_to(w: &World, targets: &[[u8; 16]], hash: [u8; 32]) -> String {
+pub(crate) fn cancel_to(w: &World, targets: &[[u8; 16]], hash: [u8; 32]) -> String {
     let body = paykit_lib::bodies::RequestReply {
         reason: None,
         label: None,

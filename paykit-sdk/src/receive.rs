@@ -46,7 +46,7 @@ use paykit_lib::records::{
 use paykit_lib::{AttemptId, Body};
 use pubky_switch_client::app::{
     AppError, ClaimFetch, ClaimOp, KeptBatchStatus, LocalWrite, Need, ObligationDeadline,
-    ReceiveContext, RecordContent, Refusal as ClientRefusal, StoreFailure, Unopened,
+    ReceiveContext, RecordContent, RecordTarget, Refusal as ClientRefusal, StoreFailure, Unopened,
 };
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::claims::{Basis, ClaimStatus, ClaimView, Outcome, RECONCILIATION_MS};
@@ -280,6 +280,19 @@ pub(crate) fn effect(
                 local(&key::answer(seq, &stored.message().msg_id), &queued)?,
             );
         }
+        // Allowances (Paykit spec 8.3): the four messages go into the `allowances` record, an
+        // end kept first as the stop; a notice changes only the executor's consent list.
+        Body::AllowanceProposal(_)
+        | Body::AllowanceAcceptance(_)
+        | Body::AllowanceRejection(_)
+        | Body::AllowanceEnd(_)
+            if scopes.iter().any(|s| s == "allowance") =>
+        {
+            crate::allowances::receive_effect(cx, stored, &scopes)?;
+        }
+        Body::ExecutorNotice(notice) if scopes.iter().any(|s| s == "allowance_execute") => {
+            crate::allowances::notice_effect(cx, notice)?;
+        }
         // A publishing app answers a request naming a used version with its current list
         // (Paykit spec 8.4, "Publishing"). This SDK publishes no list at all yet, so the
         // request is taken with no effect; the answer comes with list publishing.
@@ -289,7 +302,7 @@ pub(crate) fn effect(
     Ok(())
 }
 
-fn local<T: Serialize>(key: &str, value: &T) -> Result<LocalWrite, Fail> {
+pub(crate) fn local<T: Serialize>(key: &str, value: &T) -> Result<LocalWrite, Fail> {
     state::local_put(key, value).map_err(|_| Fail::corrupt())
 }
 
@@ -298,7 +311,7 @@ fn local<T: Serialize>(key: &str, value: &T) -> Result<LocalWrite, Fail> {
 /// the step; the step goes on, and the client stores the entry as too large once the step
 /// applies (Switch spec 8.2). Dropping the message here instead would consume a valid
 /// entry, so the refusal is not passed on.
-fn keep_local(cx: &mut ReceiveContext<'_>, write: LocalWrite) {
+pub(crate) fn keep_local(cx: &mut ReceiveContext<'_>, write: LocalWrite) {
     if let Err(error) = cx.local(write) {
         debug_assert!(
             matches!(error, AppError::Refused(ClientRefusal::Usage(_))),
@@ -341,7 +354,7 @@ fn note_cursor_time(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Resu
 /// service refuses a denied sender's appends (Switch spec 7), and the copy drops the sender
 /// at the client's commit of the applied unblock, or at the feed's `deny.delete` item,
 /// which comes before any message the sender appends after the unblock.
-fn admits_new_state(
+pub(crate) fn admits_new_state(
     cx: &mut ReceiveContext<'_>,
     sender: &[u8; 32],
     scopes: &[String],
@@ -523,7 +536,7 @@ pub(crate) fn reads_lists(scopes: &[String]) -> bool {
 
 /// Note a counterparty with Paykit activity, for re-sends after a `missed` item or a
 /// provider loss (Paykit spec 9, Switch spec 12.6).
-fn note_peer(
+pub(crate) fn note_peer(
     cx: &mut ReceiveContext<'_>,
     pubky: &[u8; 32],
     stored: &StoredMessage,
@@ -556,7 +569,15 @@ fn held_value(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<Option
 /// as with a bundle that came in parts, so the context's own wait doesn't cover it
 /// ([`Fail::AwaitsKey`]).
 fn wait_for_key(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<(), Fail> {
-    let held = cx.record(&target.record_target())?;
+    wait_for_record_key(cx, &target.record_target())
+}
+
+/// [`wait_for_key`] for the record at any client target, such as an `allowances` record.
+pub(crate) fn wait_for_record_key(
+    cx: &ReceiveContext<'_>,
+    target: &RecordTarget,
+) -> Result<(), Fail> {
+    let held = cx.record(target)?;
     if let Some(RecordContent::Unreadable(Unopened::KeyNotHeld { data_epoch })) =
         held.map(|held| held.content)
     {
@@ -600,6 +621,7 @@ fn held_request(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<bool
 /// payee's cancellation keeps: any content but a delete, a value that doesn't read and one
 /// sealed under a scope key the app doesn't hold yet included. A stop for a request held
 /// stays until it is placed; one for a request not held is bounded ([`keep_cancellation`]).
+/// An Allowance end kept as the stop follows the same rule (`allowances.rs`).
 pub(crate) fn holds_record(content: Option<&RecordContent>) -> bool {
     content.is_some_and(|content| *content != RecordContent::Deleted)
 }
@@ -614,8 +636,18 @@ fn held_or_unlisted(
     target: &ActivityTarget,
     side: RecordSide,
 ) -> Result<Option<Vec<u8>>, Fail> {
-    wait_for_key(cx, target)?;
-    let record = cx.record(&target.record_target())?;
+    held_or_unlisted_at(cx, &target.record_target(), side)
+}
+
+/// [`held_or_unlisted`] for the record at any client target, such as an `allowances`
+/// record, of `side`.
+pub(crate) fn held_or_unlisted_at(
+    cx: &ReceiveContext<'_>,
+    target: &RecordTarget,
+    side: RecordSide,
+) -> Result<Option<Vec<u8>>, Fail> {
+    wait_for_record_key(cx, target)?;
+    let record = cx.record(target)?;
     if !holds_record(record.as_ref().map(|held| &held.content)) {
         hold_while_unlisted(cx, side)?;
     }
@@ -629,7 +661,7 @@ fn held_or_unlisted(
 /// Paykit's state (`nl`, `ml`, `lc`), so an entry after a certificate or a `missed` item
 /// the same read took is held too. The entry is held as for a store unavailable for now
 /// (Paykit spec 17, question 27), and read again at a later read.
-fn hold_while_unlisted(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<(), Fail> {
+pub(crate) fn hold_while_unlisted(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<(), Fail> {
     if side_may_lack(cx, side)? {
         return Err(Fail::Store(StoreFailure::unavailable(
             StoreError::Unavailable,
@@ -735,9 +767,10 @@ fn place_manual_only(
 /// cancel that sender's request. A stop for a request `held` ([`holds_record`]) is kept until
 /// it is placed. One for a request not held is new state, which admission gates (Switch spec
 /// 7), and is kept under the bounds of a payer's reply before its record, counted apart from
-/// those: past its sender's [`MAX_KEPT_REPLIES_PER_SENDER`] such stops, that sender's earliest
-/// goes, and past [`MAX_KEPT_REPLIES`] in all, the earliest of the sender keeping the most
-/// ([`kept_reply_evicted`]). It goes [`KEPT_MESSAGE_MS`] after the cancellation's acceptance
+/// those and together with the Allowance ends kept as stops for Allowances not held
+/// ([`make_room_for_stop`]): past its sender's [`MAX_KEPT_REPLIES_PER_SENDER`] such stops,
+/// that sender's earliest goes, and past [`MAX_KEPT_REPLIES`] in all, the earliest of the
+/// sender keeping the most ([`kept_reply_evicted`]). It goes [`KEPT_MESSAGE_MS`] after the cancellation's acceptance
 /// while the request is still not held ([`crate::Paykit::place_kept_cancellations`]): by then
 /// its sender re-sends nothing, and any own app that held the request got the cancellation
 /// too.
@@ -820,51 +853,100 @@ fn keep_until_placed(
     keep_before_record(cx, stored, scopes, record)
 }
 
-/// Make room for a new stop from `sender` among the stops kept for requests not held, in the
-/// step: those the bounds drop ([`kept_reply_evicted`]) go, until there is room. Left out of
-/// the bounds, neither counted nor dropped, are the stops for a request the copy holds
-/// ([`holds_record`]) and those for a request the app keeps a stored message of to write
-/// ([`crate::stored::writes_request`]), the request's own entry among them. These last are
-/// bounded by the entries the client stores (Switch spec 8.2), one stop per request record;
-/// counted here, they would make the stops of other requests go first. One that is left
-/// out no longer counts again from then on, which can put its sender past the bound: the
-/// loop drops back to it. It is reached only once the copy of the payer's records lacks none:
-/// a cancellation of a request absent or deleted from a copy that may lack records is held
-/// before ([`hold_while_unlisted`]), so every stop is judged from a listed copy.
+/// Make room for a new stop from `sender` among the stops kept for records not held, in the
+/// step: those the bounds drop ([`kept_reply_evicted`]) go, until there is room. The payees'
+/// cancellations of requests not held (`kc/`) and the counterparties' ends of Allowances not
+/// held (`ae/`, `allowances.rs`) are counted together, under one sender's bound and the
+/// bound in all (Paykit spec 8.3, "Ends reach the executor"). Left out of the bounds,
+/// neither counted nor dropped, are:
+/// - a request's stop for a request the copy holds ([`holds_record`]), and one for a request
+///   the app keeps a stored message of to write ([`crate::stored::writes_request`]), the
+///   request's own entry among them. These last are bounded by the entries the client stores
+///   (Switch spec 8.2), one stop per request record; counted here, they would make the stops
+///   of other requests go first;
+/// - an Allowance's stop over a record held that doesn't read, or that reads and holds what
+///   the end names ([`crate::allowances::end_bounded`]), and one whose Allowance has a stored
+///   message kept to write ([`crate::allowances::keeps_stored_message`]): the message could
+///   open the record, and the stop must then be there. Of the ends kept for one Allowance,
+///   only the earliest accepted is judged so; each later one counts, since until the record
+///   reads none of them can be told to name what it holds, and a sender's ends past its
+///   bound are asked for again like any stop dropped for the bounds.
 ///
-/// A stop dropped for the bounds is dropped as one never processed, as a reply is
-/// ([`make_room_for_reply`]): the client marked the cancellation processed when it was
-/// kept, so the step forgets its pair ([`ReceiveContext::forget_processed`]) in the commit
-/// that drops it, and a re-sent copy is taken, and kept again, as a new message. Kept
-/// processed, a re-send would be declined as a duplicate, and the request it cancels could
-/// be paid once it came. The stop counts in its sender's mark of dropped replies, due at
-/// once ([`mark_dropped`]), so the sender is asked to send it again, at most once a day
+/// A stop dropped for the bounds, a cancellation or an end, is dropped as one never
+/// processed, as a reply is ([`make_room_for_reply`]): the client marked it processed when
+/// it was kept, so the step forgets its pair ([`ReceiveContext::forget_processed`]) in the
+/// commit that drops it, and a re-sent copy is taken, and kept again, as a new message. Kept
+/// processed, a re-send would be declined as a duplicate, and the request or Allowance it
+/// stops could be paid once it came. The stop counts in its sender's mark of dropped replies,
+/// due at once ([`mark_dropped`]), so the sender is asked to send it again, at most once a day
 /// and not while sends to it are held (`marks.rs`). When the client won't forget the pair
 /// now, the stop stays kept and the bounds are over by one for this step.
-fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<(), Fail> {
+///
+/// One that is left out no longer counts again from then on, which can put its sender past
+/// the bound: the loop drops back to it. A new stop is reached here only once its own side's
+/// copy lacks no record: an entry over a record absent or deleted from a copy that may lack
+/// records is held before ([`hold_while_unlisted`]). The other side's copy may still lack
+/// records, as after a narrowing of one side: none of that side's stops is counted or
+/// dropped then, since they would be judged from a copy that decides nothing.
+pub(crate) fn make_room_for_stop(
+    cx: &mut ReceiveContext<'_>,
+    sender: &[u8; 32],
+) -> Result<(), Fail> {
     let mut kept = Vec::new();
     let mut names = Vec::new();
     let mut msg_ids = Vec::new();
-    for (name, stop) in state::cx_scan::<KeptMessage>(cx, key::KEPT_CANCELLATIONS)? {
-        let Some(crate::state::StateKey::KeptCancellation(record)) =
-            crate::state::StateKey::parse(name.as_bytes())
-        else {
-            return Err(Fail::corrupt());
-        };
-        let (cancellation, at) = kept_with_time(cx, &stop)?;
-        let content = cx.record_at(&record)?.map(|held| held.content);
-        if holds_record(content.as_ref()) {
-            continue;
-        }
-        let from = cancellation.sender();
-        if let Some(request) = cancellation.message().refs.first() {
-            if keeps_stored_of(cx, &from, request)? {
+    if !side_may_lack(cx, RecordSide::Payer)? {
+        for (name, stop) in state::cx_scan::<KeptMessage>(cx, key::KEPT_CANCELLATIONS)? {
+            let Some(crate::state::StateKey::KeptCancellation(record)) =
+                crate::state::StateKey::parse(name.as_bytes())
+            else {
+                return Err(Fail::corrupt());
+            };
+            let (cancellation, at) = kept_with_time(cx, &stop)?;
+            let content = cx.record_at(&record)?.map(|held| held.content);
+            if holds_record(content.as_ref()) {
                 continue;
             }
+            let from = cancellation.sender();
+            if let Some(request) = cancellation.message().refs.first() {
+                if keeps_stored_of(cx, &from, request)? {
+                    continue;
+                }
+            }
+            kept.push((from, at));
+            names.push(name.into_bytes());
+            msg_ids.push(cancellation.message().msg_id.clone());
         }
-        kept.push((from, at));
-        names.push(name.into_bytes());
-        msg_ids.push(cancellation.message().msg_id.clone());
+    }
+    if !side_may_lack(cx, RecordSide::Allowances)? {
+        // Every end kept for one Allowance record, earliest first: the earliest is judged as
+        // the record's stop, and each later one counts.
+        let mut ends: std::collections::BTreeMap<[u8; 32], Vec<_>> =
+            std::collections::BTreeMap::new();
+        for (name, stop) in state::cx_scan::<KeptMessage>(cx, key::ALLOWANCE_ENDS)? {
+            let Some(crate::state::StateKey::AllowanceEnd { record, .. }) =
+                crate::state::StateKey::parse(name.as_bytes())
+            else {
+                return Err(Fail::corrupt());
+            };
+            let (end, at) = kept_with_time(cx, &stop)?;
+            ends.entry(record).or_default().push((at, name, end));
+        }
+        for (record, mut group) in ends {
+            group.sort_by(|a, b| (a.0, &a.2.message().msg_id).cmp(&(b.0, &b.2.message().msg_id)));
+            let content = cx.record_at(&record)?.map(|held| held.content);
+            for (index, (at, name, end)) in group.into_iter().enumerate() {
+                if index == 0
+                    && (!crate::allowances::end_bounded(cx, content.as_ref(), &end)?
+                        || crate::allowances::keeps_stored_message(cx, &record)?)
+                {
+                    continue;
+                }
+                kept.push((end.sender(), at));
+                names.push(name.into_bytes());
+                msg_ids.push(end.message().msg_id.clone());
+            }
+        }
     }
     let mut dropped: std::collections::BTreeMap<[u8; 32], (u64, u64)> =
         std::collections::BTreeMap::new();
@@ -1656,7 +1738,9 @@ fn hold_list(
 /// How many payer's replies to requests this app holds no record of it keeps from one
 /// sender identity, as Switch spec 8.2 bounds the entries of an unverified sender: past it,
 /// that sender's earliest reply is dropped. The payees' cancellations kept as stops for
-/// requests the app holds no record of are bounded the same way, counted apart.
+/// requests the app holds no record of, and the counterparties' Allowance ends kept as stops
+/// for Allowances it holds no record of, are bounded the same way, counted together and
+/// apart from the replies.
 pub const MAX_KEPT_REPLIES_PER_SENDER: usize = 64;
 
 /// How many such replies it keeps in all: past it, the earliest reply of the sender holding
@@ -1702,7 +1786,10 @@ pub(crate) fn kept_reply_evicted(kept: &[CountedReply], sender: &[u8; 32]) -> Op
 /// and a re-sent copy is taken as a new message. This is the one pair a Paykit App forgets
 /// (Switch spec 11); a reply a later copy brings again is never applied twice, since a
 /// record that reflects its `msg_id` isn't written again.
-fn make_room_for_reply(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<(), Fail> {
+pub(crate) fn make_room_for_reply(
+    cx: &mut ReceiveContext<'_>,
+    sender: &[u8; 32],
+) -> Result<(), Fail> {
     let mut kept = Vec::new();
     let mut names = Vec::new();
     let mut msg_ids = Vec::new();
@@ -1947,6 +2034,9 @@ impl Paykit {
     /// can't be built or sent now, for a store failure or a switch that doesn't answer, is an
     /// error, returned, and the message stays kept. Every kept message is read with a
     /// restore's check, and one that fails it fails the call as a corrupt store.
+    ///
+    /// The Allowance answers kept before their record go too
+    /// ([`Paykit::place_kept_allowance_response`]), each once the Allowances side is listed.
     pub(crate) async fn place_kept_replies(&mut self) -> crate::error::Result<()> {
         use crate::stored::{PeriodPlace, Placed};
         let own = self.identity();
@@ -1955,6 +2045,11 @@ impl Paykit {
             // corrupt store, so the receive fails rather than drop, give up or place it.
             let reply = kept.stored(&own)?;
             let kept_key = format!("{}{rest}", key::KEPT_REPLIES);
+            // An Allowance's answer kept before its record (`allowances.rs`).
+            if crate::allowances::is_allowance_response(reply.body()) {
+                Box::pin(self.place_kept_allowance_response(&kept_key, reply)).await?;
+                continue;
+            }
             let (Some(request), Some(role), Some(accepted_at)) = (
                 reply.message().refs.first().copied(),
                 crate::activity::Role::of(reply.body()),
