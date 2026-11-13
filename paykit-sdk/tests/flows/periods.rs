@@ -2718,3 +2718,84 @@ async fn test_periods_details_expiry_judged_on_the_verified_service_time() {
         "{view:?}"
     );
 }
+
+#[tokio::test]
+async fn test_periods_acceptance_stays_after_a_restore() {
+    // Restored from a backup taken after the acceptance, the wallet holds the subscription,
+    // and once the user has seen the payee may have cancelled it, a second acceptance is
+    // refused: the request record keeps the acceptance, and no second one goes.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut app = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    app.resume_payments().await.unwrap();
+    app.receive(None).await.unwrap();
+    let options = paykit_sdk::AcceptOptions::default()
+        .with_possibly_cancelled_confirmed(pubky_switch_client::app::UserConfirmed::new());
+    let refused = app
+        .accept_subscription_with(&request, options)
+        .await
+        .unwrap_err();
+    assert_eq!(refusal(&refused), Refusal::Subscribed);
+    let summary = shop.receive(None).await.unwrap();
+    assert!(!received(&summary, "paykit.payment_request_acceptance"));
+}
+
+#[tokio::test]
+async fn test_periods_credit_stays_given_after_a_restore() {
+    // A period credited, its receipt in its record: restored from a backup taken before
+    // the credit, the shop sends no second receipt, and the payment credits no other
+    // occurrence.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let body = period_proof(&w, shop.app_id(), january()).await;
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        body,
+    );
+    shop.receive(None).await.unwrap();
+    let backup = shop.backup().await.unwrap();
+    let period = shop.payee_activity().await.unwrap()[0].periods[0].record;
+    let receipt = shop.confirm_payment(&period).await.unwrap().unwrap();
+    drop(shop);
+    let mut shop = Paykit::restore(
+        w.env(&w.bob, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.confirm_payment(&period).await.unwrap(),
+        Some(receipt.clone())
+    );
+    let summary = wallet.receive(None).await.unwrap();
+    let receipts = summary
+        .report
+        .events
+        .iter()
+        .filter(|e| matches!(e, AppEvent::MessageReceived { kind, .. } if kind == "paykit.payment_receipt"))
+        .count();
+    assert_eq!(receipts, 1);
+}
