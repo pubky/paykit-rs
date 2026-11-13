@@ -453,10 +453,15 @@ impl Paykit {
     /// Send a one-time request to `to` (Paykit spec 8.1 step 1, Paykit wire 4.5), under this
     /// app's selling label. The payer must admit this identity, for example after an invite
     /// (Paykit spec 1). The request is signed, and its record written in the batch that
-    /// queues it, then it is sent.
+    /// queues it, then it is sent. Nothing is signed, written or queued while sends to `to`
+    /// are held: at an app holding `contacts`, while the copy of the deny list holds it, or
+    /// while that copy isn't known, which a read of the lists is tried for first (Paykit
+    /// spec 8.1, "Blocked counterparties"). An app without `contacts` reads no lists, and
+    /// holds nothing.
     ///
     /// # Errors
     ///
+    /// [`Refusal::NotNow`] while sends to `to` are held, with nothing recorded or queued;
     /// [`Refusal::ScopeMissing`] without `request` or a label; [`Refusal::Label`];
     /// [`PaykitError::Lib`] with `Validation` for a draft that breaks Paykit wire 4.5; the
     /// client's errors. A failure that leaves the request's batch kept (the network, `429`,
@@ -479,6 +484,9 @@ impl Paykit {
     ) -> Result<SentRequest> {
         self.refresh_own()?;
         self.require_payee()?;
+        // Nothing new starts with a counterparty whose sends are held (Paykit spec 8.1,
+        // "Blocked counterparties"), refused before anything is signed, written or queued.
+        self.refuse_while_sends_held(&to).await?;
         let label = self.selling_label()?;
         let request = PaymentRequest {
             amount: draft.amount,

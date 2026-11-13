@@ -1558,3 +1558,118 @@ async fn test_blocked_list_request_to_a_blocked_payee_not_sent_unconfirmed() {
 async fn test_blocked_list_request_while_the_deny_list_is_unknown_not_sent() {
     no_list_asked_while_held(Held::Unknown).await;
 }
+
+/// Bob's till, holding `request` and `manage_contacts`, on `store`, with its copy of the
+/// lists read.
+async fn contacts_till(
+    w: &World,
+    store: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+) -> Paykit {
+    let mut till = w
+        .join_with(
+            &w.bob,
+            "till",
+            AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+            PaykitConfig::default(),
+            store,
+        )
+        .await;
+    till.receive(None).await.unwrap();
+    till
+}
+
+/// The next read of bob's lists fails.
+fn fail_bobs_list_read(w: &World) {
+    w.bob.switch().fail_next(Fault::Error {
+        path: "/allow".into(),
+        code: ErrorCode::Unavailable,
+        current: serde_json::Value::Null,
+    });
+}
+
+/// Bob's till holds `contacts`, and its sends to alice are then `held`: a new request to
+/// her is refused, nothing recorded, queued or reaching her (Paykit spec 8.1, "Blocked
+/// counterparties"). Once alice is unblocked, or the lists read, the same request goes.
+async fn request_held(held: Held) {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let counts = std::sync::Arc::new(CountsQueued::default());
+    let mut till = contacts_till(
+        &w,
+        std::sync::Arc::clone(&counts)
+            as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    )
+    .await;
+    match held {
+        Held::Blocked => till.block(&w.alice_id()).await.unwrap(),
+        Held::Unknown => {
+            // The receive's due read fails, and so does the read the request tries first.
+            w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+            fail_bobs_list_read(&w);
+            till.receive(None).await.unwrap();
+            fail_bobs_list_read(&w);
+        }
+    }
+    let queued = counts.queued.load(std::sync::atomic::Ordering::SeqCst);
+    let entries = w.alice.switch().entries_from(&w.bob_id());
+
+    let refused = till
+        .send_request(w.alice_id(), draft("1", w.clock.now_ms()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{held:?}: {refused:?}"
+    );
+    till.flush().await.unwrap();
+    assert_eq!(
+        counts.queued.load(std::sync::atomic::Ordering::SeqCst),
+        queued,
+        "{held:?}"
+    );
+    assert!(till.payee_activity().await.unwrap().is_empty(), "{held:?}");
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), entries);
+
+    if let Held::Blocked = held {
+        till.unblock(&w.alice_id()).await.unwrap();
+    }
+    let request = request_from(&mut till, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), entries + 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+}
+
+#[tokio::test]
+async fn test_blocked_request_to_a_blocked_payer_refused_with_nothing_sent() {
+    request_held(Held::Blocked).await;
+}
+
+#[tokio::test]
+async fn test_blocked_request_while_the_deny_list_is_unknown_refused_with_nothing_sent() {
+    request_held(Held::Unknown).await;
+}
+
+#[tokio::test]
+async fn test_blocked_request_from_an_app_without_contacts_sent_while_the_lists_dont_read() {
+    // Bob's shop holds no `contacts`, so it reads no lists and holds nothing: a read of them
+    // that would fail decides nothing, and its request goes.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    fail_bobs_list_read(&w);
+    let entries = w.alice.switch().entries_from(&w.bob_id());
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), entries + 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+}
