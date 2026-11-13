@@ -40,6 +40,21 @@
 //!   these marks for every counterparty the deny list holds then (`bw/`), at the next read
 //!   of the lists; such a speculative mark is the first the bound drops.
 //!
+//! **The block floor** (`bf`). A block mark that goes for the bound or its own expiry
+//! may leave a request of its window still on its way back: an ask delivered just before
+//! is answered later. So its latest time folds into one per-app time, the block floor: the
+//! latest of the latest times of the marks gone. A one-time request from any sender whose
+//! signed `created_at` is earlier than the floor plus the clock tolerance opens paid only by
+//! hand, as one whose sender's mark still lives does. That holds more than the block's own
+//! requests, the conservative side: only requests dated before marks already gone, so old
+//! ones arriving late. A request so dated can still come back only while its sender's
+//! outbox delivers it, until 30 days after its `created_at` less the clock tolerance, so
+//! before the floor plus [`crate::KEPT_MESSAGE_MS`]; and an entry accepted by then is
+//! taken, or given up, within [`crate::KEPT_MESSAGE_MS`] of its acceptance, also one held
+//! or parked (Switch spec 8.2). So the floor goes once the highest service time verified
+//! passes it by twice [`crate::KEPT_MESSAGE_MS`] plus the clock tolerance. A backup carries
+//! it; a restore bounds it as it bounds the marks.
+//!
 //! **Two times.** A mark holds the earliest acceptance time among the messages it covers,
 //! which a re-send asks from, and the latest, which the mark expires by. Each message
 //! dropped counts with its own acceptance time, a re-sent copy dropped again with its new
@@ -555,6 +570,11 @@ impl Paykit {
         let family = MarkFamily::Blocked;
         let now = self.now();
         let service = self.service_time();
+        if let Some(floor) = self.local_get::<u64>(key::BLOCK_FLOOR).await? {
+            if floor_expired(floor, service) {
+                self.local_delete(key::BLOCK_FLOOR).await?;
+            }
+        }
         let fresh_copy = self
             .local_get::<u64>(key::LISTS_READ)
             .await?
@@ -630,6 +650,7 @@ impl Paykit {
                 .collect(),
         };
         let raised = self.service_time().unwrap_or(0);
+        let floor = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
         match count_blocked(held, &others, sender, (from, until), false) {
             BlockedCount::Held => return Ok(false),
             BlockedCount::Dropped => {
@@ -637,10 +658,12 @@ impl Paykit {
                     &key::blocked_lost(&sender, from),
                     &crate::notices::KeptNotice::blocked_lost(sender, from, until, raised),
                 )?;
+                fold_into_floor(tx, floor, until)?;
             }
             BlockedCount::Put { mark, evicted } => {
                 if let Some(gone) = evicted {
                     tell_lost_if_unasked(tx, &gone, raised)?;
+                    fold_into_floor(tx, floor, gone.latest_ms)?;
                     tx.delete(&family.key(&gone.sender));
                 }
                 tx.put(&family.key(&sender), &*mark)?;
@@ -740,6 +763,8 @@ impl Paykit {
             if family == MarkFamily::Blocked {
                 let gone = mark.drop_mark().clone();
                 tell_lost_if_unasked(&mut tx, &gone, self.service_time().unwrap_or(0))?;
+                let floor = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
+                fold_into_floor(&mut tx, floor, gone.latest_ms)?;
             }
             self.local_commit(tx).await?;
             return Ok(0);
@@ -905,6 +930,28 @@ impl Paykit {
     }
 }
 
+/// Fold `latest`, the latest time of a block mark gone for the bound or its own expiry,
+/// into the block floor (`bf`) in `tx`, which `floor` holds now (module docs, "The block
+/// floor").
+pub(crate) fn fold_into_floor(
+    tx: &mut crate::state::Tx,
+    floor: Option<u64>,
+    latest: u64,
+) -> Result<()> {
+    let folded = floor.map_or(latest, |floor| floor.max(latest));
+    if floor != Some(folded) {
+        tx.put(key::BLOCK_FLOOR, &folded)?;
+    }
+    Ok(())
+}
+
+/// Whether the block floor `floor` has gone by `service`, the highest service time
+/// verified: no request a sender signed before it can still be taken (module docs).
+pub(crate) fn floor_expired(floor: u64, service: Option<u64>) -> bool {
+    let kept = 2 * crate::KEPT_MESSAGE_MS + pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+    service.is_some_and(|t| floor.saturating_add(kept) < t)
+}
+
 /// Tell the host, in `tx`, that `gone`'s window can no longer come back, when no ask for it
 /// was delivered: a block's mark that expires or that the bound drops (module docs).
 pub(crate) fn tell_lost_if_unasked(
@@ -988,6 +1035,30 @@ mod tests {
             (next.earliest_ms, next.latest_ms, next.queued),
             (5, 30, None)
         );
+    }
+
+    #[test]
+    fn test_block_floor_kept_while_a_request_dated_before_it_can_be_taken() {
+        // Delivered until 30 days after its signing less the tolerance, a request dated
+        // before the floor plus the tolerance is accepted before the floor plus 30 days, and
+        // taken or given up within 30 days of that: the floor lives that long.
+        let floor = 1_000_000;
+        let tolerance = pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+        let last_taken = floor + 2 * crate::KEPT_MESSAGE_MS + tolerance;
+        assert!(!floor_expired(floor, None));
+        assert!(!floor_expired(floor, Some(floor + crate::KEPT_MESSAGE_MS)));
+        assert!(!floor_expired(floor, Some(last_taken)));
+        assert!(floor_expired(floor, Some(last_taken + 1)));
+    }
+
+    #[test]
+    fn test_fold_into_floor_keeps_the_latest() {
+        let mut tx = crate::state::Tx::default();
+        fold_into_floor(&mut tx, Some(50), 20).unwrap();
+        assert!(tx.into_writes().is_empty());
+        let mut tx = crate::state::Tx::default();
+        fold_into_floor(&mut tx, Some(50), 80).unwrap();
+        assert_eq!(tx.into_writes().len(), 1);
     }
 
     #[test]

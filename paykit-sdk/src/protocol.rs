@@ -373,7 +373,8 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::Peer(_)
             | StateKey::Spam(_)
             | StateKey::Resent { .. }
-            | StateKey::ResentDay { .. } => {
+            | StateKey::ResentDay { .. }
+            | StateKey::BlockFloor => {
                 state::restored::<u64>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;

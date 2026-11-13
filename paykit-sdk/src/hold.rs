@@ -475,6 +475,12 @@ impl Paykit {
                 tx.put(&format!("{}{rest}", family.prefix()), &held)?;
             }
         }
+        // So is the block floor (`marks.rs`).
+        if let Some(floor) = self.local_get::<u64>(key::BLOCK_FLOOR).await? {
+            if floor > bound {
+                tx.put(key::BLOCK_FLOOR, &bound)?;
+            }
+        }
         // So is a widening of the block marks owed: one from the backup's cursor time, dated
         // past the bound, starts at the bound, at its own key.
         for (_, window) in self

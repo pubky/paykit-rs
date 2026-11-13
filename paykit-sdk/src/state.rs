@@ -50,6 +50,7 @@
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
 //! | `fg` | the flagged senders as the app last read them, at most `MAX_FLAGGED_COPY`; absent while not known, which holds the asks of block marks (`marks.rs`); never restored | |
+//! | `bf` | the block floor: the latest of the latest times of the block marks gone for the bound or their own expiry; a one-time request dated before it plus the clock tolerance opens paid only by hand, whatever its sender; kept until the highest service time verified passes it by twice [`crate::KEPT_MESSAGE_MS`] plus the clock tolerance (`marks.rs`) | yes |
 //! | `bk/<pubky>` | this app's block or unblock of `pubky` not yet shown by the list (`OwnBlockMark`): a block from before the switch is asked, an unblock only with the batch the client keeps; a block counts until a read of the list shows it, and is written again at a receive while the client neither keeps nor applied its batch, a restored one too, since the kept batch stays with the device that kept it; an unblock counts for payments and held sends only while the client still keeps its batch, never for the spam rule, and isn't restored (Paykit spec 8.1) | |
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
 //! | `bd/<sender>` | a mark of a sender's messages dropped for the user's block, each as one never processed (its pair forgotten), as `pd/` holds; it asks that sender once it is neither blocked nor flagged (`marks.rs`, Paykit spec 8.1) | |
@@ -375,7 +376,8 @@ impl Stored for u64 {
             | StateKey::Spam(_)
             | StateKey::Resent { .. }
             | StateKey::ResentDay { .. }
-            | StateKey::ListsRead => Ok(()),
+            | StateKey::ListsRead
+            | StateKey::BlockFloor => Ok(()),
             _ => corrupt(),
         }
     }
@@ -922,6 +924,8 @@ pub(crate) mod key {
     pub(crate) const DROPPED_BLOCKED: &str = "bd/";
     pub(crate) const BLOCKED_WIDENINGS: &str = "bw/";
     pub(crate) const FLAGGED: &str = "fg";
+    /// The block floor: the latest time of the block marks gone (`marks.rs`).
+    pub(crate) const BLOCK_FLOOR: &str = "bf";
     pub(crate) const KEY_WAITS: &str = "kw/";
 
     /// The mark of replies from `sender` dropped for the bounds.
@@ -1150,6 +1154,8 @@ pub(crate) enum StateKey {
     BlockedWidening { from_ms: u64 },
     /// `fg`: the flagged senders as the app last read them.
     Flagged,
+    /// `bf`: the latest time of the block marks gone for the bound or their expiry.
+    BlockFloor,
     /// `nt/<counterparty>/lost-<from_ms>`: the notice that messages dropped for a block
     /// can no longer come back.
     BlockedLost {
@@ -1213,6 +1219,7 @@ impl StateKey {
             "lr" => Self::ListsRead,
             "dl" => Self::Denied,
             "fg" => Self::Flagged,
+            "bf" => Self::BlockFloor,
             _ => {
                 let (family, rest) = text.split_once('/')?;
                 match family {
@@ -1811,6 +1818,7 @@ mod tests {
                 StateKey::BlockedWidening { from_ms: 7 },
             ),
             (key::FLAGGED.into(), StateKey::Flagged),
+            (key::BLOCK_FLOOR.into(), StateKey::BlockFloor),
             (
                 key::blocked_lost(&pubky, 9),
                 StateKey::BlockedLost {

@@ -837,3 +837,163 @@ async fn test_blocked_return_mark_of_a_sender_still_blocked_spares_the_lists_rea
     }
     assert!(asked(&wallet, &w.bob_id()).await.is_empty());
 }
+
+/// Bob's request dropped for the block, bob unblocked and asked: the ask is delivered, and
+/// his shop hasn't answered yet.
+async fn asked_not_answered(w: &World, wallet: &mut Paykit, shop: &mut Paykit) {
+    dropped_for_the_block(w, wallet, shop).await;
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(asked(wallet, &w.bob_id()).await.len(), 1);
+}
+
+#[tokio::test]
+async fn test_blocked_return_request_after_its_mark_went_for_the_bound_paid_only_by_hand() {
+    // Bob was asked; before his request comes back, the bound on marks drops his mark for
+    // another sender's. The request that then comes back still opens paid only by hand.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    asked_not_answered(&w, &mut wallet, &mut shop).await;
+    // 128 newer marks, asked already, and carol's message dropped for her block.
+    let now = w.clock.now_ms();
+    let mut writes = Vec::new();
+    for i in 0..paykit_sdk::MAX_DROPPED_MARKS {
+        let sender = [u8::try_from(i + 100).unwrap(); 32];
+        let value = serde_json::json!({
+            "v": 1,
+            "d": {
+                "sender": pubky_switch_core::enc::b64(&sender),
+                "earliest_ms": now - 1_000 + i as u64,
+                "latest_ms": now - 1_000 + i as u64,
+                "due": true,
+                "asked_at_ms": now,
+                "queued": null,
+            }
+        });
+        writes.push(pubky_switch_client::app::LocalWrite::Put {
+            key: format!("bd/{}", pubky_switch_core::enc::b64(&sender)).into_bytes(),
+            value: serde_json::to_vec(&value).unwrap(),
+        });
+    }
+    wallet.app_mut().protocol_commit(&writes).await.unwrap();
+    let mut carol = w
+        .join(
+            &w.carol,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    wallet.app_mut().invite(&w.carol_id()).await.unwrap();
+    request_from(&mut carol, w.alice_id(), draft("7", w.clock.now_ms())).await;
+    wallet.app_mut().deny(&w.carol_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let senders = crate::common::mark_senders(&wallet, "bd/").await;
+    assert!(senders.contains(&w.carol_id()));
+    assert!(
+        !senders.contains(&w.bob_id()),
+        "bob's mark went for the bound"
+    );
+    // Bob's shop answers; his request comes back with no mark of his.
+    shop.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let views = wallet.requests().await.unwrap();
+    assert_eq!(views.len(), 1, "{views:?}");
+    assert!(views[0].manual_only);
+    assert!(held_for_the_user(&wallet).await);
+}
+
+#[tokio::test]
+async fn test_blocked_return_request_after_its_mark_expired_paid_only_by_hand() {
+    // Bob is asked near the end of his mark's 30 days; his request comes back, and waits
+    // while the copy of the lists isn't known, past the mark's expiry. Taken then, it still
+    // opens paid only by hand.
+    let w = World::new();
+    let lists = Arc::new(ListsStore::default());
+    let mut wallet = contacts_wallet(&w, Arc::clone(&lists) as Arc<dyn StateStore>).await;
+    let mut shop = w.shop().await;
+    dropped_for_the_block(&w, &mut wallet, &mut shop).await;
+    w.clock.advance_ms(29 * 24 * 60 * MINUTE_MS);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(asked(&wallet, &w.bob_id()).await.len(), 1);
+    shop.receive(None).await.unwrap();
+    lists.lists_unknown(true);
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.requests().await.unwrap().is_empty());
+    // Past the mark's 30 days, the request still waits; the mark goes.
+    w.clock.advance_ms(2 * 24 * 60 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(block_marks(&wallet).await, 0);
+    lists.lists_unknown(false);
+    wallet.receive(None).await.unwrap();
+    let views = wallet.requests().await.unwrap();
+    assert_eq!(views.len(), 1, "{views:?}");
+    assert!(views[0].manual_only);
+}
+
+#[tokio::test]
+async fn test_blocked_return_older_request_judged_by_a_newer_window() {
+    // Bob is asked for his first request; before it comes back he is blocked again, and a
+    // second request is dropped: a new window. Both come back, the first judged by the
+    // newer window's latest time, and both open paid only by hand.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    asked_not_answered(&w, &mut wallet, &mut shop).await;
+    w.clock.advance_ms(60 * MINUTE_MS);
+    request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.requests().await.unwrap().is_empty());
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(asked(&wallet, &w.bob_id()).await.len(), 2);
+    shop.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let views = wallet.requests().await.unwrap();
+    assert_eq!(views.len(), 2, "{views:?}");
+    assert!(views.iter().all(|view| view.manual_only), "{views:?}");
+}
+
+#[tokio::test]
+async fn test_blocked_return_recurring_request_dated_in_a_window_opens_with_no_mark() {
+    // The control: a recurring request of bob's dated inside his block's window opens with
+    // no mark, where a one-time one would be paid only by hand. This base pays no recurring
+    // request automatically; the executor part takes the mark for it (S-BS-5).
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    let body = serde_json::json!({
+        "amount": { "asset": "btc", "value": "1" },
+        "payment_reference": "plan-1",
+        "proposal_expires_at": pubky_switch_core::time::rfc3339(w.clock.now_ms() + 24 * 60 * MINUTE_MS),
+        "payment_endpoints": { "btc-lightning-bolt11": "lnbc1invoice" },
+        "recurrence": {
+            "anchor": "2026-01-31T00:00:00.000Z",
+            "ends_at": null,
+            "every": 1,
+            "starts_at": "2026-01-31T00:00:00.000Z",
+            "unit": "month"
+        }
+    });
+    let recurring = w.sign_as(
+        &w.bob,
+        "shop",
+        &w.alice,
+        "paykit.payment_request",
+        Vec::new(),
+        body.as_object().cloned().unwrap(),
+    );
+    asked_not_answered(&w, &mut wallet, &mut shop).await;
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &recurring);
+    wallet.receive(None).await.unwrap();
+    let views = wallet.requests().await.unwrap();
+    assert_eq!(views.len(), 1, "{views:?}");
+    assert!(views[0].recurring);
+    assert!(!views[0].manual_only);
+    assert!(!held_for_the_user(&wallet).await);
+}

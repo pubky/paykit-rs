@@ -400,6 +400,9 @@ fn mark_blocked(
                 let mut tx = Tx::default();
                 crate::marks::tell_lost_if_unasked(&mut tx, &gone, raised)
                     .map_err(|_| Fail::corrupt())?;
+                let floor = state::cx_get::<u64>(cx, key::BLOCK_FLOOR)?;
+                crate::marks::fold_into_floor(&mut tx, floor, gone.latest_ms)
+                    .map_err(|_| Fail::corrupt())?;
                 tx.delete(&family.key(&gone.sender));
                 for write in tx.into_writes() {
                     keep_local(cx, write);
@@ -417,23 +420,33 @@ fn mark_blocked(
     }
 }
 
-/// Whether `stored`, a request from `sender`, came back after a block (`marks.rs`): the
-/// sender holds a block's mark and the request's signed `created_at` is earlier than the
-/// mark's latest time plus the clock tolerance, so it is one the inbox accepted while the
-/// sender was blocked. Such a request is held for the user's confirmation: it is never paid
-/// or accepted automatically, by this app or another own app's executor (`manual_only`,
-/// Paykit wire 5.3; Paykit spec 8.1, "Blocked counterparties").
+/// Whether `stored`, a request from `sender`, may have come back after a block (`marks.rs`):
+/// its signed `created_at` is earlier than its sender's block mark's latest time, or the
+/// block floor's (marks gone for the bound or their expiry, whatever their sender), plus the
+/// clock tolerance, so its inbox may have accepted it while the sender was blocked. Such a
+/// request is paid only by hand: it is never paid automatically, by this app or another
+/// own app's executor (`manual_only`, Paykit wire 5.3; Paykit spec 8.1, "Blocked
+/// counterparties").
 fn came_back_from_block(
     cx: &ReceiveContext<'_>,
     sender: &[u8; 32],
     stored: &StoredMessage,
 ) -> Result<bool, Fail> {
-    let Some(mark) = state::cx_get::<crate::marks::DropMark>(cx, &MarkFamily::Blocked.key(sender))?
-    else {
-        return Ok(false);
-    };
+    let mark = state::cx_get::<crate::marks::DropMark>(cx, &MarkFamily::Blocked.key(sender))?;
+    let floor = state::cx_get::<u64>(cx, key::BLOCK_FLOOR)?;
+    Ok(came_back_by(stored, mark.map(|mark| mark.latest_ms), floor))
+}
+
+/// Whether `stored`, signed at its `created_at`, is dated before `latest`, its sender's
+/// block mark's latest time, or before `floor`, the block floor, each plus the clock
+/// tolerance (`marks.rs`, "The block floor").
+fn came_back_by(stored: &StoredMessage, latest: Option<u64>, floor: Option<u64>) -> bool {
     let tolerance = pubky_switch_core::records::CLOCK_TOLERANCE_MS;
-    Ok(stored.message().created_at_ms < mark.latest_ms.saturating_add(tolerance))
+    let created = stored.message().created_at_ms;
+    [latest, floor]
+        .into_iter()
+        .flatten()
+        .any(|time| created < time.saturating_add(tolerance))
 }
 
 impl Paykit {
@@ -454,10 +467,8 @@ impl Paykit {
         let mark = self
             .local_get::<crate::marks::DropMark>(&MarkFamily::Blocked.key(&stored.sender()))
             .await?;
-        let tolerance = pubky_switch_core::records::CLOCK_TOLERANCE_MS;
-        Ok(mark.is_some_and(|mark| {
-            stored.message().created_at_ms < mark.latest_ms.saturating_add(tolerance)
-        }))
+        let floor = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
+        Ok(came_back_by(stored, mark.map(|mark| mark.latest_ms), floor))
     }
 }
 
