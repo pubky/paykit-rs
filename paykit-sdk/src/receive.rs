@@ -590,8 +590,9 @@ fn keep_cancellation(
 ///   open the record, and the stop must then be there.
 ///
 /// An Allowance end dropped for the bounds has its processed pair forgotten in the same
-/// commit, so its sender's re-send is taken; a cancellation keeps its pair, as Paykit spec
-/// 8.1 has a Paykit App forget only a kept reply's.
+/// commit, so its sender's re-send is taken, and counts in its sender's mark of dropped
+/// replies, which asks it to send again once the app holds a record of its requests or
+/// Allowances; a cancellation keeps its pair, as the base has it.
 ///
 /// One that is left out no longer counts again from then on, which can put its sender past
 /// the bound: the loop drops back to it. A new stop is reached here only once its own side's
@@ -606,7 +607,9 @@ pub(crate) fn make_room_for_stop(
     let mut kept = Vec::new();
     let mut names = Vec::new();
     // For an Allowance end, its sender and `msg_id`, whose pair goes with it.
-    let mut ends: Vec<Option<([u8; 32], String)>> = Vec::new();
+    let mut ends: Vec<Option<([u8; 32], String, u64)>> = Vec::new();
+    // The ends dropped, by sender: the earliest and the latest acceptance time.
+    let mut dropped: std::collections::BTreeMap<[u8; 32], (u64, u64)> = Default::default();
     if !side_may_lack(cx, RecordSide::Payer)? {
         for (name, stop) in state::cx_scan::<KeptMessage>(cx, key::KEPT_CANCELLATIONS)? {
             let Some(crate::state::StateKey::KeptCancellation(record)) =
@@ -646,7 +649,7 @@ pub(crate) fn make_room_for_stop(
             }
             kept.push((end.sender(), at));
             names.push(name.into_bytes());
-            ends.push(Some((end.sender(), end.message().msg_id.clone())));
+            ends.push(Some((end.sender(), end.message().msg_id.clone(), at)));
         }
     }
     while let Some(index) = kept_reply_evicted(&kept, sender) {
@@ -654,13 +657,17 @@ pub(crate) fn make_room_for_stop(
         // client marked it processed when the stop was kept, so its pair is forgotten in the
         // commit that drops it, and a copy its sender sends again is taken (Switch spec 11),
         // as for a kept reply ([`make_room_for_reply`]).
-        if let Some((from, msg_id)) = &ends[index] {
+        if let Some((from, msg_id, at)) = &ends[index] {
             match cx.forget_processed(*from, msg_id) {
-                Ok(_) => {}
+                Ok(_) => {
+                    let times = dropped.entry(*from).or_insert((*at, *at));
+                    times.0 = times.0.min(*at);
+                    times.1 = times.1.max(*at);
+                }
                 // The client won't forget the pair now: dropped without it, the end could
                 // never be taken again, so the stop stays, and the bounds are over by one
                 // for this step.
-                Err(AppError::Refused(ClientRefusal::NotNow(_))) => return Ok(()),
+                Err(AppError::Refused(ClientRefusal::NotNow(_))) => break,
                 // Past the step's bound on local writes: the context marks the step, and
                 // the client stores the entry as too large, applying none of it.
                 Err(AppError::Refused(ClientRefusal::Usage(_))) => {}
@@ -675,6 +682,12 @@ pub(crate) fn make_room_for_stop(
                 key: names.swap_remove(index),
             },
         );
+    }
+    // Each end dropped counts in its sender's mark of dropped replies, so the sender is asked
+    // to send it again once the app holds a record of its requests or Allowances, as for a
+    // reply dropped for the bounds.
+    for (from, (earliest, latest)) in dropped {
+        count_in_reply_mark(cx, from, earliest, latest)?;
     }
     Ok(())
 }
@@ -1316,6 +1329,20 @@ pub(crate) fn make_room_for_reply(
             key: names.swap_remove(index),
         },
     );
+    count_in_reply_mark(cx, from, at, at)
+}
+
+/// Count messages from `from` dropped for a bound in this step, accepted from `earliest` to
+/// `latest`, in its sender's mark of dropped replies (`pd/<sender>`, `marks.rs`), so the
+/// sender is asked to send them again once the app holds a record of its requests or
+/// Allowances. One call per sender in a step, with every time it dropped there: the mark is
+/// read as the step started.
+fn count_in_reply_mark(
+    cx: &mut ReceiveContext<'_>,
+    from: [u8; 32],
+    earliest: u64,
+    latest: u64,
+) -> Result<(), Fail> {
     let family = MarkFamily::Replies;
     let mark_key = family.key(&from);
     let held = state::cx_get::<crate::marks::DropMark>(cx, &mark_key)?;
@@ -1325,7 +1352,12 @@ pub(crate) fn make_room_for_reply(
             others.push((mark.sender, mark.latest_ms));
         }
     }
-    let counted = count_dropped(held, &others, from, at, false);
+    let mut counted = count_dropped(held, &others, from, earliest, false);
+    if latest != earliest {
+        if let Some(mark) = counted.put.take() {
+            counted.put = count_dropped(Some(mark), &[], from, latest, false).put;
+        }
+    }
     if let Some(gone) = counted.evicted {
         keep_local(
             cx,
