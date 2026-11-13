@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{PaykitError, Result};
 use crate::paykit::Paykit;
 use crate::resend::ResendSelection;
-use crate::state::{key, StateKey};
+use crate::state::key;
 
 /// How many marks of each family the app keeps: past it, the mark whose latest time is
 /// earliest goes, a tie going to the lower sender identity.
@@ -112,15 +112,6 @@ impl MarkFamily {
         }
     }
 
-    /// The sender a key of this family names; `None` for another key.
-    pub(crate) fn sender_of(self, key: &str) -> Option<[u8; 32]> {
-        match (self, StateKey::parse(key.as_bytes())?) {
-            (Self::Replies, StateKey::DroppedReplies { sender })
-            | (Self::Unverified, StateKey::DroppedUnverified { sender }) => Some(sender),
-            _ => None,
-        }
-    }
-
     /// What a request for `mark` asks to re-send.
     fn selection(self, mark: &DropMark) -> ResendSelection {
         let selection = ResendSelection::default().with_accepted_from_ms(mark.earliest_ms);
@@ -129,15 +120,6 @@ impl MarkFamily {
             Self::Unverified => selection.with_accepted_until_ms(mark.latest_ms),
         }
     }
-}
-
-/// Read a mark at `key` of `family`, bound to the sender its key names.
-pub(crate) fn read_mark(family: MarkFamily, key: &str, value: &[u8]) -> Result<DropMark> {
-    let mark = crate::state::decode::<DropMark>(value)?;
-    if family.sender_of(key) != Some(mark.sender) || mark.earliest_ms > mark.latest_ms {
-        return Err(PaykitError::corrupt());
-    }
-    Ok(mark)
 }
 
 /// What counting a message from `sender` accepted at `at` does to a family's marks.
@@ -218,14 +200,7 @@ impl Paykit {
         at: u64,
     ) -> Result<()> {
         let family = MarkFamily::Unverified;
-        let held = match self
-            .app
-            .protocol_get(family.key(&sender).as_bytes())
-            .await?
-        {
-            Some(value) => Some(read_mark(family, &family.key(&sender), &value)?),
-            None => None,
-        };
+        let held = self.local_get::<DropMark>(&family.key(&sender)).await?;
         let others = match held {
             Some(_) => Vec::new(),
             None => self.marks_of(family).await?,
@@ -243,9 +218,7 @@ impl Paykit {
     /// Every mark of `family`, as (sender, latest time).
     async fn marks_of(&self, family: MarkFamily) -> Result<Vec<([u8; 32], u64)>> {
         let mut out = Vec::new();
-        for (key, value) in self.app.protocol_scan(family.prefix().as_bytes()).await? {
-            let key = String::from_utf8(key).map_err(|_| PaykitError::corrupt())?;
-            let mark = read_mark(family, &key, &value)?;
+        for (_, mark) in self.local_scan::<DropMark>(family.prefix()).await? {
             out.push((mark.sender, mark.latest_ms));
         }
         Ok(out)
@@ -260,9 +233,8 @@ impl Paykit {
         let service = self.service_time();
         let mut asked = 0u64;
         for family in [MarkFamily::Replies, MarkFamily::Unverified] {
-            for (key, value) in self.app.protocol_scan(family.prefix().as_bytes()).await? {
-                let key = String::from_utf8(key).map_err(|_| PaykitError::corrupt())?;
-                let mark = read_mark(family, &key, &value)?;
+            for (rest, mark) in self.local_scan::<DropMark>(family.prefix()).await? {
+                let key = format!("{}{rest}", family.prefix());
                 if mark.expired(service) {
                     self.local_delete(&key).await?;
                 } else if mark.due && !self.sends_held(&mark.sender).await? {
@@ -366,9 +338,8 @@ impl Paykit {
         let own = self.identity();
         let family = MarkFamily::Replies;
         let mut waiting = std::collections::BTreeMap::new();
-        for (key, value) in self.app.protocol_scan(family.prefix().as_bytes()).await? {
-            let key = String::from_utf8(key).map_err(|_| PaykitError::corrupt())?;
-            let mark = read_mark(family, &key, &value)?;
+        for (rest, mark) in self.local_scan::<DropMark>(family.prefix()).await? {
+            let key = format!("{}{rest}", family.prefix());
             if !mark.due {
                 waiting.insert(mark.sender, (key, mark));
             }
@@ -496,17 +467,5 @@ mod tests {
                 evicted: None
             }
         );
-    }
-
-    #[test]
-    fn test_marks_read_refuses_another_sender_or_crossed_times() {
-        let key = MarkFamily::Replies.key(&[1; 32]);
-        let good = crate::state::encode(&mark(1, 5, 6)).unwrap();
-        assert!(read_mark(MarkFamily::Replies, &key, &good).is_ok());
-        assert!(read_mark(MarkFamily::Unverified, &key, &good).is_err());
-        let other = crate::state::encode(&mark(2, 5, 6)).unwrap();
-        assert!(read_mark(MarkFamily::Replies, &key, &other).is_err());
-        let crossed = crate::state::encode(&mark(1, 7, 6)).unwrap();
-        assert!(read_mark(MarkFamily::Replies, &key, &crossed).is_err());
     }
 }

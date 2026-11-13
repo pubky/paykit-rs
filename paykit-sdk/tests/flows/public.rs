@@ -14,7 +14,7 @@ const DAY_MS: u64 = 24 * HOUR_MS;
 
 /// Bob's `shop` publishes its record on his Homeserver with `member` as its Paykit member,
 /// expiring at `expires_at`, made now.
-fn publish(w: &World, member: Value, expires_at: Option<u64>) -> Vec<u8> {
+pub(crate) fn publish(w: &World, member: Value, expires_at: Option<u64>) -> Vec<u8> {
     publish_at(w, member, w.clock.now_ms(), expires_at)
 }
 

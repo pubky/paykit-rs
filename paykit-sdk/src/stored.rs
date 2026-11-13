@@ -56,7 +56,7 @@ use crate::error::{PaykitError, Result};
 use crate::notices::{KeptNotice, NoticeKind, StoredHandle};
 use crate::paykit::Paykit;
 use crate::receive::{
-    failure_view, receipt_obligation, receipt_on_record, receipt_settles, FailureView,
+    failure_view, receipt_claim, receipt_deadline, receipt_on_record, receipt_settles, FailureView,
     ReceiptClaim, ReceiptSettles, SwitchClaim,
 };
 use crate::records::{list_target, KeptMessage};
@@ -143,6 +143,11 @@ fn record_side(target: &ActivityTarget) -> crate::hold::RecordSide {
 pub(crate) struct StoredNote {
     /// The entry's local ID at the client.
     pub(crate) stored_id: u64,
+    /// The entry's message hash, which the client checks a forget by
+    /// ([`pubky_switch_client::app::App::forget_parked`]): the note's message's own, so the
+    /// ID is followed only to the entry of that message.
+    #[serde(with = "serde_b64")]
+    pub(crate) hash: [u8; 32],
     #[serde(with = "serde_b64")]
     pub(crate) sender: [u8; 32],
     pub(crate) msg_id: String,
@@ -185,28 +190,25 @@ fn given_up_notice(
     )
 }
 
-/// Whether the stored note `value` at `key` keeps a message of `request` still to write:
-/// one not in its record yet, whether it waits for a write that failed or for a listing. A
-/// payee's cancellation of that request kept as a stop stays while one does
+/// Whether `note`, a stored note read bound to its key, keeps a message of `request` still
+/// to write: one not in its record yet, whether it waits for a write that failed or for a
+/// listing. A payee's cancellation of that request kept as a stop stays while one does
 /// ([`Paykit::place_kept_cancellations`]): the request's own entry may be among them, and
-/// written without the stop it would be payable. The note is read bound to its key
-/// ([`StoredNote::bound`]).
+/// written without the stop it would be payable.
 pub(crate) fn writes_request(
-    key: &[u8],
-    value: &[u8],
+    note: &StoredNote,
     own: &[u8; 32],
     request: &[u8; 32],
 ) -> Result<bool> {
-    let key = std::str::from_utf8(key).map_err(|_| PaykitError::corrupt())?;
-    let note = crate::state::decode::<StoredNote>(value)?;
-    let stored = note.bound(key, own)?;
+    let stored = note.message.stored(own)?;
     Ok(!note.placed && named_request(&stored) == Some(*request))
 }
 
 impl StoredNote {
     /// The note read whole and bound to `key` (`se/<sender>/<msg_id>`), as every family is
-    /// at a restore: its sender and `msg_id` are those the key names, and its message
-    /// verifies for `own` as that sender's message of that `msg_id`. Returns the message.
+    /// at a restore: its sender and `msg_id` are those the key names, its message verifies
+    /// for `own` as that sender's message of that `msg_id`, and the entry's hash it keeps is
+    /// that message's. Returns the message.
     ///
     /// # Errors
     ///
@@ -220,6 +222,7 @@ impl StoredNote {
             || self.msg_id != msg_id
             || stored.sender() != sender
             || stored.message().msg_id != msg_id
+            || stored.hash() != self.hash
         {
             return Err(PaykitError::corrupt());
         }
@@ -260,11 +263,7 @@ enum Place {
 impl Paykit {
     /// The note kept at `key`, read whole and bound to it ([`StoredNote::bound`]).
     async fn stored_note(&self, key: &str) -> Result<Option<StoredNote>> {
-        let Some(note) = self.local_get::<StoredNote>(key).await? else {
-            return Ok(None);
-        };
-        note.bound(key, &self.identity())?;
-        Ok(Some(note))
+        self.local_get::<StoredNote>(key).await
     }
 
     /// The requests received whose record write the switch refused, kept to write later,
@@ -411,6 +410,7 @@ impl Paykit {
         }
         let note = StoredNote {
             stored_id,
+            hash: stored.hash(),
             sender: entry.sender,
             msg_id: stored.message().msg_id.clone(),
             message: KeptMessage::of(&stored),
@@ -551,7 +551,7 @@ impl Paykit {
                         // takes the entry's handle here.
                         let handle = StoredHandle {
                             stored_id: note.stored_id,
-                            hash: stored.hash(),
+                            hash: note.hash,
                         };
                         match self.kept_notice(&notice).await? {
                             None => {
@@ -578,6 +578,10 @@ impl Paykit {
                 }
                 self.local_put(&note_key, &note).await?;
             }
+            // The note's entry, found by its ID and bound to the hash the note keeps: an
+            // entry at that ID holding another message is a corrupt store, and nothing is
+            // forgotten or dropped. The client forgets by the note's own hash, never the
+            // entry's.
             let summary = self
                 .app
                 .parked_entries()
@@ -586,9 +590,10 @@ impl Paykit {
                 .find(|entry| entry.stored_id == note.stored_id);
             let gone = match summary {
                 None => true,
-                Some(entry) => self
+                Some(entry) if entry.hash != note.hash => return Err(PaykitError::corrupt()),
+                Some(_) => self
                     .app
-                    .forget_parked(entry.stored_id, &entry.hash)
+                    .forget_parked(note.stored_id, &note.hash)
                     .await
                     .is_ok(),
             };
@@ -713,14 +718,12 @@ impl Paykit {
             }
         }
         if self.app.cert().has_permission(Permission::ClaimsWrite) {
-            let journaled = self.journal_entry(&attempt_id).await?;
-            let (obligation, deadline) = receipt_obligation(
-                &stored,
-                record,
-                journaled.as_ref(),
-                &attempt_id,
-                |request| self.obligation(&sender, request, 0),
-            );
+            // Read bound to its key and to the claim the receipt settles, as at the first read.
+            let obligation = receipt_claim(&stored, &attempt_id, |request| {
+                self.obligation(&sender, request, 0)
+            });
+            let journaled = self.journal_entry_on(&attempt_id, &obligation).await?;
+            let deadline = receipt_deadline(&stored, record, journaled.as_ref());
             // The claim view as the first read takes it, by the same rule
             // (`receive::failure_view`): the view the app keeps, or the switch's read only
             // when it asks for it. A read the switch refuses settles nothing.
@@ -825,6 +828,7 @@ mod tests {
         );
         StoredNote {
             stored_id: 1,
+            hash: stored.hash(),
             sender: bob.id(),
             msg_id: stored.message().msg_id.clone(),
             message: KeptMessage::of(&stored),
