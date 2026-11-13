@@ -829,19 +829,21 @@ impl Paykit {
         let Some(held) = self.app.shared_record(&key).await? else {
             return Ok(AnswerRecord::Gone);
         };
-        match held.content {
-            RecordContent::Deleted => return Ok(AnswerRecord::Gone),
-            RecordContent::Unreadable(_) => return Ok(AnswerRecord::Undecided),
-            RecordContent::Value(_) => {}
+        if let RecordContent::Unreadable(_) = held.content {
+            return Ok(AnswerRecord::Undecided);
+        }
+        // A record seen divergent whose user hasn't confirmed it since, its current write a
+        // delete or not: the upload may hold the answer, so nothing is decided on the write
+        // held (Paykit spec 6).
+        if Box::pin(self.pause_of(&held)).await?.paused {
+            return Ok(AnswerRecord::Undecided);
+        }
+        if let RecordContent::Deleted = held.content {
+            return Ok(AnswerRecord::Gone);
         }
         let Some(record) = self.held_activity(&target).await? else {
             return Ok(AnswerRecord::Undecided);
         };
-        // A record seen divergent whose user hasn't confirmed it since: the upload may hold the
-        // answer, so nothing is decided on the write held (Paykit spec 6).
-        if Box::pin(self.pause_of(&held)).await?.paused {
-            return Ok(AnswerRecord::Undecided);
-        }
         Ok(
             if record.reflects(&answer.msg_id) || rejected(&record) || cancelled(&record) {
                 AnswerRecord::Covered
@@ -919,10 +921,11 @@ pub(crate) struct OwnResendOwed {
 /// What a request record says of a held answer it shows no message of to send now
 /// ([`Paykit::queue_own_again`]).
 enum AnswerRecord {
-    /// It can't be read now, or is paused as divergent and not confirmed since: it may still
-    /// hold the answer, which stays.
+    /// It can't be read now, or is paused as divergent and not confirmed since, a delete
+    /// included: it may still hold the answer, which stays.
     Undecided,
-    /// It is absent or deleted: the request is gone, and the answer goes with nothing sent.
+    /// It is absent, or deleted and not paused: the request is gone, and the answer goes
+    /// with nothing sent.
     Gone,
     /// It holds the answer, or a stop that covers it: the answer goes with nothing sent.
     Covered,

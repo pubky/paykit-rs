@@ -2507,6 +2507,60 @@ async fn held_answer_lacking_in_its_record(divergent: bool) {
 }
 
 #[tokio::test]
+async fn test_divergent_held_answer_kept_while_its_paused_record_is_deleted() {
+    // Alice rejects bob's request while bob is blocked: recorded, its message held. Her phone
+    // then deletes the request record, and the delete shows divergent. Nothing is decided on
+    // that view: the held answer stays, and nothing is sent or told. Once the user confirms
+    // the delete, the request is gone and the answer goes with nothing sent.
+    let w = World::new();
+    let seen = Arc::new(crate::outcome_record::NoSeenMarks::default());
+    let base = Arc::clone(&seen) as Arc<dyn StateStore>;
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            Arc::clone(&base),
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let record = wallet.request(&request).await.unwrap().record;
+    wallet.block(&w.bob_id()).await.unwrap();
+    let entries = w.bob.switch().entries_from(&w.alice_id());
+    wallet.reject_request(&request, None).await.unwrap();
+    seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    phone.receive(None).await.unwrap();
+    crate::outcome_record::phone_writes(&mut phone, &request, None).await;
+    w.alice
+        .switch()
+        .make_divergent(OTHER_UPLOADER, record, [1; 32])
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let held = wallet.app().shared_record(&record).await.unwrap().unwrap();
+    assert!(held.divergent);
+    assert_eq!(
+        held.content,
+        pubky_switch_client::app::RecordContent::Deleted
+    );
+    assert_eq!(wallet.app().protocol_scan(b"ha/").await.unwrap().len(), 1);
+    assert!(wallet.notices().await.unwrap().is_empty());
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.flush().await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"ha/").await.unwrap().len(), 1);
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    confirm(&mut wallet, &record).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_scan(b"ha/").await.unwrap().is_empty());
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+}
+
+#[tokio::test]
 async fn test_divergent_held_answer_kept_while_its_paused_record_lacks_it() {
     held_answer_lacking_in_its_record(true).await;
 }

@@ -53,7 +53,7 @@
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `kw/<sender>` | a mark of a sender's entries the client dropped while they waited for a scope key, as `pd/` holds, with the data epochs they waited for; it asks only while the app holds every key of those epochs (`marks.rs`) | |
-//! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply to a request the app holds no record of yet, or whose record it holds but can't open, read or bind, kept until it does, placed only once the record names its sender, or a receipt for a payer record the app holds but can't read and that isn't paused as divergent, kept until it reads, and moved to `dw/` if it reads paused (`receive.rs`) | |
+//! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply to a request the app holds no record of yet, or whose record it holds but can't open, read or bind, kept until it does, placed only once the record names its sender, a proof of a payment without a request for the payee's record of its settlement that the app holds but can't read, placed once it reads naming its sender and removed if it names another, or a receipt for a payer record the app holds but can't read and that isn't paused as divergent, kept until it reads, and moved to `dw/` if it reads paused (`receive.rs`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing, since a dropped entry's time is already in its sender's mark | |
 //! | `dv/<record key>` | the pause mark of a record the app has seen divergent: paused until the user confirms, or the write the user confirmed over, with the write a credit's refusal showed it at and the write a credit's confirmation was given over (`divergent.rs`); a restore installs it paused, neither shown nor confirmed for a credit | |
 //! | `dw/<record key>/<role>/<msg_id>` | a received message whose write over a divergent record waits for the user's confirmation, or for the messages kept over the record before it, to write into its record later, in the order its inbox accepted them, a receipt over a payer record that doesn't read included, written once the record also reads, and one kept in `pr/` whose record read paused; never one from anyone but the counterparty of a record that reads; given up at its 30 days, also one that no longer points to its record (`divergent.rs`) | |
@@ -593,7 +593,9 @@ impl sealed::Sealed for KeptMessage {}
 ///   or proof its inbox accepted, from that sender and of that `msg_id`, kept under the
 ///   record key of this app's payee record of the request it names first, under its label
 ///   (Switch spec 8.2, Paykit spec 8.1); or a `paykit.payment_receipt`, kept under the
-///   record key of the payer's record it names ([`crate::receive::receipt_target`]).
+///   record key of the payer's record it names ([`crate::receive::receipt_target`]); or a
+///   proof of a payment without a request, from that sender and of that `msg_id`, whose
+///   record, the payee's of its settlement, is proven against the rail before it is placed.
 /// - At `lh/<record key>`, a `paykit.private_payment_list`, kept under the record key of its
 ///   payee app's `payment_lists` record, from its sender and App ID (Paykit wire 5.4).
 impl Stored for KeptMessage {
@@ -608,6 +610,19 @@ impl Stored for KeptMessage {
                 .ok_or_else(PaykitError::corrupt)
         };
         let (target, record_key) = match (family, message.body()) {
+            // A proof of a payment without a request kept for the payee's record of its
+            // settlement, which didn't read: the record is the one the rail's settlement of
+            // the proof names, which no binder can read, so it is proven before the proof is
+            // placed (`Paykit::place_kept_replies`): one kept for another record is never
+            // written, and is given up at its 30 days.
+            (StateKey::KeptReply { sender, msg_id, .. }, Body::PaymentProof(_))
+                if message.message().refs.is_empty()
+                    && message.sender() == *sender
+                    && message.message().msg_id == *msg_id
+                    && message.accepted_at().is_some() =>
+            {
+                return Ok(());
+            }
             (StateKey::KeptCancellation(record_key), Body::PaymentRequestCancellation(_))
                 if message.accepted_at().is_some() =>
             {

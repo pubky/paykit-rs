@@ -763,14 +763,29 @@ pub(crate) fn write_target(
 /// 5.3).
 const KEPT_OTHERS: usize = 16;
 
+/// How many messages of one role are kept over one record, all senders together: twice
+/// what one sender keeps ([`KEPT_OTHERS`] and its first), so the record's counterparty
+/// keeps its whole share beside the messages of others.
+const KEPT_CAP: usize = 2 * (KEPT_OTHERS + 1);
+
 /// The kept messages of one record and role, oldest first, that stay once `new` is kept
 /// beside `kept` (Paykit spec 6, "One message per role", as the receive step places them):
 /// for a list, latest state, only the newest version, and `new` taken with no effect when it
 /// is no newer; for any other role, the first, which the record stores in its role, and the
-/// newest [`KEPT_OTHERS`] after it, which it only reflects, the ones past that bound taken
-/// from `new`'s own sender only. Returns whether `new` is kept, and the `msg_id`s of the
-/// kept messages that go.
-fn kept_after(kept: &[StoredMessage], new: &StoredMessage) -> (bool, Vec<String>) {
+/// newest [`KEPT_OTHERS`] after it, which it only reflects.
+///
+/// Each sender keeps at most its first and its [`KEPT_OTHERS`] newest: past that, its own
+/// earliest go, so no sender pushes out a message of another. With one sender this is the
+/// first of the role and the newest after it. All senders together keep at most
+/// [`KEPT_CAP`]; past it, the role's first aside:
+/// - over a record that `reads`, whose counterparty the receive step has shown is `new`'s
+///   sender, the earliest messages of other senders go, never the counterparty's;
+/// - over a record that doesn't read, whose counterparty can't be told, the earliest
+///   message of the sender keeping the most goes, of the lower identity between senders
+///   keeping as many, as past the bound in all on replies before their record.
+///
+/// Returns whether `new` is kept, and the `msg_id`s of the kept messages that go.
+fn kept_after(kept: &[StoredMessage], new: &StoredMessage, reads: bool) -> (bool, Vec<String>) {
     let msg_id = |stored: &StoredMessage| stored.message().msg_id.clone();
     if kept.iter().any(|held| msg_id(held) == msg_id(new)) {
         return (false, Vec::new());
@@ -784,21 +799,59 @@ fn kept_after(kept: &[StoredMessage], new: &StoredMessage) -> (bool, Vec<String>
     }
     let mut all: Vec<&StoredMessage> = kept.iter().chain(std::iter::once(new)).collect();
     all.sort_by_key(|stored| (stored.accepted_at(), msg_id(stored)));
-    // Past the bound, the messages that go are the new message's sender's own, accepted
-    // earliest, the first of the role aside: no sender pushes out a message of another,
-    // so a sender that isn't the record's counterparty, kept while the record doesn't read,
-    // never makes the counterparty's go. With one sender this keeps the first and the
-    // newest [`KEPT_OTHERS`] after it.
-    let excess = all.len().saturating_sub(KEPT_OTHERS + 1);
+    let first = msg_id(all[0]);
+    let new_id = msg_id(new);
     let sender = new.sender();
-    let gone: Vec<String> = all
+    // The new message's sender's own, past its share, earliest first, the role's first aside.
+    let own = all
         .iter()
-        .skip(1)
         .filter(|stored| stored.sender() == sender)
-        .take(excess)
+        .count();
+    let mut gone: Vec<String> = all
+        .iter()
+        .filter(|stored| stored.sender() == sender && msg_id(stored) != first)
+        .take(own.saturating_sub(KEPT_OTHERS + 1))
         .map(|stored| msg_id(stored))
         .collect();
-    let kept_new = !gone.contains(&msg_id(new));
+    // All senders together, past the cap.
+    loop {
+        let left: Vec<&StoredMessage> = all
+            .iter()
+            .copied()
+            .filter(|stored| !gone.contains(&msg_id(stored)))
+            .collect();
+        // The new message stays over the bound when it is the one that would go: its step
+        // writes its pair (`step_keep`).
+        let kept_count = left.len() + usize::from(gone.contains(&new_id));
+        if kept_count <= KEPT_CAP {
+            break;
+        }
+        let evictable =
+            |stored: &StoredMessage| msg_id(stored) != first && msg_id(stored) != new_id;
+        let pick = if reads {
+            left.iter()
+                .filter(|stored| evictable(stored))
+                .find(|stored| stored.sender() != sender)
+        } else {
+            let mut counts: std::collections::BTreeMap<[u8; 32], usize> =
+                std::collections::BTreeMap::new();
+            for stored in &left {
+                *counts.entry(stored.sender()).or_default() += 1;
+            }
+            let mut senders: Vec<([u8; 32], usize)> = counts.into_iter().collect();
+            senders.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            senders.iter().find_map(|(most, _)| {
+                left.iter()
+                    .filter(|stored| evictable(stored))
+                    .find(|stored| stored.sender() == *most)
+            })
+        };
+        match pick {
+            Some(stored) => gone.push(msg_id(stored)),
+            None => break,
+        }
+    }
+    let kept_new = !gone.contains(&new_id);
     (kept_new, gone)
 }
 
@@ -907,6 +960,7 @@ pub(crate) fn step_keep(
     held: &SharedRecord,
     stored: &StoredMessage,
     settlement: Settlement<'_>,
+    reads: bool,
 ) -> std::result::Result<(), Fail> {
     let (Some(role), Some(view)) = (WriteRole::of(stored), View::of(held)) else {
         return Ok(());
@@ -931,7 +985,7 @@ pub(crate) fn step_keep(
             held_messages.push(kept.message);
         }
     }
-    let (keep, gone) = kept_after(&held_messages, stored);
+    let (keep, gone) = kept_after(&held_messages, stored, reads);
     // This step's own message, when the bound would drop it (it was accepted before the 16
     // latest kept, or at their time with a lower `msg_id`), can't be dropped as one never
     // processed: the step's outcome writes its pair. It is kept instead, one over the bound,
@@ -1468,7 +1522,7 @@ impl Paykit {
         let kept_already = held_messages
             .iter()
             .any(|held| held.message().msg_id == msg_id);
-        let (keep, gone) = kept_after(&held_messages, stored);
+        let (keep, gone) = kept_after(&held_messages, stored, true);
         for dropped_id in gone.iter().filter(|gone| **gone != msg_id) {
             let Some(dropped) = held_messages
                 .iter()
@@ -1944,16 +1998,16 @@ mod tests {
         let mut kept = Vec::new();
         for _ in 0..=KEPT_OTHERS {
             let new = reply();
-            let (keep, gone) = kept_after(&kept, &new);
+            let (keep, gone) = kept_after(&kept, &new, true);
             assert!(keep && gone.is_empty());
             kept.push(new);
         }
         // The same message again is no new one.
-        assert_eq!(kept_after(&kept, &kept[3]), (false, Vec::new()));
+        assert_eq!(kept_after(&kept, &kept[3], true), (false, Vec::new()));
         // Past the bound, the earliest of the others goes, the first staying: one time of
         // acceptance here, so the order is the `msg_id`'s.
         let new = reply();
-        let (keep, gone) = kept_after(&kept, &new);
+        let (keep, gone) = kept_after(&kept, &new, true);
         let mut all: Vec<String> = kept
             .iter()
             .chain(std::iter::once(&new))
@@ -1987,11 +2041,62 @@ mod tests {
             .collect();
         for _ in 0..3 {
             let new = reply(&carol);
-            let (_, gone) = kept_after(&kept, &new);
+            let (_, gone) = kept_after(&kept, &new, false);
             assert!(gone.iter().all(|id| !alices.contains(id)), "{gone:?}");
             kept.retain(|stored| !gone.contains(&stored.message().msg_id));
             kept.push(new);
         }
+    }
+
+    #[test]
+    fn test_divergent_kept_after_caps_all_senders_together() {
+        let bob = crate::testkit::Party::new("bob", "shop", &["request"]);
+        let reply = |from: &crate::testkit::Party| {
+            from.message(
+                &bob,
+                "paykit.payment_request_acceptance",
+                vec![[1; 32]],
+                crate::testkit::object(serde_json::json!({ "label": null })),
+            )
+        };
+        let alice = crate::testkit::Party::new("alice", "wallet", &["pay", "contacts"]);
+        let others: Vec<crate::testkit::Party> = (0..32)
+            .map(|i| {
+                crate::testkit::Party::new(&format!("other{i}"), "wallet", &["pay", "contacts"])
+            })
+            .collect();
+        let id = |stored: &StoredMessage| stored.message().msg_id.clone();
+        let first_of = |kept: &[StoredMessage], new: &StoredMessage| {
+            kept.iter()
+                .chain(std::iter::once(new))
+                .map(id)
+                .min()
+                .unwrap()
+        };
+        // Over a record that reads, the counterparty's message: past the cap, another
+        // sender's goes, never the counterparty's.
+        let mut kept: Vec<StoredMessage> = (0..KEPT_OTHERS).map(|_| reply(&alice)).collect();
+        kept.extend(others.iter().take(KEPT_CAP - KEPT_OTHERS).map(|o| reply(o)));
+        assert_eq!(kept.len(), KEPT_CAP);
+        let new = reply(&alice);
+        let (keep, gone) = kept_after(&kept, &new, true);
+        assert!(keep);
+        assert_eq!(gone.len(), 1, "{gone:?}");
+        let went = kept.iter().find(|stored| id(stored) == gone[0]).unwrap();
+        assert_ne!(went.sender(), alice.id());
+        assert_ne!(gone[0], first_of(&kept, &new));
+        // Over a record that doesn't read: past the cap, the earliest of the sender keeping
+        // the most goes, the role's first aside.
+        let mut kept: Vec<StoredMessage> = (0..3).map(|_| reply(&alice)).collect();
+        kept.extend(others.iter().take(KEPT_CAP - 3).map(|o| reply(o)));
+        assert_eq!(kept.len(), KEPT_CAP);
+        let new = reply(&others[KEPT_CAP - 3]);
+        let (keep, gone) = kept_after(&kept, &new, false);
+        assert!(keep);
+        assert_eq!(gone.len(), 1, "{gone:?}");
+        let went = kept.iter().find(|stored| id(stored) == gone[0]).unwrap();
+        assert_eq!(went.sender(), alice.id());
+        assert_ne!(gone[0], first_of(&kept, &new));
     }
 
     #[test]

@@ -1866,3 +1866,84 @@ async fn test_stored_proof_from_another_identity_never_written_into_a_settlement
     );
     assert!(!value.to_string().contains(&from_carol), "{value}");
 }
+
+#[tokio::test]
+async fn test_stored_request_over_an_unread_record_held_then_given_up_at_30_days() {
+    // Alice's wallet records bob's request; her tablet then writes the request record as a
+    // value that doesn't read. Her phone, which keeps no mark of what it has seen, gets bob's
+    // request: the record's key binds bob, so the entry is held until the record reads,
+    // never written over the value; 30 days after its acceptance it is given up, the host
+    // told, and nothing stays stored.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut tablet = w.wallet("tablet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let seen = Arc::new(crate::outcome_record::NoSeenMarks::default());
+    seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut phone = w
+        .wallet_on(
+            "phone",
+            Arc::clone(&seen) as Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    phone.receive(None).await.unwrap();
+    tablet.receive(None).await.unwrap();
+    crate::outcome_record::phone_writes(
+        &mut tablet,
+        &request,
+        Some(crate::outcome_record::INVALID),
+    )
+    .await;
+    phone.receive(None).await.unwrap();
+    let record = phone
+        .app()
+        .record_key(&crate::outcome_record::payer_record(&request))
+        .unwrap();
+    async fn value_at(phone: &paykit_sdk::Paykit, record: &[u8; 32]) -> Option<Vec<u8>> {
+        phone
+            .app()
+            .shared_record(record)
+            .await
+            .unwrap()
+            .unwrap()
+            .content
+            .value()
+            .map(<[u8]>::to_vec)
+    }
+    assert_eq!(
+        value_at(&phone, &record).await.as_deref(),
+        Some(crate::outcome_record::INVALID)
+    );
+    let sent = shop
+        .app()
+        .sent_to(&w.alice_id(), 0, u64::MAX)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|sent| sent.kind == "paykit.payment_request")
+        .unwrap();
+    w.deliver(&w.bob, "shop", &w.alice, &[phone.app_id()], &sent.plaintext);
+    phone.receive(None).await.unwrap();
+    assert_eq!(
+        value_at(&phone, &record).await.as_deref(),
+        Some(crate::outcome_record::INVALID)
+    );
+    assert!(phone.notices().await.unwrap().is_empty());
+    w.clock.advance_ms(DAY_MS + 1);
+    phone.receive(None).await.unwrap();
+    w.clock.advance_ms(31 * DAY_MS);
+    phone.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    assert_eq!(
+        value_at(&phone, &record).await.as_deref(),
+        Some(crate::outcome_record::INVALID)
+    );
+    assert!(phone.app_mut().parked_entries().await.unwrap().is_empty());
+    let notices = phone.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].msg_id.as_deref(), Some(sent.msg_id.as_str()));
+}

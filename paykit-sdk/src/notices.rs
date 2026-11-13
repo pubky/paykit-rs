@@ -143,6 +143,9 @@ pub(crate) enum GivenUpOrigin {
     /// were held (`ha/`), passed its replay window unsent, or was lost with a write of its
     /// request record that holds neither it nor any stop.
     HeldAnswer,
+    /// A received message whose entry was held unprocessed while the record it goes into
+    /// couldn't be read, past its 30 days.
+    HeldUnread,
 }
 
 /// What a message given up leaves behind ([`KeptNotice::given_up`]).
