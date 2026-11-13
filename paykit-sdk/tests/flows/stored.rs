@@ -2,26 +2,18 @@
 //! the switch refuses is written later by the app, an entry dropped unverified is asked for
 //! again, and the SDK acknowledges the duty events it took.
 
-use paykit_sdk::{PayOptions, PayeeStatus, RequestStatus};
+use std::sync::Arc;
+
+use paykit_sdk::{AppScopes, PayOptions, PayeeStatus, Paykit, PaykitConfig, Rail, RequestStatus};
 use pubky_switch_client::app::AppEvent;
 use pubky_switch_client::clock::Clock;
-use pubky_switch_client::testing::{Fault, TestSigner};
-use pubky_switch_core::http::ErrorCode;
+use pubky_switch_client::testing::Fault;
+use pubky_switch_core::claims::Outcome;
 
-use crate::common::{asked, draft, mark_senders, request_from, seed_marks, World};
+use crate::common::{
+    asked, draft, mark_senders, refuse_writes, request_from, seed_marks, store, World,
+};
 use pubky_switch_core::records::DAY_MS;
-
-/// The next `n` batches at `signer`'s switch are refused for good, `403 permission_missing`,
-/// as an effect the switch refuses whatever is sent again.
-fn refuse_writes(signer: &TestSigner, n: usize) {
-    for _ in 0..n {
-        signer.switch().fail_next(Fault::Error {
-            path: "/ops".into(),
-            code: ErrorCode::PermissionMissing,
-            current: serde_json::Value::Null,
-        });
-    }
-}
 
 /// Whether `events` hold a duty event about an entry stored locally.
 fn about_stored(events: &[AppEvent]) -> bool {
@@ -76,7 +68,7 @@ async fn test_stored_refused_request_shown_unrecorded_then_written() {
 }
 
 /// The keys of Paykit's local state under `prefix`.
-async fn kept(app: &paykit_sdk::Paykit, prefix: &str) -> Vec<Vec<u8>> {
+pub(crate) async fn kept(app: &paykit_sdk::Paykit, prefix: &str) -> Vec<Vec<u8>> {
     app.app()
         .protocol_scan(prefix.as_bytes())
         .await
@@ -84,6 +76,37 @@ async fn kept(app: &paykit_sdk::Paykit, prefix: &str) -> Vec<Vec<u8>> {
         .into_iter()
         .map(|(key, _)| key)
         .collect()
+}
+
+#[tokio::test]
+async fn test_stored_refused_request_written_later_notes_its_sender() {
+    // A request applied at its first read notes bob as a counterparty to ask for re-sends
+    // after a `missed` item (Paykit spec 9); one written later does too, once written.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    assert!(kept(&wallet, "peer/").await.is_empty());
+    wallet.receive(None).await.unwrap();
+    assert!(kept(&wallet, "se/").await.is_empty());
+    assert_eq!(kept(&wallet, "peer/").await.len(), 1);
+}
+
+#[tokio::test]
+async fn test_stored_refused_list_held_notes_its_sender() {
+    // A list applied at its first read notes bob as a counterparty, its hold included; one
+    // whose step is refused is held, and notes him too.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.held_lists().await.unwrap().len(), 1);
+    assert_eq!(kept(&wallet, "peer/").await.len(), 1);
 }
 
 #[tokio::test]
@@ -393,8 +416,49 @@ async fn test_stored_refused_receipt_written_beside_its_proof() {
     assert!(holds_receipt(&wallet, &request).await);
 }
 
+#[tokio::test]
+async fn test_stored_refused_receipt_from_before_a_joined_apps_first_listing_written_after() {
+    // Alice's wallet pays bob's request; a phone joins, and its first read takes bob's
+    // receipt, whose write is refused for good, before Paykit has listed the phone's
+    // records. The stored entry is kept, and written after the listing.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    let mut phone = Paykit::join(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        w.approve(&w.alice, "phone", &AppScopes::new().pay().build().unwrap()),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    // No certificate is kept as listed under before the first listing.
+    assert!(phone.app().protocol_get(b"lc").await.unwrap().is_none());
+    // Bob's shop reads alice's directory again, which lists the phone, so the receipt goes
+    // to it too.
+    w.clock.advance_ms(11 * 60_000);
+    shop.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    assert!(shop.confirm_payment(&record).await.unwrap().is_some());
+    refuse_writes(&w.alice, 2);
+    let summary = phone.receive(None).await.unwrap();
+    assert!(about_stored(&summary.report.events), "{summary:?}");
+    assert!(phone.app().protocol_get(b"lc").await.unwrap().is_some());
+    assert!(!holds_receipt(&phone, &request).await);
+    phone.receive(None).await.unwrap();
+    assert!(holds_receipt(&phone, &request).await);
+    assert!(phone.notices().await.unwrap().is_empty());
+}
+
 /// Alice's wallet pays `request`, the dispatch left in flight. Returns the attempt.
-async fn pending(
+pub(crate) async fn pending(
     w: &World,
     wallet: &mut paykit_sdk::Paykit,
     request: &paykit_sdk::RequestRef,
@@ -412,7 +476,7 @@ async fn pending(
 }
 
 /// Bob's receipt for the open `attempt_id`, naming a proof the record doesn't hold.
-fn receipt_of_another_proof(
+pub(crate) fn receipt_of_another_proof(
     w: &World,
     wallet: &paykit_sdk::Paykit,
     request: &paykit_sdk::RequestRef,
@@ -444,12 +508,37 @@ async fn test_stored_refused_receipt_naming_another_proof_not_written() {
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     let attempt_id = pending(&w, &mut wallet, &request).await;
-    // Its step, which settles the attempt, is refused.
+    // Its step, which settles the attempt, is refused, and so is its first later write.
     receipt_of_another_proof(&w, &wallet, &request, attempt_id);
-    refuse_writes(&w.alice, 1);
+    refuse_writes(&w.alice, 2);
     wallet.receive(None).await.unwrap();
+    assert_eq!(kept(&wallet, "se/").await.len(), 1);
+    assert_eq!(outcome_of(&mut wallet, attempt_id).await, Outcome::Open);
+    // Written later, it isn't stored, and it settles the attempt it names, as at its first
+    // read.
     wallet.receive(None).await.unwrap();
+    assert!(kept(&wallet, "se/").await.is_empty());
     assert!(!holds_receipt(&wallet, &request).await);
+    assert_eq!(outcome_of(&mut wallet, attempt_id).await, Outcome::Done);
+}
+
+/// The outcome of `attempt_id` on its claim, as the switch holds it.
+async fn outcome_of(wallet: &mut paykit_sdk::Paykit, attempt_id: paykit_lib::AttemptId) -> Outcome {
+    let obligation = wallet
+        .payments()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|payment| payment.attempt_id == attempt_id)
+        .unwrap()
+        .obligation;
+    let read = wallet
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    read.view.attempt(&attempt_id.to_bytes()).unwrap().outcome
 }
 
 #[tokio::test]
@@ -492,12 +581,17 @@ async fn test_stored_refused_note_given_up_past_its_window() {
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     let attempt_id = pending(&w, &mut wallet, &request).await;
-    // A receipt naming a proof the record never holds: refused, and never written.
+    // A receipt naming a proof the record never holds: its step, which settles the
+    // attempt, is refused, and so is its first later write.
     receipt_of_another_proof(&w, &wallet, &request, attempt_id);
-    refuse_writes(&w.alice, 1);
+    refuse_writes(&w.alice, 2);
     wallet.receive(None).await.unwrap();
     assert_eq!(kept(&wallet, "se/").await.len(), 1);
     w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+    // Past its window, its later write is refused again: the client's own read first takes
+    // what is due at the switch, so the refusal meets the later write.
+    wallet.app_mut().receive(None).await.unwrap();
+    refuse_writes(&w.alice, 1);
     wallet.receive(None).await.unwrap();
     // Given up: its note goes, its entry stays stored for the host, who is told.
     assert!(kept(&wallet, "se/").await.is_empty());
@@ -509,8 +603,171 @@ async fn test_stored_refused_note_given_up_past_its_window() {
     assert_eq!(notices[0].counterparty, w.bob_id());
     assert_eq!(notices[0].request_hash, Some(request.request_hash));
     assert!(notices[0].msg_id.is_some());
-    // Acknowledged, it goes at once: nothing raises it again.
+    // Acknowledged, it goes at once with its stored entry: nothing raises it again.
     wallet.acknowledge_notice(&notices[0].id).await.unwrap();
+    assert!(kept(&wallet, "nt/").await.is_empty());
+    assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_stored_given_up_notice_kept_while_its_entry_cant_be_forgotten() {
+    let w = World::new();
+    let fault = Arc::new(pubky_switch_client::store::FaultStore::new(
+        store(),
+        pubky_switch_client::store::Fault::None,
+    ));
+    let mut wallet = w
+        .wallet_on(
+            "wallet",
+            Arc::clone(&fault) as Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let attempt_id = pending(&w, &mut wallet, &request).await;
+    receipt_of_another_proof(&w, &wallet, &request, attempt_id);
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+    // Past its window, its later write is refused again: the client's own read first takes
+    // what is due at the switch, so the refusal meets the later write.
+    wallet.app_mut().receive(None).await.unwrap();
+    refuse_writes(&w.alice, 1);
+    wallet.receive(None).await.unwrap();
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    // The entry can't be forgotten now: the acknowledgement fails, and the notice stays.
+    fault.fail_scan(b"duty/", 0);
+    assert!(wallet.acknowledge_notice(&notices[0].id).await.is_err());
+    assert_eq!(wallet.notices().await.unwrap(), notices);
+    assert_eq!(wallet.app_mut().parked_entries().await.unwrap().len(), 1);
+    // Acknowledged again, the entry goes, then the notice.
+    wallet.acknowledge_notice(&notices[0].id).await.unwrap();
+    assert!(wallet.notices().await.unwrap().is_empty());
+    assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
+}
+
+/// Alice's wallet with a message given up: bob's receipt naming another proof, refused at
+/// its step and at each later write past its window. Returns the wallet and the notice.
+pub(crate) async fn given_up(w: &World) -> (paykit_sdk::Paykit, paykit_sdk::Notice) {
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let attempt_id = pending(w, &mut wallet, &request).await;
+    receipt_of_another_proof(w, &wallet, &request, attempt_id);
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+    // Past its window, its later write is refused again: the client's own read first takes
+    // what is due at the switch, so the refusal meets the later write.
+    wallet.app_mut().receive(None).await.unwrap();
+    refuse_writes(&w.alice, 1);
+    wallet.receive(None).await.unwrap();
+    let notice = wallet.notices().await.unwrap().remove(0);
+    (wallet, notice)
+}
+
+/// The value of the notice `id` copied to the key of `other`, another message's notice.
+async fn copy_notice(wallet: &mut paykit_sdk::Paykit, id: &str, other: &str) {
+    let value = wallet
+        .app()
+        .protocol_get(format!("nt/{id}").as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    wallet
+        .app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: format!("nt/{other}").into_bytes(),
+            value,
+        }])
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_stored_notice_under_another_key_isnt_listed_or_followed() {
+    let w = World::new();
+    let (mut wallet, notice) = given_up(&w).await;
+    // A value bound to one message's key, under another message's key: corrupt state.
+    let (sender, _) = notice.id.split_once('/').unwrap();
+    let other = format!("{sender}/223e4567-e89b-42d3-a456-426614174000");
+    copy_notice(&mut wallet, &notice.id, &other).await;
+    assert!(wallet.notices().await.is_err());
+    // Its acknowledgement doesn't follow the copied handle: the entry stays.
+    assert!(wallet.acknowledge_notice(&other).await.is_err());
+    assert_eq!(wallet.app_mut().parked_entries().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_stored_note_past_its_window_kept_when_its_write_errs() {
+    // Past its window, the receipt's later write reads its payment's journal entry, which
+    // doesn't read: the write wasn't evaluated, so the note stays and nothing is given up.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let attempt_id = pending(&w, &mut wallet, &request).await;
+    receipt_of_another_proof(&w, &wallet, &request, attempt_id);
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(kept(&wallet, "se/").await.len(), 1);
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+    wallet
+        .app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: format!("j/{}", attempt_id.to_text()).into_bytes(),
+            value: br#"{"v":1,"d":{}}"#.to_vec(),
+        }])
+        .await
+        .unwrap();
+    assert!(wallet.receive(None).await.is_err());
+    assert_eq!(kept(&wallet, "se/").await.len(), 1);
+    assert!(kept(&wallet, "nt/").await.is_empty());
+}
+
+#[tokio::test]
+async fn test_stored_note_under_another_key_is_corrupt() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    let (key, value) = wallet.app().protocol_scan(b"se/").await.unwrap().remove(0);
+    let key = String::from_utf8(key).unwrap();
+    let (sender, _) = key.trim_start_matches("se/").split_once('/').unwrap();
+    wallet
+        .app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: format!("se/{sender}/223e4567-e89b-42d3-a456-426614174000").into_bytes(),
+            value,
+        }])
+        .await
+        .unwrap();
+    assert!(wallet.requests().await.is_err());
+}
+
+#[tokio::test]
+async fn test_stored_note_past_its_window_kept_when_the_switch_doesnt_answer() {
+    // Past its window, the later write's batch doesn't reach the switch: it wasn't
+    // evaluated, so the note stays and nothing is given up.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let attempt_id = pending(&w, &mut wallet, &request).await;
+    receipt_of_another_proof(&w, &wallet, &request, attempt_id);
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+    wallet.app_mut().receive(None).await.unwrap();
+    w.alice.switch().fail_next(Fault::Unreachable {
+        path: "/ops".into(),
+        after: 0,
+    });
+    assert!(wallet.receive(None).await.is_err());
+    assert_eq!(kept(&wallet, "se/").await.len(), 1);
     assert!(kept(&wallet, "nt/").await.is_empty());
 }
 
@@ -930,4 +1187,224 @@ async fn test_stored_refused_receipt_waiting_for_the_current_epochs_key_given_up
     }
     assert!(kept(&wallet, "se/").await.is_empty());
     assert!(!holds_receipt(&wallet, &request).await);
+}
+
+/// `app` backed up, dropped and restored onto a new store; the restore's reconcile run, and
+/// one receive, in which the client tells of the parked entries the backup carries again.
+pub(crate) async fn restored(w: &World, mut app: Paykit) -> Paykit {
+    let backup = app.backup().await.unwrap();
+    let backup = paykit_sdk::PaykitBackup::from_bytes(&backup.to_bytes().unwrap()).unwrap();
+    drop(app);
+    let mut app = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    app.reconcile().await.unwrap();
+    app.end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    app.receive(None).await.unwrap();
+    app
+}
+
+/// A message given up, as [`given_up`], its receipt signed once so it can be sent again.
+struct GivenUp {
+    notice: paykit_sdk::Notice,
+    receipt: pubky_switch_core::message::MessagePlaintext,
+    attempt_id: paykit_lib::AttemptId,
+    obligation: [u8; 32],
+}
+
+async fn given_up_signed(w: &World) -> (Paykit, GivenUp) {
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let attempt_id = pending(w, &mut wallet, &request).await;
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    let body = paykit_lib::bodies::PaymentReceipt {
+        attempt_id,
+        billing_period: None,
+        metadata: None,
+        payment_reference: None,
+    }
+    .to_body(2)
+    .unwrap();
+    let receipt = w.sign_as(
+        &w.bob,
+        "shop",
+        &w.alice,
+        "paykit.payment_receipt",
+        vec![[7; 32], request.request_hash],
+        body,
+    );
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &receipt);
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+    wallet.app_mut().receive(None).await.unwrap();
+    refuse_writes(&w.alice, 1);
+    wallet.receive(None).await.unwrap();
+    let notice = wallet.notices().await.unwrap().remove(0);
+    assert_eq!(notice.kind, paykit_sdk::NoticeKind::MessageGivenUp);
+    (
+        wallet,
+        GivenUp {
+            notice,
+            receipt,
+            attempt_id,
+            obligation,
+        },
+    )
+}
+
+/// The outcome of the attempt on its claim, which the given-up receipt would settle.
+async fn claim_outcome(app: &mut Paykit, given: &GivenUp) -> Outcome {
+    let read = app
+        .app_mut()
+        .read_claim(&given.obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    read.view
+        .attempt(&given.attempt_id.to_bytes())
+        .unwrap()
+        .outcome
+}
+
+#[tokio::test]
+async fn test_stored_given_up_message_stays_given_up_after_a_restore() {
+    // Given up, then backed up and restored: the restore keeps the notice, not the note,
+    // and the client tells of the parked entry again. The message stays given up: no note
+    // is kept and its effect, settling the attempt, is never applied; the notice stays,
+    // and its acknowledgement forgets the restored entry.
+    let w = World::new();
+    let (wallet, given) = given_up_signed(&w).await;
+    let mut app = restored(&w, wallet).await;
+    app.receive(None).await.unwrap();
+    assert!(kept(&app, "se/").await.is_empty());
+    assert_eq!(claim_outcome(&mut app, &given).await, Outcome::Open);
+    assert_eq!(app.notices().await.unwrap(), vec![given.notice.clone()]);
+    assert_eq!(app.app_mut().parked_entries().await.unwrap().len(), 1);
+    app.acknowledge_notice(&given.notice.id).await.unwrap();
+    assert!(app.app_mut().parked_entries().await.unwrap().is_empty());
+    assert!(app.notices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_stored_given_up_message_sent_again_after_a_restore_has_no_effect() {
+    // The sender sends the given-up message again after the restore: it stays processed.
+    let w = World::new();
+    let (wallet, given) = given_up_signed(&w).await;
+    let mut app = restored(&w, wallet).await;
+    w.deliver(&w.bob, "shop", &w.alice, &[app.app_id()], &given.receipt);
+    app.receive(None).await.unwrap();
+    app.receive(None).await.unwrap();
+    assert_eq!(claim_outcome(&mut app, &given).await, Outcome::Open);
+    assert!(kept(&app, "se/").await.is_empty());
+    assert_eq!(app.notices().await.unwrap(), vec![given.notice]);
+}
+
+#[tokio::test]
+async fn test_stored_given_up_message_cant_be_released_after_a_restore() {
+    // The host can't release the restored entry of a message given up: the client releases
+    // only an entry whose effect is uncertain, and this one's was refused. Nothing runs it.
+    let w = World::new();
+    let (wallet, given) = given_up_signed(&w).await;
+    let mut app = restored(&w, wallet).await;
+    let entry = app.app_mut().parked_entries().await.unwrap().remove(0);
+    assert!(app
+        .app_mut()
+        .release_parked(entry.stored_id, &entry.hash)
+        .await
+        .is_err());
+    app.receive(None).await.unwrap();
+    assert_eq!(claim_outcome(&mut app, &given).await, Outcome::Open);
+    assert!(kept(&app, "se/").await.is_empty());
+}
+
+#[tokio::test]
+async fn test_stored_given_up_and_acknowledged_message_sent_again_after_a_restore_has_no_effect() {
+    // Acknowledged, the notice goes with its entry; the message stays processed at the
+    // client, in the backup too, so a copy sent again after a restore applies nothing.
+    let w = World::new();
+    let (mut wallet, given) = given_up_signed(&w).await;
+    wallet.acknowledge_notice(&given.notice.id).await.unwrap();
+    let mut app = restored(&w, wallet).await;
+    w.deliver(&w.bob, "shop", &w.alice, &[app.app_id()], &given.receipt);
+    app.receive(None).await.unwrap();
+    app.receive(None).await.unwrap();
+    assert_eq!(claim_outcome(&mut app, &given).await, Outcome::Open);
+    assert!(kept(&app, "se/").await.is_empty());
+    assert!(app.notices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_stored_forgotten_entry_sent_again_after_a_restore_writes_nothing_twice() {
+    // A request stored for good, written later and its entry forgotten. After a restore the
+    // payee re-sends it, as the restore asks: the record holds it already, so nothing is
+    // written again and nothing is stored again.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
+    let record = wallet
+        .app()
+        .record_key(&crate::outcome_record::payer_record(&request))
+        .unwrap();
+    let mut app = restored(&w, wallet).await;
+    let writes = w.record_writes(&w.alice, &record);
+    let answered = shop.receive(None).await.unwrap();
+    assert!(answered.resends >= 1, "no re-send request reached bob");
+    app.receive(None).await.unwrap();
+    assert_eq!(w.record_writes(&w.alice, &record), writes);
+    assert_eq!(app.requests().await.unwrap().len(), 1);
+    assert!(app.app_mut().parked_entries().await.unwrap().is_empty());
+    assert!(kept(&app, "se/").await.is_empty());
+}
+
+#[tokio::test]
+async fn test_stored_entry_dropped_unverified_mark_gone_stays_gone_after_a_restore() {
+    // The mark of an entry dropped unverified goes 30 days after its latest time. A restore
+    // from a backup taken then tells the client's events again: the dropped entry counts
+    // with its own old time, so no mark lives again and nothing is asked (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let (_, at) = dropped_unverified(&w, &mut wallet, &mut shop).await;
+    w.homeserver.set_down(false);
+    wallet.flush().await.unwrap();
+    w.clock.set_ms(at + paykit_sdk::KEPT_MESSAGE_MS);
+    wallet.receive(None).await.unwrap();
+    assert!(unverified_marks(&wallet).await.is_empty());
+    let before = asked(&wallet, &w.bob_id()).await.len();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut wallet = paykit_sdk::Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    wallet.reconcile().await.unwrap();
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(unverified_marks(&wallet).await.is_empty());
+    let after = asked(&wallet, &w.bob_id()).await;
+    assert!(
+        after.iter().skip(before).all(|(_, until)| until.is_none()),
+        "only the restore's own ask: {after:?}"
+    );
 }

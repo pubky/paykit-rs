@@ -1907,9 +1907,13 @@ signed again by their sender with refs or sides changed, at the record key bindi
 gives. A response refers to the proposal; an end refers to the proposal and the stored \
 acceptance; an end referring to the proposal alone is its sender's withdrawal, before any \
 response; a rejected Allowance has no end; executor_app_id comes only in an acceptance, from \
-the allower. accepted are records a reader binds; refused are those it refuses, the last a \
-record whose rejection carries executor_app_id, which check 10 drops. reason is \
-paykit-lib's wording.";
+the allower; conflicted is a second proposal under the record's allowance_id, from either \
+side, with valid terms and another hash than the record's proposal, or, beside the record's \
+response, a second acceptance or rejection from the proposal's recipient, referring to the \
+proposal, with another hash than the record's response (spec 8.3). accepted are \
+records a reader binds; refused are those it refuses, the last two records whose stored \
+message check 10 drops: a rejection carrying executor_app_id, and a conflicting proposal \
+whose terms aren't valid. reason is paykit-lib's wording.";
 
 /// A case of `allowance_records`: its name and the record.
 type AllowanceCase = (&'static str, AllowanceRecord);
@@ -1992,6 +1996,45 @@ fn allowance_cases(keys: &Keys) -> (Vec<AllowanceCase>, Vec<AllowanceCase>) {
         ),
     ];
     let mut refused = refused;
+    // A second, different proposal under the record's allowance_id makes the Allowance
+    // conflicted (Paykit spec 8.3, Paykit wire 5.4): from the counterparty, here with other
+    // terms, or from this identity's own app, crossing the counterparty's.
+    let second = resign_with(keys, "allowance_proposal", |m| {
+        m.msg_id = SECOND_PROPOSAL.into();
+        m.body
+            .get_mut("terms")
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert("lifetime_amount_limit".into(), serde_json::json!("0.20"));
+    });
+    let crossing = resign_with(keys, "allowance_proposal", |m| {
+        m.msg_id = CROSSING_PROPOSAL.into();
+        m.from = pubky_switch_core::message::Sender {
+            identity: alice,
+            app_id: keys.app("phone").keys.app_id_bytes(),
+        };
+        m.to = pubky(BOB);
+        m.body
+            .insert("proposer_role".into(), serde_json::json!("allower"));
+    });
+    let mut accepted = accepted;
+    accepted.extend([
+        (
+            "an accepted Allowance conflicted by a second proposal from the counterparty",
+            AllowanceRecord {
+                conflicted: Some(second),
+                ..base.clone()
+            },
+        ),
+        (
+            "a proposal conflicted by a crossing proposal from this identity",
+            AllowanceRecord {
+                response: None,
+                conflicted: Some(crossing),
+                ..base.clone()
+            },
+        ),
+    ]);
     // executor_app_id only in an acceptance from the allower (Paykit wire 4.16).
     let allower_proposal = resigned(keys, "allowance_proposal", None, |b| {
         b.insert("proposer_role".into(), serde_json::json!("allower"));
@@ -2010,30 +2053,222 @@ fn allowance_cases(keys: &Keys) -> (Vec<AllowanceCase>, Vec<AllowanceCase>) {
             ..base.clone()
         },
     ));
+    let other_allowance = resign_with(keys, "allowance_proposal", |m| {
+        m.msg_id = SECOND_PROPOSAL.into();
+        m.body.insert(
+            "allowance_id".into(),
+            serde_json::json!("55de1f16-1a9e-4504-bc9c-57efc3a2b38c"),
+        );
+    });
+    refused.extend([
+        (
+            "conflicted holding the record's own proposal",
+            AllowanceRecord {
+                conflicted: Some(base.proposal.clone()),
+                ..base.clone()
+            },
+        ),
+        (
+            "conflicted holding the record's own acceptance",
+            AllowanceRecord {
+                conflicted: base.response.clone(),
+                ..base.clone()
+            },
+        ),
+        (
+            "a conflicting proposal naming another Allowance",
+            AllowanceRecord {
+                conflicted: Some(other_allowance),
+                ..base.clone()
+            },
+        ),
+    ]);
+    let (more_accepted, more_refused) = conflicting_response_cases(keys, &base, rejection);
+    accepted.extend(more_accepted);
+    refused.extend(more_refused);
     (accepted, refused)
 }
+
+/// The cases of `allowance_records` whose `conflicted` holds a second response (Paykit spec
+/// 8.3, Paykit wire 5.4): beside the record's acceptance, its proposal's recipient's
+/// rejection, or another acceptance; and the responses a reader refuses there.
+fn conflicting_response_cases(
+    keys: &Keys,
+    base: &AllowanceRecord,
+    rejection: paykit_lib::records::StoredMessage,
+) -> (Vec<AllowanceCase>, Vec<AllowanceCase>) {
+    let proposal = base.proposal.hash();
+    let acceptance = base.response.as_ref().unwrap().hash();
+    let other_acceptance = resign_with(keys, "allowance_acceptance", |m| {
+        m.msg_id = SECOND_RESPONSE.into();
+    });
+    let accepted = vec![
+        (
+            "an accepted Allowance conflicted by a rejection after the acceptance",
+            AllowanceRecord {
+                conflicted: Some(rejection.clone()),
+                ..base.clone()
+            },
+        ),
+        (
+            "an accepted Allowance conflicted by another acceptance",
+            AllowanceRecord {
+                conflicted: Some(other_acceptance.clone()),
+                ..base.clone()
+            },
+        ),
+    ];
+    let other_allowance = resign_with(keys, "allowance_acceptance", |m| {
+        m.msg_id = SECOND_RESPONSE.into();
+        m.body.insert(
+            "allowance_id".into(),
+            serde_json::json!("55de1f16-1a9e-4504-bc9c-57efc3a2b38c"),
+        );
+    });
+    let from_proposer = resign_with(keys, "allowance_acceptance", |m| {
+        m.msg_id = SECOND_RESPONSE.into();
+        m.from = pubky_switch_core::message::Sender {
+            identity: pubky(BOB),
+            app_id: keys.app("shop").keys.app_id_bytes(),
+        };
+        m.to = pubky(ALICE);
+        m.body.remove("executor_app_id");
+    });
+    let other_proposal = resign_with(keys, "allowance_acceptance", |m| {
+        m.msg_id = SECOND_RESPONSE.into();
+        m.refs = vec![[7; 32]];
+    });
+    // executor_app_id only in an acceptance from the allower (Paykit wire 4.16), in a
+    // conflicting acceptance too: here the proposer is the allower.
+    let allower_proposal = resigned(keys, "allowance_proposal", None, |b| {
+        b.insert("proposer_role".into(), serde_json::json!("allower"));
+    });
+    let from_allowee = |msg_id: &str, executor: bool| {
+        resign_with(keys, "allowance_acceptance", |m| {
+            m.msg_id = msg_id.into();
+            m.refs = vec![allower_proposal.hash()];
+            if !executor {
+                m.body.remove("executor_app_id");
+            }
+        })
+    };
+    let mut refused = vec![
+        (
+            "a conflicting response naming another Allowance",
+            AllowanceRecord {
+                conflicted: Some(other_allowance),
+                ..base.clone()
+            },
+        ),
+        (
+            "a conflicting response where the record holds no response",
+            AllowanceRecord {
+                response: None,
+                conflicted: Some(other_acceptance),
+                ..base.clone()
+            },
+        ),
+        (
+            "a conflicting response from the proposal's sender",
+            AllowanceRecord {
+                conflicted: Some(from_proposer),
+                ..base.clone()
+            },
+        ),
+        (
+            "a conflicting response referring to another proposal",
+            AllowanceRecord {
+                conflicted: Some(other_proposal),
+                ..base.clone()
+            },
+        ),
+        (
+            "a conflicting acceptance from the allowee carrying executor_app_id",
+            AllowanceRecord {
+                proposal: allower_proposal.clone(),
+                response: Some(from_allowee("250b9ef2-c357-4856-b8c0-863368e627b5", false)),
+                conflicted: Some(from_allowee(SECOND_RESPONSE, true)),
+                ..base.clone()
+            },
+        ),
+    ];
+    // An end isn't a response: a second end is processed, not stored (Paykit spec 8.3).
+    refused.push((
+        "conflicted holding an end",
+        AllowanceRecord {
+            conflicted: Some(resigned(
+                keys,
+                "allowance_end",
+                Some(vec![proposal, acceptance]),
+                |_| {},
+            )),
+            ..base.clone()
+        },
+    ));
+    (accepted, refused)
+}
+
+/// The `msg_id` of the second response of `allowance_records`' conflicted records, from
+/// alice's executor.
+const SECOND_RESPONSE: &str = "c3e5a7b9-1d2f-4e6a-8b0c-2d4f6a8c0e1b";
+
+/// The `msg_id` of the second proposal of `allowance_records`' conflicted records, from bob.
+const SECOND_PROPOSAL: &str = "0d4c2f5e-8a1b-4c3d-9e7f-6a5b4c3d2e1f";
+
+/// The `msg_id` of the proposal alice's phone sends under bob's proposal's `allowance_id`.
+const CROSSING_PROPOSAL: &str = "5b1e7c9a-2d4f-4a6b-8c0e-1f3a5c7e9b2d";
 
 /// A record whose rejection carries `executor_app_id`, which check 10 drops (Paykit wire
 /// 4.16): the stored message can't be built, so the case is the record's JSON with the
 /// rejection signed as its sender signs it.
 fn rejection_with_executor(keys: &Keys) -> (Vec<u8>, [u8; 32]) {
-    use pubky_switch_core::message::MessagePlaintext;
     let alice = pubky(ALICE);
+    let base = AllowanceRecord::read(&allowance_record_value(keys), &alice).unwrap();
+    record_with_unstorable(keys, "allowance_rejection", "response", |m| {
+        m.refs = vec![base.proposal.hash()];
+        m.body
+            .insert("allowance_id".into(), serde_json::json!(ALLOWANCE_ID));
+        m.body.insert(
+            "executor_app_id".into(),
+            serde_json::json!(keys.app("executor").app_id),
+        );
+    })
+}
+
+/// A record whose conflicting proposal has terms that aren't valid, a minimum above the
+/// maximum, which check 10 drops (Paykit wire 4.15, 5.4), built as
+/// [`rejection_with_executor`] builds its case.
+fn conflicted_with_invalid_terms(keys: &Keys) -> (Vec<u8>, [u8; 32]) {
+    record_with_unstorable(keys, "allowance_proposal", "conflicted", |m| {
+        m.msg_id = SECOND_PROPOSAL.into();
+        let range = m
+            .body
+            .get_mut("terms")
+            .and_then(|t| t.get_mut("per_payment_amount"))
+            .and_then(Value::as_object_mut)
+            .unwrap();
+        range.insert("minimum".into(), serde_json::json!("0.02"));
+    })
+}
+
+/// `binding_accepted`'s `allowances` record with `member` holding `base` changed by `change`
+/// and signed as its sender signs it: a message no stored message can hold, so the case is
+/// the record's JSON. Returns it with the record's key.
+fn record_with_unstorable(
+    keys: &Keys,
+    base: &str,
+    member: &str,
+    change: impl FnOnce(&mut pubky_switch_core::message::Message),
+) -> (Vec<u8>, [u8; 32]) {
+    use pubky_switch_core::message::MessagePlaintext;
     let s = paykit("sealed.json");
     let accepted = &arr(&s, "binding_accepted")[1];
-    let base = AllowanceRecord::read(&allowance_record_value(keys), &alice).unwrap();
     let mut m = pubky_switch_core::message::Message::parse(
-        &message_json("allowance_rejection"),
+        &message_json(base),
         paykit_lib::kinds::OPAQUE_MEMBERS,
     )
     .unwrap();
-    m.refs = vec![base.proposal.hash()];
-    m.body
-        .insert("allowance_id".into(), serde_json::json!(ALLOWANCE_ID));
-    m.body.insert(
-        "executor_app_id".into(),
-        serde_json::json!(keys.app("executor").app_id),
-    );
+    change(&mut m);
     let json = m.to_json().unwrap();
     let sender = keys.app_by_id(&m.from.app_id_text());
     let plaintext = MessagePlaintext::sign_json(
@@ -2042,7 +2277,7 @@ fn rejection_with_executor(keys: &Keys) -> (Vec<u8>, [u8; 32]) {
         paykit_lib::kinds::OPAQUE_MEMBERS,
     )
     .unwrap();
-    let response = serde_json::json!({
+    let stored = serde_json::json!({
         "accepted_at": null,
         "cert": signed_json_doc(&crate::common::cert_doc(&sender.name)),
         "plaintext": {
@@ -2050,10 +2285,10 @@ fn rejection_with_executor(keys: &Keys) -> (Vec<u8>, [u8; 32]) {
             "sender_app": b64(&m.from.app_id),
             "signature": b64(&plaintext.signature()),
         },
-        "sender": pubky_switch_core::enc::pubky_id(&alice),
+        "sender": pubky_switch_core::enc::pubky_id(&sender.identity),
     });
     let mut record: Value = serde_json::from_slice(value(accepted)).unwrap();
-    record["response"] = response;
+    record[member] = stored;
     (serde_json::to_vec(&record).unwrap(), key(accepted))
 }
 
@@ -2085,15 +2320,24 @@ fn allowance_records(keys: &Keys) -> Value {
         out
     };
     let mut refused: Vec<Value> = refused.iter().map(|c| write(c, false)).collect();
-    let (value, key) = rejection_with_executor(keys);
-    let name = "a rejection carrying executor_app_id";
-    let error = AllowanceRecord::bind(&value, &alice, &nk, &key).expect_err(name);
-    refused.push(serde_json::json!({
-        "name": name,
-        "reason": quoted(&error.to_string()),
-        "record_key": b64(&key),
-        "value": String::from_utf8(value).unwrap(),
-    }));
+    for (name, (value, key)) in [
+        (
+            "a rejection carrying executor_app_id",
+            rejection_with_executor(keys),
+        ),
+        (
+            "a conflicting proposal whose terms aren't valid",
+            conflicted_with_invalid_terms(keys),
+        ),
+    ] {
+        let error = AllowanceRecord::bind(&value, &alice, &nk, &key).expect_err(name);
+        refused.push(serde_json::json!({
+            "name": name,
+            "reason": quoted(&error.to_string()),
+            "record_key": b64(&key),
+            "value": String::from_utf8(value).unwrap(),
+        }));
+    }
     serde_json::json!({
         "accepted": accepted.iter().map(|c| write(c, true)).collect::<Vec<_>>(),
         "description": ALLOWANCE_RECORDS_DESCRIPTION,
@@ -2109,7 +2353,7 @@ fn check_allowance_records(keys: &Keys, v: &Value) {
     let m = &v["allowance_records"];
     let (accepted, refused) = allowance_cases(keys);
     assert_eq!(arr(m, "accepted").len(), accepted.len());
-    assert_eq!(arr(m, "refused").len(), refused.len() + 1);
+    assert_eq!(arr(m, "refused").len(), refused.len() + 2);
     for (list, taken) in [("accepted", true), ("refused", false)] {
         for case in arr(m, list) {
             let name = st(case, "name");
@@ -2404,6 +2648,155 @@ fn test_allowance_record_seen_roles_are_kept() {
         ..no_end.clone()
     };
     assert!(no_end.check_later_write(&reproposed).is_err());
+}
+
+#[test]
+fn test_allowance_record_conflicted_is_never_dropped() {
+    let keys = Keys::load();
+    let (accepted, _) = allowance_cases(&keys);
+    let plain = accepted[0].1.clone();
+    let conflicted = accepted
+        .iter()
+        .find(|(name, _)| name.contains("second proposal from the counterparty"))
+        .unwrap()
+        .1
+        .clone();
+    let second = conflicted.conflicted.clone().unwrap();
+    // A later write may make a record conflicted, and keeps it so.
+    let unended = AllowanceRecord {
+        end: None,
+        ..plain.clone()
+    };
+    unended.check_later_write(&conflicted).unwrap();
+    conflicted.check_later_write(&conflicted).unwrap();
+    let ended = AllowanceRecord {
+        end: plain.end.clone(),
+        ..conflicted.clone()
+    };
+    conflicted.check_later_write(&ended).unwrap();
+    // It never clears it, replaces the conflicting proposal, or swaps the two.
+    let cleared = AllowanceRecord {
+        conflicted: None,
+        ..conflicted.clone()
+    };
+    let error = conflicted
+        .check_later_write(&cleared)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("role seen"), "{error}");
+    let third = resign_with(&keys, "allowance_proposal", |m| {
+        m.msg_id = "9f2a4c6e-8b0d-4e1f-a3b5-c7d9e1f3a5b7".into();
+        m.body
+            .insert("proposer_role".into(), serde_json::json!("allower"));
+    });
+    let replaced = AllowanceRecord {
+        conflicted: Some(third),
+        ..conflicted.clone()
+    };
+    assert!(conflicted.check_later_write(&replaced).is_err());
+    let swapped = AllowanceRecord {
+        proposal: second,
+        conflicted: Some(conflicted.proposal.clone()),
+        response: None,
+        ..conflicted.clone()
+    };
+    swapped.to_json().unwrap();
+    let held = AllowanceRecord {
+        response: None,
+        ..conflicted.clone()
+    };
+    assert!(held.check_later_write(&swapped).is_err());
+}
+
+#[test]
+fn test_allowance_record_conflicting_response_is_never_dropped() {
+    let keys = Keys::load();
+    let (accepted, _) = allowance_cases(&keys);
+    let case = |part: &str| {
+        accepted
+            .iter()
+            .find(|(name, _)| name.contains(part))
+            .unwrap()
+            .1
+            .clone()
+    };
+    let plain = case("the accepted Allowance with its end");
+    let rejected = case("a rejection after the acceptance");
+    let reaccepted = case("conflicted by another acceptance");
+    let unended = AllowanceRecord { end: None, ..plain };
+    // A later write may add the conflicting response, and keeps it as seen.
+    unended.check_later_write(&rejected).unwrap();
+    rejected.check_later_write(&rejected).unwrap();
+    // It never clears it, nor replaces it with another conflicting response.
+    let cleared = AllowanceRecord {
+        conflicted: None,
+        ..rejected.clone()
+    };
+    assert!(rejected.check_later_write(&cleared).is_err());
+    assert!(rejected.check_later_write(&reaccepted).is_err());
+    assert!(rejected.current_grant(&pubky(ALICE)).is_none());
+}
+
+#[test]
+fn test_allowance_record_conflicted_has_no_current_grant() {
+    let keys = Keys::load();
+    let alice = pubky(ALICE);
+    let entry = &paykit("documents.json")["executor_grant_history_entry"];
+    let mut with_grant: Value = serde_json::from_slice(&allowance_record_value(&keys)).unwrap();
+    with_grant["grants"] = serde_json::json!([entry]);
+    with_grant["grant"] = entry["grant"].clone();
+    let granted = AllowanceRecord::read(&serde_json::to_vec(&with_grant).unwrap(), &alice).unwrap();
+    let (_, executor) = granted.current_grant(&alice).unwrap();
+    let (accepted, _) = allowance_cases(&keys);
+    let second = accepted
+        .iter()
+        .find_map(|(name, r)| {
+            name.contains("second proposal from the counterparty")
+                .then(|| r.conflicted.clone())
+                .flatten()
+        })
+        .unwrap();
+    let conflicted = AllowanceRecord {
+        conflicted: Some(second),
+        ..granted.clone()
+    };
+    // Nothing is paid under it: no current grant. The grant history still names the
+    // executor at each version, so the outcomes of attempts already open are recorded.
+    assert!(conflicted.current_grant(&alice).is_none());
+    let after = pubky_switch_core::ops::RecordVersion {
+        generation: 1,
+        version: 13,
+    };
+    assert_eq!(
+        conflicted.executor_at(&alice, after).unwrap(),
+        Some(executor.app_id())
+    );
+    let json = conflicted.to_json().unwrap();
+    let read = AllowanceRecord::read(&json, &alice).unwrap();
+    assert!(read.conflicted.is_some() && read.current_grant(&alice).is_none());
+    assert!(read.msg_ids.iter().any(|id| id == SECOND_PROPOSAL));
+}
+
+#[test]
+fn test_allowance_record_conflicted_msg_id_is_a_stored_one() {
+    // The conflicting proposal is stored, so its msg_id stays however many others follow it
+    // (Paykit wire 5.3, 5.4).
+    let keys = Keys::load();
+    let alice = pubky(ALICE);
+    let (accepted, _) = allowance_cases(&keys);
+    let conflicted = accepted
+        .iter()
+        .find(|(name, _)| name.contains("second proposal from the counterparty"))
+        .unwrap()
+        .1
+        .clone();
+    let mut json: Value = serde_json::from_slice(&conflicted.to_json().unwrap()).unwrap();
+    let mut ids = vec![serde_json::json!(SECOND_PROPOSAL)];
+    ids.extend((1..=17u32).map(|i| serde_json::json!(format!("{i:08x}-0000-4000-8000-{i:012x}"))));
+    json["msg_ids"] = Value::Array(ids);
+    let read = AllowanceRecord::read(&serde_json::to_vec(&json).unwrap(), &alice).unwrap();
+    assert!(read.msg_ids.iter().any(|id| id == SECOND_PROPOSAL));
+    assert!(!read.msg_ids.iter().any(|id| id.starts_with("00000001-")));
 }
 
 /// The `payment_lists` record of `binding_accepted`, a used single-use endpoint of its list,

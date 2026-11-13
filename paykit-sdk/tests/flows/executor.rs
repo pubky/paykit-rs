@@ -545,12 +545,17 @@ async fn test_executor_handoff_stops_the_previous_executor() {
     // The notice takes the Allowance off the previous executor's consent list.
     old.receive(None).await.unwrap();
     assert!(!old.allowance(&record).await.unwrap().consented);
-    // The new executor builds on the previous one's ledger.
+    // The new executor keeps no ledger version to check the previous one's ledger
+    // against: it builds on none and pays nothing automatically (Paykit spec 8.3, "Last
+    // ledger version").
     new.receive(None).await.unwrap();
-    let paid = new.pay_under_allowance(&second, &record).await.unwrap();
-    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let refused = new.pay_under_allowance(&second, &record).await.unwrap_err();
+    assert!(
+        refused_for(&refused, "no ledger version is kept"),
+        "{refused:?}"
+    );
     let (_, ledger) = held(&new, &record).await;
-    assert_eq!(ledger.unwrap().entries.len(), 2);
+    assert_eq!(ledger.unwrap().entries.len(), 1);
 }
 
 #[tokio::test]
@@ -572,10 +577,26 @@ async fn test_executor_refuses_a_ledger_written_by_another_app() {
         ),
     );
     other.app_mut().read_record(&target).await.unwrap();
+    // Conditioned on the Allowance record as an executor's write is, so the check that
+    // refuses it is the writer's: the grant history names another app at that version.
+    let version = other
+        .app()
+        .shared_record(&record)
+        .await
+        .unwrap()
+        .unwrap()
+        .version;
     let empty = Ledger::empty(allowance.counterparty, allowance.allowance_id.clone());
     other
         .app_mut()
-        .put_record(&target, &empty.to_json().unwrap(), Vec::new())
+        .put_record(
+            &target,
+            &empty.to_json().unwrap(),
+            vec![pubky_switch_core::ops::Condition::RecordVersion {
+                key: record,
+                version,
+            }],
+        )
         .await
         .unwrap();
     let request = request(&w, &mut shop, &mut wallet, "0.5").await;
@@ -583,7 +604,13 @@ async fn test_executor_refuses_a_ledger_written_by_another_app() {
         .pay_under_allowance(&request, &record)
         .await
         .unwrap_err();
-    assert!(refused_for(&refused, "writer"), "{refused:?}");
+    assert!(
+        refused_for(
+            &refused,
+            "the ledger's writer isn't the executor at the version it was conditioned on"
+        ),
+        "{refused:?}"
+    );
     assert!(w.rail.all_executions().is_empty());
 }
 
@@ -738,4 +765,86 @@ async fn test_executor_journal_entry_with_an_allowance_that_does_not_read_is_cor
         .unwrap();
     let refused = wallet.payments().await.unwrap_err();
     assert!(refused.refusal().is_none(), "{refused:?}");
+}
+
+/// Bob proposes again under the Allowance at the wallet's `record`, with other terms: a
+/// second, different proposal, which makes the Allowance conflicted (Paykit spec 8.3).
+async fn propose_again(w: &World, wallet: &Paykit, record: &[u8; 32]) {
+    let (allowance, _) = held(wallet, record).await;
+    let mut terms = terms_with(json!({ "lifetime_amount_limit": "3" }))
+        .to_json()
+        .unwrap();
+    terms["lifetime_amount_limit"] = json!("3");
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.allowance_proposal",
+        Vec::new(),
+        json!({
+            "allowance_id": allowance.allowance_id.as_str(),
+            "proposer_role": "allowee",
+            "terms": terms,
+        })
+        .as_object()
+        .cloned()
+        .unwrap(),
+    );
+}
+
+#[tokio::test]
+async fn test_executor_refuses_a_conflicted_allowance() {
+    // The record shows the conflict: nothing is paid under it, whatever its grant says.
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    propose_again(&w, &wallet, &record).await;
+    wallet.receive(None).await.unwrap();
+    let (allowance, _) = held(&wallet, &record).await;
+    assert!(allowance.conflicted.is_some());
+    let refused = wallet
+        .pay_under_allowance(&request, &record)
+        .await
+        .unwrap_err();
+    assert!(!not_automatic(&refused), "{refused:?}");
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::AllowanceConflicted)),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_executor_refuses_a_conflict_kept_before_the_record_shows_it() {
+    // The second proposal is kept as the stop; the later write of it into the record is
+    // refused, so the record still holds the executor's grant and no `conflicted`. The kept
+    // stop alone refuses the payment.
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    propose_again(&w, &wallet, &record).await;
+    crate::common::refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    let (allowance, _) = held(&wallet, &record).await;
+    assert!(allowance.conflicted.is_none());
+    assert_eq!(wallet.app().protocol_scan(b"cf/").await.unwrap().len(), 1);
+    let refused = wallet
+        .pay_under_allowance(&request, &record)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::AllowanceConflicted)),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    // The conflict took the Allowance off the consent list for good, so no grant is
+    // written again.
+    let grants = allowance.grants.len();
+    let refused = wallet
+        .grant_executor(&record, UserConfirmed::new())
+        .await
+        .unwrap_err();
+    assert!(refused.refusal().is_some(), "{refused:?}");
+    assert_eq!(held(&wallet, &record).await.0.grants.len(), grants);
 }

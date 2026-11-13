@@ -142,3 +142,96 @@ async fn test_receipts_of_a_payment_without_a_request_carry_the_payees_reference
         .unwrap();
     assert_eq!(by_reference.len(), 1);
 }
+
+#[tokio::test]
+async fn test_receipts_of_a_billing_period_carry_the_requests_reference() {
+    // Another own app wrote alice's period record of bob's monthly request, holding bob's
+    // receipt of the first Billing Period. The period record holds no request: the
+    // receipt's reference is the request's, read from the request record.
+    let w = World::new();
+    let _shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let body = json!({
+        "amount": { "asset": "btc", "value": "1" },
+        "payment_reference": "plan-7",
+        "proposal_expires_at": pubky_switch_core::time::rfc3339(w.clock.now_ms() + 3_600_000),
+        "payment_endpoints": { "btc-lightning-bolt11": "lnbc1invoice" },
+        "recurrence": {
+            "anchor": "2026-01-31T00:00:00.000Z",
+            "ends_at": null,
+            "every": 1,
+            "starts_at": "2026-01-31T00:00:00.000Z",
+            "unit": "month"
+        }
+    });
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.payment_request",
+        Vec::new(),
+        body.as_object().cloned().unwrap(),
+    );
+    wallet.receive(None).await.unwrap();
+    let request = wallet.requests().await.unwrap().remove(0).request;
+    let period = PeriodRef {
+        starts_at: 1_769_817_600_000,
+        ends_at: 1_772_236_800_000,
+    };
+    let receipt = paykit_lib::bodies::PaymentReceipt {
+        attempt_id: paykit_lib::AttemptId::from_bytes([3; 16]),
+        billing_period: Some(period),
+        metadata: None,
+        payment_reference: None,
+    }
+    .to_body(2)
+    .unwrap();
+    let plaintext = w.sign_as(
+        &w.bob,
+        "shop",
+        &w.alice,
+        "paykit.payment_receipt",
+        vec![[7; 32], request.request_hash],
+        receipt,
+    );
+    let keys = w.bob.identity().app_keys("shop");
+    let cert = w.bob.switch().app(&keys.app_id_bytes()).cert.unwrap();
+    let stored = paykit_lib::records::StoredMessage::new(
+        w.bob_id(),
+        cert.signed(),
+        plaintext,
+        Some(w.clock.now_ms()),
+        &w.alice_id(),
+    )
+    .unwrap();
+    let mut record = paykit_lib::records::ActivityRecord::new(
+        paykit_lib::records::ActivitySide::Payer,
+        w.bob_id(),
+    );
+    record.request_hash = Some(request.request_hash);
+    record.billing_period = Some(period);
+    record.receipt = Some(stored);
+    let collection = paykit_lib::collections::Collection::PayerActivity;
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(collection.name(), collection.policy(None)),
+        &paykit_lib::derive::natural_key::period_record(
+            &w.bob_id(),
+            &request.request_hash,
+            period.starts_at / 1000,
+        ),
+    );
+    wallet
+        .app_mut()
+        .put_record(&target, &record.to_json().unwrap(), Vec::new())
+        .await
+        .unwrap();
+    let reference = PaymentReference::new("plan-7").unwrap();
+    let found = wallet
+        .receipts(ReceiptsOf::Reference(reference))
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].billing_period, Some(period));
+    assert_eq!(found[0].payment_reference.as_deref(), Some("plan-7"));
+}

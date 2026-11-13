@@ -52,7 +52,7 @@ use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
 use serde::{Deserialize, Serialize};
 
 use crate::activity::ActivityTarget;
-use crate::allowances::{allowance_target, Consent, NoticeTarget};
+use crate::allowances::{allowance_target, Consent, ConsentEntry, NoticeTarget};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::Destination;
 use crate::pay::PayOptions;
@@ -219,7 +219,8 @@ impl Paykit {
         }
     }
 
-    /// The kept ledger version of the Allowance at `record`, checked as at a restore.
+    /// The kept ledger version of the Allowance at `record`, read bound to its key as a
+    /// restore reads it (`state::Stored`).
     async fn kept_ledger(&self, record: &[u8; 32]) -> Result<Option<(KeptLedger, Ledger)>> {
         let Some(kept) = self
             .local_get::<KeptLedger>(&key::kept_ledger(record))
@@ -227,7 +228,7 @@ impl Paykit {
         else {
             return Ok(None);
         };
-        let ledger = check_kept_ledger(record, &kept)?;
+        let ledger = Ledger::from_json(&kept.value).map_err(|_| PaykitError::corrupt())?;
         Ok(Some((kept, ledger)))
     }
 
@@ -313,6 +314,11 @@ impl Paykit {
             .held_allowance(record)
             .await?
             .ok_or(Refusal::NotFound)?;
+        // Conflicted for good (Paykit spec 8.3, "Conflicted"): in the record, or kept as the
+        // stop before the record shows it.
+        if allowance.conflicted.is_some() || self.conflict_kept(record).await? {
+            return Ok(Err(Refusal::AllowanceConflicted));
+        }
         if allowance.end.is_some() || self.allowance_stopped(record).await? {
             return Ok(Err(Refusal::AllowanceEnded));
         }
@@ -482,7 +488,17 @@ impl Paykit {
             shared.writer,
         )
         .map_err(not_automatic)?;
-        if let Some((kept, held)) = &kept {
+        // Merged spec 8.3 checks the write shown against the version kept: an executor that
+        // keeps none, as a new executor after a handoff, or one restored from a backup taken
+        // before its first ledger write, has nothing to check it against, so it builds on
+        // nothing and pays nothing automatically (fail closed). Which write such an executor
+        // may build on is left to the spec.
+        let Some((kept, held)) = &kept else {
+            return Err(not_automatic(
+                "no ledger version is kept to check the ledger shown against",
+            ));
+        };
+        {
             let item = op.item_hash().map_err(|_| PaykitError::corrupt())?;
             let built_on = match &op.body().kind {
                 OpKind::RecordPut(put) => put.expected_version,
@@ -687,8 +703,12 @@ impl Paykit {
             self.records_known().await?;
             self.require_executor()?;
             if matches!(
-                self.local_get::<Consent>(&key::consent(record)).await?,
-                Some(Consent::Removed { .. })
+                self.local_get::<ConsentEntry>(&key::consent(record))
+                    .await?,
+                Some(ConsentEntry {
+                    consent: Consent::Removed { .. },
+                    ..
+                })
             ) {
                 return Err(Refusal::Usage(
                     "Paykit spec 8.3: the Allowance left the consent list for good".into(),
@@ -738,6 +758,10 @@ impl Paykit {
             .held_allowance(record)
             .await?
             .ok_or(Refusal::NotFound)?;
+        // No grant is written for a conflicted Allowance (Paykit spec 8.3, "Conflicted").
+        if held.conflicted.is_some() || self.conflict_kept(record).await? {
+            return Err(Refusal::AllowanceConflicted.into());
+        }
         if held.end.is_some() || self.allowance_stopped(record).await? {
             return Err(Refusal::AllowanceEnded.into());
         }
@@ -795,9 +819,13 @@ impl Paykit {
         let mut queue = Vec::new();
         let mut locals = vec![state::local_put(
             &key::consent(record),
-            &Consent::Held {
-                confirm_again: false,
-            },
+            &ConsentEntry::new(
+                held.counterparty,
+                &held.allowance_id,
+                Consent::Held {
+                    confirm_again: false,
+                },
+            ),
         )?];
         if let Some(previous) = previous.filter(|app| *app != self.app_id()) {
             let body = ExecutorNotice {
@@ -906,19 +934,26 @@ impl Paykit {
             )
             .into());
         }
-        match self.local_get::<Consent>(&key::consent(record)).await? {
+        // Read bound to its key (`state::Stored`): the entry names this Allowance.
+        match self
+            .local_get::<ConsentEntry>(&key::consent(record))
+            .await?
+        {
             None => Err(Refusal::NotFound.into()),
-            Some(Consent::Removed { .. }) => Err(Refusal::Usage(
+            Some(ConsentEntry {
+                consent: Consent::Removed { .. },
+                ..
+            }) => Err(Refusal::Usage(
                 "Paykit spec 8.3: the Allowance left the consent list for good".into(),
             )
             .into()),
-            Some(Consent::Held { .. }) => {
+            Some(entry) => {
                 let mut tx = Tx::default();
                 tx.put(
                     &key::consent(record),
-                    &Consent::Held {
+                    &entry.with(Consent::Held {
                         confirm_again: false,
-                    },
+                    }),
                 )?;
                 self.local_commit(tx).await
             }
