@@ -674,17 +674,23 @@ impl Paykit {
     /// payloads stay the payment method's to expire. [`Paykit::publish_list_to`] sends it the
     /// list again.
     ///
+    /// The withdrawal goes at once even while sends to `counterparty` are held, the deny list
+    /// holding it or its copy not known (Paykit spec 8.1, 8.4): it stops payments to
+    /// endpoints this app no longer wants paid, and a payer this app blocked can still pay
+    /// them. An empty version that doesn't reach its inbox is owed, and goes again at a later
+    /// receive, a restore's included ([`Paykit::tend_lists`]).
+    ///
     /// # Errors
     ///
-    /// [`Refusal::NotFound`] for a counterparty that never got a list; as
-    /// [`Paykit::publish_list_to`].
+    /// [`Refusal::NotFound`] for a counterparty that never got a list;
+    /// [`Refusal::CertificateRefused`]; [`Refusal::ScopeMissing`] without `request` or a
+    /// label; a store failure.
     pub async fn withdraw_list_from(&mut self, counterparty: &[u8; 32]) -> Result<ListsPublished> {
         self.refresh_own()?;
         self.require_payee()?;
         if self.recipient(counterparty).await?.is_none() {
             return Err(Refusal::NotFound.into());
         }
-        self.refuse_held(&[*counterparty]).await?;
         self.publish_to(&[*counterparty], true, None).await
     }
 
@@ -886,7 +892,8 @@ impl Paykit {
 
     /// Send each of `counterparties` a newer version, empty when `withdraw`, each on its own.
     /// One whose sends are held ([`Paykit::list_held`]) is sent nothing: a newer version is
-    /// owed it, which goes once a read of the deny list shows it not blocked. `undelivered` is as for [`Paykit::settled`].
+    /// owed it, which goes once a read of the deny list shows it not blocked. A withdrawal
+    /// goes all the same: it only stops payments ([`Paykit::withdraw_list_from`]). `undelivered` is as for [`Paykit::settled`].
     async fn publish_to(
         &mut self,
         counterparties: &[[u8; 32]],
@@ -895,7 +902,12 @@ impl Paykit {
     ) -> Result<ListsPublished> {
         let mut out = ListsPublished::default();
         for counterparty in counterparties {
-            if let Some(refusal) = self.list_held(counterparty).await? {
+            let held = if withdraw {
+                None
+            } else {
+                self.list_held(counterparty).await?
+            };
+            if let Some(refusal) = held {
                 let rkey = key::list_recipient(counterparty);
                 if let Some(mut recipient) = self.recipient(counterparty).await? {
                     if !recipient.owed {
@@ -1161,6 +1173,7 @@ impl Paykit {
         // A certificate without a selling scope sends no list: its recipients would drop it.
         let payee = paykit_lib::scopes::acts_as_payee(self.app.cert().scopes());
         let mut waiting = Vec::new();
+        let mut withdrawals = Vec::new();
         let now = self.now();
         let mut tx = Tx::default();
         for recipient in self.recipients().await? {
@@ -1183,6 +1196,25 @@ impl Paykit {
                 continue;
             }
             let recipient = self.settled(recipient, Some(&undelivered)).await?;
+            // A withdrawal whose empty version didn't reach the counterparty, as when a
+            // restore's outbox lacks it, is owed while a version it held may still be paid:
+            // it goes again, held sends or not, at most once an hour.
+            let unreached = recipient
+                .current()
+                .is_some_and(|o| o.fate == Fate::Unreached);
+            let payable = recipient
+                .versions
+                .iter()
+                .any(|o| !o.endpoints.is_empty() && now < o.expires_at_ms);
+            let recent = recipient
+                .resent_at_ms
+                .is_some_and(|at| at <= now && now - at < RESEND_INTERVAL_MS);
+            if payee && !recipient.active && unreached && payable {
+                if !recent {
+                    withdrawals.push(recipient.counterparty);
+                }
+                continue;
+            }
             let due = recipient.current().is_some_and(|o| renewal_due(o, now));
             let waits = recipient.owed || recipient.requested || recipient.resend || due;
             if payee && recipient.active && waits {
@@ -1190,9 +1222,19 @@ impl Paykit {
             }
         }
         self.local_commit(tx).await?;
+        let withdrawn = self
+            .publish_to(&withdrawals, true, Some(&undelivered))
+            .await?;
+        for sent in &withdrawn.sent {
+            if let Some(mut recipient) = self.recipient(&sent.counterparty).await? {
+                recipient.resent_at_ms = Some(now);
+                self.local_put(&key::list_recipient(&sent.counterparty), &recipient)
+                    .await?;
+            }
+        }
         if removed || waiting.is_empty() {
             self.run_releases().await?;
-            return Ok(ListsPublished::default());
+            return Ok(withdrawn);
         }
         // A counterparty whose sends are held keeps what it waits for, uncounted, until a
         // read shows it not blocked.
@@ -1253,6 +1295,8 @@ impl Paykit {
         self.local_commit(tx).await?;
         let mut out = self.publish_to(&owed, false, Some(&undelivered)).await?;
         out.not_sent.extend(blocked);
+        out.sent.extend(withdrawn.sent);
+        out.not_sent.extend(withdrawn.not_sent);
         for (counterparty, current) in resend {
             if self.app.resend(&current.msg_id).await.is_err() {
                 continue;
