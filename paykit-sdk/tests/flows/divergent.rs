@@ -2664,6 +2664,290 @@ mod durable_event {
         assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     }
 
+    /// After the user confirmed `record`, held by `app` on `base`, its record turns divergent
+    /// again at `signer`'s switch: the client reads it so and keeps its report untaken. Then
+    /// `other`, another own app, writes the record at `target` again, a newer write that
+    /// clears the view, before `app` takes the report, at its next receive.
+    async fn divergent_again_cleared(
+        base: &Arc<dyn StateStore>,
+        app: &mut Paykit,
+        other: &mut Paykit,
+        signer: &pubky_switch_client::testing::TestSigner,
+        target: &RecordTarget,
+        record: &[u8; 32],
+    ) {
+        // The client's flag goes as a write clears it, so the next divergent view is a change.
+        set_divergent(base, app, record, false);
+        signer
+            .switch()
+            .make_divergent(UPLOADER, *record, [2; 32])
+            .unwrap();
+        app.app_mut().receive(None).await.unwrap();
+        assert!(
+            app.app()
+                .shared_record(record)
+                .await
+                .unwrap()
+                .unwrap()
+                .divergent
+        );
+        other.receive(None).await.unwrap();
+        let value = other
+            .app()
+            .shared_record(record)
+            .await
+            .unwrap()
+            .unwrap()
+            .content
+            .value()
+            .unwrap()
+            .to_vec();
+        let op = other
+            .app_mut()
+            .record_op(target, Some(&value), Vec::new())
+            .await
+            .unwrap();
+        other
+            .app_mut()
+            .submit_batch(pubky_switch_client::app::OpBatch::new().entry(op))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_divergent_event_after_a_confirmation_pauses_again_over_a_cleared_view() {
+        // The user confirmed the record's first divergence. A second divergence's report is
+        // taken only after a newer write has cleared the view: the earlier confirmation
+        // confirms nothing for it, the record is paused again, and a payment by hand waits
+        // for the user's new confirmation.
+        let w = World::new();
+        let base = store();
+        let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+        let mut phone = w.wallet("phone").await;
+        let mut shop = w.shop().await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        let record = wallet.request(&request).await.unwrap().record;
+        w.alice
+            .switch()
+            .make_divergent(UPLOADER, record, [1; 32])
+            .unwrap();
+        wallet.receive(None).await.unwrap();
+        confirm(&mut wallet, &record).await.unwrap();
+        let target = crate::outcome_record::payer_record(&request);
+        divergent_again_cleared(&base, &mut wallet, &mut phone, &w.alice, &target, &record).await;
+        wallet.receive(None).await.unwrap();
+        assert!(
+            !wallet
+                .app()
+                .shared_record(&record)
+                .await
+                .unwrap()
+                .unwrap()
+                .divergent
+        );
+        let listed = wallet.divergent_records().await.unwrap();
+        assert!(
+            listed.iter().any(|r| r.record == record && r.paused),
+            "{listed:?}"
+        );
+        let refused = wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(refused_records(&refused), vec![(record, true, false)]);
+        confirm(&mut wallet, &record).await.unwrap();
+        let outcome = wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn test_divergent_event_after_a_confirmation_withholds_the_repeat_again() {
+        // As above, with a payment in flight: its repeat is withheld again until the user's
+        // new confirmation.
+        let w = World::new();
+        let base = store();
+        let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+        let mut phone = w.wallet("phone").await;
+        let mut shop = w.shop().await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        w.rail.next(Behaviour::Hang);
+        let PayOutcome::Pending { attempt_id, .. } = wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap()
+        else {
+            panic!("pending");
+        };
+        w.rail.set_declaration(idempotent_without_history());
+        let record = wallet.request(&request).await.unwrap().record;
+        w.alice
+            .switch()
+            .make_divergent(UPLOADER, record, [1; 32])
+            .unwrap();
+        wallet.receive(None).await.unwrap();
+        confirm(&mut wallet, &record).await.unwrap();
+        let target = crate::outcome_record::payer_record(&request);
+        divergent_again_cleared(&base, &mut wallet, &mut phone, &w.alice, &target, &record).await;
+        wallet.receive(None).await.unwrap();
+        assert!(
+            !wallet
+                .app()
+                .shared_record(&record)
+                .await
+                .unwrap()
+                .unwrap()
+                .divergent
+        );
+        let resumed = wallet.resume_payments().await.unwrap();
+        assert!(
+            matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+            "{resumed:?}"
+        );
+        assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+        confirm(&mut wallet, &record).await.unwrap();
+        wallet.resume_payments().await.unwrap();
+        assert_eq!(w.rail.pay_calls(&attempt_id), 2);
+    }
+
+    #[tokio::test]
+    async fn test_divergent_event_after_a_credit_confirmation_needs_a_new_one() {
+        // The shop's user confirmed its record shown for a credit. A second divergence's
+        // report comes after a newer write cleared the view: the credit waits for a new
+        // confirmation shown for a credit, then goes.
+        let w = World::new();
+        let base = store();
+        let mut wallet = w.wallet("wallet").await;
+        let mut shop = shop_on(&w, Arc::clone(&base)).await;
+        let mut till = w
+            .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+            .await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap();
+        shop.receive(None).await.unwrap();
+        let paid = sale(&shop, &request).await.record;
+        w.bob
+            .switch()
+            .make_divergent(UPLOADER, paid, [1; 32])
+            .unwrap();
+        shop.receive(None).await.unwrap();
+        let refused = shop.confirm_payment(&paid).await.unwrap_err();
+        assert!(shown_for_a_credit(&refused));
+        confirm_refused(&mut shop, &refused).await;
+        let collection = Collection::PayeeActivity;
+        let target = RecordTarget::new(
+            SwitchCollection::new(collection.name(), collection.policy(None)),
+            &natural_key::request_record(&w.bob_id(), &request.request_hash),
+        );
+        divergent_again_cleared(&base, &mut shop, &mut till, &w.bob, &target, &paid).await;
+        shop.receive(None).await.unwrap();
+        assert!(
+            !shop
+                .app()
+                .shared_record(&paid)
+                .await
+                .unwrap()
+                .unwrap()
+                .divergent
+        );
+        let refused = shop.confirm_payment(&paid).await.unwrap_err();
+        assert_eq!(refused_records(&refused), vec![(paid, true, false)]);
+        assert!(shown_for_a_credit(&refused));
+        confirm_refused(&mut shop, &refused).await;
+        assert!(shop.confirm_payment(&paid).await.unwrap().is_some());
+    }
+
+    /// A store whose next commit that counts a duty event taken (`p/dt/`) fails once armed:
+    /// the app stops between a report's mark and the commit that counts it taken, so the
+    /// client delivers the report again.
+    #[derive(Default)]
+    struct FailsTaken {
+        inner: pubky_switch_client::store::MemoryStore,
+        armed: std::sync::atomic::AtomicBool,
+    }
+
+    impl StateStore for FailsTaken {
+        fn get(
+            &self,
+            ns: &str,
+            key: &[u8],
+        ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+            self.inner.get(ns, key)
+        }
+
+        fn scan(
+            &self,
+            ns: &str,
+            prefix: &[u8],
+            after: Option<&[u8]>,
+            limit: u32,
+        ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+        {
+            self.inner.scan(ns, prefix, after, limit)
+        }
+
+        fn commit(&self, batch: WriteBatch) -> Result<(), pubky_switch_client::error::StoreError> {
+            let taken = batch.writes.iter().any(|write| {
+                matches!(write, pubky_switch_client::store::Write::Put { key, .. } if key.starts_with(b"p/dt/"))
+            });
+            if taken && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return Err(pubky_switch_client::error::StoreError::Unavailable);
+            }
+            self.inner.commit(batch)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_divergent_event_taken_again_after_a_restart_pauses_nothing_confirmed_since() {
+        // The app keeps a report's mark and stops before the commit that counts the report
+        // taken. It starts again, its user confirms the record, and a newer write clears the
+        // view. The client delivers the same report again, by its ID: the mark has taken it,
+        // and the confirmation, given after it, stands; the payment goes.
+        let w = World::new();
+        let failing = Arc::new(FailsTaken::default());
+        let base = Arc::clone(&failing) as Arc<dyn StateStore>;
+        let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+        let app_id = wallet.app_id();
+        let mut shop = w.shop().await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        let record = wallet.request(&request).await.unwrap().record;
+        w.alice
+            .switch()
+            .make_divergent(UPLOADER, record, [1; 32])
+            .unwrap();
+        failing
+            .armed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(wallet.receive(None).await.is_err());
+        drop(wallet);
+        let mut wallet = w
+            .load_on_clock(&w.alice, Arc::clone(&base), app_id, Arc::clone(&w.clock))
+            .await;
+        confirm(&mut wallet, &record).await.unwrap();
+        set_divergent(&base, &wallet, &record, false);
+        wallet.receive(None).await.unwrap();
+        assert!(wallet
+            .divergent_records()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.record != record));
+        let outcome = wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    }
+
     #[tokio::test]
     async fn test_divergent_repeat_withheld_when_its_fresh_read_shows_the_record_divergent() {
         // The wallet's own copy shows the request record clear; the switch holds it

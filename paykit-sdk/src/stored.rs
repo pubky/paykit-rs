@@ -373,8 +373,8 @@ impl Paykit {
             }
             // A record a view showed divergent pauses (`divergent.rs`): its mark is its own
             // commit, before this event's, and taking the event again changes nothing.
-            AppEvent::RecordDivergent { key: record, .. } => {
-                Box::pin(self.take_divergent_event(record)).await?;
+            AppEvent::RecordDivergent { key: record, id } => {
+                Box::pin(self.take_divergent_event(record, id)).await?;
                 true
             }
             _ => false,

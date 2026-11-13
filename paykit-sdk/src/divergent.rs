@@ -73,10 +73,14 @@
 //! the receive step with the cursor move and in its calls. The client's report that a view
 //! showed a record divergent (`AppEvent::RecordDivergent`) is a duty event, delivered until
 //! acknowledged, through a restart and a flag cleared since: each receive takes it by the
-//! record's key, never by its ID, and marks the record whatever its view shows now, in a
-//! commit before the one that counts the event taken, so it is acknowledged only once the
-//! mark is kept. A second event for one divergence, as a restore raises under a new ID,
-//! changes nothing. At a load, every record held is looked at once too.
+//! record's key and pauses the record whatever its view shows now, in a commit before the
+//! one that counts the event taken, so it is acknowledged only once the record is paused. A
+//! record its user had confirmed is paused again: the confirmation was of the write shown
+//! then, and confirms nothing for a later divergence. The mark keeps the latest event it
+//! took, by its ID: the same event delivered again, as after a stop before the commit that
+//! counts it taken, changes nothing, so it never pauses again a record confirmed after it;
+//! an event raised again under a new ID while a paused mark waits, as after a restore,
+//! leaves the pause as it is. At a load, every record held is looked at once too.
 //!
 //! **Restore.** A backup carries the marks and the kept writes. A restore installs every
 //! mark unconfirmed, a confirmation given before it included: the restored app pauses each
@@ -92,8 +96,8 @@ use paykit_lib::derive::natural_key;
 use paykit_lib::records::StoredMessage;
 use paykit_lib::Body;
 use pubky_switch_client::app::{
-    AppError, ReceiveContext, RecordContent, RecordTarget, Refusal as ClientRefusal, SharedRecord,
-    UserConfirmed,
+    AppError, EventId, ReceiveContext, RecordContent, RecordTarget, Refusal as ClientRefusal,
+    SharedRecord, UserConfirmed,
 };
 use pubky_switch_core::enc::serde_b64;
 use pubky_switch_core::ops::RecordVersion;
@@ -180,6 +184,13 @@ pub(crate) struct DivergentMark {
     /// a credit, whatever the host passes back. `None` until a credit's refusal names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     credit_shown: Option<SeenVersion>,
+    /// The latest of the client's divergence reports (`AppEvent::RecordDivergent`) this mark
+    /// has taken, by its event ID's stable string form: the same report again, as a restart
+    /// delivers one taken before its own commit, or an earlier one of the same store, changes
+    /// nothing, so it never pauses again a record the user confirmed after it. `None` for a
+    /// mark no report has set or kept since, and after a restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    event: Option<String>,
 }
 
 impl DivergentMark {
@@ -191,7 +202,25 @@ impl DivergentMark {
             confirmed: None,
             credit_confirmed: None,
             credit_shown: None,
+            event: None,
         }
+    }
+
+    /// The mark with `event` the latest report it has taken.
+    fn taking(mut self, event: &EventId) -> Self {
+        self.event = Some(event.to_string());
+        self
+    }
+
+    /// Whether `event` is a report this mark has taken already, or an earlier one of the same
+    /// store: the client's event IDs order only within one store, so one of another store
+    /// is never taken as taken.
+    fn has_taken(&self, event: &EventId) -> bool {
+        self.event
+            .as_deref()
+            .and_then(|taken| taken.parse::<EventId>().ok())
+            .and_then(|taken| taken.cmp_same_store(event))
+            .is_some_and(std::cmp::Ordering::is_ge)
     }
 
     /// Whether a credit waits for the user's confirmation of this record shown that it may
@@ -221,6 +250,10 @@ impl DivergentMark {
             || self.credit_confirmed.is_some_and(|at| at < self.seen)
             || self.credit_shown.is_some_and(|at| at < self.seen)
             || (self.credit_confirmed.is_some() && self.confirmed.is_none())
+            || self
+                .event
+                .as_deref()
+                .is_some_and(|event| event.parse::<EventId>().is_err())
         {
             return Err(PaykitError::corrupt());
         }
@@ -234,6 +267,8 @@ impl DivergentMark {
         self.confirmed = None;
         self.credit_confirmed = None;
         self.credit_shown = None;
+        // The restored client raises its reports again under IDs of its own store.
+        self.event = None;
         self
     }
 }
@@ -312,11 +347,12 @@ impl Marked {
         }
     }
 
-    /// The mark the client's report sets ([`after_event`]); none over a mismatch.
-    fn after_event(&self, view: &View) -> Option<DivergentMark> {
+    /// The mark the client's report `event` sets ([`after_event`]); none over a mismatch,
+    /// which is paused already and stays as it is.
+    fn after_event(&self, view: &View, event: &EventId) -> Option<DivergentMark> {
         match self {
             Self::Mismatch => None,
-            _ => after_event(self.mark(), view),
+            _ => after_event(self.mark(), view, event),
         }
     }
 
@@ -371,13 +407,34 @@ pub(crate) fn after_view(mark: Option<&DivergentMark>, view: &View) -> Option<Di
     }
 }
 
-/// The mark after the client reported the record divergent (`RecordDivergent`), whatever
-/// its view shows now: a view showed it so, a later write in the same read may have cleared
-/// it since. A record with a mark already is judged by its view.
-pub(crate) fn after_event(mark: Option<&DivergentMark>, view: &View) -> Option<DivergentMark> {
+/// The mark after the client's report `event` that the record was seen divergent
+/// (`RecordDivergent`), whatever its view shows now: a view showed it so, and a later write
+/// may have cleared it since, in the same read or before the report is taken. The report
+/// carries the record's key, not the write it showed.
+/// - A report the mark has taken already, or an earlier one of the same store, changes
+///   nothing ([`DivergentMark::has_taken`]).
+/// - With no mark, the record is paused, at the write held.
+/// - A paused mark stays as it is, the report noted in it.
+/// - A confirmed mark is of the write it was given over, and confirms nothing for a later
+///   divergence (Paykit spec 6): the record is paused again, at the write held, with no
+///   confirmation, a credit's included, whatever the view's flag shows now. Paused, it is
+///   ended only by the user's confirmation of the write the app then shows. The one report
+///   a confirmed mark keeps is one of the write it confirmed while the view still shows that
+///   write divergent: a second upload beside the same write can't be told from the first,
+///   and one confirmation covers both.
+pub(crate) fn after_event(
+    mark: Option<&DivergentMark>,
+    view: &View,
+    event: &EventId,
+) -> Option<DivergentMark> {
     match mark {
-        None => Some(DivergentMark::paused(view)),
-        Some(_) => after_view(mark, view),
+        Some(mark) if mark.has_taken(event) => None,
+        None => Some(DivergentMark::paused(view).taking(event)),
+        Some(mark) if mark.is_paused() => Some(mark.clone().taking(event)),
+        Some(mark) if view.divergent && mark.confirmed == Some(view.version) => {
+            Some(mark.clone().taking(event))
+        }
+        Some(_) => Some(DivergentMark::paused(view).taking(event)),
     }
 }
 
@@ -413,6 +470,7 @@ pub(crate) fn after_confirmation(
             mark.and_then(|mark| mark.credit_confirmed)
         },
         credit_shown: shown,
+        event: mark.and_then(|mark| mark.event.clone()),
     })
 }
 
@@ -1297,16 +1355,24 @@ impl Paykit {
             .await
     }
 
-    /// The mark the client's report that `record` was seen divergent sets, a duty event
-    /// (`AppEvent::RecordDivergent`): a view showed it so, whatever its view shows now.
-    /// Taking it again changes nothing, so a report delivered twice, or raised again under a
-    /// new ID after a restore, asks nothing twice. A mark that doesn't point to its record
-    /// is left as it is ([`Marked::Mismatch`]).
-    pub(crate) async fn take_divergent_event(&mut self, record: &[u8; 32]) -> Result<()> {
+    /// The mark the client's report `event` that `record` was seen divergent sets, a duty
+    /// event (`AppEvent::RecordDivergent`): a view showed it so, whatever its view shows now
+    /// ([`after_event`]). It is kept in its own commit, before the one that counts the event
+    /// taken, so the event is acknowledged only once the record is paused, or its mark has
+    /// taken it. Taking the same report again changes nothing, so a report delivered twice
+    /// never pauses again a record its user confirmed after it; a report of a later
+    /// divergence pauses a record its user had confirmed. A mark that doesn't point to its
+    /// record is paused already and left as it is ([`Marked::Mismatch`]); a record no
+    /// longer held takes no mark.
+    pub(crate) async fn take_divergent_event(
+        &mut self,
+        record: &[u8; 32],
+        event: &EventId,
+    ) -> Result<()> {
         let (marked, Some(view)) = self.mark_and_view(record).await? else {
             return Ok(());
         };
-        if let Some(after) = marked.after_event(&view) {
+        if let Some(after) = marked.after_event(&view, event) {
             self.put_mark(record, &after).await?;
         }
         Ok(())
@@ -1776,12 +1842,58 @@ mod tests {
         assert!(!Pause::of(Some(&mark), Some(&view(false, 4))).blocks_automatic());
     }
 
+    /// The client's event ID `counter` of one store.
+    fn event(counter: u64) -> EventId {
+        format!("{}-{counter}", "ab".repeat(16)).parse().unwrap()
+    }
+
     #[test]
     fn test_divergent_event_pauses_a_record_without_a_mark_whatever_its_view() {
-        assert!(after_event(None, &view(false, 4)).unwrap().is_paused());
-        // A confirmed record's earlier event asks nothing again.
-        assert!(after_event(Some(&confirmed(3)), &view(true, 3)).is_none());
-        assert!(after_event(Some(&confirmed(3)), &view(false, 4)).is_none());
+        assert!(after_event(None, &view(false, 4), &event(1))
+            .unwrap()
+            .is_paused());
+        // A report of the write the user confirmed, while the view shows it divergent, asks
+        // nothing again: one confirmation covers it.
+        let kept = after_event(Some(&confirmed(3)), &view(true, 3), &event(1)).unwrap();
+        assert!(!kept.is_paused());
+        // The same report again changes nothing.
+        assert!(after_event(Some(&kept), &view(true, 3), &event(1)).is_none());
+    }
+
+    #[test]
+    fn test_divergent_event_pauses_a_confirmed_record_again_whatever_its_view() {
+        // A later divergence's report, its view cleared by a newer write before the report
+        // is taken: the earlier confirmation, a credit's included, confirms nothing for it.
+        let credit = DivergentMark {
+            credit_shown: Some(view(true, 3).version),
+            ..DivergentMark::paused(&view(true, 3))
+        };
+        let confirmed = after_confirmation(Some(&credit), Some(&view(true, 3)), true).unwrap();
+        assert!(!confirmed.credit_waits());
+        for held in [view(false, 5), view(true, 5)] {
+            let again = after_event(Some(&confirmed), &held, &event(2)).unwrap();
+            assert!(again.is_paused() && again.credit_waits());
+            assert!(!confirmed_mark_ends(&again, Some(&view(false, 6))));
+            let pause = Pause::of(Some(&again), Some(&view(false, 6)));
+            assert!(pause.blocks_by_hand() && pause.blocks_automatic() && pause.blocks_credit());
+            // A paused mark stays as it is at a later report, the report noted.
+            let later = after_event(Some(&again), &view(false, 6), &event(3)).unwrap();
+            assert_eq!(later.confirmed, None);
+            assert_eq!(later.seen, again.seen);
+        }
+        // A report the mark took before its confirmation, delivered again, pauses nothing:
+        // the confirmation came after it.
+        let taken = after_event(None, &view(true, 3), &event(4)).unwrap();
+        let confirmed = after_confirmation(Some(&taken), Some(&view(true, 3)), false).unwrap();
+        assert!(after_event(Some(&confirmed), &view(false, 5), &event(4)).is_none());
+        assert!(after_event(Some(&confirmed), &view(false, 5), &event(3)).is_none());
+        // A report of another store is never taken as one taken.
+        let other: EventId = format!("{}-4", "cd".repeat(16)).parse().unwrap();
+        assert!(after_event(Some(&confirmed), &view(false, 5), &other)
+            .unwrap()
+            .is_paused());
+        // A restore drops the report: the restored client's IDs are of its own store.
+        assert_eq!(confirmed.restored().event, None);
     }
 
     #[test]
@@ -1857,7 +1969,7 @@ mod tests {
             assert_eq!(pause.write_waits(), divergent);
             // No mark is written over it, and it never goes by itself.
             assert!(marked.after_view(&held).is_none());
-            assert!(marked.after_event(&held).is_none());
+            assert!(marked.after_event(&held, &event(1)).is_none());
             assert!(!marked.ends(Some(&held)));
         }
         // The user's confirmation replaces it at the write held.
