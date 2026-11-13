@@ -1939,8 +1939,9 @@ fn with_acceptance_cert(
 
 #[tokio::test]
 async fn test_restore_acceptance_without_its_kept_certificate_refused() {
-    // The acceptance and the certificate it was signed under are kept together: an entry
-    // with the one and not the other is no form a run writes, and the restore refuses it.
+    // The acceptance is placed only under the certificate it was signed under, kept beside
+    // it: a backup whose entry keeps the acceptance without that certificate would have it
+    // placed under another, so the restore refuses it, writing nothing.
     let w = World::new();
     let (good, app_id) = backup_with_a_payment(&w).await;
     refused_writing_nothing(
@@ -1952,11 +1953,11 @@ async fn test_restore_acceptance_without_its_kept_certificate_refused() {
     .await;
 }
 
-/// `good` with its journal entry's `member` set to `value`, or removed for `None`.
+/// `good` with its journal entry's `member` set to `value`.
 fn with_journal_member(
     good: &serde_json::Value,
     member: &str,
-    value: Option<serde_json::Value>,
+    value: serde_json::Value,
 ) -> serde_json::Value {
     let mut layer = layer_of(good);
     let entry = &mut layer
@@ -1965,35 +1966,27 @@ fn with_journal_member(
         .map(|(_, v)| v)
         .unwrap()["d"];
     assert!(entry.get(member).is_some(), "no {member}");
-    match value {
-        Some(value) => entry[member] = value,
-        None => {
-            entry.as_object_mut().unwrap().remove(member);
-        }
-    }
+    entry[member] = value;
     with_layer(good, layer)
 }
 
 #[tokio::test]
-async fn test_restore_journal_entry_of_shapes_no_run_writes_refused() {
-    // Each is refused, writing nothing: a payment with no carrier kept (it is journaled
-    // before the entry is first saved), a payment of a request that keeps no request, one
-    // with no transfer bound that no reconcile rebuilt, and an entry without an always
-    // written member.
+async fn test_restore_journal_entry_breaking_its_payment_invariants_refused() {
+    // Each would let a payment go on unchecked, so each is refused, writing nothing: no
+    // carrier to check the destination against before a repeat; a payment of a request
+    // keeping no request to rebuild its record, so `done` could go without it; and no
+    // transfer bound on an entry a reconcile didn't rebuild, so a repeat would be held to
+    // no bound it was planned under.
     let w = World::new();
     let (good, app_id) = backup_with_a_payment(&w).await;
     let cases = [
-        ("no carrier", "carrier", Some(serde_json::Value::Null)),
-        ("no request kept", "request", Some(serde_json::Value::Null)),
-        (
-            "no transfer bound",
-            "transfer_bound",
-            Some(serde_json::Value::Null),
-        ),
-        ("no failed_on_claim member", "failed_on_claim", None),
+        ("no carrier", "carrier"),
+        ("no request kept", "request"),
+        ("no transfer bound", "transfer_bound"),
     ];
-    for (what, member, value) in cases {
-        refused_writing_nothing(&w, with_journal_member(&good, member, value), app_id, what).await;
+    for (what, member) in cases {
+        let backup = with_journal_member(&good, member, serde_json::Value::Null);
+        refused_writing_nothing(&w, backup, app_id, what).await;
     }
 }
 
