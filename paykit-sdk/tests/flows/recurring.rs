@@ -1,5 +1,5 @@
-//! Recurring requests in this part (Paykit spec 8.2): received and shown, never paid, and
-//! rejected before acceptance, so a wallet that doesn't pay them can dismiss one.
+//! Recurring requests (Paykit spec 8.2): received and shown, accepted or rejected before
+//! their proposal expires, never both, and not yet paid by this SDK.
 
 use paykit_sdk::{PayOptions, Paykit, Refusal, RequestRef, RequestStatus};
 use pubky_switch_client::clock::Clock;
@@ -60,7 +60,7 @@ async fn test_recurring_request_rejected_before_acceptance() {
         matches!(refused.refusal(), Some(Refusal::Recurring)),
         "{refused:?}"
     );
-    // Its payer cancellation belongs to the recurring flows.
+    // Its payer cancellation belongs to the flows that pay its periods.
     let refused = wallet.cancel_request(&request, None).await.unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::Recurring)),
@@ -235,16 +235,16 @@ async fn rejected_across_expiry(
 }
 
 #[tokio::test]
-async fn test_recurring_rejection_crossing_an_acceptance_past_expiry_is_recurring() {
+async fn test_recurring_rejection_crossing_an_acceptance_past_expiry_is_subscribed() {
     // Another own app accepted the request before its proposal expired: an accepted
     // recurring request no longer expires as a whole, so the wallet's rejection, refused
-    // past the expiry, says the request is accepted and recurring, not that it expired.
+    // past the expiry, says the subscription is accepted, not that it expired.
     let w = World::new();
     let (refusal, wallet, request) = rejected_across_expiry(&w, FirstAnswer::Accept, false).await;
-    assert_eq!(refusal, Refusal::Recurring);
+    assert_eq!(refusal, Refusal::Subscribed);
     assert_eq!(
         wallet.request(&request).await.unwrap().status,
-        RequestStatus::Open
+        RequestStatus::Subscribed
     );
 }
 
@@ -295,7 +295,7 @@ async fn test_recurring_rejection_past_expiry_seen_first_shows_what_another_app_
     // record as it was before the phone answered it: the record read again decides, before
     // anything is sent.
     for (first, expected) in [
-        (FirstAnswer::Accept, Refusal::Recurring),
+        (FirstAnswer::Accept, Refusal::Subscribed),
         (FirstAnswer::Reject, Refusal::Rejected),
         (FirstAnswer::PayeeCancelled, Refusal::Cancelled),
     ] {
