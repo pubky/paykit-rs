@@ -2448,12 +2448,17 @@ async fn test_allowances_proposal_over_a_deleted_record_is_conflicted_after_a_re
     assert!(held_deleted(&restored, &mine).await);
     assert_eq!(restored.app().protocol_scan(b"cf/").await.unwrap().len(), 1);
     assert!(restored.accept_allowance(&mine).await.is_err());
+    // The host is shown it conflicted, from the kept proposal, with nothing consented.
+    let view = restored.allowance(&mine).await.unwrap();
+    assert_eq!(view.status, AllowanceStatus::Conflicted);
+    assert_eq!(view.counterparty, w.bob_id());
+    assert!(!view.consented);
     assert!(restored
         .allowances()
         .await
         .unwrap()
         .iter()
-        .all(|view| view.record != mine));
+        .any(|view| view.record == mine && view.status == AllowanceStatus::Conflicted));
 }
 
 #[tokio::test]
@@ -2694,7 +2699,9 @@ async fn test_allowances_stored_proposal_over_a_record_deleted_since_is_conflict
     assert!(held_deleted(&wallet, &mine).await);
     assert_eq!(wallet.app().protocol_scan(b"cf/").await.unwrap().len(), 1);
     assert_eq!(w.record_writes(&w.alice, &mine), writes);
-    assert!(wallet.allowances().await.unwrap().is_empty());
+    let views = wallet.allowances().await.unwrap();
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0].status, AllowanceStatus::Conflicted);
 }
 
 #[tokio::test]
@@ -2784,4 +2791,30 @@ async fn test_allowances_consent_paused_under_an_ignored_current_write() {
         consent_entry(&phone, &mine).await,
         Some(json!({ "held": { "confirm_again": false } }))
     );
+}
+
+#[tokio::test]
+async fn test_allowances_view_shows_a_blocked_counterparty() {
+    // The wallet blocks bob: his Allowance shows blocked, as his requests do, and unblocked
+    // once he is (Paykit spec 8.1, "Blocked counterparties").
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = alice_app(
+        &w,
+        "keeper",
+        AppScopes::new()
+            .pay()
+            .allowance()
+            .manage_contacts()
+            .build()
+            .unwrap(),
+    )
+    .await;
+    let (_, mine) = proposed(&w, &mut shop, &mut wallet).await;
+    assert!(!wallet.allowance(&mine).await.unwrap().blocked);
+    wallet.block(&w.bob_id()).await.unwrap();
+    assert!(wallet.allowance(&mine).await.unwrap().blocked);
+    assert!(wallet.allowances().await.unwrap()[0].blocked);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    assert!(!wallet.allowance(&mine).await.unwrap().blocked);
 }
