@@ -1193,3 +1193,70 @@ async fn test_executor_empty_ledger_owed_after_a_kept_grant_written_before_the_f
     let (_, ledger) = held(&wallet, &record).await;
     assert_eq!(ledger.unwrap().entries.len(), 1);
 }
+
+#[tokio::test]
+async fn test_executor_pays_inside_its_limits_until_ended_through_a_restore() {
+    // One Allowance from acceptance to end. Bob proposes under a lifetime limit of 1 btc and
+    // the wallet accepts it and becomes its executor. It pays a request inside the limit, and
+    // refuses one the limit has no room for. Restored from a backup, it pays nothing until
+    // its user confirms the Allowance again, then pays inside the limit once more. Bob ends
+    // the Allowance: from then on nothing is paid under it (Paykit spec 8.3).
+    let w = World::new();
+    let (mut shop, mut wallet, record) =
+        set_up(&w, terms_with(json!({ "lifetime_amount_limit": "1" }))).await;
+    let inside = request(&w, &mut shop, &mut wallet, "0.4").await;
+    let paid = wallet.pay_under_allowance(&inside, &record).await.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let outside = request(&w, &mut shop, &mut wallet, "0.7").await;
+    let refused = wallet
+        .pay_under_allowance(&outside, &record)
+        .await
+        .unwrap_err();
+    assert!(refused_for(&refused, "lifetime limit"), "{refused:?}");
+    // A restore: nothing is paid until the user confirms the Allowance again.
+    let after = request(&w, &mut shop, &mut wallet, "0.3").await;
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut wallet = Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    wallet.reconcile().await.unwrap();
+    wallet.end_reconcile(UserConfirmed::new()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let refused = wallet
+        .pay_under_allowance(&after, &record)
+        .await
+        .unwrap_err();
+    assert!(refused_for(&refused, "consent list"), "{refused:?}");
+    wallet
+        .confirm_allowance_again(&record, UserConfirmed::new())
+        .await
+        .unwrap();
+    wallet
+        .confirm_possibly_cancelled(&after, UserConfirmed::new())
+        .await
+        .unwrap();
+    let paid = wallet.pay_under_allowance(&after, &record).await.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(w.rail.all_executions().len(), 2);
+    // Bob ends it: nothing more is paid under it.
+    shop.receive(None).await.unwrap();
+    let theirs = shop.allowances().await.unwrap()[0].record;
+    shop.end_allowance(&theirs).await.unwrap();
+    let last = request(&w, &mut shop, &mut wallet, "0.1").await;
+    let refused = wallet
+        .pay_under_allowance(&last, &record)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::AllowanceEnded)),
+        "{refused:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 2);
+}
