@@ -772,8 +772,8 @@ impl Paykit {
         // A restore's re-send of the messages an `allowances` record stores, from the record
         // bound to its key (Paykit spec 7.2, 8.3; `allowances::own_allowance_to_send_again`).
         if let Some(restore) = owed.as_ref() {
-            for record_held in self.app.records_of(Collection::Allowances.name()).await? {
-                let Some(record) = self.held_allowance(&record_held.key).await? else {
+            for record_held in Box::pin(self.app.records_of(Collection::Allowances.name())).await? {
+                let Some(record) = Box::pin(self.held_allowance(&record_held.key)).await? else {
                     continue;
                 };
                 let counterparty = record.counterparty;
@@ -786,8 +786,8 @@ impl Paykit {
                 }
                 // Nothing is sent for a conflicted Allowance, nor under a counterparty's end
                 // kept as the stop, which the record doesn't show yet.
-                if self.conflict_kept(&record_held.key).await?
-                    || self.allowance_stopped(&record_held.key).await?
+                if Box::pin(self.conflict_kept(&record_held.key)).await?
+                    || Box::pin(self.allowance_stopped(&record_held.key)).await?
                 {
                     continue;
                 }
@@ -796,12 +796,12 @@ impl Paykit {
                 if messages.is_empty() {
                     continue;
                 }
-                if self.sends_held(&counterparty).await? {
+                if Box::pin(self.sends_held(&counterparty)).await? {
                     waiting.insert(counterparty);
                     continue;
                 }
                 for stored in messages {
-                    self.queue_stored_again(stored).await?;
+                    Box::pin(self.queue_stored_again(stored)).await?;
                 }
             }
         }

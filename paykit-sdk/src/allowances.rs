@@ -929,7 +929,7 @@ impl Paykit {
         &self,
         record: &[u8; 32],
     ) -> Result<Option<AllowanceRecord>> {
-        let Some(held) = self.app.shared_record(record).await? else {
+        let Some(held) = Box::pin(self.app.shared_record(record)).await? else {
             return Ok(None);
         };
         let collection = Collection::Allowances;
@@ -949,7 +949,7 @@ impl Paykit {
     /// [`keeps_stored_message`], outside the receive step.
     async fn keeps_stored_message(&self, record: &[u8; 32]) -> Result<bool> {
         let own = self.identity();
-        for (rest, note) in self.local_scan::<StoredNote>(key::STORED_NOTES).await? {
+        for (rest, note) in Box::pin(self.local_scan::<StoredNote>(key::STORED_NOTES)).await? {
             let key = format!("{}{rest}", key::STORED_NOTES);
             if let Some(target) = note_target(key.as_bytes(), &note, &own)? {
                 if self.app.record_key(&target)? == *record {
@@ -963,20 +963,22 @@ impl Paykit {
     /// Whether this app keeps the counterparty's end of the Allowance at `record` as its
     /// stop.
     pub(crate) async fn allowance_stopped(&self, record: &[u8; 32]) -> Result<bool> {
-        self.allowance_stop(&key::allowance_end(record)).await
+        Box::pin(self.allowance_stop(&key::allowance_end(record))).await
     }
 
     /// Whether this app keeps a conflicting proposal or response of the Allowance at
     /// `record` as its stop (`cf/`), not yet in the record.
     pub(crate) async fn conflict_kept(&self, record: &[u8; 32]) -> Result<bool> {
-        self.allowance_stop(&key::conflict(record)).await
+        Box::pin(self.allowance_stop(&key::conflict(record))).await
     }
 
     /// Whether a stop is kept at `stop`, read bound to its key as a restore reads it
     /// (`state::Stored`): one that doesn't verify, isn't of its family's kinds, or names
     /// another record is a corrupt store, never no stop.
     async fn allowance_stop(&self, stop: &str) -> Result<bool> {
-        Ok(self.local_get::<KeptMessage>(stop).await?.is_some())
+        Ok(Box::pin(self.local_get::<KeptMessage>(stop))
+            .await?
+            .is_some())
     }
 
     /// Whether a `missed` item's mark (`mc`) is set. It holds only `true`: any other value
@@ -1058,8 +1060,8 @@ impl Paykit {
             .queue(signed)
             .locals(tx.into_writes());
         let record_key = self.app.record_key(&target)?;
-        let delivery = match self.app.submit_batch(batch).await {
-            Ok(_) => self.delivered(&msg_id).await?,
+        let delivery = match Box::pin(self.app.submit_batch(batch)).await {
+            Ok(_) => Box::pin(self.delivered(&msg_id)).await?,
             Err(error) => match error.kept_batch() {
                 Some(batch_id) => MessageDelivery::Kept { batch_id },
                 None => return Err(error.into()),
@@ -1090,16 +1092,16 @@ impl Paykit {
     pub(crate) async fn send_owed_ends(&mut self) -> Result<()> {
         let own = self.identity();
         let app_id = self.app_id();
-        for (_, owed) in self.local_scan::<OwedEnd>(key::OWED_ENDS).await? {
+        for (_, owed) in Box::pin(self.local_scan::<OwedEnd>(key::OWED_ENDS)).await? {
             let mark = key::owed_end(&owed.record);
-            let Some(held) = self.held_allowance(&owed.record).await? else {
+            let Some(held) = Box::pin(self.held_allowance(&owed.record)).await? else {
                 let deleted = self
                     .app
                     .shared_record(&owed.record)
                     .await?
                     .is_some_and(|held| held.content == RecordContent::Deleted);
                 if deleted {
-                    self.local_delete(&mark).await?;
+                    Box::pin(self.local_delete(&mark)).await?;
                 }
                 continue;
             };
@@ -1109,20 +1111,20 @@ impl Paykit {
                     && end.message().from.app_id == app_id
             });
             let Some(end) = end else {
-                self.local_delete(&mark).await?;
+                Box::pin(self.local_delete(&mark)).await?;
                 continue;
             };
             // Nothing is sent for a conflicted Allowance (Paykit spec 8.3, "Conflicted"), as
             // a restore's re-send sends nothing for one: the conflict ended it on both sides.
-            if held.conflicted.is_some() || self.conflict_kept(&owed.record).await? {
-                self.local_delete(&mark).await?;
+            if held.conflicted.is_some() || Box::pin(self.conflict_kept(&owed.record)).await? {
+                Box::pin(self.local_delete(&mark)).await?;
                 continue;
             }
-            if self.sends_held(&held.counterparty).await? {
+            if Box::pin(self.sends_held(&held.counterparty)).await? {
                 continue;
             }
-            self.queue_stored_again(end).await?;
-            self.local_delete(&mark).await?;
+            Box::pin(self.queue_stored_again(end)).await?;
+            Box::pin(self.local_delete(&mark)).await?;
         }
         Ok(())
     }
@@ -1130,7 +1132,7 @@ impl Paykit {
     /// Where `msg_id`, recorded and queued, is after one try to deliver it now: a try that
     /// fails leaves it queued for the next flush.
     async fn delivered(&mut self, msg_id: &str) -> Result<MessageDelivery> {
-        let delivery = match self.app.flush_message(msg_id).await {
+        let delivery = match Box::pin(self.app.flush_message(msg_id)).await {
             Ok(Some(delivery)) => delivery,
             _ => self
                 .app
@@ -1194,11 +1196,11 @@ impl Paykit {
     /// `record`, `kind`, built again from a fresh read after the record changed meanwhile.
     async fn answer_allowance(&mut self, record: &[u8; 32], kind: Kind) -> Result<String> {
         self.refresh_own()?;
-        self.records_known().await?;
+        Box::pin(self.records_known()).await?;
         self.require_allowance()?;
         // A record that can't be opened yet may hold a response or an end: nothing is
         // answered or ended over it until it opens (Paykit spec 8.3, one response).
-        self.refuse_while_awaiting_key(record).await?;
+        Box::pin(self.refuse_while_awaiting_key(record)).await?;
         let own = self.identity();
         let mut tries = 0;
         loop {
@@ -1207,10 +1209,10 @@ impl Paykit {
                 .await?
                 .ok_or(Refusal::NotFound)?;
             // Nothing is sent for a conflicted Allowance (Paykit spec 8.3, "Conflicted").
-            if held.conflicted.is_some() || self.conflict_kept(record).await? {
+            if held.conflicted.is_some() || Box::pin(self.conflict_kept(record)).await? {
                 return Err(Refusal::AllowanceConflicted.into());
             }
-            if held.end.is_some() || self.allowance_stopped(record).await? {
+            if held.end.is_some() || Box::pin(self.allowance_stopped(record)).await? {
                 return Err(Refusal::AllowanceEnded.into());
             }
             // A proposal, acceptance or rejection to a counterparty whose sends are held is
@@ -1278,7 +1280,7 @@ impl Paykit {
                     Box::pin(self.delivered(&msg_id)).await?;
                     // A notice not delivered now goes with the next flush.
                     for notice in notices {
-                        let _ = self.app.flush_message(&notice).await;
+                        let _ = Box::pin(self.app.flush_message(&notice)).await;
                     }
                     return Ok(msg_id);
                 }
@@ -1309,7 +1311,7 @@ impl Paykit {
         mut locals: Vec<LocalWrite>,
         owed: Option<&OwedEnd>,
     ) -> Result<()> {
-        let before = self.held_allowance(&self.app.record_key(target)?).await?;
+        let before = Box::pin(self.held_allowance(&self.app.record_key(target)?)).await?;
         let mut queued: Vec<String> = queue.iter().map(|m| m.msg_id().to_owned()).collect();
         // A crossing end owed while sends are held counts as queued: its mark goes in this
         // batch, and its message goes from the record later ([`Paykit::send_owed_ends`]).
@@ -1334,12 +1336,12 @@ impl Paykit {
         for message in queue {
             batch = batch.queue(message);
         }
-        match self.app.submit_batch(batch).await {
+        match Box::pin(self.app.submit_batch(batch)).await {
             Ok(_) => Ok(()),
             Err(error) if error.kept_batch().is_some() => Ok(()),
             Err(error) => {
                 if error.code() == Some(ErrorCode::Conflict) {
-                    self.app.read_record(target).await?;
+                    Box::pin(self.app.read_record(target)).await?;
                 }
                 Err(error.into())
             }
@@ -1402,17 +1404,19 @@ impl Paykit {
     }
 
     async fn allowances_inner(&self) -> Result<Vec<AllowanceView>> {
-        self.refuse_while_unlisted().await?;
+        Box::pin(self.refuse_while_unlisted()).await?;
         let mut out = Vec::new();
-        for held in self.app.records_of(Collection::Allowances.name()).await? {
+        for held in Box::pin(self.app.records_of(Collection::Allowances.name())).await? {
             // A record waiting for its scope key would be left out: the list would be
             // partial, so it is refused for now instead.
             if crate::hold::awaits_key(&held.content) {
                 return Err(crate::hold::value_awaits_key());
             }
-            if let Some(record) = self.held_allowance(&held.key).await? {
-                out.push(self.allowance_view(held.key, &record).await?);
-            } else if let Some(view) = self.deleted_conflict_view(&held.key, &held.content).await? {
+            if let Some(record) = Box::pin(self.held_allowance(&held.key)).await? {
+                out.push(Box::pin(self.allowance_view(held.key, &record)).await?);
+            } else if let Some(view) =
+                Box::pin(self.deleted_conflict_view(&held.key, &held.content)).await?
+            {
                 out.push(view);
             }
         }
@@ -1429,10 +1433,10 @@ impl Paykit {
     }
 
     async fn allowance_inner(&self, record: &[u8; 32]) -> Result<AllowanceView> {
-        self.refuse_while_unlisted().await?;
-        self.refuse_while_awaiting_key(record).await?;
-        if let Some(held) = self.held_allowance(record).await? {
-            return self.allowance_view(*record, &held).await;
+        Box::pin(self.refuse_while_unlisted()).await?;
+        Box::pin(self.refuse_while_awaiting_key(record)).await?;
+        if let Some(held) = Box::pin(self.held_allowance(record)).await? {
+            return Box::pin(self.allowance_view(*record, &held)).await;
         }
         let content = self
             .app
@@ -1499,7 +1503,7 @@ impl Paykit {
             status: AllowanceStatus::Conflicted,
             executor_app_id: None,
             consented: false,
-            blocked: self.blocked_as_known(&stored.sender()).await?,
+            blocked: Box::pin(self.blocked_as_known(&stored.sender())).await?,
         }))
     }
 
@@ -1528,28 +1532,28 @@ impl Paykit {
             terms: Some(proposal.terms.clone()),
             status: status(
                 held,
-                self.allowance_stopped(&record).await?,
-                self.conflict_kept(&record).await?,
+                Box::pin(self.allowance_stopped(&record)).await?,
+                Box::pin(self.conflict_kept(&record)).await?,
             ),
             executor_app_id: held.current_grant(&own).map(|(grant, _)| grant.app_id),
-            consented: self.consents(&record).await?,
-            blocked: self.blocked_as_known(&held.counterparty).await?,
+            consented: Box::pin(self.consents(&record)).await?,
+            blocked: Box::pin(self.blocked_as_known(&held.counterparty)).await?,
         })
     }
 
     /// Whether the copy of the deny list holds `pubky`, for the views: `None` while the copy
     /// isn't known ([`Paykit::deny_copy_known`]).
     async fn blocked_as_known(&self, pubky: &[u8; 32]) -> Result<Option<bool>> {
-        if !self.deny_copy_known().await? {
+        if !Box::pin(self.deny_copy_known()).await? {
             return Ok(None);
         }
-        Ok(Some(self.denied_as_last_read(pubky).await?))
+        Ok(Some(Box::pin(self.denied_as_last_read(pubky)).await?))
     }
 
     /// [`Refusal::NotNow`] while the record at `record` waits for its scope key: the app
     /// can't say yet what it holds ([`crate::hold::value_awaits_key`]).
     async fn refuse_while_awaiting_key(&self, record: &[u8; 32]) -> Result<()> {
-        if let Some(held) = self.app.shared_record(record).await? {
+        if let Some(held) = Box::pin(self.app.shared_record(record)).await? {
             if crate::hold::awaits_key(&held.content) {
                 return Err(crate::hold::value_awaits_key());
             }
@@ -1561,13 +1565,13 @@ impl Paykit {
     /// record of, for the re-sends after a restore or a `missed` item.
     pub(crate) async fn open_allowance_counterparties(&self) -> Result<Vec<[u8; 32]>> {
         let mut out = Vec::new();
-        for held in self.app.records_of(Collection::Allowances.name()).await? {
-            if let Some(record) = self.held_allowance(&held.key).await? {
+        for held in Box::pin(self.app.records_of(Collection::Allowances.name())).await? {
+            if let Some(record) = Box::pin(self.held_allowance(&held.key)).await? {
                 let open = matches!(
                     status(
                         &record,
-                        self.allowance_stopped(&held.key).await?,
-                        self.conflict_kept(&held.key).await?,
+                        Box::pin(self.allowance_stopped(&held.key)).await?,
+                        Box::pin(self.conflict_kept(&held.key)).await?,
                     ),
                     AllowanceStatus::Proposed | AllowanceStatus::Accepted
                 );
@@ -1594,19 +1598,19 @@ impl Paykit {
     /// 8.2; Paykit spec 8.3, "Executor", "Ending"): the user's confirmation of such a write
     /// comes with the executor, so until then it pays nothing.
     pub(crate) async fn consents(&self, record: &[u8; 32]) -> Result<bool> {
-        if self.consents_unconfirmed().await?
-            || self.allowance_stopped(record).await?
-            || self.conflict_kept(record).await?
+        if Box::pin(self.consents_unconfirmed()).await?
+            || Box::pin(self.allowance_stopped(record)).await?
+            || Box::pin(self.conflict_kept(record)).await?
         {
             return Ok(false);
         }
-        let Some(shared) = self.app.shared_record(record).await? else {
+        let Some(shared) = Box::pin(self.app.shared_record(record)).await? else {
             return Ok(false);
         };
         if shared.flagged {
             return Ok(false);
         }
-        match self.held_allowance(record).await? {
+        match Box::pin(self.held_allowance(record)).await? {
             Some(held) if held.end.is_none() && !rejected(&held) && held.conflicted.is_none() => {}
             _ => return Ok(false),
         }
@@ -1625,18 +1629,18 @@ impl Paykit {
     /// the entries the service deleted (Paykit spec 7.2, 8.3). Run after each receive; a
     /// commit that fails leaves the mark, under which nothing is consented, for the next.
     pub(crate) async fn confirm_consents_again(&mut self) -> Result<()> {
-        if !self.consents_unconfirmed().await? {
+        if !Box::pin(self.consents_unconfirmed()).await? {
             return Ok(());
         }
         let mut tx = Tx::default();
-        for (rest, entry) in self.local_scan::<ConsentEntry>(key::CONSENTS).await? {
+        for (rest, entry) in Box::pin(self.local_scan::<ConsentEntry>(key::CONSENTS)).await? {
             let again = entry.consent.confirm_again();
             if again != entry.consent {
                 tx.put(&format!("{}{rest}", key::CONSENTS), &entry.with(again))?;
             }
         }
         tx.delete(key::MISSED_CONSENTS);
-        self.local_commit(tx).await
+        Box::pin(self.local_commit(tx)).await
     }
 
     /// Drop each executor notice's target (`en/<msg_id>`) once the client reports its notice
@@ -1648,15 +1652,16 @@ impl Paykit {
     /// each receive.
     pub(crate) async fn sweep_notice_targets(&mut self) -> Result<()> {
         let mut tx = Tx::default();
-        for (rest, target) in self.local_scan::<NoticeTarget>(key::NOTICE_TARGETS).await? {
+        for (rest, target) in Box::pin(self.local_scan::<NoticeTarget>(key::NOTICE_TARGETS)).await?
+        {
             if matches!(
-                self.app.delivery(&target.msg_id).await?,
+                Box::pin(self.app.delivery(&target.msg_id)).await?,
                 Some(Delivery::Accepted { .. } | Delivery::Failed { .. })
             ) {
                 tx.delete(&format!("{}{rest}", key::NOTICE_TARGETS));
             }
         }
-        self.local_commit(tx).await
+        Box::pin(self.local_commit(tx)).await
     }
 
     /// Remove from the consent list, for good, every Allowance whose record this app holds
@@ -1668,16 +1673,16 @@ impl Paykit {
     /// made loses nothing the user consented to. Run after each receive.
     pub(crate) async fn sweep_consents(&mut self) -> Result<()> {
         let mut tx = Tx::default();
-        for (rest, entry) in self.local_scan::<ConsentEntry>(key::CONSENTS).await? {
+        for (rest, entry) in Box::pin(self.local_scan::<ConsentEntry>(key::CONSENTS)).await? {
             let record = consent_record(&rest)?;
             if !matches!(entry.consent, Consent::Held { .. }) {
                 continue;
             }
-            let reason = match self.held_allowance(&record).await? {
+            let reason = match Box::pin(self.held_allowance(&record)).await? {
                 Some(held) if held.conflicted.is_some() => ConsentEnd::Conflicted,
                 Some(held) if held.end.is_some() => ConsentEnd::Ended,
                 Some(held) if rejected(&held) => ConsentEnd::Rejected,
-                _ if self.conflict_kept(&record).await? => ConsentEnd::Conflicted,
+                _ if Box::pin(self.conflict_kept(&record)).await? => ConsentEnd::Conflicted,
                 _ => continue,
             };
             tx.put(
@@ -1685,7 +1690,7 @@ impl Paykit {
                 &entry.with(Consent::Removed { reason }),
             )?;
         }
-        self.local_commit(tx).await
+        Box::pin(self.local_commit(tx)).await
     }
 
     // ---------------------------------------------------------------------------------
@@ -1700,13 +1705,13 @@ impl Paykit {
     /// the next run. Nothing runs while the copy of `allowances` may lack records.
     pub(crate) async fn place_allowance_stops(&mut self) -> Result<()> {
         if !self.holds("allowance")
-            || self.scope_keys_awaited().await?.is_some()
-            || self.side_unlisted(RecordSide::Allowances).await?
+            || Box::pin(self.scope_keys_awaited()).await?.is_some()
+            || Box::pin(self.side_unlisted(RecordSide::Allowances)).await?
         {
             return Ok(());
         }
         let own = self.identity();
-        for (rest, kept) in self.local_scan::<KeptMessage>(key::ALLOWANCE_ENDS).await? {
+        for (rest, kept) in Box::pin(self.local_scan::<KeptMessage>(key::ALLOWANCE_ENDS)).await? {
             let stop = format!("{}{rest}", key::ALLOWANCE_ENDS);
             // Read bound to its key (`state::Stored`).
             let end = kept.stored(&own)?;
@@ -1724,16 +1729,18 @@ impl Paykit {
                 // No record held, or a delete: the stop goes 30 days after its acceptance.
                 None | Some(RecordContent::Deleted) => {
                     if stale(&end, self.service_time())?
-                        && !self.keeps_stored_message(&record).await?
+                        && !Box::pin(self.keeps_stored_message(&record)).await?
                     {
-                        self.local_delete(&stop).await?;
+                        Box::pin(self.local_delete(&stop)).await?;
                     }
                 }
                 Some(RecordContent::Value(_)) => {
-                    if let Some(held) = self.held_allowance(&record).await? {
+                    if let Some(held) = Box::pin(self.held_allowance(&record)).await? {
                         // A write the switch refuses now is tried at the next run; the stop
                         // stands meanwhile. Any other failure is the call's error.
-                        written(self.record_end(&target, record, held, end, &stop).await)?;
+                        written(
+                            Box::pin(self.record_end(&target, record, held, end, &stop)).await,
+                        )?;
                     }
                 }
                 // A value that doesn't read or waits for its key: never written over; the
@@ -1741,7 +1748,7 @@ impl Paykit {
                 Some(_) => {}
             }
         }
-        self.place_conflicts().await
+        Box::pin(self.place_conflicts()).await
     }
 
     /// Write every kept conflicting proposal or response into its Allowance record's
@@ -1756,7 +1763,7 @@ impl Paykit {
     /// cleared then either (Paykit spec 8.3, "Conflicted", "Ending").
     async fn place_conflicts(&mut self) -> Result<()> {
         let own = self.identity();
-        for (rest, kept) in self.local_scan::<KeptMessage>(key::CONFLICTS).await? {
+        for (rest, kept) in Box::pin(self.local_scan::<KeptMessage>(key::CONFLICTS)).await? {
             let stop = format!("{}{rest}", key::CONFLICTS);
             // Read bound to its key (`state::Stored`).
             let message = kept.stored(&own)?;
@@ -1765,14 +1772,14 @@ impl Paykit {
             };
             let target = allowance_target(&message.sender(), &allowance_id);
             let record = self.app.record_key(&target)?;
-            let Some(held) = self.held_allowance(&record).await? else {
+            let Some(held) = Box::pin(self.held_allowance(&record)).await? else {
                 continue;
             };
             let locals = vec![LocalWrite::Delete {
                 key: stop.as_bytes().to_vec(),
             }];
             if held.conflicted.is_some() {
-                self.app.protocol_commit(&locals).await?;
+                Box::pin(self.app.protocol_commit(&locals)).await?;
                 continue;
             }
             // A kept message the record doesn't conflict with stays the stop for good: a
@@ -1792,8 +1799,7 @@ impl Paykit {
             // A write the switch refuses now is tried at the next run; the stop stands
             // meanwhile. Any other failure is the call's error.
             written(
-                self.submit_with_record(&target, &next, Vec::new(), locals, None)
-                    .await,
+                Box::pin(self.submit_with_record(&target, &next, Vec::new(), locals, None)).await,
             )?;
         }
         Ok(())
@@ -1812,7 +1818,7 @@ impl Paykit {
         let refs = end.message().refs.clone();
         let proposal = held.proposal.hash();
         if refs.first() != Some(&proposal) {
-            return self.local_delete(stop).await;
+            return Box::pin(self.local_delete(stop)).await;
         }
         // An end over a record that holds an end or a rejection changes nothing but is
         // reflected by its `msg_id` (Paykit wire 4.16), with the stop dropped in the same
@@ -1820,7 +1826,7 @@ impl Paykit {
         if held.end.is_some() || rejected(&held) {
             let mut next = held;
             if !place(&mut next, end) {
-                return self.local_delete(stop).await;
+                return Box::pin(self.local_delete(stop)).await;
             }
             let locals = vec![LocalWrite::Delete {
                 key: stop.as_bytes().to_vec(),
@@ -1829,7 +1835,7 @@ impl Paykit {
                 .submit_with_record(target, &next, Vec::new(), locals, None)
                 .await;
         }
-        let conflicted = held.conflicted.is_some() || self.conflict_kept(&record).await?;
+        let conflicted = held.conflicted.is_some() || Box::pin(self.conflict_kept(&record)).await?;
         let mut next = held.clone();
         let mut queue = Vec::new();
         let mut owed = None;
@@ -1866,7 +1872,7 @@ impl Paykit {
                     // a batch built on the record's earlier version fails; only its message
                     // to the counterparty waits, owed (`eo/`), sent from the record once
                     // sends to it aren't held (Paykit spec 8.3, "Ending").
-                    if self.sends_held(&held.counterparty).await? {
+                    if Box::pin(self.sends_held(&held.counterparty)).await? {
                         owed = Some(OwedEnd {
                             record,
                             msg_id: own_end.msg_id().to_owned(),
@@ -1883,14 +1889,14 @@ impl Paykit {
                         && accepted.is_none_or(|a| refs.get(1) != Some(&a.hash())) =>
                 {
                     if stale(&end, self.service_time())?
-                        && !self.keeps_stored_message(&record).await?
+                        && !Box::pin(self.keeps_stored_message(&record)).await?
                     {
-                        self.local_delete(stop).await?;
+                        Box::pin(self.local_delete(stop)).await?;
                     }
                     return Ok(());
                 }
                 // Any other end isn't one of this Allowance (Paykit wire 4.16).
-                _ => return self.local_delete(stop).await,
+                _ => return Box::pin(self.local_delete(stop)).await,
             }
         }
         let mut locals = Vec::new();
@@ -1899,12 +1905,11 @@ impl Paykit {
             key: stop.as_bytes().to_vec(),
         });
         let sent: Vec<String> = queue.iter().map(|m| m.msg_id().to_owned()).collect();
-        self.submit_with_record(target, &next, queue, locals, owed.as_ref())
-            .await?;
+        Box::pin(self.submit_with_record(target, &next, queue, locals, owed.as_ref())).await?;
         // The write went through with the messages queued in its batch: one not delivered
         // now goes with the next flush, and the write's outcome doesn't wait for it.
         for msg_id in sent {
-            let _ = self.app.flush_message(&msg_id).await;
+            let _ = Box::pin(self.app.flush_message(&msg_id)).await;
         }
         Ok(())
     }
@@ -1929,7 +1934,7 @@ impl Paykit {
         kept_key: &str,
         reply: StoredMessage,
     ) -> Result<()> {
-        if self.side_unlisted(RecordSide::Allowances).await? {
+        if Box::pin(self.side_unlisted(RecordSide::Allowances)).await? {
             return Ok(());
         }
         let Some(allowance_id) = named_allowance(reply.body()).cloned() else {
@@ -1946,7 +1951,7 @@ impl Paykit {
             .map(|held| held.content);
         if !receive::holds_record(content.as_ref()) {
             if crate::stored::past_window(accepted_at, self.service_time()) {
-                self.local_delete(kept_key).await?;
+                Box::pin(self.local_delete(kept_key)).await?;
             }
             return Ok(());
         }
@@ -1972,7 +1977,7 @@ impl Paykit {
         stored: &StoredMessage,
         mut locals: Vec<LocalWrite>,
     ) -> Result<()> {
-        let kept = self.conflict_kept(record).await?;
+        let kept = Box::pin(self.conflict_kept(record)).await?;
         let consent = self
             .local_get::<ConsentEntry>(&key::consent(record))
             .await?;
@@ -1983,13 +1988,13 @@ impl Paykit {
             consent.as_ref(),
             self.holds("allowance_execute"),
         )?);
-        Ok(self.app.protocol_commit(&locals).await?)
+        Ok(Box::pin(self.app.protocol_commit(&locals)).await?)
     }
 
     /// A stored entry's proposal, acceptance or rejection (`stored.rs`), written into its
     /// Allowance record by a later write of the app's own ([`Paykit::place_allowance_later`]).
     pub(crate) async fn place_allowance_note(&mut self, stored: StoredMessage) -> Result<Placed> {
-        self.place_allowance_later(stored, Vec::new()).await
+        Box::pin(self.place_allowance_later(stored, Vec::new())).await
     }
 
     /// The later write of an Allowance's proposal, acceptance or rejection kept to write, a
@@ -2017,7 +2022,7 @@ impl Paykit {
         let Some(allowance_id) = named_allowance(stored.body()).cloned() else {
             return Err(PaykitError::corrupt());
         };
-        if self.side_unlisted(RecordSide::Allowances).await? {
+        if Box::pin(self.side_unlisted(RecordSide::Allowances)).await? {
             return Ok(Placed::Waits);
         }
         if self
@@ -2047,20 +2052,20 @@ impl Paykit {
             // for a record.
             Some(RecordContent::Deleted) => match stored.body() {
                 Body::AllowanceProposal(_) => {
-                    self.keep_conflict_later(&record, &stored, locals).await?;
+                    Box::pin(self.keep_conflict_later(&record, &stored, locals)).await?;
                     return Ok(Placed::Done);
                 }
                 _ => None,
             },
             Some(content) if crate::hold::awaits_key(&content) => return Ok(Placed::Not),
-            Some(RecordContent::Value(_)) => match self.held_allowance(&record).await? {
+            Some(RecordContent::Value(_)) => match Box::pin(self.held_allowance(&record)).await? {
                 Some(held) if held.conflicted.is_none() && conflicts(&held, &stored) => {
-                    self.keep_conflict_later(&record, &stored, locals).await?;
+                    Box::pin(self.keep_conflict_later(&record, &stored, locals)).await?;
                     return Ok(Placed::Done);
                 }
                 Some(mut held) => {
                     if !place(&mut held, stored) {
-                        self.app.protocol_commit(&locals).await?;
+                        Box::pin(self.app.protocol_commit(&locals)).await?;
                         return Ok(Placed::Done);
                     }
                     Some(held)
@@ -2072,10 +2077,7 @@ impl Paykit {
         let Some(next) = next else {
             return Ok(Placed::Not);
         };
-        written(
-            self.submit_with_record(&target, &next, Vec::new(), locals, None)
-                .await,
-        )
+        written(Box::pin(self.submit_with_record(&target, &next, Vec::new(), locals, None)).await)
     }
 }
 

@@ -541,7 +541,7 @@ impl Paykit {
                 .await?;
             for held in allowances {
                 // A record that doesn't read or bind shows no counterparty.
-                let Some(record) = self.held_allowance(&held.key).await? else {
+                let Some(record) = Box::pin(self.held_allowance(&held.key)).await? else {
                     continue;
                 };
                 if let Some((key, mut mark)) = waiting.remove(&record.counterparty) {
