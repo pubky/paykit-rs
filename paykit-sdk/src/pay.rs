@@ -682,10 +682,12 @@ impl Paykit {
     /// `contacts`, the deny list as read at most 10 minutes ago, or read first, decides: a
     /// request from a blocked payee is [`Refusal::Blocked`] until the user confirms paying
     /// it. A request whose record is divergent, or was seen so, is [`Refusal::Divergent`]
-    /// until the user confirms it ([`Paykit::confirm_divergent`]), unless no confirmation
-    /// could let it be paid: one past its deadline is refused for that, and one whose
-    /// endpoints' app the payee's `identity.json` no longer lists as current is
-    /// [`Refusal::Destination`], that copy read fresh, a read that fails being the refusal.
+    /// until the user confirms it ([`Paykit::confirm_divergent`]), except in three cases
+    /// that can't be paid anyway: one past its deadline goes on to the checks after the
+    /// pause, its deadline refusing it at the latest; one carrying endpoints whose app the
+    /// payee's `identity.json` no longer lists as current, and one requiring an app that
+    /// copy lists as removed, are [`Refusal::Destination`], that copy read fresh, a read
+    /// that fails being the refusal.
     pub async fn pay_request(
         &mut self,
         request: &RequestRef,
@@ -726,20 +728,24 @@ impl Paykit {
         // cancelled it, which ends the hold (Paykit spec 7.2, "What a restore loses").
         let record_key = self.activity_key(&target)?;
         // Divergent after a provider loss, or seen so: paid by hand only once the user has
-        // seen that the payee may have cancelled it (Paykit spec 6). A request no
-        // confirmation could let be paid is refused for what stops it instead, as a list that
-        // couldn't be paid anyway pauses nothing (Paykit spec 8.4): one past its deadline
-        // goes on to the deadline's refusal below, which the service's time only moves
-        // further past, and one whose endpoints' app is no longer current is refused as the
-        // destination check refuses it.
+        // seen that the payee may have cancelled it (Paykit spec 6). Three requests that can't
+        // be paid anyway are refused for what stops them instead, as a list that couldn't be
+        // paid anyway pauses nothing (Paykit spec 8.4): one past its deadline goes on to the
+        // checks below, its deadline refusing it at the latest, which the service's time only
+        // moves further past; one whose endpoints' app is no longer current is refused as the
+        // destination check refuses it; and one requiring an app the payee removed is refused
+        // for that.
         let deadline = body.attempt_deadline(None)?;
         if Box::pin(self.pause_at(&record_key)).await?.blocks_by_hand()
             && !self.deadline_passed(deadline)
         {
-            if let RequestDestination::Endpoints(_) = &body.destination {
-                Box::pin(self.refuse_unless_sender_current(&request.payee, &stored, &options))
-                    .await?;
-            }
+            Box::pin(self.refuse_unpayable_request(
+                &request.payee,
+                &stored,
+                &body.destination,
+                &options,
+            ))
+            .await?;
             Box::pin(self.refuse_while_paused(&[record_key])).await?;
         }
         let end_hold = if self.held(&record_key, &record).await? {
@@ -1206,16 +1212,25 @@ impl Paykit {
         Ok(view.map_or(0, |v| v.step))
     }
 
-    /// Refused as the destination check refuses it when the app that sent `request`, the
-    /// app its endpoints belong to, isn't current in the payee's `identity.json` (Paykit
-    /// spec 4, 7.2): read fresh, as for a request's endpoint. A read that fails is the
-    /// refusal: the app is taken neither as current nor as removed without it.
-    async fn refuse_unless_sender_current(
+    /// Refused when the app the destination of `request` must come from can't give one
+    /// whatever the user confirms (Paykit spec 4, 7.2, 8.1), judged on the payee's
+    /// `identity.json` read fresh, as for a request's endpoint: a request carrying
+    /// endpoints, as the destination check refuses it, when the app that sent it, whose
+    /// endpoints they are, isn't current; a request requiring an app, when the payee has
+    /// removed that app, which is never listed again (Switch spec 4). An app not listed yet
+    /// isn't removed. A request whose destination any current app may give is not judged,
+    /// and no copy is read for it. A read that fails is the refusal: no app is taken as
+    /// current nor as removed without it.
+    async fn refuse_unpayable_request(
         &mut self,
         payee: &[u8; 32],
         request: &StoredMessage,
+        destination: &RequestDestination,
         options: &PayOptions,
     ) -> Result<()> {
+        if let RequestDestination::Any = destination {
+            return Ok(());
+        }
         let identity = match self
             .payee_identity(
                 payee,
@@ -1228,10 +1243,23 @@ impl Paykit {
             Ok(identity) => identity,
             Err(refusal) => return Err(refusal.into()),
         };
-        let carrier = Carrier::Message(Box::new(request.clone()));
-        let app_id = request.message().from.app_id;
-        crate::destination::current(&identity.doc, &app_id, &carrier, self.now())
-            .map_err(|why| Refusal::Destination(why).into())
+        match destination {
+            RequestDestination::RequiredApp(app) if identity.doc.lists_removed(app) => {
+                Err(Refusal::Destination(
+                    "Paykit spec 8.1: the request's required app is removed from the payee's \
+                     identity.json"
+                        .into(),
+                )
+                .into())
+            }
+            RequestDestination::Endpoints(_) => {
+                let carrier = Carrier::Message(Box::new(request.clone()));
+                let app_id = request.message().from.app_id;
+                crate::destination::current(&identity.doc, &app_id, &carrier, self.now())
+                    .map_err(|why| Refusal::Destination(why).into())
+            }
+            _ => Ok(()),
+        }
     }
 
     fn refuse_claim(&self, view: &ClaimView) -> Result<()> {
@@ -1256,10 +1284,11 @@ impl Paykit {
     /// ([`Paykit::ask_for_lists`]) and the refusal is [`Refusal::WaitingForList`]; a list in
     /// use that offers no endpoint the payment may use is [`Refusal::NoDestination`]; lists
     /// in use whose endpoints the method pays none of, and no expired list, are
-    /// [`Refusal::UnsupportedEndpoint`], without asking. A current app's list paused as
-    /// divergent ([`Paykit::confirm_divergent`]), with no other list to pay, is
-    /// [`Refusal::Divergent`] naming its record, and its app isn't asked; the list of an app
-    /// the payee's `identity.json` doesn't list as current plays no part, paused or not.
+    /// [`Refusal::UnsupportedEndpoint`], without asking. The list of an app the payee's
+    /// `identity.json` lists in `apps`, paused as divergent ([`Paykit::confirm_divergent`]),
+    /// with no other list to pay, is [`Refusal::Divergent`] naming its record, whatever
+    /// certificate it was signed under, and its app isn't asked; the list of an app that
+    /// copy doesn't list in `apps`, or lists as removed, plays no part, paused or not.
     async fn list_destination(
         &mut self,
         payee: &[u8; 32],
@@ -1315,7 +1344,8 @@ impl Paykit {
         // whatever version it chose, would shadow the current apps' and then be refused by
         // the destination check. The payee's `identity.json` is the copy that check takes,
         // so a fresh one is read once here, before any list is judged paused: a list of an
-        // app that copy doesn't list as current is never usable, whatever its upload holds,
+        // app that copy doesn't list in `apps`, or lists as removed, is never usable,
+        // whatever its upload holds,
         // so it plays no part, paused or not, and only a list that would otherwise be usable
         // pauses the payment (Paykit spec 8.4). A read that fails is the payment's refusal:
         // without it, no list is taken as a current app's, nor as a removed app's.

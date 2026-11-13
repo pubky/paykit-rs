@@ -178,10 +178,11 @@ pub enum Refusal {
     /// [`crate::DivergentRecord::may_hold_credit`]: only a confirmation of these lets the
     /// credit go, so this refusal comes also after the user confirmed the same record from a
     /// receive's summary or [`crate::Paykit::divergent_records`], and is answered the same
-    /// way. A payment's refusal names only records that hold it back: a list of an app the
-    /// payee's `identity.json` no longer lists as current is never among them, nor the
-    /// record of a request no confirmation could let be paid, past its deadline or with
-    /// endpoints of such an app, which is refused for that instead.
+    /// way. A payment's refusal never names the list of an app the payee's `identity.json`
+    /// doesn't list in `apps`, or lists as removed, nor the record of a request past its
+    /// deadline, carrying endpoints of an app that copy doesn't list as current, or
+    /// requiring an app it lists as removed: such a payment goes on to the refusal of what
+    /// stops it ([`crate::Paykit::pay_request`]).
     #[error("Paykit spec 6: a record is divergent; the user must confirm")]
     Divergent {
         /// The records the user is asked to confirm.

@@ -1462,7 +1462,7 @@ impl Paykit {
     /// [`Paykit::confirm_payment`] again, has the user confirm each record its
     /// [`Refusal::Divergent`] names, shown with `may_hold_credit`, exactly as that refusal
     /// gives it, and calls `confirm_payment` once more. The `payment_lists` record of an app
-    /// the payee's `identity.json` no longer lists as current is listed too while paused: it
+    /// the payee's `identity.json` no longer lists in `apps` is listed too while paused: it
     /// holds back no payment, since no list of that app is paid (Paykit spec 8.4), and
     /// confirming it only ends its pause.
     ///

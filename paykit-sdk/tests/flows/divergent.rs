@@ -223,6 +223,74 @@ async fn test_divergent_request_from_a_removed_app_refused_for_its_destination()
     assert!(shown_paused(&wallet, &record).await);
 }
 
+/// A request for 1 btc that requires the Private Payment List or public endpoints of
+/// bob's app `app` (Paykit wire 4.5).
+fn requiring(app: [u8; 16], now: u64) -> paykit_sdk::RequestDraft {
+    paykit_sdk::RequestDraft::new(
+        btc("1"),
+        paykit_lib::PaymentReference::new("order-1").unwrap(),
+        paykit_lib::bodies::RequestDestination::RequiredApp(app),
+    )
+    .with_proposal_expires_at_ms(now + 24 * HOUR_MS)
+}
+
+#[tokio::test]
+async fn test_divergent_request_requiring_a_removed_app_refused_for_its_destination() {
+    // The request record is divergent, and the request requires the shop, which Bob's
+    // signer has since removed: a removed app is never listed again (Switch spec 4), so no
+    // confirmation could let it be paid, and the payment is refused for that, naming no
+    // record and asking no app for a list (Paykit spec 8.1).
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    let draft = requiring(shop.app_id(), w.clock.now_ms());
+    let request = request_from(&mut shop, w.alice_id(), draft).await;
+    wallet.receive(None).await.unwrap();
+    let record = wallet.request(&request).await.unwrap().record;
+    set_divergent(&base, &wallet, &record, true);
+    remove_from_bob(&w, shop.app_id());
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::Destination(_))),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    assert!(wallet.payments().await.unwrap().is_empty());
+    assert!(list_asks(&w, &wallet).await.is_empty());
+    assert!(shown_paused(&wallet, &record).await);
+}
+
+#[tokio::test]
+async fn test_divergent_request_requiring_an_app_not_listed_yet_still_paused() {
+    // The request requires an app bob's identity.json neither lists nor has removed: it may
+    // still be listed, so the request isn't one that can't be paid, and its divergent
+    // record pauses the payment as any other (Paykit spec 6).
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    let request = request_from(
+        &mut shop,
+        w.alice_id(),
+        requiring([7; 16], w.clock.now_ms()),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    let record = wallet.request(&request).await.unwrap().record;
+    set_divergent(&base, &wallet, &record, true);
+    w.clock.advance_ms(11 * 60_000);
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(refused_records(&refused), vec![(record, true, true)]);
+    assert!(w.rail.all_executions().is_empty());
+}
+
 #[tokio::test]
 async fn test_divergent_request_unjudged_while_the_payees_identity_is_unreadable() {
     // The request record is divergent, and bob's identity.json can be read neither from his
