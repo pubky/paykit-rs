@@ -1070,3 +1070,185 @@ async fn test_stored_refused_receipt_waits_for_the_current_epochs_key_past_its_w
     assert!(kept(&wallet, "se/").await.is_empty());
     assert!(holds_receipt(&wallet, &request).await);
 }
+
+/// `app` backed up, dropped and restored onto a new store; the restore's reconcile run, and
+/// one receive, in which the client tells of the parked entries the backup carries again.
+pub(crate) async fn restored(w: &World, mut app: Paykit) -> Paykit {
+    let backup = app.backup().await.unwrap();
+    let backup = paykit_sdk::PaykitBackup::from_bytes(&backup.to_bytes().unwrap()).unwrap();
+    drop(app);
+    let mut app = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    app.reconcile().await.unwrap();
+    app.end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    app.receive(None).await.unwrap();
+    app
+}
+
+/// A message given up, as [`given_up`], its receipt signed once so it can be sent again.
+struct GivenUp {
+    notice: paykit_sdk::Notice,
+    receipt: pubky_switch_core::message::MessagePlaintext,
+    attempt_id: paykit_lib::AttemptId,
+    obligation: [u8; 32],
+}
+
+async fn given_up_signed(w: &World) -> (Paykit, GivenUp) {
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let attempt_id = pending(w, &mut wallet, &request).await;
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    let body = paykit_lib::bodies::PaymentReceipt {
+        attempt_id,
+        billing_period: None,
+        metadata: None,
+        payment_reference: None,
+    }
+    .to_body(2)
+    .unwrap();
+    let receipt = w.sign_as(
+        &w.bob,
+        "shop",
+        &w.alice,
+        "paykit.payment_receipt",
+        vec![[7; 32], request.request_hash],
+        body,
+    );
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &receipt);
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+    wallet.app_mut().receive(None).await.unwrap();
+    refuse_writes(&w.alice, 1);
+    wallet.receive(None).await.unwrap();
+    let notice = wallet.notices().await.unwrap().remove(0);
+    assert_eq!(notice.kind, paykit_sdk::NoticeKind::MessageGivenUp);
+    (
+        wallet,
+        GivenUp {
+            notice,
+            receipt,
+            attempt_id,
+            obligation,
+        },
+    )
+}
+
+/// The outcome of the attempt on its claim, which the given-up receipt would settle.
+async fn claim_outcome(app: &mut Paykit, given: &GivenUp) -> Outcome {
+    let read = app
+        .app_mut()
+        .read_claim(&given.obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    read.view
+        .attempt(&given.attempt_id.to_bytes())
+        .unwrap()
+        .outcome
+}
+
+#[tokio::test]
+async fn test_stored_given_up_message_stays_given_up_after_a_restore() {
+    // Given up, then backed up and restored: the restore keeps the notice, not the note,
+    // and the client tells of the parked entry again. The message stays given up: no note
+    // is kept and its effect, settling the attempt, is never applied; the notice stays,
+    // and its acknowledgement forgets the restored entry.
+    let w = World::new();
+    let (wallet, given) = given_up_signed(&w).await;
+    let mut app = restored(&w, wallet).await;
+    app.receive(None).await.unwrap();
+    assert!(kept(&app, "se/").await.is_empty());
+    assert_eq!(claim_outcome(&mut app, &given).await, Outcome::Open);
+    assert_eq!(app.notices().await.unwrap(), vec![given.notice.clone()]);
+    assert_eq!(app.app_mut().parked_entries().await.unwrap().len(), 1);
+    app.acknowledge_notice(&given.notice.id).await.unwrap();
+    assert!(app.app_mut().parked_entries().await.unwrap().is_empty());
+    assert!(app.notices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_stored_given_up_message_sent_again_after_a_restore_has_no_effect() {
+    // The sender sends the given-up message again after the restore: it stays processed.
+    let w = World::new();
+    let (wallet, given) = given_up_signed(&w).await;
+    let mut app = restored(&w, wallet).await;
+    w.deliver(&w.bob, "shop", &w.alice, &[app.app_id()], &given.receipt);
+    app.receive(None).await.unwrap();
+    app.receive(None).await.unwrap();
+    assert_eq!(claim_outcome(&mut app, &given).await, Outcome::Open);
+    assert!(kept(&app, "se/").await.is_empty());
+    assert_eq!(app.notices().await.unwrap(), vec![given.notice]);
+}
+
+#[tokio::test]
+async fn test_stored_given_up_message_cant_be_released_after_a_restore() {
+    // The host can't release the restored entry of a message given up: the client releases
+    // only an entry whose effect is uncertain, and this one's was refused. Nothing runs it.
+    let w = World::new();
+    let (wallet, given) = given_up_signed(&w).await;
+    let mut app = restored(&w, wallet).await;
+    let entry = app.app_mut().parked_entries().await.unwrap().remove(0);
+    assert!(app
+        .app_mut()
+        .release_parked(entry.stored_id, &entry.hash)
+        .await
+        .is_err());
+    app.receive(None).await.unwrap();
+    assert_eq!(claim_outcome(&mut app, &given).await, Outcome::Open);
+    assert!(kept(&app, "se/").await.is_empty());
+}
+
+#[tokio::test]
+async fn test_stored_given_up_and_acknowledged_message_sent_again_after_a_restore_has_no_effect() {
+    // Acknowledged, the notice goes with its entry; the message stays processed at the
+    // client, in the backup too, so a copy sent again after a restore applies nothing.
+    let w = World::new();
+    let (mut wallet, given) = given_up_signed(&w).await;
+    wallet.acknowledge_notice(&given.notice.id).await.unwrap();
+    let mut app = restored(&w, wallet).await;
+    w.deliver(&w.bob, "shop", &w.alice, &[app.app_id()], &given.receipt);
+    app.receive(None).await.unwrap();
+    app.receive(None).await.unwrap();
+    assert_eq!(claim_outcome(&mut app, &given).await, Outcome::Open);
+    assert!(kept(&app, "se/").await.is_empty());
+    assert!(app.notices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_stored_forgotten_entry_sent_again_after_a_restore_writes_nothing_twice() {
+    // A request stored for good, written later and its entry forgotten. After a restore the
+    // payee re-sends it, as the restore asks: the record holds it already, so nothing is
+    // written again and nothing is stored again.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
+    let record = wallet
+        .app()
+        .record_key(&crate::outcome_record::payer_record(&request))
+        .unwrap();
+    let mut app = restored(&w, wallet).await;
+    let writes = w.record_writes(&w.alice, &record);
+    let answered = shop.receive(None).await.unwrap();
+    assert!(answered.resends >= 1, "no re-send request reached bob");
+    app.receive(None).await.unwrap();
+    assert_eq!(w.record_writes(&w.alice, &record), writes);
+    assert_eq!(app.requests().await.unwrap().len(), 1);
+    assert!(app.app_mut().parked_entries().await.unwrap().is_empty());
+    assert!(kept(&app, "se/").await.is_empty());
+}

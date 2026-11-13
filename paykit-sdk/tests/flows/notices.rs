@@ -674,3 +674,25 @@ async fn test_notices_late_receipt_held_while_its_record_awaits_its_key() {
     wallet.resume_payments().await.unwrap();
     assert!(wallet.payments().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn test_notices_acknowledged_late_receipt_raises_none_again_after_a_restore() {
+    // The host acknowledged "marked failed, was paid" before the backup. After the restore
+    // the payee's receipt comes again: the acknowledged notice is restored with its
+    // payment, so it is not raised again.
+    let w = World::new();
+    let (mut wallet, mut shop, attempt_id) = paid_after_failed(&w).await;
+    w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    wallet.receive(None).await.unwrap();
+    wallet.resume_payments().await.unwrap();
+    receipt(&mut shop).await;
+    wallet.receive(None).await.unwrap();
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    wallet.acknowledge_notice(&notices[0].id).await.unwrap();
+    let mut app = crate::stored::restored(&w, wallet).await;
+    receipt_again(&w, &app, attempt_id, &[app.app_id()]).await;
+    app.receive(None).await.unwrap();
+    app.receive(None).await.unwrap();
+    assert!(app.notices().await.unwrap().is_empty());
+}
