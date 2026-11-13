@@ -634,6 +634,10 @@ impl Paykit {
         // An app holding `contacts` reads the flagged senders again first, at most every 10
         // minutes, for the spam rule (Paykit wire 4.1).
         self.refresh_lists_when_due().await?;
+        // After a restore, this app's blocks the backup kept unanswered are written again.
+        if self.certificate_refused().is_none() {
+            self.send_own_blocks_again().await?;
+        }
         // The records paused before this read, for the summary's new ones.
         let paused_before = self.paused_records().await?;
         // Whether the client may list at this read's start ([`Paykit::records_listed`]).

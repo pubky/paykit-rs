@@ -1060,3 +1060,83 @@ async fn test_replies_kept_and_marks_dated_past_the_backup_bounded_at_a_restore(
         "{mark}"
     );
 }
+
+/// `shop` backed up, dropped and restored from that backup.
+async fn shop_restored(w: &World, mut shop: Paykit) -> Paykit {
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let mut shop = Paykit::restore(
+        w.env(&w.bob, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    shop.reconcile().await.unwrap();
+    shop
+}
+
+/// Alice's wallet sends bob again every message it sent him, as answers to his asks do.
+async fn send_all_again(w: &World, wallet: &mut Paykit) {
+    for sent in wallet
+        .app()
+        .sent_to(&w.bob_id(), 0, u64::MAX)
+        .await
+        .unwrap()
+    {
+        wallet.app_mut().resend(&sent.msg_id).await.unwrap();
+    }
+    wallet.flush().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_replies_given_up_stay_given_up_after_a_restore_and_a_resend() {
+    // The replies are given up past 30 days, the switch refusing their writes. A restore
+    // from a backup taken then, and alice sending them again, place nothing: a message
+    // given up stays processed while its notice is kept (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - DAY_MS);
+    shop.receive(None).await.unwrap();
+    record_request(&w, &mut shop, &request).await;
+    w.clock.advance_ms(2 * DAY_MS);
+    shop.app_mut().rotate().await.unwrap();
+    shop.app_mut().flush_cursor().await.unwrap();
+    crate::common::refuse_writes(&w.bob, 2);
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.notices().await.unwrap().len(), 2);
+    let mut shop = shop_restored(&w, shop).await;
+    send_all_again(&w, &mut wallet).await;
+    for _ in 0..2 {
+        shop.receive(None).await.unwrap();
+    }
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert_eq!(shop.notices().await.unwrap().len(), 2);
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        PayeeStatus::Requested
+    );
+}
+
+#[tokio::test]
+async fn test_replies_dropped_past_30_days_stay_dropped_after_a_restore() {
+    // The replies' record never came: past 30 days they are dropped, with no notice. A
+    // restore from a backup taken then keeps nothing of them.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let _request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    let mut shop = shop_restored(&w, shop).await;
+    for _ in 0..2 {
+        shop.receive(None).await.unwrap();
+    }
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert!(shop.notices().await.unwrap().is_empty());
+}

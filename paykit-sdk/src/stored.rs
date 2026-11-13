@@ -385,6 +385,11 @@ impl Paykit {
     /// a list's hold. Whether it is kept, or was already: `false` for an entry gone, one that
     /// doesn't read as a message that verifies for this app, and a kind no record of this
     /// app's holds.
+    ///
+    /// A message given up stays given up (Paykit spec 8.1): its record write has ended and
+    /// the message stays processed. An entry the client tells of again with its notice kept,
+    /// as a restore does with the parked entry it carries, only gives the notice the entry's
+    /// handle, which its acknowledgement forgets: no note is kept, so nothing writes it.
     async fn note_stored(&mut self, stored_id: u64, tx: &mut Tx) -> Result<bool> {
         let own = self.identity();
         let Some(entry) = self.app.parked_entry(stored_id).await? else {
@@ -399,6 +404,22 @@ impl Paykit {
         ) else {
             return Ok(false);
         };
+        let notice_key = key::message_notice(&entry.sender, &stored.message().msg_id);
+        if let Some(mut given_up) = self.kept_notice(&notice_key).await? {
+            let handle = StoredHandle {
+                stored_id,
+                hash: stored.hash(),
+            };
+            // A notice raised with no entry stored names its origin instead; once the
+            // client stores the entry, the handle replaces it: a notice names one or the
+            // other, never both.
+            if given_up.stored.as_ref() != Some(&handle) || given_up.origin.is_some() {
+                given_up.stored = Some(handle);
+                given_up.origin = None;
+                tx.put(&notice_key, &given_up)?;
+            }
+            return Ok(true);
+        }
         let note_key = key::stored_note(&entry.sender, &stored.message().msg_id);
         if self.stored_note(&note_key).await?.is_some() {
             return Ok(true);

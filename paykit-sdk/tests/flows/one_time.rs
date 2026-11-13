@@ -2129,3 +2129,44 @@ async fn test_one_time_stop_at_another_key_refuses_the_receive_steps_bounds() {
     let _ = wallet.receive(None).await;
     assert!(!keeps_stop(&w, &wallet, [9; 32]).await);
 }
+
+/// `wallet` backed up, dropped and restored from that backup, reconciled.
+async fn wallet_restored(w: &World, mut wallet: paykit_sdk::Paykit) -> paykit_sdk::Paykit {
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut wallet = paykit_sdk::Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    wallet.reconcile().await.unwrap();
+    wallet
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    wallet
+}
+
+#[tokio::test]
+async fn test_one_time_stop_gone_at_30_days_stays_gone_after_a_restore() {
+    // A stop for a request the wallet holds no record of goes at 30 days. A restore from a
+    // backup taken then keeps none: the receive and the listing after it bring nothing back.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let hash = [7; 32];
+    cancel_to(&w, &[wallet.app_id()], hash);
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+    wallet.receive(None).await.unwrap();
+    assert!(!keeps_stop(&w, &wallet, hash).await);
+    let mut wallet = wallet_restored(&w, wallet).await;
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(!keeps_stop(&w, &wallet, hash).await);
+}
