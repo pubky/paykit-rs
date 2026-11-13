@@ -3576,3 +3576,96 @@ async fn test_periods_kept_details_wait_while_the_records_are_unlisted_then_stor
     assert_eq!(view.periods.len(), 1, "{view:?}");
     assert_eq!(view.periods[0].details.len(), 1, "{view:?}");
 }
+#[tokio::test]
+async fn test_periods_proof_from_a_flagged_third_party_naming_a_held_request_only_counted() {
+    // Carol, flagged, isn't the counterparty of alice's subscription at bob's till, yet she
+    // sends a proof naming its request and period details the till doesn't hold. The spam
+    // rule gates a message from a sender that is no counterparty of the record it names: it
+    // is only counted, and nothing of hers is kept.
+    let w = World::new();
+    let lists = Arc::new(crate::common::ListsStore::default());
+    let mut till = w
+        .join_with(
+            &w.bob,
+            "till",
+            AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+            PaykitConfig::default(),
+            Arc::clone(&lists) as Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    let mut wallet = w.wallet("wallet").await;
+    let _carol = w
+        .join(&w.carol, "wallet", AppScopes::new().pay().build().unwrap())
+        .await;
+    till.receive(None).await.unwrap();
+    let request = till
+        .send_request(w.alice_id(), monthly(w.clock.now_ms(), None))
+        .await
+        .unwrap()
+        .request
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.accept_subscription(&request).await.unwrap();
+    till.receive(None).await.unwrap();
+    lists.flag(&w.carol_id());
+    let body = period_proof(&w, till.app_id(), january()).await;
+    w.inject(
+        &w.carol,
+        "wallet",
+        &w.bob,
+        &[till.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash, [1; 32]],
+        body,
+    );
+    till.receive(None).await.unwrap();
+    till.receive(None).await.unwrap();
+    let kept = till.app().protocol_scan(b"pr/").await.unwrap();
+    assert!(kept.is_empty(), "{} kept", kept.len());
+    assert_eq!(till.spam_count(&w.carol_id()).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn test_periods_proof_from_a_third_party_never_opens_the_period_record() {
+    // Carol, admitted and not flagged, isn't the counterparty of alice's subscription at
+    // bob's shop, yet she sends a proof of January naming its request. It opens no period
+    // record under her as counterparty: it is kept as a reply before its record, never
+    // placed. Alice's own proof of January then goes into the period record.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let _carol = w
+        .join(&w.carol, "wallet", AppScopes::new().pay().build().unwrap())
+        .await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let body = period_proof(&w, shop.app_id(), january()).await;
+    w.inject(
+        &w.carol,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        body.clone(),
+    );
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(shop.payee_activity().await.unwrap()[0].periods.is_empty());
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        body,
+    );
+    shop.receive(None).await.unwrap();
+    let sale = &shop.payee_activity().await.unwrap()[0];
+    assert_eq!(sale.periods.len(), 1, "{sale:?}");
+    assert!(sale.periods[0].paid, "{sale:?}");
+}

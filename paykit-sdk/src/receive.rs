@@ -584,15 +584,40 @@ fn keep_before_record(
     Ok(())
 }
 
-/// Keep `stored`, a message naming the request whose record is at `record`, until it can be
-/// placed. With no request record held there it is new state, kept through the spam rule
-/// ([`keep_before_record`]). With one held that the message can't be placed in now (a value
-/// that doesn't open, read or bind, or a period record that doesn't open or bind or lacks the
-/// period details a proof names), it updates activity the app holds, no new state: it is
-/// kept outside the spam rule, within the bounds on kept replies ([`keep_reply`]), so a
-/// blocked or flagged counterparty's message is never dropped for a record the app can't
-/// read yet. The later write places it once the record can take it, or gives it up with the
-/// host's notice past its 30 days ([`crate::Paykit::place_kept_replies`]).
+/// Hold the entry of `stored`, a payer's reply to a request whose payee record the app holds
+/// but whose value doesn't open for good, as for a store unavailable for now: whether its
+/// sender is the record's counterparty can't be told, so it is neither counted under the
+/// spam rule, which could drop a real payer's reply, nor kept outside it, which would let
+/// anyone create state. The client holds the entry on the feed for its bounded wait, then
+/// stores it and tries it at every read, telling the host (`StoreFailing`); it is processed
+/// once the record reads. Once [`KEPT_MESSAGE_MS`] have passed since its acceptance, on
+/// `service`, the highest service time verified, its sender re-sends nothing that old
+/// (Paykit spec 9): the hold ends, and the reply is taken as one before its record, kept
+/// through the spam rule and given up with the host's notice, or, from a blocked or flagged
+/// sender, only counted.
+fn hold_until_readable(stored: &StoredMessage, service: Option<u64>) -> Result<(), Fail> {
+    let past = stored
+        .accepted_at()
+        .is_some_and(|at| crate::stored::past_window(at, service));
+    if past {
+        return Ok(());
+    }
+    Err(Fail::Store(StoreFailure::unavailable(
+        StoreError::Unavailable,
+    )))
+}
+
+/// Keep `stored`, a payee's period details at the payer, naming the request whose record
+/// is at `record`, until they can be placed. That record's key derives from the details'
+/// sender, so a record held there is one whose counterparty is the sender. With none held
+/// they are new state, kept through the spam rule ([`keep_before_record`]). With one held
+/// that they can't be placed in now (a value that doesn't open for good, read or bind, or
+/// a period record that doesn't open or bind), they update activity the app holds, no new
+/// state: they are kept outside the spam rule, within the bounds on kept replies
+/// ([`keep_reply`]), so a blocked or flagged payee's details are never dropped for a record
+/// the app can't read yet. The later write places them once the record can take them, or
+/// gives them up with the host's notice past their 30 days
+/// ([`crate::Paykit::place_kept_replies`]).
 fn keep_until_placed(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
@@ -809,11 +834,15 @@ fn payer_reply(
             // spam rule gates, within the bounds on kept replies ([`kept_reply_evicted`]).
             // While the copy of the payee's records may lack records, the absence decides
             // nothing: the entry is held instead ([`held_or_unlisted`]).
-            // A request record held whose value doesn't open is no absence: the reply updates
-            // activity the app holds, kept outside the spam rule until it can be placed
-            // ([`keep_until_placed`]).
+            // A request record held whose value doesn't open for good is no absence, but the
+            // payee's request record key doesn't name the sender, so whether the sender is its
+            // counterparty can't be told: the entry is held until the record reads
+            // ([`hold_until_readable`]), neither counted nor kept.
             let Some(value) = held_or_unlisted(cx, &target, RecordSide::Payee)? else {
-                keep_until_placed(cx, stored, scopes, &target)?;
+                if held_request(cx, &target)? {
+                    hold_until_readable(stored, cx.highest_service_time())?;
+                }
+                keep_before_record(cx, stored, scopes, &target)?;
                 return Ok(false);
             };
             // A Billing Period's proof goes into its period record, never the request's
@@ -821,11 +850,12 @@ fn payer_reply(
             // and a proof naming a period that isn't the request's is dropped. A record that
             // doesn't read is written again with the message, as before.
             let request_target = target;
-            let target = match activity::read(Some(&value), &own, ActivitySide::Payee) {
-                Some(record) => period_or_request(&own, &request_target, &record, stored, request)
+            let read = activity::read(Some(&value), &own, ActivitySide::Payee);
+            let target = match &read {
+                Some(record) => period_or_request(&own, &request_target, record, stored, request)
                     .ok_or_else(|| {
-                        Fail::Drop("Paykit wire 4.4: a message naming another period".into())
-                    })?,
+                    Fail::Drop("Paykit wire 4.4: a message naming another period".into())
+                })?,
                 None => request_target.clone(),
             };
             // A proof naming period details the period record doesn't hold, such as ones
@@ -835,22 +865,33 @@ fn payer_reply(
             // bound to its key, as the later writes read it: one whose value doesn't read or
             // bind is never written over here, and the proof waits the same way.
             if target != request_target {
+                // Only the request's counterparty, whom its stored request names, pays its
+                // Billing Periods: a proof from anyone else is no update of activity the app
+                // holds. It never goes into a period record, where it would open one under
+                // another counterparty; it is new state, kept through the spam rule as a
+                // reply before its record ([`keep_before_record`]), and never placed.
+                if read.as_ref().map(|record| record.counterparty) != Some(sender) {
+                    keep_before_record(cx, stored, scopes, &request_target)?;
+                    return Ok(true);
+                }
+                // From the counterparty, a proof the period record can't take now updates
+                // activity the app holds: kept outside the spam rule ([`keep_reply`]).
                 let held = match held_or_unlisted(cx, &target, RecordSide::Payee)? {
                     None if held_request(cx, &target)? => {
-                        keep_until_placed(cx, stored, scopes, &request_target)?;
+                        keep_reply(cx, &request_target, stored)?;
                         return Ok(true);
                     }
                     None => None,
                     Some(value) => match bound_activity(cx, &target, &value, settlement)? {
                         Some(period) => Some(period),
                         None => {
-                            keep_until_placed(cx, stored, scopes, &request_target)?;
+                            keep_reply(cx, &request_target, stored)?;
                             return Ok(true);
                         }
                     },
                 };
                 if awaits_named_details(held.as_ref(), ActivitySide::Payee, stored) {
-                    keep_until_placed(cx, stored, scopes, &request_target)?;
+                    keep_reply(cx, &request_target, stored)?;
                     return Ok(true);
                 }
             }
