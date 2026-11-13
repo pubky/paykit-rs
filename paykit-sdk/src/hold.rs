@@ -661,8 +661,8 @@ impl Paykit {
     /// whose value doesn't open for good, read or bind shows none of its messages: the
     /// re-send stays owed and judges every record again at each receive, until each such
     /// record reads, its messages then going under the same rules, or 30 days have passed
-    /// since the restore ([`OwnResendOwed::unread_since_ms`]), after which none of them could
-    /// still go; a delete holds no message, and a record under another policy nothing of
+    /// since the restore ([`OwnResendOwed::restored_at_ms`]), after which none of them could
+    /// still go, so one found unreadable later than that is not waited for; a delete holds no message, and a record under another policy nothing of
     /// Paykit's. Messages to a counterparty whose sends are held wait, the restore's mark or
     /// the held answer naming it, for a later receive: nothing reaches it meanwhile. Period
     /// details go again only while no later stop covers them: none once their period is
@@ -693,13 +693,6 @@ impl Paykit {
         let mut still_held = std::collections::BTreeSet::new();
         let mut done = std::collections::BTreeSet::new();
         let mut given_up = Vec::new();
-        // A record the restore's re-send can't read names no counterparty: while one may
-        // still hold a message that could go, every record is judged again, whoever its
-        // counterparty.
-        let unread_open = owed
-            .as_ref()
-            .and_then(|owed| owed.unread_since_ms)
-            .is_some_and(|since| !self.past_restore_window(since));
         let mut unread = false;
         for (collection, side) in [
             (
@@ -732,19 +725,18 @@ impl Paykit {
                     )
                 });
                 // A record that doesn't open, read or bind shows nothing to send now: the
-                // restore's re-send judges it again at each receive (`unread_since_ms`), and
-                // a held answer it may hold stays (`answer_record_unread`).
+                // restore's re-send judges every record again at the next receive, until 30
+                // days after the restore (`restored_at_ms`), and a held answer it may hold
+                // stays (`answer_record_unread`).
                 let Some(record) = record else {
                     unread = true;
                     continue;
                 };
                 let counterparty = record.counterparty;
                 let restore_owes = owed.as_ref().is_some_and(|owed| {
-                    unread_open
-                        || owed
-                            .waiting
-                            .as_ref()
-                            .is_none_or(|waiting| waiting.binary_search(&counterparty).is_ok())
+                    owed.waiting
+                        .as_ref()
+                        .is_none_or(|waiting| waiting.binary_search(&counterparty).is_ok())
                 });
                 // Period details go again only while no later stop covers them: one their
                 // request record can't show yet holds them, unless the client would refuse
@@ -840,21 +832,33 @@ impl Paykit {
             tx.delete(&key::held_answer(&answer.payee, &answer.msg_id));
         }
         if let Some(owed) = &owed {
-            // The first pass to find a record it can't read sets the time the 30 days run
-            // from, and later passes keep it.
-            let unread_since_ms = owed
-                .unread_since_ms
+            // The restore's time, kept for the life of the mark. A mark without it, written
+            // before it was kept or by a restore that stopped before writing it, takes the
+            // time of the first pass that finds a record it can't read, which is later: the
+            // wait never ends early.
+            let restored_at_ms = owed
+                .restored_at_ms
                 .or_else(|| unread.then(|| self.window_now()));
             let unread_waits =
-                unread && unread_since_ms.is_some_and(|since| !self.past_restore_window(since));
-            if waiting.is_empty() && !unread_waits {
+                unread && restored_at_ms.is_some_and(|at| !self.past_restore_window(at));
+            if unread_waits {
+                // A record that can't be read names no counterparty: the next pass judges
+                // every record again, whoever its counterparty.
+                tx.put(
+                    key::OWN_RESEND_OWED,
+                    &OwnResendOwed {
+                        waiting: None,
+                        restored_at_ms,
+                    },
+                )?;
+            } else if waiting.is_empty() {
                 tx.delete(key::OWN_RESEND_OWED);
             } else {
                 tx.put(
                     key::OWN_RESEND_OWED,
                     &OwnResendOwed {
                         waiting: Some(waiting.into_iter().collect()),
-                        unread_since_ms,
+                        restored_at_ms,
                     },
                 )?;
             }
@@ -887,11 +891,28 @@ impl Paykit {
         self.now().max(self.service_time().unwrap_or(0))
     }
 
-    /// Whether 30 days have passed, on [`Paykit::window_now`], since `since_ms`, a time at or
-    /// after the restore: every message an activity record stores to be sent again was
+    /// Whether 30 days have passed, on [`Paykit::window_now`], since `since_ms`, the restore's
+    /// time or a later one: every message an activity record stores to be sent again was
     /// signed before the backup, so none could still go by then.
     fn past_restore_window(&self, since_ms: u64) -> bool {
         self.window_now() > since_ms.saturating_add(pubky_switch_client::app::SENT_RETENTION_MS)
+    }
+
+    /// Write the restore's time into the restore's re-send mark, right after the client's
+    /// restore commit ([`OwnResendOwed::restored_at_ms`]): the restore's own step reads no
+    /// clock. A mark that has one keeps it.
+    pub(crate) async fn stamp_restore_time(&mut self) -> Result<()> {
+        let Some(mut owed) = self
+            .local_get::<OwnResendOwed>(key::OWN_RESEND_OWED)
+            .await?
+        else {
+            return Ok(());
+        };
+        if owed.restored_at_ms.is_some() {
+            return Ok(());
+        }
+        owed.restored_at_ms = Some(self.window_now());
+        self.local_put(key::OWN_RESEND_OWED, &owed).await
     }
 
     /// Whether a later stop covers the period details the payee period record `record`,
@@ -994,20 +1015,23 @@ impl Paykit {
 /// ([`Paykit::queue_own_again`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct OwnResendOwed {
-    /// `None` while no pass ran: every counterparty's messages are owed. After a pass, the
-    /// counterparties some of whose messages wait, ascending, each once: only their messages
-    /// are owed. Those whose sends were held then, a blocked one or every one while the copy
-    /// of the deny list isn't known, and those with period details whose request record
-    /// couldn't show yet whether a later stop covers them ([`DetailsStop::Unknown`]).
+    /// `None` while no pass ran, or after a pass that found an activity record it couldn't
+    /// read (a value that doesn't open for good, read or bind), which names no counterparty,
+    /// within 30 days of the restore: every counterparty's messages are owed. After any other
+    /// pass, the counterparties some of whose messages wait, ascending, each once: only
+    /// their messages are owed. Those whose sends were held then, a blocked one or every one
+    /// while the copy of the deny list isn't known, and those with period details whose
+    /// request record couldn't show yet whether a later stop covers them
+    /// ([`DetailsStop::Unknown`]).
     pub(crate) waiting: Option<Vec<[u8; 32]>>,
-    /// Set by the first pass that found an activity record it couldn't read (a value that
-    /// doesn't open for good, read or bind), to [`Paykit::window_now`] then, at or after the
-    /// restore, and kept: such a record names no counterparty, so while one is found, and
-    /// until 30 days after this time, every record is judged again at each receive, and the
-    /// re-send stays owed. `None`, as in a mark written before this field, until a pass
-    /// finds one.
+    /// The restore's time, on [`Paykit::window_now`], written by [`Paykit::restore`] right
+    /// after the client's restore commit and kept for the life of the mark: 30 days after it
+    /// no message a record stores to be sent again could still go, so no record that can't
+    /// be read keeps the re-send owed past it. `None`, in a mark written before this field or
+    /// by a restore that stopped before writing it, fails closed: the first pass that finds
+    /// a record it can't read sets it to its own time, which is later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) unread_since_ms: Option<u64>,
+    pub(crate) restored_at_ms: Option<u64>,
 }
 
 /// Whether a later stop covers the period details a payee period record keeps, for the

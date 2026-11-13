@@ -2637,3 +2637,68 @@ async fn test_restore_own_unread_record_and_a_blocked_counterparty_both_wait() {
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), alices + 1);
     assert_eq!(w.carol.switch().entries_from(&w.bob_id()), carol_before + 1);
 }
+
+#[tokio::test]
+async fn test_restore_own_record_found_unreadable_25_days_after_the_restore_waited_for_5_more() {
+    // The restored shop's re-send stays owed while carol, to whom its request went
+    // unanswered, is blocked. 25 days after the restore the till writes a record no reader
+    // reads, and carol is unblocked: her request goes, and the record keeps the re-send owed
+    // only until 30 days after the restore, not 30 days after it was found, since no
+    // message the restore could send again can still go by then (Paykit spec 7.2, "What a
+    // restore loses").
+    let w = World::new();
+    let mut shop = w
+        .join(
+            &w.bob,
+            "shop",
+            AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+        )
+        .await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let mut carols = w
+        .join(&w.carol, "wallet", AppScopes::new().pay().build().unwrap())
+        .await;
+    carols.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut unexpiring = draft("1", w.clock.now_ms());
+    unexpiring.proposal_expires_at_ms = None;
+    let to_carol = shop.send_request(w.carol_id(), unexpiring).await.unwrap();
+    carols.receive(None).await.unwrap();
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let mut shop = restored_unreceived(&w, &w.bob, &backup).await;
+    shop.block(&w.carol_id()).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    let before = w.carol.switch().entries_from(&w.bob_id());
+    w.clock.advance_ms(25 * pubky_switch_core::records::DAY_MS);
+    till.receive(None).await.unwrap();
+    let nowhere = paykit_sdk::RequestRef {
+        payee: w.bob_id(),
+        request_hash: [7; 32],
+    };
+    let unreadable = serde_json::to_vec(&serde_json::json!({ "v": 99 })).unwrap();
+    crate::periods::writes_value(
+        &mut till,
+        &crate::periods::payee_request_at(&nowhere),
+        &unreadable,
+    )
+    .await;
+    shop.unblock(&w.carol_id()).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(crate::periods::queued(&shop, &to_carol.msg_id).await);
+    assert_eq!(w.carol.switch().entries_from(&w.bob_id()), before + 1);
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    w.clock.advance_ms(4 * pubky_switch_core::records::DAY_MS);
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    w.clock.advance_ms(2 * pubky_switch_core::records::DAY_MS);
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert_eq!(w.carol.switch().entries_from(&w.bob_id()), before + 1);
+}

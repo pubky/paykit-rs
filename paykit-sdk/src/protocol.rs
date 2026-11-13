@@ -527,7 +527,8 @@ pub(crate) fn restore_paykit_layer(
     writes.push(owed);
     // The messages this app signed that a batch the backup kept unanswered queued are in no
     // outbox: they are queued again from the records once they are listed
-    // (`Paykit::queue_own_again`).
+    // (`Paykit::queue_own_again`). This step reads no clock: `Paykit::restore` writes the
+    // restore's time into the mark right after this commit (`Paykit::stamp_restore_time`).
     let resend = state::local_put(key::OWN_RESEND_OWED, &crate::hold::OwnResendOwed::default())
         .map_err(|_| String::from("the restore's re-send mark can't be written"))?;
     writes.push(resend);

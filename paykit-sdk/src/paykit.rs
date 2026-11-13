@@ -472,6 +472,7 @@ impl Paykit {
         .await?;
         let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
         paykit.bound_restored_cursor_time().await?;
+        paykit.stamp_restore_time().await?;
         Ok(paykit)
     }
 
