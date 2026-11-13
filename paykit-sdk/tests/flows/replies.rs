@@ -1175,3 +1175,322 @@ async fn test_replies_dropped_past_30_days_stay_dropped_after_a_restore() {
     assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
     assert!(shop.notices().await.unwrap().is_empty());
 }
+
+/// Bob's shop holding his request record to alice as a value that opens but doesn't read as
+/// an activity record, written by bob's till, with no pause.
+struct PayeeUnread {
+    shop: Paykit,
+    till: Paykit,
+    _wallet: Paykit,
+    _carol: Paykit,
+    request: RequestRef,
+    record: [u8; 32],
+    target: RecordTarget,
+    good: Vec<u8>,
+}
+
+/// [`PayeeUnread`]: the shop keeps no mark of what it has seen in a record, so it holds the
+/// value that doesn't read rather than refuse it as a regression.
+async fn payee_unread(w: &World) -> PayeeUnread {
+    let seen = Arc::new(crate::outcome_record::NoSeenMarks::default());
+    let base = Arc::clone(&seen) as Arc<dyn pubky_switch_client::store::StateStore>;
+    let wallet = w.wallet("wallet").await;
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            base,
+        )
+        .await;
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let carol = w
+        .join(
+            &w.carol,
+            "wallet",
+            paykit_sdk::AppScopes::new().pay().build().unwrap(),
+        )
+        .await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    till.receive(None).await.unwrap();
+    let collection = Collection::PayeeActivity;
+    let target = RecordTarget::new(
+        SwitchCollection::new(collection.name(), collection.policy(None)),
+        &natural_key::request_record(&w.bob_id(), &request.request_hash),
+    );
+    let good = till
+        .app()
+        .shared_record(&record)
+        .await
+        .unwrap()
+        .unwrap()
+        .content
+        .value()
+        .unwrap()
+        .to_vec();
+    seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut s = PayeeUnread {
+        shop,
+        till,
+        _wallet: wallet,
+        _carol: carol,
+        request,
+        record,
+        target,
+        good,
+    };
+    s.till_writes(crate::outcome_record::INVALID).await;
+    s.shop.receive(None).await.unwrap();
+    assert_eq!(s.held().await, crate::outcome_record::INVALID);
+    s
+}
+
+impl PayeeUnread {
+    /// Bob's till writes `value` at the request record.
+    async fn till_writes(&mut self, value: &[u8]) {
+        self.till.receive(None).await.unwrap();
+        let op = self
+            .till
+            .app_mut()
+            .record_op(&self.target, Some(value), Vec::new())
+            .await
+            .unwrap();
+        self.till
+            .app_mut()
+            .submit_batch(OpBatch::new().entry(op))
+            .await
+            .unwrap();
+    }
+
+    /// The value the shop holds at the request record.
+    async fn held(&self) -> Vec<u8> {
+        self.shop
+            .app()
+            .shared_record(&self.record)
+            .await
+            .unwrap()
+            .unwrap()
+            .content
+            .value()
+            .unwrap()
+            .to_vec()
+    }
+
+    /// The shop's status of the request.
+    async fn status(&self) -> PayeeStatus {
+        self.shop
+            .payee_activity()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|a| a.request_hash == Some(self.request.request_hash))
+            .unwrap()
+            .status
+    }
+}
+
+/// A payer's acceptance, under no label.
+fn acceptance_body() -> serde_json::Map<String, serde_json::Value> {
+    json!({ "label": null }).as_object().cloned().unwrap()
+}
+
+#[tokio::test]
+async fn test_replies_over_an_unread_record_another_identitys_acceptance_writes_nothing() {
+    // Carol's acceptance naming bob's request reaches the shop, which can't read the request
+    // record: it can't tell the record's counterparty, so nothing is written over the value.
+    let w = World::new();
+    let mut s = payee_unread(&w).await;
+    w.inject(
+        &w.carol,
+        "wallet",
+        &w.bob,
+        &[s.shop.app_id()],
+        "paykit.payment_request_acceptance",
+        vec![s.request.request_hash],
+        acceptance_body(),
+    );
+    s.shop.receive(None).await.unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&s.held().await),
+        String::from_utf8_lossy(crate::outcome_record::INVALID)
+    );
+}
+
+#[tokio::test]
+async fn test_replies_over_an_unread_record_another_identitys_period_proof_writes_nothing() {
+    // Carol's proof naming bob's request and a Billing Period reaches the shop, which can't
+    // read the request record. A record whose counterparty can't be told is never written
+    // over: the value stays, and names no one new.
+    let w = World::new();
+    let mut s = payee_unread(&w).await;
+    let now = w.clock.now_ms();
+    let body = paykit_lib::bodies::PaymentProof {
+        attempt_id: paykit_lib::AttemptId::generate().unwrap(),
+        billing_period: Some(paykit_lib::periods::PeriodRef {
+            starts_at: now,
+            ends_at: now + crate::common::HOUR_MS,
+        }),
+        payment_endpoint_identifier: crate::common::endpoint("btc-lightning-bolt11"),
+        payment_app_id: s.shop.app_id(),
+        list_version: None,
+        amount: None,
+        allowance_id: None,
+        label: None,
+        payment_reference: None,
+        proof: json!({ "type": "x-fake" }).as_object().cloned().unwrap(),
+    }
+    .to_body(1)
+    .unwrap();
+    w.inject(
+        &w.carol,
+        "wallet",
+        &w.bob,
+        &[s.shop.app_id()],
+        "paykit.payment_proof",
+        vec![s.request.request_hash],
+        body,
+    );
+    s.shop.receive(None).await.unwrap();
+    let carol = pubky_switch_core::enc::pubky_id(&w.carol_id());
+    let held = String::from_utf8_lossy(&s.held().await).into_owned();
+    assert!(
+        !held.contains(&carol),
+        "the request record now names carol: {held}"
+    );
+    assert_eq!(
+        held,
+        String::from_utf8_lossy(crate::outcome_record::INVALID)
+    );
+}
+
+#[tokio::test]
+async fn test_replies_over_an_unread_record_counterpartys_acceptance_placed_once_it_reads() {
+    // Alice's acceptance reaches the shop while it can't read the request record: it is kept
+    // as a reply before its record, never dropped, and placed once the record reads naming
+    // alice.
+    let w = World::new();
+    let mut s = payee_unread(&w).await;
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[s.shop.app_id()],
+        "paykit.payment_request_acceptance",
+        vec![s.request.request_hash],
+        acceptance_body(),
+    );
+    s.shop.receive(None).await.unwrap();
+    assert_eq!(s.shop.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    let good = s.good.clone();
+    s.till_writes(&good).await;
+    s.shop.receive(None).await.unwrap();
+    s.shop.receive(None).await.unwrap();
+    assert_eq!(s.status().await, PayeeStatus::Accepted);
+    assert!(s.shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+}
+
+/// A proof of a payment without a request from `from`, with app `app`, of the fake rail's
+/// settlement `tx`, to bob's shop `shop`.
+fn proof_of_settlement(
+    w: &World,
+    from: &pubky_switch_client::testing::TestSigner,
+    app: &str,
+    shop: &Paykit,
+    tx: &str,
+) {
+    let body = paykit_lib::bodies::PaymentProof {
+        attempt_id: paykit_lib::AttemptId::generate().unwrap(),
+        billing_period: None,
+        payment_endpoint_identifier: crate::common::endpoint("btc-lightning-bolt12"),
+        payment_app_id: shop.app_id(),
+        list_version: None,
+        amount: Some(crate::common::btc("0.0015")),
+        allowance_id: None,
+        label: None,
+        payment_reference: None,
+        proof: json!({ "rail": "fake", "tx": tx })
+            .as_object()
+            .cloned()
+            .unwrap(),
+    }
+    .to_body(0)
+    .unwrap();
+    w.inject(
+        from,
+        app,
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        Vec::new(),
+        body,
+    );
+}
+
+#[tokio::test]
+async fn test_replies_proof_over_an_unread_settlement_record_writes_nothing() {
+    // Carol's proof of a payment without a request opens the shop's record of its
+    // settlement; bob's till then writes there a value that doesn't read. Alice's proof of
+    // the same settlement isn't written over that value, whoever's the record is: its entry
+    // is held until the record reads.
+    let w = World::new();
+    let seen = Arc::new(crate::outcome_record::NoSeenMarks::default());
+    let base = Arc::clone(&seen) as Arc<dyn pubky_switch_client::store::StateStore>;
+    let _wallet = w.wallet("wallet").await;
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            base,
+        )
+        .await;
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let _carol = w
+        .join(
+            &w.carol,
+            "wallet",
+            paykit_sdk::AppScopes::new().pay().build().unwrap(),
+        )
+        .await;
+    proof_of_settlement(&w, &w.carol, "wallet", &shop, "t1");
+    shop.receive(None).await.unwrap();
+    let collection = Collection::PayeeActivity;
+    let target = RecordTarget::new(
+        SwitchCollection::new(collection.name(), collection.policy(None)),
+        &natural_key::payee_payment_record(&crate::common::endpoint("btc-lightning-bolt12"), b"t1"),
+    );
+    let record = till.app().record_key(&target).unwrap();
+    assert!(shop.app().shared_record(&record).await.unwrap().is_some());
+    seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    till.receive(None).await.unwrap();
+    let op = till
+        .app_mut()
+        .record_op(&target, Some(crate::outcome_record::INVALID), Vec::new())
+        .await
+        .unwrap();
+    till.app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    proof_of_settlement(&w, &w.alice, "wallet", &shop, "t1");
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let held = shop.app().shared_record(&record).await.unwrap().unwrap();
+    assert_eq!(held.content.value(), Some(crate::outcome_record::INVALID));
+}

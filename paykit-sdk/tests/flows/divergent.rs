@@ -1979,12 +1979,13 @@ async fn test_divergent_receipt_kept_before_its_record_read_moves_over_it_once_i
     assert!(s.wallet.notices().await.unwrap().is_empty());
 }
 
-#[tokio::test]
-async fn test_divergent_receipt_without_a_request_from_a_blocked_sender_only_counted() {
-    // A receipt of a payment without a request names a record whose counterparty can't be
-    // read while its value can't. Over such a record paused as divergent it is kept over the
-    // divergent record only under the spam rule a reply before its record takes: from a
-    // blocked sender it is only counted, and nothing is kept.
+/// A receipt of a payment without a request names a record whose counterparty can't be read
+/// while its value can't. Over such a record paused as divergent it is kept over the
+/// divergent record only under the spam rule a reply before its record takes: from bob,
+/// blocked, it is only counted, and nothing is kept. From carol, a `stranger` the spam rule
+/// admits, it is kept; once the record reads again, naming bob, it goes at that receive,
+/// never written.
+async fn receipt_without_request_over_unread_paused(stranger: bool) {
     let w = World::new();
     let seen = Arc::new(crate::outcome_record::NoSeenMarks::default());
     let base = Arc::clone(&seen) as Arc<dyn StateStore>;
@@ -2000,6 +2001,13 @@ async fn test_divergent_receipt_without_a_request_from_a_blocked_sender_only_cou
     wallet.app_mut().invite(&w.bob_id()).await.unwrap();
     let mut phone = w.wallet("phone").await;
     let mut shop = w.shop().await;
+    let _carol = w
+        .join(
+            &w.carol,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+        )
+        .await;
     w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
         .await;
     wallet.receive(None).await.unwrap();
@@ -2022,6 +2030,16 @@ async fn test_divergent_receipt_without_a_request_from_a_blocked_sender_only_cou
     );
     phone.receive(None).await.unwrap();
     let record = phone.app().record_key(&target).unwrap();
+    let good = phone
+        .app()
+        .shared_record(&record)
+        .await
+        .unwrap()
+        .unwrap()
+        .content
+        .value()
+        .unwrap()
+        .to_vec();
     seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
     let op = phone
         .app_mut()
@@ -2045,8 +2063,9 @@ async fn test_divergent_receipt_without_a_request_from_a_blocked_sender_only_cou
     }
     .to_body(1)
     .unwrap();
+    let from = if stranger { &w.carol } else { &w.bob };
     w.inject(
-        &w.bob,
+        from,
         "shop",
         &w.alice,
         &[wallet.app_id()],
@@ -2054,11 +2073,44 @@ async fn test_divergent_receipt_without_a_request_from_a_blocked_sender_only_cou
         vec![[7; 32]],
         body,
     );
-    wallet.block(&w.bob_id()).await.unwrap();
+    if !stranger {
+        wallet.block(&w.bob_id()).await.unwrap();
+        wallet.receive(None).await.unwrap();
+        assert!(crate::stored::kept(&wallet, "dw/").await.is_empty());
+        assert!(crate::stored::kept(&wallet, "pr/").await.is_empty());
+        assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 1);
+        return;
+    }
+    wallet.receive(None).await.unwrap();
+    assert_eq!(crate::stored::kept(&wallet, "dw/").await.len(), 1);
+    phone.receive(None).await.unwrap();
+    let op = phone
+        .app_mut()
+        .record_op(&target, Some(&good), Vec::new())
+        .await
+        .unwrap();
+    phone
+        .app_mut()
+        .submit_batch(pubky_switch_client::app::OpBatch::new().entry(op))
+        .await
+        .unwrap();
     wallet.receive(None).await.unwrap();
     assert!(crate::stored::kept(&wallet, "dw/").await.is_empty());
-    assert!(crate::stored::kept(&wallet, "pr/").await.is_empty());
-    assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 1);
+    let listed = wallet.divergent_records().await.unwrap();
+    assert!(
+        listed.iter().any(|r| r.record == record && r.paused),
+        "{listed:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_divergent_receipt_without_a_request_from_a_blocked_sender_only_counted() {
+    receipt_without_request_over_unread_paused(false).await;
+}
+
+#[tokio::test]
+async fn test_divergent_receipt_from_another_identity_kept_while_unread_goes_once_it_reads() {
+    receipt_without_request_over_unread_paused(true).await;
 }
 
 #[tokio::test]
@@ -2252,11 +2304,11 @@ async fn test_divergent_receipt_from_another_identity_never_kept_over_a_paused_r
 
 /// The shop holds bob's request record as a value that doesn't read, paused as divergent,
 /// and carol, who isn't the request's counterparty, sends it an acceptance naming the
-/// request. The shop can't tell the record's counterparty, so the acceptance is kept over it
-/// only as new state, under the spam rule: with `contacts` and carol blocked, it is only
-/// counted and nothing is kept. Without `contacts`, which gates nothing, it is kept; once
-/// the record reads again, naming alice, carol's message goes at that receive, never
-/// written, holding none of the record's gates, the pause as it was.
+/// request. The shop can't tell the record's counterparty, so the acceptance is kept as a
+/// reply before its record, under the spam rule, never over the divergent record: with
+/// `contacts` and carol blocked, it is only counted and nothing is kept. Without `contacts`,
+/// which gates nothing, it is kept there; once the record reads again, naming alice, carol's
+/// reply is never written, holds none of the record's gates, and leaves the pause as it was.
 async fn acceptance_over_unread_paused(blocked: bool) {
     let w = World::new();
     let seen = Arc::new(crate::outcome_record::NoSeenMarks::default());
@@ -2336,11 +2388,13 @@ async fn acceptance_over_unread_paused(blocked: bool) {
         shop.block(&w.carol_id()).await.unwrap();
         shop.receive(None).await.unwrap();
         assert!(shop.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+        assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
         assert_eq!(shop.spam_count(&w.carol_id()).await.unwrap(), 1);
         return;
     }
     shop.receive(None).await.unwrap();
-    assert_eq!(shop.app().protocol_scan(b"dw/").await.unwrap().len(), 1);
+    assert!(shop.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
     till_writes(&mut till, &good).await;
     shop.receive(None).await.unwrap();
     assert!(shop.app().protocol_scan(b"dw/").await.unwrap().is_empty());
@@ -2361,8 +2415,105 @@ async fn test_divergent_acceptance_over_a_paused_record_that_doesnt_read_only_co
 }
 
 #[tokio::test]
-async fn test_divergent_acceptance_from_another_identity_kept_while_unread_goes_once_it_reads() {
+async fn test_divergent_acceptance_from_another_identity_kept_while_unread_never_written() {
     acceptance_over_unread_paused(false).await;
+}
+
+/// Alice rejects bob's request while bob is blocked: recorded, its message held. A newer write
+/// of the request record that lacks the rejection then comes, with a `divergent` view or
+/// not. Nothing is decided on a view paused as divergent: the held answer stays, nothing is
+/// sent and nothing told, also after bob is unblocked. Once the user has confirmed the
+/// record, or at once for a record never seen divergent, the write lacking the rejection
+/// gives the answer up with the host told, never silently, and the user can reject again.
+async fn held_answer_lacking_in_its_record(divergent: bool) {
+    let w = World::new();
+    let seen = Arc::new(crate::outcome_record::NoSeenMarks::default());
+    let base = Arc::clone(&seen) as Arc<dyn StateStore>;
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            Arc::clone(&base),
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let record = wallet.request(&request).await.unwrap().record;
+    let good = phone
+        .app()
+        .shared_record(&record)
+        .await
+        .unwrap()
+        .unwrap()
+        .content
+        .value()
+        .unwrap()
+        .to_vec();
+    wallet.block(&w.bob_id()).await.unwrap();
+    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let rejection = wallet.reject_request(&request, None).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"ha/").await.unwrap().len(), 1);
+    seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    phone.receive(None).await.unwrap();
+    crate::outcome_record::phone_writes(&mut phone, &request, Some(&good)).await;
+    if divergent {
+        w.alice
+            .switch()
+            .make_divergent(OTHER_UPLOADER, record, [1; 32])
+            .unwrap();
+    }
+    wallet.receive(None).await.unwrap();
+    let view = wallet.request(&request).await.unwrap();
+    assert_eq!(view.divergent, divergent, "{view:?}");
+    assert_ne!(view.status, RequestStatus::Rejected, "{view:?}");
+    let sent = |w: &World| w.bob.switch().entries_from(&w.alice_id()) - entries;
+    if divergent {
+        let held = wallet.app().protocol_scan(b"ha/").await.unwrap().len();
+        let notices = wallet.notices().await.unwrap().len();
+        wallet.unblock(&w.bob_id()).await.unwrap();
+        wallet.receive(None).await.unwrap();
+        wallet.flush().await.unwrap();
+        assert_eq!(
+            (held, notices, sent(&w)),
+            (1, 0, 0),
+            "(held answers kept, notices, sent to bob) while the record is paused"
+        );
+        assert_eq!(wallet.app().protocol_scan(b"ha/").await.unwrap().len(), 1);
+        assert!(wallet.notices().await.unwrap().is_empty());
+        confirm(&mut wallet, &record).await.unwrap();
+        wallet.receive(None).await.unwrap();
+    } else {
+        wallet.unblock(&w.bob_id()).await.unwrap();
+        wallet.receive(None).await.unwrap();
+        wallet.flush().await.unwrap();
+    }
+    assert!(wallet.app().protocol_scan(b"ha/").await.unwrap().is_empty());
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, NoticeKind::MessageGivenUp);
+    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].msg_id.as_deref(), Some(rejection.as_str()));
+    assert_eq!(sent(&w), 0);
+    // The user rejects the request again: it goes.
+    wallet.reject_request(&request, None).await.unwrap();
+    wallet.flush().await.unwrap();
+    assert_eq!(sent(&w), 1);
+}
+
+#[tokio::test]
+async fn test_divergent_held_answer_kept_while_its_paused_record_lacks_it() {
+    held_answer_lacking_in_its_record(true).await;
+}
+
+#[tokio::test]
+async fn test_divergent_held_answer_lacking_in_a_record_never_paused_given_up_with_a_notice() {
+    held_answer_lacking_in_its_record(false).await;
 }
 
 /// The client's durable divergence report: `AppEvent::RecordDivergent { id, key }` is a duty

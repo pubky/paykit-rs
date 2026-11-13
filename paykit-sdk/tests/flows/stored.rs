@@ -1800,3 +1800,69 @@ async fn test_stored_receipt_over_a_record_that_never_reads_given_up_with_a_noti
 async fn test_stored_receipt_over_a_record_that_doesnt_open_kept_until_it_reads() {
     receipt_over_unread_record(Unread::Sealed, true).await;
 }
+
+#[tokio::test]
+async fn test_stored_proof_from_another_identity_never_written_into_a_settlement_record() {
+    // Carol's proof of a payment without a request reaches bob's shop first; the service
+    // refuses its write, so it is kept to write later. Alice's proof of the same settlement
+    // then opens the shop's record of it, naming alice. Carol's kept proof is never written
+    // there, not even reflected: the record names its counterparty.
+    let w = World::new();
+    let _wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let _carol = w
+        .join(&w.carol, "wallet", AppScopes::new().pay().build().unwrap())
+        .await;
+    let proof = |from: &pubky_switch_client::testing::TestSigner| {
+        let body = paykit_lib::bodies::PaymentProof {
+            attempt_id: paykit_lib::AttemptId::generate().unwrap(),
+            billing_period: None,
+            payment_endpoint_identifier: crate::common::endpoint("btc-lightning-bolt12"),
+            payment_app_id: shop.app_id(),
+            list_version: None,
+            amount: Some(crate::common::btc("0.0015")),
+            allowance_id: None,
+            label: None,
+            payment_reference: None,
+            proof: serde_json::json!({ "rail": "fake", "tx": "t1" })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        }
+        .to_body(0)
+        .unwrap();
+        w.inject(
+            from,
+            "wallet",
+            &w.bob,
+            &[shop.app_id()],
+            "paykit.payment_proof",
+            Vec::new(),
+            body,
+        )
+    };
+    let from_carol = proof(&w.carol);
+    w.clock.advance_ms(1);
+    proof(&w.alice);
+    crate::common::refuse_writes(&w.bob, 1);
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(kept(&shop, "se/").await.is_empty());
+    let collection = paykit_lib::collections::Collection::PayeeActivity;
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(collection.name(), collection.policy(None)),
+        &paykit_lib::derive::natural_key::payee_payment_record(
+            &crate::common::endpoint("btc-lightning-bolt12"),
+            b"t1",
+        ),
+    );
+    let record = shop.app().record_key(&target).unwrap();
+    let held = shop.app().shared_record(&record).await.unwrap().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    assert_eq!(
+        value["counterparty"],
+        serde_json::json!(pubky_switch_core::enc::pubky_id(&w.alice_id())),
+        "{value}"
+    );
+    assert!(!value.to_string().contains(&from_carol), "{value}");
+}

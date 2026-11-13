@@ -767,8 +767,9 @@ const KEPT_OTHERS: usize = 16;
 /// beside `kept` (Paykit spec 6, "One message per role", as the receive step places them):
 /// for a list, latest state, only the newest version, and `new` taken with no effect when it
 /// is no newer; for any other role, the first, which the record stores in its role, and the
-/// newest [`KEPT_OTHERS`] after it, which it only reflects. Returns whether `new` is kept,
-/// and the `msg_id`s of the kept messages that go.
+/// newest [`KEPT_OTHERS`] after it, which it only reflects, the ones past that bound taken
+/// from `new`'s own sender only. Returns whether `new` is kept, and the `msg_id`s of the
+/// kept messages that go.
 fn kept_after(kept: &[StoredMessage], new: &StoredMessage) -> (bool, Vec<String>) {
     let msg_id = |stored: &StoredMessage| stored.message().msg_id.clone();
     if kept.iter().any(|held| msg_id(held) == msg_id(new)) {
@@ -783,11 +784,18 @@ fn kept_after(kept: &[StoredMessage], new: &StoredMessage) -> (bool, Vec<String>
     }
     let mut all: Vec<&StoredMessage> = kept.iter().chain(std::iter::once(new)).collect();
     all.sort_by_key(|stored| (stored.accepted_at(), msg_id(stored)));
+    // Past the bound, the messages that go are the new message's sender's own, accepted
+    // earliest, the first of the role aside: no sender pushes out a message of another,
+    // so a sender that isn't the record's counterparty, kept while the record doesn't read,
+    // never makes the counterparty's go. With one sender this keeps the first and the
+    // newest [`KEPT_OTHERS`] after it.
+    let excess = all.len().saturating_sub(KEPT_OTHERS + 1);
+    let sender = new.sender();
     let gone: Vec<String> = all
         .iter()
         .skip(1)
-        .rev()
-        .skip(KEPT_OTHERS)
+        .filter(|stored| stored.sender() == sender)
+        .take(excess)
         .map(|stored| msg_id(stored))
         .collect();
     let kept_new = !gone.contains(&msg_id(new));
@@ -1954,6 +1962,36 @@ mod tests {
         all.sort();
         assert_eq!(gone, vec![all[1].clone()]);
         assert_eq!(keep, new.message().msg_id != all[1]);
+    }
+
+    #[test]
+    fn test_divergent_kept_after_drops_only_the_new_messages_sender() {
+        // The bound is full of alice's messages; carol's come. None of alice's goes for them:
+        // what goes past the bound is carol's own, the one a step takes kept over the bound
+        // until a later message of carol's drops it.
+        let alice = crate::testkit::Party::new("alice", "wallet", &["pay", "contacts"]);
+        let carol = crate::testkit::Party::new("carol", "wallet", &["pay", "contacts"]);
+        let bob = crate::testkit::Party::new("bob", "shop", &["request"]);
+        let reply = |from: &crate::testkit::Party| {
+            from.message(
+                &bob,
+                "paykit.payment_request_acceptance",
+                vec![[1; 32]],
+                crate::testkit::object(serde_json::json!({ "label": null })),
+            )
+        };
+        let mut kept: Vec<StoredMessage> = (0..=KEPT_OTHERS).map(|_| reply(&alice)).collect();
+        let alices: Vec<String> = kept
+            .iter()
+            .map(|stored| stored.message().msg_id.clone())
+            .collect();
+        for _ in 0..3 {
+            let new = reply(&carol);
+            let (_, gone) = kept_after(&kept, &new);
+            assert!(gone.iter().all(|id| !alices.contains(id)), "{gone:?}");
+            kept.retain(|stored| !gone.contains(&stored.message().msg_id));
+            kept.push(new);
+        }
     }
 
     #[test]

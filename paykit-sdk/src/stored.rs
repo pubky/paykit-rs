@@ -753,6 +753,13 @@ impl Paykit {
                 let Some(record) = self.held_activity(target).await? else {
                     return Ok(Placed::Not);
                 };
+                // A record that reads names its counterparty: a message about it from anyone
+                // else is never placed, its role held or not (Paykit spec 8.1), and is done
+                // with, nothing written. A receipt finds the same in `place_receipt`.
+                if role != Role::Receipt && record.counterparty != stored.sender() {
+                    self.local_commit(locals).await?;
+                    return Ok(Placed::Done);
+                }
                 if role == Role::Receipt {
                     return self.place_receipt(target, &record, stored, locals).await;
                 }

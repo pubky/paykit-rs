@@ -465,11 +465,48 @@ fn side_may_lack(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<bool, Fail
     ))
 }
 
+/// The activity record held at `target` read and bound to its key and label, as the app's
+/// later writes read it (`Paykit::held_activity`): `None` for none, a delete, a value that
+/// isn't open, or one that doesn't read or bind. Every decision on who a record's
+/// counterparty is takes it from here.
+fn held_bound(
+    cx: &ReceiveContext<'_>,
+    target: &ActivityTarget,
+    settlement: Settlement<'_>,
+) -> Result<Option<ActivityRecord>, Fail> {
+    let Some(value) = held_value(cx, target)? else {
+        return Ok(None);
+    };
+    let key = cx.record_key(&target.record_target())?;
+    Ok(crate::records::bind_activity(
+        &value,
+        &cx.identity(),
+        target.side.side(),
+        target.label().as_ref(),
+        &key,
+        |t| cx.record_key(t).ok(),
+        settlement,
+    ))
+}
+
+/// Hold the entry unprocessed, as for a store unavailable for now (Paykit spec 17, question
+/// 27): the client reads it again at later reads, and stores it locally after its bounded
+/// wait, so the feed goes on meanwhile.
+fn hold_entry() -> Fail {
+    Fail::Store(StoreFailure::unavailable(StoreError::Unavailable))
+}
+
 /// Place `stored` in its `role` of the record at `target`, in the effect's batch, built on
-/// the version the app holds. A record that doesn't read is written again with the message
-/// (the reader doesn't act on an invalid record, Paykit wire 5.3). Nothing is written when
-/// the record already reflects the message. A message whose sender, `counterparty`, isn't
-/// the counterparty of a record that reads is dropped, never placed nor kept.
+/// the version the app holds. Nothing is written when the record already reflects the
+/// message. A message whose sender, `counterparty`, isn't the counterparty of the record
+/// held, read and bound ([`held_bound`]), is dropped, never placed nor kept.
+///
+/// A record held whose value can't be read now (one that doesn't open, or that doesn't read
+/// or bind) is never written over by a received message, whoever sends it (Paykit wire
+/// 5.3: a reader doesn't act on an invalid record, and the value may hold what another own
+/// app stored): the entry is held until the record reads ([`hold_entry`]). A payer's reply
+/// over such a payee record is kept as a reply before its record before this
+/// ([`payer_reply`]).
 fn place(
     cx: &mut ReceiveContext<'_>,
     target: &ActivityTarget,
@@ -485,17 +522,19 @@ fn place(
     // settlement it saw credited isn't credited again (Paykit spec 8.1, "Records not listed
     // yet"). Only an app holding no seen state of it opens it again.
     let record_target = target.record_target();
-    if cx
-        .record(&record_target)?
+    let held = cx.record(&record_target)?;
+    if held
+        .as_ref()
         .is_some_and(|held| held.content == RecordContent::Deleted)
         && cx.record_seen(&cx.record_key(&record_target)?)?.is_some()
     {
         return Ok(());
     }
-    let own = cx.identity();
     let side = target.side.side();
-    let current = held_value(cx, target)?;
-    let read = activity::read(current.as_deref(), &own, side);
+    let read = held_bound(cx, target, settlement)?;
+    if read.is_none() && holds_record(held.as_ref().map(|held| &held.content)) {
+        return Err(hold_entry());
+    }
     // A record that reads names its counterparty: a message about it from anyone else is
     // never placed, written or kept over it, paused or not (Paykit spec 8.1, "Replies before
     // their record"). A record held is never taken for its sender being the counterparty.
@@ -507,7 +546,6 @@ fn place(
             "Paykit spec 8.1: a message about a record from anyone but its counterparty".into(),
         ));
     }
-    let unread = read.is_none();
     let mut record = read.unwrap_or_else(|| activity::empty(side, counterparty));
     if !activity::place(&mut record, role, stored.clone()) {
         return Ok(());
@@ -516,19 +554,8 @@ fn place(
     // message is kept, and written once the user confirms (Paykit spec 6), as one is while
     // messages kept over the record before it wait to be written. The view is taken either
     // way: a stop written over it leaves the record paused.
-    if let Some(held) = cx.record(&target.record_target())? {
+    if let Some(held) = held {
         if crate::divergent::step_write_waits(cx, &held, stored, settlement)? {
-            // Over a record held that doesn't read, its counterparty can't be told. A request
-            // names a record whose key derives from its sender; any other message names one
-            // that anyone naming the request or settlement reaches, so it is kept only as new
-            // state, under the spam rule (Paykit wire 4.1), as a reply over a payee record
-            // that doesn't open is ([`payer_reply`]).
-            if unread && role != Role::Request && holds_record(Some(&held.content)) {
-                let scopes = cx.cert().scopes().to_vec();
-                if !admits_new_state(cx, &counterparty, &scopes)? {
-                    return Ok(());
-                }
-            }
             return crate::divergent::step_keep(cx, &held, stored, settlement);
         }
     }
@@ -710,8 +737,13 @@ fn payer_reply(
             // held, then placed (`Paykit::place_kept_replies`). It is new state, which the
             // spam rule gates, within the bounds on kept replies ([`kept_reply_evicted`]).
             // While the copy of the payee's records may lack records, the absence decides
-            // nothing: the entry is held instead ([`held_or_unlisted`]).
-            if held_or_unlisted(cx, &target, RecordSide::Payee)?.is_none() {
+            // nothing: the entry is held instead ([`held_or_unlisted`]). A record held whose
+            // value doesn't open, read or bind can't show its counterparty, since its key
+            // names only the request: the reply is kept the same way, never written over the
+            // value, and placed once the record reads naming its sender (Paykit spec 8.1).
+            if held_or_unlisted(cx, &target, RecordSide::Payee)?.is_none()
+                || held_bound(cx, &target, settlement)?.is_none()
+            {
                 if admits_new_state(cx, &sender, scopes)? {
                     keep_reply(cx, &target, stored)?;
                 }
@@ -796,10 +828,8 @@ fn receipt_effect(
     let target = receipt_target(stored, &own, &attempt_id);
     let held = cx.record(&target.record_target())?;
     let content = held.as_ref().map(|held| held.content.clone());
-    let value = held_or_unlisted(cx, &target, RecordSide::Payer)?;
-    let record = value
-        .as_deref()
-        .and_then(|value| activity::read(Some(value), &own, target.side.side()));
+    held_or_unlisted(cx, &target, RecordSide::Payer)?;
+    let record = held_bound(cx, &target, settlement)?;
     // A record that reads names its counterparty: a receipt from anyone else does nothing,
     // paused or not, and is never kept over it.
     let found = match &record {

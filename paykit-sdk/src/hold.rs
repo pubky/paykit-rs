@@ -652,10 +652,13 @@ impl Paykit {
     /// answer refused that way never reached its payee: the host is told, with a
     /// [`crate::NoticeKind::MessageGivenUp`] notice, and the record still holds it, so no own
     /// app pays or accepts the request. A restore's re-send of any other message tells
-    /// nothing. A held answer no record shows to send any more (a later stop, such as the
-    /// payee's cancellation or receipt, covers it, or the record is gone) goes with nothing
-    /// sent; one whose record is held but can't be read now stays, since that record may
-    /// still hold it. The pass waits while a record of the copy is sealed under a scope key the app
+    /// nothing. A held answer no record shows to send any more goes with nothing sent when a
+    /// stop in its record covers it, or the record is gone; one whose record is held but
+    /// can't be read now, or is paused as divergent and not confirmed since, stays, since
+    /// that record may still hold it (Paykit spec 6). One whose record reads, isn't paused,
+    /// and holds neither it nor any stop was lost with a write: it is given up with a
+    /// [`crate::NoticeKind::MessageGivenUp`] notice, never silently, so the user may answer
+    /// again ([`AnswerRecord`]). The pass waits while a record of the copy is sealed under a scope key the app
     /// doesn't hold yet ([`Paykit::copy_awaits_key`]), so what such a record stores is sent
     /// once it opens; a record that doesn't bind to its key shows nothing to send. Messages
     /// to a counterparty whose sends are held wait, the restore's mark or the held answer
@@ -756,6 +759,29 @@ impl Paykit {
                 }
             }
         }
+        // Each held answer is queued, given up with its notice, or shown to send by no record
+        // any more, unless its payee's sends are still held. Nothing is decided on a record
+        // that can't be read now, or that is paused as divergent and not confirmed since: such
+        // a record may still hold the answer, and the answer stays. A record the user has
+        // confirmed, or never saw divergent, that lacks the answer and holds no stop gives it
+        // up with the host told, never silently: the user may answer again.
+        let mut gone = Vec::new();
+        for answer in held.values() {
+            if still_held.contains(&answer.msg_id) || done.contains(&answer.msg_id) {
+                if done.contains(&answer.msg_id) {
+                    gone.push(answer.clone());
+                }
+                continue;
+            }
+            match Box::pin(self.answer_record(answer)).await? {
+                AnswerRecord::Undecided => {}
+                AnswerRecord::Gone | AnswerRecord::Covered => gone.push(answer.clone()),
+                AnswerRecord::Lacks => {
+                    given_up.push(answer.clone());
+                    gone.push(answer.clone());
+                }
+            }
+        }
         let mut tx = Tx::default();
         let at = self.service_time().unwrap_or(0);
         for answer in given_up {
@@ -775,16 +801,7 @@ impl Paykit {
                 )?;
             }
         }
-        // Each held answer is queued, given up with its notice, or shown to send by no record
-        // any more, unless its payee's sends are still held. One whose request record is
-        // held but can't be read now decides nothing yet, and stays.
-        for answer in held.values() {
-            if still_held.contains(&answer.msg_id) {
-                continue;
-            }
-            if !done.contains(&answer.msg_id) && self.answer_record_unread(answer).await? {
-                continue;
-            }
+        for answer in gone {
             tx.delete(&key::held_answer(&answer.payee, &answer.msg_id));
         }
         if owed.is_some() {
@@ -802,20 +819,34 @@ impl Paykit {
         self.local_commit(tx).await
     }
 
-    /// Whether the request record a held answer was recorded in is held but can't be read
-    /// now: a value that doesn't open, or one that doesn't read or bind. Such a record may
-    /// still hold the answer, so the answer is kept for a later pass. An absent or deleted
-    /// record, or one that binds, decides.
-    async fn answer_record_unread(&self, answer: &HeldAnswer) -> Result<bool> {
+    /// What the request record a held answer was recorded in, which shows no message of it
+    /// to send now, says of the answer ([`AnswerRecord`]).
+    async fn answer_record(&mut self, answer: &HeldAnswer) -> Result<AnswerRecord> {
         let target = crate::activity::ActivityTarget::payer(
             paykit_lib::derive::natural_key::request_record(&answer.payee, &answer.request_hash),
         );
         let key = self.activity_key(&target)?;
+        let Some(held) = self.app.shared_record(&key).await? else {
+            return Ok(AnswerRecord::Gone);
+        };
+        match held.content {
+            RecordContent::Deleted => return Ok(AnswerRecord::Gone),
+            RecordContent::Unreadable(_) => return Ok(AnswerRecord::Undecided),
+            RecordContent::Value(_) => {}
+        }
+        let Some(record) = self.held_activity(&target).await? else {
+            return Ok(AnswerRecord::Undecided);
+        };
+        // A record seen divergent whose user hasn't confirmed it since: the upload may hold the
+        // answer, so nothing is decided on the write held (Paykit spec 6).
+        if Box::pin(self.pause_of(&held)).await?.paused {
+            return Ok(AnswerRecord::Undecided);
+        }
         Ok(
-            match self.app.shared_record(&key).await?.map(|held| held.content) {
-                None | Some(RecordContent::Deleted) => false,
-                Some(RecordContent::Value(_)) => self.held_activity(&target).await?.is_none(),
-                Some(RecordContent::Unreadable(_)) => true,
+            if record.reflects(&answer.msg_id) || rejected(&record) || cancelled(&record) {
+                AnswerRecord::Covered
+            } else {
+                AnswerRecord::Lacks
             },
         )
     }
@@ -883,6 +914,21 @@ pub(crate) struct OwnResendOwed {
     /// counterparties whose sends were held then, a blocked one or every one while the copy
     /// of the deny list isn't known, ascending, each once: only their messages are owed.
     pub(crate) waiting: Option<Vec<[u8; 32]>>,
+}
+
+/// What a request record says of a held answer it shows no message of to send now
+/// ([`Paykit::queue_own_again`]).
+enum AnswerRecord {
+    /// It can't be read now, or is paused as divergent and not confirmed since: it may still
+    /// hold the answer, which stays.
+    Undecided,
+    /// It is absent or deleted: the request is gone, and the answer goes with nothing sent.
+    Gone,
+    /// It holds the answer, or a stop that covers it: the answer goes with nothing sent.
+    Covered,
+    /// It reads, isn't paused, and holds neither the answer nor any stop: the answer was lost
+    /// with a write, and is given up with the host told, so the user may answer again.
+    Lacks,
 }
 
 /// A rejection or payer's cancellation this app recorded in its request record while sends
