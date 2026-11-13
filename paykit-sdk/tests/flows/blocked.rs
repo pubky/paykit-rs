@@ -2248,3 +2248,97 @@ async fn test_blocked_receipt_to_a_blocked_payer_delivered() {
     let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
     assert!(!value["receipt"].is_null(), "{value}");
 }
+
+#[tokio::test]
+async fn test_blocked_subscription_cancellation_and_rejection_refused_with_nothing_recorded() {
+    // Alice's wallet accepted bob's subscription, and bob is then blocked: a payer's
+    // cancellation of a subscription isn't built at this head, so it is refused as
+    // `Recurring`, and a rejection after the acceptance as `Subscribed`. Neither is
+    // recorded or held, though a rejection or cancellation of a request is recorded while
+    // sends to its payee are held (Paykit spec 8.1, "Blocked counterparties"; 8.2).
+    let w = World::new();
+    let (mut wallet, mut shop, _) = received(&w, PaykitConfig::default()).await;
+    let request = request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::periods::monthly(w.clock.now_ms(), None),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    wallet.accept_subscription(&request).await.unwrap();
+    wallet.block(&w.bob_id()).await.unwrap();
+    let record = wallet.request(&request).await.unwrap().record;
+    let version = |held: Option<pubky_switch_client::app::SharedRecord>| held.unwrap().version;
+    let before = version(wallet.app().shared_record(&record).await.unwrap());
+    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let refused = wallet.cancel_request(&request, None).await.unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::Recurring));
+    let refused = wallet.reject_request(&request, None).await.unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::Subscribed));
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        version(wallet.app().shared_record(&record).await.unwrap()),
+        before
+    );
+    assert!(wallet.app().protocol_scan(b"ha/").await.unwrap().is_empty());
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Blocked
+    );
+}
+
+#[tokio::test]
+async fn test_blocked_held_rejection_over_a_record_left_unreadable_after_a_restore_sent_once_it_reads(
+) {
+    // The wallet's rejection is recorded and held while bob is blocked, and the wallet is
+    // backed up. After the backup the phone writes the request record as a value no reader
+    // reads. The restored wallet, bob unblocked, sends nothing while the record doesn't
+    // read: the held answer and the restore's re-send both stay owed. Once the phone writes
+    // the record back, the rejection goes, once (Paykit spec 7.2, "What a restore loses";
+    // 8.1, Blocked counterparties).
+    let w = World::new();
+    let (mut wallet, _, request) = received(&w, PaykitConfig::default()).await;
+    let mut phone = w.wallet("phone").await;
+    wallet.block(&w.bob_id()).await.unwrap();
+    let rejection = wallet.reject_request(&request, None).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"ha/").await.unwrap().len(), 1);
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    phone.receive(None).await.unwrap();
+    let collection = paykit_lib::collections::Collection::PayerActivity;
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(collection.name(), collection.policy(None)),
+        &paykit_lib::derive::natural_key::request_record(&request.payee, &request.request_hash),
+    );
+    let held = phone.app_mut().read_record(&target).await.unwrap().unwrap();
+    let good = held.content.value().unwrap().to_vec();
+    let unreadable = serde_json::to_vec(&serde_json::json!({ "v": 99 })).unwrap();
+    crate::periods::writes_value(&mut phone, &target, &unreadable).await;
+    let mut wallet = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    let entries = w.bob.switch().entries_from(&w.alice_id());
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    assert!(wallet.app().delivery(&rejection).await.unwrap().is_none());
+    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert_eq!(wallet.app().protocol_scan(b"ha/").await.unwrap().len(), 1);
+    crate::periods::writes_value(&mut phone, &target, &good).await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().delivery(&rejection).await.unwrap().is_some());
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries + 1);
+    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(wallet.app().protocol_scan(b"ha/").await.unwrap().is_empty());
+    wallet.receive(None).await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries + 1);
+}
