@@ -440,13 +440,13 @@ fn consent_removed(
 
 /// What an app holds at an Allowance's record, in the receive step.
 enum Held {
-    /// No record, and the copy is listed: it holds none.
+    /// No record, or a delete, and the copy is listed: it holds none.
     None,
     /// A record that binds.
     Record(Box<AllowanceRecord>),
-    /// A delete, or a value that doesn't read or doesn't bind: never written over, since it
-    /// may hold what another own app stored; the entry is kept as a stored entry and given
-    /// up after 30 days ([`stored_entry`], Paykit spec 8.1, "Stored entries").
+    /// A value that doesn't read or doesn't bind: never written over, since it may hold what
+    /// another own app stored; the entry is kept as a stored entry and given up after 30
+    /// days ([`stored_entry`], Paykit spec 8.1, "Stored entries").
     Unreadable,
 }
 
@@ -469,14 +469,15 @@ pub(crate) fn receive_effect(
     if let Body::AllowanceEnd(_) = stored.body() {
         return keep_end(cx, &target, &allowance_id, stored, scopes);
     }
+    // The request path's own read (`receive::held_or_unlisted_at`, which
+    // `receive::held_or_unlisted` is): the entry waits for the record's scope key, and an
+    // absent or deleted record is held while the copy may lack records, since a later write
+    // may have opened it again (Paykit spec 8.1, "Records not listed yet"). Past that, a
+    // delete is a record not held, as for a request: a proposal opens the record again under
+    // the spam rule, an answer is kept before its record.
     let value = receive::held_or_unlisted_at(cx, &target, RecordSide::Allowances)?;
     let content = cx.record(&target)?.map(|held| held.content);
-    // A delete decides nothing while the copy may lack records either: a later write may
-    // have opened the record again (Paykit spec 8.1, "Records not listed yet").
-    if content == Some(RecordContent::Deleted) {
-        receive::hold_while_unlisted(cx, RecordSide::Allowances)?;
-    }
-    let present = content.is_some();
+    let present = receive::holds_record(content.as_ref());
     let held = match value {
         Some(value) => bind_at(&value, &own, &sender, &allowance_id)
             .map_or(Held::Unreadable, |r| Held::Record(Box::new(r))),
@@ -522,8 +523,8 @@ pub(crate) fn receive_effect(
 }
 
 /// A proposal or an answer whose Allowance record the app holds as a value it can't read
-/// for a reason other than a missing key, or a delete: never written over, since it may hold
-/// what another own app stored, and not dropped at once. The entry is stored locally, the
+/// for a reason other than a missing key: never written over, since it may hold what another
+/// own app stored, and not dropped at once. The entry is stored locally, the
 /// cursor passing it (Switch spec 8.2), and its step is tried again at each read, so the
 /// message goes into the record once the record reads. Once [`KEPT_MESSAGE_MS`] have passed
 /// since its acceptance it is given up, processed with the host's notice as its only write
@@ -1672,8 +1673,8 @@ impl Paykit {
     /// - It waits while the copy of `allowances` may lack records ([`Placed::Waits`]), never
     ///   given up meanwhile, whatever else holds.
     /// - It isn't written now ([`Placed::Not`]) while the current epoch's `allowance` key is
-    ///   missing or the record waits for its key, over a value that doesn't read or bind, a
-    ///   delete or an answer's absent record, all never written over, or when the switch
+    ///   missing or the record waits for its key, over a value that doesn't read or bind,
+    ///   never written over, for an answer whose record is absent or deleted, or when the switch
     ///   refuses the write ([`crate::stored::submitted`]): tried again, and given up once
     ///   [`crate::KEPT_MESSAGE_MS`] have passed since its acceptance (Paykit spec 8.1).
     /// - One the record reflects already, or that makes the Allowance conflicted, is done:
@@ -1707,7 +1708,9 @@ impl Paykit {
             .await?
             .map(|held| held.content)
         {
-            None => match stored.body() {
+            // A record absent or deleted is opened only by a message that may open it, a
+            // proposal, as the request path's later write does (`Paykit::place_note`).
+            None | Some(RecordContent::Deleted) => match stored.body() {
                 Body::AllowanceProposal(_) => opened(counterparty, stored),
                 _ => None,
             },

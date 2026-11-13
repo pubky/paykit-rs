@@ -2299,3 +2299,169 @@ async fn test_allowances_notice_target_naming_another_notice_is_corrupt() {
     let error = wallet.receive(None).await.unwrap_err();
     assert!(error.to_string().contains("corrupt"), "{error:?}");
 }
+
+/// `wallet` backed up and restored, its listing and reconcile done, then bob asked to send
+/// again everything his inbox sent alice and the re-sent copies read: a terminal state of
+/// the wallet's must come through both unchanged.
+async fn restored_and_resent(w: &World, shop: &mut Paykit, mut wallet: Paykit) -> Paykit {
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    restored.receive(None).await.unwrap();
+    restored.reconcile().await.unwrap();
+    restored.receive(None).await.unwrap();
+    restored
+        .request_resend(
+            w.bob_id(),
+            paykit_sdk::ResendSelection::default().with_accepted_from_ms(0),
+        )
+        .await
+        .unwrap();
+    w.clock.advance_ms(HOUR_MS);
+    shop.receive(None).await.unwrap();
+    restored.receive(None).await.unwrap();
+    restored
+}
+
+/// An Allowance the wallet answered, ended after its acceptance when `ended`, rejected
+/// otherwise; then the wallet restored from a backup and bob's messages sent to it again:
+/// it stays as it ended, and nothing is answered under it (Paykit spec 8.3; wire 5.4, Seen
+/// roles).
+async fn terminal_through_a_restore(ended: bool) {
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    let (_, mine) = proposed(&w, &mut shop, &mut wallet).await;
+    let status = if ended {
+        wallet.accept_allowance(&mine).await.unwrap();
+        wallet.end_allowance(&mine).await.unwrap();
+        AllowanceStatus::Ended
+    } else {
+        wallet.reject_allowance(&mine).await.unwrap();
+        AllowanceStatus::Rejected
+    };
+    let mut restored = restored_and_resent(&w, &mut shop, wallet).await;
+    assert_eq!(restored.allowance(&mine).await.unwrap().status, status);
+    assert!(restored.accept_allowance(&mine).await.is_err());
+    assert!(restored.reject_allowance(&mine).await.is_err());
+}
+
+#[tokio::test]
+async fn test_allowances_ended_never_revived_by_a_restore_and_resends() {
+    terminal_through_a_restore(true).await;
+}
+
+#[tokio::test]
+async fn test_allowances_rejected_never_revived_by_a_restore_and_resends() {
+    terminal_through_a_restore(false).await;
+}
+
+#[tokio::test]
+async fn test_allowances_conflicted_kept_through_a_restore_and_resends() {
+    // A conflicted Allowance, the wallet restored from a backup and bob's messages sent to it
+    // again: it stays conflicted, the record keeps `conflicted`, and nothing is answered
+    // (Paykit spec 8.3, "Never cleared").
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    let (_, mine) = proposed(&w, &mut shop, &mut wallet).await;
+    let id = wallet.allowance(&mine).await.unwrap().allowance_id;
+    propose_as(&w, &[wallet.app_id()], id.as_str(), "0.20");
+    wallet.receive(None).await.unwrap();
+    assert!(!value(&wallet, &mine).await["conflicted"].is_null());
+    let mut restored = restored_and_resent(&w, &mut shop, wallet).await;
+    assert_eq!(
+        restored.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Conflicted
+    );
+    assert!(!value(&restored, &mine).await["conflicted"].is_null());
+    let error = restored.accept_allowance(&mine).await.unwrap_err();
+    assert!(
+        matches!(refusal(&error), Some(Refusal::AllowanceConflicted)),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_allowances_proposal_over_a_deleted_record_opens_it_only_as_proposed() {
+    // An accepted Allowance's record is deleted by another own app. The wallet is restored
+    // from a backup taken before the delete, bob sends his messages again, and then proposes
+    // again under the same Allowance ID: the proposal opens the record again over the delete,
+    // as a request's does, and only as proposed, with no response, end or grant, so nothing
+    // brings back the acceptance or its limits (Paykit spec 8.1, 8.3).
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    let (_, mine) = proposed(&w, &mut shop, &mut wallet).await;
+    wallet.accept_allowance(&mine).await.unwrap();
+    let id = wallet.allowance(&mine).await.unwrap().allowance_id;
+    let backup_wallet = wallet;
+    let mut tool = alice_app(
+        &w,
+        "tool",
+        AppScopes::new().pay().allowance().build().unwrap(),
+    )
+    .await;
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "allowances",
+            paykit_lib::Collection::Allowances.fixed_policy(),
+        ),
+        &paykit_lib::derive::natural_key::allowance(&w.bob_id(), &id),
+    );
+    tool.app_mut().read_record(&target).await.unwrap();
+    let op = tool
+        .app_mut()
+        .record_op(&target, None, Vec::new())
+        .await
+        .unwrap();
+    tool.app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    let mut restored = restored_and_resent(&w, &mut shop, backup_wallet).await;
+    assert!(restored.accept_allowance(&mine).await.is_err());
+    w.clock.advance_ms(HOUR_MS);
+    propose_as(&w, &[restored.app_id()], id.as_str(), "0.10");
+    restored.receive(None).await.unwrap();
+    let view = restored.allowance(&mine).await.unwrap();
+    assert_eq!(view.status, AllowanceStatus::Proposed);
+    assert_eq!(view.executor_app_id, None);
+    assert!(!view.consented);
+    let record = value(&restored, &mine).await;
+    assert!(record["response"].is_null());
+    assert!(record["end"].is_null());
+    assert!(record["grant"].is_null());
+}
+
+#[tokio::test]
+async fn test_allowances_kept_end_survives_a_restore_and_its_resent_copy() {
+    // Bob ends the Allowance; the wallet keeps his end as the stop, and its write of the end
+    // into the record is refused, so only the stop shows it. The wallet is then restored from
+    // a backup and bob's messages sent to it again: the stop comes through, the Allowance
+    // shows ended, and nothing is answered under it (Paykit spec 8.3, "Ends reach the
+    // executor").
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    let (theirs, mine) = proposed(&w, &mut shop, &mut wallet).await;
+    shop.end_allowance(&theirs).await.unwrap();
+    refuse_writes(&w, 2);
+    wallet.receive(None).await.unwrap();
+    assert!(value(&wallet, &mine).await["end"].is_null());
+    assert_eq!(wallet.app().protocol_scan(b"ae/").await.unwrap().len(), 1);
+    let mut restored = restored_and_resent(&w, &mut shop, wallet).await;
+    assert_eq!(
+        restored.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Ended
+    );
+    assert!(restored.accept_allowance(&mine).await.is_err());
+}
