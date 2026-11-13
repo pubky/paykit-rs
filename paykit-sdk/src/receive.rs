@@ -700,7 +700,14 @@ fn period_details_effect(
     .map_err(|_| Fail::Drop("Paykit wire 4.5: a payment deadline past 64 bits".into()))?;
     match stores {
         crate::periods::Window::Takes => {}
-        crate::periods::Window::Closed => return Ok(()),
+        // Taken with no effect, as decided from the records the copy holds: never while the
+        // copy of the payer's records may lack records, a newer write such as another own
+        // app's acceptance among them (Paykit spec 8.1, "Records not listed yet"): the entry
+        // is held then, and read again once they are listed.
+        crate::periods::Window::Closed => {
+            hold_while_unlisted(cx, RecordSide::Payer)?;
+            return Ok(());
+        }
         // No service time verified yet: the entry is held, as for a store unavailable for
         // now, and read again at a later read, never taken with no effect on a time the
         // app hasn't verified.
@@ -1633,8 +1640,8 @@ impl Paykit {
                         // A proof naming details the period record doesn't hold waits for
                         // them, within its window.
                         PeriodPlace::AwaitsDetails => Placed::Not,
-                        // Details with no service time verified yet wait for one.
-                        PeriodPlace::AwaitsTime => Placed::Waits,
+                        // Details whose storing can't be decided yet wait.
+                        PeriodPlace::Undecided => Placed::Waits,
                     }
                 }
                 // A request record that doesn't open or bind is never written over: the

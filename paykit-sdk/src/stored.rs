@@ -258,8 +258,8 @@ enum Place {
     /// Into a period record that doesn't hold the period details the proof names yet: it
     /// waits for them (Paykit wire 5.3), within its window.
     AwaitsDetails,
-    /// Period details that wait for a verified service time ([`PeriodPlace::AwaitsTime`]).
-    AwaitsTime,
+    /// Period details whose storing can't be decided yet ([`PeriodPlace::Undecided`]).
+    Undecided,
 }
 
 /// Where a message naming a request whose record is held goes ([`Paykit::period_destination`]).
@@ -276,9 +276,12 @@ pub(crate) enum PeriodPlace {
     /// A proof naming period details the period record doesn't hold
     /// ([`crate::receive::awaits_named_details`]): it waits for them.
     AwaitsDetails,
-    /// Period details with no service time verified yet, so whether the payer stores them
-    /// can't be told ([`crate::periods::Window::NoTime`]): they wait for one.
-    AwaitsTime,
+    /// Period details whose storing can't be decided yet: no service time is verified
+    /// ([`crate::periods::Window::NoTime`]), or they would be taken with no effect while the
+    /// copy of the payer's records may lack records, a newer write such as another own app's
+    /// acceptance among them, so the records the copy holds decide nothing then (Paykit spec
+    /// 8.1, "Records not listed yet"). They wait, never given up meanwhile.
+    Undecided,
 }
 
 impl Paykit {
@@ -478,7 +481,7 @@ impl Paykit {
                 | Place::AwaitsRequest(_)
                 | Place::Taken
                 | Place::AwaitsDetails
-                | Place::AwaitsTime,
+                | Place::Undecided,
             ) => {}
         }
         let note = StoredNote {
@@ -613,7 +616,7 @@ impl Paykit {
                 PeriodPlace::Invalid => None,
                 PeriodPlace::Taken => Some(Place::Taken),
                 PeriodPlace::AwaitsDetails => Some(Place::AwaitsDetails),
-                PeriodPlace::AwaitsTime => Some(Place::AwaitsTime),
+                PeriodPlace::Undecided => Some(Place::Undecided),
             },
         )
     }
@@ -622,7 +625,8 @@ impl Paykit {
     /// at `target`, is held: the one rule of the later writes, a stored entry's and a message
     /// kept before its record (`pr/`), as the receive step decides it. The period it names
     /// is checked against the request ([`crate::receive::period_or_request`]); details go
-    /// only where the payer stores them ([`crate::periods::stores_details`]); a proof naming
+    /// only where the payer stores them ([`crate::periods::stores_details`]), and are taken
+    /// with no effect only once the copy of the payer's records lacks none; a proof naming
     /// details the period record doesn't hold waits for them
     /// ([`crate::receive::awaits_named_details`]).
     pub(crate) async fn period_destination(
@@ -648,8 +652,14 @@ impl Paykit {
                 stopped,
             ) {
                 Ok(crate::periods::Window::Takes) => {}
-                Ok(crate::periods::Window::Closed) => return Ok(PeriodPlace::Taken),
-                Ok(crate::periods::Window::NoTime) => return Ok(PeriodPlace::AwaitsTime),
+                Ok(crate::periods::Window::Closed) => {
+                    return Ok(if self.side_unlisted(record_side(target)).await? {
+                        PeriodPlace::Undecided
+                    } else {
+                        PeriodPlace::Taken
+                    });
+                }
+                Ok(crate::periods::Window::NoTime) => return Ok(PeriodPlace::Undecided),
                 // A payment deadline past 64 bits: no attempt on the period can be made.
                 Err(_) => return Ok(PeriodPlace::Invalid),
             }
@@ -706,8 +716,8 @@ impl Paykit {
                     }
                     Some(Place::Taken) => Placed::Done,
                     Some(Place::AwaitsDetails) => Placed::Not,
-                    // With no service time verified no window runs: it waits for one.
-                    Some(Place::AwaitsTime) => Placed::Waits,
+                    // Not decided yet: it waits, never given up meanwhile.
+                    Some(Place::Undecided) => Placed::Waits,
                     None => Placed::Not,
                 };
                 let later = later_write(placed, accepted_at, self.service_time());
