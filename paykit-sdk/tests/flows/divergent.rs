@@ -882,8 +882,9 @@ async fn test_divergent_kept_value_that_doesnt_read_holds_the_new_message() {
     set_divergent(&base, &shop, &record, true);
     let ns = pubky_switch_client::store::client_namespace(&shop.app_id());
     let kept = format!(
-        "p/dw/{}/proof/123e4567-e89b-42d3-a456-426614174000",
-        pubky_switch_core::enc::b64(&record)
+        "p/dw/{}/proof/{}/123e4567-e89b-42d3-a456-426614174000",
+        pubky_switch_core::enc::b64(&record),
+        pubky_switch_core::enc::b64(&w.alice_id())
     );
     let mut batch = WriteBatch::new();
     batch
@@ -2114,6 +2115,136 @@ async fn test_divergent_receipt_from_another_identity_kept_while_unread_goes_onc
 }
 
 #[tokio::test]
+async fn test_divergent_kept_messages_of_two_senders_with_one_msg_id_both_kept() {
+    // A `msg_id` is each sender's own. Over alice's payer record of a payment without a
+    // request, paused as divergent while it doesn't read, carol's receipt comes first, then
+    // bob's, the record's counterparty, under the same `msg_id`: both are kept. Once the
+    // record reads naming bob, carol's goes; once the user confirms, bob's is written and the
+    // attempt is done.
+    use pubky_switch_core::claims::Outcome;
+    let w = World::new();
+    let seen = Arc::new(crate::outcome_record::NoSeenMarks::default());
+    let base = Arc::clone(&seen) as Arc<dyn StateStore>;
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            Arc::clone(&base),
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let _carol = w
+        .join(
+            &w.carol,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_without_request(
+            UnrequestedPayment::new(w.bob_id(), btc("0.0015")).with_options(
+                PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")),
+            ),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    let collection = Collection::PayerActivity;
+    let target = RecordTarget::new(
+        SwitchCollection::new(collection.name(), collection.policy(None)),
+        &natural_key::payer_payment_record(&w.alice_id(), &attempt_id),
+    );
+    phone.receive(None).await.unwrap();
+    let record = phone.app().record_key(&target).unwrap();
+    let good = phone
+        .app()
+        .shared_record(&record)
+        .await
+        .unwrap()
+        .unwrap()
+        .content
+        .value()
+        .unwrap()
+        .to_vec();
+    seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let phone_writes = async |phone: &mut Paykit, value: &[u8]| {
+        phone.receive(None).await.unwrap();
+        let op = phone
+            .app_mut()
+            .record_op(&target, Some(value), Vec::new())
+            .await
+            .unwrap();
+        phone
+            .app_mut()
+            .submit_batch(pubky_switch_client::app::OpBatch::new().entry(op))
+            .await
+            .unwrap();
+    };
+    phone_writes(&mut phone, crate::outcome_record::INVALID).await;
+    wallet.receive(None).await.unwrap();
+    set_divergent(&base, &wallet, &record, true);
+    let body = paykit_lib::bodies::PaymentReceipt {
+        attempt_id,
+        billing_period: None,
+        metadata: None,
+        payment_reference: None,
+    }
+    .to_body(1)
+    .unwrap();
+    let msg_id = "123e4567-e89b-42d3-a456-426614174000";
+    for from in [&w.carol, &w.bob] {
+        let keys = from.identity().app_keys("shop");
+        let mut message = pubky_switch_core::message::Message::new(
+            "paykit.payment_receipt",
+            pubky_switch_core::message::Sender::of_app(from.identity().public(), &keys),
+            w.alice.identity().public(),
+            w.clock.now_ms(),
+            vec![[7; 32]],
+            body.clone(),
+        )
+        .unwrap();
+        message.msg_id = msg_id.into();
+        let plaintext = message.sign(&keys).unwrap();
+        w.deliver(from, "shop", &w.alice, &[wallet.app_id()], &plaintext);
+        wallet.receive(None).await.unwrap();
+    }
+    let kept = crate::stored::kept(&wallet, "dw/").await;
+    assert_eq!(kept.len(), 2, "{kept:?}");
+    phone_writes(&mut phone, &good).await;
+    wallet.receive(None).await.unwrap();
+    let kept = crate::stored::kept(&wallet, "dw/").await;
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert!(String::from_utf8_lossy(&kept[0]).ends_with(&format!(
+        "/{}/{msg_id}",
+        pubky_switch_core::enc::b64(&w.bob_id())
+    )));
+    confirm(&mut wallet, &record).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(crate::stored::kept(&wallet, "dw/").await.is_empty());
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    let read = wallet
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        read.view.attempt(&attempt_id.to_bytes()).unwrap().outcome,
+        Outcome::Done
+    );
+}
+
+#[tokio::test]
 async fn test_divergent_held_rejection_recorded_over_a_paused_record_and_sent_once_unblocked() {
     // Alice rejects bob's request while her wallet holds its record paused as divergent and
     // bob is blocked. The rejection is a stop: it is recorded at once over the paused record,
@@ -3247,7 +3378,11 @@ async fn test_divergent_mark_with_a_credit_confirmation_no_writer_leaves_credits
     // write than its showing, or one newer than the plain confirmation: the mark reads as a
     // corrupt store and the credit is refused, never let go. Put back, the mark still holds
     // the credit for a confirmation shown for one.
-    for case in ["missing_showing", "mismatched_showing", "newer_than_confirmed"] {
+    for case in [
+        "missing_showing",
+        "mismatched_showing",
+        "newer_than_confirmed",
+    ] {
         let w = World::new();
         let base = store();
         let mut wallet = w.wallet("wallet").await;
@@ -3295,12 +3430,13 @@ async fn test_divergent_mark_with_a_credit_confirmation_no_writer_leaves_credits
             "{case}: {refused:?}"
         );
         assert!(shop.divergent_records().await.is_err(), "{case}");
-        shop.app_mut()
-            .protocol_commit(&[put(value)])
-            .await
-            .unwrap();
+        shop.app_mut().protocol_commit(&[put(value)]).await.unwrap();
         let refused = shop.confirm_payment(&paid).await.unwrap_err();
-        assert_eq!(refused_records(&refused), vec![(paid, false, true)], "{case}");
+        assert_eq!(
+            refused_records(&refused),
+            vec![(paid, false, true)],
+            "{case}"
+        );
         assert!(shown_for_a_credit(&refused), "{case}");
     }
 }

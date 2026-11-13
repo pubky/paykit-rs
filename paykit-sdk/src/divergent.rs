@@ -42,7 +42,8 @@
 //!   ([`DivergentRecord::writes_waiting`]).
 //! - **Writes over a divergent view** ([`Pause::write_waits`]): a stop (a cancellation or a
 //!   rejection) is written; any other receive-step write is kept here (`p/dw/<record
-//!   key>/<role>/<msg_id>`: of each role, the earliest the inbox accepted and the 16 latest
+//!   key>/<role>/<sender>/<msg_id>`, a message's identity its sender and `msg_id`, as the
+//!   client counts it processed: of each role, the earliest the inbox accepted and the 16 latest
 //!   after it, one dropped for this bound dropped as one never processed, its pair forgotten
 //!   so a re-send of it is taken, and the message just received, whose pair its own step
 //!   writes, kept over the bound until a later one drops it so; one the client won't forget
@@ -632,8 +633,9 @@ impl WriteRole {
 }
 
 /// A message kept to write over a divergent record after the user's confirmation
-/// (`p/dw/<record key>/<role>`). The record and role repeat in it, so a reader binds the
-/// value to its key; the record is the one its message names, derived again at every read;
+/// (`p/dw/<record key>/<role>/<sender>/<msg_id>`). The record and role repeat in it, and its
+/// message names its sender and `msg_id`, so a reader binds the value to its key; the record
+/// is the one its message names, derived again at every read;
 /// and the version of the divergent write it was kept over is the proof that the record
 /// held there later is that record, of its collection, at that write or a later one
 /// ([`points_to`]).
@@ -663,9 +665,9 @@ impl DivergentWrite {
             .map_err(|_| PaykitError::corrupt())
     }
 
-    /// The kept write bound to the key it is read at, `dw/<record>/<role>`
-    /// (`state::Stored`): a message that verifies for `own`, accepted by its inbox, of that
-    /// role, whose record, as `record_key` derives it from the message and the settlement
+    /// The kept write bound to the key it is read at, `dw/<record>/<role>/<sender>/<msg_id>`
+    /// (`state::Stored`): a message from that sender, of that `msg_id`, that verifies for
+    /// `own`, accepted by its inbox, of that role, whose record, as `record_key` derives it from the message and the settlement
     /// kept, is the one its key names, with a settlement kept exactly for a proof of a
     /// payment without a request. The one check for a restore and for every read at
     /// runtime; a value that fails it is a corrupt store.
@@ -673,6 +675,7 @@ impl DivergentWrite {
         &self,
         record: &[u8; 32],
         role: WriteRole,
+        sender: &[u8; 32],
         msg_id: &str,
         own: &[u8; 32],
         record_key: &dyn Fn(&RecordTarget) -> Result<[u8; 32]>,
@@ -683,6 +686,7 @@ impl DivergentWrite {
             matches!(stored.body(), Body::PaymentProof(_)) && stored.message().refs.is_empty();
         if self.record != *record
             || self.role != role
+            || stored.sender() != *sender
             || stored.message().msg_id != msg_id
             || WriteRole::of(&stored) != Some(role)
             || stored.accepted_at().is_none()
@@ -829,6 +833,16 @@ const KEPT_OTHERS: usize = 16;
 /// keeps its whole share beside the messages of others.
 const KEPT_CAP: usize = 2 * (KEPT_OTHERS + 1);
 
+/// A kept message's identity: its sender and its `msg_id`, as the client counts a message
+/// processed. A `msg_id` is valid for each sender on its own, so the messages of two senders
+/// may share one: every kept write is keyed, kept, dropped and removed by both.
+pub(crate) type KeptId = ([u8; 32], String);
+
+/// The identity of `stored`, a kept message ([`KeptId`]).
+fn kept_id(stored: &StoredMessage) -> KeptId {
+    (stored.sender(), stored.message().msg_id.clone())
+}
+
 /// The kept messages of one record and role, oldest first, that stay once `new` is kept
 /// beside `kept` (Paykit spec 6, "One message per role", as the receive step places them):
 /// for a list, latest state, only the newest version, and `new` taken with no effect when it
@@ -845,10 +859,9 @@ const KEPT_CAP: usize = 2 * (KEPT_OTHERS + 1);
 ///   message of the sender keeping the most goes, of the lower identity between senders
 ///   keeping as many, as past the bound in all on replies before their record.
 ///
-/// Returns whether `new` is kept, and the `msg_id`s of the kept messages that go.
-fn kept_after(kept: &[StoredMessage], new: &StoredMessage, reads: bool) -> (bool, Vec<String>) {
-    let msg_id = |stored: &StoredMessage| stored.message().msg_id.clone();
-    if kept.iter().any(|held| msg_id(held) == msg_id(new)) {
+/// Returns whether `new` is kept, and the identities of the kept messages that go.
+fn kept_after(kept: &[StoredMessage], new: &StoredMessage, reads: bool) -> (bool, Vec<KeptId>) {
+    if kept.iter().any(|held| kept_id(held) == kept_id(new)) {
         return (false, Vec::new());
     }
     if matches!(WriteRole::of(new), Some(WriteRole::List)) {
@@ -856,30 +869,30 @@ fn kept_after(kept: &[StoredMessage], new: &StoredMessage, reads: bool) -> (bool
         if newest.is_some_and(|newest| newest >= crate::receive::list_version(new)) {
             return (false, Vec::new());
         }
-        return (true, kept.iter().map(msg_id).collect());
+        return (true, kept.iter().map(kept_id).collect());
     }
     let mut all: Vec<&StoredMessage> = kept.iter().chain(std::iter::once(new)).collect();
-    all.sort_by_key(|stored| (stored.accepted_at(), msg_id(stored)));
-    let first = msg_id(all[0]);
-    let new_id = msg_id(new);
+    all.sort_by_key(|stored| (stored.accepted_at(), kept_id(stored).1));
+    let first = kept_id(all[0]);
+    let new_id = kept_id(new);
     let sender = new.sender();
     // The new message's sender's own, past its share, earliest first, the role's first aside.
     let own = all
         .iter()
         .filter(|stored| stored.sender() == sender)
         .count();
-    let mut gone: Vec<String> = all
+    let mut gone: Vec<KeptId> = all
         .iter()
-        .filter(|stored| stored.sender() == sender && msg_id(stored) != first)
+        .filter(|stored| stored.sender() == sender && kept_id(stored) != first)
         .take(own.saturating_sub(KEPT_OTHERS + 1))
-        .map(|stored| msg_id(stored))
+        .map(|stored| kept_id(stored))
         .collect();
     // All senders together, past the cap.
     loop {
         let left: Vec<&StoredMessage> = all
             .iter()
             .copied()
-            .filter(|stored| !gone.contains(&msg_id(stored)))
+            .filter(|stored| !gone.contains(&kept_id(stored)))
             .collect();
         // The new message stays over the bound when it is the one that would go: its step
         // writes its pair (`step_keep`).
@@ -888,7 +901,7 @@ fn kept_after(kept: &[StoredMessage], new: &StoredMessage, reads: bool) -> (bool
             break;
         }
         let evictable =
-            |stored: &StoredMessage| msg_id(stored) != first && msg_id(stored) != new_id;
+            |stored: &StoredMessage| kept_id(stored) != first && kept_id(stored) != new_id;
         let pick = if reads {
             left.iter()
                 .filter(|stored| evictable(stored))
@@ -908,7 +921,7 @@ fn kept_after(kept: &[StoredMessage], new: &StoredMessage, reads: bool) -> (bool
             })
         };
         match pick {
-            Some(stored) => gone.push(msg_id(stored)),
+            Some(stored) => gone.push(kept_id(stored)),
             None => break,
         }
     }
@@ -1064,11 +1077,11 @@ pub(crate) fn step_keep(
     // latest kept, or at their time with a lower `msg_id`), can't be dropped as one never
     // processed: the step's outcome writes its pair. It is kept instead, one over the bound,
     // until a later message of the role drops it with its pair forgotten.
-    let keep = keep || gone.contains(&stored.message().msg_id);
-    for msg_id in gone {
+    let keep = keep || gone.contains(&kept_id(stored));
+    for (sender, msg_id) in gone {
         let Some(dropped) = held_messages
             .iter()
-            .find(|held| held.message().msg_id == msg_id)
+            .find(|held| kept_id(held) == (sender, msg_id.clone()))
         else {
             continue;
         };
@@ -1086,14 +1099,14 @@ pub(crate) fn step_keep(
         crate::receive::keep_local(
             cx,
             pubky_switch_client::app::LocalWrite::Delete {
-                key: key::divergent_write(&record, role, &msg_id).into_bytes(),
+                key: key::divergent_write(&record, role, &sender, &msg_id).into_bytes(),
             },
         );
     }
     if !keep {
         return Ok(());
     }
-    let kept_key = key::divergent_write(&record, role, &stored.message().msg_id);
+    let kept_key = key::divergent_write(&record, role, &stored.sender(), &stored.message().msg_id);
     let kept_settlement = match stored.body() {
         Body::PaymentProof(proof) if stored.message().refs.is_empty() => Some(
             pubky_switch_core::enc::b64(&settlement(&proof.proof).ok_or_else(Fail::corrupt)?),
@@ -1573,8 +1586,8 @@ impl Paykit {
     /// of the messages kept over the record (Paykit spec 6), counted under their bound, held
     /// to their order and gates, and written once the user has confirmed the record. Its
     /// processed pair stays as it is, so it is applied once; the copy kept before goes in
-    /// the commit that keeps it here. A message kept over the record already, at the same
-    /// `msg_id`, stays as it is. A kept message the bound drops is dropped as one never
+    /// the commit that keeps it here. A message kept over the record already, from the same
+    /// sender at the same `msg_id`, stays as it is. A kept message the bound drops is dropped as one never
     /// processed, its pair forgotten in the commit that drops it, as in the receive step
     /// ([`step_keep`]); one the client won't forget yet stays, over the bound, and so does
     /// this one when the bound would drop it, until a later message of its role drops it so.
@@ -1602,20 +1615,18 @@ impl Paykit {
                 held_messages.push(kept.message);
             }
         }
-        let msg_id = stored.message().msg_id.clone();
-        let kept_already = held_messages
-            .iter()
-            .any(|held| held.message().msg_id == msg_id);
+        let id = kept_id(stored);
+        let kept_already = held_messages.iter().any(|held| kept_id(held) == id);
         let (keep, gone) = kept_after(&held_messages, stored, true);
-        for dropped_id in gone.iter().filter(|gone| **gone != msg_id) {
+        for (sender, dropped_id) in gone.iter().filter(|gone| **gone != id) {
             let Some(dropped) = held_messages
                 .iter()
-                .find(|held| held.message().msg_id == *dropped_id)
+                .find(|held| kept_id(held) == (*sender, dropped_id.clone()))
             else {
                 continue;
             };
             let delete = pubky_switch_client::app::LocalWrite::Delete {
-                key: key::divergent_write(&record, role, dropped_id).into_bytes(),
+                key: key::divergent_write(&record, role, sender, dropped_id).into_bytes(),
             };
             match self
                 .app
@@ -1628,7 +1639,7 @@ impl Paykit {
         }
         let mut tx = Tx::default();
         tx.delete(kept_key);
-        if !kept_already && (keep || gone.contains(&msg_id)) {
+        if !kept_already && (keep || gone.contains(&id)) {
             let settlement = match stored.body() {
                 Body::PaymentProof(proof) if stored.message().refs.is_empty() => {
                     let settled = self
@@ -1646,7 +1657,7 @@ impl Paykit {
                 settlement,
                 message: KeptMessage::of(stored),
             };
-            tx.put(&key::divergent_write(&record, role, &msg_id), &kept)?;
+            tx.put(&key::divergent_write(&record, role, &id.0, &id.1), &kept)?;
         }
         self.local_commit(tx).await
     }
@@ -2217,14 +2228,14 @@ mod tests {
         // acceptance here, so the order is the `msg_id`'s.
         let new = reply();
         let (keep, gone) = kept_after(&kept, &new, true);
-        let mut all: Vec<String> = kept
+        let mut all: Vec<KeptId> = kept
             .iter()
             .chain(std::iter::once(&new))
-            .map(|stored| stored.message().msg_id.clone())
+            .map(kept_id)
             .collect();
         all.sort();
         assert_eq!(gone, vec![all[1].clone()]);
-        assert_eq!(keep, new.message().msg_id != all[1]);
+        assert_eq!(keep, kept_id(&new) != all[1]);
     }
 
     #[test]
@@ -2244,15 +2255,12 @@ mod tests {
             )
         };
         let mut kept: Vec<StoredMessage> = (0..=KEPT_OTHERS).map(|_| reply(&alice)).collect();
-        let alices: Vec<String> = kept
-            .iter()
-            .map(|stored| stored.message().msg_id.clone())
-            .collect();
+        let alices: Vec<KeptId> = kept.iter().map(kept_id).collect();
         for _ in 0..3 {
             let new = reply(&carol);
             let (_, gone) = kept_after(&kept, &new, false);
             assert!(gone.iter().all(|id| !alices.contains(id)), "{gone:?}");
-            kept.retain(|stored| !gone.contains(&stored.message().msg_id));
+            kept.retain(|stored| !gone.contains(&kept_id(stored)));
             kept.push(new);
         }
     }
@@ -2274,12 +2282,12 @@ mod tests {
                 crate::testkit::Party::new(&format!("other{i}"), "wallet", &["pay", "contacts"])
             })
             .collect();
-        let id = |stored: &StoredMessage| stored.message().msg_id.clone();
+        let id = kept_id;
         let first_of = |kept: &[StoredMessage], new: &StoredMessage| {
             kept.iter()
                 .chain(std::iter::once(new))
                 .map(id)
-                .min()
+                .min_by(|a, b| a.1.cmp(&b.1))
                 .unwrap()
         };
         // Over a record that reads, the counterparty's message: past the cap, another

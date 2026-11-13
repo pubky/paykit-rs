@@ -56,7 +56,7 @@
 //! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply, or a payee's period details, for a request the app holds no record of yet, or whose record it holds but can't open, read or bind, kept until it does, placed only once the record names its sender, a proof of a payment without a request for the payee's record of its settlement that the app holds but can't read, placed once it reads naming its sender and removed if it names another, or a receipt for a payer record the app holds but can't read and that isn't paused as divergent, kept until it reads, and moved to `dw/` if it reads paused (`receive.rs`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing, since a dropped entry's time is already in its sender's mark | |
 //! | `dv/<record key>` | the pause mark of a record the app has seen divergent: paused until the user confirms, or the write the user confirmed over, with the write a credit's refusal showed it at and the write a credit's confirmation was given over (`divergent.rs`); a restore installs it paused, neither shown nor confirmed for a credit | |
-//! | `dw/<record key>/<role>/<msg_id>` | a received message whose write over a divergent record waits for the user's confirmation, or for the messages kept over the record before it, to write into its record later, in the order its inbox accepted them, a receipt over a payer record that doesn't read included, written once the record also reads, and one kept in `pr/` whose record read paused; never one from anyone but the counterparty of a record that reads; given up at its 30 days, also one that no longer points to its record (`divergent.rs`) | |
+//! | `dw/<record key>/<role>/<sender>/<msg_id>` | a received message, by its sender and `msg_id`, whose write over a divergent record waits for the user's confirmation, or for the messages kept over the record before it, to write into its record later, in the order its inbox accepted them, a receipt over a payer record that doesn't read included, written once the record also reads, and one kept in `pr/` whose record read paused; never one from anyone but the counterparty of a record that reads; given up at its 30 days, also one that no longer points to its record (`divergent.rs`) | |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, with the entry's ID and message hash, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
 
 use paykit_lib::bodies::ResendRequest;
@@ -868,7 +868,8 @@ impl Stored for crate::divergent::DivergentMark {
 
 impl sealed::Sealed for crate::divergent::DivergentWrite {}
 
-/// A message kept over a divergent record: of the record, role and `msg_id` its key names,
+/// A message kept over a divergent record: of the record, role, sender and `msg_id` its key
+/// names,
 /// its message verified for this app and naming that record
 /// ([`crate::divergent::DivergentWrite::bind_to`]).
 impl Stored for crate::divergent::DivergentWrite {
@@ -876,12 +877,13 @@ impl Stored for crate::divergent::DivergentWrite {
         let StateKey::DivergentWrite {
             record,
             role,
+            sender,
             msg_id,
         } = family
         else {
             return corrupt();
         };
-        self.bind_to(record, *role, msg_id, &binder.own, &|target| {
+        self.bind_to(record, *role, sender, msg_id, &binder.own, &|target| {
             binder.record_key(target)
         })
     }
@@ -946,13 +948,19 @@ pub(crate) mod key {
         format!("{DIVERGENT_WRITES}{}/{}/", b64(record_key), role.tag())
     }
 
-    /// The message `msg_id` of `role` kept to write over the divergent record `record_key`.
+    /// The message `msg_id` from `sender` of `role` kept to write over the divergent record
+    /// `record_key`: a `msg_id` is the sender's own, so the key names both.
     pub(crate) fn divergent_write(
         record_key: &[u8; 32],
         role: crate::divergent::WriteRole,
+        sender: &[u8; 32],
         msg_id: &str,
     ) -> String {
-        format!("{}{msg_id}", divergent_writes_of(record_key, role))
+        format!(
+            "{}{}/{msg_id}",
+            divergent_writes_of(record_key, role),
+            b64(sender)
+        )
     }
 
     /// The mark of replies from `sender` dropped for the bounds.
@@ -1172,10 +1180,12 @@ pub(crate) enum StateKey {
     MessageNotice { sender: [u8; 32], msg_id: String },
     /// `dv/<record key>`: the pause mark of a divergent record.
     Divergent([u8; 32]),
-    /// `dw/<record key>/<role>/<msg_id>`: a message kept to write over a divergent record.
+    /// `dw/<record key>/<role>/<sender>/<msg_id>`: a message kept to write over a divergent
+    /// record.
     DivergentWrite {
         record: [u8; 32],
         role: crate::divergent::WriteRole,
+        sender: [u8; 32],
         msg_id: String,
     },
     /// `nt/<attempt_id>/<kind>`: a notice for the host.
@@ -1319,10 +1329,12 @@ impl StateKey {
                     "dv" => Self::Divergent(b64_32(rest)?),
                     "dw" => {
                         let (record, rest) = rest.split_once('/')?;
-                        let (role, id) = rest.split_once('/')?;
+                        let (role, rest) = rest.split_once('/')?;
+                        let (sender, id) = rest.split_once('/')?;
                         Self::DivergentWrite {
                             record: b64_32(record)?,
                             role: crate::divergent::WriteRole::from_tag(role)?,
+                            sender: b64_32(sender)?,
                             msg_id: msg_id(id)?,
                         }
                     }
@@ -1841,10 +1853,11 @@ mod tests {
             ),
             (key::divergent(&pubky), StateKey::Divergent(pubky)),
             (
-                key::divergent_write(&pubky, crate::divergent::WriteRole::List, id),
+                key::divergent_write(&pubky, crate::divergent::WriteRole::List, &pubky, id),
                 StateKey::DivergentWrite {
                     record: pubky,
                     role: crate::divergent::WriteRole::List,
+                    sender: pubky,
                     msg_id: id.into(),
                 },
             ),
