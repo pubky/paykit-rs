@@ -173,7 +173,13 @@ pub enum Refusal {
     /// what the current write lacks, such as a cancellation of the request, a receipt, or a
     /// newer list in which the payee withdrew a destination. Nothing was written or paid.
     /// The host shows `records` and, once the user has seen that, calls
-    /// [`crate::Paykit::confirm_divergent`] for each, then calls again.
+    /// [`crate::Paykit::confirm_divergent`] for each, as given here, then calls again. From
+    /// [`crate::Paykit::confirm_payment`], each record is shown with
+    /// [`crate::DivergentRecord::may_hold_credit`]: only a confirmation of these lets the
+    /// credit go, so this refusal comes also after the user confirmed the same record from a
+    /// receive's summary or [`crate::Paykit::divergent_records`], and is answered the same
+    /// way. A payment's refusal names only records that hold it back: a list of an app the
+    /// payee's `identity.json` no longer lists as current is never among them.
     #[error("Paykit spec 6: a record is divergent; the user must confirm")]
     Divergent {
         /// The records the user is asked to confirm.

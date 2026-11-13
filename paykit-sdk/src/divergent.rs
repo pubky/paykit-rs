@@ -1457,7 +1457,14 @@ impl Paykit {
     /// accepted or credited on it automatically, and by hand only once the user confirms it
     /// and its kept messages are written; a write over it that adds no stop waits too. A
     /// record listed here is never shown for a credit
-    /// ([`DivergentRecord::may_hold_credit`]): a credit's refusal shows it so.
+    /// ([`DivergentRecord::may_hold_credit`]): a credit's refusal shows it so, and its
+    /// confirmation releases no credit. To credit a proof, the host calls
+    /// [`Paykit::confirm_payment`] again, has the user confirm each record its
+    /// [`Refusal::Divergent`] names, shown with `may_hold_credit`, exactly as that refusal
+    /// gives it, and calls `confirm_payment` once more. The `payment_lists` record of an app
+    /// the payee's `identity.json` no longer lists as current is listed too while paused: it
+    /// holds back no payment, since no list of that app is paid (Paykit spec 8.4), and
+    /// confirming it only ends its pause.
     ///
     /// # Errors
     ///
@@ -1496,7 +1503,13 @@ impl Paykit {
     /// recorded. Given over a record shown for a credit
     /// ([`DivergentRecord::may_hold_credit`]), of the write a credit's refusal showed, it also
     /// lets a credit go (Paykit spec 8.1 step 4); a plain one doesn't, nor one whose flag the
-    /// refusal didn't set. The app knows only that it returned that refusal to the host; the
+    /// refusal didn't set. So a payee app's host that confirmed a record from a receive's
+    /// summary or [`Paykit::divergent_records`] doesn't stop there to credit a proof: it calls
+    /// [`Paykit::confirm_payment`] again, confirms each record the refusal names, shown with
+    /// `may_hold_credit`, as the refusal gives it, and calls `confirm_payment` once more,
+    /// after a receive while messages kept over one of them wait to be written
+    /// ([`DivergentRecord::writes_waiting`]). The app knows only that it returned that refusal
+    /// to the host; the
     /// host shows it to the user and passes `UserConfirmed` once the user has seen it. A mark
     /// that doesn't point to the record held is replaced. Confirming a record no longer held
     /// ends its pause and drops the mark. Another own app keeps its own pause until its own

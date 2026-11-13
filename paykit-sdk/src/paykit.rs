@@ -250,8 +250,16 @@ pub struct ReceiveSummary {
     /// The records this receive paused: a view showed them divergent after a provider loss
     /// (Paykit spec 6). The host shows each to the user, who confirms it
     /// ([`Paykit::confirm_divergent`]); until then nothing is paid, accepted or credited on
-    /// it automatically, and by hand only once the user confirms. Every record paused,
-    /// whenever, is in [`Paykit::divergent_records`].
+    /// it automatically, nor paid or accepted by hand. That confirmation lets payments and
+    /// writes go on, but releases no credit (Paykit spec 8.1 step 4): these records are
+    /// shown with no [`crate::DivergentRecord::may_hold_credit`]. To credit a proof, the host
+    /// calls [`Paykit::confirm_payment`] again; while a record of that payer may hold a
+    /// credit, it is refused [`crate::Refusal::Divergent`], each record it names shown with
+    /// `may_hold_credit`. Once the user has seen that, the host confirms each of those
+    /// records exactly as that refusal gives them, then calls `confirm_payment` once more;
+    /// while messages kept over one of them wait to be written
+    /// ([`crate::DivergentRecord::writes_waiting`]), it is refused again until a receive
+    /// writes them. Every record paused, whenever, is in [`Paykit::divergent_records`].
     pub divergent: Vec<crate::DivergentRecord>,
 }
 
