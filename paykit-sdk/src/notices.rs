@@ -47,6 +47,13 @@ pub enum NoticeKind {
     /// ([`Paykit::acknowledge_notice`]) forgets the entry first
     /// ([`pubky_switch_client::app::App::forget_parked`]); if that fails, the notice stays
     /// and the error is returned, so an entry is never left stored once its notice is gone.
+    ///
+    /// Also a rejection or payer's cancellation this app recorded while sends to the payee
+    /// were held ([`Paykit::reject_request`], [`Paykit::cancel_request`]) whose replay window
+    /// of 30 days from its signing passed before they weren't: it was never sent, and never
+    /// will be. Its request record still holds it, so no own app pays or accepts the
+    /// request; the payee wasn't told. `counterparty` is then the payee, and `msg_id` the
+    /// answer's.
     MessageGivenUp,
 }
 
@@ -83,7 +90,8 @@ pub struct Notice {
     pub attempt_id: Option<AttemptId>,
     /// The message it is about, by its `msg_id`; `None` for a notice about an attempt.
     pub msg_id: Option<String>,
-    /// The counterparty: the payee of an attempt, or the message's sender.
+    /// The counterparty: the payee of an attempt, the message's sender, or, for an own
+    /// answer given up, its payee.
     pub counterparty: [u8; 32],
     /// The request paid or named, `None` for none.
     pub request_hash: Option<[u8; 32]>,
@@ -122,8 +130,12 @@ pub(crate) enum GivenUpOrigin {
     /// bounds of Switch spec 8.2: it was never processed, so a copy its sender sends again is
     /// taken as a new message.
     KeyWait,
-    /// A payer's reply kept for its record (`pr/`) was given up.
+    /// A payer's reply kept for its record, or a receipt kept for a payer record that
+    /// didn't read (`pr/`), was given up.
     KeptReply,
+    /// This app's own rejection or payer's cancellation, recorded while sends to the payee
+    /// were held (`ha/`), passed its replay window unsent.
+    HeldAnswer,
 }
 
 /// What a message given up leaves behind ([`KeptNotice::given_up`]).
