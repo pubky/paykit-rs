@@ -342,6 +342,7 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::RecordsUnlisted
             | StateKey::MissedUnlisted
             | StateKey::PayerPassOwed
+            | StateKey::ListsAwaitHost
             | StateKey::OwnResendOwed
             | StateKey::ListedCert
             | StateKey::StoredNote { .. }
@@ -467,13 +468,21 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::LastVersion
             | StateKey::ListRecipient(_)
             | StateKey::Releases { .. } => {
-                match crate::publish::check_restored(&key, &value, &binder).map_err(|_| unread())? {
-                    crate::publish::Restored::LastVersion(last) => last_version = Some(last),
-                    crate::publish::Restored::Newest(newest) => {
-                        newest_sent = newest_sent.max(Some(newest));
+                let value = match crate::publish::check_restored(&key, &value, &binder)
+                    .map_err(|_| unread())?
+                {
+                    crate::publish::Restored::LastVersion(last) => {
+                        last_version = Some(last);
+                        value
                     }
-                    crate::publish::Restored::Other => {}
-                }
+                    // Its versions not seen delivered are marked restored: the device the
+                    // backup came from may have delivered them (`publish.rs`, `Fate::Doubtful`).
+                    crate::publish::Restored::Newest { newest, marked } => {
+                        newest_sent = newest_sent.max(Some(newest));
+                        marked
+                    }
+                    crate::publish::Restored::Other => value,
+                };
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -539,6 +548,12 @@ pub(crate) fn restore_paykit_layer(
     let resend = state::local_put(key::OWN_RESEND_OWED, &crate::hold::OwnResendOwed::default())
         .map_err(|_| String::from("the restore's re-send mark can't be written"))?;
     writes.push(resend);
+    // The list and its counterparties are the backup's: a change or a withdrawal made since
+    // is gone, so no list but a withdrawal goes until the host sets its list again
+    // (`publish.rs`).
+    let lists = state::local_put(key::LISTS_AWAIT_HOST, &true)
+        .map_err(|_| String::from("the restore's lists mark can't be written"))?;
+    writes.push(lists);
     Ok(writes)
 }
 
@@ -1575,6 +1590,7 @@ mod receive_tests {
                 endpoints: std::collections::BTreeMap::new(),
                 used: false,
                 asked: false,
+                restored: false,
             }],
             ..crate::publish::Recipient::new([3; 32])
         }

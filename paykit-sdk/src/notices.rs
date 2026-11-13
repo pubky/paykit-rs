@@ -48,18 +48,24 @@ pub enum NoticeKind {
     /// ([`pubky_switch_client::app::App::forget_parked`]); if that fails, the notice stays
     /// and the error is returned, so an entry is never left stored once its notice is gone.
     MessageGivenUp,
-    /// A message this app sent, held in one of its activity records, was given up
-    /// undelivered: the client deleted it from its outbox, plaintext and all, and the
-    /// counterparty's inbox never accepted it ([`pubky_switch_client::app::AppEvent::MessageUndelivered`],
-    /// Switch spec 11). For example its delivery wasn't admitted for
+    /// A message this app sent, held in one of its activity records, was given up by this
+    /// app's client before its store saw the counterparty's inbox accept it: the client
+    /// deleted it from its outbox, plaintext and all
+    /// ([`pubky_switch_client::app::AppEvent::MessageUndelivered`], Switch spec 11). For
+    /// example its delivery wasn't admitted for
     /// [`pubky_switch_client::app::UNDELIVERABLE_MS`], or a restore didn't deliver it, its
     /// backup's outbox past [`pubky_switch_client::app::MAX_CARRIED_OUTBOX_BYTES`] or older
     /// than [`pubky_switch_client::app::SENT_RETENTION_MS`]. The record still holds it, so a
-    /// request shows as sent, a reply as made and a proof as sent, but the counterparty never
-    /// got it: the user may send it again, such as a new request. The notice names the
-    /// counterparty, the message's recipient, and the record's request, if any. A message no
-    /// record holds, such as a `resend_request` or a re-send, raises none: its event stays
-    /// for the host.
+    /// request shows as sent, a reply as made and a proof as sent.
+    ///
+    /// What the host may conclude: this store never saw it accepted. What it may not: that
+    /// the counterparty never got it. After a restore the device the backup came from may
+    /// have delivered it before the restore, so the host must not present it as never
+    /// received, and a new request in its place may be paid as well as the first: the user
+    /// may ask the counterparty, or cancel the first request before sending another. The
+    /// notice names the counterparty, the message's
+    /// recipient, and the record's request, if any. A message no record holds, such as a
+    /// `resend_request` or a re-send, raises none: its event stays for the host.
     MessageUndelivered,
 }
 

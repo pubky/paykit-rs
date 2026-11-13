@@ -45,6 +45,7 @@
 //! | `lc` | the certificate the shared records were last listed under, signed: a certificate held now other than it means the copy may lack records until Paykit lists them, since one held between may have read less (`hold.rs`); written only by a Paykit listing, in its commit; absent from a join or a restore until that listing, which leaves the records unlisted; never restored | |
 //! | `ro` | set by a restore: this app's own messages its activity records store to be sent are queued again once the records are listed (`hold.rs`, `Paykit::queue_own_again`); after a pass, the counterparties whose sends were held then, whose messages wait; never restored | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
+//! | `lw` | set by a restore: the list and the counterparties are the backup's, so no list but a withdrawal goes until the host sets its list again, which clears it (`publish.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named, when, and its `msg_id`, to ask again for one that didn't reach the payee's inbox (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<counterparty>/<msg_id>` | a notice for the host about a payment, a message received and given up, or a message this app sent that a record holds and the client gave up undelivered, until acknowledged (`notices.rs`) | |
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
@@ -510,6 +511,7 @@ impl Stored for bool {
             StateKey::RecordsUnlisted
             | StateKey::MissedUnlisted
             | StateKey::PayerPassOwed
+            | StateKey::ListsAwaitHost
             | StateKey::HoldConfirmed(_)
             | StateKey::Taken(_)
                 if *self =>
@@ -871,6 +873,7 @@ pub(crate) mod key {
     pub(crate) const MISSED_UNLISTED: &str = "ml";
     pub(crate) const PAYER_PASS_OWED: &str = "pp";
     pub(crate) const OWN_RESEND_OWED: &str = "ro";
+    pub(crate) const LISTS_AWAIT_HOST: &str = "lw";
     pub(crate) const LISTED_CERT: &str = "lc";
     pub(crate) const NOTICES: &str = "nt/";
     pub(crate) const STORED_NOTES: &str = "se/";
@@ -1054,6 +1057,8 @@ pub(crate) enum StateKey {
     MissedUnlisted,
     /// `pp`: no reconcile ran the payer pass since a restore.
     PayerPassOwed,
+    /// `lw`: set by a restore: no list but a withdrawal goes until the host sets its list.
+    ListsAwaitHost,
     /// `ro`: the restore's re-send of this app's own messages is owed.
     OwnResendOwed,
     /// `lc`: the certificate the shared records were last listed under.
@@ -1153,6 +1158,7 @@ impl StateKey {
             "nl" => Self::RecordsUnlisted,
             "ml" => Self::MissedUnlisted,
             "pp" => Self::PayerPassOwed,
+            "lw" => Self::ListsAwaitHost,
             "ro" => Self::OwnResendOwed,
             "lc" => Self::ListedCert,
             "lr" => Self::ListsRead,
@@ -1648,6 +1654,7 @@ mod tests {
             (key::RECORDS_UNLISTED.into(), StateKey::RecordsUnlisted),
             (key::MISSED_UNLISTED.into(), StateKey::MissedUnlisted),
             (key::PAYER_PASS_OWED.into(), StateKey::PayerPassOwed),
+            (key::LISTS_AWAIT_HOST.into(), StateKey::ListsAwaitHost),
             (key::OWN_RESEND_OWED.into(), StateKey::OwnResendOwed),
             (key::LISTED_CERT.into(), StateKey::ListedCert),
             (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),

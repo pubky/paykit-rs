@@ -593,6 +593,85 @@ async fn test_publishing_list_request_naming_an_older_version_resends_the_curren
 }
 
 #[tokio::test]
+async fn test_publishing_newest_sent_again_held_while_the_deny_copy_is_unknown() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_reading_lists(&w, &mut wallet).await;
+    let older = shop.published_lists().await.unwrap()[0].version;
+    w.clock.advance_ms(1000);
+    shop.publish_list_to(&[w.alice_id()]).await.unwrap();
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    // She names the older version; both of the receive's reads of the lists fail.
+    ask_for_the_list(&w, &shop, Some(older), shop.app_id());
+    w.clock.advance_ms(LISTS_REFRESH_MS);
+    fail_list_reads(&w, 2);
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.lists.resent.is_empty(), "{:?}", got.lists);
+    // Read again, the newest goes again.
+    let got = shop.receive(None).await.unwrap();
+    assert_eq!(got.lists.resent.len(), 1, "{:?}", got.lists);
+}
+
+#[tokio::test]
+async fn test_publishing_request_held_past_the_bound_answered_once_by_a_change() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default().with_list_answers_per_day(1),
+            store(),
+        )
+        .await;
+    w.publish_to_alice(&mut shop).await;
+    wallet.receive(None).await.unwrap();
+    ask_for_the_list(&w, &shop, None, shop.app_id());
+    assert_eq!(shop.receive(None).await.unwrap().lists.sent.len(), 1);
+    // Past the bound, a second request is held.
+    ask_for_the_list(&w, &shop, None, shop.app_id());
+    assert!(shop.receive(None).await.unwrap().lists.sent.is_empty());
+    // A list change sends her a newer version: it answers the held request.
+    let changed = shop.set_list_endpoints(list("lno1changed")).await.unwrap();
+    assert_eq!(changed.sent.len(), 1, "{changed:?}");
+    // Once the bound frees, nothing more goes for it.
+    w.clock.advance_ms(DAY_MS);
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.lists.sent.is_empty(), "{:?}", got.lists);
+}
+
+#[tokio::test]
+async fn test_publishing_proofs_answered_within_the_daily_bound() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default().with_list_answers_per_day(1),
+            store(),
+        )
+        .await;
+    w.publish_to_alice(&mut shop).await;
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    // The first proof of a single-use endpoint gets a newer version.
+    let after = paid_single_use(&w, &mut wallet, &mut shop).await;
+    assert_eq!(after.sent.len(), 1, "{after:?}");
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    // The second, in the same day, is past the bound: no fresh payload is issued.
+    let issued = w.rail.issued().len();
+    let held = paid_single_use(&w, &mut wallet, &mut shop).await;
+    assert!(held.sent.is_empty(), "{held:?}");
+    assert_eq!(w.rail.issued().len(), issued);
+    // Once the bound frees, it is answered.
+    w.clock.advance_ms(DAY_MS);
+    let got = shop.receive(None).await.unwrap();
+    assert_eq!(got.lists.sent.len(), 1, "{:?}", got.lists);
+}
+
+#[tokio::test]
 async fn test_publishing_list_request_naming_a_used_older_version_resends_the_newest() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -851,7 +930,7 @@ async fn shop_on(w: &World, base: &Arc<FailingCommits>) -> Paykit {
 }
 
 #[tokio::test]
-async fn test_publishing_payloads_of_a_version_never_queued_released() {
+async fn test_publishing_payloads_of_a_version_never_queued_released_and_the_list_sent_again() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let base = Arc::new(FailingCommits::default());
@@ -869,16 +948,17 @@ async fn test_publishing_payloads_of_a_version_never_queued_released() {
     base.fail(None);
     assert!(released(&w).is_empty());
     // The version is recorded, and never left: the next receive gives its payload back,
-    // once.
+    // once, and sends her a newer version, still owed.
     shop.receive(None).await.unwrap();
     assert_eq!(released(&w), vec!["bc1qissued1".to_owned()]);
     shop.receive(None).await.unwrap();
     assert_eq!(released(&w).len(), 1);
-    assert_eq!(lists_taken(&mut wallet).await, 0);
-    // Given back already, it isn't given back again when the app is removed.
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    // Given back already, it isn't given back again when the app is removed; the version
+    // she holds is.
     revoke_shop(&w, &shop);
     shop.receive(None).await.unwrap();
-    assert_eq!(released(&w).len(), 1);
+    assert_eq!(released(&w).len(), 2);
 }
 
 #[tokio::test]
@@ -1165,12 +1245,12 @@ async fn test_publishing_withdrawal_goes_while_the_deny_copy_is_unknown() {
 }
 
 #[tokio::test]
-async fn test_publishing_withdrawal_that_never_arrived_sent_again_at_most_once_an_hour() {
+async fn test_publishing_withdrawal_refused_for_good_not_sent_again() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = shop_reading_lists(&w, &mut wallet).await;
     shop.block(&w.alice_id()).await.unwrap();
-    // Her inbox refuses the empty version for good: it never reached her.
+    // Her switch refuses the empty version for good: no re-send changes that.
     w.alice
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Error {
@@ -1179,13 +1259,38 @@ async fn test_publishing_withdrawal_that_never_arrived_sent_again_at_most_once_a
             current: serde_json::Value::Null,
         });
     shop.withdraw_list_from(&w.alice_id()).await.unwrap();
+    for _ in 0..3 {
+        w.clock.advance_ms(2 * HOUR_MS);
+        let got = shop.receive(None).await.unwrap();
+        assert!(got.lists.sent.is_empty(), "{:?}", got.lists);
+    }
     assert_eq!(lists_taken(&mut wallet).await, 0);
-    // Owed while her old version may still be paid, it goes again, blocked or not.
+}
+
+#[tokio::test]
+async fn test_publishing_withdrawal_that_never_left_sent_again_an_hour_after_it() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let base = Arc::new(FailingCommits::default());
+    let mut shop = shop_on(&w, &base).await;
+    shop.publish_list_to(&[w.alice_id()]).await.unwrap();
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    // The empty version is recorded, and its queueing fails: it never left.
+    base.fail(Some(b"out/"));
+    assert!(shop.withdraw_list_from(&w.alice_id()).await.is_err());
+    base.fail(None);
+    // Not within the hour of the withdrawal: nothing goes yet.
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.lists.sent.is_empty(), "{:?}", got.lists);
+    w.clock.advance_ms(HOUR_MS - 1);
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.lists.sent.is_empty(), "{:?}", got.lists);
+    // An hour after it, it goes again; reached, never again.
+    w.clock.advance_ms(1);
     let got = shop.receive(None).await.unwrap();
     assert_eq!(got.lists.sent.len(), 1, "{:?}", got.lists);
     assert_eq!(lists_taken(&mut wallet).await, 1);
     assert!(no_usable_list(&w, &mut wallet).await);
-    // Reached, it isn't sent again.
     w.clock.advance_ms(2 * HOUR_MS);
     let got = shop.receive(None).await.unwrap();
     assert!(got.lists.sent.is_empty(), "{:?}", got.lists);
@@ -1607,6 +1712,12 @@ async fn test_publishing_state_restored_and_versions_stay_above_the_lost_ones() 
     let published = shop.published_lists().await.unwrap();
     assert_eq!(published.len(), 1);
     assert_eq!(published[0].version, first.version);
+    // The host sets its list again: she is sent a version above the lost one.
+    assert!(shop.lists_await_host().await.unwrap());
+    let set = shop.set_list_endpoints(alice_list()).await.unwrap();
+    assert_eq!(set.sent.len(), 1, "{set:?}");
+    assert!(set.sent[0].version > lost.version);
+    assert_eq!(lists_taken(&mut wallet).await, 1);
     // She asks naming the version the restore lost: it is answered above it.
     ask_for_the_list(&w, &shop, Some(lost.version), shop.app_id());
     let got = shop.receive(None).await.unwrap();
@@ -1618,6 +1729,17 @@ async fn test_publishing_state_restored_and_versions_stay_above_the_lost_ones() 
     let again = shop.receive(None).await.unwrap();
     assert!(again.lists.sent.is_empty(), "{:?}", again.lists);
     assert_eq!(again.lists.resent, got.lists.sent);
+}
+
+/// The list [`World::publish_to_alice`] sets.
+fn alice_list() -> BTreeMap<paykit_lib::PaymentEndpointIdentifier, OfferedEndpoint> {
+    let mut endpoints = BTreeMap::new();
+    endpoints.insert(endpoint("btc-bitcoin-p2wpkh"), OfferedEndpoint::SingleUse);
+    endpoints.insert(
+        endpoint("btc-lightning-bolt12"),
+        OfferedEndpoint::Reusable(PaymentEndpointPayload::new("lno1reusable").unwrap()),
+    );
+    endpoints
 }
 
 /// Bob's local key of what he sent `counterparty`.
@@ -1760,4 +1882,169 @@ async fn test_publishing_last_version_below_a_version_sent_refused_as_corrupt() 
         shop.published_lists().await.unwrap()[0].version,
         first.version
     );
+}
+
+// Probe tests of the independent pre-review; each asserts the behaviour the part claims.
+
+/// A changed list whose queueing fails (as a crash between its record and its queueing
+/// leaves it) still reaches the counterparty: the change is owed until it is sent.
+#[tokio::test]
+async fn test_publishing_probe_changed_list_owed_after_its_queueing_failed() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let base = Arc::new(FailingCommits::default());
+    let mut shop = shop_on(&w, &base).await;
+    shop.publish_list_to(&[w.alice_id()]).await.unwrap();
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    base.fail(Some(b"out/"));
+    assert!(shop.set_list_endpoints(list("lno1changed")).await.is_err());
+    base.fail(None);
+    // The host sets the list again, and the app receives: the change should reach alice.
+    let again = shop.set_list_endpoints(list("lno1changed")).await.unwrap();
+    let got = shop.receive(None).await.unwrap();
+    w.clock.advance_ms(2 * HOUR_MS);
+    let later = shop.receive(None).await.unwrap();
+    let taken = lists_taken(&mut wallet).await;
+    wallet
+        .pay_without_request(to_bob(&w, "btc-lightning-bolt12"))
+        .await
+        .unwrap();
+    assert_eq!(
+        last_offered(&w, "btc-lightning-bolt12"),
+        "lno1changed",
+        "again={again:?} got={:?} later={:?} taken={taken}",
+        got.lists,
+        later.lists
+    );
+}
+
+/// A restore gives back no single-use payload of a version the payer received before the
+/// backup: she can still pay it.
+#[tokio::test]
+async fn test_publishing_probe_restore_keeps_the_payload_of_a_delivered_version() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.publish_to_alice(&mut shop).await;
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let mut shop = restored_shop(&w, &backup).await;
+    shop.receive(None).await.unwrap();
+    let given_back = released(&w);
+    // She pays the single-use payload of the version she holds.
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let payload = last_offered(&w, "btc-bitcoin-p2wpkh");
+    assert!(
+        !given_back.contains(&payload),
+        "paid {payload}, which the restored shop gave back: {given_back:?}"
+    );
+}
+
+/// The same with the version settled before the backup: seen reached, nothing goes back.
+#[tokio::test]
+async fn test_publishing_probe_restore_keeps_the_payload_of_a_version_settled_before_the_backup() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.publish_to_alice(&mut shop).await;
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    shop.receive(None).await.unwrap();
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let mut shop = restored_shop(&w, &backup).await;
+    shop.receive(None).await.unwrap();
+    assert!(released(&w).is_empty(), "released {:?}", released(&w));
+}
+
+/// After a restore no list but a withdrawal goes until the host sets its list again: a
+/// counterparty withdrawn from after the backup isn't renewed, and the backup's list isn't
+/// sent on its own.
+#[tokio::test]
+async fn test_publishing_restored_lists_wait_for_the_host() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.publish_to_alice(&mut shop).await;
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    let backup = shop.backup().await.unwrap();
+    shop.withdraw_list_from(&w.alice_id()).await.unwrap();
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    assert!(no_usable_list(&w, &mut wallet).await);
+    drop(shop);
+    let mut shop = restored_shop(&w, &backup).await;
+    assert!(shop.lists_await_host().await.unwrap());
+    // The renewal is due: it waits for the host, nothing goes.
+    w.clock.advance_ms(LIST_LIFETIME_MS / 2);
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.lists.sent.is_empty(), "{:?}", got.lists);
+    assert_eq!(got.lists.not_sent.len(), 1, "{:?}", got.lists);
+    let refused = shop.publish_list_to(&[w.alice_id()]).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{refused:?}"
+    );
+    assert_eq!(lists_taken(&mut wallet).await, 0);
+    assert!(no_usable_list(&w, &mut wallet).await);
+    // The host re-applies the withdrawal, which goes, then sets its list: she gets no list.
+    shop.withdraw_list_from(&w.alice_id()).await.unwrap();
+    let set = shop.set_list_endpoints(list("lno1changed")).await.unwrap();
+    assert!(set.sent.is_empty(), "{set:?}");
+    assert!(!shop.lists_await_host().await.unwrap());
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.lists.sent.is_empty(), "{:?}", got.lists);
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    assert!(no_usable_list(&w, &mut wallet).await);
+}
+
+/// After a restore the backup's list isn't sent until the host sets its list, and then the
+/// host's list goes, not the backup's.
+#[tokio::test]
+async fn test_publishing_restored_list_not_republished_until_the_host_sets_it() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.publish_to_alice(&mut shop).await;
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    let backup = shop.backup().await.unwrap();
+    // The user removes the reusable endpoint after the backup.
+    shop.set_list_endpoints(list("lno1changed")).await.unwrap();
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    drop(shop);
+    let mut shop = restored_shop(&w, &backup).await;
+    w.clock.advance_ms(LIST_LIFETIME_MS / 2);
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.lists.sent.is_empty(), "{:?}", got.lists);
+    // The host sets its list: that one goes.
+    let set = shop.set_list_endpoints(list("lno1changed")).await.unwrap();
+    assert_eq!(set.sent.len(), 1, "{set:?}");
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    wallet
+        .pay_without_request(to_bob(&w, "btc-lightning-bolt12"))
+        .await
+        .unwrap();
+    assert_eq!(last_offered(&w, "btc-lightning-bolt12"), "lno1changed");
+}
+
+/// The same for a counterparty also blocked: the shared deny list still holds her after
+/// the restore, so no renewal goes.
+#[tokio::test]
+async fn test_publishing_probe_withdrawal_after_the_backup_lost_but_the_block_holds() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_reading_lists(&w, &mut wallet).await;
+    let backup = shop.backup().await.unwrap();
+    shop.block(&w.alice_id()).await.unwrap();
+    shop.withdraw_list_from(&w.alice_id()).await.unwrap();
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    drop(shop);
+    let mut shop = restored_shop(&w, &backup).await;
+    w.clock.advance_ms(LIST_LIFETIME_MS / 2);
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.lists.sent.is_empty(), "{:?}", got.lists);
+    assert_eq!(lists_taken(&mut wallet).await, 0);
 }

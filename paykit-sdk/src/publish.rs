@@ -82,6 +82,18 @@ pub const LIST_LIFETIME_MS: u64 = 30 * DAY_MS;
 /// to its list requests (Paykit spec 8.4): once an hour.
 const RESEND_INTERVAL_MS: u64 = 60 * 60 * 1000;
 
+/// Whether something first tried at `first` and last at `last` is due again at `now`:
+/// hourly for a day from the first, then daily. A time ahead of the clock (restored, or
+/// the clock set back) counts as just now.
+fn retry_due(first: u64, last: u64, now: u64) -> bool {
+    let interval = if now.saturating_sub(first) < DAY_MS {
+        RESEND_INTERVAL_MS
+    } else {
+        DAY_MS
+    };
+    last <= now && now - last >= interval
+}
+
 /// The most versions a counterparty's list requests are remembered by, owed an answer
 /// ([`Recipient::asking`]) or answered ([`Recipient::named`]), so its requests can't grow
 /// the state without bound. A request past it is still answered: a version it named that
@@ -195,8 +207,30 @@ pub(crate) enum Fate {
     Pending,
     /// The counterparty's inbox accepted it while it was the newest: the payer may pay it.
     Reached,
-    /// No payer can pay it: its single-use payloads were given back.
+    /// No payer can pay it: it never left, the client gave it up never accepted, or a newer
+    /// version reached that inbox first. Its single-use payloads were given back.
     Unreached,
+    /// The counterparty's switch refused it for good: no payer can pay it, its single-use
+    /// payloads were given back, and nothing is sent again for it.
+    Refused,
+    /// A restore brought it back before it was seen delivered: the device the backup came
+    /// from may have delivered it, so the payer may hold it. Its single-use payloads are never
+    /// given back (they stay the payment method's to expire), and it may also not have
+    /// reached: a withdrawal it stands for is sent again.
+    Doubtful,
+}
+
+impl Fate {
+    /// Whether a payer may hold the version, and pay it while it is unexpired.
+    fn payable(self) -> bool {
+        !matches!(self, Self::Unreached | Self::Refused)
+    }
+
+    /// Whether the version may not have reached the counterparty, so that what it carries is
+    /// still owed: not after a refusal for good, which no re-send changes.
+    fn maybe_unreached(self) -> bool {
+        matches!(self, Self::Unreached | Self::Doubtful)
+    }
 }
 
 /// An endpoint a version offered.
@@ -222,6 +256,10 @@ pub(crate) struct Offered {
     /// A list request named it and was answered with a newer version: a later one naming
     /// it gets the newest sent again instead.
     pub(crate) asked: bool,
+    /// A restore brought it back before it was seen delivered (`Fate::Doubtful` once a
+    /// receive settles it).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) restored: bool,
 }
 
 impl Offered {
@@ -235,6 +273,7 @@ impl Offered {
         let produced = self.expires_at_ms == self.published_at_ms.saturating_add(LIST_LIFETIME_MS)
             && self.published_at_ms <= self.version
             && !(self.fate == Fate::Pending && self.accepted_at_ms.is_some())
+            && (self.fate != Fate::Doubtful || self.restored)
             && (!self.used || self.endpoints.values().any(|e| e.single_use));
         if !produced {
             return Err(PaykitError::corrupt());
@@ -280,6 +319,15 @@ pub(crate) struct Recipient {
     pub(crate) resend: bool,
     /// When the newest version was last sent again, device clock.
     pub(crate) resent_at_ms: Option<u64>,
+    /// When the app first withdrew its list from the counterparty, device clock: the
+    /// withdrawal's re-sends are hourly for a day from then, then daily.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) withdrawn_at_ms: Option<u64>,
+    /// When an owed version first failed to go for a reason that isn't a store failure,
+    /// such as the size bound, and when it was last tried: it is tried again hourly for a
+    /// day from the first, then daily.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) failed_since_ms: Option<(u64, u64)>,
     /// When each newer version sent in answer to a list request went, device clock, within
     /// the last 24 hours.
     pub(crate) answers: Vec<u64>,
@@ -298,6 +346,8 @@ impl Recipient {
             named: Vec::new(),
             resend: false,
             resent_at_ms: None,
+            withdrawn_at_ms: None,
+            failed_since_ms: None,
             answers: Vec::new(),
             versions: Vec::new(),
         }
@@ -402,10 +452,18 @@ pub(crate) fn check_restored(
             state::restored::<u64>(key, value, binder).map(Restored::LastVersion)
         }
         StateKey::ListRecipient(_) => {
-            let recipient = state::restored::<Recipient>(key, value, binder)?;
-            Ok(Restored::Newest(
-                recipient.current().map_or(0, |o| o.version),
-            ))
+            let mut recipient = state::restored::<Recipient>(key, value, binder)?;
+            for offered in &mut recipient.versions {
+                if matches!(offered.fate, Fate::Pending | Fate::Doubtful)
+                    && offered.accepted_at_ms.is_none()
+                {
+                    offered.restored = true;
+                }
+            }
+            Ok(Restored::Newest {
+                newest: recipient.current().map_or(0, |o| o.version),
+                marked: state::encode(&recipient)?,
+            })
         }
         StateKey::Releases { .. } => {
             state::restored::<Releases>(key, value, binder)?;
@@ -420,8 +478,9 @@ pub(crate) fn check_restored(
 pub(crate) enum Restored {
     /// The last version published.
     LastVersion(u64),
-    /// The newest version sent one counterparty.
-    Newest(u64),
+    /// The newest version sent one counterparty, and the counterparty's value with every
+    /// version not seen delivered marked restored, as the restore installs it.
+    Newest { newest: u64, marked: Vec<u8> },
     /// Neither.
     Other,
 }
@@ -504,7 +563,10 @@ pub(crate) fn note_proof(
     // A second proof of one version names one no longer the newest once a newer one was
     // sent. The newest version of a counterparty withdrawn from is empty: no proof names it.
     offered.used = true;
-    recipient.owed |= newest;
+    // A newer version is owed, within the daily bound on answers, as a list request's is:
+    // the proof isn't verified here, so a counterparty sending proofs can't make the app
+    // issue fresh single-use payloads past that bound (Paykit spec 8.4).
+    recipient.requested |= newest;
     keep_recipient(cx, &recipient)
 }
 
@@ -626,16 +688,28 @@ impl Paykit {
             expires_at: self.now().saturating_add(LIST_LIFETIME_MS),
         };
         self.signed_list(self.identity(), &fits)?;
-        if self.kept_list().await?.as_ref() == Some(&list) {
+        // After a restore the host setting its list again, the same one included, ends the
+        // wait for it (`lw`): every counterparty that gets the lists is sent the list now.
+        let awaited = self.lists_await_host().await?;
+        if !awaited && self.kept_list().await?.as_ref() == Some(&list) {
             return Ok(ListsPublished::default());
         }
-        self.local_put(key::LIST, &list).await?;
+        // The change is owed to every counterparty that gets the lists from the commit that
+        // makes it until its message is queued (`Paykit::send_list`), so a failed queueing
+        // or a crash sends it at a later receive.
+        let mut tx = Tx::default();
+        tx.put(key::LIST, &list)?.delete(key::LISTS_AWAIT_HOST);
         let mut active = Vec::new();
-        for recipient in self.recipients().await? {
+        for mut recipient in self.recipients().await? {
             if recipient.active {
                 active.push(recipient.counterparty);
+                if !recipient.owed {
+                    recipient.owed = true;
+                    tx.put(&key::list_recipient(&recipient.counterparty), &recipient)?;
+                }
             }
         }
+        self.local_commit(tx).await?;
         self.know_deny_copy().await?;
         self.publish_to(&active, false, None).await
     }
@@ -662,6 +736,9 @@ impl Paykit {
             return Err(
                 Refusal::Usage("Paykit spec 8.4: a list goes to another identity".into()).into(),
             );
+        }
+        if self.lists_await_host().await? {
+            return Err(awaits_host_refusal().into());
         }
         self.refuse_held(counterparties).await?;
         self.publish_to(counterparties, false, None).await
@@ -878,6 +955,22 @@ impl Paykit {
         }))
     }
 
+    /// Whether, after a restore, the app's lists wait for the host to set its list again
+    /// ([`Paykit::set_list_endpoints`]): the list and the counterparties that get it are the
+    /// backup's, so a list change or a withdrawal made since is gone, and until then no list
+    /// but a withdrawal goes (Paykit spec 7.2, "What a restore loses"). The host shows it,
+    /// re-applies the user's withdrawals and sets the list.
+    ///
+    /// # Errors
+    ///
+    /// A store failure.
+    pub async fn lists_await_host(&self) -> Result<bool> {
+        Ok(self
+            .local_get::<bool>(key::LISTS_AWAIT_HOST)
+            .await?
+            .unwrap_or(false))
+    }
+
     /// Refuse a call that sends `counterparties` a list while sends to one of them are held
     /// ([`Paykit::list_held`]), with nothing sent to any.
     async fn refuse_held(&mut self, counterparties: &[[u8; 32]]) -> Result<()> {
@@ -928,10 +1021,24 @@ impl Paykit {
                 Err(error @ PaykitError::Client(AppError::Store(_) | AppError::Alarm(_))) => {
                     return Err(error);
                 }
-                Err(error) => out.not_sent.push(ListNotSent {
-                    counterparty: *counterparty,
-                    reason: error.to_string(),
-                }),
+                // Owed still, and tried again hourly for a day, then daily.
+                Err(error) => {
+                    if let Some(mut recipient) = self.recipient(counterparty).await? {
+                        let now = self.now();
+                        recipient.owed = !withdraw || recipient.owed;
+                        recipient.failed_since_ms = Some(
+                            recipient
+                                .failed_since_ms
+                                .map_or((now, now), |(first, _)| (first, now)),
+                        );
+                        self.local_put(&key::list_recipient(counterparty), &recipient)
+                            .await?;
+                    }
+                    out.not_sent.push(ListNotSent {
+                        counterparty: *counterparty,
+                        reason: error.to_string(),
+                    });
+                }
             }
         }
         self.run_releases().await?;
@@ -1003,11 +1110,18 @@ impl Paykit {
                 .collect(),
             used: false,
             asked: false,
+            restored: false,
         });
+        // The version is recorded, and the counterparty withdrawn from, before anything is
+        // queued; what is owed stays owed until the message is queued (below), so a failed
+        // queueing or a crash between the two sends a newer version at a later receive.
         recipient.active = !withdraw;
-        // A newer version answers every request owed, and supersedes a re-send.
-        recipient.owed = false;
-        recipient.resend = false;
+        if withdraw && recipient.withdrawn_at_ms.is_none() {
+            recipient.withdrawn_at_ms = Some(now);
+        }
+        if !withdraw {
+            recipient.withdrawn_at_ms = None;
+        }
         let mut tx = Tx::default();
         tx.put(&rkey, &recipient)?
             .put(key::LAST_VERSION, &version)?;
@@ -1019,6 +1133,24 @@ impl Paykit {
             return Err(error);
         }
         self.app.queue_signed(signed).await?;
+        // Queued: a newer version answers every request owed, once, and supersedes a re-send
+        // (Paykit spec 8.4); the versions those requests named count as answered.
+        if !withdraw {
+            recipient.owed = false;
+            recipient.resend = false;
+            recipient.requested = false;
+            let asking = std::mem::take(&mut recipient.asking);
+            for named in asking {
+                match recipient.versions.iter_mut().find(|o| o.version == named) {
+                    Some(o) => o.asked = true,
+                    None => recipient.named.push((named, now)),
+                }
+            }
+            let over = recipient.named.len().saturating_sub(MAX_NAMED);
+            recipient.named.drain(..over);
+        }
+        recipient.failed_since_ms = None;
+        self.local_put(&rkey, &recipient).await?;
         // Queued, the list goes at the next flush if this try fails.
         let _ = self.app.flush_message(&msg_id).await;
         Ok(SentList {
@@ -1087,14 +1219,33 @@ impl Paykit {
         let before = recipient.clone();
         let now = self.now();
         for offered in &mut recipient.versions {
-            if offered.fate != Fate::Pending || offered.accepted_at_ms.is_some() {
+            let open = matches!(offered.fate, Fate::Pending | Fate::Doubtful);
+            if !open || offered.accepted_at_ms.is_some() {
                 continue;
             }
-            match self.app.delivery(&offered.msg_id).await? {
+            let delivery = self.app.delivery(&offered.msg_id).await?;
+            // A version a restore brought back before it was seen delivered: the device the
+            // backup came from may have delivered it (a backup carries no sent messages, and
+            // the client's `MessageUndelivered` after a restore says only that this store
+            // never saw it accepted). Nothing short of its acceptance decides it: it is
+            // never given back, and stays Doubtful.
+            if offered.restored {
+                match delivery {
+                    Some(Delivery::Accepted { accepted_at_ms }) => {
+                        offered.accepted_at_ms = Some(accepted_at_ms);
+                        offered.fate = Fate::Pending;
+                    }
+                    Some(Delivery::Queued { .. }) => {}
+                    _ if undelivered.is_some() => offered.fate = Fate::Doubtful,
+                    _ => {}
+                }
+                continue;
+            }
+            match delivery {
                 Some(Delivery::Accepted { accepted_at_ms }) => {
                     offered.accepted_at_ms = Some(accepted_at_ms);
                 }
-                Some(Delivery::Failed { .. }) => offered.fate = Fate::Unreached,
+                Some(Delivery::Failed { .. }) => offered.fate = Fate::Refused,
                 Some(_) => {}
                 // Not in the outbox and never seen accepted: it never left, or the client gave
                 // it up undelivered. Past half the time the client keeps a sent message, with
@@ -1124,9 +1275,8 @@ impl Paykit {
                     };
                 }
             }
-            if offered.fate == Fate::Unreached
-                && before_fate(&before, offered.version) != Fate::Unreached
-            {
+            let given_back = |fate: Fate| !fate.payable();
+            if given_back(offered.fate) && !given_back(before_fate(&before, offered.version)) {
                 release_in(
                     &mut tx,
                     &Releases {
@@ -1181,7 +1331,7 @@ impl Paykit {
                 for offered in recipient
                     .versions
                     .iter()
-                    .filter(|o| !o.used && o.fate != Fate::Unreached)
+                    .filter(|o| !o.used && o.fate.payable())
                 {
                     release_in(
                         &mut tx,
@@ -1196,27 +1346,44 @@ impl Paykit {
                 continue;
             }
             let recipient = self.settled(recipient, Some(&undelivered)).await?;
-            // A withdrawal whose empty version didn't reach the counterparty, as when a
-            // restore's outbox lacks it, is owed while a version it held may still be paid:
-            // it goes again, held sends or not, at most once an hour.
-            let unreached = recipient
-                .current()
-                .is_some_and(|o| o.fate == Fate::Unreached);
-            let payable = recipient
-                .versions
-                .iter()
-                .any(|o| !o.endpoints.is_empty() && now < o.expires_at_ms);
-            let recent = recipient
-                .resent_at_ms
-                .is_some_and(|at| at <= now && now - at < RESEND_INTERVAL_MS);
-            if payee && !recipient.active && unreached && payable {
-                if !recent {
-                    withdrawals.push(recipient.counterparty);
+            // A withdrawal whose empty version may not have reached the counterparty (the
+            // client gave it up, it never left, or a restore brought it back unseen) is owed
+            // while a version it may hold can still be paid: it goes again, held sends or
+            // not, hourly for a day from the withdrawal, then daily. One the switch refused
+            // for good isn't sent again.
+            if !recipient.active {
+                if let Some(current) = recipient.current() {
+                    let payable = recipient.versions.iter().any(|o| {
+                        !o.endpoints.is_empty() && o.fate.payable() && now < o.expires_at_ms
+                    });
+                    let first = recipient.withdrawn_at_ms.unwrap_or(current.published_at_ms);
+                    let last = recipient
+                        .resent_at_ms
+                        .map_or(current.published_at_ms, |at| {
+                            at.max(current.published_at_ms)
+                        });
+                    if payee
+                        && current.fate.maybe_unreached()
+                        && payable
+                        && retry_due(first, last, now)
+                    {
+                        withdrawals.push(recipient.counterparty);
+                    }
                 }
                 continue;
             }
             let due = recipient.current().is_some_and(|o| renewal_due(o, now));
-            let waits = recipient.owed || recipient.requested || recipient.resend || due;
+            // The newest version didn't reach the counterparty: what it carried is owed.
+            let lost = recipient
+                .current()
+                .is_some_and(|o| o.fate == Fate::Unreached);
+            // An owed version that failed to go for a reason other than the store, such as
+            // the size bound, is tried again hourly for a day, then daily.
+            let failing = recipient
+                .failed_since_ms
+                .is_some_and(|(first, last)| !retry_due(first, last, now));
+            let waits = (recipient.owed || lost || recipient.requested || recipient.resend || due)
+                && !failing;
             if payee && recipient.active && waits {
                 waiting.push(recipient);
             }
@@ -1237,13 +1404,22 @@ impl Paykit {
             return Ok(withdrawn);
         }
         // A counterparty whose sends are held keeps what it waits for, uncounted, until a
-        // read shows it not blocked.
+        // read shows it not blocked. After a restore every list waits for the host
+        // (`lw`), withdrawals aside: the list and the counterparties are the backup's.
         self.know_deny_copy().await?;
+        let awaits_host = self.lists_await_host().await?;
         let mut blocked = Vec::new();
         let mut owed = Vec::new();
         let mut resend = Vec::new();
         let mut tx = Tx::default();
         for mut recipient in waiting {
+            if awaits_host {
+                blocked.push(ListNotSent {
+                    counterparty: recipient.counterparty,
+                    reason: awaits_host_refusal().to_string(),
+                });
+                continue;
+            }
             if let Some(refusal) = self.list_held(&recipient.counterparty).await? {
                 blocked.push(ListNotSent {
                     counterparty: recipient.counterparty,
@@ -1277,7 +1453,10 @@ impl Paykit {
                 tx.put(&rkey, &recipient)?;
             }
             let due = recipient.current().is_some_and(|o| renewal_due(o, now));
-            if recipient.owed || due {
+            let lost = recipient
+                .current()
+                .is_some_and(|o| o.fate == Fate::Unreached);
+            if recipient.owed || lost || due {
                 owed.push(recipient.counterparty);
             } else if let (true, Some(current)) = (recipient.resend, recipient.current()) {
                 // The newest goes again at most once an hour; a request within it gets none.
@@ -1350,6 +1529,14 @@ fn overtaken(accepted: &[(u64, u64)], version: u64, at: u64) -> bool {
     accepted.iter().any(|(v, t)| *v > version && *t < at)
 }
 
+/// The refusal of a list while, after a restore, the lists wait for the host
+/// ([`Paykit::lists_await_host`]).
+fn awaits_host_refusal() -> Refusal {
+    Refusal::NotNow(
+        "Paykit spec 7.2: after a restore no list goes until the host sets its list again".into(),
+    )
+}
+
 /// The fate `version` had in `before`; `Pending` for one it didn't hold.
 fn before_fate(before: &Recipient, version: u64) -> Fate {
     before
@@ -1374,6 +1561,7 @@ mod tests {
             endpoints: BTreeMap::new(),
             used: false,
             asked: false,
+            restored: false,
         }
     }
 
@@ -1459,12 +1647,26 @@ mod tests {
     }
 
     #[test]
+    fn test_publish_retry_hourly_for_a_day_then_daily() {
+        let hour = RESEND_INTERVAL_MS;
+        assert!(!retry_due(0, 0, hour - 1));
+        assert!(retry_due(0, 0, hour));
+        assert!(!retry_due(0, 23 * hour, 24 * hour - 1));
+        // Past the first day from the first try, daily.
+        assert!(!retry_due(0, 24 * hour, 25 * hour));
+        assert!(!retry_due(0, 24 * hour, 48 * hour - 1));
+        assert!(retry_due(0, 24 * hour, 48 * hour));
+        // A last try ahead of the clock counts as just now.
+        assert!(!retry_due(0, 10 * hour, 5 * hour));
+    }
+
+    #[test]
     fn test_publish_restore_binds_each_value_to_its_key() {
         let value = state::encode(&recipient()).unwrap();
-        assert_eq!(
+        assert!(matches!(
             check_at(&key::list_recipient(&[3; 32]), &value).unwrap(),
-            Restored::Newest(1_000)
-        );
+            Restored::Newest { newest: 1_000, .. }
+        ));
         assert!(check_at(&key::list_recipient(&[4; 32]), &value).is_err());
         let value = state::encode(&releases()).unwrap();
         let at = |counterparty: [u8; 32], version| key::releases(&counterparty, version);
