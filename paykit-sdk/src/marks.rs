@@ -717,7 +717,7 @@ impl Paykit {
         // One commit per counterparty, so the bound on marks counts each mark already put; the
         // widening goes last, so a failure part way applies it again, which changes nothing.
         // A restore's widening runs to the time it is applied (`TO_NOW`), at least to its
-        // start; a `missed` item's keeps its own end.
+        // start; a `missed` item's keeps the item's end.
         let now = self.service_time().unwrap_or_else(|| self.now());
         for (_, window) in &widenings {
             let until = if window.until_ms == BlockedWindow::TO_NOW {

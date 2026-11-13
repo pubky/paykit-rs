@@ -779,18 +779,12 @@ impl Protocol for PaykitProtocol {
             local_write(key::MISSED_UNLISTED, &true)?,
             // What a blocked counterparty's inbox accepted among the missed entries is asked
             // for once it is unblocked: every counterparty the deny list holds at the next
-            // read of the lists is marked for the item's times (`marks.rs`). An item that
-            // gives no end (`u64::MAX`, kept owed by an older build) runs to that read, as
-            // the missed hold reads it unbounded: an unknown end never narrows the window.
+            // read of the lists is marked for the item's times (`marks.rs`).
             local_write(
                 &key::blocked_widening(missed.accepted_from_ms),
                 &crate::marks::BlockedWindow {
                     from_ms: missed.accepted_from_ms,
-                    until_ms: if missed.accepted_until_ms == u64::MAX {
-                        crate::marks::BlockedWindow::TO_NOW
-                    } else {
-                        missed.accepted_until_ms
-                    },
+                    until_ms: missed.accepted_until_ms,
                 },
             )?,
             LocalWrite::DeletePrefix {
@@ -1082,23 +1076,15 @@ mod receive_tests {
     }
 
     #[test]
-    fn test_missed_widening_runs_to_the_read_when_the_item_gives_no_end() {
-        let bounded = MissedEntries {
+    fn test_missed_widening_keeps_the_items_times() {
+        let missed = MissedEntries {
             seq: 1,
             entries: 1,
             accepted_from_ms: 10,
             accepted_until_ms: 20,
         };
-        assert_eq!(widening(&bounded)["d"]["until_ms"], 20);
-        // No end known: it runs to the read that applies it, never to its start alone.
-        let unbounded = MissedEntries {
-            accepted_until_ms: u64::MAX,
-            ..bounded
-        };
-        assert_eq!(
-            widening(&unbounded)["d"]["until_ms"],
-            crate::marks::BlockedWindow::TO_NOW
-        );
+        assert_eq!(widening(&missed)["d"]["from_ms"], 10);
+        assert_eq!(widening(&missed)["d"]["until_ms"], 20);
     }
 
     fn protocol_of(own: &Party) -> PaykitProtocol {
