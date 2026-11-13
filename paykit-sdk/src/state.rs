@@ -53,7 +53,7 @@
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `kw/<sender>` | a mark of a sender's entries the client dropped while they waited for a scope key, as `pd/` holds, with the data epochs they waited for; it asks only while the app holds every key of those epochs (`marks.rs`) | |
-//! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply to a request the app holds no record of yet, kept until it does (`receive.rs`) | |
+//! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply to a request the app holds no record of yet, kept until it does, or a receipt for a payer record the app holds but can't read, kept until it reads (`receive.rs`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing, since a dropped entry's time is already in its sender's mark | |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, with the entry's ID and message hash, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
 
@@ -590,7 +590,8 @@ impl sealed::Sealed for KeptMessage {}
 /// - At `pr/<sender>/<record key>/<msg_id>`, a payer's acceptance, rejection, cancellation
 ///   or proof its inbox accepted, from that sender and of that `msg_id`, kept under the
 ///   record key of this app's payee record of the request it names first, under its label
-///   (Switch spec 8.2, Paykit spec 8.1).
+///   (Switch spec 8.2, Paykit spec 8.1); or a `paykit.payment_receipt`, kept under the
+///   record key of the payer's record it names ([`crate::receive::receipt_target`]).
 /// - At `lh/<record key>`, a `paykit.private_payment_list`, kept under the record key of its
 ///   payee app's `payment_lists` record, from its sender and App ID (Paykit wire 5.4).
 impl Stored for KeptMessage {
@@ -632,6 +633,22 @@ impl Stored for KeptMessage {
                     natural_key::request_record(&binder.own, &first()?),
                     message.body().label(),
                 );
+                (target.record_target(), record)
+            }
+            // A receipt kept for the payer's record it names, which didn't read.
+            (
+                StateKey::KeptReply {
+                    sender,
+                    record,
+                    msg_id,
+                },
+                Body::PaymentReceipt(receipt),
+            ) if message.sender() == *sender
+                && message.message().msg_id == *msg_id
+                && message.accepted_at().is_some() =>
+            {
+                let target =
+                    crate::receive::receipt_target(&message, &binder.own, &receipt.attempt_id);
                 (target.record_target(), record)
             }
             (StateKey::HeldList(record_key), Body::PrivatePaymentList(_)) => (

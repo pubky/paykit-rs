@@ -130,7 +130,8 @@ pub(crate) enum GivenUpOrigin {
     /// bounds of Switch spec 8.2: it was never processed, so a copy its sender sends again is
     /// taken as a new message.
     KeyWait,
-    /// A payer's reply kept for its record (`pr/`) was given up.
+    /// A payer's reply kept for its record, or a receipt kept for a payer record that
+    /// didn't read (`pr/`), was given up.
     KeptReply,
     /// This app's own rejection or payer's cancellation, recorded while sends to the payee
     /// were held (`ha/`), passed its replay window unsent.

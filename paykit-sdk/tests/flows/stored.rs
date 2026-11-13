@@ -1661,3 +1661,142 @@ async fn test_stored_key_wait_mark_and_notice_carried_through_a_restore() {
     );
     assert_eq!(wallet.notices().await.unwrap(), notices);
 }
+
+/// How alice's payer record of bob's request can't be read when his receipt comes.
+#[derive(Clone, Copy, Debug)]
+enum Unread {
+    /// Its value doesn't read as an activity record.
+    Value,
+    /// Its value doesn't open with the key the wallet holds.
+    Sealed,
+}
+
+/// Bob's receipt for alice's open attempt comes while her wallet holds the payer record of
+/// the request but can't read it (`unread`): the receipt is kept, never taken with no
+/// effect, nothing is held on the feed, and the attempt stays open. Once the phone writes
+/// the record back, a later write of the wallet's settles the attempt by the receipt, as
+/// its first read would have (Paykit spec 8.1, "Stored entries"; Switch spec 10.2). With
+/// `reads` false the record never reads again: 30 days after its acceptance the receipt is
+/// given up, and a notice tells the host.
+async fn receipt_over_unread_record(unread: Unread, reads: bool) {
+    let w = World::new();
+    let store = Arc::new(crate::outcome_record::NoSeenMarks::default());
+    let mut wallet = w
+        .wallet_on(
+            "wallet",
+            Arc::clone(&store) as Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let attempt_id = pending(&w, &mut wallet, &request).await;
+    phone.receive(None).await.unwrap();
+    let target = crate::outcome_record::payer_record(&request);
+    let key = phone.app().record_key(&target).unwrap();
+    let good = phone
+        .app()
+        .shared_record(&key)
+        .await
+        .unwrap()
+        .unwrap()
+        .content
+        .value()
+        .unwrap()
+        .to_vec();
+    store.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    match unread {
+        Unread::Value => {
+            crate::outcome_record::phone_writes(
+                &mut phone,
+                &request,
+                Some(crate::outcome_record::INVALID),
+            )
+            .await;
+        }
+        Unread::Sealed => {
+            // The data epoch rotates, and the phone takes the new epoch's key first. Its
+            // write, sealed at that epoch under another key, waits at the wallet for the
+            // key, then doesn't open with it.
+            w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+            crate::unrequested::store_bundle(&w, phone.app_id(), &phone.app().cert().clone());
+            phone.receive(None).await.unwrap();
+            let (_, kind) = phone
+                .app_mut()
+                .record_op(&target, Some(&good), Vec::new())
+                .await
+                .unwrap();
+            let pubky_switch_core::ops::OpKind::RecordPut(mut put) = kind else {
+                panic!("a record write");
+            };
+            put.value_sealed = pubky_switch_core::sealed::SealedValue::seal(
+                &[3; 32],
+                &w.alice_id(),
+                phone.app().data_epoch(),
+                &target.collection.policy.read_scope,
+                &put.key,
+                &good,
+            )
+            .unwrap();
+            w.alice
+                .switch()
+                .app_op(
+                    &w.alice.identity().app_keys("phone"),
+                    pubky_switch_core::ops::OpKind::RecordPut(put),
+                )
+                .unwrap();
+            wallet.receive(None).await.unwrap();
+            crate::unrequested::store_bundle(&w, wallet.app_id(), &wallet.app().cert().clone());
+        }
+    }
+    wallet.receive(None).await.unwrap();
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    match unread {
+        Unread::Value => assert_eq!(held.content.value(), Some(crate::outcome_record::INVALID)),
+        Unread::Sealed => assert_eq!(
+            held.content,
+            pubky_switch_client::app::RecordContent::Unreadable(
+                pubky_switch_client::app::Unopened::DoesNotOpen
+            )
+        ),
+    }
+    receipt_of_another_proof(&w, &wallet, &request, attempt_id);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(kept(&wallet, "pr/").await.len(), 1, "{unread:?}");
+    assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
+    assert_eq!(outcome_of(&mut wallet, attempt_id).await, Outcome::Open);
+    assert!(wallet.notices().await.unwrap().is_empty());
+
+    if !reads {
+        w.clock.advance_ms(31 * DAY_MS);
+        wallet.receive(None).await.unwrap();
+        assert!(kept(&wallet, "pr/").await.is_empty(), "{unread:?}");
+        let notices = wallet.notices().await.unwrap();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+        assert_eq!(notices[0].counterparty, w.bob_id());
+        return;
+    }
+    phone.receive(None).await.unwrap();
+    crate::outcome_record::phone_writes(&mut phone, &request, Some(&good)).await;
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(kept(&wallet, "pr/").await.is_empty(), "{unread:?}");
+    assert_eq!(outcome_of(&mut wallet, attempt_id).await, Outcome::Done);
+}
+
+#[tokio::test]
+async fn test_stored_receipt_over_a_record_value_that_doesnt_read_kept_until_it_reads() {
+    receipt_over_unread_record(Unread::Value, true).await;
+}
+
+#[tokio::test]
+async fn test_stored_receipt_over_a_record_that_never_reads_given_up_with_a_notice() {
+    receipt_over_unread_record(Unread::Value, false).await;
+}
+
+#[tokio::test]
+async fn test_stored_receipt_over_a_record_that_doesnt_open_kept_until_it_reads() {
+    receipt_over_unread_record(Unread::Sealed, true).await;
+}
