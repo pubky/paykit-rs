@@ -623,7 +623,8 @@ impl Paykit {
 
     /// Where `stored`, a message naming `request`, goes now that `record`, the request record
     /// at `target`, is held: the one rule of the later writes, a stored entry's and a message
-    /// kept before its record (`pr/`), as the receive step decides it. The period it names
+    /// kept before its record (`pr/`), as the receive step decides it. A message from anyone
+    /// but the record's counterparty is [`PeriodPlace::Invalid`]. The period it names
     /// is checked against the request ([`crate::receive::period_or_request`]); details go
     /// only where the payer stores them ([`crate::periods::stores_details`]), and are taken
     /// with no effect only once the copy of the payer's records lacks none; a proof naming
@@ -636,6 +637,11 @@ impl Paykit {
         stored: &StoredMessage,
         request: &[u8; 32],
     ) -> Result<PeriodPlace> {
+        // Only the record's counterparty writes into it or its period records: a message from
+        // anyone else is no update of this activity, and goes nowhere.
+        if record.counterparty != stored.sender() {
+            return Ok(PeriodPlace::Invalid);
+        }
         let own = self.identity();
         let Some(into) = crate::receive::period_or_request(&own, target, record, stored, request)
         else {
