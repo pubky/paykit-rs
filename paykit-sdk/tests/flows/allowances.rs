@@ -4614,3 +4614,176 @@ async fn test_allowances_second_end_over_an_unreadable_record_dropped_for_the_bo
         Some(ended)
     );
 }
+
+#[tokio::test]
+async fn test_allowances_owed_end_naming_another_end_is_corrupt() {
+    // The owed mark of the keeper's crossing end, read back naming another `msg_id` than the
+    // end its record holds, is state no writer leaves: the receive fails as a corrupt store,
+    // and the mark is neither dropped nor taken as sent.
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(keeper(&w)).await;
+    let (_, mine) = Box::pin(crossing_while_held(
+        &w,
+        &mut shop,
+        &mut wallet,
+        SendsHeld::Blocked,
+    ))
+    .await;
+    let (key, value) = wallet.app().protocol_scan(b"eo/").await.unwrap().remove(0);
+    let mut owed: Value = serde_json::from_slice(&value).unwrap();
+    owed["d"]["msg_id"] = json!("0d6f5b9e-3c1a-4e8b-9f2d-7a4c1e5b8d30");
+    wallet
+        .app_mut()
+        .protocol_commit(&[LocalWrite::Put {
+            key: key.clone(),
+            value: serde_json::to_vec(&owed).unwrap(),
+        }])
+        .await
+        .unwrap();
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    let error = wallet.receive(None).await.unwrap_err();
+    assert!(error.to_string().contains("corrupt"), "{error:?}");
+    assert_eq!(wallet.app().protocol_scan(b"eo/").await.unwrap().len(), 1);
+    assert!(Box::pin(ends_naming_both(&wallet, &mine)).await);
+}
+
+/// As [`World::inject`], with `msg_id` as the message's ID.
+#[allow(clippy::too_many_arguments)]
+fn inject_with_id(
+    w: &World,
+    signer: &pubky_switch_client::testing::TestSigner,
+    app: &str,
+    targets: &[[u8; 16]],
+    kind: &str,
+    refs: Vec<[u8; 32]>,
+    body: Value,
+    msg_id: &str,
+) {
+    let keys = signer.identity().app_keys(app);
+    let cert = signer.switch().app(&keys.app_id_bytes()).cert.unwrap();
+    let mut message = pubky_switch_core::message::Message::new(
+        kind,
+        pubky_switch_core::message::Sender::of_app(signer.identity().public(), &keys),
+        w.alice.identity().public(),
+        w.clock.now_ms(),
+        refs,
+        body.as_object().cloned().unwrap(),
+    )
+    .unwrap();
+    message.msg_id = msg_id.to_owned();
+    let plaintext = message.sign(&keys).unwrap();
+    w.alice
+        .switch()
+        .send_plaintext(signer.identity().public(), &cert, &plaintext, targets)
+        .unwrap();
+}
+
+/// Carol's app `shop`, holding `request` and `allowance`, which alice's `wallet` admits.
+async fn carol_admitted(w: &World, wallet: &mut Paykit) -> Paykit {
+    wallet.app_mut().invite(&w.carol_id()).await.unwrap();
+    let mut carol = w
+        .join(
+            &w.carol,
+            "shop",
+            AppScopes::new().request().allowance().build().unwrap(),
+        )
+        .await;
+    carol.app_mut().invite(&w.alice_id()).await.unwrap();
+    carol
+}
+
+#[tokio::test]
+async fn test_allowances_two_senders_ends_with_one_msg_id_kept_apart() {
+    // Carol's end under the ID of bob's Allowance, with the `msg_id` bob's end will carry,
+    // comes first. A message is its sender's and its `msg_id` (Switch spec 8.2): her stop is
+    // under her own record key, and bob's end, with the same `msg_id`, ends his Allowance.
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(wallet(&w)).await;
+    let _carol = Box::pin(carol_admitted(&w, &mut wallet)).await;
+    let (theirs, mine) = Box::pin(proposed(&w, &mut shop, &mut wallet)).await;
+    wallet.accept_allowance(&mine).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let record = AllowanceRecord::read(
+        &serde_json::to_vec(&Box::pin(value(&wallet, &mine)).await).unwrap(),
+        &w.alice_id(),
+    )
+    .unwrap();
+    let id = "0d6f5b9e-3c1a-4e8b-9f2d-7a4c1e5b8d30";
+    let refs = vec![
+        record.proposal.hash(),
+        record.response.as_ref().unwrap().hash(),
+    ];
+    let body = json!({ "allowance_id": record.allowance_id.as_str() });
+    w.clock.advance_ms(1);
+    inject_with_id(
+        &w,
+        &w.carol,
+        "shop",
+        &[wallet.app_id()],
+        "paykit.allowance_end",
+        refs.clone(),
+        body.clone(),
+        id,
+    );
+    w.clock.advance_ms(1);
+    inject_with_id(
+        &w,
+        &w.bob,
+        "shop",
+        &[wallet.app_id()],
+        "paykit.allowance_end",
+        refs,
+        body,
+        id,
+    );
+    let got = wallet.receive(None).await.unwrap();
+    let ends = got
+        .report
+        .events
+        .iter()
+        .filter(|e| matches!(e, AppEvent::MessageReceived { kind, .. } if kind == "paykit.allowance_end"))
+        .count();
+    assert_eq!(ends, 2, "{got:?}");
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Ended
+    );
+    assert_eq!(
+        Box::pin(recorded_end(&w, &wallet, &mine)).await,
+        Some(id.to_owned())
+    );
+    let _ = theirs;
+    assert_eq!(Box::pin(stops(&wallet)).await, 1);
+    assert!(!Box::pin(keeps_end_at(&wallet, &mine)).await);
+}
+
+#[tokio::test]
+async fn test_allowances_two_senders_answers_with_one_msg_id_kept_apart() {
+    // Bob's and carol's acceptances of proposals the wallet holds no record of, under one
+    // Allowance ID and one `msg_id`, are two messages: each is kept before its record, under
+    // its sender (Switch spec 8.2; Paykit spec 8.1).
+    let w = World::new();
+    let shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(wallet(&w)).await;
+    let _carol = Box::pin(carol_admitted(&w, &mut wallet)).await;
+    let id = "0d6f5b9e-3c1a-4e8b-9f2d-7a4c1e5b8d30";
+    let body = json!({ "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4" });
+    for signer in [&w.bob, &w.carol] {
+        w.clock.advance_ms(1);
+        inject_with_id(
+            &w,
+            signer,
+            "shop",
+            &[wallet.app_id()],
+            "paykit.allowance_acceptance",
+            vec![[7; 32]],
+            body.clone(),
+            id,
+        );
+    }
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"pr/").await.unwrap().len(), 2);
+    drop(shop);
+}

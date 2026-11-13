@@ -1099,9 +1099,12 @@ impl Paykit {
     /// client's `queue_stored`, and drop the mark after it (Paykit spec 8.1, "Blocked
     /// counterparties"; 8.3, "Ending"). A mark stays while sends to the counterparty are held,
     /// or while its record isn't held as a value that reads and binds. One whose record is
-    /// held as deleted, or doesn't hold that end of this app's, goes with nothing sent: no
-    /// record holds the end to send; so does one whose Allowance is conflicted by then, in the
-    /// record or as a kept stop, for which nothing is sent. As a message queued again from its
+    /// held as deleted goes with nothing sent: no record holds the end to send; so does one
+    /// whose Allowance is conflicted by then, in the record or as a kept stop, for which
+    /// nothing is sent. A mark over a record that reads and binds without that end of this
+    /// app's is a corrupt store: the mark is written in the batch that records the end, and
+    /// the client keeps an end the app has seen against any later write (Switch spec 8.2), so
+    /// no writer leaves it so, and dropping it would leave the counterparty without the end. As a message queued again from its
     /// record it goes only until 30 days after its `created_at`, less the clock tolerance
     /// (Paykit spec 8.3, "Ending"; 7.2, "What a restore loses"): one the client refuses for
     /// good past that is neither sent nor told, as at a restore's re-send
@@ -1130,8 +1133,7 @@ impl Paykit {
                     && end.message().from.app_id == app_id
             });
             let Some(end) = end else {
-                Box::pin(self.local_delete(&mark)).await?;
-                continue;
+                return Err(PaykitError::corrupt());
             };
             // Nothing is sent for a conflicted Allowance (Paykit spec 8.3, "Conflicted"), as
             // a restore's re-send sends nothing for one: the conflict ended it on both sides.
