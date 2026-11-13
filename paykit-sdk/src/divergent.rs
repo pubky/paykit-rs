@@ -2076,7 +2076,7 @@ mod tests {
         // Over a record that reads, the counterparty's message: past the cap, another
         // sender's goes, never the counterparty's.
         let mut kept: Vec<StoredMessage> = (0..KEPT_OTHERS).map(|_| reply(&alice)).collect();
-        kept.extend(others.iter().take(KEPT_CAP - KEPT_OTHERS).map(|o| reply(o)));
+        kept.extend(others.iter().take(KEPT_CAP - KEPT_OTHERS).map(&reply));
         assert_eq!(kept.len(), KEPT_CAP);
         let new = reply(&alice);
         let (keep, gone) = kept_after(&kept, &new, true);
@@ -2088,7 +2088,7 @@ mod tests {
         // Over a record that doesn't read: past the cap, the earliest of the sender keeping
         // the most goes, the role's first aside.
         let mut kept: Vec<StoredMessage> = (0..3).map(|_| reply(&alice)).collect();
-        kept.extend(others.iter().take(KEPT_CAP - 3).map(|o| reply(o)));
+        kept.extend(others.iter().take(KEPT_CAP - 3).map(&reply));
         assert_eq!(kept.len(), KEPT_CAP);
         let new = reply(&others[KEPT_CAP - 3]);
         let (keep, gone) = kept_after(&kept, &new, false);
