@@ -1541,14 +1541,10 @@ async fn test_divergent_kept_list_written_before_a_payment_to_it() {
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
 
-/// The client's durable divergence report (pubky/pubky-switch#180):
-/// `AppEvent::RecordDivergent { id, key }` is a duty event, delivered until acknowledged, kept
-/// through a restart and a cleared flag, and raised again under a new ID after a restore;
-/// `ScriptedSwitch::make_divergent` makes a record divergent at the switch, as a conflicting
-/// upload does. These tests switch on with the pin that holds it: build them with
-/// `RUSTFLAGS="--cfg switch_durable_divergence"`; the pin move drops the cfg. Paykit is not
-/// released on a pin without them.
-#[cfg(switch_durable_divergence)]
+/// The client's durable divergence report: `AppEvent::RecordDivergent { id, key }` is a duty
+/// event, delivered until acknowledged, kept through a restart and a cleared flag, and raised
+/// again under a new ID after a restore; `ScriptedSwitch::make_divergent` makes a record
+/// divergent at the switch, as a conflicting upload does.
 mod durable_event {
     use super::*;
 

@@ -62,21 +62,13 @@
 //!   decides nothing.
 //!
 //! **Seen at every read.** A view is taken wherever the SDK reads a record to act on it, in
-//! the receive step with the cursor move and in its calls; at every receive, each record the
-//! client reported divergent (`RecordDivergent`) is marked, as the client saw it so even if
-//! a later write in the same read cleared it; and at a load, every record held is looked at
-//! once, so a flag a crash left before the receive's events were taken still pauses. The
-//! report is taken as a duty event too, at its first sight, with a mark.
-//!
-//! **Condition for release.** The client at the current pin raises `RecordDivergent` in
-//! memory only: a record that goes divergent and is cleared within one read, followed by a
-//! crash before the read's events are taken, leaves no pause. This is closed only by the
-//! client's durable report (pubky/pubky-switch#180: `AppEvent::RecordDivergent { id, key }`
-//! as a duty event, delivered until acknowledged, kept through a restart and a cleared flag,
-//! raised again under a new ID after a restore). This module is not released on a pin
-//! without it. Its duty-event arm is written against that interface, and the flow tests
-//! that drive the event are built only with `--cfg switch_durable_divergence`, on a pin
-//! that holds #180.
+//! the receive step with the cursor move and in its calls. The client's report that a view
+//! showed a record divergent (`AppEvent::RecordDivergent`) is a duty event, delivered until
+//! acknowledged, through a restart and a flag cleared since: each receive takes it by the
+//! record's key, never by its ID, and marks the record whatever its view shows now, in a
+//! commit before the one that counts the event taken, so it is acknowledged only once the
+//! mark is kept. A second event for one divergence, as a restore raises under a new ID,
+//! changes nothing. At a load, every record held is looked at once too.
 //!
 //! **Restore.** A backup carries the marks and the kept writes. A restore installs every
 //! mark unconfirmed, a confirmation given before it included: the restored app pauses each
@@ -92,7 +84,7 @@ use paykit_lib::derive::natural_key;
 use paykit_lib::records::StoredMessage;
 use paykit_lib::Body;
 use pubky_switch_client::app::{
-    AppEvent, ReceiveContext, RecordContent, RecordTarget, SharedRecord, UserConfirmed,
+    ReceiveContext, RecordContent, RecordTarget, SharedRecord, UserConfirmed,
 };
 use pubky_switch_core::enc::serde_b64;
 use pubky_switch_core::ops::RecordVersion;
@@ -1066,21 +1058,11 @@ impl Paykit {
             .await
     }
 
-    /// The marks every record the client reported divergent (`RecordDivergent` in `events`)
-    /// sets: a view showed it so, whatever its view shows now.
-    pub(crate) async fn take_divergent_events(&mut self, events: &[AppEvent]) -> Result<()> {
-        for event in events {
-            if let AppEvent::RecordDivergent { key: record, .. } = event {
-                self.take_divergent_event(record).await?;
-            }
-        }
-        Ok(())
-    }
-
-    /// The mark the client's report that `record` was seen divergent sets: a view showed it
-    /// so, whatever its view shows now. Taking it again changes nothing, so the report may
-    /// come both as a duty event, at first sight, and in a read's events. A mark that
-    /// doesn't point to its record is left as it is ([`Marked::Mismatch`]).
+    /// The mark the client's report that `record` was seen divergent sets, a duty event
+    /// (`AppEvent::RecordDivergent`): a view showed it so, whatever its view shows now.
+    /// Taking it again changes nothing, so a report delivered twice, or raised again under a
+    /// new ID after a restore, asks nothing twice. A mark that doesn't point to its record
+    /// is left as it is ([`Marked::Mismatch`]).
     pub(crate) async fn take_divergent_event(&mut self, record: &[u8; 32]) -> Result<()> {
         let (marked, Some(view)) = self.mark_and_view(record).await? else {
             return Ok(());

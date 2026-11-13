@@ -708,14 +708,11 @@ impl Paykit {
         let duties = Box::pin(self.app.unacknowledged_events()).await?;
         let account_gone =
             account_gone(&report.events) || (report.stopped && account_gone(&duties));
-        // The duty events about stored entries are taken before anything returns, so that
-        // once the host acknowledges what this report showed none is lost: only the SDK's
-        // own marks and notes are kept here, and nothing is written at the switch
-        // (`stored.rs`).
+        // The duty events about stored entries and divergent records are taken before
+        // anything returns, so that once the host acknowledges what this report showed none
+        // is lost: only the SDK's own marks and notes are kept here, and nothing is written at
+        // the switch (`stored.rs`, `divergent.rs`).
         Box::pin(self.take_stored_events(&duties)).await?;
-        // Every record the read showed divergent is paused, whatever its view shows now: only
-        // the SDK's own marks are written (`divergent.rs`).
-        Box::pin(self.take_divergent_events(&report.events)).await?;
         // A `missed` item the read took holds the open requests from a time on
         // (`hold.rs`), bounded now that the read verified the service time.
         Box::pin(self.bound_missed_hold()).await?;

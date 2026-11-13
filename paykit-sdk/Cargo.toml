@@ -30,8 +30,3 @@ paykit-sdk = { path = ".", features = ["test-support"] }
 pubky-switch-client = { workspace = true, features = ["test-support"] }
 pubky-switch-core = { workspace = true, features = ["test-vectors"] }
 tokio = { version = "1", features = ["macros", "rt", "time"] }
-
-[lints.rust]
-# The flow tests that drive the client's durable `RecordDivergent` duty event build only on
-# a pin that holds pubky/pubky-switch#180, with `--cfg switch_durable_divergence`.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(switch_durable_divergence)"] }
