@@ -4295,8 +4295,15 @@ enum RecordWhile {
 /// due. Once the phone writes the record back, the wallet asks bob to send again, once,
 /// from the mark's earliest time, after he is unblocked when `blocked`, and the copy the
 /// shop sends again is stored; with nothing dropped, nothing is asked and the kept details
-/// are stored (Paykit spec 8.1, "Replies before their record"; Paykit spec 9).
-async fn details_dropped_for_the_bounds(record_while: RecordWhile, more: usize, blocked: bool) {
+/// are stored. With `february`, the wallet holds February's period record of bob's
+/// throughout, which reads and makes no mark due: only a request's record does (Paykit
+/// spec 8.1, "Replies before their record"; Paykit spec 9).
+async fn details_dropped_for_the_bounds(
+    record_while: RecordWhile,
+    more: usize,
+    blocked: bool,
+    february: bool,
+) {
     let w = World::new();
     let mut wallet = w
         .join_with(
@@ -4311,6 +4318,19 @@ async fn details_dropped_for_the_bounds(record_while: RecordWhile, more: usize, 
     let mut phone = w.wallet("phone").await;
     let mut shop = w.shop().await;
     let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    // February's details, stored: a period record of bob's the wallet holds, which reads.
+    let mut february_details = None;
+    if february {
+        let sent = shop
+            .send_period_details(
+                &sale,
+                details(month(1), "lnbc1feb", w.clock.now_ms() + DAY_MS),
+            )
+            .await
+            .unwrap();
+        wallet.receive(None).await.unwrap();
+        february_details = Some(sent.msg_id);
+    }
     phone.receive(None).await.unwrap();
     let target = payer_request_at(&request);
     let held = phone.app_mut().read_record(&target).await.unwrap().unwrap();
@@ -4379,6 +4399,9 @@ async fn details_dropped_for_the_bounds(record_while: RecordWhile, more: usize, 
         assert_eq!(marks[0]["due"], json!(false), "{record_while:?}");
         assert_eq!(marks[0]["earliest_ms"], json!(first_at), "{record_while:?}");
     }
+    // No record of the request reads yet, a period record of bob's included: nothing is
+    // asked.
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
     if blocked {
         wallet.block(&w.bob_id()).await.unwrap();
     }
@@ -4416,22 +4439,29 @@ async fn details_dropped_for_the_bounds(record_while: RecordWhile, more: usize, 
     // Once: a later receive asks nothing more.
     assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
     let view = wallet.request(&request).await.unwrap();
-    let stored: Vec<&str> = view
+    let mut stored: Vec<&str> = view
         .periods
         .iter()
         .flat_map(|p| p.details.iter().map(|d| d.msg_id.as_str()))
         .collect();
-    assert_eq!(
-        stored,
-        [first.msg_id.as_str()],
-        "{record_while:?}: {view:?}"
-    );
+    stored.sort_unstable();
+    let mut expected: Vec<&str> = std::iter::once(first.msg_id.as_str())
+        .chain(february_details.as_deref())
+        .collect();
+    expected.sort_unstable();
+    assert_eq!(stored, expected, "{record_while:?}: {view:?}");
 }
 
 #[tokio::test]
 async fn test_periods_details_dropped_for_the_bounds_before_their_record_asked_again() {
     // The driver's future goes on the heap: it drives four apps through a restore.
-    Box::pin(details_dropped_for_the_bounds(RecordWhile::Gone, 64, false)).await;
+    Box::pin(details_dropped_for_the_bounds(
+        RecordWhile::Gone,
+        64,
+        false,
+        false,
+    ))
+    .await;
 }
 
 #[tokio::test]
@@ -4440,13 +4470,20 @@ async fn test_periods_details_dropped_for_the_bounds_over_an_unreadable_record_a
         RecordWhile::Unreadable,
         64,
         false,
+        false,
     ))
     .await;
 }
 
 #[tokio::test]
 async fn test_periods_details_within_the_bounds_before_their_record_none_dropped() {
-    Box::pin(details_dropped_for_the_bounds(RecordWhile::Gone, 63, false)).await;
+    Box::pin(details_dropped_for_the_bounds(
+        RecordWhile::Gone,
+        63,
+        false,
+        false,
+    ))
+    .await;
 }
 
 #[tokio::test]
@@ -4454,6 +4491,7 @@ async fn test_periods_details_within_the_bounds_over_an_unreadable_record_none_d
     Box::pin(details_dropped_for_the_bounds(
         RecordWhile::Unreadable,
         63,
+        false,
         false,
     ))
     .await;
@@ -4464,6 +4502,21 @@ async fn test_periods_details_dropped_for_the_bounds_of_a_blocked_payee_asked_on
     Box::pin(details_dropped_for_the_bounds(
         RecordWhile::Unreadable,
         64,
+        true,
+        false,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_periods_details_dropped_for_the_bounds_not_asked_on_a_period_record_alone() {
+    // The wallet holds February's period record of bob's, which reads, while its record of
+    // the request doesn't: only a request's record makes the mark due, so nothing is asked
+    // until that record reads.
+    Box::pin(details_dropped_for_the_bounds(
+        RecordWhile::Gone,
+        64,
+        false,
         true,
     ))
     .await;
