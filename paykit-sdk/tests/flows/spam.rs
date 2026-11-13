@@ -222,6 +222,71 @@ async fn test_spam_blocked_sender_list_cancellation_and_resend_only_counted() {
     assert!(w.rail.all_executions().is_empty());
 }
 
+/// The next `n` calls to alice's switch's `/ops` don't connect: a batch is kept unanswered.
+fn keep_ops(w: &World, n: usize) {
+    for _ in 0..n {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+                path: "/ops".into(),
+                after: 0,
+            });
+    }
+}
+
+#[tokio::test]
+async fn test_spam_own_block_kept_unanswered_counts_new_state_at_once() {
+    // The wallet blocks bob while its switch doesn't answer: the `deny.put` is kept, and the
+    // lists the client holds don't show bob yet. Bob's request, list and `resend_request`
+    // that come after are only counted all the same (Paykit wire 4.1; Paykit spec 8.1, a
+    // block the app wrote counts at once).
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    keep_ops(&w, 8);
+    wallet.block(&w.bob_id()).await.unwrap();
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(!lists.deny.contains(&w.bob_id()));
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    shop.request_resend(
+        w.alice_id(),
+        ResendSelection::default().with_request_hashes(vec![[9; 32]]),
+    )
+    .await
+    .unwrap();
+
+    let got = wallet.receive(None).await.unwrap();
+    assert_eq!(got.resends, 0, "{got:?}");
+    assert!(wallet.requests().await.unwrap().is_empty());
+    assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 3);
+}
+
+#[tokio::test]
+async fn test_spam_own_unblock_kept_unanswered_admits_new_state_at_once() {
+    // Bob's `resend_request` reaches alice's inbox before she blocks him; the wallet then
+    // unblocks him while its switch doesn't answer: the `deny.delete` is kept, and the lists
+    // the client holds still show bob. The request is taken, not counted, the unblock
+    // counting at once (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    shop.request_resend(
+        w.alice_id(),
+        ResendSelection::default().with_request_hashes(vec![[9; 32]]),
+    )
+    .await
+    .unwrap();
+    wallet.block(&w.bob_id()).await.unwrap();
+    keep_ops(&w, 8);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(lists.deny.contains(&w.bob_id()));
+
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 0);
+}
+
 #[tokio::test]
 async fn test_spam_blocked_payer_unrequested_proof_only_counted() {
     let w = World::new();

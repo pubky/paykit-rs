@@ -309,7 +309,9 @@ fn note_cursor_time(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Resu
 /// of the lists failed ([`key::LISTS_READ`] absent): a copy older than the refresh interval
 /// may miss a flag, and [`Paykit::refresh_lists_when_due`] reads the lists again before the
 /// next read of the feed. A failed store read holds the message too: it is never read as a
-/// clean sender.
+/// clean sender. A block or unblock of `sender` this app wrote whose batch the client keeps
+/// unanswered (`bk/`) counts at once, as for a payment (Paykit spec 8.1): the client's copy
+/// of the lists shows it only once the list does.
 fn admits_new_state(
     cx: &mut ReceiveContext<'_>,
     sender: &[u8; 32],
@@ -326,7 +328,8 @@ fn admits_new_state(
     if standing.lists_as_of_ms.is_none() {
         return Err(unknown());
     }
-    if !(standing.blocked || standing.flagged) {
+    let blocked = state::cx_get::<bool>(cx, &key::own_block(sender))?.unwrap_or(standing.blocked);
+    if !(blocked || standing.flagged) {
         return Ok(true);
     }
     let kept = key::spam(sender);
