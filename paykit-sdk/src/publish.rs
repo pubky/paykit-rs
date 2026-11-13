@@ -895,7 +895,7 @@ impl Paykit {
     ) -> Result<ListsPublished> {
         let mut out = ListsPublished::default();
         for counterparty in counterparties {
-            if self.list_held(counterparty).await?.is_some() {
+            if let Some(refusal) = self.list_held(counterparty).await? {
                 let rkey = key::list_recipient(counterparty);
                 if let Some(mut recipient) = self.recipient(counterparty).await? {
                     if !recipient.owed {
@@ -905,7 +905,7 @@ impl Paykit {
                 }
                 out.not_sent.push(ListNotSent {
                     counterparty: *counterparty,
-                    reason: Refusal::CounterpartyBlocked.to_string(),
+                    reason: refusal.to_string(),
                 });
                 continue;
             }

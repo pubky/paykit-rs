@@ -324,6 +324,62 @@ async fn test_unrequested_list_request_not_delivered_asked_again_at_the_next_rec
 }
 
 #[tokio::test]
+async fn test_unrequested_list_request_held_while_the_payee_is_blocked() {
+    let w = World::new();
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            paykit_sdk::AppScopes::new()
+                .pay()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+            paykit_sdk::PaykitConfig::default(),
+            crate::common::store(),
+        )
+        .await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    refuse_next_to_bob(&w);
+    pay_lightning(&w, &mut wallet).await;
+    assert_eq!(list_requests(&mut shop).await, 0);
+    // Not delivered, it would go again at the receive: blocked, bob is asked nothing.
+    wallet.block(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(list_requests(&mut shop).await, 0);
+    // Unblocked, the receive asks him.
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(list_requests(&mut shop).await, 1);
+}
+
+#[tokio::test]
+async fn test_unrequested_list_request_held_while_the_deny_copy_is_unknown() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    refuse_next_to_bob(&w);
+    pay_lightning(&w, &mut wallet).await;
+    assert_eq!(list_requests(&mut shop).await, 0);
+    // The copy is due again and its read fails: it isn't known, so nothing is asked.
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/allow".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    wallet.receive(None).await.unwrap();
+    assert_eq!(list_requests(&mut shop).await, 0);
+    // Read again, the request goes.
+    wallet.receive(None).await.unwrap();
+    assert_eq!(list_requests(&mut shop).await, 1);
+}
+
+#[tokio::test]
 async fn test_unrequested_list_request_not_delivered_asked_again_by_a_payment() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;

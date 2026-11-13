@@ -699,6 +699,46 @@ async fn test_publishing_expired_version_named_past_the_bound_held_until_it_free
     assert_eq!(got.lists.resent.len(), 1, "{:?}", got.lists);
 }
 
+/// The lengths of what bob's shop remembers of alice's list requests: the versions owed
+/// an answer and those answered.
+async fn remembered(shop: &Paykit, w: &World) -> (usize, usize) {
+    let key = format!("lp/{}", pubky_switch_core::enc::b64(&w.alice_id()));
+    let bytes = shop
+        .app()
+        .protocol_get(key.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let len = |name: &str| value["d"][name].as_array().map_or(0, Vec::len);
+    (len("asking"), len("named"))
+}
+
+#[tokio::test]
+async fn test_publishing_versions_a_counterparty_names_remembered_up_to_sixteen() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.publish_to_alice(&mut shop).await;
+    wallet.receive(None).await.unwrap();
+    // Twenty requests naming versions the shop never sent: all owed, sixteen remembered.
+    for version in 1..=20 {
+        ask_for_the_list(&w, &shop, Some(version), shop.app_id());
+    }
+    let got = shop.receive(None).await.unwrap();
+    // One newer version answers them all, and at most sixteen are remembered as answered.
+    assert_eq!(got.lists.sent.len(), 1, "{:?}", got.lists);
+    assert_eq!(remembered(&shop, &w).await, (0, 16));
+    // Twenty more: still bounded, and the state reads back.
+    for version in 21..=40 {
+        ask_for_the_list(&w, &shop, Some(version), shop.app_id());
+    }
+    shop.receive(None).await.unwrap();
+    let (asking, named) = remembered(&shop, &w).await;
+    assert!(asking <= 16 && named <= 16, "{asking} {named}");
+    shop.published_lists().await.unwrap();
+}
+
 #[tokio::test]
 async fn test_publishing_withdrawn_counterparty_sent_an_empty_list_and_nothing_after() {
     let w = World::new();
@@ -1022,7 +1062,6 @@ async fn shop_reading_lists(w: &World, wallet: &mut Paykit) -> Paykit {
     shop
 }
 
-/// Whether `published` names alice as not sent for being blocked.
 /// Whether the only list not sent is alice's, held while the copy of the deny list isn't
 /// known.
 fn held_for_alice(w: &World, published: &paykit_sdk::ListsPublished) -> bool {
@@ -1032,6 +1071,7 @@ fn held_for_alice(w: &World, published: &paykit_sdk::ListsPublished) -> bool {
         && published.not_sent[0].reason.contains("isn't known")
 }
 
+/// Whether `published` names alice as not sent for being blocked.
 fn blocked_for_alice(w: &World, published: &paykit_sdk::ListsPublished) -> bool {
     published.sent.is_empty()
         && published.not_sent.len() == 1
@@ -1139,6 +1179,39 @@ async fn test_publishing_with_the_deny_list_unread_sends_nothing() {
     assert!(held_for_alice(&w, &got.lists), "{:?}", got.lists);
     assert_eq!(lists_taken(&mut wallet).await, 0);
     // Read again, the renewal goes.
+    let got = shop.receive(None).await.unwrap();
+    assert_eq!(got.lists.sent.len(), 1, "{:?}", got.lists);
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+}
+
+#[tokio::test]
+async fn test_publishing_with_the_deny_list_unknown_holds_a_changed_list_an_answer_and_a_withdrawal(
+) {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_reading_lists(&w, &mut wallet).await;
+    // The copy is due again and its read fails: it isn't known, so the changed list is
+    // held for alice, nothing issued for her.
+    w.clock.advance_ms(LISTS_REFRESH_MS);
+    fail_list_reads(&w, 1);
+    let changed = shop.set_list_endpoints(list("lno1changed")).await.unwrap();
+    assert!(held_for_alice(&w, &changed), "{changed:?}");
+    assert_eq!(w.rail.issued().len(), 1);
+    // Her list request is owed but not answered while both of the receive's reads fail.
+    ask_for_the_list(&w, &shop, None, shop.app_id());
+    fail_list_reads(&w, 2);
+    let got = shop.receive(None).await.unwrap();
+    assert!(held_for_alice(&w, &got.lists), "{:?}", got.lists);
+    // A withdrawal is refused while the copy isn't known, nothing sent.
+    fail_list_reads(&w, 1);
+    let refused = shop.withdraw_list_from(&w.alice_id()).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{refused:?}"
+    );
+    assert_eq!(lists_taken(&mut wallet).await, 0);
+    // Read again, what she is owed goes: one newer version for both the change and the
+    // request.
     let got = shop.receive(None).await.unwrap();
     assert_eq!(got.lists.sent.len(), 1, "{:?}", got.lists);
     assert_eq!(lists_taken(&mut wallet).await, 1);
