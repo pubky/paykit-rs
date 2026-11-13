@@ -2028,3 +2028,41 @@ async fn test_divergent_acceptance_dropped_for_the_bound_taken_again_from_a_rese
     let got = shop.receive(None).await.unwrap();
     assert!(got.applied.contains(&dropped), "{got:?}");
 }
+
+#[tokio::test]
+async fn test_divergent_credit_waits_for_a_deleted_record_seen_divergent() {
+    // Another payee record is deleted, so the app can't tell whose it was, and its view is
+    // divergent: its upload may hold a receipt of the same settlement. The credit waits for
+    // the user's confirmation shown for a credit (Paykit spec 8.1 step 4).
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_on(&w, Arc::clone(&base)).await;
+    let first = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let second = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet
+        .pay_request(&first, PayOptions::default())
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let paid = sale(&shop, &first).await.record;
+    let other = sale(&shop, &second).await.record;
+    let target = RecordTarget::new(
+        SwitchCollection::new(
+            Collection::PayeeActivity.name(),
+            Collection::PayeeActivity.policy(None),
+        ),
+        &natural_key::request_record(&w.bob_id(), &second.request_hash),
+    );
+    assert_eq!(shop.app().record_key(&target).unwrap(), other);
+    shop.app_mut()
+        .delete_record(&target, Vec::new())
+        .await
+        .unwrap();
+    set_divergent(&base, &shop, &other, true);
+    let refused = shop.confirm_payment(&paid).await.unwrap_err();
+    assert_eq!(refused_records(&refused), vec![(other, true, true)]);
+    confirm_refused(&mut shop, &refused).await;
+    assert!(shop.confirm_payment(&paid).await.unwrap().is_some());
+}

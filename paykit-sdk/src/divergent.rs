@@ -1186,7 +1186,8 @@ impl Paykit {
     }
 
     /// A payee app's credit of a proof in `record`, from `counterparty`, waits for the user
-    /// while `record` or any other record of the same counterparty it holds is paused, its
+    /// while `record` or any other record of the same counterparty it holds, or one whose
+    /// counterparty it can't tell, is paused, its
     /// kept messages wait to be written, or it was seen divergent and the user hasn't
     /// confirmed it shown that it may hold a credit of a settlement its current write lacks
     /// (Paykit spec 8.1 step 4): the upload may hold a receipt of the same settlement, so
@@ -1207,11 +1208,16 @@ impl Paykit {
             if held.key == *record {
                 continue;
             }
-            // A record that doesn't bind isn't acted on (Paykit wire 5.3); a failure to read
-            // one is the call's error.
+            // A record that doesn't open or bind, a delete among them, may be of the same
+            // counterparty, and its upload may hold a receipt: it counts as one of the
+            // counterparty's here, failing closed, and holds the credit only while it is
+            // paused, divergent or not confirmed for a credit. A failure to read one is the
+            // call's error.
             match self.payee_record(&held.key).await {
-                Ok((_, other)) if other.counterparty == *counterparty => records.push(held.key),
-                Ok(_) | Err(PaykitError::Refused(Refusal::NotFound) | PaykitError::Lib(_)) => {}
+                Ok((_, other)) if other.counterparty != *counterparty => {}
+                Ok(_) | Err(PaykitError::Refused(Refusal::NotFound) | PaykitError::Lib(_)) => {
+                    records.push(held.key)
+                }
                 Err(error) => return Err(error),
             }
         }
