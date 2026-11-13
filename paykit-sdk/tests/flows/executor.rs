@@ -1824,3 +1824,39 @@ async fn test_executor_end_to_a_blocked_counterparty_sent_and_pays_nothing_after
 async fn test_executor_end_while_the_deny_copy_is_unknown_sent_and_pays_nothing_after() {
     ended_while_sends_held(false).await;
 }
+
+#[tokio::test]
+async fn test_executor_handoff_notice_store_failure_is_the_grants_error() {
+    // The new executor's store fails the commit that records the handoff notice delivered:
+    // the grant returns that failure, and nothing goes on past it.
+    let w = World::new();
+    let (mut shop, mut old, record) = set_up(&w, terms_with(json!({}))).await;
+    let first = request(&w, &mut shop, &mut old, "0.5").await;
+    old.pay_under_allowance(&first, &record).await.unwrap();
+    let base = crate::common::store();
+    let fault = std::sync::Arc::new(pubky_switch_client::store::FaultStore::new(
+        std::sync::Arc::clone(&base),
+        pubky_switch_client::store::Fault::None,
+    ));
+    let mut new = w
+        .join_with(
+            &w.alice,
+            "wallet2",
+            AppScopes::new()
+                .pay()
+                .allowance()
+                .allowance_execute()
+                .contacts()
+                .build()
+                .unwrap(),
+            paykit_sdk::PaykitConfig::default(),
+            std::sync::Arc::clone(&fault)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    new.app_mut().invite(&w.bob_id()).await.unwrap();
+    new.receive(None).await.unwrap();
+    fault.fail_put_once(b"sent/");
+    let granted = new.grant_executor(&record, UserConfirmed::new()).await;
+    assert!(granted.is_err(), "{granted:?}");
+}
