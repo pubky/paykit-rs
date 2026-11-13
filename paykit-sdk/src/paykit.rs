@@ -228,8 +228,18 @@ pub struct ReceiveSummary {
     /// again only after a later bundle part leaves a key still missing, or after a restore;
     /// it doesn't ask at every read. Until the keys come the records the certificate adds
     /// aren't listed, and the calls that act on them are refused as not now; the host tells
-    /// the user the signer must come online.
+    /// the user the signer must come online. Set too while an entry waits for the key of a
+    /// data epoch its record's value is sealed at ([`ReceiveSummary::key_epochs_awaited`]).
     pub scope_keys_awaited: bool,
+    /// The data epochs whose scope keys entries stored by the client wait for, ascending, as
+    /// the read's `AppEvent::AwaitingKeys` names them: such an entry's record holds a value
+    /// sealed at that epoch, which the app can't open yet, or its write needs the current
+    /// epoch's key. The client stores each such entry and passes it at once, and runs its
+    /// step again once the key comes (Switch spec 8.2). One it drops past its bounds first,
+    /// 21 days from its acceptance on the service time verified, was never processed: the
+    /// host is told once ([`crate::NoticeKind::MessageGivenUp`]), and its sender is asked to
+    /// send it again once the app holds every key such messages waited for (Paykit spec 8.1).
+    pub key_epochs_awaited: Vec<u64>,
     /// The account is gone at this switch: the client took it as erased (Switch spec 12.7),
     /// a provider loss (Switch spec 12.6). The host tells the user. The app reads nothing
     /// more there, and the SDK acts on nothing by itself: lookups of the identity there fail
@@ -237,6 +247,22 @@ pub struct ReceiveSummary {
     /// switch to resume from. Set from the read that takes the account as gone until the
     /// host acknowledges its `AppEvent::AccountGone`, or until the account shows again.
     pub account_gone: bool,
+}
+
+/// The data epochs `events` name as waited for (`AppEvent::AwaitingKeys`), ascending, each
+/// once.
+fn key_epochs_awaited(events: &[AppEvent]) -> Vec<u64> {
+    let mut epochs: Vec<u64> = events
+        .iter()
+        .filter_map(|event| match event {
+            AppEvent::AwaitingKeys { epochs, .. } => Some(epochs.iter().copied()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    epochs.sort_unstable();
+    epochs.dedup();
+    epochs
 }
 
 /// Whether `events` hold the client's `AccountGone` (Switch spec 12.7).
@@ -590,10 +616,8 @@ impl Paykit {
     /// a certificate Paykit refuses or an account gone, or not: the SDK has kept what it
     /// needs of the events about stored entries before it returns. The SDK itself
     /// acknowledges, in order, the events it took up to the first it didn't; the rest wait
-    /// for the host. An entry dropped unverified (`AppEvent::StoredEntryDropped`) is left to
-    /// the host: this SDK doesn't ask the sender to re-send entries dropped unverified
-    /// (Paykit spec 8.1, "Stored entries"), so once the host acknowledges that event,
-    /// nothing asks for the entry again.
+    /// for the host. An entry dropped unverified (`AppEvent::StoredEntryDropped`) counts in
+    /// its sender's mark, which asks that sender to send it again (`marks.rs`).
     ///
     /// A receive that returns an error shows no report. When the client's read returned
     /// before the error, the client counts the duty events the read raised as handed to the
@@ -607,7 +631,13 @@ impl Paykit {
     /// The client's errors; [`Refusal::SwitchUnavailable`] while the account may have been
     /// erased and the client's wait before it takes it as gone goes on, as for a switch that
     /// doesn't answer (Switch spec 12.7). A message whose effect couldn't be written yet
-    /// stays before the cursor, and the next call hands it over again.
+    /// stays before the cursor, and the next call hands it over again. One waiting for a
+    /// scope key the app doesn't hold yet is stored by the client and passed at once, not
+    /// held behind the cursor, and is read again once the key comes.
+    ///
+    /// A `missed` item's listing is made inside the client's read, before any later entry is
+    /// handed over (Switch spec 8.2): a listing that fails there fails the read, and this
+    /// call returns its error; the next receive lists first.
     pub async fn receive(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
         // The read's future goes on the heap: the client's read nests deep, and a host
         // polling it on a small stack, such as a test thread's 2 MiB, keeps room for it.
@@ -615,12 +645,26 @@ impl Paykit {
     }
 
     async fn receive_inner(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
+        // Each step's future goes on the heap: built in this future's poll, every one of them
+        // would otherwise take its size of the stack there, beside the client's read, and a
+        // host thread of 2 MiB would not hold a deep read in a debug build.
+        // This app's unblocks whose batch the client no longer keeps count no more: they go
+        // first, so the lists are read again below, before the copy this app judges by is
+        // used. The steps never count an unblock: the client's copy decides there.
+        if self.certificate_refused().is_none() {
+            Box::pin(self.drop_unblocks_not_kept()).await?;
+        }
         // An app holding `contacts` reads the flagged senders again first, at most every 10
         // minutes, for the spam rule (Paykit wire 4.1).
-        self.refresh_lists_when_due().await?;
+        Box::pin(self.refresh_lists_when_due()).await?;
+        // This app's blocks that may not reach the switch otherwise are written again: one
+        // whose batch the client neither keeps nor applied, a restored one among them.
+        if self.certificate_refused().is_none() {
+            Box::pin(self.send_own_blocks_again()).await?;
+        }
         // Whether the client may list at this read's start ([`Paykit::records_listed`]).
         let keys_held_before = self.holds_scope_keys();
-        let report = match self.app.receive(wait).await {
+        let report = match Box::pin(self.app.receive(wait)).await {
             Ok(report) => report,
             // The erasure's wait: the switch answers as for an account it doesn't host, and
             // nothing authenticates that, so it counts as not answering until the wait ends.
@@ -629,17 +673,23 @@ impl Paykit {
             }
             Err(error) => return Err(error.into()),
         };
+        // The data epochs the entries the client stores for a key wait for, as its report
+        // names them at every read while any waits.
+        let key_epochs_awaited = key_epochs_awaited(&report.events);
         // The duty events kept, listed once, right after the read: a listing hands every
         // kept duty event to the host, so one made later in this receive would hand over,
         // in no report, those the steps below raise, such as a listing's.
-        let duties = self.app.unacknowledged_events().await?;
+        let duties = Box::pin(self.app.unacknowledged_events()).await?;
         let account_gone =
             account_gone(&report.events) || (report.stopped && account_gone(&duties));
         // The duty events about stored entries are taken before anything returns, so that
         // once the host acknowledges what this report showed none is lost: only the SDK's
         // own marks and notes are kept here, and nothing is written at the switch
         // (`stored.rs`).
-        self.take_stored_events(&duties).await?;
+        Box::pin(self.take_stored_events(&duties)).await?;
+        // A `missed` item the read took holds the open requests from a time on
+        // (`hold.rs`), bounded now that the read verified the service time.
+        Box::pin(self.bound_missed_hold()).await?;
         if account_gone {
             // Nothing more is read or written there: the summary tells the host.
             return Ok(ReceiveSummary {
@@ -665,27 +715,33 @@ impl Paykit {
         // (`Paykit::records_listed`). A stopped one (the app removed here, a provider change
         // followed) may have returned before it.
         if !report.stopped {
-            self.records_listed(keys_held_before).await?;
+            Box::pin(self.records_listed(keys_held_before)).await?;
         }
         // A certificate the read took, any other than the one the records were listed under,
         // a narrower one included: they are listed now, or stay unlisted for the next
         // receive or write (`Paykit::list_under_new_cert`).
-        let records_unlisted = self.list_under_new_cert().await?;
-        let keys = self.scope_keys_awaited().await?;
+        let records_unlisted = Box::pin(self.list_under_new_cert()).await?;
+        let keys = Box::pin(self.scope_keys_awaited()).await?;
         // The entries the client stored for good: their messages, kept above, written into
         // their records as room frees (`stored.rs`), unless the payer's side waits for its
         // scope keys or its listing, as for the payees' cancellations below.
-        if !self.payer_waits(keys).await? {
-            self.place_stored().await?;
+        if !Box::pin(self.payer_waits(keys)).await? {
+            Box::pin(self.place_stored()).await?;
         }
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1), unless the payer's side waits for its scope keys:
         // they build on request records the copy may lack, and stay kept meanwhile.
-        if !self.payer_waits(keys).await? {
-            self.place_kept_cancellations().await?;
+        if !Box::pin(self.payer_waits(keys)).await? {
+            Box::pin(self.place_kept_cancellations()).await?;
         }
+        // The senders of messages dropped before they were taken: of replies dropped for the
+        // bounds once the app holds the record of one of their requests, of entries dropped
+        // unverified at once, then again at most once a day while the mark lives.
+        let marked = Box::pin(self.ask_on_marks()).await?;
+        // The payers' replies kept for requests whose record wasn't held yet.
+        Box::pin(self.place_kept_replies()).await?;
         // Lists held over a `payment_lists` record that didn't read, once it reads.
-        self.place_held_lists().await?;
+        Box::pin(self.place_held_lists()).await?;
         let applied = report
             .events
             .iter()
@@ -694,15 +750,25 @@ impl Paykit {
                 _ => None,
             })
             .collect();
-        let answered = self.answer_kept_resends().await?;
-        let asked = self.send_asks().await?;
+        let answered = Box::pin(self.answer_kept_resends()).await?;
+        // A restore's asks that waited for a record's key are queued at the receive that
+        // opens it, once the records are listed (`hold.rs`), and so are, once, this app's own
+        // messages the records store to be sent that no outbox holds.
+        if Box::pin(self.unlisted()).await?.is_none()
+            && Box::pin(self.scope_keys_awaited()).await?.is_none()
+        {
+            Box::pin(self.queue_restore_asks()).await?;
+            Box::pin(self.queue_own_again()).await?;
+        }
+        let asked = Box::pin(self.send_asks()).await?;
         Ok(ReceiveSummary {
             report,
             applied,
-            resends: answered.saturating_add(asked),
+            resends: answered.saturating_add(asked).saturating_add(marked),
             certificate_refused: None,
             records_unlisted,
-            scope_keys_awaited: keys.is_some(),
+            scope_keys_awaited: keys.is_some() || !key_epochs_awaited.is_empty(),
+            key_epochs_awaited,
             account_gone: false,
         })
     }
@@ -803,6 +869,9 @@ mod tests {
         assert_send(&wallet.payments());
         assert_send(&wallet.repair_activity_record(&attempt));
         assert_send(&wallet.resume_payments());
+        assert_send(&wallet.block(&key));
+        assert_send(&wallet.unblock(&key));
+        assert_send(&wallet.confirm_possibly_cancelled(&request, confirmed));
         assert_send(&wallet.notices());
         assert_send(&wallet.acknowledge_notice(""));
         assert_send(&wallet.receipts(ReceiptsOf::All));

@@ -222,6 +222,150 @@ async fn test_spam_blocked_sender_list_cancellation_and_resend_only_counted() {
     assert!(w.rail.all_executions().is_empty());
 }
 
+/// The next `n` calls to alice's switch's `/ops` don't connect: a batch is kept unanswered.
+fn keep_ops(w: &World, n: usize) {
+    for _ in 0..n {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+                path: "/ops".into(),
+                after: 0,
+            });
+    }
+}
+
+#[tokio::test]
+async fn test_spam_own_block_kept_unanswered_counts_new_state_at_once() {
+    // The wallet blocks bob while its switch doesn't answer: the `deny.put` is kept, and the
+    // lists the client holds don't show bob yet. Bob's request, list and `resend_request`
+    // that come after are only counted all the same (Paykit wire 4.1; Paykit spec 8.1, a
+    // block the app wrote counts at once).
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    keep_ops(&w, 8);
+    wallet.block(&w.bob_id()).await.unwrap();
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(!lists.deny.contains(&w.bob_id()));
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    shop.request_resend(
+        w.alice_id(),
+        ResendSelection::default().with_request_hashes(vec![[9; 32]]),
+    )
+    .await
+    .unwrap();
+
+    let got = wallet.receive(None).await.unwrap();
+    assert_eq!(got.resends, 0, "{got:?}");
+    assert!(wallet.requests().await.unwrap().is_empty());
+    assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 3);
+}
+
+#[tokio::test]
+async fn test_spam_own_unblock_kept_unanswered_leaves_the_copy_to_decide() {
+    // Bob's `resend_request` reaches alice's inbox before she blocks him; the wallet then
+    // unblocks him while its switch doesn't answer: the `deny.delete` is kept, and the lists
+    // the client holds still show bob. The unblock doesn't override them in the spam rule:
+    // the request is only counted (Paykit wire 4.1).
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    shop.request_resend(
+        w.alice_id(),
+        ResendSelection::default().with_request_hashes(vec![[9; 32]]),
+    )
+    .await
+    .unwrap();
+    wallet.block(&w.bob_id()).await.unwrap();
+    keep_ops(&w, 8);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(lists.deny.contains(&w.bob_id()));
+
+    let got = wallet.receive(None).await.unwrap();
+    assert_eq!(got.resends, 0, "{got:?}");
+    assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn test_spam_own_unblock_refused_before_the_feed_leaves_new_state_counted() {
+    // Bob's request reaches alice's inbox before she blocks him; the wallet's unblock of him
+    // is then kept unanswered. The next read sends the kept batch again before its feed, and
+    // the switch refuses it for good, so the deny list still holds bob when his request comes
+    // in that same read: no activity record, only the count (Paykit wire 4.1).
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.block(&w.bob_id()).await.unwrap();
+    keep_ops(&w, 1);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"bk/").await.unwrap().len(), 1);
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::Conflict,
+            current: serde_json::Value::Null,
+        });
+
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.requests().await.unwrap().is_empty());
+    assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 1);
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(lists.deny.contains(&w.bob_id()));
+}
+
+#[tokio::test]
+async fn test_spam_own_unblock_applied_lets_new_state_through() {
+    // The switch applies the wallet's unblock of bob: his request sent after it opens its
+    // record (Paykit wire 4.1).
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    wallet.block(&w.bob_id()).await.unwrap();
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+    assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_spam_own_unblock_applied_with_its_answer_lost_lets_new_state_through() {
+    // The switch applies the wallet's unblock of bob but its answer is lost, so the client
+    // keeps the batch and its copy of the lists still shows bob. Bob's request sent after it
+    // comes in a read whose send of the kept batch again can't connect: the feed's
+    // `deny.delete` item comes before the request and drops bob from the copy, so the request
+    // opens its record (Paykit wire 4.1, Switch spec 8.3).
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    wallet.receive(None).await.unwrap();
+    wallet.block(&w.bob_id()).await.unwrap();
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"bk/").await.unwrap().len(), 1);
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    keep_ops(&w, 1);
+
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+    assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 0);
+}
+
 #[tokio::test]
 async fn test_spam_blocked_payer_unrequested_proof_only_counted() {
     let w = World::new();

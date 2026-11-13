@@ -7,23 +7,13 @@ use std::sync::Arc;
 use paykit_sdk::{AppScopes, PayOptions, PayeeStatus, Paykit, PaykitConfig, Rail, RequestStatus};
 use pubky_switch_client::app::AppEvent;
 use pubky_switch_client::clock::Clock;
-use pubky_switch_client::testing::{Fault, TestSigner};
+use pubky_switch_client::testing::Fault;
 use pubky_switch_core::claims::Outcome;
-use pubky_switch_core::http::ErrorCode;
 
-use crate::common::{draft, request_from, store, World};
-
-/// The next `n` batches at `signer`'s switch are refused for good, `403 permission_missing`,
-/// as an effect the switch refuses whatever is sent again.
-pub(crate) fn refuse_writes(signer: &TestSigner, n: usize) {
-    for _ in 0..n {
-        signer.switch().fail_next(Fault::Error {
-            path: "/ops".into(),
-            code: ErrorCode::PermissionMissing,
-            current: serde_json::Value::Null,
-        });
-    }
-}
+use crate::common::{
+    asked, draft, mark_senders, refuse_writes, request_from, seed_marks, store, World,
+};
+use pubky_switch_core::records::DAY_MS;
 
 /// Whether `events` hold a duty event about an entry stored locally.
 fn about_stored(events: &[AppEvent]) -> bool {
@@ -145,14 +135,14 @@ async fn test_stored_refused_proof_at_the_payee_written_later() {
     assert!(shop.app_mut().parked_entries().await.unwrap().is_empty());
 }
 
-/// Bob's request to alice's wallet, stored unverified while bob's standing can't be
-/// checked, then dropped past 21 days, with the homeserver down until it returns. Returns the
-/// request and the duty event's ID.
+/// Bob's request to alice, stored unverified at her wallet while bob's standing can't be
+/// checked, then dropped past 21 days, with the homeserver down. Returns the request and
+/// when alice's inbox accepted it.
 async fn dropped_unverified(
     w: &World,
     wallet: &mut paykit_sdk::Paykit,
     shop: &mut paykit_sdk::Paykit,
-) -> (paykit_sdk::RequestRef, pubky_switch_client::app::EventId) {
+) -> (paykit_sdk::RequestRef, u64) {
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     let mut unexpiring = draft("1", w.clock.now_ms());
     unexpiring.proposal_expires_at_ms = None;
@@ -170,52 +160,111 @@ async fn dropped_unverified(
     // The bounds are judged on the service time verified: the first read verifies it.
     let mut events = wallet.receive(None).await.unwrap().report.events;
     events.extend(wallet.receive(None).await.unwrap().report.events);
-    w.homeserver.set_down(false);
-    let id = events
+    let at = events
         .iter()
         .find_map(|e| match e {
-            AppEvent::StoredEntryDropped { id, .. } => Some(*id),
+            AppEvent::StoredEntryDropped { accepted_at_ms, .. } => Some(*accepted_at_ms),
             _ => None,
         })
         .unwrap_or_else(|| panic!("{events:?}"));
     assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
-    (request, id)
-}
-
-/// Whether `wallet`'s host still has the duty event `id` to acknowledge.
-async fn unacknowledged(
-    wallet: &mut paykit_sdk::Paykit,
-    id: pubky_switch_client::app::EventId,
-) -> bool {
-    wallet
-        .app_mut()
-        .unacknowledged_events()
-        .await
-        .unwrap()
-        .iter()
-        .any(|e| e.id() == Some(id))
+    let events = wallet.app_mut().unacknowledged_events().await.unwrap();
+    assert!(!about_stored(&events), "{events:?}");
+    (request, at)
 }
 
 #[tokio::test]
-async fn test_stored_entry_dropped_unverified_left_for_the_host() {
+async fn test_stored_entry_dropped_unverified_asked_for_again() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    let (request, id) = dropped_unverified(&w, &mut wallet, &mut shop).await;
-    // The SDK neither takes nor acknowledges the event, and asks for no re-send.
-    for _ in 0..3 {
-        assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
-    }
-    assert!(unacknowledged(&mut wallet, id).await);
-    assert!(kept(&wallet, "dt/").await.is_empty());
-    assert!(kept(&wallet, "ask/").await.is_empty());
+    let (request, _) = dropped_unverified(&w, &mut wallet, &mut shop).await;
+    w.homeserver.set_down(false);
+    // The wallet asked bob to send it again; bob's shop answers, and the request arrives.
     wallet.flush().await.unwrap();
     shop.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
-    assert!(wallet.request(&request).await.is_err());
-    // The host acknowledges it: it goes.
-    wallet.app_mut().ack_events(id).await.unwrap();
-    assert!(!unacknowledged(&mut wallet, id).await);
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+}
+
+#[tokio::test]
+async fn test_stored_entry_dropped_unverified_mark_past_128_the_earliest_latest_goes() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let held = seed_marks(
+        &mut wallet,
+        "ud/",
+        paykit_sdk::MAX_DROPPED_MARKS,
+        w.clock.now_ms() - 1_000,
+    )
+    .await;
+    dropped_unverified(&w, &mut wallet, &mut shop).await;
+    let senders = mark_senders(&wallet, "ud/").await;
+    assert_eq!(senders.len(), paykit_sdk::MAX_DROPPED_MARKS);
+    assert!(senders.contains(&w.bob_id()));
+    assert!(!senders.contains(&held[0]));
+    assert!(senders.contains(&held[1]));
+}
+
+/// The marks of entries dropped unverified, whole.
+async fn unverified_marks(app: &paykit_sdk::Paykit) -> Vec<serde_json::Value> {
+    app.app()
+        .protocol_scan(b"ud/")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, value)| serde_json::from_slice::<serde_json::Value>(&value).unwrap()["d"].clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn test_stored_entry_dropped_unverified_mark_asks_its_window_once_a_day() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let (_, at) = dropped_unverified(&w, &mut wallet, &mut shop).await;
+    w.homeserver.set_down(false);
+    wallet.flush().await.unwrap();
+    // Asked for what bob's inbox accepted from the mark's earliest time to its latest.
+    assert_eq!(
+        asked(&wallet, &w.bob_id()).await,
+        vec![(Some(at), Some(at))]
+    );
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
+    // A backup carries the mark whole, so a restore doesn't reset it.
+    let held = unverified_marks(&wallet).await;
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0]["earliest_ms"], at);
+    assert_eq!(held[0]["latest_ms"], at);
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut wallet = paykit_sdk::Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(unverified_marks(&wallet).await, held);
+    wallet.reconcile().await.unwrap();
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
+    // Asked again a day later while the mark lives.
+    w.clock.advance_ms(DAY_MS);
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
+    assert_eq!(
+        asked(&wallet, &w.bob_id()).await.last(),
+        Some(&(Some(at), Some(at)))
+    );
+    // 30 days after its latest time, the mark goes.
+    w.clock.set_ms(at + paykit_sdk::KEPT_MESSAGE_MS);
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
+    assert!(unverified_marks(&wallet).await.is_empty());
 }
 
 /// Bob's request reaches alice's wallet, whose receive step's batch is applied and its
@@ -739,47 +788,101 @@ async fn test_stored_refused_lists_hold_the_newer() {
     }
 }
 
-#[tokio::test]
-async fn test_stored_events_after_an_entry_dropped_unverified_wait_for_the_host() {
-    let w = World::new();
-    let mut wallet = w.wallet("wallet").await;
-    let mut shop = w.shop().await;
-    let (_, dropped) = dropped_unverified(&w, &mut wallet, &mut shop).await;
-    // An event the SDK takes, after it: a request whose step's write is refused for good.
-    let later = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+/// Alice's wallet rejects bob's `request` while her switch takes no write, then refuses the
+/// batch kept for it for good: a duty event about a kept batch, for the host.
+async fn batch_refused(
+    w: &World,
+    wallet: &mut paykit_sdk::Paykit,
+    request: &paykit_sdk::RequestRef,
+) {
+    w.alice.switch().fail_next(Fault::Unreachable {
+        path: "/ops".into(),
+        after: 0,
+    });
+    let _ = wallet.reject_request(request, None).await;
+    let before = refused_batches(wallet).await;
     refuse_writes(&w.alice, 1);
-    wallet.receive(None).await.unwrap();
-    let taken = wallet
+    let _ = wallet.receive(None).await;
+    assert_eq!(refused_batches(wallet).await, before + 1);
+}
+
+/// How many duty events about a kept batch refused the wallet's host hasn't acknowledged.
+async fn refused_batches(wallet: &mut paykit_sdk::Paykit) -> usize {
+    wallet
         .app_mut()
         .unacknowledged_events()
         .await
         .unwrap()
         .iter()
-        .find_map(|e| match e {
-            AppEvent::EffectRefused { id, .. } => Some(*id),
-            _ => None,
-        })
+        .filter(|e| matches!(e, AppEvent::BatchRefused { .. }))
+        .count()
+}
+
+#[tokio::test]
+async fn test_stored_dropped_entry_between_host_events_asked_for_once() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let first = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    // A host event first, which the host doesn't acknowledge.
+    batch_refused(&w, &mut wallet, &first).await;
+    // Bob's next request is stored unverified, then dropped past 21 days.
+    let mut unexpiring = draft("2", w.clock.now_ms());
+    unexpiring.proposal_expires_at_ms = None;
+    let request = request_from(&mut shop, w.alice_id(), unexpiring).await;
+    w.homeserver.set_down(true);
+    // Past the 10 minutes bob's `identity.json` is cached for.
+    w.clock.advance_ms(11 * 60_000);
+    let _ = wallet.receive(None).await;
+    w.clock
+        .advance_ms(pubky_switch_client::app::DEFAULT_PARK_AFTER_MS + 1);
+    let _ = wallet.receive(None).await;
+    assert_eq!(wallet.app_mut().parked_entries().await.unwrap().len(), 1);
+    w.clock
+        .advance_ms(pubky_switch_client::app::MAX_UNVERIFIED_AGE_MS);
+    let (one, two) = (
+        wallet.receive(None).await.unwrap(),
+        wallet.receive(None).await.unwrap(),
+    );
+    assert!(
+        one.report
+            .events
+            .iter()
+            .chain(&two.report.events)
+            .any(|e| matches!(e, AppEvent::StoredEntryDropped { .. })),
+        "{:?} {:?}",
+        one.report.events,
+        two.report.events
+    );
+    // Asked once at first sight, though the host acknowledges nothing: a read again asks
+    // nothing more.
+    assert_eq!(one.resends + two.resends, 1);
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
+    // A host event after it; the host acknowledges up to it once the receive returned.
+    batch_refused(&w, &mut wallet, &first).await;
+    let last = wallet
+        .app_mut()
+        .unacknowledged_events()
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(AppEvent::id)
+        .next_back()
         .unwrap();
-    // The SDK acknowledges only up to the event it hasn't taken, so the later ones wait
-    // for the host, over every read; they keep one mark each, and no more.
-    let marks = kept(&wallet, "dt/").await.len();
-    assert!(marks >= 1);
-    for _ in 0..5 {
-        wallet.receive(None).await.unwrap();
-        assert!(unacknowledged(&mut wallet, taken).await);
-        assert_eq!(kept(&wallet, "dt/").await.len(), marks);
-    }
+    wallet.app_mut().ack_events(last).await.unwrap();
+    // The re-send was asked once, at first sight: later reads within the day ask nothing
+    // more.
+    w.homeserver.set_down(false);
+    wallet.flush().await.unwrap();
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
+    shop.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
     assert_eq!(
-        wallet.request(&later).await.unwrap().status,
+        wallet.request(&request).await.unwrap().status,
         RequestStatus::Open
     );
-    // Once the host acknowledges the event it holds, the SDK acknowledges the rest at its
-    // next read, and the mark goes.
-    wallet.app_mut().ack_events(dropped).await.unwrap();
-    wallet.receive(None).await.unwrap();
-    assert!(!unacknowledged(&mut wallet, taken).await);
-    wallet.receive(None).await.unwrap();
-    assert!(kept(&wallet, "dt/").await.is_empty());
 }
 
 #[tokio::test]
@@ -980,11 +1083,35 @@ async fn test_stored_refused_older_list_never_replaces_a_newer_held() {
     }
 }
 
+/// The wallet's kept receipt for `request`, waiting for a scope key: kept a day short of 30
+/// days from its acceptance, then given up with the host's notice.
+async fn given_up_after_30_days(
+    w: &World,
+    wallet: &mut paykit_sdk::Paykit,
+    request: &paykit_sdk::RequestRef,
+) {
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - DAY_MS);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(kept(wallet, "se/").await.len(), 1);
+    assert!(wallet.notices().await.unwrap().is_empty());
+    w.clock.advance_ms(2 * DAY_MS);
+    wallet.receive(None).await.unwrap();
+    assert!(kept(wallet, "se/").await.is_empty());
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].request_hash, Some(request.request_hash));
+}
+
 #[tokio::test]
-async fn test_stored_refused_receipt_waits_for_its_records_key_past_its_window() {
+async fn test_stored_refused_receipt_waiting_for_its_records_key_given_up_after_30_days() {
     // A refused receipt is kept while the payer's record is held unopened, written again by
-    // the phone under a key the wallet doesn't hold yet: it isn't given up past its window
-    // while it waits, and is written once the key comes.
+    // the phone under a key the wallet doesn't hold yet. It waits for the key a day short of
+    // 30 days from its acceptance, and is then given up, the host told once: a key that comes
+    // later finds nothing kept (Paykit spec 8.1). The phone took the receipt too, so the
+    // record holds it whatever the wallet does.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut phone = w.wallet("phone").await;
@@ -1020,25 +1147,21 @@ async fn test_stored_refused_receipt_waits_for_its_records_key_past_its_window()
     let cert = wallet.app().cert().clone();
     crate::unrequested::store_bundle_from(&w, wallet.app_id(), &cert, newest);
     wallet.receive(None).await.unwrap();
-    w.clock
-        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
-    wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
-    assert_eq!(kept(&wallet, "se/").await.len(), 1);
-    assert!(wallet.notices().await.unwrap().is_empty());
+    given_up_after_30_days(&w, &mut wallet, &request).await;
     crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
     for _ in 0..3 {
         wallet.receive(None).await.unwrap();
     }
     assert!(kept(&wallet, "se/").await.is_empty());
-    assert!(holds_receipt(&wallet, &request).await);
+    assert_eq!(wallet.notices().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn test_stored_refused_receipt_waits_for_the_current_epochs_key_past_its_window() {
+async fn test_stored_refused_receipt_waiting_for_the_current_epochs_key_given_up_after_30_days() {
     // A refused receipt is kept, and then the data epoch rotates with no key for the wallet:
-    // nothing can be sealed at the record yet, so the receipt is neither written nor given up
-    // past its window, and is written once the key comes.
+    // nothing can be sealed at the record yet. The receipt waits for the key a day short of
+    // 30 days from its acceptance, and is then given up, the host told: a key that comes
+    // later doesn't bring it back (Paykit spec 8.1).
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -1056,19 +1179,14 @@ async fn test_stored_refused_receipt_waits_for_the_current_epochs_key_past_its_w
     assert_eq!(kept(&wallet, "se/").await.len(), 1);
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
     wallet.receive(None).await.unwrap();
-    w.clock
-        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
-    wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
-    assert_eq!(kept(&wallet, "se/").await.len(), 1);
-    assert!(wallet.notices().await.unwrap().is_empty());
+    given_up_after_30_days(&w, &mut wallet, &request).await;
     let cert = wallet.app().cert().clone();
     crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
     for _ in 0..3 {
         wallet.receive(None).await.unwrap();
     }
     assert!(kept(&wallet, "se/").await.is_empty());
-    assert!(holds_receipt(&wallet, &request).await);
+    assert!(!holds_receipt(&wallet, &request).await);
 }
 
 /// `app` backed up, dropped and restored onto a new store; the restore's reconcile run, and
@@ -1251,4 +1369,295 @@ async fn test_stored_forgotten_entry_sent_again_after_a_restore_writes_nothing_t
     assert_eq!(app.requests().await.unwrap().len(), 1);
     assert!(app.app_mut().parked_entries().await.unwrap().is_empty());
     assert!(kept(&app, "se/").await.is_empty());
+}
+
+#[tokio::test]
+async fn test_stored_entry_dropped_unverified_mark_gone_stays_gone_after_a_restore() {
+    // The mark of an entry dropped unverified goes 30 days after its latest time. A restore
+    // from a backup taken then tells the client's events again: the dropped entry counts
+    // with its own old time, so no mark lives again and nothing is asked (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let (_, at) = dropped_unverified(&w, &mut wallet, &mut shop).await;
+    w.homeserver.set_down(false);
+    wallet.flush().await.unwrap();
+    w.clock.set_ms(at + paykit_sdk::KEPT_MESSAGE_MS);
+    wallet.receive(None).await.unwrap();
+    assert!(unverified_marks(&wallet).await.is_empty());
+    let before = asked(&wallet, &w.bob_id()).await.len();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut wallet = paykit_sdk::Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    wallet.reconcile().await.unwrap();
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(unverified_marks(&wallet).await.is_empty());
+    let after = asked(&wallet, &w.bob_id()).await;
+    assert!(
+        after.iter().skip(before).all(|(_, until)| until.is_none()),
+        "only the restore's own ask: {after:?}"
+    );
+}
+
+/// The data epochs the wallet's entries stored for a key wait for, in order.
+async fn awaiting(wallet: &mut Paykit) -> Vec<u64> {
+    wallet
+        .app_mut()
+        .parked_entries()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| match entry.reason {
+            pubky_switch_client::app::ParkReason::AwaitingKey { data_epoch } => Some(data_epoch),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Bob's request reaches alice's wallet once the data epoch has rotated with no key for the
+/// wallet: its receive step can't seal the request record, so the client stores the entry
+/// at once to wait for the key, reported as waiting for it (Switch spec 8.2). Returns the
+/// request, the epoch it waits for and when it was sent, by the clock every party shares.
+async fn waiting_for_the_current_key(
+    w: &World,
+    wallet: &mut Paykit,
+    shop: &mut Paykit,
+) -> (paykit_sdk::RequestRef, u64, u64) {
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
+    wallet.receive(None).await.unwrap();
+    let mut unexpiring = draft("1", w.clock.now_ms());
+    unexpiring.proposal_expires_at_ms = None;
+    let request = request_from(shop, w.alice_id(), unexpiring).await;
+    let sent = w.clock.now_ms();
+    let mut events = Vec::new();
+    for _ in 0..pubky_switch_client::app::RETRY_EVENT_READS + 1 {
+        let summary = wallet.receive(None).await.unwrap();
+        assert!(summary.key_epochs_awaited.contains(&epoch), "{summary:?}");
+        assert!(summary.scope_keys_awaited);
+        events.extend(summary.report.events);
+    }
+    assert!(awaiting(wallet).await.contains(&epoch));
+    // Stored at once, never as a store failing.
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            AppEvent::StoreFailing { .. }
+                | AppEvent::Parked {
+                    reason: pubky_switch_client::app::ParkReason::StoreUnavailable,
+                    ..
+                }
+        )),
+        "{events:?}"
+    );
+    (request, epoch, sent)
+}
+
+/// Run receives past 21 days from `at`, when the entries waiting for a key were sent, so the
+/// client drops them (Switch spec 8.2). Returns the events the reads raised.
+async fn past_the_key_wait(w: &World, wallet: &mut Paykit, at: u64) -> Vec<AppEvent> {
+    w.clock
+        .set_ms(at + pubky_switch_client::app::MAX_UNVERIFIED_AGE_MS + DAY_MS);
+    // The bounds are judged on the service time verified: the first read verifies it.
+    let mut events = wallet.receive(None).await.unwrap().report.events;
+    events.extend(wallet.receive(None).await.unwrap().report.events);
+    events
+}
+
+/// The marks of key waits, whole.
+async fn key_wait_marks(app: &Paykit) -> Vec<serde_json::Value> {
+    app.app()
+        .protocol_scan(b"kw/")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, value)| serde_json::from_slice::<serde_json::Value>(&value).unwrap()["d"].clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn test_stored_key_wait_dropped_given_up_once_and_asked_again_once_the_key_comes() {
+    // The client drops bob's request past 21 days while it waits for the current epoch's
+    // key: never processed, the host is told once, naming it, and bob is asked to send it
+    // again only once the key is held, from a mark of its own (Paykit spec 8.1). The copy
+    // bob sends again is taken as a new message, the notice kept notwithstanding.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    wallet.receive(None).await.unwrap();
+    let (request, epoch, sent) = waiting_for_the_current_key(&w, &mut wallet, &mut shop).await;
+    // A day short of the 21 days it still waits, and nothing is told.
+    w.clock
+        .set_ms(sent + pubky_switch_client::app::MAX_UNVERIFIED_AGE_MS - DAY_MS);
+    wallet.receive(None).await.unwrap();
+    assert!(awaiting(&mut wallet).await.contains(&epoch));
+    assert!(wallet.notices().await.unwrap().is_empty());
+    assert!(key_wait_marks(&wallet).await.is_empty());
+    let events = past_the_key_wait(&w, &mut wallet, sent).await;
+    let (msg_id, at) = events
+        .iter()
+        .find_map(|e| match e {
+            AppEvent::StoredEntryDropped {
+                awaited_epoch: Some(awaited),
+                msg_id: Some(msg_id),
+                accepted_at_ms,
+                ..
+            } if *awaited == epoch => Some((msg_id.clone(), *accepted_at_ms)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{events:?}"));
+    assert!(awaiting(&mut wallet).await.is_empty());
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+    assert_eq!(notices[0].msg_id.as_deref(), Some(msg_id.as_str()));
+    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].request_hash, None);
+    // Its own mark, with the epoch it waited for; none of entries dropped unverified, which
+    // would ask at once.
+    let marks = key_wait_marks(&wallet).await;
+    assert_eq!(marks.len(), 1, "{marks:?}");
+    assert_eq!(marks[0]["epochs"], serde_json::json!([epoch]));
+    assert_eq!(marks[0]["earliest_ms"], at);
+    assert!(kept(&wallet, "ud/").await.is_empty());
+    // Told once, and bob not asked while the key is missing.
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.notices().await.unwrap().len(), 1);
+    assert!(asked(&wallet, &w.bob_id()).await.is_empty());
+    // The key comes: bob is asked for what his inbox accepted at the mark's times.
+    let cert = wallet.app().cert().clone();
+    crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        asked(&wallet, &w.bob_id()).await,
+        vec![(Some(at), Some(at))]
+    );
+    // Bob's shop sends it again; the wallet takes it.
+    shop.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+    assert_eq!(wallet.notices().await.unwrap().len(), 1);
+}
+
+/// `app` backed up, dropped and restored onto a new store, with no reconcile: a restored app
+/// that lacks the current epoch's key can't list its records yet.
+async fn restored_unlisted(w: &World, mut app: Paykit) -> Paykit {
+    let backup = app.backup().await.unwrap();
+    let backup = paykit_sdk::PaykitBackup::from_bytes(&backup.to_bytes().unwrap()).unwrap();
+    drop(app);
+    Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_stored_key_wait_dropped_while_the_records_are_not_listed_given_up_at_once() {
+    // The wallet is restored while bob's request waits for the current epoch's key: the
+    // restored app can't list its records without the key, so its copy may lack the
+    // request's record. The client drops the entry past 21 days, never processed, and the
+    // host is told all the same, in that receive (Paykit spec 8.1, "Stored entries").
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    wallet.receive(None).await.unwrap();
+    let (_, epoch, sent) = waiting_for_the_current_key(&w, &mut wallet, &mut shop).await;
+    let mut wallet = restored_unlisted(&w, wallet).await;
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(summary.scope_keys_awaited, "{summary:?}");
+    assert!(awaiting(&mut wallet).await.contains(&epoch));
+    assert!(wallet.notices().await.unwrap().is_empty());
+    past_the_key_wait(&w, &mut wallet, sent).await;
+    assert!(wallet.app().protocol_get(b"nl").await.unwrap().is_some());
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(key_wait_marks(&wallet).await.len(), 1);
+}
+
+#[tokio::test]
+async fn test_stored_key_wait_mark_asks_only_once_every_awaited_key_is_held() {
+    // Two of bob's requests wait for the keys of two data epochs and are dropped: the mark
+    // names both epochs, and asks bob only once the wallet holds both keys, not when only
+    // the later one comes.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    wallet.receive(None).await.unwrap();
+    let (_, first, _) = waiting_for_the_current_key(&w, &mut wallet, &mut shop).await;
+    let (_, second, sent) = waiting_for_the_current_key(&w, &mut wallet, &mut shop).await;
+    assert!(first < second);
+    past_the_key_wait(&w, &mut wallet, sent).await;
+    let marks = key_wait_marks(&wallet).await;
+    assert_eq!(marks.len(), 1, "{marks:?}");
+    assert_eq!(marks[0]["epochs"], serde_json::json!([first, second]));
+    let cert = wallet.app().cert().clone();
+    crate::unrequested::store_bundle_from(&w, wallet.app_id(), &cert, second);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(asked(&wallet, &w.bob_id()).await.is_empty());
+    crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(asked(&wallet, &w.bob_id()).await.len(), 1);
+}
+
+#[tokio::test]
+async fn test_stored_key_wait_mark_and_notice_carried_through_a_restore() {
+    // A backup carries the mark whole and the notice: the restored app tells nothing again,
+    // asks bob only once the key is held, and takes the copy he sends again as a new
+    // message.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    wallet.receive(None).await.unwrap();
+    let (request, _, sent) = waiting_for_the_current_key(&w, &mut wallet, &mut shop).await;
+    past_the_key_wait(&w, &mut wallet, sent).await;
+    let held = key_wait_marks(&wallet).await;
+    assert_eq!(held.len(), 1);
+    let at = held[0]["earliest_ms"].as_u64().unwrap();
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1);
+    let cert = wallet.app().cert().clone();
+    let mut wallet = restored_unlisted(&w, wallet).await;
+    assert_eq!(key_wait_marks(&wallet).await, held);
+    assert_eq!(wallet.notices().await.unwrap(), notices);
+    wallet.receive(None).await.unwrap();
+    assert!(asked(&wallet, &w.bob_id()).await.is_empty());
+    crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        asked(&wallet, &w.bob_id()).await,
+        vec![(Some(at), Some(at))]
+    );
+    shop.receive(None).await.unwrap();
+    // The restored app's first read lists what it couldn't before; the copy comes after.
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    // Taken, and held as a restore holds every open request.
+    let status = wallet.request(&request).await.unwrap().status;
+    assert!(
+        matches!(status, RequestStatus::Open | RequestStatus::Held),
+        "{status:?}"
+    );
+    assert_eq!(wallet.notices().await.unwrap(), notices);
 }

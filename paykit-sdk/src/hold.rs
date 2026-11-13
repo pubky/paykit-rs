@@ -1,13 +1,18 @@
-//! The hold after a restore (Paykit spec 7.2, "What a restore loses"), one-time branch.
+//! The hold after a restore (Paykit spec 7.2, "What a restore loses"), one-time branch, and
+//! the same hold after a `missed` item.
 //!
 //! A backup can predate a payee's cancellation of a request it holds open: the restored app
 //! would see the request payable. So every restore from a backup holds every open request,
 //! as the restore itself sets it: [`crate::protocol::PaykitProtocol`]'s restore step adds the
 //! hold to the writes it installs, in the restore's one commit, so no restore can leave it
 //! out; it is no part of what a backup carries, and a confirmation an older backup holds is
-//! dropped by the restore. While a request is held:
+//! dropped by the restore. A `missed` item (Switch spec 8.2) shows the service deleted
+//! entries before the app read them, a payee's cancellation possibly among them: the
+//! protocol's `missed` step sets the same hold (`mh`) and drops every confirmation of an
+//! earlier one, in the commit that passes the item. While a request is held:
 //!
-//! - no automatic attempt is made on it (part 1 makes none);
+//! - no automatic attempt is made on it, and a dispatch made before is not repeated at a
+//!   resume;
 //! - a manual one only once the user has seen that the payee may have cancelled it
 //!   ([`crate::PayOptions::possibly_cancelled_confirmed`]), which ends the hold for that
 //!   request;
@@ -24,7 +29,8 @@ use paykit_lib::collections::Collection;
 use paykit_lib::records::ActivityRecord;
 use pubky_switch_client::app::Protocol as _;
 use pubky_switch_client::app::{
-    AppError, Collection as SwitchCollection, PolicyFamily, RecordContent, Unopened,
+    AppError, Collection as SwitchCollection, PolicyFamily, RecordContent,
+    Refusal as ClientRefusal, Unopened,
 };
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::records::{AppCert, CLOCK_TOLERANCE_MS};
@@ -34,18 +40,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
-use crate::protocol::QueuedAsk;
 use crate::requests::{cancelled, rejected, RequestStatus};
 use crate::state::{key, Tx};
 
 /// The hold a restore set (`p/rh`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RestoreHold {
     /// From when the counterparties are asked to re-send: the acceptance time of the last
     /// entry the backup's cursor passed, less the clock tolerance.
     pub(crate) resend_from_ms: u64,
-    /// The re-sends are queued.
+    /// The re-sends are all queued.
     pub(crate) asks_queued: bool,
+    /// The counterparties asked already while a record of the copy was sealed, in
+    /// increasing order ([`Paykit::queue_restore_asks`]). A hold written before this member
+    /// existed, a valid run's form, reads as having asked none.
+    #[serde(default)]
+    pub(crate) asked: Vec<[u8; 32]>,
 }
 
 impl RestoreHold {
@@ -55,7 +65,42 @@ impl RestoreHold {
         Self {
             resend_from_ms: cursor_time_ms.saturating_sub(CLOCK_TOLERANCE_MS),
             asks_queued: false,
+            asked: Vec::new(),
         }
+    }
+}
+
+/// The hold a `missed` item set (`p/mh`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct MissedHold {
+    /// A time no earlier than the last acceptance time of the entries the item tells of:
+    /// the item's own last acceptance time (`MissedEntries::accepted_until_ms`), or, for an
+    /// item kept owed by a build that didn't keep it, the highest service time verified once
+    /// the read that took the item returned ([`Paykit::bound_missed_hold`]). `None` until
+    /// then, when every open request is held.
+    pub(crate) bound_ms: Option<u64>,
+}
+
+impl MissedHold {
+    /// The hold of an item whose last acceptance time is `accepted_until_ms`: bounded by it,
+    /// or unbounded until the read returns when the client knows no end (`u64::MAX`).
+    pub(crate) fn of_item(accepted_until_ms: u64) -> Self {
+        Self {
+            bound_ms: (accepted_until_ms != u64::MAX).then_some(accepted_until_ms),
+        }
+    }
+
+    /// Whether the open request `request` is held (Paykit spec 7.2, 9). One the app held at
+    /// the item, its inbox having accepted it no later than the bound, is held. One first
+    /// seen after the item is held only when its signed `created_at` is earlier than the
+    /// bound plus the clock tolerance: a request created later can't have had its
+    /// cancellation among the entries missed. A request with no acceptance time is held.
+    pub(crate) fn holds(&self, request: &paykit_lib::records::StoredMessage) -> bool {
+        let Some(bound) = self.bound_ms else {
+            return true;
+        };
+        let held_at_item = request.accepted_at().is_none_or(|at| at <= bound);
+        held_at_item || request.message().created_at_ms < bound.saturating_add(CLOCK_TOLERANCE_MS)
     }
 }
 
@@ -103,10 +148,10 @@ fn read_by_scope(collection: &SwitchCollection, scope: &str) -> bool {
 }
 
 /// Whether the app's copy of `side`'s records may lack records, so a record's absence there
-/// decides nothing yet (Paykit spec 8.1, "Records not listed yet"): a restore's mark
-/// (`restore`, `p/nl`), no certificate kept as listed under (`p/lc`), or `held`, the
-/// certificate held now, another than `listed` while it reads a collection of the side, or
-/// a member of one. The one rule for every caller: [`Paykit::unlisted`],
+/// decides nothing yet (Paykit spec 8.1, "Records not listed yet"): a restore's or a `missed`
+/// item's mark (`marked`, `p/nl` or `p/ml`), no certificate kept as listed under (`p/lc`),
+/// or `held`, the certificate held now, another than `listed` while it reads a collection
+/// of the side, or a member of one. The one rule for every caller: [`Paykit::unlisted`],
 /// [`Paykit::payer_waits`], and the receive step, which reads the same state through its
 /// context.
 ///
@@ -119,11 +164,11 @@ fn read_by_scope(collection: &SwitchCollection, scope: &str) -> bool {
 /// ([`Paykit::list_records`]); a side `held` reads none of lacks nothing it reads.
 pub(crate) fn side_unlisted(
     side: RecordSide,
-    restore: bool,
+    marked: bool,
     listed: Option<&AppCert>,
     held: &AppCert,
 ) -> bool {
-    restore
+    marked
         || listed.is_none_or(|listed| {
             listed.hash() != held.hash()
                 && side
@@ -139,6 +184,11 @@ pub(crate) enum Unlisted {
     /// A restore set `p/nl`: the client owes a listing too, which its next read makes
     /// before the feed (Switch spec 12.4 step 2.1).
     Restore,
+    /// A `missed` item set `p/ml` (Switch spec 8.2): the client lists again at the start of
+    /// its next read, so entries later in the read that passed the item, and calls before
+    /// the next one, would decide from the copy as it was. A listing Paykit makes
+    /// ([`Paykit::list_records`]) ends this, at the end of that receive.
+    Missed,
     /// The certificate the app holds is another than the one the records were last listed
     /// under (`p/lc`), or none is kept ([`side_unlisted`]). A client owes a listing too for
     /// one that reads collections, or members of one, that the certificate before it didn't
@@ -159,11 +209,11 @@ impl Paykit {
             .map_err(|_| PaykitError::corrupt())
     }
 
-    /// Why the shared records aren't listed, if they aren't: a restore's mark, or the
-    /// certificate held now being another than the one last listed under. The second is
-    /// read from what the store holds, the client's certificate and `p/lc`, which only a
-    /// listing writes, so a read that takes a certificate and fails, a failed write, a crash
-    /// or a restart before the next listing loses nothing.
+    /// Why the shared records aren't listed, if they aren't: a restore's mark, a `missed`
+    /// item's, or the certificate held now being another than the one last listed under.
+    /// The last is read from what the store holds, the client's certificate and `p/lc`,
+    /// which only a listing writes, so a read that takes a certificate and fails, a failed
+    /// write, a crash or a restart before the next listing loses nothing.
     pub(crate) async fn unlisted(&self) -> Result<Option<Unlisted>> {
         if self
             .local_get::<bool>(key::RECORDS_UNLISTED)
@@ -171,6 +221,13 @@ impl Paykit {
             .is_some()
         {
             return Ok(Some(Unlisted::Restore));
+        }
+        if self
+            .local_get::<bool>(key::MISSED_UNLISTED)
+            .await?
+            .is_some()
+        {
+            return Ok(Some(Unlisted::Missed));
         }
         Ok(self
             .side_unlisted(RecordSide::All)
@@ -182,14 +239,18 @@ impl Paykit {
     /// refuses too: with none kept as listed under, as after a join, the copy may be empty,
     /// and a call that only reads is refused rather than answer from it.
     pub(crate) async fn side_unlisted(&self, side: RecordSide) -> Result<bool> {
-        let restore = self
+        let marked = self
             .local_get::<bool>(key::RECORDS_UNLISTED)
             .await?
-            .is_some();
+            .is_some()
+            || self
+                .local_get::<bool>(key::MISSED_UNLISTED)
+                .await?
+                .is_some();
         let listed = self.listed_cert().await?;
         Ok(side_unlisted(
             side,
-            restore,
+            marked,
             listed.as_ref(),
             self.app.cert(),
         ))
@@ -276,23 +337,35 @@ impl Paykit {
             .all(|scope| self.app.scope_key(epoch, scope).is_some())
     }
 
-    /// Whether the request record at `record_key`, `record`, is held after a restore: a
-    /// restore set the hold, the user hasn't confirmed this request since, and it is open.
-    /// Every open request is held, one first seen after the restore too: no time the app
-    /// can see proves a request new, since its creation time is the counterparty's and a
-    /// request from before the backup can come again with a later acceptance time (Paykit
-    /// spec 7.2, "What a restore loses": nothing releases the hold automatically).
+    /// Whether the request record at `record_key`, `record`, is held after a restore or a
+    /// `missed` item: one of them set the hold, the user hasn't confirmed this request
+    /// since, and it is open.
+    /// After a restore every open request is held, one first seen after the restore too: no
+    /// time the app can see proves a request new, since its creation time is the
+    /// counterparty's and a request from before the backup can come again with a later
+    /// acceptance time (Paykit spec 7.2, "What a restore loses": nothing releases the hold
+    /// automatically). After a `missed` item, a request first seen after it is held only
+    /// when created before the item's last acceptance time plus the clock tolerance
+    /// ([`MissedHold::holds`]).
     pub(crate) async fn held(
         &self,
         record_key: &[u8; 32],
         record: &ActivityRecord,
     ) -> Result<bool> {
-        if self
+        let restored = self
             .local_get::<RestoreHold>(key::RESTORE_HOLD)
             .await?
-            .is_none()
-        {
-            return Ok(false);
+            .is_some();
+        if !restored {
+            let Some(missed) = self.local_get::<MissedHold>(key::MISSED_HOLD).await? else {
+                return Ok(false);
+            };
+            let Some((request, _)) = crate::requests::request_of(record) else {
+                return Ok(false);
+            };
+            if !missed.holds(request) {
+                return Ok(false);
+            }
         }
         if record.shows_paid() || cancelled(record) || rejected(record) {
             return Ok(false);
@@ -303,28 +376,113 @@ impl Paykit {
             .is_none())
     }
 
-    /// A restored cursor time (`ct`) above the backup's highest verified service time plus
-    /// the clock tolerance is clamped to that bound, with the hold's re-send time: a time
-    /// ahead of any the backup verified would ask counterparties to re-send from the future,
-    /// so nothing would come back (Paykit spec 7.2, "What a restore loses"). Clamped, not
-    /// refused: the time decides only where the re-sends start, and a restore must not fail
-    /// on it. Without a verified time the device clock is the bound.
-    pub(crate) async fn bound_restored_cursor_time(&mut self) -> Result<()> {
-        let Some(cursor) = self.local_get::<u64>(key::CURSOR_TIME).await? else {
+    /// Bound a `missed` item's hold set by the read that just returned with no last
+    /// acceptance time ([`MissedHold::bound_ms`]) by the highest service time verified: the
+    /// item came no later. Without a verified time, it stays unbounded.
+    pub(crate) async fn bound_missed_hold(&mut self) -> Result<()> {
+        let Some(hold) = self.local_get::<MissedHold>(key::MISSED_HOLD).await? else {
             return Ok(());
         };
+        if hold.bound_ms.is_some() {
+            return Ok(());
+        }
+        let Some(bound) = self.service_time() else {
+            return Ok(());
+        };
+        let hold = MissedHold {
+            bound_ms: Some(bound),
+        };
+        self.local_put(key::MISSED_HOLD, &hold).await
+    }
+
+    /// The user has seen that the payee may have cancelled `request` since the backup the
+    /// app was restored from, or a `missed` item, and lets its payment go on: the request's
+    /// hold ends, as a payment confirmed with
+    /// [`crate::PayOptions::possibly_cancelled_confirmed`] ends it, so a dispatch made before
+    /// the hold is repeated at a later resume (Paykit spec 7.2). It never overrides a
+    /// cancellation the record shows or the app keeps. A later `missed` item holds the
+    /// request again.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::NotNow`] while the app can't tell whether it holds the request: its record
+    /// is sealed under a scope key the app doesn't hold yet, or a value that doesn't read, or
+    /// it is missing from a copy that may lack records; [`Refusal::NotFound`] when the copy
+    /// holds no record of it. A later restore holds the request again all the same. A store
+    /// failure.
+    pub async fn confirm_possibly_cancelled(
+        &mut self,
+        request: &crate::requests::RequestRef,
+        _confirmed: pubky_switch_client::app::UserConfirmed,
+    ) -> Result<()> {
+        self.refresh_own()?;
+        let target = crate::activity::ActivityTarget::payer(
+            paykit_lib::derive::natural_key::request_record(&request.payee, &request.request_hash),
+        );
+        if self.held_activity(&target).await?.is_none() {
+            return Err(self.request_record_refusal(&target).await?);
+        }
+        let record_key = self.activity_key(&target)?;
+        self.local_put(&key::hold_confirmed(&record_key), &true)
+            .await
+    }
+
+    /// A restored time above the backup's highest verified service time plus the clock
+    /// tolerance is clamped to that bound: the cursor time (`ct`), with the hold's re-send
+    /// time, the two times of each mark of dropped messages (`pd/`, `ud/`, `kw/`), and the
+    /// acceptance time of each stop (`kc/`) and kept reply (`pr/`). A cursor time ahead of
+    /// any the backup verified would ask counterparties to re-send from the future, so
+    /// nothing would come back (Paykit spec 7.2, "What a restore loses"); a mark or a kept
+    /// message dated there would never expire. Clamped, not refused: the times decide only
+    /// where the re-sends start and when the items go, and a restore must not fail on them.
+    /// Without a verified time the device clock is the bound. Each value is read bound to its
+    /// key first, as a restore reads it.
+    pub(crate) async fn bound_restored_cursor_time(&mut self) -> Result<()> {
         let bound = self
             .service_time()
             .unwrap_or_else(|| self.now())
             .saturating_add(CLOCK_TOLERANCE_MS);
-        if cursor <= bound {
-            return Ok(());
-        }
         let mut tx = Tx::default();
-        tx.put(key::CURSOR_TIME, &bound)?;
-        if let Some(mut hold) = self.local_get::<RestoreHold>(key::RESTORE_HOLD).await? {
-            hold.resend_from_ms = RestoreHold::of(bound).resend_from_ms;
-            tx.put(key::RESTORE_HOLD, &hold)?;
+        if let Some(cursor) = self.local_get::<u64>(key::CURSOR_TIME).await? {
+            if cursor > bound {
+                tx.put(key::CURSOR_TIME, &bound)?;
+                if let Some(mut hold) = self.local_get::<RestoreHold>(key::RESTORE_HOLD).await? {
+                    hold.resend_from_ms = RestoreHold::of(bound).resend_from_ms;
+                    tx.put(key::RESTORE_HOLD, &hold)?;
+                }
+            }
+        }
+        for family in [
+            crate::marks::MarkFamily::Replies,
+            crate::marks::MarkFamily::Unverified,
+        ] {
+            for (rest, mut mark) in self
+                .local_scan::<crate::marks::DropMark>(family.prefix())
+                .await?
+            {
+                if mark.clamp(bound) {
+                    tx.put(&format!("{}{rest}", family.prefix()), &mark)?;
+                }
+            }
+        }
+        let family = crate::marks::MarkFamily::KeyWaits;
+        for (rest, mut held) in self
+            .local_scan::<crate::marks::KeyWaitMark>(family.prefix())
+            .await?
+        {
+            if held.mark.clamp(bound) {
+                tx.put(&format!("{}{rest}", family.prefix()), &held)?;
+            }
+        }
+        for prefix in [key::KEPT_CANCELLATIONS, key::KEPT_REPLIES] {
+            for (rest, mut kept) in self
+                .local_scan::<crate::records::KeptMessage>(prefix)
+                .await?
+            {
+                if kept.bound_acceptance(bound) {
+                    tx.put(&format!("{prefix}{rest}"), &kept)?;
+                }
+            }
         }
         self.local_commit(tx).await
     }
@@ -360,9 +518,9 @@ impl Paykit {
         Ok(())
     }
 
-    /// List every collection the app's certificate reads, then clear the restore's mark and
-    /// keep that certificate as the one listed under, in one commit: a crash before it
-    /// leaves the records to be listed again. Refused while a wider certificate's scope
+    /// List every collection the app's certificate reads, then clear the restore's and a
+    /// `missed` item's marks and keep that certificate as the one listed under, in one
+    /// commit: a crash before it leaves the records to be listed again. Refused while a wider certificate's scope
     /// keys are missing ([`Paykit::refuse_while_scope_keys_missing`]): a listing before them
     /// keeps values the app can't open, and keeping the certificate then would mark them
     /// listed for good. Every listing of Paykit's comes here. Only a receive takes a
@@ -373,6 +531,7 @@ impl Paykit {
         self.app.list_collections().await?;
         let mut tx = Tx::default();
         tx.delete(key::RECORDS_UNLISTED);
+        tx.delete(key::MISSED_UNLISTED);
         tx.put(key::LISTED_CERT, &signed)?;
         self.local_commit(tx).await
     }
@@ -384,7 +543,8 @@ impl Paykit {
     /// which a restore's first read may have widened before its listing. Otherwise the
     /// listing was skipped, and the mark stays until a read that lists. The certificate
     /// listed under stays as it was, since the read may have taken another one after its
-    /// listing ([`Unlisted::Certificate`]).
+    /// listing ([`Unlisted::Certificate`]), and so does a `missed` item's mark: the client
+    /// listed before the feed, and the item came after ([`Unlisted::Missed`]).
     pub(crate) async fn records_listed(&mut self, keys_held_before: bool) -> Result<()> {
         if !keys_held_before || !self.holds_scope_keys() {
             return Ok(());
@@ -399,13 +559,18 @@ impl Paykit {
         Ok(())
     }
 
-    /// At a receive, under another certificate than the one the records were listed under:
-    /// they are listed now, so the calls that only read see them. A listing that fails
-    /// leaves the records unlisted, for the next receive or write, and its error's text is
-    /// returned for the host ([`crate::ReceiveSummary::records_unlisted`]): the read went through, so its
+    /// At a receive, under another certificate than the one the records were listed under,
+    /// or after a `missed` item: they are listed now, so the calls that only read see them,
+    /// and the item's deleted entries left out nothing. A listing that fails leaves the
+    /// records unlisted, for the next receive or write, and its error's text is returned for
+    /// the host ([`crate::ReceiveSummary::records_unlisted`]): the read went through, so its
     /// report isn't lost to it. A store failure or an alarm is the receive's error.
     pub(crate) async fn list_under_new_cert(&mut self) -> Result<Option<String>> {
-        if self.unlisted().await? != Some(Unlisted::Certificate) || !self.holds_scope_keys() {
+        let owed = matches!(
+            self.unlisted().await?,
+            Some(Unlisted::Certificate | Unlisted::Missed)
+        );
+        if !owed || !self.holds_scope_keys() {
             return Ok(None);
         }
         match self.list_records().await {
@@ -455,10 +620,123 @@ impl Paykit {
         Ok(())
     }
 
+    /// Whether a payer's or payee's activity record in the copy holds a value sealed under
+    /// a scope key the app doesn't hold yet ([`awaits_key`]): its counterparty and status
+    /// can't be read, so the re-sends a restore or a `missed` item asks for wait for it.
+    pub(crate) async fn copy_awaits_key(&self) -> Result<bool> {
+        for collection in [Collection::PayerActivity, Collection::PayeeActivity] {
+            for held in self.app.records_of(collection.name()).await? {
+                if awaits_key(&held.content) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Queue again, once after a restore, the messages this app signed that its activity
+    /// records store to be sent ([`own_to_send_again`]), with the signed plaintext each
+    /// record stores (Switch spec 11, "Queued again by its signer"): a batch the backup kept
+    /// unanswered queued its message only with an answer the restored app never gets, so
+    /// no outbox holds it. Called once the copy of the records is listed and no scope key
+    /// is awaited. A message the outbox holds, or that was sent, is queued once; one the
+    /// client refuses ([`pubky_switch_client::app::WontDeliver`]: past its replay window of
+    /// 30 days from its `created_at`, given up already, too large) is not sent again,
+    /// nothing is told the host, and it is never asked for again; one the client refuses as
+    /// not this app's own is not sent either. The pass waits while a record of the copy is
+    /// sealed under a scope key the app doesn't hold yet ([`Paykit::copy_awaits_key`]), so
+    /// what such a record stores is sent once it opens; a record that doesn't bind to its key
+    /// shows nothing to send. Messages to a counterparty whose sends are held wait, the mark naming
+    /// it, for a later receive.
+    pub(crate) async fn queue_own_again(&mut self) -> Result<()> {
+        let Some(owed) = self
+            .local_get::<OwnResendOwed>(key::OWN_RESEND_OWED)
+            .await?
+        else {
+            return Ok(());
+        };
+        if self.copy_awaits_key().await? {
+            return Ok(());
+        }
+        let own = self.identity();
+        let app_id = self.app.cert().app_id();
+        let mut waiting = std::collections::BTreeSet::new();
+        for (collection, side) in [
+            (
+                Collection::PayerActivity,
+                paykit_lib::records::ActivitySide::Payer,
+            ),
+            (
+                Collection::PayeeActivity,
+                paykit_lib::records::ActivitySide::Payee,
+            ),
+        ] {
+            for held in self.app.records_of(collection.name()).await? {
+                let Some(value) = held.content.value() else {
+                    continue;
+                };
+                // A record that doesn't bind shows nothing to send.
+                let label = collection.policy_label(&held.policy).flatten();
+                let Some(record) = crate::records::bind_activity(
+                    value,
+                    &own,
+                    side,
+                    label.as_ref(),
+                    &held.key,
+                    |t| self.app.record_key(t).ok(),
+                    &|p| self.rail.settlement_id(p),
+                ) else {
+                    continue;
+                };
+                let counterparty = record.counterparty;
+                if owed
+                    .waiting
+                    .as_ref()
+                    .is_some_and(|waiting| waiting.binary_search(&counterparty).is_err())
+                {
+                    continue;
+                }
+                let messages = own_to_send_again(&record, &own, &app_id);
+                if messages.is_empty() {
+                    continue;
+                }
+                if self.sends_held(&counterparty).await? {
+                    waiting.insert(counterparty);
+                    continue;
+                }
+                for stored in messages {
+                    match self.app.queue_stored(stored.plaintext()).await {
+                        Ok(msg_id) => {
+                            let _ = self.app.flush_message(&msg_id).await;
+                        }
+                        // Refused for good, or not this app's own: nothing is queued and
+                        // nothing is told; the pass doesn't ask again.
+                        Err(AppError::Refused(
+                            ClientRefusal::WontDeliver(_) | ClientRefusal::Usage(_),
+                        )) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
+        }
+        if waiting.is_empty() {
+            self.local_delete(key::OWN_RESEND_OWED).await
+        } else {
+            let owed = OwnResendOwed {
+                waiting: Some(waiting.into_iter().collect()),
+            };
+            self.local_put(key::OWN_RESEND_OWED, &owed).await
+        }
+    }
+
     /// Queue, once after a restore, a `resend_request` to every counterparty with an open
     /// request, from the restore's re-send time; [`Paykit::receive`] sends them. The start is
     /// bounded where it is used as well as at the restore and the load: no ordering of a
-    /// load, a renewal and a crash leaves the re-sends starting in the future.
+    /// load, a renewal and a crash leaves the re-sends starting in the future. A request
+    /// record sealed under a scope key the app doesn't hold yet shows no counterparty: the
+    /// counterparties the other records show are asked now, each once, and the hold names
+    /// them, so the one a sealed record shows is asked once it opens; the asks are all
+    /// queued once no record is sealed.
     pub(crate) async fn queue_restore_asks(&mut self) -> Result<()> {
         let Some(mut hold) = self.local_get::<RestoreHold>(key::RESTORE_HOLD).await? else {
             return Ok(());
@@ -486,21 +764,68 @@ impl Paykit {
                 counterparties.insert(view.request.payee);
             }
         }
+        let mut asked: std::collections::BTreeSet<[u8; 32]> = hold.asked.iter().copied().collect();
         let mut tx = Tx::default();
         for counterparty in counterparties {
-            tx.put(
-                &key::ask(&counterparty, hold.resend_from_ms),
-                &QueuedAsk {
-                    sender: counterparty,
-                    from_ms: hold.resend_from_ms,
-                    until_ms: None,
-                },
-            )?;
+            if asked.insert(counterparty) {
+                self.queue_ask(&mut tx, counterparty, hold.resend_from_ms)
+                    .await?;
+            }
         }
-        hold.asks_queued = true;
+        if self.copy_awaits_key().await? {
+            hold.asked = asked.into_iter().collect();
+        } else {
+            hold.asks_queued = true;
+            hold.asked = Vec::new();
+        }
         tx.put(key::RESTORE_HOLD, &hold)?;
         self.local_commit(tx).await
     }
+}
+
+/// The restore's re-send of this app's own messages, owed (`p/ro`): set by a restore, never
+/// restored, gone once every message it covers was queued again or refused
+/// ([`Paykit::queue_own_again`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OwnResendOwed {
+    /// `None` while no pass ran: every counterparty's messages are owed. After a pass, the
+    /// counterparties whose sends were held then, a blocked one or every one while the copy
+    /// of the deny list isn't known, ascending, each once: only their messages are owed.
+    pub(crate) waiting: Option<Vec<[u8; 32]>>,
+}
+
+/// The messages of `record` this app signed, `app_id` of identity `own`, that it queues again
+/// after a restore (Paykit spec 7.2, "What a restore loses"): each a record stores to be
+/// sent, since every message this app stores in a record it also queues
+/// (`records::own_message_tests`), while the counterparty hasn't answered it and no later
+/// stop covers it. A request or a Billing Period's details goes while the record holds no
+/// response and no cancellation; an acceptance or a rejection while it holds no
+/// cancellation and no receipt; a proof while it holds no receipt; a cancellation and a
+/// receipt always. A receipt the app stored without sending it is never sent this way: this
+/// app stores its own receipt only in the batch that queues it
+/// ([`Paykit::confirm_payment_with`]), so its receipt in a record is one it sent.
+pub(crate) fn own_to_send_again<'a>(
+    record: &'a ActivityRecord,
+    own: &[u8; 32],
+    app_id: &[u8; 16],
+) -> Vec<&'a paykit_lib::records::StoredMessage> {
+    let answered = record.response.is_some() || record.cancellation.is_some();
+    let candidates = [
+        (&record.request, !answered),
+        (&record.period_details, !answered),
+        (
+            &record.response,
+            record.cancellation.is_none() && record.receipt.is_none(),
+        ),
+        (&record.proof, record.receipt.is_none()),
+        (&record.cancellation, true),
+        (&record.receipt, true),
+    ];
+    candidates
+        .into_iter()
+        .filter_map(|(stored, send)| stored.as_ref().filter(|_| send))
+        .filter(|stored| stored.sender() == *own && stored.cert().app_id() == *app_id)
+        .collect()
 }
 
 /// The refusal while the shared records aren't listed since a restore.
@@ -513,10 +838,10 @@ pub(crate) fn payer_pass_refusal() -> Refusal {
     )
 }
 
-fn unlisted() -> crate::error::PaykitError {
+pub(crate) fn unlisted() -> crate::error::PaykitError {
     Refusal::NotNow(
-        "Switch spec 8.3, 12.4 step 2.1: the shared records aren't listed since the restore or \
-         under the certificate held now"
+        "Switch spec 8.2, 8.3, 12.4 step 2.1: the shared records aren't listed since the \
+         restore, the missed item or under the certificate held now"
             .into(),
     )
     .into()

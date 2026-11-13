@@ -108,6 +108,31 @@ pub(crate) struct KeptNotice {
     /// notice's acknowledgement forgets ([`Paykit::acknowledge_notice`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) stored: Option<StoredHandle>,
+    /// For a message given up with no entry stored, where it came from; absent for one with
+    /// its entry's handle (`stored`), as every notice the stored entries raise is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) origin: Option<GivenUpOrigin>,
+}
+
+/// Where a message given up with no entry stored came from: no entry, so no handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GivenUpOrigin {
+    /// The client dropped its entry, stored while it waited for a scope key, past the
+    /// bounds of Switch spec 8.2: it was never processed, so a copy its sender sends again is
+    /// taken as a new message.
+    KeyWait,
+    /// A payer's reply kept for its record (`pr/`) was given up.
+    KeptReply,
+}
+
+/// What a message given up leaves behind ([`KeptNotice::given_up`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GivenUpFrom {
+    /// An entry the client keeps stored, which the acknowledgement forgets.
+    Stored(StoredHandle),
+    /// No entry: the message came from there.
+    Origin(GivenUpOrigin),
 }
 
 /// The handle of an entry the client keeps stored (Switch spec 8.2): its local ID, and the
@@ -131,6 +156,7 @@ impl KeptNotice {
             raised_at_ms: at,
             acknowledged: false,
             stored: None,
+            origin: None,
         }
     }
 
@@ -151,18 +177,23 @@ impl KeptNotice {
             raised_at_ms: at,
             acknowledged: false,
             stored: None,
+            origin: None,
         }
     }
 
-    /// The notice that message `msg_id` from `sender` was given up, raised at `at`, its
-    /// entry kept stored at `stored`.
+    /// The notice that message `msg_id` from `sender` was given up, raised at `at`: with its
+    /// entry's handle when the client keeps one stored, or else with where it came from.
     pub(crate) fn given_up(
         sender: [u8; 32],
         msg_id: &str,
         request_hash: Option<[u8; 32]>,
         at: u64,
-        stored: StoredHandle,
+        from: GivenUpFrom,
     ) -> Self {
+        let (stored, origin) = match from {
+            GivenUpFrom::Stored(handle) => (Some(handle), None),
+            GivenUpFrom::Origin(origin) => (None, Some(origin)),
+        };
         Self {
             kind: NoticeKind::MessageGivenUp,
             attempt_id: None,
@@ -171,8 +202,16 @@ impl KeptNotice {
             request_hash: request_hash.map(|hash| pubky_switch_core::enc::b64(&hash)),
             raised_at_ms: at,
             acknowledged: false,
-            stored: Some(stored),
+            stored,
+            origin,
         }
+    }
+
+    /// Whether the message given up stays processed, so a copy sent again has no effect while
+    /// the notice is kept: every give-up but the client's drop of an entry waiting for a
+    /// key, which was never processed ([`GivenUpOrigin::KeyWait`]).
+    pub(crate) fn keeps_processed(&self) -> bool {
+        self.origin != Some(GivenUpOrigin::KeyWait)
     }
 
     /// The notice read whole, at the attempt and kind its key names: one that doesn't is a
@@ -183,6 +222,7 @@ impl KeptNotice {
             || self.attempt_id.as_deref() != Some(attempt.to_text().as_str())
             || self.msg_id.is_some()
             || self.stored.is_some()
+            || self.origin.is_some()
         {
             return Err(PaykitError::corrupt());
         }
@@ -193,12 +233,14 @@ impl KeptNotice {
     /// names: one that doesn't is a corrupt store.
     pub(crate) fn check_message(&self, sender: &[u8; 32], msg_id: &str) -> Result<()> {
         // A message notice is deleted at its acknowledgement, after its entry is forgotten,
-        // so a valid run keeps none acknowledged, and none without its entry's handle.
+        // so a valid run keeps none acknowledged. It holds its entry's handle exactly when it
+        // names no origin: one raised for a stored entry always has it, and one with no
+        // entry stored (a key wait's, a kept reply's) names where it came from instead.
         if self.kind != NoticeKind::MessageGivenUp
             || self.attempt_id.is_some()
             || self.msg_id.as_deref() != Some(msg_id)
             || self.counterparty != *sender
-            || self.stored.is_none()
+            || self.stored.is_some() == self.origin.is_some()
             || self.acknowledged
         {
             return Err(PaykitError::corrupt());
@@ -395,6 +437,7 @@ mod tests {
             raised_at_ms: 3,
             acknowledged: false,
             stored: None,
+            origin: None,
         }
     }
 
@@ -436,7 +479,8 @@ mod tests {
             stored_id: 4,
             hash: [5; 32],
         };
-        let notice = KeptNotice::given_up([1; 32], id, Some([2; 32]), 3, handle);
+        let notice =
+            KeptNotice::given_up([1; 32], id, Some([2; 32]), 3, GivenUpFrom::Stored(handle));
         assert!(notice.check_message(&[1; 32], id).is_ok());
         assert!(notice.check_message(&[9; 32], id).is_err());
         assert!(notice

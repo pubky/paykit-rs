@@ -21,9 +21,10 @@ use pubky_switch_core::claims::Outcome;
 use pubky_switch_core::enc::b64;
 use serde_json::{json, Value};
 
+use crate::common::refuse_writes;
 use crate::common::{btc, draft, endpoint, request_from, World};
 use crate::restore::{kept, kept_message, kept_message_with_refs};
-use crate::stored::{receipt_of_another_proof, refuse_writes};
+use crate::stored::receipt_of_another_proof;
 
 /// A `msg_id` no message here has.
 const OTHER_MSG_ID: &str = "223e4567-e89b-42d3-a456-426614174000";

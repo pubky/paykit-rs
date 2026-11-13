@@ -43,6 +43,7 @@ mod destination;
 mod error;
 mod hold;
 mod journal;
+mod marks;
 mod notices;
 mod pay;
 mod paykit;
@@ -65,10 +66,11 @@ pub use approval::{AppScopes, RequestedScopes};
 pub use destination::IDENTITY_GRACE_MS;
 pub use error::{PaykitError, Refusal, Result};
 pub use journal::{PaymentView, Stage};
+pub use marks::MAX_DROPPED_MARKS;
 pub use notices::{Notice, NoticeKind};
 pub use pay::{
-    PayOptions, PayOutcome, PaymentDoubt, PaymentMode, TransferQuote, UnrequestedPayment,
-    UNREQUESTED_DEADLINE_MS,
+    BlockedPayment, PayOptions, PayOutcome, PaymentDoubt, PaymentMode, TransferQuote,
+    UnrequestedPayment, UNREQUESTED_DEADLINE_MS,
 };
 pub use paykit::{
     orphan_floor_s, Paykit, PaykitBackup, PaykitConfig, ReceiveSummary, DEFAULT_RESEND_BUDGET,
@@ -80,7 +82,9 @@ pub use rail::{
     RailDeclaration, RailError, RailOutcome, RailPaid, RailPayment, Transfer,
 };
 pub use receipts::{ReceiptDetails, ReceiptsOf, ReceivedReceipt};
-pub use receive::{HeldList, KEPT_MESSAGE_MS, LISTS_REFRESH_MS};
+pub use receive::{
+    HeldList, KEPT_MESSAGE_MS, LISTS_REFRESH_MS, MAX_KEPT_REPLIES, MAX_KEPT_REPLIES_PER_SENDER,
+};
 pub use reconcile::{Doubtful, ReconcileReport, Resolution};
 pub use requests::{
     MessageDelivery, PayeeActivity, PayeeStatus, RequestDraft, RequestRef, RequestStatus,

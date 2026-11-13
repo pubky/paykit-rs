@@ -847,3 +847,161 @@ async fn test_unrequested_list_over_a_value_awaiting_its_epoch_key_keeps_single_
     assert_eq!(value["msg_ids"].as_array().unwrap().len(), 2, "{value}");
     assert!(wallet.held_lists().await.unwrap().is_empty());
 }
+
+/// The `paykit.payment_receipt` body of `attempt_id`, for a payment without a request: its
+/// `refs` name only the proof.
+fn receipt_body(attempt_id: paykit_lib::AttemptId) -> serde_json::Map<String, serde_json::Value> {
+    paykit_lib::bodies::PaymentReceipt {
+        attempt_id,
+        billing_period: None,
+        metadata: None,
+        payment_reference: None,
+    }
+    .to_body(1)
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_unrequested_receipt_from_another_identity_refused() {
+    // Carol sends alice a receipt for her payment to bob, naming its attempt and its proof.
+    // She isn't the payment's payee, so the record takes nothing of it; bob's own receipt is
+    // placed (Paykit wire 4.11, 5.3).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let _carol = w
+        .join(
+            &w.carol,
+            "shop",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    let PayOutcome::Paid { attempt_id, .. } = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-lightning-bolt12"))
+        .await
+        .unwrap()
+    else {
+        panic!("paid");
+    };
+    let proof = wallet
+        .app()
+        .sent_to(&w.bob_id(), 0, u64::MAX)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|sent| sent.kind == "paykit.payment_proof")
+        .unwrap()
+        .plaintext
+        .hash();
+    let from_carol = w.inject(
+        &w.carol,
+        "shop",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.payment_receipt",
+        vec![proof],
+        receipt_body(attempt_id),
+    );
+    // Taken with no effect: nothing is written, and nothing is kept to write later.
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.applied.contains(&from_carol), "{got:?}");
+    assert!(wallet.payments().await.unwrap()[0].receipt.is_none());
+    assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
+    assert!(wallet.app().protocol_scan(b"se/").await.unwrap().is_empty());
+    // Bob's receipt of the same payment goes beside the proof.
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.payment_receipt",
+        vec![proof],
+        receipt_body(attempt_id),
+    );
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.payments().await.unwrap()[0].receipt.is_some());
+}
+
+#[tokio::test]
+async fn test_unrequested_proof_of_a_settlement_seen_not_credited_again_over_its_delete() {
+    // The shop credited alice's payment without a request; bob's till then deletes the
+    // record, and a proof of the same settlement comes again. The shop saw the record's
+    // messages, so the proof is one for the record it saw: nothing is written over the
+    // delete, and the payment isn't credited again (Paykit spec 8.1, "Records not listed
+    // yet").
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    let outcome = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-lightning-bolt12"))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.payee_activity().await.unwrap().len(), 1);
+    till.receive(None).await.unwrap();
+    let sent = wallet
+        .app()
+        .sent_to(&w.bob_id(), 0, u64::MAX)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|sent| sent.kind == "paykit.payment_proof")
+        .unwrap();
+    let message = pubky_switch_core::message::Message::parse(
+        sent.plaintext.json(),
+        paykit_lib::kinds::OPAQUE_MEMBERS,
+    )
+    .unwrap();
+    let paykit_lib::Body::PaymentProof(proof) = paykit_lib::Body::parse(&message).unwrap() else {
+        panic!("a proof");
+    };
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            paykit_lib::collections::Collection::PayeeActivity.name(),
+            paykit_lib::collections::Collection::PayeeActivity.policy(None),
+        ),
+        &paykit_lib::derive::natural_key::payee_payment_record(
+            &proof.payment_endpoint_identifier,
+            &proof.settlement_id().unwrap(),
+        ),
+    );
+    till.app_mut()
+        .delete_record(&target, Vec::new())
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let key = shop.app().record_key(&target).unwrap();
+    let written = w.record_writes(&w.bob, &key);
+    let again = w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        Vec::new(),
+        message.body.clone(),
+    );
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.applied.contains(&again), "{got:?}");
+    assert_eq!(w.record_writes(&w.bob, &key), written);
+    let held = shop.app().shared_record(&key).await.unwrap().unwrap();
+    assert_eq!(
+        held.content,
+        pubky_switch_client::app::RecordContent::Deleted
+    );
+    assert!(shop.payee_activity().await.unwrap().is_empty());
+}

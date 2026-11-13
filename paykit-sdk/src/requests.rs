@@ -39,6 +39,7 @@ use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
 use crate::rail::ProofCheck;
 use crate::receipts::{received_receipt, ReceiptDetails, ReceivedReceipt};
+use crate::receive::KEPT_MESSAGE_MS;
 use crate::records::{conflict, KeptMessage};
 use crate::state::{key, Tx};
 
@@ -282,15 +283,19 @@ pub enum RequestStatus {
     Cancelled,
     /// Its proposal expired unpaid.
     Expired,
-    /// Held after a restore: the payee may have cancelled it since the backup, and it is
-    /// paid only once the user has seen that (Paykit spec 7.2,
-    /// [`crate::PayOptions::possibly_cancelled_confirmed`]).
+    /// Held after a restore or a `missed` item: the payee may have cancelled it since the
+    /// backup, or among the entries the service deleted, and it is paid only once the user
+    /// has seen that (Paykit spec 7.2, [`crate::PayOptions::possibly_cancelled_confirmed`],
+    /// [`crate::Paykit::confirm_possibly_cancelled`]).
     Held,
     /// Received, but its record couldn't be written: the switch refused the write for good,
     /// such as over a quota (Switch spec 8.2). It is shown from the app's own copy and
     /// written into its record by a later write as room frees; it can't be paid, rejected or
     /// cancelled until then ([`Refusal::NotFound`]).
     Unrecorded,
+    /// From a payee the identity's deny list holds, as the app last read it: paused, and
+    /// paid only once the user confirms (Paykit spec 8.1, [`Refusal::Blocked`]).
+    Blocked,
 }
 
 /// A request the payer holds. Its `Debug` shows the payment reference's length only.
@@ -387,6 +392,14 @@ pub(crate) fn request_of(record: &ActivityRecord) -> Option<(&StoredMessage, &Pa
     }
 }
 
+/// The record holds this identity's acceptance (Paykit spec 8.1).
+pub(crate) fn accepted(record: &ActivityRecord) -> bool {
+    matches!(
+        record.response.as_ref().map(StoredMessage::body),
+        Some(Body::PaymentRequestAcceptance(_))
+    )
+}
+
 /// The record holds this identity's rejection (Paykit spec 8.1). Status comes from the
 /// messages held, never from `status` (Paykit wire 5.3).
 pub(crate) fn rejected(record: &ActivityRecord) -> bool {
@@ -440,10 +453,15 @@ impl Paykit {
     /// Send a one-time request to `to` (Paykit spec 8.1 step 1, Paykit wire 4.5), under this
     /// app's selling label. The payer must admit this identity, for example after an invite
     /// (Paykit spec 1). The request is signed, and its record written in the batch that
-    /// queues it, then it is sent.
+    /// queues it, then it is sent. Nothing is signed, written or queued while sends to `to`
+    /// are held: at an app holding `contacts`, while the copy of the deny list holds it, or
+    /// while that copy isn't known, which a read of the lists is tried for first (Paykit
+    /// spec 8.1, "Blocked counterparties"). An app without `contacts` reads no lists, and
+    /// holds nothing.
     ///
     /// # Errors
     ///
+    /// [`Refusal::NotNow`] while sends to `to` are held, with nothing recorded or queued;
     /// [`Refusal::ScopeMissing`] without `request` or a label; [`Refusal::Label`];
     /// [`PaykitError::Lib`] with `Validation` for a draft that breaks Paykit wire 4.5; the
     /// client's errors. A failure that leaves the request's batch kept (the network, `429`,
@@ -466,6 +484,9 @@ impl Paykit {
     ) -> Result<SentRequest> {
         self.refresh_own()?;
         self.require_payee()?;
+        // Nothing new starts with a counterparty whose sends are held (Paykit spec 8.1,
+        // "Blocked counterparties"), refused before anything is signed, written or queued.
+        self.refuse_while_sends_held(&to).await?;
         let label = self.selling_label()?;
         let request = PaymentRequest {
             amount: draft.amount,
@@ -834,6 +855,39 @@ impl Paykit {
     /// can be: another own app may have written the record from a copy of the request it got
     /// without the cancellation (Paykit spec 8.1). A placement that fails changes nothing
     /// here: the kept stop still stands, and [`Paykit::kept_stop`] refuses the payment.
+    ///
+    /// A record held that the app can't open, sealed under a scope key it doesn't hold yet
+    /// or a value that doesn't read, is refused as not now, never as no request: it may hold
+    /// a response or a cancellation, so no payment and no response is decided from it
+    /// (Paykit spec 8.1, one response per request).
+    /// The refusal of a call on the payer's request record at `target`, which the app doesn't
+    /// hold open: not now for a record held that it can't open, sealed under a scope key it
+    /// doesn't hold yet or a value that doesn't read, and for one absent while the copy of
+    /// the payer's records may lack records (Paykit spec 8.1, "Records not listed yet"):
+    /// either may hold a response or a cancellation. [`Refusal::NotFound`] only for a record
+    /// absent or deleted from a copy that lacks none.
+    pub(crate) async fn request_record_refusal(
+        &self,
+        target: &ActivityTarget,
+    ) -> Result<PaykitError> {
+        let content = self
+            .app
+            .shared_record(&self.activity_key(target)?)
+            .await?
+            .map(|held| held.content);
+        Ok(match content {
+            Some(content) if crate::hold::awaits_key(&content) => crate::hold::value_awaits_key(),
+            Some(RecordContent::Value(_) | RecordContent::Unreadable(_)) => {
+                Refusal::NotNow("Paykit wire 5.3: the request record held doesn't read".into())
+                    .into()
+            }
+            _ if self.side_unlisted(crate::hold::RecordSide::Payer).await? => {
+                crate::hold::unlisted()
+            }
+            _ => Refusal::NotFound.into(),
+        })
+    }
+
     pub(crate) async fn payer_request(
         &mut self,
         request: &RequestRef,
@@ -842,7 +896,9 @@ impl Paykit {
             &request.payee,
             &request.request_hash,
         ));
-        let record = self.activity(&target).await?.ok_or(Refusal::NotFound)?;
+        let Some(record) = self.activity(&target).await? else {
+            return Err(self.request_record_refusal(&target).await?);
+        };
         if request_of(&record).is_none() {
             return Err(Refusal::NotFound.into());
         }
@@ -858,10 +914,9 @@ impl Paykit {
     /// kept copy, in one batch. Returns whether there was one.
     async fn place_kept_cancellation(&mut self, target: &ActivityTarget) -> Result<bool> {
         let kept_key = key::kept_cancellation(&self.activity_key(target)?);
-        let Some(kept) = self.local_get::<KeptMessage>(&kept_key).await? else {
+        let Some(cancellation) = self.kept_stop_message(target).await? else {
             return Ok(false);
         };
-        let cancellation = kept.stored(&self.identity())?;
         let write = self
             .placed_write(
                 target,
@@ -892,23 +947,43 @@ impl Paykit {
     /// kept-copy stop (Paykit spec 8.1): read by every path that makes a new attempt on the
     /// request, so a stop not yet placed in the record still refuses it.
     pub(crate) async fn kept_stop(&self, target: &ActivityTarget) -> Result<bool> {
+        Ok(self.kept_stop_message(target).await?.is_some())
+    }
+
+    /// The payee's cancellation kept as the stop for the request record at `target`, read
+    /// bound to its key, as a restore reads it (`state::Stored`): one that fails it is a
+    /// corrupt store, never no stop.
+    async fn kept_stop_message(&self, target: &ActivityTarget) -> Result<Option<StoredMessage>> {
         let kept_key = key::kept_cancellation(&self.activity_key(target)?);
-        Ok(self.local_get::<KeptMessage>(&kept_key).await?.is_some())
+        self.local_get::<KeptMessage>(&kept_key)
+            .await?
+            .map(|kept| kept.stored(&self.identity()))
+            .transpose()
     }
 
     /// Place every kept cancellation whose request record this app holds, each as a later
     /// write of its own with the kept copy dropped (Paykit spec 8.1). Run after each
     /// receive, at a resume, and before any payment. One that can't be placed now stays
-    /// kept, for the next run; its kept copy refuses every new attempt meanwhile.
+    /// kept, for the next run; its kept copy refuses every new attempt meanwhile. A stop
+    /// for a request the copy doesn't hold ([`crate::receive::holds_record`]) goes once
+    /// [`KEPT_MESSAGE_MS`] have passed since the cancellation's acceptance, on the highest
+    /// service time verified, but never while the copy of the payer's records may lack
+    /// records, when the absence decides nothing, nor while the app keeps a stored message
+    /// of that request to write ([`crate::stored::writes_request`]): the request's own entry
+    /// may be one, waiting for a write that failed or for a listing, and written without
+    /// the stop the request would be payable.
     pub(crate) async fn place_kept_cancellations(&mut self) -> Result<()> {
         let own = self.identity();
-        for (_, kept) in self
+        for (rest, kept) in self
             .local_scan::<KeptMessage>(key::KEPT_CANCELLATIONS)
             .await?
         {
+            // Read bound to its key, as a restore reads it: a stop that fails it is a corrupt
+            // store, so the receive fails rather than drop or place it.
             let cancellation = kept.stored(&own)?;
+            let stop_key = format!("{}{rest}", key::KEPT_CANCELLATIONS);
             let Some(request) = cancellation.message().refs.first().copied() else {
-                continue;
+                return Err(PaykitError::corrupt());
             };
             let target = ActivityTarget::payer(natural_key::request_record(
                 &cancellation.sender(),
@@ -922,9 +997,44 @@ impl Paykit {
                 // A placement that fails now is tried again at the next run; the kept stop
                 // stands meanwhile, so it can't let a payment through.
                 let _ = self.place_kept_cancellation(&target).await;
+                continue;
+            }
+            let content = self
+                .app
+                .shared_record(&self.activity_key(&target)?)
+                .await?
+                .map(|record| record.content);
+            // A kept stop always has its acceptance time (the check refuses one without).
+            let stale = cancellation.accepted_at().is_some_and(|at| {
+                self.service_time()
+                    .is_some_and(|t| at.saturating_add(KEPT_MESSAGE_MS) <= t)
+            });
+            if stale
+                && !crate::receive::holds_record(content.as_ref())
+                && !self.side_unlisted(crate::hold::RecordSide::Payer).await?
+                && !self
+                    .keeps_stored_of(&cancellation.sender(), &request)
+                    .await?
+            {
+                self.local_delete(&stop_key).await?;
             }
         }
         Ok(())
+    }
+
+    /// Whether the app keeps a stored message from `sender` of `request` still to write
+    /// ([`crate::stored::writes_request`]).
+    async fn keeps_stored_of(&self, sender: &[u8; 32], request: &[u8; 32]) -> Result<bool> {
+        let own = self.identity();
+        for (_, note) in self
+            .local_scan::<crate::stored::StoredNote>(&key::stored_notes_of(sender))
+            .await?
+        {
+            if crate::stored::writes_request(&note, &own, request)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Every request the payer's apps received, from the `payer_activity` records this app
@@ -1025,16 +1135,16 @@ impl Paykit {
         let mut status = self.request_status(record, request, &payee, &hash).await?;
         // A cancellation kept for the request and not placed yet is a cancellation all the
         // same (Paykit spec 8.1).
-        if status == RequestStatus::Open
-            && self
-                .local_get::<KeptMessage>(&key::kept_cancellation(&record_key))
-                .await?
-                .is_some()
-        {
+        let stop = key::kept_cancellation(&record_key);
+        let stopped = self.local_get::<KeptMessage>(&stop).await?.is_some();
+        if status == RequestStatus::Open && stopped {
             status = RequestStatus::Cancelled;
         }
         if status == RequestStatus::Open && self.held(&record_key, record).await? {
             status = RequestStatus::Held;
+        }
+        if status == RequestStatus::Open && self.denied_as_last_read(&payee).await? {
+            status = RequestStatus::Blocked;
         }
         Ok(Some(RequestView {
             request: RequestRef {
@@ -1081,6 +1191,15 @@ impl Paykit {
         let recurring = body.is_recurring();
         if recurring && (cancel || record.response.is_some()) {
             return Err(Refusal::Recurring.into());
+        }
+        // One response per request (Paykit spec 8.1, "Rejecting and cancelling"): after an
+        // acceptance the payer may cancel, after a rejection it neither accepts nor cancels,
+        // and after a cancellation it sends no response. A one-time request accepted, by this
+        // app or another own app whose acceptance the record holds, is cancelled, not
+        // rejected, the acceptance's payment having failed included: the claim then shows no
+        // open, `unknown` or paid attempt, so the cancellation goes.
+        if !cancel && accepted(record) {
+            return Err(Refusal::Usage("accepted; cancel instead".into()).into());
         }
         Ok(())
     }
@@ -1215,17 +1334,24 @@ impl Paykit {
     /// its claim having no open or paid attempt, then sent. Returns the rejection's `msg_id`.
     /// A recurring request is rejected before its acceptance, conditioned on its proposal
     /// not having expired, as its acceptance would be (Paykit spec 8.2), so a wallet that
-    /// doesn't pay recurring requests can still dismiss one.
+    /// doesn't pay recurring requests can still dismiss one. Nothing is recorded, signed or
+    /// queued while sends to the payee are held: while the copy of the deny list holds it,
+    /// or while that copy isn't known, which a read of the lists is tried for first (Paykit
+    /// spec 8.1, "Blocked counterparties").
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotFound`]; [`Refusal::Rejected`], [`Refusal::Cancelled`],
+    /// [`Refusal::NotNow`] while sends to the payee are held, before anything else is
+    /// judged, with the request record unchanged and nothing queued; [`Refusal::NotFound`];
+    /// [`Refusal::Rejected`], [`Refusal::Cancelled`],
     /// [`Refusal::AlreadyPaid`] or [`Refusal::PaymentInProgress`]; [`Refusal::Recurring`] for
     /// a recurring request already accepted; [`Refusal::DeadlinePassed`] for a recurring
     /// request whose proposal expired, decided once the record the service holds shows it
     /// still unanswered: one another own app accepted meanwhile gives [`Refusal::Recurring`],
-    /// one rejected or cancelled gives that refusal; [`PaykitError::Conflict`] when the
-    /// record changed meanwhile; the client's errors.
+    /// one rejected or cancelled gives that refusal; [`Refusal::Usage`] for a one-time request
+    /// the record shows accepted, by this app or another own app, which is cancelled instead,
+    /// also once the acceptance's payment failed (Paykit spec 8.1, one response per request);
+    /// [`PaykitError::Conflict`] when the record changed meanwhile; the client's errors.
     pub async fn reject_request(
         &mut self,
         request: &RequestRef,
@@ -1238,11 +1364,13 @@ impl Paykit {
     }
 
     /// The payer cancels a request (Paykit spec 8.1, Paykit wire 4.8), recorded and sent as
-    /// a rejection is. Returns the cancellation's `msg_id`.
+    /// a rejection is, and held as a rejection is: nothing is recorded, signed or queued
+    /// while sends to the payee are held. Returns the cancellation's `msg_id`.
     ///
     /// # Errors
     ///
-    /// As [`Paykit::reject_request`].
+    /// As [`Paykit::reject_request`]: [`Refusal::NotNow`] while sends to the payee are held,
+    /// with the request record unchanged and nothing queued.
     pub async fn cancel_request(
         &mut self,
         request: &RequestRef,
@@ -1261,6 +1389,11 @@ impl Paykit {
         reason: Option<String>,
     ) -> Result<String> {
         self.require_pay()?;
+        // An answer goes to no counterparty whose sends are held (Paykit spec 8.1, "Blocked
+        // counterparties"), refused before the record is touched or anything is signed or
+        // queued: the request stays as it is, and the user answers it once the payee is
+        // unblocked or the lists are read.
+        self.refuse_while_sends_held(&request.payee).await?;
         let (target, record) = self.payer_request(request).await?;
         let (_, body) = request_of(&record).ok_or(Refusal::NotFound)?;
         let recurring = body.is_recurring();

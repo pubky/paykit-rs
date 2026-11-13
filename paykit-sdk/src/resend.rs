@@ -9,7 +9,9 @@
 //!   of messages per requester identity.
 //! - **Asking**: entries the app can't read, `missed` items and a provider loss queue
 //!   `resend_request`s, which [`crate::Paykit::receive`] sends; the client bounds their times
-//!   (Paykit spec 9, "What an app asks for"). A `resend_request` adds no conversation entry.
+//!   (Paykit spec 9, "What an app asks for"). The marks of messages dropped before they were
+//!   taken ask on their own cadence (`marks.rs`). A `resend_request` adds no conversation
+//!   entry.
 
 use paykit_lib::bodies::ResendRequest;
 use paykit_lib::kinds::{targets_app, Kind, Side, OPAQUE_MEMBERS};
@@ -23,7 +25,7 @@ use pubky_switch_core::sig::SignedDoc;
 use crate::activity::{KeptSide, SideTag};
 use crate::error::{PaykitError, Result};
 use crate::paykit::Paykit;
-use crate::protocol::{body_label, holds_role, QueuedAsk};
+use crate::protocol::{body_label, holds_role, MissedItemMark, QueuedAsk};
 use crate::state::{key, Tx};
 
 /// One message is re-sent to one requester identity at most once an hour (Paykit wire 4.12).
@@ -75,18 +77,35 @@ impl ResendSelection {
 
 impl Paykit {
     /// Ask `counterparty` to re-send messages (Paykit spec 9, Paykit wire 4.12). Best effort:
-    /// the counterparty can't be made to answer. Returns the request's `msg_id`.
+    /// the counterparty can't be made to answer. Returns the request's `msg_id`. Nothing is
+    /// queued while sends to `counterparty` are held: while the copy of the deny list holds
+    /// it, or, at an app holding `contacts`, while that copy isn't known, which a read of the
+    /// lists is tried for first (Paykit spec 8.1, "Blocked counterparties").
     ///
     /// # Errors
     ///
-    /// [`paykit_lib::Error::Validation`] for a selection that selects nothing; the client's
-    /// errors.
+    /// [`crate::Refusal::NotNow`] while sends to `counterparty` are held, with nothing
+    /// queued; [`paykit_lib::Error::Validation`] for a selection that selects nothing; the
+    /// client's errors.
     pub async fn request_resend(
         &mut self,
         counterparty: [u8; 32],
         selection: ResendSelection,
     ) -> Result<String> {
         self.refresh_own()?;
+        self.refuse_while_sends_held(&counterparty).await?;
+        let signed = self.resend_request_message(counterparty, selection)?;
+        let msg_id = self.app.queue_signed(signed).await?;
+        self.app.flush_message(&msg_id).await?;
+        Ok(msg_id)
+    }
+
+    /// A `resend_request` to `counterparty` for `selection`, signed and not yet queued.
+    pub(crate) fn resend_request_message(
+        &self,
+        counterparty: [u8; 32],
+        selection: ResendSelection,
+    ) -> Result<pubky_switch_client::app::SignedMessage> {
         let body = ResendRequest {
             msg_ids: selection.msg_ids,
             accepted_from: selection.accepted_from_ms,
@@ -95,18 +114,43 @@ impl Paykit {
             billing_period: None,
         }
         .to_body()?;
-        let signed = self.sign(counterparty, Kind::ResendRequest, Vec::new(), body)?;
-        let msg_id = self.app.queue_signed(signed).await?;
-        self.app.flush_message(&msg_id).await?;
-        Ok(msg_id)
+        self.sign(counterparty, Kind::ResendRequest, Vec::new(), body)
     }
 
     /// Send the re-sends the protocol queued: for entries the app couldn't read, to their
-    /// sender; for `missed` items and a provider loss, to every counterparty with Paykit
-    /// activity. Returns how many requests went out.
+    /// sender; after a provider loss, to every counterparty with Paykit activity; after
+    /// `missed` items, to the counterparties [`Paykit::missed_counterparties`] names; after a
+    /// restore, to the payees of open requests. Each is an ask kept for its counterparty
+    /// (`ask/`), sent and dropped once nothing holds sends to it back
+    /// ([`Paykit::sends_held`]): while the counterparty is blocked, or the copy of the deny
+    /// list isn't known, the ask stays, and goes once it is unblocked (Paykit spec 8.1,
+    /// "Blocked counterparties"), until 30 days after the latest time it asks for, when the
+    /// counterparty keeps none of it any longer. Returns how many requests went out.
     pub(crate) async fn send_asks(&mut self) -> Result<u64> {
+        self.queue_missed_asks().await?;
+        // Each read bound to its key, as a restore reads it (`state::Stored`).
+        let asks = self.local_scan::<QueuedAsk>(key::ASKS).await?;
+        // A copy of the deny list not known, as after a restore, is read first when there is
+        // an ask to send, so the asks a reconcile queues go now; a read that fails leaves
+        // them waiting.
+        if !asks.is_empty() && !self.deny_copy_known().await? {
+            self.refresh_lists_when_due().await?;
+        }
         let mut sent = 0u64;
-        for (rest, ask) in self.local_scan::<QueuedAsk>(key::ASKS).await? {
+        let service = self.service_time();
+        for (rest, ask) in asks {
+            if self.sends_held(&ask.sender).await? {
+                // Held back, an ask stays until its counterparty keeps nothing it asks for:
+                // once 30 days have passed since the latest time it names (its `until`, or
+                // its `from` for an ask of everything since), on the highest service time
+                // verified, it goes unsent. So the asks held for a blocked counterparty are
+                // bounded by the `missed` items, losses and unreadable entries of 30 days.
+                let latest = ask.until_ms.unwrap_or(ask.from_ms);
+                if crate::stored::past_window(latest, service) {
+                    self.local_delete(&format!("{}{rest}", key::ASKS)).await?;
+                }
+                continue;
+            }
             self.request_resend(
                 ask.sender,
                 ResendSelection {
@@ -119,34 +163,156 @@ impl Paykit {
             self.local_delete(&format!("{}{rest}", key::ASKS)).await?;
             sent = sent.saturating_add(1);
         }
-        let missed = self.local_scan::<u64>(key::MISSED).await?;
-        if missed.is_empty() {
-            return Ok(sent);
+        Ok(sent)
+    }
+
+    /// Turn the marks of missed entries into asks, one per counterparty (`ask/`).
+    ///
+    /// - A provider loss's marks (`missed/`) ask every counterparty with Paykit activity from
+    ///   their earliest time, and go.
+    /// - A `missed` item's mark (`mi/`) asks the counterparties [`Paykit::missed_counterparties`]
+    ///   reads from the copy of the records, once the copy is listed and no scope key is
+    ///   awaited. Those it can read now are asked now, each once per mark. While a record of
+    ///   the copy is sealed under a scope key the app doesn't hold yet, its counterparty
+    ///   can't be read: the mark stays, naming the counterparties asked already, and asks
+    ///   those that show once the record opens. It goes once no record is sealed, or once
+    ///   [`crate::KEPT_MESSAGE_MS`] have passed since its time on the highest service time
+    ///   verified, when no counterparty keeps what it would ask for any longer.
+    async fn queue_missed_asks(&mut self) -> Result<()> {
+        let lost = self.missed_marks(key::MISSED).await?;
+        if !lost.is_empty() {
+            let peers: Vec<[u8; 32]> = self
+                .local_scan::<u64>(key::PEERS)
+                .await?
+                .into_iter()
+                .map(|(rest, _)| unb64_array::<32>(&rest).map_err(|_| PaykitError::corrupt()))
+                .collect::<Result<_>>()?;
+            let from = lost.iter().map(|(_, from)| *from).min().unwrap_or(0);
+            let mut tx = Tx::default();
+            for peer in peers {
+                self.queue_ask(&mut tx, peer, from).await?;
+            }
+            for (rest, _) in lost {
+                tx.delete(&format!("{}{rest}", key::MISSED));
+            }
+            self.local_commit(tx).await?;
         }
-        let from = missed.iter().map(|(_, from)| *from).min().unwrap_or(0);
-        let peers: Vec<[u8; 32]> = self
-            .local_scan::<u64>(key::PEERS)
+        let items = self.missed_item_marks().await?;
+        // The counterparties come from the copy of the records, so the asks and their marks
+        // wait while it may lack records or waits for scope keys, for the receive that
+        // completes it.
+        if items.is_empty()
+            || self.unlisted().await?.is_some()
+            || self.scope_keys_awaited().await?.is_some()
+        {
+            return Ok(());
+        }
+        let counterparties = self.missed_counterparties().await?;
+        let sealed = self.copy_awaits_key().await?;
+        let service = self.service_time();
+        let mut tx = Tx::default();
+        for (mark_key, mut mark) in items {
+            let mut asked: std::collections::BTreeSet<[u8; 32]> =
+                mark.asked.iter().copied().collect();
+            for counterparty in &counterparties {
+                if asked.insert(*counterparty) {
+                    self.queue_ask(&mut tx, *counterparty, mark.from_ms).await?;
+                }
+            }
+            if sealed && !crate::stored::past_window(mark.from_ms, service) {
+                mark.asked = asked.into_iter().collect();
+                tx.put(&mark_key, &mark)?;
+            } else {
+                tx.delete(&mark_key);
+            }
+        }
+        self.local_commit(tx).await
+    }
+
+    /// Ask `counterparty`, in `tx`, to send again what its inbox accepted from `from_ms` on
+    /// (`ask/<counterparty>/<from>`). An ask kept already at that key, read bound to it, is
+    /// widened to everything from then on.
+    pub(crate) async fn queue_ask(
+        &self,
+        tx: &mut Tx,
+        counterparty: [u8; 32],
+        from_ms: u64,
+    ) -> Result<()> {
+        let ask_key = key::ask(&counterparty, from_ms);
+        // One kept already is read bound to its key: a value that isn't its key's is a
+        // corrupt store, never written over.
+        self.local_get::<QueuedAsk>(&ask_key).await?;
+        tx.put(
+            &ask_key,
+            &QueuedAsk {
+                sender: counterparty,
+                from_ms,
+                until_ms: None,
+            },
+        )?;
+        Ok(())
+    }
+
+    /// The marks of missed entries under `prefix` (`missed/`), each read bound to its key,
+    /// whose time it must be (`state::Stored`): one that fails it is a corrupt store, never
+    /// no mark.
+    async fn missed_marks(&self, prefix: &str) -> Result<Vec<(String, u64)>> {
+        self.local_scan::<u64>(prefix).await
+    }
+
+    /// The marks of `missed` items (`mi/`), each read bound to its key (`state::Stored`),
+    /// with its full key: one that fails it is a corrupt store, never no mark.
+    async fn missed_item_marks(&self) -> Result<Vec<(String, MissedItemMark)>> {
+        Ok(self
+            .local_scan::<MissedItemMark>(key::MISSED_ITEMS)
             .await?
             .into_iter()
-            .map(|(rest, _)| unb64_array::<32>(&rest).map_err(|_| PaykitError::corrupt()))
-            .collect::<Result<_>>()?;
-        for peer in peers {
-            self.request_resend(
-                peer,
-                ResendSelection {
-                    accepted_from_ms: Some(from),
-                    ..ResendSelection::default()
-                },
-            )
-            .await?;
-            sent = sent.saturating_add(1);
+            .map(|(rest, mark)| (format!("{}{rest}", key::MISSED_ITEMS), mark))
+            .collect())
+    }
+
+    /// The counterparties a `missed` item asks to send again (Paykit spec 9): a payee's
+    /// cancellation, or any reply, may be among the entries the service deleted. Each
+    /// counterparty of an open request, on either side, and of an unfinished payment, from
+    /// whatever records the copy holds, so a request another own app recorded counts too:
+    /// - as the payer, each payee of a request not paid, cancelled, rejected or expired;
+    /// - as the payee, each payer of a request not rejected, cancelled or receipted, and of
+    ///   a proof without a request not receipted yet;
+    /// - each payee of a payment in the journal not finished or abandoned.
+    ///
+    /// Called once the copy is listed: the copy it reads must not lack records. Allowances
+    /// add theirs here.
+    pub(crate) async fn missed_counterparties(
+        &self,
+    ) -> Result<std::collections::BTreeSet<[u8; 32]>> {
+        use crate::journal::Stage;
+        use crate::requests::{PayeeStatus, RequestStatus};
+        let mut counterparties = std::collections::BTreeSet::new();
+        for view in self.requests().await? {
+            if !matches!(
+                view.status,
+                RequestStatus::Paid
+                    | RequestStatus::Cancelled
+                    | RequestStatus::Rejected
+                    | RequestStatus::Expired
+            ) {
+                counterparties.insert(view.request.payee);
+            }
         }
-        let mut tx = Tx::default();
-        for (rest, _) in missed {
-            tx.delete(&format!("{}{rest}", key::MISSED));
+        for activity in self.payee_activity().await? {
+            if !matches!(
+                activity.status,
+                PayeeStatus::Rejected | PayeeStatus::Cancelled | PayeeStatus::Receipted
+            ) {
+                counterparties.insert(activity.payer);
+            }
         }
-        self.local_commit(tx).await?;
-        Ok(sent)
+        for payment in self.payments().await? {
+            if !matches!(payment.stage, Stage::Finished | Stage::Abandoned) {
+                counterparties.insert(payment.payee);
+            }
+        }
+        Ok(counterparties)
     }
 
     /// Answer a `resend_request` from `requester`, whose app presented `cert` (Paykit spec 9,

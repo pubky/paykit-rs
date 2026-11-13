@@ -4,6 +4,7 @@
 // The helpers set up fixed test state, where a failure is a test failure.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod blocked;
 mod certificate;
 mod common;
 mod crash;
@@ -24,6 +25,7 @@ mod receipts;
 mod receive_faults;
 mod recovery;
 mod recurring;
+mod replies;
 mod resend;
 mod restore;
 mod restore_hold;

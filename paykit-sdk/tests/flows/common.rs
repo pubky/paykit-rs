@@ -34,6 +34,8 @@ pub const HOUR_MS: u64 = 3_600_000;
 pub const ALICE_ORIGIN: &str = "https://alice-switch.example";
 /// Where bob's switch is.
 pub const BOB_ORIGIN: &str = "https://bob-switch.example";
+/// Where carol's switch is.
+pub const CAROL_ORIGIN: &str = "https://carol-switch.example";
 
 /// Every scope Paykit gives keys to, for the signers' approvals.
 pub fn spec() -> ProtocolSpec {
@@ -53,12 +55,14 @@ pub fn spec() -> ProtocolSpec {
     }
 }
 
-/// Alice, bob, their switches, the Homeserver, the clock and the rail.
+/// Alice, bob, carol, their switches, the Homeserver, the clock and the rail. Carol is a
+/// third party to alice's and bob's activity, with no app of her own until a test joins one.
 pub struct World {
     pub clock: Arc<TestClock>,
     pub homeserver: Arc<TestHomeserver>,
     pub alice: TestSigner,
     pub bob: TestSigner,
+    pub carol: TestSigner,
     pub router: Arc<Router>,
     pub rail: Arc<FakeRail>,
 }
@@ -98,15 +102,18 @@ impl World {
         };
         let alice = signer("alice", ALICE_ORIGIN);
         let bob = signer("bob", BOB_ORIGIN);
+        let carol = signer("carol", CAROL_ORIGIN);
         let router = Arc::new(Router::new());
         router.add_switch(alice.origin(), alice.switch());
         router.add_switch(bob.origin(), bob.switch());
+        router.add_switch(carol.origin(), carol.switch());
         let rail = Arc::new(FakeRail::with_clock(Arc::clone(&clock) as Arc<dyn Clock>));
         Self {
             clock,
             homeserver,
             alice,
             bob,
+            carol,
             router,
             rail,
         }
@@ -118,6 +125,10 @@ impl World {
 
     pub fn bob_id(&self) -> [u8; 32] {
         self.bob.identity().public()
+    }
+
+    pub fn carol_id(&self) -> [u8; 32] {
+        self.carol.identity().public()
     }
 
     /// The approval of app `name` of `signer` for `scopes`.
@@ -778,4 +789,91 @@ impl World {
         .await
         .unwrap()
     }
+}
+
+/// The re-send requests `app` delivered to `to`, as their `accepted_from` and
+/// `accepted_until`, in the order delivered.
+pub async fn asked(app: &Paykit, to: &[u8; 32]) -> Vec<(Option<u64>, Option<u64>)> {
+    let mut sent = app.app().sent_to(to, 0, u64::MAX).await.unwrap();
+    sent.sort_by_key(|m| m.accepted_at_ms);
+    sent.iter()
+        .filter(|m| m.kind == "paykit.resend_request")
+        .map(|m| {
+            let message = pubky_switch_core::message::Message::parse(
+                m.plaintext.json(),
+                paykit_lib::kinds::OPAQUE_MEMBERS,
+            )
+            .unwrap();
+            let body = paykit_lib::bodies::ResendRequest::from_body(&message.body).unwrap();
+            (body.accepted_from, body.accepted_until)
+        })
+        .collect()
+}
+
+/// Marks of messages dropped before they were taken, under `prefix` (`pd/` or `ud/`), for
+/// `n` made-up senders `[i + 100; 32]`, the `i`-th with both times `latest + i`, not yet due.
+/// Returns the senders, in that order.
+pub async fn seed_marks(app: &mut Paykit, prefix: &str, n: usize, latest: u64) -> Vec<[u8; 32]> {
+    let mut senders = Vec::new();
+    let mut writes = Vec::new();
+    for i in 0..n {
+        let sender = [u8::try_from(i + 100).unwrap(); 32];
+        let at = latest + u64::try_from(i).unwrap();
+        let value = serde_json::json!({
+            "v": 1,
+            "d": {
+                "sender": pubky_switch_core::enc::b64(&sender),
+                "earliest_ms": at,
+                "latest_ms": at,
+                "due": false,
+                "asked_at_ms": null,
+                "queued": null,
+            }
+        });
+        writes.push(pubky_switch_client::app::LocalWrite::Put {
+            key: format!("{prefix}{}", pubky_switch_core::enc::b64(&sender)).into_bytes(),
+            value: serde_json::to_vec(&value).unwrap(),
+        });
+        senders.push(sender);
+    }
+    app.app_mut().protocol_commit(&writes).await.unwrap();
+    senders
+}
+
+/// The senders holding a mark under `prefix`.
+pub async fn mark_senders(app: &Paykit, prefix: &str) -> Vec<[u8; 32]> {
+    app.app()
+        .protocol_scan(prefix.as_bytes())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(key, _)| {
+            let rest = std::str::from_utf8(&key[prefix.len()..]).unwrap();
+            pubky_switch_core::enc::unb64_array::<32>(rest).unwrap()
+        })
+        .collect()
+}
+
+/// The next `n` batches at `signer`'s switch are refused for good, `403 permission_missing`,
+/// as an effect the switch refuses whatever is sent again.
+pub fn refuse_writes(signer: &TestSigner, n: usize) {
+    for _ in 0..n {
+        signer
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/ops".into(),
+                code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+                current: serde_json::Value::Null,
+            });
+    }
+}
+
+/// Whether `error` is Paykit's corrupt-store error: state read back that doesn't verify.
+pub fn is_corrupt(error: &paykit_sdk::PaykitError) -> bool {
+    matches!(
+        error,
+        paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Store(
+            pubky_switch_client::error::StoreError::Corrupt
+        ))
+    )
 }
