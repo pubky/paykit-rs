@@ -4229,6 +4229,108 @@ async fn test_allowances_answer_dropped_mark_not_due_from_a_payment_without_a_re
 }
 
 #[tokio::test]
+async fn test_allowances_kept_answer_waits_through_a_renewal_without_keys_then_placed() {
+    // Alice's wallet, holding `allowance` only, sent a proposal its record doesn't hold yet,
+    // and keeps bob's acceptance before the record. The wallet is renewed to hold `pay` too,
+    // with no bundle: the payer's side waits for its keys, so the kept replies aren't placed,
+    // and the Allowances side isn't listed under the new certificate either. The record comes
+    // meanwhile: the acceptance stays kept, neither placed nor given up. Once the keys come
+    // and the records are listed, it goes into the record, once (Paykit spec 8.1, 8.3).
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(alice_app(
+        &w,
+        "wallet",
+        AppScopes::new().allowance().build().unwrap(),
+    ))
+    .await;
+    let me = wallet.app_id();
+    let id = paykit_lib::AllowanceId::generate().unwrap();
+    let body = json!({
+        "allowance_id": id.as_str(),
+        "proposer_role": "allower",
+        "terms": terms().to_json().unwrap(),
+    });
+    let signed = wallet
+        .app()
+        .sign_message(pubky_switch_client::app::OutgoingMessage::new(
+            w.bob_id(),
+            "paykit.allowance_proposal",
+            body.as_object().cloned().unwrap(),
+        ))
+        .unwrap();
+    wallet.app_mut().queue_signed(signed.clone()).await.unwrap();
+    wallet.app_mut().flush_outbox().await.unwrap();
+    shop.receive(None).await.unwrap();
+    let theirs = shop.allowances().await.unwrap()[0].record;
+    shop.accept_allowance(&theirs).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    let old = wallet.app().cert().clone();
+    let wider = renew(
+        &w,
+        me,
+        &AppScopes::new().pay().allowance().build().unwrap(),
+        1_000,
+    );
+    wallet.receive(None).await.unwrap();
+    list(&w, me, &old, &wider);
+    let summary = wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().cert().hash(), wider.hash());
+    assert!(summary.scope_keys_awaited, "{summary:?}");
+    let proposal = paykit_lib::records::StoredMessage::new(
+        w.alice_id(),
+        wallet.app().cert().signed(),
+        signed.plaintext().clone(),
+        None,
+        &w.bob_id(),
+    )
+    .unwrap();
+    let record = AllowanceRecord {
+        counterparty: w.bob_id(),
+        allowance_id: id,
+        proposal,
+        response: None,
+        end: None,
+        conflicted: None,
+        grant: None,
+        grants: Vec::new(),
+        msg_ids: Vec::new(),
+        unknown: Default::default(),
+    };
+    let target = allowances_target(&w.bob_id(), &record.allowance_id);
+    let op = wallet
+        .app_mut()
+        .record_op(&target, Some(&record.to_json().unwrap()), Vec::new())
+        .await
+        .unwrap();
+    wallet
+        .app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    let mine = wallet.app().record_key(&target).unwrap();
+    for _ in 0..2 {
+        let summary = wallet.receive(None).await.unwrap();
+        assert!(summary.scope_keys_awaited, "{summary:?}");
+        assert_eq!(wallet.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+        assert!(Box::pin(value(&wallet, &mine)).await["response"].is_null());
+    }
+    assert!(wallet.notices().await.unwrap().is_empty());
+    store_bundle(&w, me, &wider);
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(wallet.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert!(!Box::pin(value(&wallet, &mine)).await["response"].is_null());
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Accepted
+    );
+    assert!(wallet.notices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn test_allowances_restore_own_acceptance_over_a_record_left_unreadable_sent_once_it_reads() {
     // After the backup the phone writes the Allowance record as a value no reader reads. The
     // restored wallet's acceptance, which no outbox holds, isn't sent while the record
