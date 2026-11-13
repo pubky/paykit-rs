@@ -28,6 +28,7 @@ use paykit_lib::records::{
     ActivityRecord, ActivitySide, RecordBinding, StoredMessage, MAX_PERIOD_DETAILS,
 };
 use paykit_lib::{Body, PaymentEndpointIdentifier, Rate};
+use pubky_switch_client::app::{KeptReason, RecordContent, RecordRead};
 use pubky_switch_core::http::ErrorCode;
 
 use crate::activity::{ActivityTarget, Role};
@@ -249,6 +250,12 @@ pub(crate) fn period_key(payee: &[u8; 32], request_hash: &[u8; 32], period: &Per
     natural_key::period_record(payee, request_hash, period.start_secs())
 }
 
+/// The refusal of a write over a period record held as a value the app can't read: not now,
+/// never written over (Paykit spec 8.1).
+fn period_record_unread() -> PaykitError {
+    Refusal::NotNow("Paykit wire 5.3: the period record held doesn't read".into()).into()
+}
+
 impl Paykit {
     /// The period records of `collection` this app holds that bind, by the request they
     /// belong to, each list in period order.
@@ -315,7 +322,8 @@ impl Paykit {
     /// `details.expires_at`. They are written into the payee's period record in the batch
     /// that queues them, conditioned on the version read, and sent once it is applied; a
     /// record that changed meanwhile is read again and the write built again. The request
-    /// record is read again first, so the window is judged on the service's time now. Each details
+    /// record and the period record are read again first, so the window is judged on the
+    /// service's time now and nothing is written over a write the app hasn't read. Each details
     /// stays valid until its own expiry: a later one replaces none. They are sent only for
     /// a period that takes details, the periods the payer stores them for
     /// (Paykit spec 8.2): one not shown paid that is the next to start, or one started
@@ -332,7 +340,9 @@ impl Paykit {
     /// [`crate::PaykitError::Lib`] with `Validation` for details that break Paykit wire 4.9
     /// against the request, such as a period that isn't one of its own, one that doesn't
     /// take details now, or details expired on the highest service time verified;
-    /// [`Refusal::NotNow`] while the period record's value waits for its scope key;
+    /// [`Refusal::NotNow`] while the period record's value waits for its scope key, is held
+    /// as a value that doesn't read, or the switch holds a newer write of it this app
+    /// refused; [`Refusal::SwitchUnavailable`] when the records can't be read again now;
     /// [`crate::PaykitError::Conflict`] when the record kept changing; the client's errors. A failure that leaves the batch kept
     /// (the network, `429`, `503`) is no error: the details are reported sent,
     /// [`MessageDelivery::Kept`], so the host doesn't send them again.
@@ -376,13 +386,38 @@ impl Paykit {
                 period_key(&self.identity(), &request_hash, &details.billing_period),
                 target.label().as_ref(),
             );
-            let key = self.activity_key(&into)?;
-            if let Some(held) = self.app.shared_record(&key).await? {
-                if crate::hold::awaits_key(&held.content) {
+            // The period record, read again, is never written over while its value isn't
+            // open, or is held as a value that doesn't read or bind, nor while the switch
+            // holds a newer write this app refused: either may hold what another own app
+            // wrote (Paykit spec 8.1).
+            match self.app.read_record_fresh(&into.record_target()).await? {
+                RecordRead::Fresh(_)
+                | RecordRead::Kept {
+                    reason: KeptReason::NotFound | KeptReason::NotNewer,
+                    ..
+                } => {}
+                RecordRead::Kept {
+                    reason: KeptReason::Unreachable(why),
+                    ..
+                } => return Err(Refusal::SwitchUnavailable(why).into()),
+                _ => return Err(period_record_unread()),
+            }
+            let held = match self
+                .app
+                .shared_record(&self.activity_key(&into)?)
+                .await?
+                .map(|held| held.content)
+            {
+                None | Some(RecordContent::Deleted) => None,
+                Some(content) if crate::hold::awaits_key(&content) => {
                     return Err(crate::hold::value_awaits_key());
                 }
-            }
-            let held = self.held_activity(&into).await?;
+                Some(RecordContent::Value(_)) => match self.held_activity(&into).await? {
+                    Some(held) => Some(held),
+                    None => return Err(period_record_unread()),
+                },
+                Some(RecordContent::Unreadable(_)) => return Err(period_record_unread()),
+            };
             let paid = held.as_ref().is_some_and(ActivityRecord::shows_paid);
             if paid {
                 return Err(Refusal::AlreadyPaid.into());

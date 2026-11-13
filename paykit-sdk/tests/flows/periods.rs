@@ -2469,6 +2469,147 @@ async fn test_periods_another_payers_credit_of_a_settlement_leaves_the_payment_c
 }
 
 #[tokio::test]
+async fn test_periods_send_details_never_writes_over_a_period_record_that_doesnt_read() {
+    // The till writes the shop's period record as a value no reader reads, which may hold
+    // what a later version stored (Paykit spec 8.1). The shop, whose copy refuses that
+    // write, is refused its next details for now, and the value stays as it is.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    let now = w.clock.now_ms();
+    shop.send_period_details(&sale, details(january(), "lnbc1a", now + DAY_MS))
+        .await
+        .unwrap();
+    till.receive(None).await.unwrap();
+    let target = payee_period(&request);
+    let held = till.app_mut().read_record(&target).await.unwrap().unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    value["v"] = json!(99);
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let op = till
+        .app_mut()
+        .record_op(&target, Some(&bytes), Vec::new())
+        .await
+        .unwrap();
+    till.app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let refused = shop
+        .send_period_details(&sale, details(january(), "lnbc1b", now + DAY_MS))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refusal(&refused), Refusal::NotNow(_)),
+        "{refused:?}"
+    );
+    // What the switch holds, as the till reads it: its own write, not written over.
+    let after = till.app_mut().read_record(&target).await.unwrap().unwrap();
+    let after: serde_json::Value = serde_json::from_slice(after.content.value().unwrap()).unwrap();
+    assert_eq!(after["v"], json!(99), "{after}");
+}
+
+#[tokio::test]
+async fn test_periods_kept_details_never_written_over_a_period_record_that_doesnt_read() {
+    // The details reach the wallet before their request record and are kept. The phone
+    // accepts, and writes the payer's period record as a value no reader reads: once the
+    // request record is held, the kept details wait, never written over that value.
+    let w = World::new();
+    let _shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let (request, hash) = signed_request(&w);
+    inject_details(&w, &[wallet.app_id()], hash, january());
+    wallet.receive(None).await.unwrap();
+    let held = accepted_by(&w, &mut phone, &request, hash).await;
+    let target = payer_period(&held);
+    let bytes = serde_json::to_vec(&json!({ "v": 99 })).unwrap();
+    let op = phone
+        .app_mut()
+        .record_op(&target, Some(&bytes), Vec::new())
+        .await
+        .unwrap();
+    phone
+        .app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let after = wallet
+        .app_mut()
+        .read_record(&target)
+        .await
+        .unwrap()
+        .unwrap();
+    let after: serde_json::Value = serde_json::from_slice(after.content.value().unwrap()).unwrap();
+    assert_eq!(after, json!({ "v": 99 }));
+    assert!(wallet.request(&held).await.unwrap().periods.is_empty());
+}
+
+#[tokio::test]
+async fn test_periods_details_over_a_request_record_that_doesnt_read_not_lost() {
+    // The phone writes the payer's request record as a value no reader reads; the shop's
+    // details then reach the wallet. No effect is decided from a record the app can't read
+    // (Paykit spec 8.1): once the record reads again, the details are stored.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    phone.receive(None).await.unwrap();
+    let target = crate::outcome_record::payer_record(&request);
+    let held = phone.app_mut().read_record(&target).await.unwrap().unwrap();
+    let good = held.content.value().unwrap().to_vec();
+    let mut value: serde_json::Value = serde_json::from_slice(&good).unwrap();
+    value["v"] = json!(99);
+    let bad = serde_json::to_vec(&value).unwrap();
+    let op = phone
+        .app_mut()
+        .record_op(&target, Some(&bad), Vec::new())
+        .await
+        .unwrap();
+    phone
+        .app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let now = w.clock.now_ms();
+    let sent = shop
+        .send_period_details(&sale, details(january(), "lnbc1a", now + DAY_MS))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let op = phone
+        .app_mut()
+        .record_op(&target, Some(&good), Vec::new())
+        .await
+        .unwrap();
+    phone
+        .app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let view = wallet.request(&request).await.unwrap();
+    assert!(
+        view.periods
+            .iter()
+            .any(|p| p.details.iter().any(|d| d.msg_id == sent.msg_id)),
+        "{view:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_periods_details_expiry_judged_on_the_verified_service_time() {
     // The shop's device clock runs two hours ahead of the service's. Details valid for an
     // hour more on the service time it verified are sent: the device clock never decides.
