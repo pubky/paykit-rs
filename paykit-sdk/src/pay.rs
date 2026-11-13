@@ -1546,12 +1546,12 @@ impl Paykit {
             if let Some(asked) = self.local_get::<ListAsk>(&mark).await? {
                 if asked.held_version == held_version
                     && asked.within_a_day(now)
-                    && !self.ask_not_sent(&asked).await?
+                    && !Box::pin(self.ask_not_sent(&asked)).await?
                 {
                     continue;
                 }
             }
-            self.send_list_ask(*payee, app_id, held_version).await?;
+            Box::pin(self.send_list_ask(*payee, app_id, held_version)).await?;
         }
         Ok(())
     }
@@ -1568,7 +1568,7 @@ impl Paykit {
         app_id: Option<[u8; 16]>,
         held_version: Option<u64>,
     ) -> Result<()> {
-        if self.sends_held(&payee).await? {
+        if Box::pin(self.sends_held(&payee)).await? {
             return Ok(());
         }
         let body = PrivatePaymentListRequest {
@@ -1628,7 +1628,7 @@ impl Paykit {
         for (rest, asked) in self.local_scan::<ListAsk>(key::LIST_ASKS).await? {
             let mark = format!("{}{rest}", key::LIST_ASKS);
             // Read bound to its key (`state::Stored`).
-            if !asked.within_a_day(now) || !self.ask_not_sent(&asked).await? {
+            if !asked.within_a_day(now) || !Box::pin(self.ask_not_sent(&asked)).await? {
                 continue;
             }
             let versions = self

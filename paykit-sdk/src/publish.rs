@@ -712,7 +712,7 @@ impl Paykit {
             }
         }
         self.local_commit(tx).await?;
-        self.know_deny_copy().await?;
+        Box::pin(self.know_deny_copy()).await?;
         self.publish_to(&active, false, None).await
     }
 
@@ -976,7 +976,7 @@ impl Paykit {
     /// Refuse a call that sends `counterparties` a list while sends to one of them are held
     /// ([`Paykit::list_held`]), with nothing sent to any.
     async fn refuse_held(&mut self, counterparties: &[[u8; 32]]) -> Result<()> {
-        self.know_deny_copy().await?;
+        Box::pin(self.know_deny_copy()).await?;
         for counterparty in counterparties {
             if let Some(refusal) = self.list_held(counterparty).await? {
                 return Err(refusal.into());
@@ -1352,7 +1352,7 @@ impl Paykit {
                 tx.delete(&key::list_recipient(&recipient.counterparty));
                 continue;
             }
-            let recipient = self.settled(recipient, Some(&undelivered)).await?;
+            let recipient = Box::pin(self.settled(recipient, Some(&undelivered))).await?;
             // A withdrawal whose empty version may not have reached the counterparty (the
             // client gave it up, it never left, or a restore brought it back unseen) is owed
             // while a version it may hold can still be paid: it goes again, held sends or
@@ -1407,13 +1407,13 @@ impl Paykit {
             }
         }
         if removed || waiting.is_empty() {
-            self.run_releases().await?;
+            Box::pin(self.run_releases()).await?;
             return Ok(withdrawn);
         }
         // A counterparty whose sends are held keeps what it waits for, uncounted, until a
         // read shows it not blocked. After a restore every list waits for the host
         // (`lw`), withdrawals aside: the list and the counterparties are the backup's.
-        self.know_deny_copy().await?;
+        Box::pin(self.know_deny_copy()).await?;
         let awaits_host = self.lists_await_host().await?;
         let mut blocked = Vec::new();
         let mut owed = Vec::new();
@@ -1427,7 +1427,7 @@ impl Paykit {
                 });
                 continue;
             }
-            if let Some(refusal) = self.list_held(&recipient.counterparty).await? {
+            if let Some(refusal) = Box::pin(self.list_held(&recipient.counterparty)).await? {
                 blocked.push(ListNotSent {
                     counterparty: recipient.counterparty,
                     reason: refusal.to_string(),
@@ -1479,7 +1479,7 @@ impl Paykit {
             }
         }
         self.local_commit(tx).await?;
-        let mut out = self.publish_to(&owed, false, Some(&undelivered)).await?;
+        let mut out = Box::pin(self.publish_to(&owed, false, Some(&undelivered))).await?;
         out.not_sent.extend(blocked);
         out.sent.extend(withdrawn.sent);
         out.not_sent.extend(withdrawn.not_sent);

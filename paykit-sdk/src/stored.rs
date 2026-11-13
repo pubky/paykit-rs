@@ -381,7 +381,7 @@ impl Paykit {
                 msg_id,
                 resend: false,
                 ..
-            } => self.note_undelivered(msg_id, &mut tx).await?,
+            } => Box::pin(self.note_undelivered(msg_id, &mut tx)).await?,
             _ => false,
         };
         if taken {
