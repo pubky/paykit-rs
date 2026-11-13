@@ -9,11 +9,15 @@
 //! the write is applied, and the write is never made without the message (Switch spec 8.2).
 //!
 //! **An own message in a record is one to send.** No path stores a message this app signed
-//! in a record without queuing it: a request and the replies go with [`Paykit::send_with_record`]
-//! or the request's own batch, a proof in the outcome's batch that queues it, and an
-//! acceptance only once it was queued with its payment (`acceptance_released`). So a message
-//! in a record signed by this app means one to be sent, which the re-send after a restore
-//! reads it as; `test_records_own_message_written_only_where_it_is_queued` guards it.
+//! in a record without queuing it or owing it: a request and the replies go with
+//! [`Paykit::send_with_record`] or the request's own batch, a proof in the outcome's batch
+//! that queues it, and an acceptance only once it was queued with its payment
+//! (`acceptance_released`). The one exception is a rejection or payer's cancellation to a
+//! payee whose sends are held ([`Paykit::record_held`]): its batch queues nothing and writes
+//! the held answer that names it (`ha/`), from which [`Paykit::queue_own_again`] queues it
+//! once sends to the payee aren't held. So a message in a record signed by this app means
+//! one to be sent, which the re-send after a restore reads it as;
+//! `test_records_own_message_written_only_where_it_is_queued` guards it.
 
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
@@ -260,6 +264,61 @@ impl Paykit {
             }
         }
     }
+
+    /// Place `signed`, a rejection or payer's cancellation to a payee whose sends are held,
+    /// in its `role` of the record at `target` WITHOUT queuing it, in one batch with
+    /// `conditions` on the record write, the local writes `local`, and the held answer that
+    /// names it ([`crate::hold::HeldAnswer`]) for `request_hash` (Paykit spec 8.1, "Blocked
+    /// counterparties"). The record then stops every own app from paying or accepting the
+    /// request, and the message goes from the record once sends to the payee aren't held
+    /// ([`Paykit::queue_own_again`]): an own message in a record is still one to be sent
+    /// (module docs). Returns the `msg_id`. Nothing is queued, so no flush sends it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::send_with_record`].
+    pub(crate) async fn record_held(
+        &mut self,
+        signed: SignedMessage,
+        target: &ActivityTarget,
+        role: Role,
+        conditions: Vec<Condition>,
+        mut local: Vec<LocalWrite>,
+        request_hash: [u8; 32],
+    ) -> Result<String> {
+        let msg_id = signed.msg_id().to_owned();
+        let payee = signed.to();
+        local.push(crate::state::local_put(
+            &crate::state::key::held_answer(&payee, &msg_id),
+            &crate::hold::HeldAnswer {
+                payee,
+                msg_id: msg_id.clone(),
+                request_hash,
+            },
+        )?);
+        let stored = self.own_copy(&signed)?;
+        let write = self
+            .placed_write(target, payee, role, stored, conditions)
+            .await?;
+        let Some(entry) = write else {
+            // The record reflects it already: the held answer alone, with the local writes.
+            self.app.protocol_commit(&local).await?;
+            return Ok(msg_id);
+        };
+        match self
+            .app
+            .submit_batch(OpBatch::new().locals(local).entry(entry))
+            .await
+        {
+            Ok(_) => Ok(msg_id),
+            Err(error) => {
+                if error.code() == Some(ErrorCode::Conflict) {
+                    self.app.read_record(&target.record_target()).await?;
+                }
+                Err(error.into())
+            }
+        }
+    }
 }
 
 /// Bind an activity record value held at `key` under the policy of `label` (Paykit wire
@@ -365,11 +424,12 @@ mod own_message_tests {
 
     #[test]
     fn test_records_own_message_written_only_where_it_is_queued() {
-        // The stored copy of a message this app signed is made in three places, each in the
-        // batch that queues it: `send_with_record`, the request's own batch, and the
-        // outcome's batch with its proof; and an acceptance is placed only once released.
-        // A new place that stores an own message must queue it in the same batch, so that
-        // an own message in a record is always one to be sent (module docs).
+        // The stored copy of a message this app signed is made in four places, each in the
+        // batch that queues it or owes it: `send_with_record`, `record_held`, which writes
+        // the held answer that names it, the request's own batch, and the outcome's batch
+        // with its proof; and an acceptance is placed only once released. A new place that
+        // stores an own message must queue or owe it in the same batch, so that an own
+        // message in a record is always one to be sent (module docs).
         let sources = sources();
         let text = |name: &str| -> &str {
             &sources
@@ -400,7 +460,7 @@ mod own_message_tests {
             named(&[
                 ("allowances.rs", 3),
                 ("pay.rs", 1),
-                ("records.rs", 1),
+                ("records.rs", 2),
                 ("requests.rs", 1),
             ]),
             "an own message's stored copy is made somewhere new: queue it in the same batch"
@@ -429,6 +489,13 @@ mod own_message_tests {
         assert!(send.contains("self.own_copy(&signed)"));
         assert!(send.contains(".queue(signed.clone())"));
         assert!(send.contains("self.app.queue_signed(signed)"));
+        // The held path queues nothing and owes the message in the same batch.
+        let held = body(text("records.rs"), "record_held");
+        assert!(held.contains("self.own_copy(&signed)"));
+        assert!(held.contains("key::held_answer(&payee, &msg_id)"));
+        assert!(held.contains("OpBatch::new().locals(local).entry(entry)"));
+        assert!(!held.contains(".queue("));
+        assert!(!held.contains("queue_signed"));
         let request = body(text("requests.rs"), "send_request_inner");
         assert!(request.contains("self.own_copy(&signed)"));
         assert!(request.contains(".queue(signed)"));

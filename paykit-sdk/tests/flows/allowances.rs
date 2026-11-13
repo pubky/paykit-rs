@@ -3748,10 +3748,10 @@ async fn test_allowances_restore_sends_no_proposal_after_the_counterpartys_answe
 async fn test_allowances_end_dropped_for_the_bound_taken_again_from_a_resend() {
     // Bob's shop sends an end of an Allowance the wallet holds no record of; his 64 later ends
     // of others push it out of the bound. Its pair is forgotten in the commit that drops it,
-    // and it counts in bob's mark of dropped replies. Once the wallet holds a record of bob's,
-    // the mark asks him to re-send by itself; the same end is taken as a new message and kept
-    // as the stop again (Paykit spec 8.1, "Replies before their record"; 8.3, "Ends reach the
-    // executor"; Switch spec 11).
+    // and it counts in bob's mark of dropped replies, due at once: an ended Allowance's record
+    // may come at any time after its end was dropped. The mark asks him to re-send by itself,
+    // once; the same end is taken as a new message and kept as the stop again (Paykit spec
+    // 8.1, "Replies before their record"; 8.3, "Ends reach the executor"; Switch spec 11).
     let w = World::new();
     let mut shop = shop(&w).await;
     let mut wallet = wallet(&w).await;
@@ -3775,16 +3775,13 @@ async fn test_allowances_end_dropped_for_the_bound_taken_again_from_a_resend() {
         w.clock.advance_ms(1);
         end_unknown(&w, &wallet, i);
     }
-    wallet.receive(None).await.unwrap();
+    // Asked at once, in the receive that drops it, with no record of bob's held, and once
+    // only.
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
     assert!(!keeps_end(&w, &wallet, first).await);
     assert_eq!(stops(&wallet).await, bound);
     assert_eq!(wallet.app().protocol_scan(b"pd/").await.unwrap().len(), 1);
-    // Nothing asks while the wallet holds no record of bob's.
     assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
-    shop.propose_allowance(w.alice_id(), AllowanceRole::Allowee, terms())
-        .await
-        .unwrap();
-    assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
     shop.receive(None).await.unwrap();
     let got = wallet.receive(None).await.unwrap();
     assert!(received(&got, "paykit.allowance_end"), "{got:?}");

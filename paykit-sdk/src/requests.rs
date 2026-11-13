@@ -1334,15 +1334,20 @@ impl Paykit {
     /// its claim having no open or paid attempt, then sent. Returns the rejection's `msg_id`.
     /// A recurring request is rejected before its acceptance, conditioned on its proposal
     /// not having expired, as its acceptance would be (Paykit spec 8.2), so a wallet that
-    /// doesn't pay recurring requests can still dismiss one. Nothing is recorded, signed or
-    /// queued while sends to the payee are held: while the copy of the deny list holds it,
-    /// or while that copy isn't known, which a read of the lists is tried for first (Paykit
-    /// spec 8.1, "Blocked counterparties").
+    /// doesn't pay recurring requests can still dismiss one.
+    ///
+    /// While sends to the payee are held (Paykit spec 8.1, "Blocked counterparties"): while
+    /// the copy of the deny list holds it, or while that copy isn't known, which a read of the
+    /// lists is tried for first, the rejection is recorded all the same, on the same
+    /// conditions, so no own app pays or accepts the request, and only its message is held:
+    /// nothing is queued, nothing goes to the payee, and the message is sent at the first
+    /// receive after sends to the payee aren't held. One held past its replay window, 30 days
+    /// from this call, is never sent, and a [`crate::NoticeKind::MessageGivenUp`] notice
+    /// tells the host; the record still holds it.
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotNow`] while sends to the payee are held, before anything else is
-    /// judged, with the request record unchanged and nothing queued; [`Refusal::NotFound`];
+    /// [`Refusal::NotFound`];
     /// [`Refusal::Rejected`], [`Refusal::Cancelled`],
     /// [`Refusal::AlreadyPaid`] or [`Refusal::PaymentInProgress`]; [`Refusal::Recurring`] for
     /// a recurring request already accepted; [`Refusal::DeadlinePassed`] for a recurring
@@ -1364,13 +1369,12 @@ impl Paykit {
     }
 
     /// The payer cancels a request (Paykit spec 8.1, Paykit wire 4.8), recorded and sent as
-    /// a rejection is, and held as a rejection is: nothing is recorded, signed or queued
-    /// while sends to the payee are held. Returns the cancellation's `msg_id`.
+    /// a rejection is, and held as a rejection is: while sends to the payee are held it is
+    /// recorded, and its message goes once they aren't. Returns the cancellation's `msg_id`.
     ///
     /// # Errors
     ///
-    /// As [`Paykit::reject_request`]: [`Refusal::NotNow`] while sends to the payee are held,
-    /// with the request record unchanged and nothing queued.
+    /// As [`Paykit::reject_request`].
     pub async fn cancel_request(
         &mut self,
         request: &RequestRef,
@@ -1390,10 +1394,13 @@ impl Paykit {
     ) -> Result<String> {
         self.require_pay()?;
         // An answer goes to no counterparty whose sends are held (Paykit spec 8.1, "Blocked
-        // counterparties"), refused before the record is touched or anything is signed or
-        // queued: the request stays as it is, and the user answers it once the payee is
-        // unblocked or the lists are read.
-        self.refuse_while_sends_held(&request.payee).await?;
+        // counterparties"), but it is still a stop: it is recorded as when they aren't, and
+        // only its message waits ([`Paykit::record_held`]). A copy of the deny list not known
+        // is read first.
+        if !self.deny_copy_known().await? {
+            self.refresh_lists_when_due().await?;
+        }
+        let held = self.sends_held(&request.payee).await?;
         let (target, record) = self.payer_request(request).await?;
         let (_, body) = request_of(&record).ok_or(Refusal::NotFound)?;
         let recurring = body.is_recurring();
@@ -1453,10 +1460,21 @@ impl Paykit {
         } else {
             vec![self.app.claim_condition(&obligation).await?]
         };
-        let msg_id = match self
-            .send_with_record(signed, &target, role, conditions, tx.into_writes())
+        let written = if held {
+            self.record_held(
+                signed,
+                &target,
+                role,
+                conditions,
+                tx.into_writes(),
+                request.request_hash,
+            )
             .await
-        {
+        } else {
+            self.send_with_record(signed, &target, role, conditions, tx.into_writes())
+                .await
+        };
+        let msg_id = match written {
             Ok(msg_id) => msg_id,
             Err(error) => {
                 if let PaykitError::Client(client) = &error {
@@ -1475,7 +1493,9 @@ impl Paykit {
                 return Err(conflict(error));
             }
         };
-        self.app.flush_message(&msg_id).await?;
+        if !held {
+            self.app.flush_message(&msg_id).await?;
+        }
         Ok(msg_id)
     }
 }
