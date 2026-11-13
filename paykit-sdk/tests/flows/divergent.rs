@@ -1974,3 +1974,57 @@ async fn test_divergent_paused_list_asks_the_app_whose_list_expired() {
     assert!(w.rail.all_executions().is_empty());
     assert_eq!(list_asks(&w, &wallet).await, vec![Some(till.app_id())]);
 }
+
+#[tokio::test]
+async fn test_divergent_acceptance_dropped_for_the_bound_taken_again_from_a_resend() {
+    // Eighteen acceptances come over the divergent record: the earliest and the 16 latest are
+    // kept, and the second is dropped as one never processed. Once the user confirms and the
+    // kept ones are written, the payer's re-send of the second is taken, not a duplicate.
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_on(&w, Arc::clone(&base)).await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let record = sale(&shop, &request).await.record;
+    set_divergent(&base, &shop, &record, true);
+    wallet.receive(None).await.unwrap();
+    let body = serde_json::json!({ "label": null })
+        .as_object()
+        .cloned()
+        .unwrap();
+    let mut sent = Vec::new();
+    for _ in 0..18 {
+        w.clock.advance_ms(1);
+        let plaintext = w.sign_as(
+            &w.alice,
+            "wallet",
+            &w.bob,
+            "paykit.payment_request_acceptance",
+            vec![request.request_hash],
+            body.clone(),
+        );
+        w.deliver(&w.alice, "wallet", &w.bob, &[shop.app_id()], &plaintext);
+        sent.push(plaintext);
+    }
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.app().protocol_scan(b"dw/").await.unwrap().len(), 17);
+    let msg_id = |plaintext: &pubky_switch_core::message::MessagePlaintext| {
+        pubky_switch_core::message::Message::parse(
+            plaintext.json(),
+            paykit_lib::kinds::OPAQUE_MEMBERS,
+        )
+        .unwrap()
+        .msg_id
+    };
+    let dropped = msg_id(&sent[1]);
+    confirm(&mut shop, &record).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        in_role(&shop, &record, "response").await,
+        Some(msg_id(&sent[0]))
+    );
+    w.clock.advance_ms(1);
+    w.deliver(&w.alice, "wallet", &w.bob, &[shop.app_id()], &sent[1]);
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.applied.contains(&dropped), "{got:?}");
+}
