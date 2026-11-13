@@ -691,6 +691,12 @@ impl Paykit {
         options: PayOptions,
         under: Option<crate::executor::Under>,
     ) -> Result<PayOutcome> {
+        // An executor's payment looks its destination up as an automatic one.
+        let by = if under.is_some() {
+            Initiator::Automatic
+        } else {
+            Initiator::User
+        };
         self.refresh_own()?;
         self.records_known().await?;
         self.require_pay()?;
@@ -807,6 +813,7 @@ impl Paykit {
                     accepted.as_deref(),
                     &body.amount,
                     &options,
+                    by,
                 )
                 .await?
             }
@@ -817,6 +824,7 @@ impl Paykit {
                     accepted.as_deref(),
                     &body.amount,
                     &options,
+                    by,
                 )
                 .await?
             }
@@ -932,6 +940,7 @@ impl Paykit {
                 None,
                 &payment.amount,
                 &options,
+                Initiator::User,
             )
             .await?;
         let attempt_id = AttemptId::generate()?;
@@ -1242,6 +1251,7 @@ impl Paykit {
     /// use that offers no endpoint the payment may use is [`Refusal::NoDestination`]; lists
     /// in use whose endpoints the method pays none of, and no expired list, are
     /// [`Refusal::UnsupportedEndpoint`], without asking.
+    #[allow(clippy::too_many_arguments)]
     async fn list_destination(
         &mut self,
         payee: &[u8; 32],
@@ -1249,6 +1259,7 @@ impl Paykit {
         allowed: Option<&[PaymentEndpointIdentifier]>,
         amount: &PaymentAmount,
         options: &PayOptions,
+        by: Initiator,
     ) -> Result<Chosen> {
         let wanted = |id: &PaymentEndpointIdentifier| {
             options.endpoint.as_ref().is_none_or(|want| want == id)
@@ -1256,12 +1267,7 @@ impl Paykit {
         };
         if let PaymentMode::Public(_) = options.mode {
             let mut records = self
-                .public_records(
-                    payee,
-                    app,
-                    Initiator::User,
-                    options.unconfirmed_identity_confirmed,
-                )
+                .public_records(payee, app, by, options.unconfirmed_identity_confirmed)
                 .await??;
             // The payee's public Payment List is every current app's public endpoints together
             // (Paykit spec 4), handed to the method by App ID, then by identifier, so every
@@ -1302,7 +1308,7 @@ impl Paykit {
                 .payee_identity(
                     payee,
                     Need::FreshCopy,
-                    Initiator::User,
+                    by,
                     options.unconfirmed_identity_confirmed,
                 )
                 .await?
@@ -1866,7 +1872,7 @@ impl Paykit {
             Err(error) => return Err(error.into()),
         };
         if let Some((record, ledger)) = applied_ledger {
-            self.executor_applied(record, ledger).await;
+            self.executor_applied(record, ledger).await?;
         }
         let proof = submitted.proofs.first();
         entry.step = proof.and_then(|proof| proof.body().step);
@@ -2421,7 +2427,9 @@ impl Paykit {
         let target = ActivityTarget::payer(entry.natural_key.clone());
         // The Allowance the proof and a rebuilt record name is the entry's, checked against
         // what points back at it before either is built (`Paykit::entry_allowance`).
-        self.entry_allowance(entry).await?;
+        if self.entry_allowance(entry).await?.is_err() {
+            return Err(PaykitError::corrupt());
+        }
         for _ in 0..OUTCOME_TRIES {
             // A batch kept from before may have been applied since: it finished the entry.
             // Read bound to its key and to the entry's claim: a value of another attempt or
@@ -3415,8 +3423,13 @@ impl Paykit {
         }
         // An executor checks its Allowance again before money moves (Paykit spec 7.2 step 1,
         // 8.3): one ended, rejected, handed off or off the consent list pays nothing.
-        // Checked against its proof first (`Paykit::entry_allowance`): fail closed.
-        if let Some(allowance_id) = self.entry_allowance(entry).await? {
+        // Checked against its proof first (`Paykit::entry_allowance`): an entry it doesn't
+        // bear out is held, that entry alone, never paid.
+        let allowance_id = match self.entry_allowance(entry).await? {
+            Ok(allowance_id) => allowance_id,
+            Err(refusal) => return Ok(Err(Held::Check(refusal))),
+        };
+        if let Some(allowance_id) = allowance_id {
             let target = crate::allowances::allowance_target(&entry.payee, &allowance_id);
             let record = self.app.record_key(&target)?;
             if let Err(refusal) = self.allowance_gate(&record, false).await? {

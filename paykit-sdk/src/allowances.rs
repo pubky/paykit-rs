@@ -1364,14 +1364,6 @@ impl Paykit {
     // ---------------------------------------------------------------------------------
     // The consent list
 
-    /// Whether the user confirmed paying under the Allowance at `record` since its current
-    /// write the app ignores. No path confirms one yet: the executor's confirmation comes
-    /// with it, so until then an ignored current write pays nothing.
-    pub(crate) async fn ignored_write_confirmed(&self, record: &[u8; 32]) -> Result<bool> {
-        let _ = record;
-        Ok(false)
-    }
-
     /// Whether this app's consent list holds the Allowance at `record`, confirmed since any
     /// restore or `missed` item (Paykit spec 8.3, "Executor"). None is confirmed while a
     /// `missed` item's mark (`mc`) waits for [`Paykit::confirm_consents_again`], nor while

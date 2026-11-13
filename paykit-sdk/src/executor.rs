@@ -89,8 +89,9 @@ pub(crate) struct KeptLedger {
 }
 
 /// The first grant's empty ledger in the executor's own journal (`el/<Allowance record key>`,
-/// Paykit spec 8.3 "A grant implies a ledger"): written with the grant, `sent` once a batch
+/// Paykit spec 8.3 "A grant implies a ledger"): written with the grant, `sent` before a batch
 /// carrying the ledger's first write is submitted, and gone once a ledger version is kept.
+/// While it isn't sent the empty ledger is owed, written before the first payment.
 /// Never restored: only the executor that wrote the grant, while its own journal shows the
 /// empty ledger not yet sent, takes a missing ledger as empty.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +99,11 @@ pub(crate) struct EmptyLedgerMark {
     #[serde(with = "serde_b64")]
     pub(crate) record: [u8; 32],
     pub(crate) sent: bool,
+    /// The kept batch carrying the empty ledger, when its send got no answer: a batch the
+    /// client drops as refused or unsent was never applied, so the empty ledger is owed
+    /// again.
+    #[serde(default)]
+    pub(crate) batch: Option<[u8; 16]>,
 }
 
 /// The version of an Allowance record's current write the app ignores (Switch spec 8.2)
@@ -172,6 +178,14 @@ pub(crate) fn accepted_ids(
     under: Option<&Under>,
 ) -> Option<Vec<PaymentEndpointIdentifier>> {
     let terms = under.and_then(|u| u.terms.allowed_payment_endpoint_identifiers.as_deref());
+    both_allow(request, terms)
+}
+
+/// The identifiers both `request` and `terms` allow, `None` standing for any.
+fn both_allow(
+    request: Option<&[PaymentEndpointIdentifier]>,
+    terms: Option<&[PaymentEndpointIdentifier]>,
+) -> Option<Vec<PaymentEndpointIdentifier>> {
     match (request, terms) {
         (None, None) => None,
         (Some(ids), None) | (None, Some(ids)) => Some(ids.to_vec()),
@@ -248,19 +262,29 @@ impl Paykit {
     /// held must name it; without a record that reads, the kept ledger version must hold an
     /// entry for the attempt. An entry naming another Allowance than its proof is a corrupt
     /// store, checked before money moves and before the outcome's proof or record is built.
+    ///
+    /// `Ok(Err(..))` for an entry whose Allowance its proof doesn't bear out, so the caller
+    /// decides for that one entry: the gate holds it, the outcome returns it as a corrupt
+    /// store. A failure of the store is the error.
     pub(crate) async fn entry_allowance(
         &self,
         entry: &crate::journal::JournalEntry,
-    ) -> Result<Option<AllowanceId>> {
+    ) -> Result<std::result::Result<Option<AllowanceId>, Refusal>> {
         let Some(allowance_id) = entry.allowance()? else {
-            return Ok(None);
+            return Ok(Ok(None));
+        };
+        let unproven = || {
+            Ok(Err(Refusal::NotAutomatic(
+                "the journal entry's Allowance isn't the one its request record or ledger names"
+                    .into(),
+            )))
         };
         let target = crate::activity::ActivityTarget::payer(entry.natural_key.clone());
         if let Some(record) = self.held_activity(&target).await? {
             if record.allowance_id.as_ref() != Some(&allowance_id) {
-                return Err(PaykitError::corrupt());
+                return unproven();
             }
-            return Ok(Some(allowance_id));
+            return Ok(Ok(Some(allowance_id)));
         }
         let allowance = self
             .app
@@ -271,9 +295,9 @@ impl Paykit {
             .await?
             .is_some_and(|(_, ledger)| ledger.entries.iter().any(|e| e.attempt_id == attempt));
         if !in_ledger {
-            return Err(PaykitError::corrupt());
+            return unproven();
         }
-        Ok(Some(allowance_id))
+        Ok(Ok(Some(allowance_id)))
     }
 
     /// The kept ledger version of the Allowance at `record`, read bound to its key as a
@@ -339,19 +363,79 @@ impl Paykit {
     }
 
     /// Mark the first grant's empty ledger sent, before a batch carrying the ledger's first
-    /// write is submitted: from then on a missing ledger is usage history lost.
-    async fn empty_ledger_sent(&mut self, record: &[u8; 32]) -> Result<()> {
-        if self.empty_ledger_unsent(record).await? {
+    /// write is submitted, with the kept batch when its send got no answer: from then on a
+    /// missing ledger is usage history lost.
+    async fn empty_ledger_sent(
+        &mut self,
+        record: &[u8; 32],
+        batch: Option<[u8; 16]>,
+    ) -> Result<()> {
+        if self
+            .local_get::<EmptyLedgerMark>(&key::empty_ledger(record))
+            .await?
+            .is_some()
+        {
             self.local_put(
                 &key::empty_ledger(record),
                 &EmptyLedgerMark {
                     record: *record,
                     sent: true,
+                    batch,
                 },
             )
             .await?;
         }
         Ok(())
+    }
+
+    /// The first grant's empty ledger owed again: not yet sent, or sent in a kept batch the
+    /// client has since dropped as refused or unsent, never applied (the mark is then set
+    /// back to not sent). A batch still kept, applied, dropped as uncertain, or one the
+    /// client keeps nothing of, leaves the mark sent.
+    async fn empty_ledger_owed(&mut self, record: &[u8; 32]) -> Result<bool> {
+        let Some(mark) = self
+            .local_get::<EmptyLedgerMark>(&key::empty_ledger(record))
+            .await?
+        else {
+            return Ok(false);
+        };
+        if !mark.sent {
+            return Ok(true);
+        }
+        let Some(batch) = mark.batch else {
+            return Ok(false);
+        };
+        let never_applied = matches!(
+            self.app.kept_batch(batch).await?,
+            Some(pubky_switch_client::app::KeptBatchStatus::Dropped {
+                reason: pubky_switch_client::app::KeptBatchDrop::Refused { .. }
+                    | pubky_switch_client::app::KeptBatchDrop::Unsent,
+                ..
+            })
+        );
+        if never_applied {
+            self.local_put(
+                &key::empty_ledger(record),
+                &EmptyLedgerMark {
+                    record: *record,
+                    sent: false,
+                    batch: None,
+                },
+            )
+            .await?;
+        }
+        Ok(never_applied)
+    }
+
+    /// Write the first grant's empty ledger while it is owed and no ledger is at its key,
+    /// before the first payment (Paykit spec 8.3, "A grant implies a ledger"): a grant batch
+    /// kept, or a crash between the grant and its empty ledger, leaves it owed.
+    async fn write_owed_empty_ledger(&mut self, under: &Under) -> Result<()> {
+        if !self.empty_ledger_owed(&under.record_key).await? {
+            return Ok(());
+        }
+        self.write_empty_ledger(&under.record_key, &under.allowance)
+            .await
     }
 
     /// The latest write of the record at `record` the app ignores (Switch spec 8.2), from
@@ -369,7 +453,7 @@ impl Paykit {
 
     /// Whether the user confirmed paying under the Allowance at `record` since its latest
     /// ignored write (`fc/`).
-    async fn ignored_write_confirmed(&self, record: &[u8; 32]) -> Result<bool> {
+    pub(crate) async fn ignored_write_confirmed(&self, record: &[u8; 32]) -> Result<bool> {
         let Some(latest) = self.latest_ignored(record).await? else {
             return Ok(false);
         };
@@ -397,10 +481,11 @@ impl Paykit {
         fresh: bool,
     ) -> Result<std::result::Result<Under, Refusal>> {
         let own = self.identity();
-        let held = self
-            .held_allowance(record)
-            .await?
-            .ok_or(Refusal::NotFound)?;
+        // A record not held, held as deleted, or not binding is a refusal, never an error: at
+        // the gate after the batch it writes `failed`, and a resume goes on with the rest.
+        let Some(held) = self.held_allowance(record).await? else {
+            return Ok(Err(Refusal::NotFound));
+        };
         let shared: SharedRecord = if fresh {
             let target = allowance_target(&held.counterparty, &held.allowance_id);
             match self.app.read_record_fresh(&target).await? {
@@ -423,10 +508,10 @@ impl Paykit {
                 _ => return Err(PaykitError::corrupt()),
             }
         } else {
-            self.app
-                .shared_record(record)
-                .await?
-                .ok_or(Refusal::NotFound)?
+            let Some(shared) = self.app.shared_record(record).await? else {
+                return Ok(Err(Refusal::NotFound));
+            };
+            shared
         };
         let refuse = |why: &str| Ok(Err(Refusal::NotAutomatic(why.into())));
         if shared.divergent || shared.doubtful {
@@ -446,10 +531,9 @@ impl Paykit {
         } else {
             shared.version
         };
-        let allowance = self
-            .held_allowance(record)
-            .await?
-            .ok_or(Refusal::NotFound)?;
+        let Some(allowance) = self.held_allowance(record).await? else {
+            return Ok(Err(Refusal::NotFound));
+        };
         // Conflicted for good (Paykit spec 8.3, "Conflicted"): in the record, or kept as the
         // stop before the record shows it.
         if allowance.conflicted.is_some() || self.conflict_kept(record).await? {
@@ -679,10 +763,12 @@ impl Paykit {
         amount: &PaymentAmount,
         destination: &Destination,
     ) -> Result<ExecutorOps> {
+        // The first grant's empty ledger, while owed, goes before the first payment.
+        self.write_owed_empty_ledger(under).await?;
         let base = self.ledger_base(under).await?;
         if base.is_none() {
             // This batch carries the ledger's first write.
-            self.empty_ledger_sent(&under.record_key).await?;
+            self.empty_ledger_sent(&under.record_key, None).await?;
         }
         let mut ledger = base.unwrap_or_else(|| {
             Ledger::empty(
@@ -767,22 +853,34 @@ impl Paykit {
         })
     }
 
-    /// After an executor batch is applied: its ledger write is kept as the last version.
-    /// One not kept now leaves the version kept before, which the next read accepts the own
-    /// write as built on.
-    pub(crate) async fn executor_applied(&mut self, record: [u8; 32], ledger: RecordTarget) {
-        let _ = self.read_and_keep_ledger(&record, &ledger).await;
+    /// After an executor batch is applied: its ledger write is kept as the last version
+    /// ([`Paykit::keep_own_ledger`]). A failure of the app's own store is the call's error:
+    /// the attempt is then resolved as any other whose dispatch didn't start.
+    pub(crate) async fn executor_applied(
+        &mut self,
+        record: [u8; 32],
+        ledger: RecordTarget,
+    ) -> Result<()> {
+        self.keep_own_ledger(&record, &ledger).await
     }
 
-    /// Read the ledger at `ledger` from the switch, taking the own write applied, and keep
-    /// it as the last version of the Allowance at `record`.
-    async fn read_and_keep_ledger(
-        &mut self,
-        record: &[u8; 32],
-        ledger: &RecordTarget,
-    ) -> Result<()> {
-        self.app.read_record(ledger).await?;
+    /// Keep the ledger write this app just had applied as the last version of the Allowance
+    /// at `record`: from the copy the app holds when the answer left it there, else from a
+    /// read of the record. A read that fails keeps nothing, which is safe: the first
+    /// grant's empty ledger is marked sent before any ledger write goes, so a missing ledger
+    /// is then usage history lost, and a ledger shown has no kept version to be built on.
+    /// Only a failure of the app's own store is an error.
+    async fn keep_own_ledger(&mut self, record: &[u8; 32], ledger: &RecordTarget) -> Result<()> {
         let ledger_key = self.app.record_key(ledger)?;
+        if self.app.shared_record(&ledger_key).await?.is_none() {
+            if let Err(error) = self.app.read_record(ledger).await {
+                let error: PaykitError = error.into();
+                if crate::hold::local_failure(&error) {
+                    return Err(error);
+                }
+                return Ok(());
+            }
+        }
         self.keep_ledger(record, &ledger_key).await
     }
 
@@ -796,7 +894,11 @@ impl Paykit {
     ///
     /// [`Refusal::NotAutomatic`] naming the executor's check that refuses it, with nothing
     /// written; [`Refusal::AllowanceEnded`] or [`Refusal::Rejected`] for an Allowance ended
-    /// or rejected; [`Refusal::ScopeMissing`] without `allowance_execute`; otherwise as
+    /// or rejected; [`Refusal::AllowanceConflicted`] for a conflicted one; [`Refusal::NotFound`]
+    /// for an Allowance record not held, held as deleted, or not binding;
+    /// [`Refusal::SwitchUnavailable`] when the Allowance record can't be read from the switch
+    /// now; [`Refusal::NotNow`] while the app may not attempt automatically or the records
+    /// aren't listed; [`Refusal::ScopeMissing`] without `allowance_execute`; otherwise as
     /// [`Paykit::pay_request`], whose checks it takes too, a doubtful claim refused as
     /// [`Refusal::MayBePaid`] and never paid over.
     pub async fn pay_under_allowance(
@@ -822,7 +924,9 @@ impl Paykit {
     /// "Handoff"), once its user has confirmed it: sign this app's executor grant over the
     /// record version read, append it to the grant history and put the Allowance on the
     /// consent list, in one write of the record. A handoff from another own executor sends
-    /// it an `executor_notice`; after the first grant the empty ledger follows. A grant
+    /// it an `executor_notice`. The first grant's empty ledger follows, and is owed in the
+    /// executor's journal until it lands: a grant batch kept unanswered, or a crash before
+    /// the ledger's write, leaves it to be written before the first payment. A grant
     /// signed again by the current executor, such as after a provider loss, takes the
     /// current generation.
     ///
@@ -831,8 +935,10 @@ impl Paykit {
     /// [`Refusal::ScopeMissing`] without `allowance_execute`; [`Refusal::NotFound`];
     /// [`Refusal::AllowanceEnded`] or [`Refusal::Rejected`]; [`Refusal::Usage`] for an
     /// Allowance not accepted, one this identity is the allowee of, or one that left the
-    /// consent list for good; [`PaykitError::Conflict`] when the record kept changing; the
-    /// client's errors.
+    /// consent list for good; [`Refusal::AllowanceConflicted`] for a conflicted one;
+    /// [`Refusal::NotNow`] while the record is divergent or flagged, or can't be read from
+    /// the switch now, or the records aren't listed; [`PaykitError::Conflict`] when the
+    /// record kept changing; the client's errors.
     pub async fn grant_executor(
         &mut self,
         record: &[u8; 32],
@@ -997,6 +1103,7 @@ impl Paykit {
                 &EmptyLedgerMark {
                     record: *record,
                     sent: false,
+                    batch: None,
                 },
             )?);
         }
@@ -1037,8 +1144,13 @@ impl Paykit {
     }
 
     /// The empty ledger the first grant implies (Paykit spec 8.3, "A grant implies a
-    /// ledger"), conditioned on the Allowance record version the grant's write left, kept
-    /// as the last version once applied. One the switch holds already is left as it is.
+    /// ledger"), conditioned on the Allowance record version held, while it is owed. Its
+    /// outcome is its own, never the grant's: applied, the version is kept from the held
+    /// copy the answer left, with no read; kept with no answer, it stays sent, so a missing
+    /// ledger is usage history lost; refused, it is owed again, for the next payment. A
+    /// ledger at its key, one the app holds or one the switch's `409` shows, is taken as one
+    /// the executor didn't accept: no empty ledger goes over it, and the mark goes. Only a
+    /// failure of the app's own store is an error.
     async fn write_empty_ledger(
         &mut self,
         record: &[u8; 32],
@@ -1050,10 +1162,9 @@ impl Paykit {
         let lt = ledger_target(&allowance.counterparty, &allowance.allowance_id);
         let ledger_key = self.app.record_key(&lt)?;
         if self.app.shared_record(&ledger_key).await?.is_some() {
-            return Ok(());
+            return self.local_delete(&key::empty_ledger(record)).await;
         }
         let empty = Ledger::empty(allowance.counterparty, allowance.allowance_id.clone());
-        self.empty_ledger_sent(record).await?;
         let write = self
             .app
             .record_op(
@@ -1065,23 +1176,37 @@ impl Paykit {
                 }],
             )
             .await?;
+        self.empty_ledger_sent(record, None).await?;
+        let owed = EmptyLedgerMark {
+            record: *record,
+            sent: false,
+            batch: None,
+        };
         match self.app.submit_batch(OpBatch::new().entry(write)).await {
-            Ok(_) => self.read_and_keep_ledger(record, &lt).await,
-            // Kept, or no answer: sent without a verified answer.
-            Err(error) if error.kept_batch().is_some() => Ok(()),
-            // The switch answered that it wrote nothing: the empty ledger is not yet sent.
-            Err(error) if error.code().is_some() => {
-                self.local_put(
-                    &key::empty_ledger(record),
-                    &EmptyLedgerMark {
-                        record: *record,
-                        sent: false,
-                    },
-                )
-                .await?;
-                Err(error.into())
+            Ok(_) => self.keep_own_ledger(record, &lt).await,
+            Err(error) if error.kept_batch().is_some() => {
+                self.empty_ledger_sent(record, error.kept_batch()).await
             }
-            Err(error) => Err(error.into()),
+            Err(error) if error.code() == Some(ErrorCode::Conflict) => {
+                // A ledger at the key the app didn't hold, or the record changed since.
+                self.app.read_record(&lt).await?;
+                if self.app.shared_record(&ledger_key).await?.is_some() {
+                    self.local_delete(&key::empty_ledger(record)).await
+                } else {
+                    self.local_put(&key::empty_ledger(record), &owed).await
+                }
+            }
+            Err(error) if error.code().is_some() => {
+                self.local_put(&key::empty_ledger(record), &owed).await
+            }
+            Err(error) => {
+                let error: PaykitError = error.into();
+                if crate::hold::local_failure(&error) {
+                    return Err(error);
+                }
+                // No answer: sent without a verified answer, the mark stays sent.
+                Ok(())
+            }
         }
     }
 
@@ -1154,8 +1279,10 @@ impl Paykit {
     }
 
     /// Mark the one-time request `request` manual-only on its payer record (Paykit spec 8.3,
-    /// "Manual only"; Paykit wire 5.3): no executor pays it automatically from then on. The
-    /// mark is never lifted.
+    /// "Manual only"; Paykit wire 5.3): no executor pays it automatically once the write
+    /// lands. The mark is never lifted. A write kept unanswered returns `Ok` and lands with
+    /// the app's next write or read, before any executor batch, which sends kept batches
+    /// first; a kept batch the client later drops leaves no mark.
     ///
     /// # Errors
     ///
@@ -1235,8 +1362,16 @@ mod tests {
     fn test_executor_accepted_ids_keep_only_what_both_allow() {
         let a = PaymentEndpointIdentifier::new("a").unwrap();
         let b = PaymentEndpointIdentifier::new("b").unwrap();
+        let c = PaymentEndpointIdentifier::new("c").unwrap();
         assert_eq!(accepted_ids(None, None), None);
+        assert_eq!(both_allow(None, None), None);
         let asked = [a.clone(), b.clone()];
-        assert_eq!(accepted_ids(Some(&asked), None), Some(asked.to_vec()));
+        // The request's alone, or the terms' alone.
+        assert_eq!(both_allow(Some(&asked), None), Some(asked.to_vec()));
+        let allowed = [b.clone(), c.clone()];
+        assert_eq!(both_allow(None, Some(&allowed)), Some(allowed.to_vec()));
+        // Both: only what both allow, none when they share nothing.
+        assert_eq!(both_allow(Some(&asked), Some(&allowed)), Some(vec![b]));
+        assert_eq!(both_allow(Some(&[a]), Some(&[c])), Some(Vec::new()));
     }
 }

@@ -863,9 +863,9 @@ pub(crate) mod key {
         format!("{CONFLICTS}{}", b64(record_key))
     }
 
-    /// The consent list's entry of the Allowance whose record is `record_key`.
     pub(crate) const KEPT_LEDGERS: &str = "lv/";
 
+    /// The last ledger version kept of the Allowance whose record is `record_key`.
     pub(crate) fn kept_ledger(record_key: &[u8; 32]) -> String {
         format!("{KEPT_LEDGERS}{}", b64(record_key))
     }
@@ -878,6 +878,7 @@ pub(crate) mod key {
         format!("fc/{}", b64(record_key))
     }
 
+    /// The consent list's entry of the Allowance whose record is `record_key`.
     pub(crate) fn consent(record_key: &[u8; 32]) -> String {
         format!("{CONSENTS}{}", b64(record_key))
     }

@@ -1060,3 +1060,136 @@ async fn test_executor_pauses_under_an_ignored_write_until_the_user_confirms() {
     let paid = wallet.pay_under_allowance(&request, &record).await.unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
 }
+
+/// The ledger's key at the wallet, for scripting the switch's answers to its reads.
+async fn ledger_key(wallet: &Paykit, record: &[u8; 32]) -> [u8; 32] {
+    let (allowance, _) = held(wallet, record).await;
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "allowance_ledgers",
+            paykit_lib::collections::Collection::AllowanceLedgers.fixed_policy(),
+        ),
+        &paykit_lib::derive::natural_key::allowance(
+            &allowance.counterparty,
+            &allowance.allowance_id,
+        ),
+    );
+    wallet.app().record_key(&target).unwrap()
+}
+
+#[tokio::test]
+async fn test_executor_missing_ledger_after_its_own_ledger_write_is_usage_history_lost() {
+    // The first grant's empty ledger can't reach the switch, so its batch is kept; the next
+    // write sends it, and it lands with no version kept from it. The switch then answers
+    // `404` for the ledger: after its own ledger write was sent, the executor takes that as
+    // "usage history lost" (Paykit spec 8.3, "A grant implies a ledger"), never as an empty
+    // ledger with room under the lifetime limit.
+    let w = World::new();
+    let mut shop = allowance_shop(&w).await;
+    let mut wallet = executor_wallet(&w, "wallet").await;
+    let record = accepted(
+        &w,
+        &mut shop,
+        &mut wallet,
+        terms_with(json!({ "lifetime_amount_limit": "1" })),
+    )
+    .await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 1,
+        });
+    wallet
+        .grant_executor(&record, UserConfirmed::new())
+        .await
+        .unwrap();
+    assert!(held(&wallet, &record).await.1.is_none());
+    // The kept batch goes with the next read, and lands.
+    let first = request(&w, &mut shop, &mut wallet, "1").await;
+    let key = ledger_key(&wallet, &record).await;
+    assert!(w.record_writes(&w.alice, &key) > 0);
+    // The switch hides the ledger.
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: format!("records/{}", pubky_switch_core::enc::b64(&key)),
+            code: pubky_switch_core::http::ErrorCode::NotFound,
+            current: Value::Null,
+        });
+    let refused = wallet
+        .pay_under_allowance(&first, &record)
+        .await
+        .unwrap_err();
+    assert!(refused_for(&refused, "usage history lost"), "{refused:?}");
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_executor_pays_nothing_under_an_allowance_record_deleted_by_another_own_app() {
+    // Another own app deletes the accepted Allowance's record: the executor holds it as
+    // deleted and pays nothing automatically under it.
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let (allowance, _) = held(&wallet, &record).await;
+    let mut other = executor_wallet(&w, "other").await;
+    other.receive(None).await.unwrap();
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "allowances",
+            paykit_lib::collections::Collection::Allowances.fixed_policy(),
+        ),
+        &paykit_lib::derive::natural_key::allowance(
+            &allowance.counterparty,
+            &allowance.allowance_id,
+        ),
+    );
+    other.app_mut().read_record(&target).await.unwrap();
+    other
+        .app_mut()
+        .delete_record(&target, Vec::new())
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    let refused = wallet
+        .pay_under_allowance(&request, &record)
+        .await
+        .unwrap_err();
+    assert!(refused.refusal().is_some(), "{refused:?}");
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_executor_empty_ledger_owed_after_a_kept_grant_written_before_the_first_payment() {
+    // The grant's batch can't reach the switch, so it is kept and the empty ledger isn't
+    // written after it. The kept batch lands with the next read, the empty ledger still
+    // owed: the first payment writes it first, then pays on it (Paykit spec 8.3, "A grant
+    // implies a ledger").
+    let w = World::new();
+    let mut shop = allowance_shop(&w).await;
+    let mut wallet = executor_wallet(&w, "wallet").await;
+    let record = accepted(&w, &mut shop, &mut wallet, terms_with(json!({}))).await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    wallet
+        .grant_executor(&record, UserConfirmed::new())
+        .await
+        .unwrap();
+    let first = request(&w, &mut shop, &mut wallet, "0.5").await;
+    let (allowance, ledger) = held(&wallet, &record).await;
+    assert_eq!(allowance.grants.len(), 1);
+    assert!(ledger.is_none());
+    let key = ledger_key(&wallet, &record).await;
+    assert_eq!(w.record_writes(&w.alice, &key), 0);
+    let paid = wallet.pay_under_allowance(&first, &record).await.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    // The empty ledger, then the payment's entry.
+    assert_eq!(w.record_writes(&w.alice, &key), 2);
+    let (_, ledger) = held(&wallet, &record).await;
+    assert_eq!(ledger.unwrap().entries.len(), 1);
+}
