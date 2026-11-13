@@ -2480,3 +2480,225 @@ async fn test_restore_own_unblock_mark_without_its_batch_refused() {
     )
     .await;
 }
+
+/// Bob's shop sends alice a request and cancels it, and is backed up then; after the backup
+/// another own app of bob's, the till, writes the shop's request record as a value no reader
+/// reads. Returns the request, the cancellation's `msg_id`, the record's value before, the
+/// till, and the backup.
+async fn cancellation_over_a_record_left_unreadable(
+    w: &World,
+    shop: &mut Paykit,
+) -> (
+    paykit_sdk::RequestRef,
+    String,
+    Vec<u8>,
+    Paykit,
+    PaykitBackup,
+) {
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let mut wallet = w.wallet("wallet").await;
+    let request = request_from(shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let record = shop
+        .payee_activity()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|sale| sale.request_hash == Some(request.request_hash))
+        .unwrap()
+        .record;
+    let cancellation = shop.cancel_sent_request(&record, None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let backup = shop.backup().await.unwrap();
+    till.receive(None).await.unwrap();
+    let target = crate::periods::payee_request_at(&request);
+    let held = till.app_mut().read_record(&target).await.unwrap().unwrap();
+    let good = held.content.value().unwrap().to_vec();
+    let unreadable = serde_json::to_vec(&serde_json::json!({ "v": 99 })).unwrap();
+    crate::periods::writes_value(&mut till, &target, &unreadable).await;
+    (request, cancellation, good, till, backup)
+}
+
+#[tokio::test]
+async fn test_restore_own_cancellation_in_a_record_left_unreadable_waits_until_it_reads() {
+    // The record holding the shop's cancellation doesn't read when the restored shop's
+    // re-send runs: it shows nothing to send, so nothing goes and the re-send stays owed,
+    // judged again at each receive; once the till writes the record back, the cancellation
+    // is queued, once (Paykit spec 7.2, "What a restore loses").
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let (request, cancellation, good, mut till, backup) =
+        cancellation_over_a_record_left_unreadable(&w, &mut shop).await;
+    drop(shop);
+    let mut shop = restored_unreceived(&w, &w.bob, &backup).await;
+    let before = w.alice.switch().entries_from(&w.bob_id());
+    for _ in 0..2 {
+        shop.receive(None).await.unwrap();
+    }
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert!(!crate::periods::queued(&shop, &cancellation).await);
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    crate::periods::writes_value(
+        &mut till,
+        &crate::periods::payee_request_at(&request),
+        &good,
+    )
+    .await;
+    shop.receive(None).await.unwrap();
+    assert!(crate::periods::queued(&shop, &cancellation).await);
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 1);
+    shop.receive(None).await.unwrap();
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 1);
+}
+
+#[tokio::test]
+async fn test_restore_own_cancellation_in_a_record_unreadable_for_31_days_never_sent() {
+    // The record stays a value no reader reads: 30 days after the restore no message in it
+    // could still go, so the re-send is owed no more, with nothing sent and nothing told
+    // (Paykit spec 7.2, "What a restore loses").
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let (_, cancellation, _, _till, backup) =
+        cancellation_over_a_record_left_unreadable(&w, &mut shop).await;
+    drop(shop);
+    let mut shop = restored_unreceived(&w, &w.bob, &backup).await;
+    let before = w.alice.switch().entries_from(&w.bob_id());
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    w.clock.advance_ms(31 * pubky_switch_core::records::DAY_MS);
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(!crate::periods::queued(&shop, &cancellation).await);
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert!(shop.notices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_restore_own_unread_record_and_a_blocked_counterparty_both_wait() {
+    // Two waits at once: the record of the shop's cancellation to alice doesn't read, and
+    // carol, to whom its request went unanswered, is blocked. Each message goes once its
+    // own wait ends, the cancellation once the record reads, the request once carol is
+    // unblocked, and the re-send is owed until both have (Paykit spec 7.2, "What a restore
+    // loses"; 8.1, Blocked counterparties).
+    let w = World::new();
+    let mut shop = w
+        .join(
+            &w.bob,
+            "shop",
+            AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+        )
+        .await;
+    let mut carols = w
+        .join(&w.carol, "wallet", AppScopes::new().pay().build().unwrap())
+        .await;
+    carols.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut unexpiring = draft("1", w.clock.now_ms());
+    unexpiring.proposal_expires_at_ms = None;
+    let to_carol = shop.send_request(w.carol_id(), unexpiring).await.unwrap();
+    carols.receive(None).await.unwrap();
+    let (request, cancellation, good, mut till, backup) =
+        cancellation_over_a_record_left_unreadable(&w, &mut shop).await;
+    drop(shop);
+    let mut shop = restored_unreceived(&w, &w.bob, &backup).await;
+    shop.block(&w.carol_id()).await.unwrap();
+    let alices = w.alice.switch().entries_from(&w.bob_id());
+    let carol_before = w.carol.switch().entries_from(&w.bob_id());
+    for _ in 0..2 {
+        shop.receive(None).await.unwrap();
+    }
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), alices);
+    assert_eq!(w.carol.switch().entries_from(&w.bob_id()), carol_before);
+    crate::periods::writes_value(
+        &mut till,
+        &crate::periods::payee_request_at(&request),
+        &good,
+    )
+    .await;
+    shop.receive(None).await.unwrap();
+    assert!(crate::periods::queued(&shop, &cancellation).await);
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), alices + 1);
+    assert!(!crate::periods::queued(&shop, &to_carol.msg_id).await);
+    assert_eq!(w.carol.switch().entries_from(&w.bob_id()), carol_before);
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    shop.unblock(&w.carol_id()).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(crate::periods::queued(&shop, &to_carol.msg_id).await);
+    assert_eq!(w.carol.switch().entries_from(&w.bob_id()), carol_before + 1);
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    shop.receive(None).await.unwrap();
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), alices + 1);
+    assert_eq!(w.carol.switch().entries_from(&w.bob_id()), carol_before + 1);
+}
+
+#[tokio::test]
+async fn test_restore_own_record_found_unreadable_25_days_after_the_restore_waited_for_5_more() {
+    // The restored shop's re-send stays owed while carol, to whom its request went
+    // unanswered, is blocked. 25 days after the restore the till writes a record no reader
+    // reads, and carol is unblocked: her request goes, and the record keeps the re-send owed
+    // only until 30 days after the restore, not 30 days after it was found, since no
+    // message the restore could send again can still go by then (Paykit spec 7.2, "What a
+    // restore loses").
+    let w = World::new();
+    let mut shop = w
+        .join(
+            &w.bob,
+            "shop",
+            AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+        )
+        .await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let mut carols = w
+        .join(&w.carol, "wallet", AppScopes::new().pay().build().unwrap())
+        .await;
+    carols.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut unexpiring = draft("1", w.clock.now_ms());
+    unexpiring.proposal_expires_at_ms = None;
+    let to_carol = shop.send_request(w.carol_id(), unexpiring).await.unwrap();
+    carols.receive(None).await.unwrap();
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let mut shop = restored_unreceived(&w, &w.bob, &backup).await;
+    shop.block(&w.carol_id()).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    let before = w.carol.switch().entries_from(&w.bob_id());
+    w.clock.advance_ms(25 * pubky_switch_core::records::DAY_MS);
+    till.receive(None).await.unwrap();
+    let nowhere = paykit_sdk::RequestRef {
+        payee: w.bob_id(),
+        request_hash: [7; 32],
+    };
+    let unreadable = serde_json::to_vec(&serde_json::json!({ "v": 99 })).unwrap();
+    crate::periods::writes_value(
+        &mut till,
+        &crate::periods::payee_request_at(&nowhere),
+        &unreadable,
+    )
+    .await;
+    shop.unblock(&w.carol_id()).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(crate::periods::queued(&shop, &to_carol.msg_id).await);
+    assert_eq!(w.carol.switch().entries_from(&w.bob_id()), before + 1);
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    w.clock.advance_ms(4 * pubky_switch_core::records::DAY_MS);
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    w.clock.advance_ms(2 * pubky_switch_core::records::DAY_MS);
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert_eq!(w.carol.switch().entries_from(&w.bob_id()), before + 1);
+}

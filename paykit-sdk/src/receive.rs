@@ -10,12 +10,15 @@
 //! - **payer side** (`pay`): a request opens its request record; a payee's cancellation, a
 //!   receipt and a Private Payment List go into theirs. A payee's cancellation is kept,
 //!   never written in the receive step: the app places it in the request record afterwards
-//!   (the kept-copy stop, Paykit spec 8.1). A receipt also settles the attempt
+//!   (the kept-copy stop, Paykit spec 8.1). Period details go into the period record of
+//!   their Billing Period, or, for a request whose record the app doesn't hold yet, are
+//!   kept until it does (`p/pr/`). A receipt also settles the attempt
 //!   it names, by evidence (Switch spec 10.2 row 3), in the same batch: only the payee's yes
 //!   counts (Paykit spec 7.3).
 //! - **payee side** (`request` or a label): the payer's acceptance, rejection, cancellation
 //!   and proof go into the request record under the request's label, or, for a request
-//!   whose record the app doesn't hold yet, are kept until it does (`p/pr/`); a proof of a
+//!   whose record the app doesn't hold yet, are kept until it does (`p/pr/`); a Billing
+//!   Period's proof into the period record, never the request record; a proof of a
 //!   payment without a request into the record of its settlement, so one settlement is
 //!   credited once (Paykit spec 8.4).
 //! - a `resend_request` is kept, with the cursor move, for [`crate::Paykit::receive`] to
@@ -38,7 +41,7 @@
 use paykit_lib::bodies::ResendRequest;
 use paykit_lib::derive::{natural_key, request_obligation_blinded};
 use paykit_lib::records::{
-    ActivityRecord, PaymentListRecord, StoredMessage, UnrequestedDestination,
+    ActivityRecord, ActivitySide, PaymentListRecord, StoredMessage, UnrequestedDestination,
 };
 use paykit_lib::{AttemptId, Body};
 use pubky_switch_client::app::{
@@ -230,6 +233,9 @@ pub(crate) fn effect(
         Body::PaymentReceipt(receipt) if pay => {
             receipt_effect(cx, stored, receipt.attempt_id)?;
         }
+        Body::PaymentPeriodDetails(_) if pay => {
+            period_details_effect(cx, stored, &scopes, settlement)?;
+        }
         Body::PrivatePaymentList(_) if pay => {
             let target = list_target(&sender, &stored.message().from.app_id);
             let record = cx.record(&target)?;
@@ -417,6 +423,28 @@ pub(crate) fn wait_for_record_key(
     Ok(())
 }
 
+/// `value`, the activity record value the app's copy holds at `target`, read bound to its
+/// key ([`crate::records::bind_activity`]), as the later writes read it
+/// ([`crate::Paykit::held_activity`]): `None` for a value that doesn't read or bind, which
+/// the reader doesn't act on (Paykit wire 5.3).
+fn bound_activity(
+    cx: &ReceiveContext<'_>,
+    target: &ActivityTarget,
+    value: &[u8],
+    settlement: Settlement<'_>,
+) -> Result<Option<paykit_lib::records::ActivityRecord>, Fail> {
+    let key = cx.record_key(&target.record_target())?;
+    Ok(crate::records::bind_activity(
+        value,
+        &cx.identity(),
+        target.side.side(),
+        target.label().as_ref(),
+        &key,
+        |t| cx.record_key(t).ok(),
+        settlement,
+    ))
+}
+
 /// Whether the app's copy holds the record at `target` ([`holds_record`]).
 fn held_request(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<bool, Fail> {
     Ok(holds_record(
@@ -573,6 +601,68 @@ fn keep_cancellation(
     Ok(())
 }
 
+/// Keep `stored`, a message whose record this app holds no record of yet, as a message
+/// before its record (Paykit spec 8.1), under `record`, the request record it waits for:
+/// new state, which the spam rule gates, within the bounds on kept replies
+/// ([`keep_reply`]).
+fn keep_before_record(
+    cx: &mut ReceiveContext<'_>,
+    stored: &StoredMessage,
+    scopes: &[String],
+    record: &ActivityTarget,
+) -> Result<(), Fail> {
+    if admits_new_state(cx, &stored.sender(), scopes)? {
+        keep_reply(cx, record, stored)?;
+    }
+    Ok(())
+}
+
+/// Hold the entry of `stored`, a payer's reply to a request whose payee record the app holds
+/// but whose value doesn't open for good, as for a store unavailable for now: whether its
+/// sender is the record's counterparty can't be told, so it is neither counted under the
+/// spam rule, which could drop a real payer's reply, nor kept outside it, which would let
+/// anyone create state. The client holds the entry on the feed for its bounded wait, then
+/// stores it and tries it at every read, telling the host (`StoreFailing`); it is processed
+/// once the record reads. Once [`KEPT_MESSAGE_MS`] have passed since its acceptance, on
+/// `service`, the highest service time verified, its sender re-sends nothing that old
+/// (Paykit spec 9): the hold ends, and the reply is taken as one before its record, kept
+/// through the spam rule and given up with the host's notice, or, from a blocked or flagged
+/// sender, only counted.
+fn hold_until_readable(stored: &StoredMessage, service: Option<u64>) -> Result<(), Fail> {
+    let past = stored
+        .accepted_at()
+        .is_some_and(|at| crate::stored::past_window(at, service));
+    if past {
+        return Ok(());
+    }
+    Err(Fail::Store(StoreFailure::unavailable(
+        StoreError::Unavailable,
+    )))
+}
+
+/// Keep `stored`, a payee's period details at the payer, naming the request whose record
+/// is at `record`, until they can be placed. That record's key derives from the details'
+/// sender, so a record held there is one whose counterparty is the sender. With none held
+/// they are new state, kept through the spam rule ([`keep_before_record`]). With one held
+/// that they can't be placed in now (a value that doesn't open for good, read or bind, or
+/// a period record that doesn't open or bind), they update activity the app holds, no new
+/// state: they are kept outside the spam rule, within the bounds on kept replies
+/// ([`keep_reply`]), so a blocked or flagged payee's details are never dropped for a record
+/// the app can't read yet. The later write places them once the record can take them, or
+/// gives them up with the host's notice past their 30 days
+/// ([`crate::Paykit::place_kept_replies`]).
+fn keep_until_placed(
+    cx: &mut ReceiveContext<'_>,
+    stored: &StoredMessage,
+    scopes: &[String],
+    record: &ActivityTarget,
+) -> Result<(), Fail> {
+    if held_request(cx, record)? {
+        return keep_reply(cx, record, stored);
+    }
+    keep_before_record(cx, stored, scopes, record)
+}
+
 /// Make room for a new stop from `sender` among the stops kept for records not held, in the
 /// step: those the bounds drop ([`kept_reply_evicted`]) go, until there is room. The payees'
 /// cancellations of requests not held (`kc/`) and the counterparties' ends of Allowances not
@@ -685,6 +775,104 @@ pub(crate) fn make_room_for_stop(
     Ok(())
 }
 
+/// A payee's period details, at the payer (Paykit spec 8.2, Paykit wire 4.9, 5.3): stored in
+/// the payer's period record, which keeps every details of the period, once they are checked
+/// against the request its request record holds. Details for a request this app holds no
+/// record of yet are kept until it does, as a payer's reply is at the payee (Paykit spec
+/// 8.1, "Replies before their record"); while the copy of the payer's records may lack
+/// records, the absence decides nothing and the entry is held ([`held_or_unlisted`]), and a
+/// value of either record waiting for its scope key holds it too ([`wait_for_key`]).
+/// Details invalid against the request are dropped. Those the payer doesn't store, for a
+/// request it hasn't accepted, or rejected, or either side cancelled, or for a period that
+/// doesn't take details now ([`crate::periods::stores_details`]), are taken with no effect.
+/// With no service time verified yet, the entry is held until one is. Both records are read
+/// bound to their keys, as the later writes read them: a request record or period record
+/// whose value doesn't open, read or bind decides nothing and is never written over here, so
+/// the details are kept until placed ([`keep_until_placed`]), and the later write waits for
+/// a value that binds ([`crate::Paykit::place_kept_replies`]).
+///
+/// The spam rule (Paykit wire 4.1) doesn't gate the details stored here, nor those kept over
+/// a request record the app holds: they go only into the period record of a subscription
+/// the payer accepted, an update of activity it holds with this payee, not new state.
+/// Details kept before their request record is held are new state, and
+/// [`keep_before_record`] gates them.
+fn period_details_effect(
+    cx: &mut ReceiveContext<'_>,
+    stored: &StoredMessage,
+    scopes: &[String],
+    settlement: Settlement<'_>,
+) -> Result<(), Fail> {
+    let sender = stored.sender();
+    let own = cx.identity();
+    let Some(request_hash) = stored.message().refs.first().copied() else {
+        return Ok(());
+    };
+    let request_target = ActivityTarget::payer(natural_key::request_record(&sender, &request_hash));
+    let Some(value) = held_or_unlisted(cx, &request_target, RecordSide::Payer)? else {
+        return keep_until_placed(cx, stored, scopes, &request_target);
+    };
+    let Some(record) = bound_activity(cx, &request_target, &value, settlement)? else {
+        return keep_until_placed(cx, stored, scopes, &request_target);
+    };
+    if record.counterparty != sender || record.request.is_none() {
+        return Ok(());
+    }
+    let Some(target) = period_or_request(&own, &request_target, &record, stored, &request_hash)
+    else {
+        return Err(Fail::Drop(
+            "Paykit wire 4.9: period details invalid against their request".into(),
+        ));
+    };
+    // A kept stop is read back as a restore reads it, bound to its key: one that doesn't
+    // verify is corrupt state, never taken as a stop that drops the details.
+    let kept_stop = key::kept_cancellation(&cx.record_key(&request_target.record_target())?);
+    let stopped = state::cx_get::<KeptMessage>(cx, &kept_stop)?.is_some();
+    // The period record's paid state decides too; one absent shows nothing paid. One whose
+    // value waits for its key holds the entry; one held that doesn't open, read or bind
+    // decides nothing and is never written over here: the details are kept until placed.
+    wait_for_key(cx, &target)?;
+    let period = match held_value(cx, &target)? {
+        None if held_request(cx, &target)? => {
+            return keep_until_placed(cx, stored, scopes, &request_target);
+        }
+        None => None,
+        Some(value) => match bound_activity(cx, &target, &value, settlement)? {
+            Some(period) => Some(period),
+            None => return keep_until_placed(cx, stored, scopes, &request_target),
+        },
+    };
+    let stores = crate::periods::stores_details(
+        &record,
+        period.as_ref(),
+        stored,
+        cx.highest_service_time(),
+        stopped,
+    )
+    .map_err(|_| Fail::Drop("Paykit wire 4.5: a payment deadline past 64 bits".into()))?;
+    match stores {
+        crate::periods::Window::Takes => {}
+        // Taken with no effect, as decided from the records the copy holds: never while the
+        // copy of the payer's records may lack records, a newer write such as another own
+        // app's acceptance among them (Paykit spec 8.1, "Records not listed yet"): the entry
+        // is held then, and read again once they are listed.
+        crate::periods::Window::Closed => {
+            hold_while_unlisted(cx, RecordSide::Payer)?;
+            return Ok(());
+        }
+        // No service time verified yet: the entry is held, as for a store unavailable for
+        // now, and read again at a later read, never taken with no effect on a time the
+        // app hasn't verified.
+        crate::periods::Window::NoTime => {
+            return Err(Fail::Store(StoreFailure::unavailable(
+                StoreError::Unavailable,
+            )));
+        }
+    }
+    // The period record is of the request record's side, whose hold was judged above, and
+    // `place` holds the entry while its value waits for its key.
+    place(cx, &target, sender, Role::PeriodDetails, stored)
+}
+
 /// The message `kept`, read bound to its key (`state::Stored`), with its acceptance time,
 /// which every stop and kept reply carries.
 fn kept_with_time(
@@ -745,12 +933,69 @@ fn payer_reply(
             // spam rule gates, within the bounds on kept replies ([`kept_reply_evicted`]).
             // While the copy of the payee's records may lack records, the absence decides
             // nothing: the entry is held instead ([`held_or_unlisted`]).
-            if held_or_unlisted(cx, &target, RecordSide::Payee)?.is_none() {
-                if admits_new_state(cx, &sender, scopes)? {
-                    keep_reply(cx, &target, stored)?;
+            // A request record held whose value doesn't open for good is no absence, but the
+            // payee's request record key doesn't name the sender, so whether the sender is its
+            // counterparty can't be told: the entry is held until the record reads
+            // ([`hold_until_readable`]), neither counted nor kept.
+            let Some(value) = held_or_unlisted(cx, &target, RecordSide::Payee)? else {
+                if held_request(cx, &target)? {
+                    hold_until_readable(stored, cx.highest_service_time())?;
                 }
+                keep_before_record(cx, stored, scopes, &target)?;
                 return Ok(false);
+            };
+            // A Billing Period's proof goes into its period record, never the request's
+            // (Paykit wire 5.3 "Binding"): the period is checked against the request first,
+            // and a proof naming a period that isn't the request's is dropped. A record that
+            // doesn't read is written again with the message, as before.
+            let request_target = target;
+            let read = activity::read(Some(&value), &own, ActivitySide::Payee);
+            let target = match &read {
+                Some(record) => period_or_request(&own, &request_target, record, stored, request)
+                    .ok_or_else(|| {
+                    Fail::Drop("Paykit wire 4.4: a message naming another period".into())
+                })?,
+                None => request_target.clone(),
+            };
+            // A proof naming period details the period record doesn't hold, such as ones
+            // another own app sent whose record this app hasn't taken yet, would leave the
+            // record unbound (Paykit wire 5.3): it waits for them as a reply before its
+            // record, placed once the period record holds them. The period record is read
+            // bound to its key, as the later writes read it: one whose value doesn't read or
+            // bind is never written over here, and the proof waits the same way.
+            if target != request_target {
+                // Only the request's counterparty, whom its stored request names, pays its
+                // Billing Periods: a proof from anyone else is no update of activity the app
+                // holds. It never goes into a period record, where it would open one under
+                // another counterparty; it is new state, kept through the spam rule as a
+                // reply before its record ([`keep_before_record`]), and never placed.
+                if read.as_ref().map(|record| record.counterparty) != Some(sender) {
+                    keep_before_record(cx, stored, scopes, &request_target)?;
+                    return Ok(true);
+                }
+                // From the counterparty, a proof the period record can't take now updates
+                // activity the app holds: kept outside the spam rule ([`keep_reply`]).
+                let held = match held_or_unlisted(cx, &target, RecordSide::Payee)? {
+                    None if held_request(cx, &target)? => {
+                        keep_reply(cx, &request_target, stored)?;
+                        return Ok(true);
+                    }
+                    None => None,
+                    Some(value) => match bound_activity(cx, &target, &value, settlement)? {
+                        Some(period) => Some(period),
+                        None => {
+                            keep_reply(cx, &request_target, stored)?;
+                            return Ok(true);
+                        }
+                    },
+                };
+                if awaits_named_details(held.as_ref(), ActivitySide::Payee, stored) {
+                    keep_reply(cx, &request_target, stored)?;
+                    return Ok(true);
+                }
             }
+            // A period record is of the request record's side, whose hold was judged above,
+            // and `place` holds the entry while its value waits for its key.
             place(cx, &target, sender, role, stored)?;
             Ok(true)
         }
@@ -779,11 +1024,11 @@ fn payer_reply(
     }
 }
 
-/// Keep `stored`, a payer's reply to the request whose payee record is at `target`, which
-/// the app doesn't hold yet, or a receipt for the payer record at `target`, which the app
-/// can't read now (`pr/<sender>/<record key>/<msg_id>`), within the bounds on kept replies
-/// ([`make_room_for_reply`]); one kept already is read with a restore's check and left as
-/// it is. Admission is the caller's.
+/// Keep `stored`, a payer's reply or a payee's period details naming the request whose
+/// record at `target` the app doesn't hold yet, or a receipt for the payer record at
+/// `target`, which the app can't read now (`pr/<sender>/<record key>/<msg_id>`), within the
+/// bounds on kept replies ([`make_room_for_reply`]); one kept already is read with a
+/// restore's check and left as it is. Admission is the caller's.
 fn keep_reply(
     cx: &mut ReceiveContext<'_>,
     target: &ActivityTarget,
@@ -1379,9 +1624,9 @@ pub(crate) fn make_room_for_reply(
 /// earliest time. A mark is due at once when `due`, as for a stop dropped for the bounds,
 /// whose request may come at any time; otherwise, as for a reply, once the app holds the
 /// record of a request, of either side, that reads and names the sender as its
-/// counterparty: a payee's request record for a payer's reply, a payer's for a receipt
-/// (`Paykit::ask_on_marks`). A record of a Billing Period or of a payment without a request
-/// makes no mark due.
+/// counterparty: a payee's request record for a payer's reply, a payer's for a receipt or
+/// period details (`Paykit::ask_on_marks`). A record of a Billing Period or of a payment
+/// without a request makes no mark due.
 fn mark_dropped(
     cx: &mut ReceiveContext<'_>,
     from: [u8; 32],
@@ -1552,34 +1797,45 @@ impl Paykit {
         Ok(())
     }
 
-    /// Place the payer's replies kept for requests this app held no record of, each once
-    /// the record is held, and the receipts kept for payer records that didn't read, each
-    /// once the record reads, with the effects of its first read
-    /// ([`receipt_over_unread_record`]), as a later write of its own with the kept copy
-    /// dropped in its batch (Switch spec 8.2, Paykit spec 8.1). A placement that fails now is tried again
-    /// at the next receive. Once [`KEPT_MESSAGE_MS`] have passed since a reply's acceptance,
-    /// on the highest service time verified:
-    /// - with its record absent or deleted, it is dropped, and stays processed: the payer
-    ///   re-sends nothing first accepted that long ago (Paykit spec 9), so nothing asks for
-    ///   it again, unlike a reply dropped for the bounds on kept replies, whose pair is
-    ///   forgotten (`make_room_for_reply`). Never while the copy of its side's records may
-    ///   lack records ([`Paykit::side_unlisted`]): the absence decides nothing then;
-    /// - with its record held but not open, sealed under a scope key the app doesn't hold
-    ///   or a value that doesn't read, or with a sender that isn't the record's
-    ///   counterparty, it is given up, and the host told
+    /// Place the messages kept before their records (Paykit spec 8.1): the payer's replies
+    /// kept for requests this app held no record of, and the payee's period details kept
+    /// for requests whose payer record it didn't hold, each once the request record is
+    /// held, and the receipts kept for payer records that didn't read, each once the record
+    /// reads, with the effects of its first read ([`receipt_over_unread_record`]), as a
+    /// later write of its own with the kept copy dropped in its batch (Switch spec 8.2). A
+    /// period's details or proof go into the period record, once checked against the
+    /// request ([`Paykit::period_destination`]); one that fails is dropped, as are details
+    /// the payer doesn't store ([`crate::periods::stores_details`]). A placement that fails
+    /// now is tried again at the next receive. Once [`KEPT_MESSAGE_MS`] have passed since a
+    /// message's acceptance, on the highest service time verified:
+    /// - with its record absent or deleted, it is dropped, and stays processed: the
+    ///   sender re-sends nothing first accepted that long ago (Paykit spec 9), so nothing
+    ///   asks for it again, unlike a reply dropped for the bounds on kept replies, whose pair
+    ///   is forgotten (`make_room_for_reply`). Never while the copy of its side may lack
+    ///   records ([`Paykit::side_unlisted`]): the absence decides nothing then;
+    /// - with its record, or the period record it goes into, held but not open, sealed
+    ///   under a scope key the app doesn't hold or a value that doesn't read, with a sender
+    ///   that isn't the record's counterparty, or with a proof naming period details the
+    ///   period record doesn't hold, it is given up, and the host told
     ///   ([`crate::NoticeKind::MessageGivenUp`]) in the commit that drops it, as a stored
     ///   entry's message (`stored.rs`).
     ///
-    /// A reply over a held record goes through the stored entries' later write
-    /// ([`Paykit::place_note`]) and its one rule ([`crate::stored::later_write`]): a write the
-    /// switch refuses, for good or over a quota, past the window gives the reply up with the
-    /// notice; a write that can't be built or sent now, for a store failure or a switch that
-    /// doesn't answer, is an error, returned, and the reply stays kept. Every kept reply is
-    /// read with a restore's check, and one that fails it fails the call as a corrupt store.
+    /// A message over a held record goes through the stored entries' later write
+    /// ([`Paykit::place_note`]) and its one rule ([`crate::stored::later_write`]), so the
+    /// record it goes into is never written over while its value isn't open or doesn't bind,
+    /// nor created while its side may lack records: a write the switch refuses, for good or
+    /// over a quota, past the window gives the message up with the notice; a write that
+    /// can't be built or sent now, for a store failure or a switch that doesn't answer, is an
+    /// error, returned, and the message stays kept. Every kept message is read with a
+    /// restore's check, and one that fails it fails the call as a corrupt store.
+    ///
+    /// The Allowance answers kept before their record go too
+    /// ([`Paykit::place_kept_allowance_response`]), each once the Allowances side is listed.
     pub(crate) async fn place_kept_replies(&mut self) -> crate::error::Result<()> {
+        use crate::stored::{PeriodPlace, Placed};
         let own = self.identity();
         for (rest, kept) in self.local_scan::<KeptMessage>(key::KEPT_REPLIES).await? {
-            // Read bound to its key, as a restore reads it: a reply that fails it is a
+            // Read bound to its key, as a restore reads it: a message that fails it is a
             // corrupt store, so the receive fails rather than drop, give up or place it.
             let reply = kept.stored(&own)?;
             let kept_key = format!("{}{rest}", key::KEPT_REPLIES);
@@ -1589,38 +1845,32 @@ impl Paykit {
                 continue;
             }
             let (Some(request), Some(role), Some(accepted_at)) = (
-                reply.message().refs.first(),
+                reply.message().refs.first().copied(),
                 crate::activity::Role::of(reply.body()),
                 reply.accepted_at(),
             ) else {
                 return Err(crate::error::PaykitError::corrupt());
             };
             // A receipt kept for the payer's record it names, which didn't read
-            // ([`receipt_over_unread_record`]); every other reply for a payee's record.
-            let (target, side) = match reply.body() {
-                Body::PaymentReceipt(receipt) => (
-                    receipt_target(&reply, &own, &receipt.attempt_id),
-                    RecordSide::Payer,
-                ),
-                _ => (
-                    ActivityTarget::payee(
-                        natural_key::request_record(&own, request),
-                        reply.body().label(),
-                    ),
-                    RecordSide::Payee,
-                ),
+            // ([`receipt_over_unread_record`]); a reply for this app's payee record, and
+            // details for the payer's record of their request ([`kept_request_target`]).
+            let target = match reply.body() {
+                Body::PaymentReceipt(receipt) => receipt_target(&reply, &own, &receipt.attempt_id),
+                _ => kept_request_target(&own, &reply, &request),
             };
             let content = self
                 .app
                 .shared_record(&self.activity_key(&target)?)
                 .await?
                 .map(|held| held.content);
-            // No record yet: the reply waits for it within its window, and past it is dropped
-            // with no notice, its sender keeping it no longer either, but never while the
-            // copy may lack records.
+            // No record yet: the message waits for it within its window, and past it is
+            // dropped with no notice, its sender keeping it no longer either, but never while
+            // the copy of its side may lack records.
             if matches!(content, None | Some(RecordContent::Deleted)) {
                 if crate::stored::past_window(accepted_at, self.service_time())
-                    && !self.side_unlisted(side).await?
+                    && !self
+                        .side_unlisted(crate::stored::record_side(&target))
+                        .await?
                 {
                     self.local_delete(&kept_key).await?;
                 }
@@ -1630,15 +1880,48 @@ impl Paykit {
                 Some(RecordContent::Value(_)) => self.held_activity(&target).await?,
                 _ => None,
             };
-            // A reply the record can't take, its sender not the record's counterparty, isn't
-            // written: kept no longer than any other.
+            // A message the record can't take, its sender not the record's counterparty,
+            // isn't written: kept no longer than any other.
             let placed = match record {
-                Some(record) if record.counterparty != reply.sender() => crate::stored::Placed::Not,
-                _ => {
+                Some(record) if record.counterparty != reply.sender() => Placed::Not,
+                // A receipt goes into the payer's record it names, which now reads.
+                Some(_) if matches!(reply.body(), Body::PaymentReceipt(_)) => {
                     let mut tx = Tx::default();
                     tx.delete(&kept_key);
-                    self.place_note(&target, role, false, reply.clone(), tx)
+                    Box::pin(self.place_note(&target, role, false, reply.clone(), tx)).await?
+                }
+                Some(record) => {
+                    // The decision goes on the heap, as `receive`'s steps do: it nests deep.
+                    match Box::pin(self.period_destination(&target, &record, &reply, &request))
                         .await?
+                    {
+                        PeriodPlace::Record { into, creates } => {
+                            let mut tx = Tx::default();
+                            tx.delete(&kept_key);
+                            // The write goes on the heap, as `receive`'s steps do: it nests
+                            // deep.
+                            Box::pin(self.place_note(&into, role, creates, reply.clone(), tx))
+                                .await?
+                        }
+                        // Invalid against its request, or details the payer doesn't store:
+                        // dropped, as at receive.
+                        PeriodPlace::Invalid | PeriodPlace::Taken => {
+                            self.local_delete(&kept_key).await?;
+                            continue;
+                        }
+                        // A proof naming details the period record doesn't hold waits for
+                        // them, within its window.
+                        PeriodPlace::AwaitsDetails => Placed::Not,
+                        // Details whose storing can't be decided yet wait.
+                        PeriodPlace::Undecided => Placed::Waits,
+                    }
+                }
+                // A request record that doesn't open or bind is never written over: the
+                // later write waits ([`Paykit::place_note`]).
+                None => {
+                    let mut tx = Tx::default();
+                    tx.delete(&kept_key);
+                    Box::pin(self.place_note(&target, role, false, reply.clone(), tx)).await?
                 }
             };
             if crate::stored::later_write(placed, accepted_at, self.service_time())
@@ -2168,6 +2451,71 @@ impl Paykit {
         }
         Ok(answered)
     }
+}
+
+/// The request record a message kept before its record waits for (Paykit spec 8.1): the
+/// payer's, of the sender's request, for period details; the payee's, under the message's
+/// label, for a payer's reply.
+pub(crate) fn kept_request_target(
+    own: &[u8; 32],
+    kept: &StoredMessage,
+    request: &[u8; 32],
+) -> ActivityTarget {
+    match kept.body() {
+        Body::PaymentPeriodDetails(_) => {
+            ActivityTarget::payer(natural_key::request_record(&kept.sender(), request))
+        }
+        body => ActivityTarget::payee(natural_key::request_record(own, request), body.label()),
+    }
+}
+
+/// Whether `stored`, a proof, waits for the period details it names: `period`, the period
+/// record of `side` it goes into (`None` while absent or not read), doesn't hold them, so
+/// placed now the record wouldn't bind (Paykit wire 5.3). The one check of every path that
+/// places a period's proof: the receive step, a stored entry's later write and a message
+/// kept before its record ([`crate::Paykit::period_destination`]).
+pub(crate) fn awaits_named_details(
+    period: Option<&paykit_lib::records::ActivityRecord>,
+    side: ActivitySide,
+    stored: &StoredMessage,
+) -> bool {
+    match period {
+        Some(held) => activity::names_details_not_held(held, stored),
+        None => activity::names_details_not_held(&activity::empty(side, stored.sender()), stored),
+    }
+}
+
+/// The record `kept`, a message naming `request`, goes into now that `record`, the request
+/// record at `target`, is held: the period record of the Billing Period it names, checked
+/// against the request (Paykit wire 4.4, 4.9), or else the request record itself. `None`
+/// for a message that fails that check, or a request record that holds another request.
+pub(crate) fn period_or_request(
+    own: &[u8; 32],
+    target: &ActivityTarget,
+    record: &paykit_lib::records::ActivityRecord,
+    kept: &StoredMessage,
+    request: &[u8; 32],
+) -> Option<ActivityTarget> {
+    let (held, body) = crate::requests::request_of(record)?;
+    if held.hash() != *request {
+        return None;
+    }
+    let period = match kept.body() {
+        Body::PaymentPeriodDetails(details) => Some(details.check_against(body).ok()?.into()),
+        _ => crate::periods::named_period(body, kept).ok()?,
+    };
+    let Some(period) = period else {
+        return Some(target.clone());
+    };
+    let payee = match target.side {
+        crate::activity::SideTag::Payer => kept.sender(),
+        crate::activity::SideTag::Payee => *own,
+    };
+    let natural = crate::periods::period_key(&payee, request, &period);
+    Some(match target.side {
+        crate::activity::SideTag::Payer => ActivityTarget::payer(natural),
+        crate::activity::SideTag::Payee => ActivityTarget::payee(natural, target.label().as_ref()),
+    })
 }
 
 /// The `unrequested` member of a payer's record of a payment without a request: its

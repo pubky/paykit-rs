@@ -16,6 +16,8 @@
 //!   policies, and record marks.
 //! - [`Paykit`]: one Paykit App, on the client's `App`, with Paykit's API: requests
 //!   ([`Paykit::send_request`], [`Paykit::reject_request`], [`Paykit::confirm_payment`]),
+//!   recurring requests' subscriptions and Billing Periods
+//!   ([`Paykit::accept_subscription`], [`Paykit::send_period_details`]),
 //!   paying ([`Paykit::pay_request`], [`Paykit::pay_without_request`],
 //!   [`Paykit::resume_payments`]), receiving ([`Paykit::receive`]), reconciliation
 //!   ([`Paykit::reconcile`]) and Allowances ([`Paykit::propose_allowance`],
@@ -27,8 +29,8 @@
 //! - [`app_records`]: Paykit's member of app records, and reading a payee's public
 //!   endpoints from them ([`Paykit::public_endpoints`]).
 //!
-//! Recurring requests, the Allowance executor with its grant and ledger, and publishing
-//! Private Payment Lists build on the same parts, in their own modules.
+//! Paying recurring requests' periods, the Allowance executor with its grant and ledger, and
+//! publishing Private Payment Lists build on the same parts, in their own modules.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -49,6 +51,7 @@ mod marks;
 mod notices;
 mod pay;
 mod paykit;
+mod periods;
 mod protocol;
 pub mod rail;
 mod receipts;
@@ -79,6 +82,7 @@ pub use paykit::{
     orphan_floor_s, Paykit, PaykitBackup, PaykitConfig, ReceiveSummary, DEFAULT_RESEND_BUDGET,
     PRE_DISPATCH_BUDGET_MS,
 };
+pub use periods::{PeriodDetailsView, PeriodView};
 pub use protocol::{PaykitProtocol, HANDLED_KINDS};
 pub use rail::{
     CandidateError, CandidateId, EndpointSelection, PaymentEndpointCandidate, Rail,
@@ -90,8 +94,8 @@ pub use receive::{
 };
 pub use reconcile::{Doubtful, ReconcileReport, Resolution};
 pub use requests::{
-    MessageDelivery, PayeeActivity, PayeeStatus, RequestDraft, RequestRef, RequestStatus,
-    RequestView, SentRequest,
+    AcceptOptions, MessageDelivery, PayeeActivity, PayeeStatus, RequestDraft, RequestRef,
+    RequestStatus, RequestView, SentMessage, SentRequest,
 };
 pub use resend::{ResendSelection, RESEND_COOLDOWN_MS};
 pub use timer::Timer;
@@ -206,6 +210,7 @@ mod tests {
                     label: None,
                     proposal_expires_at_ms: None,
                     recurring: false,
+                    recurrence: None,
                     status: RequestStatus::Open,
                     receipt: Some(ReceivedReceipt {
                         record: [5; 32],
@@ -218,6 +223,7 @@ mod tests {
                         metadata: Some(proof()),
                         payment_reference: Some(SECRET.into()),
                     }),
+                    periods: Vec::new(),
                 }
             ),
             format!(

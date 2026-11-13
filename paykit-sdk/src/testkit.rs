@@ -89,7 +89,19 @@ impl Party {
         refs: Vec<[u8; 32]>,
         body: Map<String, Value>,
     ) -> Result<StoredMessage, paykit_lib::error::Error> {
-        let message = Message::new(
+        self.try_message_with(to, kind, refs, body, |_| {})
+    }
+
+    /// As [`Party::try_message`], the message changed by `edit` before it is signed.
+    pub(crate) fn try_message_with(
+        &self,
+        to: &Party,
+        kind: &str,
+        refs: Vec<[u8; 32]>,
+        body: Map<String, Value>,
+        edit: impl FnOnce(&mut Message),
+    ) -> Result<StoredMessage, paykit_lib::error::Error> {
+        let mut message = Message::new(
             kind,
             Sender::of_app(self.id(), &self.keys),
             to.id(),
@@ -98,6 +110,7 @@ impl Party {
             body,
         )
         .unwrap();
+        edit(&mut message);
         let plaintext = message.sign(&self.keys).unwrap();
         StoredMessage::new(
             self.id(),

@@ -1129,20 +1129,6 @@ impl Paykit {
         Ok(())
     }
 
-    /// Where `msg_id`, recorded and queued, is after one try to deliver it now: a try that
-    /// fails leaves it queued for the next flush.
-    async fn delivered(&mut self, msg_id: &str) -> Result<MessageDelivery> {
-        let delivery = match Box::pin(self.app.flush_message(msg_id)).await {
-            Ok(Some(delivery)) => delivery,
-            _ => self
-                .app
-                .delivery(msg_id)
-                .await?
-                .ok_or_else(PaykitError::corrupt)?,
-        };
-        Ok(MessageDelivery::of(delivery))
-    }
-
     /// Accept the Allowance proposed to this identity at `record` (Paykit spec 8.3, Paykit
     /// wire 4.16): the acceptance is recorded, then sent. Only the proposal's recipient
     /// answers it, once. Returns the acceptance's `msg_id`.

@@ -35,7 +35,7 @@
 //! | `rh` | the hold a restore set on the open requests (`hold.rs`); never backed up | |
 //! | `hc/<record key>` | the user confirmed a held request; never backed up | |
 //! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads | |
-//! | `kc/<record key>` | a payee's cancellation of a one-time request, kept until it is placed in the payer's request record | |
+//! | `kc/<record key>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
 //! | `lr` | when the app last read the lists, on the device clock; absent before the first read and after a due read failed, when new activity waits (Paykit wire 4.1); never restored, so a restored app reads the deny list again before any payment | |
 //! | `spam/<pubky>` | how many messages from a blocked or flagged sender only were counted (Paykit wire 4.1) | |
@@ -43,7 +43,7 @@
 //! | `rsd/<pubky>/<day>` | how many messages were re-sent to a requester that day | |
 //! | `nl` | set by a restore: the shared records aren't listed since, so the client's copy is empty and a record's absence means nothing yet; cleared once they are listed; never restored | |
 //! | `lc` | the certificate the shared records were last listed under, signed: a certificate held now other than it means the copy may lack records until Paykit lists them, since one held between may have read less (`hold.rs`); written only by a Paykit listing, in its commit; absent from a join or a restore until that listing, which leaves the records unlisted; never restored | |
-//! | `ro` | set by a restore: this app's own messages its activity records store to be sent are queued again once the records are listed (`hold.rs`, `Paykit::queue_own_again`); after a pass, the counterparties whose sends were held then, whose messages wait; never restored | |
+//! | `ro` | set by a restore: this app's own messages its activity records store to be sent are queued again once the records are listed (`hold.rs`, `Paykit::queue_own_again`); after a pass, the counterparties whose messages wait: those whose sends were held then, and those whose period details wait for their request record to show whether a later stop covers them; or none named, every record judged again at the next receive, after a pass that found an activity record it couldn't read within 30 days of the restore; and the restore's time, which `Paykit::restore` writes right after the restore and the mark keeps; never restored | |
 //! | `ha/<payee>/<msg_id>` | a rejection or payer's cancellation recorded while sends to its payee were held, its message stored in the request record and not queued, written with the record's batch: queued from the record once sends to the payee aren't held, or given up with a notice past its window (`hold.rs`, `Paykit::queue_own_again`) | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
@@ -53,7 +53,7 @@
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `kw/<sender>` | a mark of a sender's entries the client dropped while they waited for a scope key, as `pd/` holds, with the data epochs they waited for; it asks only while the app holds every key of those epochs (`marks.rs`) | |
-//! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply to a request the app holds no record of yet, kept until it does, or a receipt for a payer record the app holds but can't read, kept until it reads (`receive.rs`) | |
+//! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply, or a payee's period details, for a request the app holds no record of yet, kept until it does, or a receipt for a payer record the app holds but can't read, kept until it reads (`receive.rs`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing, since a dropped entry's time is already in its sender's mark | |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, with the entry's ID and message hash, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
 //! | `ae/<record key>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection (`allowances.rs`, Paykit spec 8.3) | |
@@ -595,10 +595,12 @@ impl sealed::Sealed for KeptMessage {}
 ///   under the record key of the payer's record of the request it cancels, from its sender
 ///   and the first of its `refs` (Paykit spec 8.1).
 /// - At `pr/<sender>/<record key>/<msg_id>`, a payer's acceptance, rejection, cancellation
-///   or proof its inbox accepted, from that sender and of that `msg_id`, kept under the
-///   record key of this app's payee record of the request it names first, under its label
-///   (Switch spec 8.2, Paykit spec 8.1); or a `paykit.payment_receipt`, kept under the
-///   record key of the payer's record it names ([`crate::receive::receipt_target`]).
+///   or proof, or a payee's period details, its inbox accepted, from that sender and of that
+///   `msg_id`, kept under the record key of the request record it waits for, of the request
+///   it names first: this app's payee record, under its label, for a reply; the payer's
+///   record of the sender's request for details (Switch spec 8.2, Paykit spec 8.1, 8.2); or
+///   a `paykit.payment_receipt`, kept under the record key of the payer's record it names
+///   ([`crate::receive::receipt_target`]).
 /// - At `lh/<record key>`, a `paykit.private_payment_list`, kept under the record key of its
 ///   payee app's `payment_lists` record, from its sender and App ID (Paykit wire 5.4).
 /// - At `pr/<sender>/<record key>/<msg_id>` too, an Allowance's acceptance or rejection its
@@ -641,15 +643,13 @@ impl Stored for KeptMessage {
                 Body::PaymentRequestAcceptance(_)
                 | Body::PaymentRequestRejection(_)
                 | Body::PaymentRequestCancellation(_)
-                | Body::PaymentProof(_),
+                | Body::PaymentProof(_)
+                | Body::PaymentPeriodDetails(_),
             ) if message.sender() == *sender
                 && message.message().msg_id == *msg_id
                 && message.accepted_at().is_some() =>
             {
-                let target = ActivityTarget::payee(
-                    natural_key::request_record(&binder.own, &first()?),
-                    message.body().label(),
-                );
+                let target = crate::receive::kept_request_target(&binder.own, &message, &first()?);
                 (target.record_target(), record)
             }
             // A receipt kept for the payer's record it names, which didn't read.
@@ -798,7 +798,7 @@ impl Stored for MissedHold {
 impl sealed::Sealed for OwnResendOwed {}
 
 /// The restore's re-send owed: the counterparties still waiting, if a pass ran, ascending,
-/// each once, which name no key.
+/// each once, and the restore's time, which name no key.
 impl Stored for OwnResendOwed {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
@@ -1661,6 +1661,17 @@ mod tests {
             key::PAYER_PASS_OWED,
             owed(serde_json::Value::Null)
         ));
+        // With the restore's time; a mark written before that field reads as none kept.
+        let stamped = serde_json::json!({ "waiting": [one], "restored_at_ms": 7 });
+        assert!(reads::<OwnResendOwed>(
+            key::OWN_RESEND_OWED,
+            stamped.clone()
+        ));
+        let read: OwnResendOwed = serde_json::from_value(stamped).unwrap();
+        assert_eq!(read.restored_at_ms, Some(7));
+        let older: OwnResendOwed =
+            serde_json::from_value(serde_json::json!({ "waiting": [one] })).unwrap();
+        assert_eq!(older.restored_at_ms, None);
         // A restore's hold at its key only.
         let hold = serde_json::json!({ "resend_from_ms": 1, "asks_queued": false, "asked": [] });
         assert!(reads::<RestoreHold>(key::RESTORE_HOLD, hold.clone()));
