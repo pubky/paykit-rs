@@ -850,7 +850,10 @@ pub(crate) mod key {
         format!("{HELD_LISTS}{}", b64(record_key))
     }
 
-    /// This app's block (`true`) or unblock of `pubky` kept unanswered.
+    /// This app's block (`true`) or unblock of `pubky` kept unanswered. It goes only once a
+    /// read of the lists shows it, or this app blocks or unblocks `pubky` again: a kept batch
+    /// the client drops (`KeptBatchDropped`, `BatchRefused`) leaves it, so a change that
+    /// never lands keeps counting, over a later change another own app makes, until then.
     pub(crate) fn own_block(pubky: &[u8; 32]) -> String {
         format!("{OWN_BLOCKS}{}", b64(pubky))
     }

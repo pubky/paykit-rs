@@ -1191,23 +1191,24 @@ fn make_room_for_reply(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result
         return Ok(());
     };
     let (from, at) = kept[index];
+    match cx.forget_processed(from, &msg_ids[index]) {
+        Ok(_) => {}
+        // The client won't forget the pair now: an entry it stores locally, or an effect it
+        // keeps to send, holds the message. Dropped without forgetting it, the reply could
+        // never be taken again, so it stays kept, and the bounds are over by one for this
+        // step.
+        Err(AppError::Refused(ClientRefusal::NotNow(_))) => return Ok(()),
+        // Past the step's bound on local writes: the context marks the step, and the
+        // client stores the entry as too large, applying none of it (`keep_local`).
+        Err(AppError::Refused(ClientRefusal::Usage(_))) => {}
+        Err(error) => return Err(error.into()),
+    }
     keep_local(
         cx,
         LocalWrite::Delete {
             key: names.swap_remove(index),
         },
     );
-    match cx.forget_processed(from, &msg_ids[index]) {
-        Ok(_) => {}
-        // The client still holds the message, in an entry it stores locally or an effect it
-        // keeps to send, and its pair keeps that one from being applied twice: the message
-        // comes to a step again from there, so dropping the kept copy loses nothing.
-        Err(AppError::Refused(ClientRefusal::NotNow(_))) => {}
-        // Past the step's bound on local writes: the context marks the step, and the
-        // client stores the entry as too large, applying none of it (`keep_local`).
-        Err(AppError::Refused(ClientRefusal::Usage(_))) => {}
-        Err(error) => return Err(error.into()),
-    }
     let family = MarkFamily::Replies;
     let mark_key = family.key(&from);
     let held = state::cx_get::<crate::marks::DropMark>(cx, &mark_key)?;
