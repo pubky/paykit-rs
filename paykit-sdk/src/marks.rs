@@ -9,7 +9,9 @@
 //!   that sender to re-send what its inbox accepted from the mark's earliest time
 //!   (`resend_request` with `accepted_from`). The client marked such a reply processed when
 //!   it was kept, so the step that drops it forgets its pair, and a re-sent copy is taken
-//!   as a new message.
+//!   as a new message. A payee's cancellation kept as a stop for a request the app holds no
+//!   record of, dropped for the bounds on those stops, counts in the same mark, which is
+//!   then due at once: the request it cancels may come at any time.
 //! - **Entries dropped unverified** (`ud/<sender>`, `stored.rs`). The app asks that sender
 //!   at once to re-send what its inbox accepted from the mark's earliest time to its latest
 //!   (`accepted_from` and `accepted_until`).
@@ -97,7 +99,8 @@ pub(crate) struct DropMark {
     /// The latest: what the mark expires by.
     pub(crate) latest_ms: u64,
     /// Whether asking is due: for replies, once the app holds the record of one of the
-    /// sender's requests; for entries dropped unverified, from the start. A mark of key
+    /// sender's requests, or at once once a stop of the sender's is dropped for the bounds;
+    /// for entries dropped unverified, from the start. A mark of key
     /// waits keeps it `false`: it is due while the app holds the keys it waits for
     /// ([`KeyWaitMark`]).
     pub(crate) due: bool,
