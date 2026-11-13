@@ -2726,5 +2726,8 @@ async fn test_restore_own_record_found_unreadable_25_days_after_the_restore_wait
     assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
     // The block mark asks again at most once a day while it lives.
     let asks = crate::common::asked(&shop, &w.carol_id()).await.len();
-    assert_eq!(w.carol.switch().entries_from(&w.bob_id()), before + 1 + asks);
+    assert_eq!(
+        w.carol.switch().entries_from(&w.bob_id()),
+        before + 1 + asks
+    );
 }

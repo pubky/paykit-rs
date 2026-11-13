@@ -28,7 +28,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 use paykit_lib::bodies::check_body;
 use paykit_lib::collections::Collection;
 use paykit_lib::kinds::{targets_app, Kind, Role as KindRole, Side, OPAQUE_MEMBERS};
-use paykit_lib::records::{ActivitySide, PaymentListRecord, StoredMessage};
+use paykit_lib::records::{ActivitySide, BlockFloorRecord, PaymentListRecord, StoredMessage};
 use paykit_lib::scopes::{acts_as_payee, check_certificate, PaykitScope, ScopeName};
 use paykit_lib::{Label, PaykitKindRules};
 use pubky_switch_client::app::{
@@ -350,6 +350,9 @@ pub(crate) fn restore_paykit_layer(
             // list the backup holds may be stale by any time, so the list is read again before
             // any payment (Paykit spec 8.1).
             StateKey::ListsRead => continue,
+            // A read's records to check against the block floor belong to the read: the
+            // restore holds every open request (`hold.rs`).
+            StateKey::FloorOpened(_) => continue,
             // This app's blocks not yet shown by the list are: the client's kept batches
             // belong to the device that kept them, so the restored app keeps counting each
             // and writes it again (`Paykit::send_own_blocks_again`). Its unblocks aren't: an unblock counts
@@ -868,6 +871,7 @@ impl Protocol for PaykitProtocol {
             (Collection::PaymentLists, Some(v)) => {
                 PaymentListRecord::read(v, &own.identity).is_ok()
             }
+            (Collection::BlockFloor, Some(v)) => BlockFloorRecord::read(v).is_ok(),
             _ => false,
         };
         match (reads, value) {
@@ -879,7 +883,8 @@ impl Protocol for PaykitProtocol {
     /// Whether a newer write goes back on what the app saw (Paykit wire 5.3, 5.4): drops or
     /// replaces a message in a role seen, or changes the Allowance seen; for a
     /// `payment_lists` record, holds an older list or drops a single-use endpoint marked
-    /// used. A value that doesn't read is refused too. A delete isn't such a write. Judged
+    /// used; for the `block_floor` record, lowers the floor. A value that doesn't read is
+    /// refused too. A delete isn't such a write. Judged
     /// as a reader that doesn't hold the version the write builds on
     /// ([`Protocol::record_regression_on`] is told).
     fn record_regression(
@@ -955,6 +960,14 @@ impl PaykitProtocol {
                 };
                 // Wire 5.4 "Seen lists": a later list of a greater version, or the same list,
                 // and never a single-use mark dropped, at any version.
+                held.check_later_write(&later).err().map(|e| e.to_string())
+            }
+            Collection::BlockFloor => {
+                let held = BlockFloorRecord::read(seen).ok()?;
+                let Ok(later) = BlockFloorRecord::read(value) else {
+                    return Some("Paykit wire 5.6: a block_floor record that doesn't read".into());
+                };
+                // Wire 5.6: the floor only rises.
                 held.check_later_write(&later).err().map(|e| e.to_string())
             }
             _ => None,

@@ -1460,6 +1460,9 @@ impl Paykit {
         if live(&status) && self.denied_as_last_read(&payee).await? {
             status = RequestStatus::Blocked;
         }
+        // The record's mark, or, for a request still open, the block floor (`crate::floor`):
+        // no automatic attempt is made on it either way.
+        let manual_only = record.manual_only || (live(&status) && self.floor_holds(stored).await?);
         Ok(Some(RequestView {
             request: RequestRef {
                 payee,
@@ -1474,7 +1477,7 @@ impl Paykit {
             recurrence: request.recurrence,
             status,
             receipt: received_receipt(record_key, record, Some(request)),
-            manual_only: record.manual_only,
+            manual_only,
             periods,
         }))
     }

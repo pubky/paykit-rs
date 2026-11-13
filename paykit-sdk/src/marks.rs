@@ -43,22 +43,17 @@
 //!   these marks for every counterparty the deny list holds then (`bw/`), at the next read
 //!   of the lists; such a speculative mark is the first the bound drops.
 //!
-//! **The block floor** (`bf`). A block mark that goes for the bound or its own expiry
-//! may leave a request of its window still on its way back: an ask delivered just before
-//! is answered later. So its latest time folds into one per-app time, the block floor: the
-//! latest of the latest times of the marks gone. A one-time request from any sender whose
-//! signed `created_at` is earlier than the floor plus the clock tolerance opens paid only by
-//! hand, as one whose sender's mark still lives does. That holds more than the block's own
-//! requests, the conservative side: only requests dated before marks already gone, so old
-//! ones arriving late. A request so dated can still come back only while its sender's
-//! outbox delivers it, until 30 days after its `created_at` less the clock tolerance, so
-//! before the floor plus [`crate::KEPT_MESSAGE_MS`]; and an entry accepted by then is
-//! taken, or given up, within [`crate::KEPT_MESSAGE_MS`] of its acceptance, also one held
-//! or parked (Switch spec 8.2). So the floor goes once the highest service time verified
-//! passes it by twice [`crate::KEPT_MESSAGE_MS`] plus the clock tolerance. A backup carries
-//! it; a restore bounds it as it bounds the marks. A restore also raises it, at its first
-//! read of the lists, to that read's time: the backup carries no mark of a sender blocked
-//! and unblocked again since, nor a floor raised since.
+//! **The block floor** (`crate::floor`). The time before which a one-time request is paid
+//! only by hand is the identity's, in its shared `block_floor` record, so every payer app
+//! applies it, one newly added too. Every ask to a sender with a live block mark here raises
+//! it first to the mark's latest time, in the ask's batch. A block mark that goes for the
+//! bound or its own expiry may leave a request of its window still on its way back: an ask
+//! delivered just before is answered later, and another ask can bring it back. So its latest
+//! time folds into the raise this app owes (`bf`), in the commit that drops it, as a
+//! restore's first read of the lists folds that read's time: the backup carries no mark of
+//! a sender blocked and unblocked again since. The raise owed is written before the block
+//! marks ask, and with any ask, and goes in the batch that writes it; meanwhile this app
+//! applies it as a floor. A backup carries it; a restore bounds it as it bounds the marks.
 //!
 //! **Two times.** A mark holds the earliest acceptance time among the messages it covers,
 //! which a re-send asks from, and the latest, which the mark expires by. Each message
@@ -575,11 +570,9 @@ impl Paykit {
         let family = MarkFamily::Blocked;
         let now = self.now();
         let service = self.service_time();
-        if let Some(floor) = self.local_get::<u64>(key::BLOCK_FLOOR).await? {
-            if floor_expired(floor, service) {
-                self.local_delete(key::BLOCK_FLOOR).await?;
-            }
-        }
+        // The raise owed goes first, so the floor every payer app reads covers the marks gone
+        // before anything this pass asks for comes back (`crate::floor`).
+        self.write_floor_owed().await?;
         let fresh_copy = self
             .local_get::<u64>(key::LISTS_READ)
             .await?
@@ -869,7 +862,19 @@ impl Paykit {
             hash: signed.hash(),
         });
         self.local_put(key, &held).await?;
-        self.app.queue_signed(signed).await?;
+        // With the raise of the block floor its mark needs, in one batch: a floor that can't
+        // be read, or a conflict, leaves the request kept as queued and not sent, so the next
+        // pass asks anew (`crate::floor`).
+        match self.queue_resend_request(signed, &sender).await {
+            Ok(_) => {}
+            Err(error)
+                if crate::floor::is_unreadable_floor(&error)
+                    || error.code() == Some(pubky_switch_core::http::ErrorCode::Conflict) =>
+            {
+                return Ok(0)
+            }
+            Err(error) => return Err(error),
+        }
         let _ = self.app.flush_message(&msg_id).await;
         if matches!(
             self.app.delivery(&msg_id).await?,
@@ -953,9 +958,9 @@ impl Paykit {
     }
 }
 
-/// Fold `latest`, the latest time of a block mark gone for the bound or its own expiry,
-/// into the block floor (`bf`) in `tx`, which `floor` holds now (module docs, "The block
-/// floor").
+/// Fold `latest`, the latest time of a block mark gone for the bound or its own expiry, or a
+/// restore's first read of the lists, into the raise of the block floor this app owes (`bf`)
+/// in `tx`, which `floor` holds now (module docs, "The block floor").
 pub(crate) fn fold_into_floor(
     tx: &mut crate::state::Tx,
     floor: Option<u64>,
@@ -966,13 +971,6 @@ pub(crate) fn fold_into_floor(
         tx.put(key::BLOCK_FLOOR, &folded)?;
     }
     Ok(())
-}
-
-/// Whether the block floor `floor` has gone by `service`, the highest service time
-/// verified: no request a sender signed before it can still be taken (module docs).
-pub(crate) fn floor_expired(floor: u64, service: Option<u64>) -> bool {
-    let kept = 2 * crate::KEPT_MESSAGE_MS + pubky_switch_core::records::CLOCK_TOLERANCE_MS;
-    service.is_some_and(|t| floor.saturating_add(kept) < t)
 }
 
 /// Tell the host, in `tx`, that `gone`'s window can no longer come back, when no ask for it
@@ -1058,20 +1056,6 @@ mod tests {
             (next.earliest_ms, next.latest_ms, next.queued),
             (5, 30, None)
         );
-    }
-
-    #[test]
-    fn test_block_floor_kept_while_a_request_dated_before_it_can_be_taken() {
-        // Delivered until 30 days after its signing less the tolerance, a request dated
-        // before the floor plus the tolerance is accepted before the floor plus 30 days, and
-        // taken or given up within 30 days of that: the floor lives that long.
-        let floor = 1_000_000;
-        let tolerance = pubky_switch_core::records::CLOCK_TOLERANCE_MS;
-        let last_taken = floor + 2 * crate::KEPT_MESSAGE_MS + tolerance;
-        assert!(!floor_expired(floor, None));
-        assert!(!floor_expired(floor, Some(floor + crate::KEPT_MESSAGE_MS)));
-        assert!(!floor_expired(floor, Some(last_taken)));
-        assert!(floor_expired(floor, Some(last_taken + 1)));
     }
 
     #[test]

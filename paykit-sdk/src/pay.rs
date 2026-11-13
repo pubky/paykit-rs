@@ -3023,10 +3023,12 @@ impl Paykit {
     /// included, whatever copy this app keeps) or doesn't read as the request, a newer write
     /// this app refused included, so nothing shows it still open; or the request is held
     /// after a restore or a `missed` item until the user confirms it (Paykit spec 7.2,
-    /// [`Paykit::confirm_possibly_cancelled`]); or the record holds `manual_only`: the
-    /// request is paid only by hand, and a repeat is an automatic payment (Paykit spec 8.1,
-    /// 8.3), so the attempt stays open and the user's payment method's history or a receipt
-    /// settles it. A payment without a request has nothing a payee cancels.
+    /// [`Paykit::confirm_possibly_cancelled`]); or the record holds `manual_only`, or the
+    /// request is a one-time one dated before the block floor, or the floor can't be read
+    /// (`crate::floor`, whatever the record holds: another app may have opened it before it
+    /// held the floor): the request is paid only by hand, and a repeat is an automatic
+    /// payment (Paykit spec 8.1, 8.3), so the attempt stays open and the user's payment
+    /// method's history or a receipt settles it. A payment without a request has nothing a payee cancels.
     async fn repeat_withheld(&mut self, entry: &JournalEntry) -> Result<bool> {
         if entry.request_hash()?.is_none() {
             return Ok(false);
@@ -3041,6 +3043,10 @@ impl Paykit {
                     || rejected(&fresh)
                     || fresh.manual_only
                     || self.held(&self.activity_key(&target)?, &fresh).await?
+                    || match crate::requests::request_of(&fresh) {
+                        Some((stored, _)) => self.floor_holds(stored).await?,
+                        None => false,
+                    }
             }
             Fresh::Missing | Fresh::Unreadable => true,
         })

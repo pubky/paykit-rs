@@ -1042,3 +1042,213 @@ async fn test_blocked_return_request_dropped_between_backup_and_restore_paid_onl
     let held: Vec<bool> = views.iter().map(|view| view.manual_only).collect();
     assert_eq!(held.iter().filter(|held| **held).count(), 1, "{views:?}");
 }
+
+/// The block floor `app` holds in the identity's `block_floor` record (Paykit wire 5.6).
+async fn shared_floor(app: &Paykit) -> Option<u64> {
+    app.app()
+        .records_of("block_floor")
+        .await
+        .unwrap()
+        .iter()
+        .find_map(|record| {
+            let value = record.content.value()?;
+            paykit_lib::records::BlockFloorRecord::read(value)
+                .ok()
+                .map(|record| record.floor_ms)
+        })
+}
+
+/// Alice's second payer app, `name`, joined now.
+async fn payer_app(w: &World, name: &str) -> Paykit {
+    w.join_with(
+        &w.alice,
+        name,
+        AppScopes::new().pay().build().unwrap(),
+        PaykitConfig::default(),
+        store(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_blocked_return_request_reaching_a_new_payer_app_first_paid_only_by_hand() {
+    // The wallet drops bob's request for the block and keeps the mark; alice then adds a
+    // phone, a payer app with no mark of bob's. Once bob is unblocked, the wallet raises the
+    // identity's block floor in the batch of its ask; the request comes back and the phone
+    // reads it first: it opens the record with `manual_only`, which the wallet then sees.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    dropped_for_the_block(&w, &mut wallet, &mut shop).await;
+    let mut phone = payer_app(&w, "phone").await;
+    assert_eq!(shared_floor(&phone).await, None);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(asked(&wallet, &w.bob_id()).await.len(), 1);
+    assert!(shared_floor(&wallet).await.is_some());
+    shop.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let views = phone.requests().await.unwrap();
+    assert_eq!(views.len(), 1, "{views:?}");
+    assert!(views[0].manual_only, "{views:?}");
+    assert!(held_for_the_user(&phone).await);
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.requests().await.unwrap()[0].manual_only);
+    // A request bob makes later is dated above the floor: no app holds it.
+    w.clock.advance_ms(60 * MINUTE_MS);
+    request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    phone.receive(None).await.unwrap();
+    let views = phone.requests().await.unwrap();
+    assert_eq!(views.iter().filter(|view| view.manual_only).count(), 1);
+}
+
+#[tokio::test]
+async fn test_blocked_return_floor_raised_again_before_the_new_app_reads_still_pays_only_by_hand() {
+    // The wallet asks bob, raising the floor; bob's request comes back; then the wallet asks
+    // carol, raising it again before the phone reads. The phone's feed shows the first raise
+    // only as its stub, so at bob's entry it holds no floor yet and opens the record without
+    // `manual_only`; by the end of the read it holds the second raise, which covers bob's
+    // request: the request shows as paid only by hand, and a resume makes no repeat of it.
+    let w = World::new();
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true),
+    );
+    let mut wallet = contacts_wallet(&w, store()).await;
+    wallet.app_mut().invite(&w.carol_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    let mut carol_shop = w
+        .join(
+            &w.carol,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    w.clock.advance_ms(MINUTE_MS);
+    request_from(&mut carol_shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    wallet.app_mut().deny(&w.carol_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(block_marks(&wallet).await, 2);
+    let mut phone = w
+        .join_with(
+            &w.alice,
+            "phone",
+            AppScopes::new().pay().build().unwrap(),
+            crate::common::day_window(),
+            store(),
+        )
+        .await;
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(asked(&wallet, &w.bob_id()).await.len(), 1);
+    assert!(asked(&wallet, &w.carol_id()).await.is_empty());
+    let first = shared_floor(&wallet).await.unwrap();
+    shop.receive(None).await.unwrap();
+    // Carol asked without a read of the feed, so the wallet doesn't take bob's request first.
+    wallet.unblock(&w.carol_id()).await.unwrap();
+    wallet
+        .request_resend(
+            w.carol_id(),
+            paykit_sdk::ResendSelection::default().with_accepted_from_ms(0),
+        )
+        .await
+        .unwrap();
+    assert!(shared_floor(&wallet).await.unwrap() > first);
+    phone.receive(None).await.unwrap();
+    let views = phone.requests().await.unwrap();
+    assert_eq!(views.len(), 1, "{views:?}");
+    assert!(views[0].manual_only, "{views:?}");
+    let request = views[0].request;
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = phone
+        .pay_request(&request, paykit_sdk::PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("in flight");
+    };
+    w.clock.advance_ms(MINUTE_MS);
+    phone.resume_payments().await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_blocked_return_floor_that_does_not_read_holds_every_one_time_request() {
+    // The identity's floor record holds a value no app can read, with none seen before: a
+    // payer app that joins then can't tell which requests came back, so every one-time
+    // request it opens is paid only by hand.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "block_floor",
+            pubky_switch_core::ident::Policy::new("pay", &["pay"]),
+        ),
+        &paykit_lib::derive::natural_key::block_floor(&w.alice_id()),
+    );
+    wallet
+        .app_mut()
+        .put_record(&target, br#"{"v":1}"#, Vec::new())
+        .await
+        .unwrap();
+    let mut phone = payer_app(&w, "phone").await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    phone.receive(None).await.unwrap();
+    let views = phone.requests().await.unwrap();
+    assert_eq!(views.len(), 1, "{views:?}");
+    assert!(views[0].manual_only, "{views:?}");
+    assert!(held_for_the_user(&phone).await);
+}
+
+#[tokio::test]
+async fn test_blocked_return_dispatch_of_a_request_dated_before_the_floor_not_repeated() {
+    // Carol's request opens as any other, and its payment is left in flight. Bob's request
+    // is then dropped for a block and asked for again, which raises the floor past carol's
+    // request. Whatever its record holds, no app pays automatically a one-time request
+    // dated before the floor: another app may have opened it before it held the floor. So
+    // a resume makes no repeat of its dispatch.
+    let w = World::new();
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true),
+    );
+    let mut wallet = contacts_wallet_with(&w, store(), crate::common::day_window()).await;
+    wallet.app_mut().invite(&w.carol_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    let mut carol_shop = w
+        .join(
+            &w.carol,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let carols = request_from(&mut carol_shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    assert!(!wallet.request(&carols).await.unwrap().manual_only);
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&carols, paykit_sdk::PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("in flight");
+    };
+    w.clock.advance_ms(MINUTE_MS);
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(block_marks(&wallet).await, 1);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(asked(&wallet, &w.bob_id()).await.len(), 1);
+    assert!(shared_floor(&wallet).await.is_some());
+    w.clock.advance_ms(MINUTE_MS);
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}

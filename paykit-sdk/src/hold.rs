@@ -116,7 +116,7 @@ pub(crate) enum KeysAwaited {
 /// A side of the shared records, by the collections it reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RecordSide {
-    /// `payer_activity` and `payment_lists`.
+    /// `payer_activity`, `payment_lists` and `block_floor`.
     Payer,
     /// `payee_activity`, every label's.
     Payee,
@@ -130,10 +130,11 @@ impl RecordSide {
         let payer = crate::activity::family(Collection::PayerActivity);
         let payee = crate::activity::family(Collection::PayeeActivity);
         let lists = crate::activity::family(Collection::PaymentLists);
+        let floor = crate::activity::family(Collection::BlockFloor);
         match self {
-            Self::Payer => vec![payer, lists],
+            Self::Payer => vec![payer, lists, floor],
             Self::Payee => vec![payee],
-            Self::All => vec![payer, payee, lists],
+            Self::All => vec![payer, payee, lists, floor],
         }
     }
 }
@@ -475,7 +476,7 @@ impl Paykit {
                 tx.put(&format!("{}{rest}", family.prefix()), &held)?;
             }
         }
-        // So is the block floor (`marks.rs`).
+        // So is the raise of the block floor owed (`crate::floor`).
         if let Some(floor) = self.local_get::<u64>(key::BLOCK_FLOOR).await? {
             if floor > bound {
                 tx.put(key::BLOCK_FLOOR, &bound)?;

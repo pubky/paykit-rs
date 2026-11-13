@@ -742,6 +742,11 @@ impl Paykit {
         // (`marks.rs`).
         Box::pin(self.forget_blocked_pairs()).await?;
         let marked = Box::pin(self.ask_on_marks()).await?;
+        // The payer's records opened before this app held the block floor they fall under
+        // carry `manual_only` from now on (`crate::floor`), unless the payer's side waits.
+        if !Box::pin(self.payer_waits(keys)).await? {
+            Box::pin(self.sweep_floor()).await?;
+        }
         // The replies and period details kept for requests whose record wasn't held yet,
         // unless the payer's side waits (`Paykit::payer_waits`), as above; each record they
         // go into that is absent while its side isn't listed waits on its own.

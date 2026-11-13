@@ -172,6 +172,14 @@ pub(crate) fn effect(
                     place_manual_only(cx, &target, sender, stored)?;
                 } else {
                     place(cx, &target, sender, Role::Request, stored)?;
+                    // A record this step opens without the mark is checked again once the
+                    // read is done: a raise of the block floor the read took before this
+                    // entry isn't committed yet, so this step doesn't see it
+                    // (`crate::floor`).
+                    if held.is_none() && one_time {
+                        let record_key = cx.record_key(&target.record_target())?;
+                        keep_local(cx, local(&key::floor_opened(&record_key), &true)?);
+                    }
                 }
                 note_peer(cx, &sender, stored)?;
             }
@@ -428,31 +436,42 @@ fn mark_blocked(
 
 /// Whether `stored`, a request from `sender`, may have come back after a block (`marks.rs`):
 /// its signed `created_at` is earlier than its sender's block mark's latest time, or the
-/// block floor's (marks gone for the bound or their expiry, whatever their sender), plus the
-/// clock tolerance, so its inbox may have accepted it while the sender was blocked. Such a
-/// request is paid only by hand: it is never paid automatically, by this app or another
-/// own app's executor (`manual_only`, Paykit wire 5.3; Paykit spec 8.1, "Blocked
-/// counterparties").
+/// block floor, the identity's or the raise this app owes, plus the clock tolerance, or the
+/// floor can't be read (`crate::floor`). Such a request is paid only by hand: it is never paid
+/// automatically, by this app or another own app's executor (`manual_only`, Paykit wire 5.3;
+/// Paykit spec 8.1, "Blocked counterparties").
 fn came_back_from_block(
     cx: &ReceiveContext<'_>,
     sender: &[u8; 32],
     stored: &StoredMessage,
 ) -> Result<bool, Fail> {
     let mark = state::cx_get::<crate::marks::DropMark>(cx, &MarkFamily::Blocked.key(sender))?;
-    let floor = state::cx_get::<u64>(cx, key::BLOCK_FLOOR)?;
-    Ok(came_back_by(stored, mark.map(|mark| mark.latest_ms), floor))
+    let owed = state::cx_get::<u64>(cx, key::BLOCK_FLOOR)?;
+    let target = crate::floor::floor_target(&cx.identity());
+    let held = cx.record(&target)?;
+    let seen = cx.record_seen(&cx.record_key(&target)?)?;
+    let shared = crate::floor::shared_floor_of(held.as_ref(), seen.as_deref());
+    Ok(came_back_by(
+        stored,
+        mark.map(|mark| mark.latest_ms),
+        shared,
+        owed,
+    ))
 }
 
 /// Whether `stored`, signed at its `created_at`, is dated before `latest`, its sender's
-/// block mark's latest time, or before `floor`, the block floor, each plus the clock
-/// tolerance (`marks.rs`, "The block floor").
-fn came_back_by(stored: &StoredMessage, latest: Option<u64>, floor: Option<u64>) -> bool {
+/// block mark's latest time, plus the clock tolerance, or before the block floor, `shared`
+/// or `owed` ([`crate::floor::dated_before`]).
+fn came_back_by(
+    stored: &StoredMessage,
+    latest: Option<u64>,
+    shared: crate::floor::SharedFloor,
+    owed: Option<u64>,
+) -> bool {
     let tolerance = pubky_switch_core::records::CLOCK_TOLERANCE_MS;
     let created = stored.message().created_at_ms;
-    [latest, floor]
-        .into_iter()
-        .flatten()
-        .any(|time| created < time.saturating_add(tolerance))
+    latest.is_some_and(|time| created < time.saturating_add(tolerance))
+        || crate::floor::dated_before(stored, shared, owed)
 }
 
 impl Paykit {
@@ -473,8 +492,11 @@ impl Paykit {
         let mark = self
             .local_get::<crate::marks::DropMark>(&MarkFamily::Blocked.key(&stored.sender()))
             .await?;
-        let floor = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
-        Ok(came_back_by(stored, mark.map(|mark| mark.latest_ms), floor))
+        let latest = mark.map(|mark| mark.latest_ms);
+        let tolerance = pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+        Ok(latest
+            .is_some_and(|time| stored.message().created_at_ms < time.saturating_add(tolerance))
+            || self.floor_holds(stored).await?)
     }
 }
 

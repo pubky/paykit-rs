@@ -80,13 +80,16 @@ impl Paykit {
     /// the counterparty can't be made to answer. Returns the request's `msg_id`. Nothing is
     /// queued while sends to `counterparty` are held: while the copy of the deny list holds
     /// it, or, at an app holding `contacts`, while that copy isn't known, which a read of the
-    /// lists is tried for first (Paykit spec 8.1, "Blocked counterparties").
+    /// lists is tried for first (Paykit spec 8.1, "Blocked counterparties"). The ask goes in
+    /// one batch with the raise of the block floor it needs (`crate::floor`).
     ///
     /// # Errors
     ///
-    /// [`crate::Refusal::NotNow`] while sends to `counterparty` are held, with nothing
-    /// queued; [`paykit_lib::Error::Validation`] for a selection that selects nothing; the
-    /// client's errors.
+    /// [`crate::Refusal::NotNow`] while sends to `counterparty` are held, or while the app
+    /// can't read the block floor it must raise first (Paykit wire 5.6: when `counterparty`
+    /// has a live block mark here, or the app owes a raise), with nothing queued;
+    /// [`paykit_lib::Error::Validation`] for a selection that selects nothing; the client's
+    /// errors, a `409 conflict` on the block floor after it is read again.
     pub async fn request_resend(
         &mut self,
         counterparty: [u8; 32],
@@ -95,7 +98,7 @@ impl Paykit {
         self.refresh_own()?;
         self.refuse_while_sends_held(&counterparty).await?;
         let signed = self.resend_request_message(counterparty, selection)?;
-        let msg_id = self.app.queue_signed(signed).await?;
+        let msg_id = self.queue_resend_request(signed, &counterparty).await?;
         self.app.flush_message(&msg_id).await?;
         Ok(msg_id)
     }
@@ -151,15 +154,23 @@ impl Paykit {
                 }
                 continue;
             }
-            self.request_resend(
-                ask.sender,
-                ResendSelection {
-                    accepted_from_ms: Some(ask.from_ms),
-                    accepted_until_ms: ask.until_ms,
-                    ..ResendSelection::default()
-                },
-            )
-            .await?;
+            let asked = self
+                .request_resend(
+                    ask.sender,
+                    ResendSelection {
+                        accepted_from_ms: Some(ask.from_ms),
+                        accepted_until_ms: ask.until_ms,
+                        ..ResendSelection::default()
+                    },
+                )
+                .await;
+            match asked {
+                Ok(_) => {}
+                // An ask that must raise the block floor stays while the floor can't be read
+                // (`crate::floor`).
+                Err(error) if crate::floor::is_unreadable_floor(&error) => continue,
+                Err(error) => return Err(error),
+            }
             self.local_delete(&format!("{}{rest}", key::ASKS)).await?;
             sent = sent.saturating_add(1);
         }

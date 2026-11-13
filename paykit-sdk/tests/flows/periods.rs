@@ -4005,7 +4005,7 @@ async fn test_periods_proof_from_a_flagged_payer_over_a_payee_period_record_that
 }
 
 /// After a `missed` item, the next receive's listing fails at Paykit's own listing: the
-/// client's listing right after the item, of the wallet's two collections, goes through.
+/// client's listing right after the item, of the wallet's three collections, goes through.
 fn missed_with_paykits_listing_failing(w: &World) {
     let now = w.clock.now_ms();
     w.alice.switch().push_missed(1, now - 1_000, now);
@@ -4013,7 +4013,7 @@ fn missed_with_paykits_listing_failing(w: &World) {
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
-            after: 2,
+            after: 3,
         });
 }
 

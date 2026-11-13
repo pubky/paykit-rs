@@ -50,7 +50,8 @@
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
 //! | `fg` | the flagged senders as the app last read them, at most `MAX_FLAGGED_COPY`; absent while not known, which holds the asks of block marks (`marks.rs`); never restored | |
-//! | `bf` | the block floor: the latest of the latest times of the block marks gone for the bound or their own expiry; a one-time request dated before it plus the clock tolerance opens paid only by hand, whatever its sender; kept until the highest service time verified passes it by twice [`crate::KEPT_MESSAGE_MS`] plus the clock tolerance (`marks.rs`) | yes |
+//! | `bf` | the raise of the identity's block floor this app owes: the latest of the latest times of the block marks gone for the bound or their own expiry, and of a restore's first read of the lists; written to the shared `block_floor` record before the block marks ask and with any ask, and deleted in that batch; applied as a floor meanwhile (`crate::floor`) | yes |
+//! | `fo/<record key>` | a request record a read opened without `manual_only`, checked against the block floor once the read is done and marked if dated before it (`crate::floor`); never restored | |
 //! | `bk/<pubky>` | this app's block or unblock of `pubky` not yet shown by the list (`OwnBlockMark`): a block from before the switch is asked, an unblock only with the batch the client keeps; a block counts until a read of the list shows it, and is written again at a receive while the client neither keeps nor applied its batch, a restored one too, since the kept batch stays with the device that kept it; an unblock counts for payments and held sends only while the client still keeps its batch, never for the spam rule, and isn't restored (Paykit spec 8.1) | |
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
 //! | `bd/<sender>` | a mark of a sender's messages dropped for the user's block, each as one never processed (its pair forgotten), as `pd/` holds; it asks that sender once it is neither blocked nor flagged (`marks.rs`, Paykit spec 8.1) | |
@@ -473,6 +474,7 @@ impl Stored for bool {
             | StateKey::MissedUnlisted
             | StateKey::PayerPassOwed
             | StateKey::HoldConfirmed(_)
+            | StateKey::FloorOpened(_)
             | StateKey::Taken(_)
                 if *self =>
             {
@@ -924,8 +926,11 @@ pub(crate) mod key {
     pub(crate) const DROPPED_BLOCKED: &str = "bd/";
     pub(crate) const BLOCKED_WIDENINGS: &str = "bw/";
     pub(crate) const FLAGGED: &str = "fg";
-    /// The block floor: the latest time of the block marks gone (`marks.rs`).
+    /// The raise of the block floor this app owes (`crate::floor`).
     pub(crate) const BLOCK_FLOOR: &str = "bf";
+    /// The request records this read opened without `manual_only`, to check against the
+    /// block floor once it is done (`crate::floor`).
+    pub(crate) const FLOOR_OPENED: &str = "fo/";
     pub(crate) const KEY_WAITS: &str = "kw/";
 
     /// The mark of replies from `sender` dropped for the bounds.
@@ -1030,6 +1035,10 @@ pub(crate) mod key {
 
     pub(crate) fn seen_records(payee: &[u8; 32], app_id: &[u8; 16]) -> String {
         format!("ar/{}/{}", b64(payee), b64(app_id))
+    }
+
+    pub(crate) fn floor_opened(record_key: &[u8; 32]) -> String {
+        format!("{FLOOR_OPENED}{}", b64(record_key))
     }
 
     pub(crate) fn hold_confirmed(record_key: &[u8; 32]) -> String {
@@ -1154,8 +1163,11 @@ pub(crate) enum StateKey {
     BlockedWidening { from_ms: u64 },
     /// `fg`: the flagged senders as the app last read them.
     Flagged,
-    /// `bf`: the latest time of the block marks gone for the bound or their expiry.
+    /// `bf`: the raise of the block floor this app owes.
     BlockFloor,
+    /// `fo/<record key>`: a request record a read opened without `manual_only`, to check
+    /// against the block floor once the read is done.
+    FloorOpened([u8; 32]),
     /// `nt/<counterparty>/lost-<from_ms>`: the notice that messages dropped for a block
     /// can no longer come back.
     BlockedLost {
@@ -1251,6 +1263,7 @@ impl StateKey {
                     "kc" => Self::KeptCancellation(b64_32(rest)?),
                     "bk" => Self::OwnBlock(b64_32(rest)?),
                     "hc" => Self::HoldConfirmed(b64_32(rest)?),
+                    "fo" => Self::FloorOpened(b64_32(rest)?),
                     "lh" => Self::HeldList(b64_32(rest)?),
                     "side" => Self::Side(msg_id(rest)?),
                     "ha" => {
@@ -1830,6 +1843,7 @@ mod tests {
             ),
             (key::FLAGGED.into(), StateKey::Flagged),
             (key::BLOCK_FLOOR.into(), StateKey::BlockFloor),
+            (key::floor_opened(&pubky), StateKey::FloorOpened(pubky)),
             (
                 key::blocked_lost(&pubky, 9),
                 StateKey::BlockedLost {
