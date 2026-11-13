@@ -510,6 +510,24 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            // A divergent record's mark comes back paused, a confirmation given before the
+            // restore included; a message kept over a divergent record is bound to its
+            // record as every runtime read binds it (`divergent.rs`).
+            StateKey::Divergent(_) => {
+                let mark =
+                    state::restored::<crate::divergent::DivergentMark>(&key, &value, &binder)
+                        .map_err(|_| unread())?
+                        .restored();
+                let value = state::encode(&mark).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::DivergentWrite { .. } => {
+                state::restored::<crate::divergent::DivergentWrite>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
             StateKey::MessageNotice { .. } | StateKey::Notice { .. } => {
                 let notice =
                     state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;

@@ -247,6 +247,22 @@ pub struct ReceiveSummary {
     /// switch to resume from. Set from the read that takes the account as gone until the
     /// host acknowledges its `AppEvent::AccountGone`, or until the account shows again.
     pub account_gone: bool,
+    /// The records this receive paused: a view showed them divergent after a provider loss
+    /// (Paykit spec 6). The host shows each to the user, who confirms it
+    /// ([`Paykit::confirm_divergent`]); until then nothing is paid, accepted or credited on
+    /// it automatically, nor paid or accepted by hand. That confirmation lets payments and
+    /// writes go on, but releases no credit (Paykit spec 8.1 step 4): these records are
+    /// shown with no [`crate::DivergentRecord::may_hold_credit`]. To credit a proof, the host
+    /// calls [`Paykit::confirm_payment`] again; while a record of that payer may hold a
+    /// credit, it is refused [`crate::Refusal::Divergent`], each record it names shown with
+    /// `may_hold_credit`. Once the user has seen that, the host confirms each of those
+    /// records exactly as that refusal gives them, then calls `confirm_payment` once more;
+    /// while messages kept over one of them wait to be written
+    /// ([`crate::DivergentRecord::writes_waiting`]), it is refused again until a receive
+    /// writes them: confirming again writes nothing, so the host runs [`Paykit::receive`]
+    /// until no record the refusal names shows `writes_waiting`, and only then calls again.
+    /// Every record paused, whenever, is in [`Paykit::divergent_records`].
+    pub divergent: Vec<crate::DivergentRecord>,
 }
 
 /// The data epochs `events` name as waited for (`AppEvent::AwaitingKeys`), ascending, each
@@ -412,6 +428,9 @@ impl Paykit {
         let protocol = Self::new_protocol(&rail);
         let app = App::load(env.clone(), protocol.clone(), config.app.clone(), app_id).await?;
         let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
+        // A record a view showed divergent pauses, also when a crash came before the
+        // receive's events were taken (`divergent.rs`): every record held is looked at once.
+        Box::pin(paykit.sweep_divergent()).await?;
         // A restore clamps its cursor time after its commit: a crash between the two leaves
         // it for the next load (`Paykit::bound_restored_cursor_time`, idempotent). Nothing is
         // written under a certificate Paykit refuses.
@@ -663,6 +682,8 @@ impl Paykit {
         if self.certificate_refused().is_none() {
             Box::pin(self.send_own_blocks_again()).await?;
         }
+        // The records paused before this read, for the summary's new ones.
+        let paused_before = Box::pin(self.paused_records()).await?;
         // Whether the client may list at this read's start ([`Paykit::records_listed`]).
         let keys_held_before = self.holds_scope_keys();
         let report = match Box::pin(self.app.receive(wait)).await {
@@ -674,6 +695,21 @@ impl Paykit {
             }
             Err(error) => return Err(error.into()),
         };
+        // What follows the read is its own future on the heap: its steps' futures are built
+        // in that future's poll, not in this one's, which stays small beside the client's
+        // deep read.
+        Box::pin(self.after_read(report, paused_before, keys_held_before)).await
+    }
+
+    /// The steps of [`Paykit::receive`] after the client's read returned `report`: the
+    /// records paused before it were `paused_before`, and the app held its scope keys at its
+    /// start when `keys_held_before`.
+    async fn after_read(
+        &mut self,
+        report: ReceiveReport,
+        paused_before: std::collections::BTreeSet<[u8; 32]>,
+        keys_held_before: bool,
+    ) -> Result<ReceiveSummary> {
         // The data epochs the entries the client stores for a key wait for, as its report
         // names them at every read while any waits.
         let key_epochs_awaited = key_epochs_awaited(&report.events);
@@ -683,19 +719,21 @@ impl Paykit {
         let duties = Box::pin(self.app.unacknowledged_events()).await?;
         let account_gone =
             account_gone(&report.events) || (report.stopped && account_gone(&duties));
-        // The duty events about stored entries are taken before anything returns, so that
-        // once the host acknowledges what this report showed none is lost: only the SDK's
-        // own marks and notes are kept here, and nothing is written at the switch
-        // (`stored.rs`).
+        // The duty events about stored entries and divergent records are taken before
+        // anything returns, so that once the host acknowledges what this report showed none
+        // is lost: only the SDK's own marks and notes are kept here, and nothing is written at
+        // the switch (`stored.rs`, `divergent.rs`).
         Box::pin(self.take_stored_events(&duties)).await?;
         // A `missed` item the read took holds the open requests from a time on
         // (`hold.rs`), bounded now that the read verified the service time.
         Box::pin(self.bound_missed_hold()).await?;
         if account_gone {
             // Nothing more is read or written there: the summary tells the host.
+            let divergent = Box::pin(self.newly_paused(&paused_before)).await?;
             return Ok(ReceiveSummary {
                 report,
                 account_gone,
+                divergent,
                 ..ReceiveSummary::default()
             });
         }
@@ -703,9 +741,11 @@ impl Paykit {
         // its events and cursor; the Paykit steps below act under the certificate, so none
         // runs.
         if let Some(refused) = self.certificate_refused() {
+            let divergent = Box::pin(self.newly_paused(&paused_before)).await?;
             return Ok(ReceiveSummary {
                 report,
                 certificate_refused: Some(refused),
+                divergent,
                 ..ReceiveSummary::default()
             });
         }
@@ -742,9 +782,12 @@ impl Paykit {
         let marked = Box::pin(self.ask_on_marks()).await?;
         // The replies and period details kept for requests whose record wasn't held yet,
         // unless the payer's side waits (`Paykit::payer_waits`), as above; each record they
-        // go into that is absent while its side isn't listed waits on its own.
+        // go into that is absent while its side isn't listed waits on its own. The messages
+        // kept over divergent records whose user has confirmed them, a list to its held list,
+        // are placed next (`divergent.rs`).
         if !Box::pin(self.payer_waits(keys)).await? {
             Box::pin(self.place_kept_replies()).await?;
+            Box::pin(self.place_divergent_writes()).await?;
         }
         // Lists held over a `payment_lists` record that didn't read, once it reads.
         Box::pin(self.place_held_lists()).await?;
@@ -778,6 +821,10 @@ impl Paykit {
             Box::pin(self.queue_own_again()).await?;
         }
         let asked = Box::pin(self.send_asks()).await?;
+        // A confirmed mark goes once its record's view isn't divergent any more, after this
+        // read's events were taken.
+        Box::pin(self.end_confirmed_marks()).await?;
+        let divergent = Box::pin(self.newly_paused(&paused_before)).await?;
         Ok(ReceiveSummary {
             report,
             applied,
@@ -787,6 +834,7 @@ impl Paykit {
             scope_keys_awaited: keys.is_some() || !key_epochs_awaited.is_empty(),
             key_epochs_awaited,
             account_gone: false,
+            divergent,
         })
     }
 
@@ -838,6 +886,7 @@ mod tests {
         resolution: Resolution,
         draft: RequestDraft,
         payment: UnrequestedPayment,
+        shown: crate::DivergentRecord,
         role: crate::AllowanceRole,
         terms: paykit_lib::allowances::AllowanceTerms,
         details: paykit_lib::bodies::PeriodDetails,
@@ -895,6 +944,8 @@ mod tests {
         assert_send(&wallet.notices());
         assert_send(&wallet.acknowledge_notice(""));
         assert_send(&wallet.receipts(ReceiptsOf::All));
+        assert_send(&wallet.divergent_records());
+        assert_send(&wallet.confirm_divergent(&shown, confirmed));
         assert_send(&wallet.propose_allowance(key, role, terms));
         assert_send(&wallet.accept_allowance(&key));
         assert_send(&wallet.reject_allowance(&key));

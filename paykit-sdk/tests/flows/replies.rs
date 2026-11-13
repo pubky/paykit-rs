@@ -1013,6 +1013,38 @@ async fn test_replies_kept_past_30_days_over_quota_given_up_with_the_notice() {
 }
 
 #[tokio::test]
+async fn test_replies_kept_wait_over_a_divergent_record_until_confirmed() {
+    // The shop's record of the request comes, divergent after a provider loss: the replies
+    // kept for it aren't written over it until the user confirms it (Paykit spec 6).
+    let w = World::new();
+    let base = crate::common::store();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            Arc::clone(&base),
+        )
+        .await;
+    let request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    record_request(&w, &mut shop, &request).await;
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    crate::divergent::set_divergent(&base, &shop, &record, true);
+    shop.receive(None).await.unwrap();
+    let sales = shop.payee_activity().await.unwrap();
+    assert_eq!(sales[0].status, PayeeStatus::Requested);
+    assert!(sales[0].divergent);
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 2);
+    crate::divergent::confirm(&mut shop, &record).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let sales = shop.payee_activity().await.unwrap();
+    assert_eq!(sales[0].status, PayeeStatus::ProofReceived);
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn test_replies_kept_and_marks_dated_past_the_backup_bounded_at_a_restore() {
     // A backup carries kept replies and a mark of dropped replies dated two days past any
     // service time it verified: a restore bounds them by that time plus the clock tolerance,
@@ -1142,4 +1174,424 @@ async fn test_replies_dropped_past_30_days_stay_dropped_after_a_restore() {
     }
     assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
     assert!(shop.notices().await.unwrap().is_empty());
+}
+
+/// Bob's shop holding his request record to alice as a value that opens but doesn't read as
+/// an activity record, written by bob's till, with no pause.
+struct PayeeUnread {
+    shop: Paykit,
+    till: Paykit,
+    _wallet: Paykit,
+    _carol: Paykit,
+    request: RequestRef,
+    record: [u8; 32],
+    target: RecordTarget,
+    good: Vec<u8>,
+}
+
+/// [`PayeeUnread`]: the shop keeps no mark of what it has seen in a record, so it holds the
+/// value that doesn't read rather than refuse it as a regression.
+async fn payee_unread(w: &World) -> PayeeUnread {
+    let seen = Arc::new(crate::outcome_record::NoSeenMarks::default());
+    let base = Arc::clone(&seen) as Arc<dyn pubky_switch_client::store::StateStore>;
+    let wallet = w.wallet("wallet").await;
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            base,
+        )
+        .await;
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let carol = w
+        .join(
+            &w.carol,
+            "wallet",
+            paykit_sdk::AppScopes::new().pay().build().unwrap(),
+        )
+        .await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    till.receive(None).await.unwrap();
+    let collection = Collection::PayeeActivity;
+    let target = RecordTarget::new(
+        SwitchCollection::new(collection.name(), collection.policy(None)),
+        &natural_key::request_record(&w.bob_id(), &request.request_hash),
+    );
+    let good = till
+        .app()
+        .shared_record(&record)
+        .await
+        .unwrap()
+        .unwrap()
+        .content
+        .value()
+        .unwrap()
+        .to_vec();
+    seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut s = PayeeUnread {
+        shop,
+        till,
+        _wallet: wallet,
+        _carol: carol,
+        request,
+        record,
+        target,
+        good,
+    };
+    s.till_writes(crate::outcome_record::INVALID).await;
+    s.shop.receive(None).await.unwrap();
+    assert_eq!(s.held().await, crate::outcome_record::INVALID);
+    s
+}
+
+impl PayeeUnread {
+    /// Bob's till writes `value` at the request record.
+    async fn till_writes(&mut self, value: &[u8]) {
+        self.till.receive(None).await.unwrap();
+        let op = self
+            .till
+            .app_mut()
+            .record_op(&self.target, Some(value), Vec::new())
+            .await
+            .unwrap();
+        self.till
+            .app_mut()
+            .submit_batch(OpBatch::new().entry(op))
+            .await
+            .unwrap();
+    }
+
+    /// The value the shop holds at the request record.
+    async fn held(&self) -> Vec<u8> {
+        self.shop
+            .app()
+            .shared_record(&self.record)
+            .await
+            .unwrap()
+            .unwrap()
+            .content
+            .value()
+            .unwrap()
+            .to_vec()
+    }
+
+    /// The shop's status of the request.
+    async fn status(&self) -> PayeeStatus {
+        self.shop
+            .payee_activity()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|a| a.request_hash == Some(self.request.request_hash))
+            .unwrap()
+            .status
+    }
+}
+
+/// A payer's acceptance, under no label.
+fn acceptance_body() -> serde_json::Map<String, serde_json::Value> {
+    json!({ "label": null }).as_object().cloned().unwrap()
+}
+
+#[tokio::test]
+async fn test_replies_over_an_unread_record_another_identitys_period_proof_writes_nothing() {
+    // Carol's proof naming bob's request and a Billing Period reaches the shop, which can't
+    // read the request record. A record whose counterparty can't be told is never written
+    // over: the value stays, and names no one new.
+    let w = World::new();
+    let mut s = payee_unread(&w).await;
+    let now = w.clock.now_ms();
+    let body = paykit_lib::bodies::PaymentProof {
+        attempt_id: paykit_lib::AttemptId::generate().unwrap(),
+        billing_period: Some(paykit_lib::periods::PeriodRef {
+            starts_at: now,
+            ends_at: now + crate::common::HOUR_MS,
+        }),
+        payment_endpoint_identifier: crate::common::endpoint("btc-lightning-bolt11"),
+        payment_app_id: s.shop.app_id(),
+        list_version: None,
+        amount: None,
+        allowance_id: None,
+        label: None,
+        payment_reference: None,
+        proof: json!({ "type": "x-fake" }).as_object().cloned().unwrap(),
+    }
+    .to_body(1)
+    .unwrap();
+    w.inject(
+        &w.carol,
+        "wallet",
+        &w.bob,
+        &[s.shop.app_id()],
+        "paykit.payment_proof",
+        vec![s.request.request_hash],
+        body,
+    );
+    s.shop.receive(None).await.unwrap();
+    let carol = pubky_switch_core::enc::pubky_id(&w.carol_id());
+    let held = String::from_utf8_lossy(&s.held().await).into_owned();
+    assert!(
+        !held.contains(&carol),
+        "the request record now names carol: {held}"
+    );
+    assert_eq!(
+        held,
+        String::from_utf8_lossy(crate::outcome_record::INVALID)
+    );
+}
+
+#[tokio::test]
+async fn test_replies_over_an_unread_record_counterpartys_acceptance_placed_once_it_reads() {
+    // Alice's acceptance reaches the shop while it can't read the request record: it is kept
+    // as a reply before its record, never dropped, and placed once the record reads naming
+    // alice.
+    let w = World::new();
+    let mut s = payee_unread(&w).await;
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[s.shop.app_id()],
+        "paykit.payment_request_acceptance",
+        vec![s.request.request_hash],
+        acceptance_body(),
+    );
+    s.shop.receive(None).await.unwrap();
+    assert_eq!(s.shop.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    let good = s.good.clone();
+    s.till_writes(&good).await;
+    s.shop.receive(None).await.unwrap();
+    s.shop.receive(None).await.unwrap();
+    assert_eq!(s.status().await, PayeeStatus::Accepted);
+    assert!(s.shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+}
+
+/// A proof of a payment without a request from `from`, with app `app`, of the fake rail's
+/// settlement `tx`, to bob's shop `shop`.
+fn proof_of_settlement(
+    w: &World,
+    from: &pubky_switch_client::testing::TestSigner,
+    app: &str,
+    shop: &Paykit,
+    tx: &str,
+) -> String {
+    let body = paykit_lib::bodies::PaymentProof {
+        attempt_id: paykit_lib::AttemptId::generate().unwrap(),
+        billing_period: None,
+        payment_endpoint_identifier: crate::common::endpoint("btc-lightning-bolt12"),
+        payment_app_id: shop.app_id(),
+        list_version: None,
+        amount: Some(crate::common::btc("0.0015")),
+        allowance_id: None,
+        label: None,
+        payment_reference: None,
+        proof: json!({ "rail": "fake", "tx": tx })
+            .as_object()
+            .cloned()
+            .unwrap(),
+    }
+    .to_body(0)
+    .unwrap();
+    w.inject(
+        from,
+        app,
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        Vec::new(),
+        body,
+    )
+}
+
+#[tokio::test]
+async fn test_replies_proof_over_an_unread_settlement_record_writes_nothing() {
+    // Carol's proof of a payment without a request opens the shop's record of its
+    // settlement; bob's till then writes there a value that doesn't read. Proofs of the same
+    // settlement, alice's and carol's own, aren't written over that value: the record can't
+    // show its counterparty, and its key doesn't bind the sender, so each is kept as a reply
+    // before its record, none held on the feed. Once the record reads again, naming carol,
+    // carol's is written and alice's goes, never written.
+    let w = World::new();
+    let seen = Arc::new(crate::outcome_record::NoSeenMarks::default());
+    let base = Arc::clone(&seen) as Arc<dyn pubky_switch_client::store::StateStore>;
+    let _wallet = w.wallet("wallet").await;
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            base,
+        )
+        .await;
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let _carol = w
+        .join(
+            &w.carol,
+            "wallet",
+            paykit_sdk::AppScopes::new().pay().build().unwrap(),
+        )
+        .await;
+    proof_of_settlement(&w, &w.carol, "wallet", &shop, "t1");
+    shop.receive(None).await.unwrap();
+    let collection = Collection::PayeeActivity;
+    let target = RecordTarget::new(
+        SwitchCollection::new(collection.name(), collection.policy(None)),
+        &natural_key::payee_payment_record(&crate::common::endpoint("btc-lightning-bolt12"), b"t1"),
+    );
+    let record = till.app().record_key(&target).unwrap();
+    let good = shop
+        .app()
+        .shared_record(&record)
+        .await
+        .unwrap()
+        .unwrap()
+        .content
+        .value()
+        .unwrap()
+        .to_vec();
+    seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    till.receive(None).await.unwrap();
+    let op = till
+        .app_mut()
+        .record_op(&target, Some(crate::outcome_record::INVALID), Vec::new())
+        .await
+        .unwrap();
+    till.app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let from_alice = proof_of_settlement(&w, &w.alice, "wallet", &shop, "t1");
+    w.clock.advance_ms(1);
+    let from_carol = proof_of_settlement(&w, &w.carol, "wallet", &shop, "t1");
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let held = shop.app().shared_record(&record).await.unwrap().unwrap();
+    assert_eq!(held.content.value(), Some(crate::outcome_record::INVALID));
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 2);
+    assert!(shop.app_mut().parked_entries().await.unwrap().is_empty());
+    till.receive(None).await.unwrap();
+    let op = till
+        .app_mut()
+        .record_op(&target, Some(&good), Vec::new())
+        .await
+        .unwrap();
+    till.app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    let held = shop.app().shared_record(&record).await.unwrap().unwrap();
+    let value = String::from_utf8_lossy(held.content.value().unwrap()).into_owned();
+    assert!(value.contains(&from_carol), "{value}");
+    assert!(!value.contains(&from_alice), "{value}");
+}
+
+#[tokio::test]
+async fn test_replies_proof_over_an_unread_settlement_record_from_a_blocked_sender_only_counted() {
+    // Bob's shop, holding `contacts`, holds its record of alice's payment t1 as a value that
+    // doesn't read. Carol, blocked, sends proofs of t1. The spam rule: a blocked sender only
+    // counts and keeps nothing, the client's stored entries included, then or 31 days on.
+    // The feed goes on: alice's later proof of t2 is credited meanwhile.
+    let w = World::new();
+    let seen = Arc::new(crate::outcome_record::NoSeenMarks::default());
+    let base = Arc::clone(&seen) as Arc<dyn pubky_switch_client::store::StateStore>;
+    let _wallet = w.wallet("wallet").await;
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+            PaykitConfig::default(),
+            base,
+        )
+        .await;
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let _carol = w
+        .join(
+            &w.carol,
+            "wallet",
+            paykit_sdk::AppScopes::new().pay().build().unwrap(),
+        )
+        .await;
+    proof_of_settlement(&w, &w.alice, "wallet", &shop, "t1");
+    shop.receive(None).await.unwrap();
+    let target = |tx: &[u8]| {
+        RecordTarget::new(
+            SwitchCollection::new(
+                Collection::PayeeActivity.name(),
+                Collection::PayeeActivity.policy(None),
+            ),
+            &natural_key::payee_payment_record(
+                &crate::common::endpoint("btc-lightning-bolt12"),
+                tx,
+            ),
+        )
+    };
+    seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    till.receive(None).await.unwrap();
+    let op = till
+        .app_mut()
+        .record_op(
+            &target(b"t1"),
+            Some(crate::outcome_record::INVALID),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    till.app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    shop.block(&w.carol_id()).await.unwrap();
+    for _ in 0..3 {
+        proof_of_settlement(&w, &w.carol, "wallet", &shop, "t1");
+    }
+    w.clock.advance_ms(1);
+    proof_of_settlement(&w, &w.alice, "wallet", &shop, "t2");
+    shop.receive(None).await.unwrap();
+    let t2 = shop.app().record_key(&target(b"t2")).unwrap();
+    let t2_held = shop.app().shared_record(&t2).await.unwrap().is_some();
+    let counted = shop.spam_count(&w.carol_id()).await.unwrap();
+    w.clock.advance_ms(DAY_MS + 1);
+    shop.receive(None).await.unwrap();
+    let parked_day = shop.app_mut().parked_entries().await.unwrap().len();
+    w.clock.advance_ms(31 * DAY_MS);
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let parked_month = shop.app_mut().parked_entries().await.unwrap().len();
+    assert_eq!(
+        (t2_held, counted, parked_day, parked_month),
+        (true, 3, 0, 0),
+        "(t2 credited, carol's proofs only counted, stored entries after a day, after 31 days)"
+    );
 }
