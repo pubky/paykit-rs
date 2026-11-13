@@ -2284,3 +2284,135 @@ async fn test_restore_own_receipt_kept_unanswered_sent_again_from_its_record() {
     shop.receive(None).await.unwrap();
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
 }
+
+/// Bob's shop sends alice a request, and her wallet rejects it: the rejection's batch is
+/// applied and its answer lost, so the rejection is in the wallet's record and in no outbox,
+/// and the wallet is backed up then. Returns the request and the backup.
+async fn wallet_backed_up_with_its_rejection_unqueued(
+    w: &World,
+    mut wallet: Paykit,
+    shop: &mut Paykit,
+) -> (paykit_sdk::RequestRef, PaykitBackup) {
+    let mut unexpiring = draft("1", w.clock.now_ms());
+    unexpiring.proposal_expires_at_ms = None;
+    let request = request_from(shop, w.alice_id(), unexpiring).await;
+    wallet.receive(None).await.unwrap();
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    let _ = wallet.reject_request(&request, None).await;
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        paykit_sdk::PayeeStatus::Requested
+    );
+    (request, wallet.backup().await.unwrap())
+}
+
+#[tokio::test]
+async fn test_restore_own_rejection_to_a_blocked_payee_waits_until_unblocked() {
+    // Bob is blocked when the restored wallet's re-send runs: its rejection, which no outbox
+    // holds, waits; once bob is unblocked it goes, once (Paykit spec 7.2, "What a restore
+    // loses"; 8.1, Blocked counterparties).
+    let w = World::new();
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    let (_, backup) = wallet_backed_up_with_its_rejection_unqueued(&w, wallet, &mut shop).await;
+    let mut wallet = restored_unreceived(&w, &w.alice, &backup).await;
+    wallet.block(&w.bob_id()).await.unwrap();
+    let before = w.bob.switch().entries_from(&w.alice_id());
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_some());
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
+    wallet.receive(None).await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        paykit_sdk::PayeeStatus::Rejected
+    );
+}
+
+#[tokio::test]
+async fn test_restore_own_rejection_in_a_record_sealed_under_a_key_not_held_waits_for_it() {
+    // After the backup the phone writes the request record again at a data epoch whose key
+    // the restored wallet doesn't hold, though it holds a later one: the wallet's rejection,
+    // which no outbox holds, waits for that key, and goes once it comes, once (Paykit spec
+    // 7.2, "What a restore loses").
+    let w = World::new();
+    let wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let wallet_app = wallet.app_id();
+    let cert = wallet.app().cert().clone();
+    let (request, backup) =
+        wallet_backed_up_with_its_rejection_unqueued(&w, wallet, &mut shop).await;
+    phone.receive(None).await.unwrap();
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    crate::unrequested::store_bundle(&w, phone.app_id(), &phone.app().cert().clone());
+    phone.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let value = crate::outcome_record::record_value(&mut phone, &request)
+        .await
+        .unwrap();
+    assert!(!value["response"].is_null(), "{value}");
+    crate::outcome_record::phone_writes(
+        &mut phone,
+        &request,
+        Some(&serde_json::to_vec(&value).unwrap()),
+    )
+    .await;
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    crate::unrequested::store_bundle_from(&w, wallet_app, &cert, newest);
+    let mut wallet = restored_unreceived(&w, &w.alice, &backup).await;
+    let before = w.bob.switch().entries_from(&w.alice_id());
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    let key = wallet
+        .app()
+        .record_key(&crate::outcome_record::payer_record(&request))
+        .unwrap();
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            held.content,
+            pubky_switch_client::app::RecordContent::Unreadable(
+                pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+            )
+        ),
+        "{:?}",
+        held.content
+    );
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_some());
+    crate::unrequested::store_bundle(&w, wallet_app, &cert);
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        paykit_sdk::PayeeStatus::Rejected
+    );
+}
