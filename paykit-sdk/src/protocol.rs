@@ -1442,40 +1442,50 @@ mod receive_tests {
     }
 
     #[test]
-    fn test_protocol_own_receipt_never_sent_again_after_a_restore() {
-        // A restore queues again a payee's own cancellation from its record, but never its
-        // receipt, which it may have stored without sending it (Paykit spec 7.2, 8.1); nor a
-        // message another app signed.
+    fn test_protocol_own_receipt_sent_again_after_a_restore() {
+        // A restore queues again a payee's own receipt and cancellation from its record: this
+        // app stores its own receipt only in the batch that queues it, so the record holds
+        // one it sent (Paykit spec 7.2); never a message another app signed.
         let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
         let bob = Party::new("bob", "shop", &["request"]);
         let till = Party::new("bob", "till", &["request"]);
         let mut record = ActivityRecord::new(paykit_lib::records::ActivitySide::Payee, alice.id());
-        record.receipt = Some(bob.message(
-            &alice,
-            "paykit.payment_receipt",
-            vec![[4; 32], [5; 32]],
-            object(json!({ "attempt_id": "DgCVYQKL1eyDacZvG6YhZg" })),
-        ));
+        let receipt = |by: &Party| {
+            by.message(
+                &alice,
+                "paykit.payment_receipt",
+                vec![[4; 32], [5; 32]],
+                object(json!({ "attempt_id": "DgCVYQKL1eyDacZvG6YhZg" })),
+            )
+        };
+        record.receipt = Some(receipt(&bob));
         let own = |record: &ActivityRecord| {
             crate::hold::own_to_send_again(record, &bob.id(), &bob.cert.app_id())
                 .into_iter()
                 .map(|stored| stored.message().kind.clone())
                 .collect::<Vec<_>>()
         };
-        assert!(own(&record).is_empty());
+        assert_eq!(own(&record), ["paykit.payment_receipt"]);
         record.cancellation = Some(bob.message(
             &alice,
             "paykit.payment_request_cancellation",
             vec![[4; 32]],
             object(json!({ "reason": null })),
         ));
-        assert_eq!(own(&record), ["paykit.payment_request_cancellation"]);
+        assert_eq!(
+            own(&record),
+            [
+                "paykit.payment_request_cancellation",
+                "paykit.payment_receipt"
+            ]
+        );
         record.cancellation = Some(till.message(
             &alice,
             "paykit.payment_request_cancellation",
             vec![[4; 32]],
             object(json!({ "reason": null })),
         ));
+        record.receipt = Some(receipt(&till));
         assert!(own(&record).is_empty());
     }
 

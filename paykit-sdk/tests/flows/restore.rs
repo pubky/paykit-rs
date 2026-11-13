@@ -2222,3 +2222,65 @@ async fn test_restore_own_request_past_its_replay_window_not_sent_again_nothing_
     wallet.receive(None).await.unwrap();
     assert!(wallet.requests().await.unwrap().is_empty());
 }
+
+/// Restore `backup` onto a new store as an app of `signer`'s identity, without a receive.
+async fn restored_unreceived(
+    w: &World,
+    signer: &pubky_switch_client::testing::TestSigner,
+    backup: &PaykitBackup,
+) -> Paykit {
+    Paykit::restore(
+        w.env(signer, store()),
+        PaykitConfig::default(),
+        backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_restore_own_receipt_kept_unanswered_sent_again_from_its_record() {
+    // The shop confirms alice's payment, and the receipt's batch is applied with its answer
+    // lost: the receipt is in the shop's record and in no outbox. Backed up then and restored
+    // onto a new store, the shop queues the receipt again with the bytes its record stores,
+    // once (Paykit spec 7.2, "What a restore loses"): alice's record shows it.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    let _ = shop
+        .confirm_payment_with(&record, paykit_sdk::ReceiptDetails::new())
+        .await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.request(&request).await.unwrap().receipt.is_none());
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let mut shop = restored_unreceived(&w, &w.bob, &backup).await;
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    wallet.receive(None).await.unwrap();
+    let receipt = wallet.request(&request).await.unwrap().receipt.unwrap();
+    assert_eq!(receipt.payee, w.bob_id());
+    let value = crate::outcome_record::record_value(&mut wallet, &request)
+        .await
+        .unwrap();
+    assert!(!value["receipt"].is_null(), "{value}");
+    // Once: a later receive queues nothing more.
+    let before = w.alice.switch().entries_from(&w.bob_id());
+    shop.receive(None).await.unwrap();
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+}

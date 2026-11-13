@@ -797,9 +797,10 @@ pub(crate) struct OwnResendOwed {
 /// (`records::own_message_tests`), while the counterparty hasn't answered it and no later
 /// stop covers it. A request or a Billing Period's details goes while the record holds no
 /// response and no cancellation; an acceptance or a rejection while it holds no
-/// cancellation and no receipt; a proof while it holds no receipt; a cancellation always. A
-/// receipt never goes this way: a payee may store one it doesn't send (Paykit spec 8.1), and
-/// the record doesn't tell the two apart.
+/// cancellation and no receipt; a proof while it holds no receipt; a cancellation and a
+/// receipt always. A receipt the app stored without sending it is never sent this way: this
+/// app stores its own receipt only in the batch that queues it
+/// ([`Paykit::confirm_payment_with`]), so its receipt in a record is one it sent.
 pub(crate) fn own_to_send_again<'a>(
     record: &'a ActivityRecord,
     own: &[u8; 32],
@@ -815,6 +816,7 @@ pub(crate) fn own_to_send_again<'a>(
         ),
         (&record.proof, record.receipt.is_none()),
         (&record.cancellation, true),
+        (&record.receipt, true),
     ];
     candidates
         .into_iter()
