@@ -3345,3 +3345,154 @@ async fn test_periods_credit_not_now_while_the_request_record_is_sealed_then_giv
     shop.receive(None).await.unwrap();
     assert!(shop.confirm_payment(&period).await.unwrap().is_some());
 }
+
+#[tokio::test]
+async fn test_periods_details_from_a_flagged_payee_over_a_period_record_that_doesnt_bind_kept() {
+    // The phone writes, at January's period record, February's record with a proof in it:
+    // a value that reads but doesn't bind to that key (Paykit wire 5.3). Bob is flagged
+    // since; his later January details reach the contacts wallet. They update a
+    // subscription the wallet holds, no new state, so the spam rule doesn't gate them: they
+    // are kept, never written over that value, and given up with the host's notice past
+    // their 30 days.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let lists = Arc::new(crate::common::ListsStore::default());
+    let mut wallet = contacts_wallet(&w, &lists).await;
+    let mut phone = w.wallet("phone").await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    let now = w.clock.now_ms();
+    shop.send_period_details(&sale, details(month(1), "lnbc1feb", now + DAY_MS))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let january_record = payer_period(&request);
+    payer_period_paid(
+        &w,
+        &mut phone,
+        &request,
+        shop.app_id(),
+        month(1),
+        &january_record,
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    let key = wallet.app().record_key(&january_record).unwrap();
+    let phones = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    lists.flag(&w.bob_id());
+    let msg_id = inject_later_details(&w, &[wallet.app_id()], request.request_hash);
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(received(&summary, "paykit.payment_period_details"));
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 0);
+    let after = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    assert_eq!(after.version, phones.version);
+    assert_eq!(after.content, phones.content);
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS + DAY_MS);
+    wallet.receive(None).await.unwrap();
+    let notices = wallet.notices().await.unwrap();
+    assert!(
+        notices
+            .iter()
+            .any(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp
+                && n.msg_id.as_deref() == Some(msg_id.as_str())),
+        "{notices:?}"
+    );
+    let after = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    assert_eq!(after.content, phones.content);
+}
+
+#[tokio::test]
+async fn test_periods_proof_from_a_flagged_payer_over_a_payee_period_record_that_doesnt_bind_kept()
+{
+    // Bob's till holds `contacts`. His shop writes, at the till's January period record,
+    // February's record: a value that reads but doesn't bind to that key (Paykit wire 5.3).
+    // Alice is flagged since, and her proof of a real payment of January reaches the till.
+    // It updates a subscription the till holds, no new state, so the spam rule doesn't gate
+    // it: it is kept, never written over that value, and given up with the host's notice
+    // past its 30 days.
+    let w = World::new();
+    let lists = Arc::new(crate::common::ListsStore::default());
+    let mut till = w
+        .join_with(
+            &w.bob,
+            "till",
+            AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+            PaykitConfig::default(),
+            Arc::clone(&lists) as Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    till.receive(None).await.unwrap();
+    let request = till
+        .send_request(w.alice_id(), monthly(w.clock.now_ms(), None))
+        .await
+        .unwrap()
+        .request
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.accept_subscription(&request).await.unwrap();
+    till.receive(None).await.unwrap();
+    let sale = till.payee_activity().await.unwrap()[0].record;
+    let now = w.clock.now_ms();
+    till.send_period_details(&sale, details(month(1), "lnbc1feb", now + DAY_MS))
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let february = shop
+        .app_mut()
+        .read_record(&payee_period_at(&request, month(1)))
+        .await
+        .unwrap()
+        .unwrap();
+    let january_record = payee_period(&request);
+    let op = shop
+        .app_mut()
+        .record_op(
+            &january_record,
+            Some(february.content.value().unwrap()),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    shop.app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    till.receive(None).await.unwrap();
+    let key = till.app().record_key(&january_record).unwrap();
+    let shops = till.app().shared_record(&key).await.unwrap().unwrap();
+    lists.flag(&w.alice_id());
+    let body = period_proof(&w, till.app_id(), january()).await;
+    let msg_id = w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[till.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        body,
+    );
+    let summary = till.receive(None).await.unwrap();
+    assert!(received(&summary, "paykit.payment_proof"));
+    till.receive(None).await.unwrap();
+    assert_eq!(till.spam_count(&w.alice_id()).await.unwrap(), 0);
+    let after = till.app().shared_record(&key).await.unwrap().unwrap();
+    assert_eq!(after.version, shops.version);
+    assert_eq!(after.content, shops.content);
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS + DAY_MS);
+    till.receive(None).await.unwrap();
+    let notices = till.notices().await.unwrap();
+    assert!(
+        notices
+            .iter()
+            .any(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp
+                && n.msg_id.as_deref() == Some(msg_id.as_str())),
+        "{notices:?}"
+    );
+}

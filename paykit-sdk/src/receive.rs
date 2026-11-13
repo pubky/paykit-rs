@@ -584,6 +584,27 @@ fn keep_before_record(
     Ok(())
 }
 
+/// Keep `stored`, a message naming the request whose record is at `record`, until it can be
+/// placed. With no request record held there it is new state, kept through the spam rule
+/// ([`keep_before_record`]). With one held that the message can't be placed in now (a value
+/// that doesn't open, read or bind, or a period record that doesn't open or bind or lacks the
+/// period details a proof names), it updates activity the app holds, no new state: it is
+/// kept outside the spam rule, within the bounds on kept replies ([`keep_reply`]), so a
+/// blocked or flagged counterparty's message is never dropped for a record the app can't
+/// read yet. The later write places it once the record can take it, or gives it up with the
+/// host's notice past its 30 days ([`crate::Paykit::place_kept_replies`]).
+fn keep_until_placed(
+    cx: &mut ReceiveContext<'_>,
+    stored: &StoredMessage,
+    scopes: &[String],
+    record: &ActivityTarget,
+) -> Result<(), Fail> {
+    if held_request(cx, record)? {
+        return keep_reply(cx, record, stored);
+    }
+    keep_before_record(cx, stored, scopes, record)
+}
+
 /// Make room for a new stop from `sender` among the stops kept for requests not held, in the
 /// step: those the bounds drop ([`kept_reply_evicted`]) go, until there is room. Left out of
 /// the bounds, neither counted nor dropped, are the stops for a request the copy holds
@@ -642,14 +663,15 @@ fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<
 /// doesn't take details now ([`crate::periods::stores_details`]), are taken with no effect.
 /// With no service time verified yet, the entry is held until one is. Both records are read
 /// bound to their keys, as the later writes read them: a request record or period record
-/// whose value doesn't read or bind decides nothing and is never written over here, so the
-/// details are kept as before their record ([`keep_before_record`]), and the later write
-/// waits for a value that binds ([`crate::Paykit::place_kept_replies`]).
+/// whose value doesn't open, read or bind decides nothing and is never written over here, so
+/// the details are kept until placed ([`keep_until_placed`]), and the later write waits for
+/// a value that binds ([`crate::Paykit::place_kept_replies`]).
 ///
-/// The spam rule (Paykit wire 4.1) doesn't gate the details stored here: they go only into
-/// the period record of a subscription the payer accepted, an update of activity it holds
-/// with this payee, not new state. Details kept before their request record are new state,
-/// and [`keep_before_record`] gates them.
+/// The spam rule (Paykit wire 4.1) doesn't gate the details stored here, nor those kept over
+/// a request record the app holds: they go only into the period record of a subscription
+/// the payer accepted, an update of activity it holds with this payee, not new state.
+/// Details kept before their request record is held are new state, and
+/// [`keep_before_record`] gates them.
 fn period_details_effect(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
@@ -663,10 +685,10 @@ fn period_details_effect(
     };
     let request_target = ActivityTarget::payer(natural_key::request_record(&sender, &request_hash));
     let Some(value) = held_or_unlisted(cx, &request_target, RecordSide::Payer)? else {
-        return keep_before_record(cx, stored, scopes, &request_target);
+        return keep_until_placed(cx, stored, scopes, &request_target);
     };
     let Some(record) = bound_activity(cx, &request_target, &value, settlement)? else {
-        return keep_before_record(cx, stored, scopes, &request_target);
+        return keep_until_placed(cx, stored, scopes, &request_target);
     };
     if record.counterparty != sender || record.request.is_none() {
         return Ok(());
@@ -681,13 +703,18 @@ fn period_details_effect(
     // verify is corrupt state, never taken as a stop that drops the details.
     let kept_stop = key::kept_cancellation(&cx.record_key(&request_target.record_target())?);
     let stopped = state::cx_get::<KeptMessage>(cx, &kept_stop)?.is_some();
-    // The period record's paid state decides too; one absent shows nothing paid, and `place`
-    // below holds the entry while its value waits for its key.
+    // The period record's paid state decides too; one absent shows nothing paid. One whose
+    // value waits for its key holds the entry; one held that doesn't open, read or bind
+    // decides nothing and is never written over here: the details are kept until placed.
+    wait_for_key(cx, &target)?;
     let period = match held_value(cx, &target)? {
+        None if held_request(cx, &target)? => {
+            return keep_until_placed(cx, stored, scopes, &request_target);
+        }
         None => None,
         Some(value) => match bound_activity(cx, &target, &value, settlement)? {
             Some(period) => Some(period),
-            None => return keep_before_record(cx, stored, scopes, &request_target),
+            None => return keep_until_placed(cx, stored, scopes, &request_target),
         },
     };
     let stores = crate::periods::stores_details(
@@ -782,8 +809,11 @@ fn payer_reply(
             // spam rule gates, within the bounds on kept replies ([`kept_reply_evicted`]).
             // While the copy of the payee's records may lack records, the absence decides
             // nothing: the entry is held instead ([`held_or_unlisted`]).
+            // A request record held whose value doesn't open is no absence: the reply updates
+            // activity the app holds, kept outside the spam rule until it can be placed
+            // ([`keep_until_placed`]).
             let Some(value) = held_or_unlisted(cx, &target, RecordSide::Payee)? else {
-                keep_before_record(cx, stored, scopes, &target)?;
+                keep_until_placed(cx, stored, scopes, &target)?;
                 return Ok(false);
             };
             // A Billing Period's proof goes into its period record, never the request's
@@ -806,17 +836,21 @@ fn payer_reply(
             // bind is never written over here, and the proof waits the same way.
             if target != request_target {
                 let held = match held_or_unlisted(cx, &target, RecordSide::Payee)? {
+                    None if held_request(cx, &target)? => {
+                        keep_until_placed(cx, stored, scopes, &request_target)?;
+                        return Ok(true);
+                    }
                     None => None,
                     Some(value) => match bound_activity(cx, &target, &value, settlement)? {
                         Some(period) => Some(period),
                         None => {
-                            keep_before_record(cx, stored, scopes, &request_target)?;
+                            keep_until_placed(cx, stored, scopes, &request_target)?;
                             return Ok(true);
                         }
                     },
                 };
                 if awaits_named_details(held.as_ref(), ActivitySide::Payee, stored) {
-                    keep_before_record(cx, stored, scopes, &request_target)?;
+                    keep_until_placed(cx, stored, scopes, &request_target)?;
                     return Ok(true);
                 }
             }
