@@ -1418,3 +1418,85 @@ async fn test_blocked_recurring_rejection_while_the_deny_list_is_unknown_refused
 {
     answer_held(Held::Unknown, Answer::RejectRecurring).await;
 }
+
+/// Bob's request received at alice's wallet, and his list, then bob blocked: the user's
+/// payment of the request and a payment without a request are each refused as blocked,
+/// showing what the user confirms. The wallet's copy of the lists then becomes unknown: the
+/// due read at a receive fails. Returns the wallet and the two payments shown.
+async fn blocked_then_unknown(
+    w: &World,
+) -> (
+    Paykit,
+    RequestRef,
+    paykit_sdk::BlockedPayment,
+    paykit_sdk::BlockedPayment,
+) {
+    let (mut wallet, mut shop, request) = received(w, PaykitConfig::default()).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    wallet.block(&w.bob_id()).await.unwrap();
+    let paid = shown(
+        wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap_err(),
+    );
+    let unrequested = shown(
+        wallet
+            .pay_without_request(unrequested_payment(w, PayOptions::default()))
+            .await
+            .unwrap_err(),
+    );
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    fail_list_read(w);
+    wallet.receive(None).await.unwrap();
+    (wallet, request, paid, unrequested)
+}
+
+/// A payment without a request to bob's list endpoint, with `options`.
+fn unrequested_payment(w: &World, options: PayOptions) -> UnrequestedPayment {
+    UnrequestedPayment::new(w.bob_id(), btc("0.001"))
+        .with_options(options.with_endpoint(endpoint("btc-lightning-bolt12")))
+}
+
+#[tokio::test]
+async fn test_blocked_confirmed_payment_while_the_deny_list_is_unknown_refused() {
+    // The user confirms paying bob's request, blocked, but the wallet's copy of the lists
+    // isn't known and the read the payment makes first fails: the confirmation doesn't stand
+    // for a read, so nothing is paid and nothing, acceptance or proof, reaches bob (Paykit
+    // spec 8.1, "How fresh the deny list is").
+    let w = World::new();
+    let (mut wallet, request, paid, _) = blocked_then_unknown(&w).await;
+    let entries = w.bob.switch().entries_from(&w.alice_id());
+    fail_list_read(&w);
+    let refused = wallet
+        .pay_request(&request, PayOptions::default().with_blocked_confirmed(paid))
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    wallet.flush().await.unwrap();
+    assert!(w.rail.all_executions().is_empty());
+    assert!(wallet.payments().await.unwrap().is_empty());
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+}
+
+#[tokio::test]
+async fn test_blocked_confirmed_payment_without_a_request_while_the_deny_list_is_unknown_refused() {
+    // As above, for a payment without a request: nothing is paid, and no proof or list
+    // request reaches bob.
+    let w = World::new();
+    let (mut wallet, _, _, unrequested) = blocked_then_unknown(&w).await;
+    let entries = w.bob.switch().entries_from(&w.alice_id());
+    fail_list_read(&w);
+    let refused = wallet
+        .pay_without_request(unrequested_payment(
+            &w,
+            PayOptions::default().with_blocked_confirmed(unrequested),
+        ))
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    wallet.flush().await.unwrap();
+    assert!(w.rail.all_executions().is_empty());
+    assert!(wallet.payments().await.unwrap().is_empty());
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+}

@@ -2351,6 +2351,49 @@ async fn test_restore_own_rejection_to_a_blocked_payee_waits_until_unblocked() {
 }
 
 #[tokio::test]
+async fn test_restore_own_rejection_waits_while_the_deny_list_is_unknown() {
+    // The restored wallet's first read of the lists fails, so its copy of the deny list isn't
+    // known when its re-send runs: its rejection, which no outbox holds, waits; at the next
+    // receive the copy is known and it goes, once (Paykit spec 7.2, "What a restore loses";
+    // 8.1, Blocked counterparties).
+    let w = World::new();
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    let (_, backup) = wallet_backed_up_with_its_rejection_unqueued(&w, wallet, &mut shop).await;
+    let mut wallet = restored_unreceived(&w, &w.alice, &backup).await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/allow".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    let before = w.bob.switch().entries_from(&w.alice_id());
+    wallet.receive(None).await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_some());
+    wallet.receive(None).await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
+    wallet.receive(None).await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        paykit_sdk::PayeeStatus::Rejected
+    );
+}
+
+#[tokio::test]
 async fn test_restore_own_rejection_in_a_record_sealed_under_a_key_not_held_waits_for_it() {
     // After the backup the phone writes the request record again at a data epoch whose key
     // the restored wallet doesn't hold, though it holds a later one: the wallet's rejection,
