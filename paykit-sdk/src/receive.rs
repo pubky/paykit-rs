@@ -557,8 +557,10 @@ fn keep_cancellation(
 /// kept, so the step forgets its pair ([`ReceiveContext::forget_processed`]) in the commit
 /// that drops it, and a re-sent copy is taken, and kept again, as a new message. Kept
 /// processed, a re-send would be declined as a duplicate, and the request it cancels could
-/// be paid once it came. When the client won't forget the pair now, the stop stays kept and
-/// the bounds are over by one for this step.
+/// be paid once it came. The stop counts in its sender's mark of dropped replies, due at
+/// once ([`mark_dropped`]), so the sender is asked to send it again, at most once a day
+/// and not while sends to it are held (`marks.rs`). When the client won't forget the pair
+/// now, the stop stays kept and the bounds are over by one for this step.
 fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<(), Fail> {
     let mut kept = Vec::new();
     let mut names = Vec::new();
@@ -584,13 +586,15 @@ fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<
         names.push(name.into_bytes());
         msg_ids.push(cancellation.message().msg_id.clone());
     }
+    let mut dropped: std::collections::BTreeMap<[u8; 32], (u64, u64)> =
+        std::collections::BTreeMap::new();
     while let Some(index) = kept_reply_evicted(&kept, sender) {
-        let (from, _) = kept[index];
+        let (from, at) = kept[index];
         match cx.forget_processed(from, &msg_ids[index]) {
             Ok(_) => {}
             // The client won't forget the pair now: dropped without forgetting it, the stop
             // could never be taken again, so it stays kept.
-            Err(AppError::Refused(ClientRefusal::NotNow(_))) => return Ok(()),
+            Err(AppError::Refused(ClientRefusal::NotNow(_))) => break,
             // Past the step's bound on local writes: the context marks the step, and the
             // client stores the entry as too large, applying none of it (`keep_local`).
             Err(AppError::Refused(ClientRefusal::Usage(_))) => {}
@@ -604,6 +608,11 @@ fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<
                 key: names.swap_remove(index),
             },
         );
+        let times = dropped.entry(from).or_insert((at, at));
+        *times = (times.0.min(at), times.1.max(at));
+    }
+    for (from, times) in dropped {
+        mark_dropped(cx, from, times, true)?;
     }
     Ok(())
 }
@@ -1288,6 +1297,22 @@ fn make_room_for_reply(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result
             key: names.swap_remove(index),
         },
     );
+    mark_dropped(cx, from, (at, at), false)
+}
+
+/// Count messages from `from` dropped for the bounds, accepted between `times` (the
+/// earliest and the latest), in the sender's mark of dropped replies (`pd/<sender>`,
+/// `marks.rs`), in the step: the sender is asked to send them again, from the mark's
+/// earliest time. A mark is due at once when `due`, as for a stop dropped for the bounds,
+/// whose request may come at any time; otherwise, as for a reply, once the app holds the
+/// record of one of the sender's requests.
+fn mark_dropped(
+    cx: &mut ReceiveContext<'_>,
+    from: [u8; 32],
+    times: (u64, u64),
+    due: bool,
+) -> Result<(), Fail> {
+    let (earliest, latest) = times;
     let family = MarkFamily::Replies;
     let mark_key = family.key(&from);
     let held = state::cx_get::<crate::marks::DropMark>(cx, &mark_key)?;
@@ -1297,7 +1322,7 @@ fn make_room_for_reply(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result
             others.push((mark.sender, mark.latest_ms));
         }
     }
-    let counted = count_dropped(held, &others, from, at, false);
+    let counted = count_dropped(held, &others, from, earliest, due);
     if let Some(gone) = counted.evicted {
         keep_local(
             cx,
@@ -1306,7 +1331,9 @@ fn make_room_for_reply(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result
             },
         );
     }
-    if let Some(mark) = counted.put {
+    if let Some(mut mark) = counted.put {
+        mark.latest_ms = mark.latest_ms.max(latest);
+        mark.due |= due;
         keep_local(cx, local(&mark_key, &mark)?);
     }
     Ok(())
