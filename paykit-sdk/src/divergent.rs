@@ -655,10 +655,8 @@ pub(crate) struct DivergentWrite {
     settlement: Option<String>,
     message: KeptMessage,
     /// Where the receive step took it among the messages kept over the record, of every
-    /// role ([`Order`]); `None` for a value stored without it, which reads as taken before
-    /// every message of its millisecond that has one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    intake: Option<u64>,
+    /// role ([`Order`]). Every writer sets it: a value without it is a corrupt store.
+    intake: u64,
 }
 
 impl DivergentWrite {
@@ -751,12 +749,11 @@ impl DivergentWrite {
 /// read and across reads, the cursor only moving forward: the order it keeps them in is
 /// the inbox's. An entry the client gives again from its local store, or a receipt moved
 /// over its record from `pr/`, is taken when it comes, after those kept before it in its
-/// millisecond. A value stored without its intake (`None`) reads as taken before every
-/// message of its millisecond that has one, so those wait behind it.
+/// millisecond.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Order {
     at: u64,
-    intake: Option<u64>,
+    intake: u64,
 }
 
 impl Order {
@@ -766,7 +763,7 @@ impl Order {
     fn after_kept(stored: &StoredMessage) -> Self {
         Self {
             at: stored.accepted_at().unwrap_or(u64::MAX),
-            intake: Some(u64::MAX),
+            intake: u64::MAX,
         }
     }
 }
@@ -775,7 +772,7 @@ impl Order {
 /// values kept over it already, of every role: one after the latest.
 fn next_intake<'a>(kept: impl IntoIterator<Item = &'a DivergentWrite>) -> u64 {
     kept.into_iter()
-        .filter_map(|kept| kept.intake)
+        .map(|kept| kept.intake)
         .max()
         .map_or(0, |latest| latest.saturating_add(1))
 }
@@ -1137,7 +1134,7 @@ pub(crate) fn step_keep(
     }
     let order = Order {
         at: stored.accepted_at().ok_or_else(Fail::corrupt)?,
-        intake: Some(intake),
+        intake,
     };
     let (keep, gone) = kept_after(&held_messages, &(stored.clone(), order), reads);
     // This step's own message, when the bound would drop it (it was accepted before the 16
@@ -1186,7 +1183,7 @@ pub(crate) fn step_keep(
         seen: view.version,
         settlement: kept_settlement,
         message: KeptMessage::of(stored),
-        intake: Some(intake),
+        intake,
     };
     let write = state::local_put(&kept_key, &kept).map_err(|_| Fail::corrupt())?;
     crate::receive::keep_local(cx, write);
@@ -1691,7 +1688,7 @@ impl Paykit {
         let kept_already = held_messages.iter().any(|(held, _)| kept_id(held) == id);
         let order = Order {
             at: stored.accepted_at().ok_or_else(PaykitError::corrupt)?,
-            intake: Some(intake),
+            intake,
         };
         let (keep, gone) = kept_after(&held_messages, &(stored.clone(), order), true);
         for (sender, dropped_id) in gone.iter().filter(|gone| **gone != id) {
@@ -1732,7 +1729,7 @@ impl Paykit {
                 seen: view.version,
                 settlement,
                 message: KeptMessage::of(stored),
-                intake: Some(intake),
+                intake,
             };
             tx.put(&key::divergent_write(&record, role, &id.0, &id.1), &kept)?;
         }
@@ -2258,7 +2255,7 @@ mod tests {
             seen: view(true, 3).version,
             settlement: Some(pubky_switch_core::enc::b64(b"t1")),
             message: KeptMessage::of(&proof),
-            intake: Some(0),
+            intake: 0,
         };
         let rail = |proof: &serde_json::Map<String, serde_json::Value>| {
             paykit_lib::derive::settlement_id(proof)
@@ -2285,7 +2282,7 @@ mod tests {
     fn taken(stored: StoredMessage, intake: u64) -> (StoredMessage, Order) {
         let order = Order {
             at: stored.accepted_at().unwrap(),
-            intake: Some(intake),
+            intake,
         };
         (stored, order)
     }
@@ -2334,19 +2331,65 @@ mod tests {
         let (keep, gone) = kept_after(&kept, &late, true);
         assert!(keep);
         assert_eq!(gone, vec![kept_id(&kept[1].0)]);
-        // A value stored without its intake reads as taken before every message of its
-        // millisecond that has one, and after every earlier millisecond.
-        let unknown = Order {
-            at: late.1.at,
-            intake: None,
-        };
-        assert!(unknown < kept[0].1 && unknown < Order::after_kept(&late.0));
+        // A message not kept comes after every kept one of its millisecond, and every
+        // message of an earlier millisecond before them all.
+        assert!(kept[0].1 < Order::after_kept(&late.0));
         assert!(
             Order {
                 at: late.1.at - 1,
-                intake: Some(u64::MAX),
-            } < unknown
+                intake: u64::MAX,
+            } < kept[0].1
         );
+    }
+
+    #[test]
+    fn test_divergent_write_without_its_intake_is_corrupt_at_a_restore() {
+        // Every writer of `dw/` sets the intake: a value without it is no state a run
+        // leaves, and a restore refuses it as it refuses any other such shape.
+        let alice = crate::testkit::Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = crate::testkit::Party::new("bob", "shop", &["request"]);
+        let reply = alice.message(
+            &bob,
+            "paykit.payment_request_acceptance",
+            vec![[4; 32]],
+            crate::testkit::object(serde_json::json!({})),
+        );
+        let Some(WriteTarget::Activity { target, .. }) = write_target(&reply, &bob.id(), &|_| None)
+        else {
+            panic!("an acceptance goes into an activity record");
+        };
+        let blind = |input: &[u8]| pubky_switch_core::enc::hash(input);
+        let at = target.record_target();
+        let record = pubky_switch_core::ident::record_key_from_blinded(
+            &at.collection.name,
+            &blind(&at.natural_key),
+            &at.collection.policy.hash().unwrap(),
+        );
+        let kept = DivergentWrite {
+            record,
+            role: WriteRole::Response,
+            seen: view(true, 3).version,
+            settlement: None,
+            message: KeptMessage::of(&reply),
+            intake: 0,
+        };
+        let key = key::divergent_write(
+            &record,
+            WriteRole::Response,
+            &alice.id(),
+            &reply.message().msg_id,
+        );
+        let binder = state::Binder::new(bob.id(), &bob.cert, &blind);
+        let value = state::encode(&kept).unwrap();
+        assert!(state::restored::<DivergentWrite>(key.as_bytes(), &value, &binder).is_ok());
+        let mut without: serde_json::Value = serde_json::from_slice(&value).unwrap();
+        assert!(without["d"]
+            .as_object_mut()
+            .unwrap()
+            .remove("intake")
+            .is_some());
+        let without = serde_json::to_vec(&without).unwrap();
+        assert!(state::restored::<DivergentWrite>(key.as_bytes(), &without, &binder).is_err());
     }
 
     #[test]
