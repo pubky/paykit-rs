@@ -355,8 +355,10 @@ pub(crate) fn count_blocked(
     let (from, until) = window;
     if let Some(mut mark) = held {
         if mark.asked_at_ms.is_some() {
+            // A new window, which never lowers the mark's latest time: a request of the old
+            // window may still be on its way back, and is judged by it.
             mark.earliest_ms = from;
-            mark.latest_ms = until;
+            mark.latest_ms = mark.latest_ms.max(until);
             mark.asked_at_ms = None;
             mark.late_told = false;
             mark.speculative = !real;
@@ -546,11 +548,18 @@ impl Paykit {
     /// read's copy must show the sender neither blocked nor flagged: a copy sent to a flagged
     /// sender's re-send would be counted only, and lost. A read that fails, or a copy of the
     /// flagged senders that isn't kept, asks nothing. No time of the device is compared with
-    /// a service time.
+    /// a service time. The copy kept from a read under [`crate::LISTS_REFRESH_MS`] old only
+    /// spares the read: while it shows every such sender denied or flagged, the read isn't
+    /// made, as its answer could only hold the ask. It never decides that a mark asks.
     async fn ask_on_block_marks(&mut self) -> Result<u64> {
         let family = MarkFamily::Blocked;
         let now = self.now();
         let service = self.service_time();
+        let fresh_copy = self
+            .local_get::<u64>(key::LISTS_READ)
+            .await?
+            .is_some_and(|read| read <= now && now - read < crate::LISTS_REFRESH_MS);
+        let kept_flagged = self.local_get::<Vec<[u8; 32]>>(key::FLAGGED).await?;
         let mut ready = Vec::new();
         for (rest, mark) in self.local_scan::<DropMark>(family.prefix()).await? {
             let own_change = self
@@ -567,7 +576,14 @@ impl Paykit {
                 && !own_change
                 && would_send
                 && !mark.expired(service);
-            ready.push((rest, mark, ready_now));
+            // A fresh copy that still holds the sender spares the read for it.
+            let held_by_fresh_copy = ready_now
+                && fresh_copy
+                && (self.denied_as_last_read(&mark.sender).await?
+                    || kept_flagged
+                        .as_ref()
+                        .is_some_and(|flagged| flagged.contains(&mark.sender)));
+            ready.push((rest, mark, ready_now && !held_by_fresh_copy));
         }
         let read = if ready.iter().any(|(_, _, ready_now)| *ready_now) {
             Box::pin(self.read_lists_now()).await?
@@ -972,6 +988,20 @@ mod tests {
             (next.earliest_ms, next.latest_ms, next.queued),
             (5, 30, None)
         );
+    }
+
+    #[test]
+    fn test_count_blocked_new_window_never_lowers_the_latest_time() {
+        // An older `missed` window applied over an asked mark starts a new window, but its
+        // latest time stays: a request of the old window may still come back.
+        let asked = mark(1, 50, 100);
+        let BlockedCount::Put { mark: next, .. } =
+            count_blocked(Some(asked), &[], [1; 32], (10, 20), false)
+        else {
+            panic!("counted");
+        };
+        assert_eq!((next.earliest_ms, next.latest_ms), (10, 100));
+        assert_eq!(next.asked_at_ms, None);
     }
 
     #[test]

@@ -502,8 +502,10 @@ async fn test_blocked_return_no_ask_while_the_deny_list_holds_the_sender() {
     wallet.receive(None).await.unwrap();
     assert_eq!(block_marks(&wallet).await, 1);
     assert!(asked(&wallet, &w.bob_id()).await.is_empty());
-    // Unblocked, the ask's own read shows it: he is asked.
+    // Unblocked: once the copy that showed him denied is due for a refresh, the ask reads
+    // the lists and he is asked.
     wallet.app_mut().undeny(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
     wallet.receive(None).await.unwrap();
     assert_eq!(asked(&wallet, &w.bob_id()).await.len(), 1);
 }
@@ -803,4 +805,35 @@ async fn test_blocked_return_marks_and_widenings_dated_past_the_backup_bounded_a
         );
         assert!(String::from_utf8(key).unwrap() <= format!("bw/{bound:020}"));
     }
+}
+
+#[tokio::test]
+async fn test_blocked_return_mark_of_a_sender_still_blocked_spares_the_lists_read() {
+    // While bob stays blocked and the copy of the lists is fresh, his mark makes no receive
+    // read the lists beyond its own 10-minute refresh: a read armed to fail isn't made.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.block(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(block_marks(&wallet).await, 1);
+    assert!(wallet.app().protocol_get(b"lr").await.unwrap().is_some());
+    for _ in 0..3 {
+        w.clock.advance_ms(MINUTE_MS);
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/allow".into(),
+                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                current: serde_json::Value::Null,
+            });
+        wallet.receive(None).await.unwrap();
+        assert!(wallet.app().protocol_get(b"lr").await.unwrap().is_some());
+        // The armed fault stays for the next read; this one takes it.
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(asked(&wallet, &w.bob_id()).await.is_empty());
 }
