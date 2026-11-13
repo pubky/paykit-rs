@@ -545,17 +545,14 @@ async fn test_executor_handoff_stops_the_previous_executor() {
     // The notice takes the Allowance off the previous executor's consent list.
     old.receive(None).await.unwrap();
     assert!(!old.allowance(&record).await.unwrap().consented);
-    // The new executor keeps no ledger version to check the previous one's ledger
-    // against: it builds on none and pays nothing automatically (Paykit spec 8.3, "Last
+    // The new executor never held a ledger version: it builds on the previous executor's
+    // ledger shown, once it passes every other check, and keeps it (Paykit spec 8.3, "Last
     // ledger version").
     new.receive(None).await.unwrap();
-    let refused = new.pay_under_allowance(&second, &record).await.unwrap_err();
-    assert!(
-        refused_for(&refused, "no ledger version is kept"),
-        "{refused:?}"
-    );
+    let paid = new.pay_under_allowance(&second, &record).await.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     let (_, ledger) = held(&new, &record).await;
-    assert_eq!(ledger.unwrap().entries.len(), 1);
+    assert_eq!(ledger.unwrap().entries.len(), 2);
 }
 
 #[tokio::test]

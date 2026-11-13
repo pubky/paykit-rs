@@ -104,6 +104,11 @@ pub(crate) struct EmptyLedgerMark {
     /// again.
     #[serde(default)]
     pub(crate) batch: Option<[u8; 16]>,
+    /// A ledger was already at its key at the first grant: the executor writes no empty
+    /// ledger over it and takes it as one it didn't accept, paying nothing on it until its
+    /// user confirms a repair (Paykit spec 8.3, "A grant implies a ledger").
+    #[serde(default)]
+    pub(crate) unaccepted: bool,
 }
 
 /// The version of an Allowance record's current write the app ignores (Switch spec 8.2)
@@ -353,6 +358,15 @@ impl Paykit {
         self.local_commit(tx).await
     }
 
+    /// Whether a ledger was at its key at the first grant (`el/`), so the executor takes it
+    /// as one it didn't accept (Paykit spec 8.3, "A grant implies a ledger").
+    async fn ledger_unaccepted(&self, record: &[u8; 32]) -> Result<bool> {
+        Ok(self
+            .local_get::<EmptyLedgerMark>(&key::empty_ledger(record))
+            .await?
+            .is_some_and(|mark| mark.unaccepted))
+    }
+
     /// Whether this executor's own journal shows the first grant's empty ledger not yet
     /// sent (`el/`): only then is a missing ledger the empty one (Paykit spec 8.3).
     async fn empty_ledger_unsent(&self, record: &[u8; 32]) -> Result<bool> {
@@ -381,6 +395,7 @@ impl Paykit {
                     record: *record,
                     sent: true,
                     batch,
+                    unaccepted: false,
                 },
             )
             .await?;
@@ -420,6 +435,7 @@ impl Paykit {
                     record: *record,
                     sent: false,
                     batch: None,
+                    unaccepted: false,
                 },
             )
             .await?;
@@ -709,17 +725,17 @@ impl Paykit {
             shared.writer,
         )
         .map_err(not_automatic)?;
-        // Merged spec 8.3 checks the write shown against the version kept: an executor that
-        // keeps none, as a new executor after a handoff, or one restored from a backup taken
-        // before its first ledger write, has nothing to check it against, so it builds on
-        // nothing and pays nothing automatically (fail closed). Which write such an executor
-        // may build on is left to the spec.
-        let Some((kept, held)) = &kept else {
+        // An executor that never held a ledger version, such as a new executor after a
+        // handoff that never read the ledger, or one restored from a backup that holds none,
+        // builds on the write shown once it passes every other check, and keeps it from then
+        // on (Paykit spec 8.3, "Last ledger version"; open question 32). A ledger that was at
+        // its key at the first grant is the exception: one the executor didn't accept.
+        if kept.is_none() && self.ledger_unaccepted(&under.record_key).await? {
             return Err(not_automatic(
-                "no ledger version is kept to check the ledger shown against",
+                "the ledger at its key before the first grant isn't one this executor accepted",
             ));
-        };
-        {
+        }
+        if let Some((kept, held)) = &kept {
             let item = op.item_hash().map_err(|_| PaykitError::corrupt())?;
             let built_on = match &op.body().kind {
                 OpKind::RecordPut(put) => put.expected_version,
@@ -1097,13 +1113,14 @@ impl Paykit {
         let lt = ledger_target(&held.counterparty, &held.allowance_id);
         let ledger_key = self.app.record_key(&lt)?;
         let ledger_held = self.app.shared_record(&ledger_key).await?.is_some();
-        if next.grants.len() == 1 && !ledger_held {
+        if next.grants.len() == 1 {
             locals.push(state::local_put(
                 &key::empty_ledger(record),
                 &EmptyLedgerMark {
                     record: *record,
-                    sent: false,
+                    sent: ledger_held,
                     batch: None,
+                    unaccepted: ledger_held,
                 },
             )?);
         }
@@ -1162,7 +1179,17 @@ impl Paykit {
         let lt = ledger_target(&allowance.counterparty, &allowance.allowance_id);
         let ledger_key = self.app.record_key(&lt)?;
         if self.app.shared_record(&ledger_key).await?.is_some() {
-            return self.local_delete(&key::empty_ledger(record)).await;
+            return self
+                .local_put(
+                    &key::empty_ledger(record),
+                    &EmptyLedgerMark {
+                        record: *record,
+                        sent: true,
+                        batch: None,
+                        unaccepted: true,
+                    },
+                )
+                .await;
         }
         let empty = Ledger::empty(allowance.counterparty, allowance.allowance_id.clone());
         let write = self
@@ -1181,6 +1208,13 @@ impl Paykit {
             record: *record,
             sent: false,
             batch: None,
+            unaccepted: false,
+        };
+        let unaccepted = EmptyLedgerMark {
+            record: *record,
+            sent: true,
+            batch: None,
+            unaccepted: true,
         };
         match self.app.submit_batch(OpBatch::new().entry(write)).await {
             Ok(_) => self.keep_own_ledger(record, &lt).await,
@@ -1191,7 +1225,8 @@ impl Paykit {
                 // A ledger at the key the app didn't hold, or the record changed since.
                 self.app.read_record(&lt).await?;
                 if self.app.shared_record(&ledger_key).await?.is_some() {
-                    self.local_delete(&key::empty_ledger(record)).await
+                    self.local_put(&key::empty_ledger(record), &unaccepted)
+                        .await
                 } else {
                     self.local_put(&key::empty_ledger(record), &owed).await
                 }
