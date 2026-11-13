@@ -456,6 +456,14 @@ impl Paykit {
     /// key. On an error, neither layer is in the store. The app is in reconcile mode until
     /// [`Paykit::reconcile`] and [`Paykit::end_reconcile`].
     ///
+    /// A publishing app whose backup holds a list it published publishes no Private Payment
+    /// List after the restore until the host sets its list again
+    /// ([`Paykit::set_list_endpoints`]): the backup's list and counterparties may be older
+    /// than what the user changed since. Only a withdrawal goes meanwhile. The host re-applies
+    /// the withdrawals made since the backup first ([`Paykit::withdraw_list_from`]), then sets
+    /// the list; until then [`Paykit::lists_await_host`] reads `true`, and the restore raises
+    /// a [`crate::NoticeKind::ListsAwaitHost`] notice once, which goes when the list is set.
+    ///
     /// # Errors
     ///
     /// [`crate::PaykitError::Lib`] `Validation` for an `orphan_after_s` below the rail's floor

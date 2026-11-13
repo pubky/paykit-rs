@@ -45,9 +45,9 @@
 //! | `lc` | the certificate the shared records were last listed under, signed: a certificate held now other than it means the copy may lack records until Paykit lists them, since one held between may have read less (`hold.rs`); written only by a Paykit listing, in its commit; absent from a join or a restore until that listing, which leaves the records unlisted; never restored | |
 //! | `ro` | set by a restore: this app's own messages its activity records store to be sent are queued again once the records are listed (`hold.rs`, `Paykit::queue_own_again`); after a pass, the counterparties whose sends were held then, whose messages wait; never restored | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
-//! | `lw` | set by a restore: the list and the counterparties are the backup's, so no list but a withdrawal goes until the host sets its list again, which clears it (`publish.rs`); never restored | |
+//! | `lw` | set by a restore whose backup holds a list this app published (`ll`, `lv` or `lp/`): the list and the counterparties are the backup's, so no list but a withdrawal goes until the host sets its list again, which clears it (`publish.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named, when, and its `msg_id`, to ask again for one that didn't reach the payee's inbox (Paykit spec 8.4) | |
-//! | `nt/<attempt_id>/<kind>`, `nt/<counterparty>/<msg_id>` | a notice for the host about a payment, a message received and given up, or a message this app sent that a record holds and the client gave up undelivered, until acknowledged (`notices.rs`) | |
+//! | `nt/<attempt_id>/<kind>`, `nt/<counterparty>/<msg_id>`, `nt/lists/await_host` | a notice for the host about a payment, a message received and given up, a message this app sent that a record holds and the client gave up undelivered, or, written with `lw`, that lists wait for the host, until acknowledged or, for the last, until the host sets its list (`notices.rs`) | |
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
 //! | `bk/<pubky>` | this app's block or unblock of `pubky` not yet shown by the list (`OwnBlockMark`): a block from before the switch is asked, an unblock only with the batch the client keeps; a block counts until a read of the list shows it, and is written again at a receive while the client neither keeps nor applied its batch, a restored one too, since the kept batch stays with the device that kept it; an unblock counts for payments and held sends only while the client still keeps its batch, never for the spam rule, and isn't restored (Paykit spec 8.1) | |
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
@@ -693,8 +693,8 @@ impl sealed::Sealed for KeptNotice {}
 /// A notice: of the attempt and kind, or the sender and `msg_id`, its key names
 /// ([`crate::notices::bind_notice`]).
 impl Stored for KeptNotice {
-    fn bind(&self, key: &str, _: &StateKey, _: &Binder<'_>) -> Result<()> {
-        crate::notices::bind_notice(key, self)
+    fn bind(&self, key: &str, _: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        crate::notices::bind_notice(key, self, &binder.own)
     }
 }
 
@@ -876,6 +876,8 @@ pub(crate) mod key {
     pub(crate) const LISTS_AWAIT_HOST: &str = "lw";
     pub(crate) const LISTED_CERT: &str = "lc";
     pub(crate) const NOTICES: &str = "nt/";
+    /// The notice that, after a restore, lists wait for the host.
+    pub(crate) const LISTS_NOTICE: &str = "nt/lists/await_host";
     pub(crate) const STORED_NOTES: &str = "se/";
     pub(crate) const KEPT_REPLIES: &str = "pr/";
     pub(crate) const DROPPED_REPLIES: &str = "pd/";
@@ -1118,12 +1120,17 @@ pub(crate) enum StateKey {
     /// `nt/<counterparty>/<msg_id>`: a notice for the host about a message given up, its
     /// sender, or undelivered, its recipient.
     MessageNotice { sender: [u8; 32], msg_id: String },
+    /// `nt/lists/await_host`: the notice that, after a restore, lists wait for the host.
+    ListsNotice,
     /// `nt/<attempt_id>/<kind>`: a notice for the host.
     Notice {
         attempt: AttemptId,
         kind: crate::notices::NoticeKind,
     },
 }
+
+/// The rest of [`key::LISTS_NOTICE`] after the family's prefix.
+const LISTS_NOTICE_REST: &str = "lists/await_host";
 
 impl StateKey {
     /// The family of `key`, read whole and strictly: a base64 member in its one spelling,
@@ -1268,6 +1275,9 @@ impl StateKey {
                         }
                     }
                     "nt" => {
+                        if rest == LISTS_NOTICE_REST {
+                            return Some(Self::ListsNotice);
+                        }
                         let (attempt, tag) = rest.split_once('/')?;
                         if let Some(sender) = b64_32(attempt) {
                             return Some(Self::MessageNotice {
@@ -1655,6 +1665,7 @@ mod tests {
             (key::MISSED_UNLISTED.into(), StateKey::MissedUnlisted),
             (key::PAYER_PASS_OWED.into(), StateKey::PayerPassOwed),
             (key::LISTS_AWAIT_HOST.into(), StateKey::ListsAwaitHost),
+            (key::LISTS_NOTICE.into(), StateKey::ListsNotice),
             (key::OWN_RESEND_OWED.into(), StateKey::OwnResendOwed),
             (key::LISTED_CERT.into(), StateKey::ListedCert),
             (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),
@@ -1782,6 +1793,8 @@ mod tests {
             "nt/BQUFBQUFBQUFBQUFBQUFBQ/paid",
             "dt/05-7",
             "nt/BQUFBQUFBQUFBQUFBQUFBQ",
+            "nt/lists/await_hostx",
+            "nt/lists",
             "lp/",
             "rl/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM/11",
             "llx",

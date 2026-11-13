@@ -698,7 +698,9 @@ impl Paykit {
         // makes it until its message is queued (`Paykit::send_list`), so a failed queueing
         // or a crash sends it at a later receive.
         let mut tx = Tx::default();
-        tx.put(key::LIST, &list)?.delete(key::LISTS_AWAIT_HOST);
+        tx.put(key::LIST, &list)?
+            .delete(key::LISTS_AWAIT_HOST)
+            .delete(key::LISTS_NOTICE);
         let mut active = Vec::new();
         for mut recipient in self.recipients().await? {
             if recipient.active {
@@ -1228,12 +1230,17 @@ impl Paykit {
             // backup came from may have delivered it (a backup carries no sent messages, and
             // the client's `MessageUndelivered` after a restore says only that this store
             // never saw it accepted). Nothing short of its acceptance decides it: it is
-            // never given back, and stays Doubtful.
+            // never given back, and stays Doubtful. A withdrawal, which holds no payload to give
+            // back, that this store's outbox sent and the switch refused for good is Refused,
+            // as any other: it isn't sent again.
             if offered.restored {
                 match delivery {
                     Some(Delivery::Accepted { accepted_at_ms }) => {
                         offered.accepted_at_ms = Some(accepted_at_ms);
                         offered.fate = Fate::Pending;
+                    }
+                    Some(Delivery::Failed { .. }) if offered.endpoints.is_empty() => {
+                        offered.fate = Fate::Refused;
                     }
                     Some(Delivery::Queued { .. }) => {}
                     _ if undelivered.is_some() => offered.fate = Fate::Doubtful,

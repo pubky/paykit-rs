@@ -314,6 +314,8 @@ pub(crate) fn restore_paykit_layer(
     // run keeps the one never below the other (`publish::check_last_version`).
     let mut last_version = None;
     let mut newest_sent = None;
+    // Whether the backup holds a list this app published (`ll`, `lv` or `lp/`).
+    let mut published = false;
     for (key, value) in state {
         // The schema is closed: a key no builder of the SDK writes is refused, and every
         // value is read as its family's, bound to what its key names (`state::StateKey`).
@@ -468,6 +470,7 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::LastVersion
             | StateKey::ListRecipient(_)
             | StateKey::Releases { .. } => {
+                published |= !matches!(family, StateKey::Releases { .. });
                 let value = match crate::publish::check_restored(&key, &value, &binder)
                     .map_err(|_| unread())?
                 {
@@ -486,6 +489,8 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            // The notice that lists wait for the host is this restore's own to raise, with `lw`.
+            StateKey::ListsNotice => continue,
             StateKey::MessageNotice { .. } | StateKey::Notice { .. } => {
                 let notice =
                     state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
@@ -550,10 +555,19 @@ pub(crate) fn restore_paykit_layer(
     writes.push(resend);
     // The list and its counterparties are the backup's: a change or a withdrawal made since
     // is gone, so no list but a withdrawal goes until the host sets its list again
-    // (`publish.rs`).
-    let lists = state::local_put(key::LISTS_AWAIT_HOST, &true)
-        .map_err(|_| String::from("the restore's lists mark can't be written"))?;
-    writes.push(lists);
+    // (`publish.rs`), and the host is told once. An app that published none waits for
+    // nothing.
+    if published {
+        let lists = state::local_put(key::LISTS_AWAIT_HOST, &true)
+            .map_err(|_| String::from("the restore's lists mark can't be written"))?;
+        writes.push(lists);
+        let notice = state::local_put(
+            key::LISTS_NOTICE,
+            &KeptNotice::lists_await_host(own, cursor_time_ms),
+        )
+        .map_err(|_| String::from("the restore's lists notice can't be written"))?;
+        writes.push(notice);
+    }
     Ok(writes)
 }
 

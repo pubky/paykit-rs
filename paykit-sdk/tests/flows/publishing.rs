@@ -1268,6 +1268,44 @@ async fn test_publishing_withdrawal_refused_for_good_not_sent_again() {
 }
 
 #[tokio::test]
+async fn test_publishing_restored_withdrawal_refused_for_good_not_sent_again() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.publish_to_alice(&mut shop).await;
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    // The withdrawal's delivery fails for now: the backup holds it unseen, in its outbox.
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "inbox".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    shop.withdraw_list_from(&w.alice_id()).await.unwrap();
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    // The host flushes the restored outbox, and her switch refuses it for good: no re-send
+    // changes that, and nothing of it is sent again.
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "inbox".into(),
+            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            current: serde_json::Value::Null,
+        });
+    let mut shop = restored_shop(&w, &backup).await;
+    shop.flush().await.unwrap();
+    for _ in 0..4 {
+        w.clock.advance_ms(2 * HOUR_MS);
+        let got = shop.receive(None).await.unwrap();
+        shop.flush().await.unwrap();
+        assert!(got.lists.sent.is_empty(), "{:?}", got.lists);
+    }
+    assert_eq!(lists_taken(&mut wallet).await, 0);
+}
+
+#[tokio::test]
 async fn test_publishing_withdrawal_that_never_left_sent_again_an_hour_after_it() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -1978,6 +2016,14 @@ async fn test_publishing_restored_lists_wait_for_the_host() {
     drop(shop);
     let mut shop = restored_shop(&w, &backup).await;
     assert!(shop.lists_await_host().await.unwrap());
+    // The host is told once.
+    let waits = |notices: Vec<paykit_sdk::Notice>| {
+        notices
+            .iter()
+            .filter(|n| n.kind == paykit_sdk::NoticeKind::ListsAwaitHost)
+            .count()
+    };
+    assert_eq!(waits(shop.notices().await.unwrap()), 1);
     // The renewal is due: it waits for the host, nothing goes.
     w.clock.advance_ms(LIST_LIFETIME_MS / 2);
     let got = shop.receive(None).await.unwrap();
@@ -1992,13 +2038,35 @@ async fn test_publishing_restored_lists_wait_for_the_host() {
     assert!(no_usable_list(&w, &mut wallet).await);
     // The host re-applies the withdrawal, which goes, then sets its list: she gets no list.
     shop.withdraw_list_from(&w.alice_id()).await.unwrap();
+    assert_eq!(waits(shop.notices().await.unwrap()), 1);
     let set = shop.set_list_endpoints(list("lno1changed")).await.unwrap();
     assert!(set.sent.is_empty(), "{set:?}");
     assert!(!shop.lists_await_host().await.unwrap());
+    // Set, the list waits no more, and the notice goes.
+    assert_eq!(waits(shop.notices().await.unwrap()), 0);
     let got = shop.receive(None).await.unwrap();
     assert!(got.lists.sent.is_empty(), "{:?}", got.lists);
     assert_eq!(lists_taken(&mut wallet).await, 1);
     assert!(no_usable_list(&w, &mut wallet).await);
+}
+
+/// An app that never published a list waits for nothing after a restore, and isn't told it
+/// does.
+#[tokio::test]
+async fn test_publishing_restore_without_a_list_waits_for_nothing() {
+    let w = World::new();
+    let shop = w.shop().await;
+    let mut shop = shop;
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let shop = restored_shop(&w, &backup).await;
+    assert!(!shop.lists_await_host().await.unwrap());
+    assert!(shop
+        .notices()
+        .await
+        .unwrap()
+        .iter()
+        .all(|n| n.kind != paykit_sdk::NoticeKind::ListsAwaitHost));
 }
 
 /// After a restore the backup's list isn't sent until the host sets its list, and then the
@@ -2047,4 +2115,30 @@ async fn test_publishing_probe_withdrawal_after_the_backup_lost_but_the_block_ho
     let got = shop.receive(None).await.unwrap();
     assert!(got.lists.sent.is_empty(), "{:?}", got.lists);
     assert_eq!(lists_taken(&mut wallet).await, 0);
+}
+
+/// A change whose fan-out stops at the first counterparty, its queueing failing, still
+/// reaches every counterparty that gets the lists, the one never tried included.
+#[tokio::test]
+async fn test_publishing_change_reaches_a_counterparty_the_failed_fan_out_never_tried() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut other = w
+        .join(&w.carol, "wallet", AppScopes::new().pay().build().unwrap())
+        .await;
+    other.app_mut().invite(&w.bob_id()).await.unwrap();
+    let base = Arc::new(FailingCommits::default());
+    let mut shop = shop_on(&w, &base).await;
+    shop.publish_list_to(&[w.alice_id(), w.carol_id()])
+        .await
+        .unwrap();
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    assert_eq!(lists_taken(&mut other).await, 1);
+    base.fail(Some(b"out/"));
+    assert!(shop.set_list_endpoints(list("lno1changed")).await.is_err());
+    base.fail(None);
+    let got = shop.receive(None).await.unwrap();
+    assert_eq!(got.lists.sent.len(), 2, "{:?}", got.lists);
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    assert_eq!(lists_taken(&mut other).await, 1);
 }

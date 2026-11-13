@@ -67,6 +67,14 @@ pub enum NoticeKind {
     /// recipient, and the record's request, if any. A message no record holds, such as a
     /// `resend_request` or a re-send, raises none: its event stays for the host.
     MessageUndelivered,
+    /// After a restore, this app publishes no Private Payment List until the host sets its
+    /// list again ([`Paykit::set_list_endpoints`]): the backup's list and its counterparties
+    /// may be older than what the user changed since ([`Paykit::lists_await_host`]). Only a
+    /// withdrawal goes meanwhile ([`Paykit::withdraw_list_from`]), so the host re-applies
+    /// the withdrawals made since the backup first, then sets the list. Raised once, by a
+    /// restore whose backup holds a list this app published, and gone when the host sets the
+    /// list. Its `counterparty` is the app's own identity.
+    ListsAwaitHost,
 }
 
 impl NoticeKind {
@@ -77,6 +85,7 @@ impl NoticeKind {
             Self::HeldWithoutPay => "held_without_pay",
             Self::MessageGivenUp => "given_up",
             Self::MessageUndelivered => "undelivered",
+            Self::ListsAwaitHost => "lists_await_host",
         }
     }
 
@@ -87,6 +96,7 @@ impl NoticeKind {
             "held_without_pay" => Some(Self::HeldWithoutPay),
             "given_up" => Some(Self::MessageGivenUp),
             "undelivered" => Some(Self::MessageUndelivered),
+            "lists_await_host" => Some(Self::ListsAwaitHost),
             _ => None,
         }
     }
@@ -258,6 +268,39 @@ impl KeptNotice {
         }
     }
 
+    /// The notice that, after a restore, lists wait for the host ([`NoticeKind::ListsAwaitHost`]),
+    /// of `own`, the app's identity, raised at `at`.
+    pub(crate) fn lists_await_host(own: [u8; 32], at: u64) -> Self {
+        Self {
+            kind: NoticeKind::ListsAwaitHost,
+            attempt_id: None,
+            msg_id: None,
+            counterparty: own,
+            request_hash: None,
+            raised_at_ms: at,
+            acknowledged: false,
+            stored: None,
+            origin: None,
+        }
+    }
+
+    /// The notice that lists wait for the host read whole: of no attempt or message, not
+    /// acknowledged (it is deleted then), and of `own`; one that isn't is a corrupt store.
+    pub(crate) fn check_lists(&self, own: &[u8; 32]) -> Result<()> {
+        if self.kind != NoticeKind::ListsAwaitHost
+            || self.attempt_id.is_some()
+            || self.msg_id.is_some()
+            || self.request_hash.is_some()
+            || self.stored.is_some()
+            || self.origin.is_some()
+            || self.acknowledged
+            || self.counterparty != *own
+        {
+            return Err(PaykitError::corrupt());
+        }
+        Ok(())
+    }
+
     /// Whether the message given up stays processed, so a copy sent again has no effect while
     /// the notice is kept: every give-up but the client's drop of an entry waiting for a
     /// key, which was never processed ([`GivenUpOrigin::KeyWait`]).
@@ -339,10 +382,11 @@ impl KeptNotice {
 
 /// Bind `notice`, read at `key` (`nt/...`), to what the key names, as a restore checks it:
 /// a value at another notice's key, or under a key that names no notice, is a corrupt store.
-pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
+pub(crate) fn bind_notice(key: &str, notice: &KeptNotice, own: &[u8; 32]) -> Result<()> {
     match StateKey::parse(key.as_bytes()) {
         Some(StateKey::Notice { attempt, kind }) => notice.check(&attempt, kind),
         Some(StateKey::MessageNotice { sender, msg_id }) => notice.check_message(&sender, &msg_id),
+        Some(StateKey::ListsNotice) => notice.check_lists(own),
         _ => Err(PaykitError::corrupt()),
     }
 }
@@ -381,7 +425,7 @@ impl Paykit {
         let key = format!("{}{id}", key::NOTICES);
         if !matches!(
             StateKey::parse(key.as_bytes()),
-            Some(StateKey::Notice { .. } | StateKey::MessageNotice { .. })
+            Some(StateKey::Notice { .. } | StateKey::MessageNotice { .. } | StateKey::ListsNotice)
         ) {
             return Err(Refusal::NotFound.into());
         }
