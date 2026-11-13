@@ -292,6 +292,183 @@ async fn test_restore_hold_keeps_a_request_created_before_and_resent_after() {
     assert_eq!(requests[0].status, RequestStatus::Held);
 }
 
+/// The next `n` batches at alice's switch are refused for good.
+fn refuse_writes(w: &World, n: usize) {
+    for _ in 0..n {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/ops".into(),
+                code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+                current: serde_json::Value::Null,
+            });
+    }
+}
+
+/// Bob's shop sends `request` again, as a re-send does.
+async fn send_again(w: &World, shop: &mut Paykit, request: &RequestRef) {
+    let sent = shop
+        .app()
+        .sent_to(&w.alice_id(), 0, u64::MAX)
+        .await
+        .unwrap();
+    let msg_id = sent
+        .iter()
+        .find(|s| s.plaintext.hash() == request.request_hash)
+        .unwrap()
+        .msg_id
+        .clone();
+    shop.app_mut().resend(&msg_id).await.unwrap();
+}
+
+/// `app` backed up, dropped and restored, as [`restored`] restores.
+async fn restored_from(w: &World, mut app: Paykit) -> Paykit {
+    let backup = app.backup().await.unwrap();
+    let backup = PaykitBackup::from_bytes(&backup.to_bytes().unwrap()).unwrap();
+    drop(app);
+    restored(w, &backup).await
+}
+
+#[tokio::test]
+async fn test_restore_hold_stop_kept_before_the_backup_stops_after_it() {
+    // The payee's cancellation is kept, its placement refused, when the backup is taken:
+    // the restore carries the stop, which refuses the request for good, confirmed or not.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    cancel(&mut shop, &request).await;
+    refuse_writes(&w, 4);
+    let _ = wallet.receive(None).await;
+    assert_eq!(wallet.app().protocol_scan(b"kc/").await.unwrap().len(), 1);
+    let mut app = restored_from(&w, wallet).await;
+    let refused = app.pay_request(&request, confirmed()).await.unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
+    app.receive(None).await.unwrap();
+    assert_eq!(
+        app.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_restore_hold_stop_placed_before_the_backup_survives_the_request_sent_again() {
+    // The cancellation is placed before the backup. After the restore the payee sends the
+    // request again: the record keeps the stop.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    cancel(&mut shop, &request).await;
+    wallet.receive(None).await.unwrap();
+    let mut app = restored_from(&w, wallet).await;
+    send_again(&w, &mut shop, &request).await;
+    app.receive(None).await.unwrap();
+    assert_eq!(
+        app.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+    let refused = app.pay_request(&request, confirmed()).await.unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_restore_hold_rejected_request_stays_rejected_after_it_is_sent_again() {
+    // The user rejected the request before the backup; re-sent after the restore, it stays
+    // rejected and is never paid.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet.reject_request(&request, None).await.unwrap();
+    let mut app = restored_from(&w, wallet).await;
+    send_again(&w, &mut shop, &request).await;
+    app.receive(None).await.unwrap();
+    assert_eq!(
+        app.request(&request).await.unwrap().status,
+        RequestStatus::Rejected
+    );
+    let refused = app.pay_request(&request, confirmed()).await.unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::Rejected));
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_restore_hold_resolved_attempt_never_dispatched_again() {
+    // The user resolved the attempt `failed` before the backup: a resume after the restore
+    // dispatches nothing again, and the claim keeps the resolution.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    wallet
+        .resolve_attempt(
+            &obligation,
+            attempt_id,
+            paykit_sdk::Resolution::Failed,
+            UserConfirmed::new(),
+        )
+        .await
+        .unwrap();
+    let mut app = restored_from(&w, wallet).await;
+    assert!(app.resume_payments().await.unwrap().is_empty());
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+    assert_eq!(
+        app.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
+    let read = app
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        read.view.attempt(&attempt_id.to_bytes()).unwrap().outcome,
+        pubky_switch_core::claims::Outcome::Failed
+    );
+}
+
+#[tokio::test]
+async fn test_restore_hold_confirmation_is_asked_again_after_another_restore() {
+    // A user's confirmation of a held request belongs to the restore it answered (`hc/` is
+    // never backed up): each restore holds the open requests again until the payee re-sends
+    // or the user confirms (Paykit spec 7.2, "What a restore loses").
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let mut app = restored_from(&w, wallet).await;
+    w.rail.next(paykit_sdk::rail::Behaviour::Refuse);
+    let failed = app.pay_request(&request, confirmed()).await.unwrap();
+    assert!(matches!(failed, PayOutcome::Failed { .. }), "{failed:?}");
+    assert_eq!(
+        app.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+    let app = restored_from(&w, app).await;
+    assert_eq!(
+        app.request(&request).await.unwrap().status,
+        RequestStatus::Held
+    );
+}
+
 /// A `missed` item at alice's switch: entries accepted in the last second were deleted before
 /// the wallet read them (Switch spec 8.2).
 fn missed(w: &World) {
@@ -389,6 +566,36 @@ async fn test_restore_hold_confirming_a_request_not_held_refused_as_not_found() 
         .await
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::NotFound));
+}
+
+#[tokio::test]
+async fn test_restore_hold_confirming_a_request_missing_from_a_copy_not_listed_refused_as_not_now()
+{
+    // After a `missed` item whose listing fails, bob's request is missing from the copy,
+    // which may lack records: the confirmation is refused as not now, not as no request.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    wallet.receive(None).await.unwrap();
+    missed(&w);
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "records?collection".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.records_unlisted.is_some(), "{got:?}");
+    let refused = wallet
+        .confirm_possibly_cancelled(&request, UserConfirmed::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{refused:?}"
+    );
 }
 
 /// Whether `wallet` keeps the mark of records not listed since a `missed` item.
@@ -764,4 +971,63 @@ async fn test_restore_hold_missed_item_mark_naming_another_time_refused_as_corru
     assert!(crate::common::is_corrupt(&failed), "{failed:?}");
     assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
     assert_eq!(wallet.app().protocol_scan(b"mi/").await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_confirmed_is_held_again_by_a_restore() {
+    // The user confirmed a request a `missed` item held. A restore from a backup taken then
+    // holds it again, as every restore holds every open request (Paykit spec 7.2): a
+    // confirmation belongs to the hold it ended, and a backup carries none.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    missed(&w);
+    wallet.receive(None).await.unwrap();
+    wallet
+        .confirm_possibly_cancelled(&request, UserConfirmed::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+    let mut wallet = restored_from(&w, wallet).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Held
+    );
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_asks_sent_not_sent_again_by_a_restore() {
+    // A `missed` item's ask to bob went, and its mark with it. A restore from a backup taken
+    // then asks bob from the restore's own time as its reconcile ends, and never the item's
+    // ask again.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    missed(&w);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(asks_to(&wallet, &w.bob_id()).await, 1);
+    assert!(wallet.app().protocol_scan(b"mi/").await.unwrap().is_empty());
+    // The restore's own ask goes as its reconcile ends.
+    let mut wallet = restored_from(&w, wallet).await;
+    let before = asks_to(&wallet, &w.bob_id()).await;
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(asks_to(&wallet, &w.bob_id()).await, before);
+    assert!(wallet.app().protocol_scan(b"mi/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan(b"ask/")
+        .await
+        .unwrap()
+        .is_empty());
 }

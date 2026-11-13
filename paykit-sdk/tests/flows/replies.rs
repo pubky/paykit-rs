@@ -547,8 +547,10 @@ async fn test_replies_dropped_asked_for_from_the_marks_time() {
     w.clock.advance_ms(60_000);
     let n = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
     let (request, _) = kept_then_unmatched(&w, &mut wallet, &mut shop, n).await;
+    // The shop holds the earlier request's record, alice's: her mark asks at once.
+    assert_eq!(asked(&shop, &w.alice_id()).await.len(), 1);
     record_request(&w, &mut shop, &request).await;
-    assert_eq!(shop.receive(None).await.unwrap().resends, 1);
+    assert_eq!(shop.receive(None).await.unwrap().resends, 0);
     // Alice answers from the mark's time: the paid request's two replies come back, as
     // duplicates for now, and not the earlier payment's.
     wallet.receive(None).await.unwrap();
@@ -558,6 +560,22 @@ async fn test_replies_dropped_asked_for_from_the_marks_time() {
         .filter(|e| matches!(e, pubky_switch_client::app::AppEvent::Duplicate { .. }))
         .count();
     assert_eq!(again, 2, "{events:?}");
+}
+
+#[tokio::test]
+async fn test_replies_dropped_asked_at_once_while_a_request_of_their_sender_is_held() {
+    // The shop held alice's request's record before her replies past the bound came: the
+    // mark of the one dropped is due at once, though no record changes, and asks her.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    unmatched_replies(&w, &shop, paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER + 1);
+    shop.receive(None).await.unwrap();
+    assert_eq!(mark_senders(&shop, "pd/").await, vec![w.alice_id()]);
+    assert_eq!(asked(&shop, &w.alice_id()).await.len(), 1);
 }
 
 /// How many of the payer's acceptance and proof the shop's record at `record` holds.
@@ -718,6 +736,13 @@ async fn test_replies_kept_over_a_record_sealed_at_a_key_not_held_given_up_with_
         .iter()
         .all(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp
             && n.request_hash == Some(request.hash())));
+    // No entry is stored for a kept reply: acknowledging its notice forgets none, and the
+    // notice goes.
+    let parked = shop.app_mut().parked_entries().await.unwrap().len();
+    shop.acknowledge_notice(&notices[0].id).await.unwrap();
+    assert_eq!(shop.app_mut().parked_entries().await.unwrap().len(), parked);
+    assert_eq!(shop.app().protocol_scan(b"nt/").await.unwrap().len(), 1);
+    assert_eq!(shop.notices().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -867,8 +892,8 @@ async fn test_replies_kept_under_another_messages_key_refused_as_corrupt() {
 #[tokio::test]
 async fn test_replies_kept_past_30_days_whose_write_fails_stay_kept() {
     // Past 30 days the record comes, and the shop's writes placing the replies don't reach
-    // its switch: a failed write is no refusal, so the replies stay kept, none
-    // given up, and are placed once the switch answers.
+    // its switch: a failed write is no refusal, so the receive returns the error, the
+    // replies stay kept, none given up, and are placed once the switch answers.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -879,13 +904,11 @@ async fn test_replies_kept_past_30_days_whose_write_fails_stay_kept() {
     w.clock.advance_ms(2 * DAY_MS);
     shop.app_mut().rotate().await.unwrap();
     shop.app_mut().flush_cursor().await.unwrap();
-    for _ in 0..4 {
-        w.bob.switch().fail_next(Fault::Unreachable {
-            path: "/ops".into(),
-            after: 0,
-        });
-    }
-    shop.receive(None).await.unwrap();
+    w.bob.switch().fail_next(Fault::Unreachable {
+        path: "/ops".into(),
+        after: 0,
+    });
+    assert!(shop.receive(None).await.is_err());
     assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 2);
     assert!(shop.notices().await.unwrap().is_empty());
     shop.flush().await.unwrap();
@@ -896,4 +919,191 @@ async fn test_replies_kept_past_30_days_whose_write_fails_stay_kept() {
         shop.payee_activity().await.unwrap()[0].status,
         PayeeStatus::ProofReceived
     );
+}
+
+#[tokio::test]
+async fn test_replies_kept_past_30_days_refused_by_the_switch_given_up_with_the_notice() {
+    // Past 30 days the record comes, and the switch refuses for good the writes placing the
+    // replies: that refusal is the record's, so the replies are given up, the host told.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - DAY_MS);
+    shop.receive(None).await.unwrap();
+    record_request(&w, &mut shop, &request).await;
+    w.clock.advance_ms(2 * DAY_MS);
+    shop.app_mut().rotate().await.unwrap();
+    shop.app_mut().flush_cursor().await.unwrap();
+    crate::common::refuse_writes(&w.bob, 2);
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    let notices = shop.notices().await.unwrap();
+    assert_eq!(notices.len(), 2, "{notices:?}");
+    assert!(notices
+        .iter()
+        .all(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp));
+}
+
+#[tokio::test]
+async fn test_replies_kept_past_30_days_over_quota_given_up_with_the_notice() {
+    // As the write-fails test, but each write placing the replies is refused for good
+    // (`429 quota_exceeded`), not unreachable, 31 days after their acceptance: a reply is kept
+    // at most 30 days (Paykit spec 8.1), so both are given up, the host told.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - DAY_MS);
+    shop.receive(None).await.unwrap();
+    record_request(&w, &mut shop, &request).await;
+    w.clock.advance_ms(2 * DAY_MS);
+    shop.app_mut().rotate().await.unwrap();
+    shop.app_mut().flush_cursor().await.unwrap();
+    for _ in 0..2 {
+        w.bob.switch().fail_next(Fault::Error {
+            path: "/ops".into(),
+            code: ErrorCode::QuotaExceeded,
+            current: serde_json::Value::Null,
+        });
+    }
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    let notices = shop.notices().await.unwrap();
+    assert_eq!(notices.len(), 2, "{notices:?}");
+    assert!(notices
+        .iter()
+        .all(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp));
+}
+
+#[tokio::test]
+async fn test_replies_kept_and_marks_dated_past_the_backup_bounded_at_a_restore() {
+    // A backup carries kept replies and a mark of dropped replies dated two days past any
+    // service time it verified: a restore bounds them by that time plus the clock tolerance,
+    // as it bounds the cursor time, so they go 30 days on, not later.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let _request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    let ahead = w.clock.now_ms() + 2 * DAY_MS;
+    let mut writes = Vec::new();
+    for (key, value) in shop.app().protocol_scan(b"pr/").await.unwrap() {
+        let mut kept: serde_json::Value = serde_json::from_slice(&value).unwrap();
+        kept["d"]["accepted_at"] = json!(ahead);
+        writes.push(pubky_switch_client::app::LocalWrite::Put {
+            key,
+            value: serde_json::to_vec(&kept).unwrap(),
+        });
+    }
+    shop.app_mut().protocol_commit(&writes).await.unwrap();
+    seed_marks(&mut shop, "pd/", 1, ahead).await;
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let shop = Paykit::restore(
+        w.env(&w.bob, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    let bound = w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+    let kept = shop.app().protocol_scan(b"pr/").await.unwrap();
+    assert_eq!(kept.len(), 2);
+    for (_, value) in kept {
+        let kept: serde_json::Value = serde_json::from_slice(&value).unwrap();
+        assert!(
+            kept["d"]["accepted_at"].as_u64().unwrap() <= bound,
+            "{kept}"
+        );
+    }
+    let marks = shop.app().protocol_scan(b"pd/").await.unwrap();
+    assert_eq!(marks.len(), 1);
+    let mark: serde_json::Value = serde_json::from_slice(&marks[0].1).unwrap();
+    assert!(mark["d"]["latest_ms"].as_u64().unwrap() <= bound, "{mark}");
+    assert!(
+        mark["d"]["earliest_ms"].as_u64().unwrap() <= bound,
+        "{mark}"
+    );
+}
+
+/// `shop` backed up, dropped and restored from that backup.
+async fn shop_restored(w: &World, mut shop: Paykit) -> Paykit {
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let mut shop = Paykit::restore(
+        w.env(&w.bob, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    shop.reconcile().await.unwrap();
+    shop
+}
+
+/// Alice's wallet sends bob again every message it sent him, as answers to his asks do.
+async fn send_all_again(w: &World, wallet: &mut Paykit) {
+    for sent in wallet
+        .app()
+        .sent_to(&w.bob_id(), 0, u64::MAX)
+        .await
+        .unwrap()
+    {
+        wallet.app_mut().resend(&sent.msg_id).await.unwrap();
+    }
+    wallet.flush().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_replies_given_up_stay_given_up_after_a_restore_and_a_resend() {
+    // The replies are given up past 30 days, the switch refusing their writes. A restore
+    // from a backup taken then, and alice sending them again, place nothing: a message
+    // given up stays processed while its notice is kept (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - DAY_MS);
+    shop.receive(None).await.unwrap();
+    record_request(&w, &mut shop, &request).await;
+    w.clock.advance_ms(2 * DAY_MS);
+    shop.app_mut().rotate().await.unwrap();
+    shop.app_mut().flush_cursor().await.unwrap();
+    crate::common::refuse_writes(&w.bob, 2);
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.notices().await.unwrap().len(), 2);
+    let mut shop = shop_restored(&w, shop).await;
+    send_all_again(&w, &mut wallet).await;
+    for _ in 0..2 {
+        shop.receive(None).await.unwrap();
+    }
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert_eq!(shop.notices().await.unwrap().len(), 2);
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        PayeeStatus::Requested
+    );
+}
+
+#[tokio::test]
+async fn test_replies_dropped_past_30_days_stay_dropped_after_a_restore() {
+    // The replies' record never came: past 30 days they are dropped, with no notice. A
+    // restore from a backup taken then keeps nothing of them.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let _request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    let mut shop = shop_restored(&w, shop).await;
+    for _ in 0..2 {
+        shop.receive(None).await.unwrap();
+    }
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert!(shop.notices().await.unwrap().is_empty());
 }

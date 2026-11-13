@@ -71,6 +71,17 @@ impl KeptMessage {
             .map_err(|_| PaykitError::corrupt())
     }
 
+    /// Bound the acceptance time kept to `bound`: whether it was later.
+    pub(crate) fn bound_acceptance(&mut self, bound: u64) -> bool {
+        match self.accepted_at {
+            Some(at) if at > bound => {
+                self.accepted_at = Some(bound);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// The stored message again, verified for `recipient` as a record's copy is (Paykit wire
     /// 5.2). A kept message that no longer reads is a corrupt store.
     pub(crate) fn stored(&self, recipient: &[u8; 32]) -> Result<StoredMessage> {
@@ -336,6 +347,22 @@ mod own_message_tests {
         out
     }
 
+    /// The text of the function `name` in `text`: from its signature to the first line
+    /// closing it at its own indentation.
+    fn body<'a>(text: &'a str, name: &str) -> &'a str {
+        let at = text
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("no fn {name}"));
+        let start = text[..at].rfind('\n').map_or(0, |n| n + 1);
+        let indent = &text[start..at]
+            .chars()
+            .take_while(|c| *c == ' ')
+            .collect::<String>();
+        let close = format!("\n{indent}}}\n");
+        let end = text[at..].find(&close).map_or(text.len(), |n| at + n);
+        &text[at..end]
+    }
+
     #[test]
     fn test_records_own_message_written_only_where_it_is_queued() {
         // The stored copy of a message this app signed is made in three places, each in the
@@ -344,6 +371,13 @@ mod own_message_tests {
         // A new place that stores an own message must queue it in the same batch, so that
         // an own message in a record is always one to be sent (module docs).
         let sources = sources();
+        let text = |name: &str| -> &str {
+            &sources
+                .iter()
+                .find(|(file, _)| file == name)
+                .unwrap_or_else(|| panic!("no {name}"))
+                .1
+        };
         let count = |needle: &str| -> Vec<(String, usize)> {
             sources
                 .iter()
@@ -366,14 +400,43 @@ mod own_message_tests {
             named(&[("pay.rs", 1), ("records.rs", 1), ("requests.rs", 1)]),
             "an own message's stored copy is made somewhere new: queue it in the same batch"
         );
+        // Every stored message is built in one of these: a received message kept
+        // (`KeptMessage::stored`) or stored by the client (`note_stored`), an own message's
+        // copy (`own_copy`), an acceptance journaled (`acceptance_message`), and the unit
+        // tests' parties. A copy built anywhere else could store an own message unqueued.
+        assert_eq!(
+            count("StoredMessage::new("),
+            named(&[
+                ("journal.rs", 1),
+                ("records.rs", 2),
+                ("stored.rs", 1),
+                ("testkit.rs", 1),
+            ]),
+            "a stored message is built somewhere new"
+        );
+        assert!(body(text("records.rs"), "own_copy").contains("StoredMessage::new("));
+        assert!(body(text("journal.rs"), "acceptance_message").contains("StoredMessage::new("));
+        assert!(body(text("stored.rs"), "note_stored").contains("StoredMessage::new("));
+        // Each place that makes an own copy queues it with the record write.
+        let send = body(text("records.rs"), "send_with_record");
+        assert!(send.contains("self.own_copy(&signed)"));
+        assert!(send.contains(".queue(signed.clone())"));
+        assert!(send.contains("self.app.queue_signed(signed)"));
+        let request = body(text("requests.rs"), "send_request_inner");
+        assert!(request.contains("self.own_copy(&signed)"));
+        assert!(request.contains(".queue(signed)"));
         // The journal's own check reads it; only the outcome places it.
         assert_eq!(
             count(".acceptance_message("),
             named(&[("journal.rs", 1), ("pay.rs", 1)]),
             "an acceptance is placed somewhere new"
         );
-        let pay = &sources.iter().find(|(name, _)| name == "pay.rs").unwrap().1;
-        assert!(pay.contains("if !entry.acceptance_released {"));
-        assert!(pay.contains("batch = batch.queue(proof);"));
+        let pay = text("pay.rs");
+        assert!(body(pay, "outcome_record").contains("self.own_copy(proof)"));
+        let outcome = body(pay, "write_outcome");
+        assert!(outcome.contains(".outcome_record(entry, &target, paid, proof.as_ref()"));
+        assert!(outcome.contains("batch = batch.queue(proof);"));
+        assert!(outcome.contains("self.app.queue_signed(proof)"));
+        assert!(body(pay, "place_acceptance").contains("if !entry.acceptance_released {"));
     }
 }

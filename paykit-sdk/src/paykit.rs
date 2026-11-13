@@ -625,6 +625,10 @@ impl Paykit {
         // An app holding `contacts` reads the flagged senders again first, at most every 10
         // minutes, for the spam rule (Paykit wire 4.1).
         self.refresh_lists_when_due().await?;
+        // After a restore, this app's blocks the backup kept unanswered are written again.
+        if self.certificate_refused().is_none() {
+            self.send_own_blocks_again().await?;
+        }
         // Whether the client may list at this read's start ([`Paykit::records_listed`]).
         let keys_held_before = self.holds_scope_keys();
         // Only this read's key waits count: a read that returned an error left its own.
@@ -718,11 +722,12 @@ impl Paykit {
             self.place_kept_cancellations().await?;
         }
         // The senders of messages dropped before they were taken: of replies dropped for the
-        // bounds once the record of one of their requests came, of entries dropped
+        // bounds once the app holds the record of one of their requests, of entries dropped
         // unverified at once, then again at most once a day while the mark lives.
-        let marked = self.ask_on_marks(&report.events).await?;
+        let marked = self.ask_on_marks().await?;
         // The replies and period details kept for requests whose record wasn't held yet,
-        // unless the payer's side waits for its scope keys or its listing, as above.
+        // unless the payer's side waits (`Paykit::payer_waits`), as above; each record they
+        // go into that is absent while its side isn't listed waits on its own.
         if !self.payer_waits(keys).await? {
             self.place_kept_replies().await?;
         }

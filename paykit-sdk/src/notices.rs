@@ -25,11 +25,13 @@ pub enum NoticeKind {
     /// so it can't be recorded on the claim (Paykit spec 7.2, "What a payment method
     /// declares"). An app that gets the receipt and holds the failure raises it. An app
     /// holds the failure when it has it from a stable source: the attempt's owner from its
-    /// own journal, another own app from a view of the claim, kept or read, that shows the
-    /// attempt `failed`. The record's `status` is informational and never decides it. An own
-    /// app that never saw the failure, such as one that joined after the service deleted
-    /// the claim, can't tell and raises nothing. Either way the app records the receipt in
-    /// its activity record.
+    /// own journal, or any own app, the owner included, from a view of the claim, kept or
+    /// read, that shows the attempt `failed`. An owner restored from a backup that predates
+    /// the failure has no journal entry for it, and uses such a view as any other own app
+    /// does. The record's `status` is informational and never decides it. An own app that
+    /// never saw the failure, such as one that joined after the service deleted the claim,
+    /// can't tell and raises nothing. Either way the app records the receipt in its
+    /// activity record.
     PaidAfterFailed,
     /// The payment is held: the app's certificate no longer holds `pay`, so the app reads
     /// and writes no claim and no payer record, and the attempt waits, open, for an app
@@ -106,6 +108,29 @@ pub(crate) struct KeptNotice {
     /// notice's acknowledgement forgets ([`Paykit::acknowledge_notice`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) stored: Option<StoredHandle>,
+    /// For a message given up with no entry stored, where it came from; absent for one with
+    /// its entry's handle (`stored`), as every notice the stored entries raise is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) origin: Option<GivenUpOrigin>,
+}
+
+/// Where a message given up with no entry stored came from: no entry, so no handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GivenUpOrigin {
+    /// The receive step gave it up waiting for its record's scope key: it was processed.
+    ReceiveStep,
+    /// A payer's reply kept for its record (`pr/`) was given up.
+    KeptReply,
+}
+
+/// What a message given up leaves behind ([`KeptNotice::given_up`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GivenUpFrom {
+    /// An entry the client keeps stored, which the acknowledgement forgets.
+    Stored(StoredHandle),
+    /// No entry: the message came from there.
+    Origin(GivenUpOrigin),
 }
 
 /// The handle of an entry the client keeps stored (Switch spec 8.2): its local ID, and the
@@ -129,6 +154,7 @@ impl KeptNotice {
             raised_at_ms: at,
             acknowledged: false,
             stored: None,
+            origin: None,
         }
     }
 
@@ -149,19 +175,23 @@ impl KeptNotice {
             raised_at_ms: at,
             acknowledged: false,
             stored: None,
+            origin: None,
         }
     }
 
-    /// The notice that message `msg_id` from `sender` was given up, raised at `at`, its
-    /// entry kept stored at `stored`, if the client keeps one: a message the receive step
-    /// gave up, or a payer's reply kept for its record, has none.
+    /// The notice that message `msg_id` from `sender` was given up, raised at `at`: with its
+    /// entry's handle when the client keeps one stored, or else with where it came from.
     pub(crate) fn given_up(
         sender: [u8; 32],
         msg_id: &str,
         request_hash: Option<[u8; 32]>,
         at: u64,
-        stored: Option<StoredHandle>,
+        from: GivenUpFrom,
     ) -> Self {
+        let (stored, origin) = match from {
+            GivenUpFrom::Stored(handle) => (Some(handle), None),
+            GivenUpFrom::Origin(origin) => (None, Some(origin)),
+        };
         Self {
             kind: NoticeKind::MessageGivenUp,
             attempt_id: None,
@@ -171,6 +201,7 @@ impl KeptNotice {
             raised_at_ms: at,
             acknowledged: false,
             stored,
+            origin,
         }
     }
 
@@ -182,6 +213,7 @@ impl KeptNotice {
             || self.attempt_id.as_deref() != Some(attempt.to_text().as_str())
             || self.msg_id.is_some()
             || self.stored.is_some()
+            || self.origin.is_some()
         {
             return Err(PaykitError::corrupt());
         }
@@ -191,10 +223,16 @@ impl KeptNotice {
     /// The notice of a message given up read whole, at the sender and `msg_id` its key
     /// names: one that doesn't is a corrupt store.
     pub(crate) fn check_message(&self, sender: &[u8; 32], msg_id: &str) -> Result<()> {
+        // A message notice is deleted at its acknowledgement, after its entry is forgotten,
+        // so a valid run keeps none acknowledged. It holds its entry's handle exactly when it
+        // names no origin: one raised for a stored entry always has it, and one with no
+        // entry stored (the receive step's, a kept reply's) names where it came from instead.
         if self.kind != NoticeKind::MessageGivenUp
             || self.attempt_id.is_some()
             || self.msg_id.as_deref() != Some(msg_id)
             || self.counterparty != *sender
+            || self.stored.is_some() == self.origin.is_some()
+            || self.acknowledged
         {
             return Err(PaykitError::corrupt());
         }
@@ -234,6 +272,16 @@ impl KeptNotice {
     }
 }
 
+/// Bind `notice`, read at `key` (`nt/...`), to what the key names, as a restore checks it:
+/// a value at another notice's key, or under a key that names no notice, is a corrupt store.
+pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
+    match StateKey::parse(key.as_bytes()) {
+        Some(StateKey::Notice { attempt, kind }) => notice.check(&attempt, kind),
+        Some(StateKey::MessageNotice { sender, msg_id }) => notice.check_message(&sender, &msg_id),
+        _ => Err(PaykitError::corrupt()),
+    }
+}
+
 /// The ID of the notice of `kind` about `attempt`: its key after the family's prefix.
 pub(crate) fn notice_id(attempt: &AttemptId, kind: NoticeKind) -> String {
     format!("{}/{}", attempt.to_text(), kind.tag())
@@ -247,6 +295,7 @@ impl Paykit {
     /// A store failure, or a kept notice that doesn't read.
     pub async fn notices(&self) -> Result<Vec<Notice>> {
         let mut out = Vec::new();
+        // Each read whole and bound to its key ([`bind_notice`]).
         for (id, kept) in self.local_scan::<KeptNotice>(key::NOTICES).await? {
             if !kept.acknowledged {
                 out.push(kept.view(id)?);
@@ -271,10 +320,7 @@ impl Paykit {
         ) {
             return Err(Refusal::NotFound.into());
         }
-        let mut kept = self
-            .local_get::<KeptNotice>(&key)
-            .await?
-            .ok_or(Refusal::NotFound)?;
+        let mut kept = self.kept_notice(&key).await?.ok_or(Refusal::NotFound)?;
         if kept.acknowledged {
             return Ok(());
         }
@@ -288,16 +334,13 @@ impl Paykit {
             .transpose()
             .map_err(|_| PaykitError::corrupt())?;
         let held = match attempt {
-            Some(attempt) => self
-                .local_get::<JournalEntry>(&key::journal(&attempt))
-                .await?
-                .is_some(),
+            Some(attempt) => self.journal_entry(&attempt).await?.is_some(),
             None => false,
         };
         // The entry a message given up left stored is forgotten first: a failure keeps the
         // notice, for the host to acknowledge again.
         if let Some(stored) = &kept.stored {
-            self.forget_stored(stored).await?;
+            self.forget_stored(stored, &kept).await?;
         }
         if !held {
             return self.local_delete(&key).await;
@@ -306,18 +349,38 @@ impl Paykit {
         self.local_put(&key, &kept).await
     }
 
+    /// The notice kept at `key`, read whole and bound to it ([`bind_notice`]).
+    ///
+    /// # Errors
+    ///
+    /// A store failure, or a value that doesn't read or isn't the notice its key names.
+    pub(crate) async fn kept_notice(&self, key: &str) -> Result<Option<KeptNotice>> {
+        self.local_get::<KeptNotice>(key).await
+    }
+
     /// Forget the entry `stored` names, if the client still keeps it: by its local ID and
     /// hash, or, after a restore onto another store, which tells of its entries again, by
     /// its hash. One gone already, such as one the host forgot itself, is not looked for.
-    async fn forget_stored(&mut self, stored: &StoredHandle) -> Result<()> {
+    /// The entry found is bound to `notice`: one holding another message than the sender's
+    /// `msg_id` the notice names is a corrupt store, and nothing is forgotten.
+    async fn forget_stored(&mut self, stored: &StoredHandle, notice: &KeptNotice) -> Result<()> {
         let entries = self.app.parked_entries().await?;
         let entry = entries
             .iter()
             .find(|e| e.stored_id == stored.stored_id && e.hash == stored.hash)
             .or_else(|| entries.iter().find(|e| e.hash == stored.hash));
-        if let Some(entry) = entry {
-            self.app.forget_parked(entry.stored_id, &entry.hash).await?;
+        let Some(entry) = entry.cloned() else {
+            return Ok(());
+        };
+        let message = self.app.parked_entry(entry.stored_id).await?;
+        let names = message.as_ref().is_some_and(|parked| {
+            parked.sender == notice.counterparty
+                && parked.message.as_ref().map(|m| m.msg_id.as_str()) == notice.msg_id.as_deref()
+        });
+        if !names {
+            return Err(PaykitError::corrupt());
         }
+        self.app.forget_parked(entry.stored_id, &entry.hash).await?;
         Ok(())
     }
 
@@ -329,7 +392,7 @@ impl Paykit {
         entry: &JournalEntry,
     ) -> Result<()> {
         let key = key::notice(&entry.attempt()?, kind);
-        if self.local_get::<KeptNotice>(&key).await?.is_some() {
+        if self.kept_notice(&key).await?.is_some() {
             return Ok(());
         }
         let at = self.service_time().unwrap_or(0);
@@ -344,7 +407,7 @@ impl Paykit {
         entry: &JournalEntry,
     ) -> Result<()> {
         let key = key::notice(&entry.attempt()?, kind);
-        if self.local_get::<KeptNotice>(&key).await?.is_some() {
+        if self.kept_notice(&key).await?.is_some() {
             self.local_delete(&key).await?;
         }
         Ok(())
@@ -365,6 +428,7 @@ mod tests {
             raised_at_ms: 3,
             acknowledged: false,
             stored: None,
+            origin: None,
         }
     }
 
@@ -406,7 +470,8 @@ mod tests {
             stored_id: 4,
             hash: [5; 32],
         };
-        let notice = KeptNotice::given_up([1; 32], id, Some([2; 32]), 3, Some(handle));
+        let notice =
+            KeptNotice::given_up([1; 32], id, Some([2; 32]), 3, GivenUpFrom::Stored(handle));
         assert!(notice.check_message(&[1; 32], id).is_ok());
         assert!(notice.check_message(&[9; 32], id).is_err());
         assert!(notice

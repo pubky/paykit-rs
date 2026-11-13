@@ -497,23 +497,21 @@ mod tests {
         // the held ones staying (Paykit wire 4.9).
         let (alice, bob) = parties();
         let held = details(&bob, &alice, [7; 32], "2026-03-01T00:00:00.000Z");
-        let mut message = pubky_switch_core::message::Message::new(
-            "paykit.payment_period_details",
-            pubky_switch_core::message::Sender::of_app(bob.id(), &bob.keys),
-            alice.id(),
-            held.message().created_at_ms,
-            vec![[7; 32]],
-            held.message().body.clone(),
-        )
-        .unwrap();
-        message.msg_id = held.message().msg_id.clone();
-        message.body.insert(
+        let mut body = held.message().body.clone();
+        body.insert(
             "expires_at".into(),
             serde_json::Value::String("2026-03-09T00:00:00.000Z".into()),
         );
-        let plaintext = message.sign(&bob.keys).unwrap();
-        let other =
-            StoredMessage::new(bob.id(), bob.cert.signed(), plaintext, None, &alice.id()).unwrap();
+        let msg_id = held.message().msg_id.clone();
+        let other = bob
+            .try_message_with(
+                &alice,
+                "paykit.payment_period_details",
+                vec![[7; 32]],
+                body,
+                |message| message.msg_id = msg_id,
+            )
+            .unwrap();
         assert_ne!(other.hash(), held.hash());
         let mut record = empty(ActivitySide::Payer, bob.id());
         assert!(place(&mut record, Role::PeriodDetails, held.clone()));

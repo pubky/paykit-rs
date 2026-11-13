@@ -13,6 +13,7 @@ mod destinations;
 mod erasure;
 mod final_check;
 mod labels;
+mod local_state;
 mod mixed_versions;
 mod notices;
 mod one_time;

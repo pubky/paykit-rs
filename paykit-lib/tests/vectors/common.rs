@@ -340,7 +340,11 @@ pub fn generated(name: &str, cases: &[(Place<'_>, Value)]) {
         }
         let mut text = serde_json::to_string_pretty(&file).unwrap();
         text.push('\n');
-        std::fs::write(&path, text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        // The other tests read the file in parallel: write it beside and rename it into
+        // place, so none of them reads it half written.
+        let partial = path.with_extension("json.partial");
+        std::fs::write(&partial, text).unwrap_or_else(|e| panic!("{}: {e}", partial.display()));
+        std::fs::rename(&partial, &path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     }
     let file = paykit(name);
     for (place, value) in cases {
