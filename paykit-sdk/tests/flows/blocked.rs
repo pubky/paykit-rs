@@ -726,3 +726,42 @@ async fn test_blocked_peer_ask_held_goes_30_days_after_its_time() {
     wallet.receive(None).await.unwrap();
     assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
 }
+
+#[tokio::test]
+async fn test_blocked_own_block_kept_unanswered_survives_a_restore_and_is_written_again() {
+    // The wallet blocks bob while its switch doesn't answer, and is backed up with the block
+    // kept unanswered. The kept batch stays with the device that kept it: the restored app
+    // still counts the block, refusing the user's payment, and writes it again, so the list
+    // at the switch holds bob (Paykit spec 8.1).
+    let w = World::new();
+    let (mut wallet, _, request) = received(&w, PaykitConfig::default()).await;
+    keep_ops(&w, 1);
+    wallet.block(&w.bob_id()).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut wallet = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    wallet.reconcile().await.unwrap();
+    wallet
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(lists.deny.contains(&w.bob_id()));
+    // Past the restore's hold, which the user confirms, the block refuses the payment.
+    let held = PayOptions::default()
+        .with_possibly_cancelled_confirmed(pubky_switch_client::app::UserConfirmed::new());
+    let refused = wallet.pay_request(&request, held).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::Blocked { .. })),
+        "{refused:?}"
+    );
+}

@@ -369,9 +369,16 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::Taken(_) => continue,
             // The time of the last read of the lists isn't restored: the copy of the deny
             // list the backup holds may be stale by any time, so the list is read again before
-            // any payment (Paykit spec 8.1). Nor are this app's blocks kept unanswered: the
-            // client's kept batches belong to the device that kept them.
-            StateKey::ListsRead | StateKey::OwnBlock(_) => continue,
+            // any payment (Paykit spec 8.1).
+            StateKey::ListsRead => continue,
+            // This app's blocks and unblocks kept unanswered are: the client's kept batches
+            // belong to the device that kept them, so the restored app keeps counting each
+            // and writes it again (`Paykit::send_own_blocks_again`).
+            StateKey::OwnBlock(_) => {
+                state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
             StateKey::Journal(attempt) => attempt,
             StateKey::CursorTime => {
                 cursor_time_ms =
@@ -699,6 +706,19 @@ impl Protocol for PaykitProtocol {
                 Err(Fail::Store(failure)) => return Outcome::Retry(failure),
                 Err(_) => return Outcome::Retry(StoreFailure::of_entry(StoreError::Corrupt)),
             }
+        }
+        // A message given up stays processed (Paykit spec 8.1): a copy the sender sends again,
+        // or the parked entry the host releases, has no effect while its notice is kept.
+        let notice = key::message_notice(&message.sender, &message.message.msg_id);
+        match state::cx_get::<KeptNotice>(cx, &notice) {
+            Ok(Some(_)) => {
+                return Outcome::Drop {
+                    reason: "Paykit spec 8.1: a message given up stays processed".into(),
+                }
+            }
+            Ok(None) => {}
+            Err(Fail::Store(failure)) => return Outcome::Retry(failure),
+            Err(_) => return Outcome::Retry(StoreFailure::of_entry(StoreError::Corrupt)),
         }
         let stored = match stored_copy(message) {
             Ok(stored) => stored,

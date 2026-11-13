@@ -1673,6 +1673,36 @@ impl Paykit {
         self.local_commit(tx).await
     }
 
+    /// Write again, once after a restore, each block and unblock this app made that the
+    /// backup kept unanswered (`bk/`): the client's kept batch that would have sent it
+    /// belongs to the device that kept it, and isn't restored, so without this the user's
+    /// block would be lost at the next read of the lists (Paykit spec 8.1). Each counts at
+    /// once meanwhile, as a kept one does. One the switch refuses, or that can't be sent
+    /// now, keeps its mark, so it still counts, until the list shows it or the user changes
+    /// it; only a store failure is an error.
+    pub(crate) async fn send_own_blocks_again(&mut self) -> crate::error::Result<()> {
+        let Some(mut hold) = self
+            .local_get::<crate::hold::RestoreHold>(key::RESTORE_HOLD)
+            .await?
+        else {
+            return Ok(());
+        };
+        if hold.own_blocks_sent {
+            return Ok(());
+        }
+        for (rest, blocked) in self.local_scan::<bool>(key::OWN_BLOCKS).await? {
+            let pubky = pubky_switch_core::enc::unb64_array::<32>(&rest)
+                .map_err(|_| crate::error::PaykitError::corrupt())?;
+            match self.list_own(&pubky, blocked).await {
+                Err(crate::error::PaykitError::Client(error))
+                    if !matches!(error.unkept(), AppError::Store(_) | AppError::Alarm(_)) => {}
+                other => other?,
+            }
+        }
+        hold.own_blocks_sent = true;
+        self.local_put(key::RESTORE_HOLD, &hold).await
+    }
+
     /// The copy of the deny list with `pubky` held or not, put in `tx`.
     async fn copy_denied(
         &self,
