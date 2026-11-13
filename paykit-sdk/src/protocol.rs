@@ -1496,6 +1496,107 @@ mod receive_tests {
     }
 
     #[test]
+    fn test_protocol_own_period_details_each_sent_again_after_a_restore() {
+        // A period record keeps every details the payee sent for its period, the latest in
+        // `period_details` and the others in `earlier_details`: a restore queues again each
+        // this app signed, the earlier ones first, and none another app signed (Paykit spec
+        // 7.2, "What a restore loses").
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let till = Party::new("bob", "till", &["request"]);
+        let details = |by: &Party, expires: &str| {
+            by.message(
+                &alice,
+                "paykit.payment_period_details",
+                vec![[7; 32]],
+                object(json!({
+                    "billing_period": {
+                        "starts_at": "2026-02-28T00:00:00.000Z",
+                        "ends_at": "2026-03-31T00:00:00.000Z"
+                    },
+                    "expires_at": expires,
+                    "payment_endpoints": { "btc-lightning-bolt11": "lnbc1period" }
+                })),
+            )
+        };
+        let mut record = activity::empty(ActivitySide::Payee, alice.id());
+        for (by, expires) in [
+            (&bob, "2026-03-01T00:00:00.000Z"),
+            (&bob, "2026-03-02T00:00:00.000Z"),
+            (&till, "2026-03-03T00:00:00.000Z"),
+        ] {
+            assert!(activity::place(
+                &mut record,
+                activity::Role::PeriodDetails,
+                details(by, expires)
+            ));
+        }
+        assert_eq!(record.earlier_details.len(), 2);
+        let own = |record: &ActivityRecord| {
+            crate::hold::own_to_send_again(record, &bob.id(), &bob.cert.app_id())
+                .into_iter()
+                .map(|stored| stored.hash())
+                .collect::<Vec<_>>()
+        };
+        let mut expected: Vec<[u8; 32]> = record
+            .earlier_details
+            .iter()
+            .chain(record.period_details.iter())
+            .filter(|stored| stored.cert().app_id() == bob.cert.app_id())
+            .map(|stored| stored.hash())
+            .collect();
+        assert_eq!(expected.len(), 2);
+        assert_eq!(own(&record), expected);
+        // Whichever the record holds as current: a proof naming the earliest makes it the
+        // period's current details, and each is still queued once.
+        let earliest = record.earlier_details[0].clone();
+        let body = paykit_lib::bodies::PaymentProof {
+            attempt_id: paykit_lib::AttemptId::from_bytes([9; 16]),
+            billing_period: Some(paykit_lib::periods::PeriodRef {
+                starts_at: 1_772_236_800_000,
+                ends_at: 1_774_915_200_000,
+            }),
+            payment_endpoint_identifier: paykit_lib::PaymentEndpointIdentifier::new(
+                "btc-lightning-bolt11",
+            )
+            .unwrap(),
+            payment_app_id: [0; 16],
+            list_version: None,
+            amount: None,
+            allowance_id: None,
+            label: None,
+            payment_reference: None,
+            proof: object(json!({ "preimage": "00" })),
+        }
+        .to_body(2)
+        .unwrap();
+        let proof = alice.message(
+            &bob,
+            "paykit.payment_proof",
+            vec![[7; 32], earliest.hash()],
+            body,
+        );
+        assert!(activity::place(&mut record, activity::Role::Proof, proof));
+        assert_eq!(
+            record.period_details.as_ref().map(|d| d.hash()),
+            Some(earliest.hash())
+        );
+        let mut sent = own(&record);
+        sent.sort();
+        expected.sort();
+        assert_eq!(sent, expected);
+        // A later stop covers every one of them: only the stop goes again.
+        let cancellation = bob.message(
+            &alice,
+            "paykit.payment_request_cancellation",
+            vec![[7; 32]],
+            object(json!({ "reason": null })),
+        );
+        record.cancellation = Some(cancellation.clone());
+        assert_eq!(own(&record), [cancellation.hash()]);
+    }
+
+    #[test]
     fn test_protocol_record_regression_on_a_dropped_role() {
         let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
         let bob = Party::new("bob", "shop", &["request"]);

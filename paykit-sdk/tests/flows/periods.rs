@@ -2815,6 +2815,202 @@ async fn test_periods_acceptance_stays_after_a_restore() {
     assert!(!received(&summary, "paykit.payment_request_acceptance"));
 }
 
+/// Bob's `till`, alice's `wallet` subscribed to its monthly request, sends her January's
+/// details twice, `apart_ms` apart, and is backed up then: its period record keeps the
+/// first in `earlier_details` and the second in `period_details`. Returns the two
+/// `msg_id`s, the earlier first, and the backup.
+async fn details_twice_backed_up(
+    w: &World,
+    till: &mut Paykit,
+    wallet: &mut Paykit,
+    apart_ms: u64,
+) -> ([String; 2], paykit_sdk::PaykitBackup) {
+    let request = requested(w, till, wallet).await;
+    wallet.accept_subscription(&request).await.unwrap();
+    till.receive(None).await.unwrap();
+    let sale = till.payee_activity().await.unwrap()[0].record;
+    let first = till
+        .send_period_details(
+            &sale,
+            details(january(), "lnbc1first", w.clock.now_ms() + DAY_MS),
+        )
+        .await
+        .unwrap();
+    w.clock.advance_ms(apart_ms);
+    let second = till
+        .send_period_details(
+            &sale,
+            details(january(), "lnbc1second", w.clock.now_ms() + DAY_MS),
+        )
+        .await
+        .unwrap();
+    let period = &till.payee_activity().await.unwrap()[0].periods[0];
+    let held: Vec<&str> = period.details.iter().map(|d| d.msg_id.as_str()).collect();
+    assert_eq!(held, [second.msg_id.as_str(), first.msg_id.as_str()]);
+    wallet.receive(None).await.unwrap();
+    ([first.msg_id, second.msg_id], till.backup().await.unwrap())
+}
+
+/// `backup` restored onto a new store as an app of bob's, without a receive: no outbox holds
+/// what it sent before.
+async fn bob_restored(w: &World, backup: &paykit_sdk::PaykitBackup) -> Paykit {
+    Paykit::restore(
+        w.env(&w.bob, store()),
+        PaykitConfig::default(),
+        backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap()
+}
+
+/// Whether the client of `app` holds `msg_id` queued or sent.
+async fn queued(app: &Paykit, msg_id: &str) -> bool {
+    app.message_delivery(msg_id).await.unwrap().is_some()
+}
+
+#[tokio::test]
+async fn test_periods_restore_queues_each_own_details_again_once() {
+    // The period record keeps both details the shop sent: the restored shop queues each
+    // again, once, the earlier one as well as the current one (Paykit spec 7.2, "What a
+    // restore loses").
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (sent, backup) = details_twice_backed_up(&w, &mut shop, &mut wallet, 1_000).await;
+    drop(shop);
+    let mut shop = bob_restored(&w, &backup).await;
+    for msg_id in &sent {
+        assert!(!queued(&shop, msg_id).await);
+    }
+    let before = w.alice.switch().entries_from(&w.bob_id());
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    for msg_id in &sent {
+        assert!(queued(&shop, msg_id).await, "{msg_id}");
+    }
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 2);
+    // Once: a later receive queues nothing more.
+    shop.receive(None).await.unwrap();
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 2);
+    // The wallet takes the copies as the details it holds.
+    wallet.receive(None).await.unwrap();
+    let view = &wallet.requests().await.unwrap()[0];
+    assert_eq!(view.periods.len(), 1);
+    assert_eq!(view.periods[0].details.len(), 2);
+}
+
+#[tokio::test]
+async fn test_periods_restore_queues_the_own_acceptance_again_once() {
+    // The request record keeps the wallet's acceptance: restored from a backup, whose
+    // outbox holds nothing sent before, the wallet queues it again, once, and the shop
+    // takes the copy as the acceptance it holds (Paykit spec 7.2, "What a restore loses").
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let request = requested(&w, &mut shop, &mut wallet).await;
+    let accepted = wallet.accept_subscription(&request).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut wallet = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert!(!queued(&wallet, &accepted.msg_id).await);
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(queued(&wallet, &accepted.msg_id).await);
+    let after = w.bob.switch().entries_from(&w.alice_id());
+    wallet.receive(None).await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), after);
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        PayeeStatus::Accepted
+    );
+}
+
+#[tokio::test]
+async fn test_periods_restore_own_details_wait_while_sends_to_the_payer_are_held() {
+    // Alice is blocked when the restored till's re-send runs: neither details goes, and the
+    // re-send stays owed; once she is unblocked both go, each once (Paykit spec 7.2, "What a
+    // restore loses"; 8.1, Blocked counterparties).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+        )
+        .await;
+    let (sent, backup) = details_twice_backed_up(&w, &mut till, &mut wallet, 1_000).await;
+    drop(till);
+    let mut till = bob_restored(&w, &backup).await;
+    till.block(&w.alice_id()).await.unwrap();
+    let before = w.alice.switch().entries_from(&w.bob_id());
+    for _ in 0..2 {
+        till.receive(None).await.unwrap();
+    }
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert!(till.app().protocol_get(b"ro").await.unwrap().is_some());
+    for msg_id in &sent {
+        assert!(!queued(&till, msg_id).await, "{msg_id}");
+    }
+    till.unblock(&w.alice_id()).await.unwrap();
+    till.receive(None).await.unwrap();
+    assert!(till.app().protocol_get(b"ro").await.unwrap().is_none());
+    for msg_id in &sent {
+        assert!(queued(&till, msg_id).await, "{msg_id}");
+    }
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 2);
+    till.receive(None).await.unwrap();
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 2);
+}
+
+#[tokio::test]
+async fn test_periods_restore_own_details_past_their_replay_window_not_sent_again() {
+    // The first details were sent 20 days before the second, and the shop is restored 11
+    // days after the second: the first is past its 30 days from its `created_at`, which the
+    // client refuses to queue again, nothing told; the second goes, once (Paykit spec 7.2,
+    // "What a restore loses").
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (sent, backup) = details_twice_backed_up(&w, &mut shop, &mut wallet, 20 * DAY_MS).await;
+    drop(shop);
+    let mut shop = bob_restored(&w, &backup).await;
+    w.clock.advance_ms(11 * DAY_MS);
+    let before = w.alice.switch().entries_from(&w.bob_id());
+    let summary = shop.receive(None).await.unwrap();
+    assert!(
+        !summary
+            .report
+            .events
+            .iter()
+            .any(|e| matches!(e, AppEvent::MessageUndelivered { .. })),
+        "{:?}",
+        summary.report.events
+    );
+    assert!(shop.notices().await.unwrap().is_empty());
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(!queued(&shop, &sent[0]).await);
+    assert!(queued(&shop, &sent[1]).await);
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 1);
+    shop.receive(None).await.unwrap();
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 1);
+}
+
 #[tokio::test]
 async fn test_periods_credit_stays_given_after_a_restore() {
     // A period credited, its receipt in its record: restored from a backup taken before
@@ -2849,6 +3045,8 @@ async fn test_periods_credit_stays_given_after_a_restore() {
     .await
     .unwrap();
     shop.receive(None).await.unwrap();
+    // The receipt the period record keeps is queued again, the same message.
+    assert!(queued(&shop, &receipt).await);
     assert_eq!(
         shop.confirm_payment(&period).await.unwrap(),
         Some(receipt.clone())

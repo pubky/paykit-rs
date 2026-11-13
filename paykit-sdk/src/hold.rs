@@ -799,9 +799,10 @@ pub(crate) struct OwnResendOwed {
 /// sent, since every message this app stores in a record it also queues
 /// (`records::own_message_tests`), while the counterparty hasn't answered it and no later
 /// stop covers it. A request or a Billing Period's details goes while the record holds no
-/// response and no cancellation; an acceptance or a rejection while it holds no
-/// cancellation and no receipt; a proof while it holds no receipt; a cancellation and a
-/// receipt always. A receipt the app stored without sending it is never sent this way: this
+/// response and no cancellation, every details a period record keeps, the earlier ones
+/// (`earlier_details`) and then the current one; an acceptance or a rejection while it
+/// holds no cancellation and no receipt; a proof while it holds no receipt; a cancellation
+/// and a receipt always. A receipt the app stored without sending it is never sent this way: this
 /// app stores its own receipt only in the batch that queues it
 /// ([`Paykit::confirm_payment_with`]), so its receipt in a record is one it sent.
 pub(crate) fn own_to_send_again<'a>(
@@ -810,8 +811,11 @@ pub(crate) fn own_to_send_again<'a>(
     app_id: &[u8; 16],
 ) -> Vec<&'a paykit_lib::records::StoredMessage> {
     let answered = record.response.is_some() || record.cancellation.is_some();
-    let candidates = [
-        (&record.request, !answered),
+    let earlier = record
+        .earlier_details
+        .iter()
+        .map(|stored| (stored, !answered));
+    let later = [
         (&record.period_details, !answered),
         (
             &record.response,
@@ -820,10 +824,17 @@ pub(crate) fn own_to_send_again<'a>(
         (&record.proof, record.receipt.is_none()),
         (&record.cancellation, true),
         (&record.receipt, true),
-    ];
-    candidates
-        .into_iter()
-        .filter_map(|(stored, send)| stored.as_ref().filter(|_| send))
+    ]
+    .into_iter()
+    .filter_map(|(stored, send)| stored.as_ref().map(|stored| (stored, send)));
+    record
+        .request
+        .iter()
+        .map(|stored| (stored, !answered))
+        .chain(earlier)
+        .chain(later)
+        .filter(|(_, send)| *send)
+        .map(|(stored, _)| stored)
         .filter(|stored| stored.sender() == *own && stored.cert().app_id() == *app_id)
         .collect()
 }
