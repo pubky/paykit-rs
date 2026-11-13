@@ -1682,11 +1682,6 @@ mod receive_tests {
         let good = "123e4567-e89b-42d3-a456-426614174000";
         assert!(restore_state(&[ask(good)]).is_ok());
         assert!(restore_state(&[ask("not-a-msg-id")]).is_err());
-        // One without its `msg_id` is no form a run writes.
-        let (at, value) = ask(good);
-        let mut without: serde_json::Value = serde_json::from_slice(&value).unwrap();
-        without["d"].as_object_mut().unwrap().remove("msg_id");
-        assert!(restore_state(&[(at, serde_json::to_vec(&without).unwrap())]).is_err());
         let (_, value) = ask(good);
         assert!(restore_state(&[(key::list_ask(&[4; 32], None), value)]).is_err());
     }

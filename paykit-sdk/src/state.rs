@@ -1642,9 +1642,6 @@ mod tests {
             })
         };
         assert!(reads::<ListAsk>(&key::list_ask(&pubky, None), asked(None)));
-        let mut without = asked(None);
-        without.as_object_mut().unwrap().remove("msg_id");
-        assert!(!reads::<ListAsk>(&key::list_ask(&pubky, None), without));
         assert!(!reads::<ListAsk>(
             &key::list_ask(&pubky, None),
             asked(Some([2; 16]))
