@@ -1034,18 +1034,34 @@ async fn test_periods_details_bound_period_after_the_next_dropped() {
 }
 
 #[tokio::test]
-async fn test_periods_details_bound_period_past_its_deadline_taken() {
-    // Each period is due a day after its start; its deadline bounds no details: a payer
-    // that fell behind can still pay it. February's are taken past its deadline, and
-    // January's too.
+async fn test_periods_details_bound_period_past_its_deadline_dropped() {
+    // Each period is due a day after its start. On day 40, January's and February's
+    // deadlines have passed: the shop sends no details for them, and the wallet takes any
+    // sent all the same with no effect. March, the next to start, takes them.
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
     let now = w.clock.now_ms();
     let draft = monthly(now, None).with_period_deadline_s(86_400);
     let sub = subscribed_for(&w, &mut shop, &mut wallet, draft, 40).await;
-    assert!(details_stored(&w, &mut shop, &mut wallet, &sub, month(1)).await);
-    assert!(details_stored(&w, &mut shop, &mut wallet, &sub, month(0)).await);
+    refused_and_dropped(&w, &mut shop, &mut wallet, &sub, month(0)).await;
+    refused_and_dropped(&w, &mut shop, &mut wallet, &sub, month(1)).await;
+    assert!(details_stored(&w, &mut shop, &mut wallet, &sub, month(2)).await);
+}
+
+#[tokio::test]
+async fn test_periods_details_bound_within_a_long_deadline_taken_past_sixteen() {
+    // With a payment deadline, a started period whose deadline hasn't passed takes details,
+    // however many periods started since: the bound of 16 is for a request without one.
+    // Day 2 is the 19th latest to have started on day 20, and is due on day 32.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let now = w.clock.now_ms();
+    let draft = daily(now).with_period_deadline_s(30 * 86_400);
+    let sub = subscribed_for(&w, &mut shop, &mut wallet, draft, 20).await;
+    w.clock.advance_ms(HOUR_MS);
+    assert!(details_stored(&w, &mut shop, &mut wallet, &sub, day(2)).await);
 }
 
 /// A daily request for 1 btc, from now, paid to one invoice of the sending app, its
@@ -1572,9 +1588,10 @@ async fn test_periods_send_details_for_a_rejected_request_refused() {
 }
 
 #[tokio::test]
-async fn test_periods_proof_named_details_stay_current_past_later_details() {
-    // Once the period record holds a proof naming details, later details go in as earlier
-    // ones: the record still binds, and the period stays paid.
+async fn test_periods_details_for_a_period_shown_paid_refused() {
+    // The payee sends details only for a period whose record doesn't show it paid (Paykit
+    // spec 8.2): once the period record holds the proof, and then its receipt, no later
+    // details go, and the details the proof names stay current.
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
@@ -1602,17 +1619,26 @@ async fn test_periods_proof_named_details_stay_current_past_later_details() {
     );
     shop.receive(None).await.unwrap();
     w.clock.advance_ms(1_000);
-    shop.send_period_details(&sale, details(january(), "lnbc1later", now + DAY_MS))
+    let refused = shop
+        .send_period_details(&sale, details(january(), "lnbc1later", now + DAY_MS))
         .await
-        .unwrap();
+        .unwrap_err();
+    assert_eq!(refusal(&refused), Refusal::AlreadyPaid);
+    let period = shop.payee_activity().await.unwrap()[0].periods[0].record;
+    assert!(shop.confirm_payment(&period).await.unwrap().is_some());
+    let refused = shop
+        .send_period_details(&sale, details(january(), "lnbc1late", now + DAY_MS))
+        .await
+        .unwrap_err();
+    assert_eq!(refusal(&refused), Refusal::AlreadyPaid);
     let held = shop.app_mut().read_record(&target).await.unwrap().unwrap();
     let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
     let current =
         paykit_lib::records::StoredMessage::read(&value["period_details"], &w.alice_id()).unwrap();
     assert_eq!(current.message().msg_id, named);
     let sale = &shop.payee_activity().await.unwrap()[0];
-    assert!(sale.periods[0].paid);
-    assert_eq!(sale.periods[0].details.len(), 2);
+    assert!(sale.periods[0].paid && sale.periods[0].credited);
+    assert_eq!(sale.periods[0].details.len(), 1);
 }
 
 /// A payment of 1 btc at the fake rail to `invoice`, attempt `attempt`, and a payer's proof

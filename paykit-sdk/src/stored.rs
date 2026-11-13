@@ -606,7 +606,14 @@ impl Paykit {
         };
         if matches!(stored.body(), Body::PaymentPeriodDetails(_)) {
             let stopped = self.kept_stop(target).await?;
-            if !crate::periods::stores_details(record, stored, self.service_time(), stopped) {
+            let period = self.held_activity(&into).await?;
+            if !crate::periods::stores_details(
+                record,
+                period.as_ref(),
+                stored,
+                self.service_time(),
+                stopped,
+            ) {
                 return Ok(PeriodPlace::Taken);
             }
         }

@@ -10,19 +10,20 @@
 //! - **A period record** keeps every details of its period, none replacing another; the
 //!   proof of the period and its receipt go there too, never into the request record
 //!   (Paykit wire 5.3 "Binding"). The payer stores details only for a subscription it
-//!   accepted and that runs, and only for one of the 16 latest periods to have started,
-//!   or the first that hasn't ([`stores_details`]); the payee sends them only for such a
+//!   accepted and that runs, and only for a period not shown paid that is the next to
+//!   start, or one started whose payment deadline hasn't passed, or, without one, one of the
+//!   16 latest to have started ([`stores_details`]); the payee sends them only for such a
 //!   period.
 //! - **Views:** a request's view lists the period records the app holds for it
 //!   ([`PeriodView`]), each with its details, latest first.
 
 use std::collections::HashMap;
 
-use paykit_lib::bodies::{period_details_order, PaymentRequest, PeriodDetails};
+use paykit_lib::bodies::{period_details_order, PaymentDeadline, PaymentRequest, PeriodDetails};
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
 use paykit_lib::kinds::Kind;
-use paykit_lib::periods::{BillingPeriod, PeriodRef, Recurrence};
+use paykit_lib::periods::{BillingPeriod, PeriodRef};
 use paykit_lib::records::{
     ActivityRecord, ActivitySide, RecordBinding, StoredMessage, MAX_PERIOD_DETAILS,
 };
@@ -147,24 +148,27 @@ pub(crate) fn named_period(
     }
 }
 
-/// How many of the latest Billing Periods to have started take period details (Paykit
-/// spec 8.2): a payer that fell behind can still pay an earlier one.
+/// How many of the latest Billing Periods to have started take period details on a request
+/// without a payment deadline (Paykit spec 8.2): a payer that fell behind can still pay an
+/// earlier one.
 pub(crate) const STARTED_PERIODS_WITH_DETAILS: i64 = 16;
 
 /// Whether the payer stores the period details `stored` for the request `record` holds
-/// (Paykit spec 8.2), the one rule every path that stores them follows: at receive, once a
-/// request record comes for details kept before it, and when a write the switch refused is
-/// made later.
+/// (Paykit spec 8.2), `period` the payer's period record of the period they name, if it
+/// reads: the one rule every path that stores them follows: at receive, once a request
+/// record comes for details kept before it, and when a write the switch refused is made
+/// later.
 ///
 /// - **A subscription running:** only for a request the payer accepted, as v0.1 holds
 ///   details before acceptance invalid, and that neither side rejected or cancelled, nor
 ///   is `stopped` by a payee's cancellation the app keeps and hasn't placed yet (Paykit
 ///   spec 8.1, the kept-copy stop): a subscription that runs no more has no periods to pay.
-/// - **A period that takes details:** one of the latest periods to have started, or the
-///   first that hasn't, on `t`, the highest service time verified ([`takes_details`]). So
-///   a payee can't make the payer hold records for periods without bound.
+/// - **A period that takes details** on `t`, the highest service time verified
+///   ([`takes_details`]). So a payee can make the payer hold period records only for
+///   periods it may still pay.
 pub(crate) fn stores_details(
     record: &ActivityRecord,
+    period: Option<&ActivityRecord>,
     stored: &StoredMessage,
     t: Option<u64>,
     stopped: bool,
@@ -175,33 +179,44 @@ pub(crate) fn stores_details(
     let Some((_, request)) = request_of(record) else {
         return false;
     };
-    let (Some(recurrence), Some(Ok(period))) = (
-        request.recurrence.as_ref(),
-        stored
-            .body()
-            .billing_period()
-            .map(|named| request.named_period(named)),
-    ) else {
+    let Some(Ok(named)) = stored
+        .body()
+        .billing_period()
+        .map(|named| request.named_period(named))
+    else {
         return false;
     };
-    takes_details(recurrence, &period, t)
+    takes_details(
+        request,
+        &named,
+        period.is_some_and(ActivityRecord::shows_paid),
+        t,
+    )
 }
 
-/// Whether `period` of `recurrence` takes period details on `t`, the highest service time
-/// verified (Paykit spec 8.2): one of the [`STARTED_PERIODS_WITH_DETAILS`] latest periods to
-/// have started, or the first that hasn't. The payee sends details only for such a period,
-/// and the payer stores them only for one, by this same rule. A period's payment deadline
-/// doesn't bound it. With no time verified yet, no period has started, as for every time
-/// the SDK judges on the service's clock, never on the device's: only the request's first
-/// period takes details then.
+/// Whether `period` of the recurring `request` takes period details on `t`, the highest
+/// service time verified (Paykit spec 8.2): a period not shown `paid` that is the next to
+/// start, or one that has started and, with a payment deadline, whose deadline hasn't
+/// passed, or, without one, is one of the [`STARTED_PERIODS_WITH_DETAILS`] latest to have
+/// started. The payee sends details only for such a period, and the payer stores them only
+/// for one, by this same rule. With no time verified yet, no period has started, as for
+/// every time the SDK judges on the service's clock, never on the device's: only the
+/// request's first period, the next to start, takes details then.
 pub(crate) fn takes_details(
-    recurrence: &Recurrence,
+    request: &PaymentRequest,
     period: &BillingPeriod,
+    paid: bool,
     t: Option<u64>,
 ) -> bool {
+    let Some(recurrence) = request.recurrence.as_ref() else {
+        return false;
+    };
     let Ok(first) = recurrence.first() else {
         return false;
     };
+    if paid {
+        return false;
+    }
     // The latest period to have started, the request's last once it has ended; none
     // before the first starts.
     let last = recurrence.last().ok().flatten().map(|last| last.index);
@@ -209,13 +224,22 @@ pub(crate) fn takes_details(
         .and_then(|t| recurrence.rule().index_at(t).ok())
         .map(|k| last.map_or(k, |last| k.min(last)))
         .filter(|k| *k >= first.index);
-    match latest {
-        None => period.index == first.index,
-        Some(k) => {
-            Some(period.index) == k.checked_add(1)
-                || (period.index <= k
-                    && k.saturating_sub(period.index) < STARTED_PERIODS_WITH_DETAILS)
+    let (Some(k), Some(t)) = (latest, t) else {
+        return period.index == first.index;
+    };
+    if Some(period.index) == k.checked_add(1) {
+        return true;
+    }
+    if period.index > k {
+        return false;
+    }
+    match request.payment_deadline {
+        Some(PaymentDeadline::PeriodStart { seconds }) => {
+            t < period
+                .starts_at
+                .saturating_add(seconds.saturating_mul(1000))
         }
+        _ => k.saturating_sub(period.index) < STARTED_PERIODS_WITH_DETAILS,
     }
 }
 
@@ -290,10 +314,13 @@ impl Paykit {
     /// the period's destination, its conversion rates, or both, valid until
     /// `details.expires_at`. They are written into the payee's period record in the batch
     /// that queues them, conditioned on the version read, and sent once it is applied; a
-    /// record that changed meanwhile is read again and the write built again. Each details
+    /// record that changed meanwhile is read again and the write built again. The request
+    /// record is read again first, so the window is judged on the service's time now. Each details
     /// stays valid until its own expiry: a later one replaces none. They are sent only for
-    /// a period that takes details, the periods the payer stores them for: one of the 16
-    /// latest to have started, or the next one, on the highest service time verified.
+    /// a period that takes details, the periods the payer stores them for
+    /// (Paykit spec 8.2): one not shown paid that is the next to start, or one started
+    /// whose payment deadline hasn't passed, or, for a request without one, one of the 16
+    /// latest to have started, on the highest service time verified.
     ///
     /// # Errors
     ///
@@ -301,11 +328,12 @@ impl Paykit {
     /// record this app doesn't hold, or a period record; [`Refusal::Usage`] for a one-time
     /// request, or a period that holds 8 details already; [`Refusal::NotSubscribed`] before
     /// the payer's acceptance; [`Refusal::Rejected`] or [`Refusal::Cancelled`];
-    /// [`crate::PaykitError::Lib`] with `Validation` for details that break Paykit wire 4.9 against
-    /// the request, such as a period that isn't one of its own, one that doesn't take
-    /// details now, or details that expired by the device clock; [`Refusal::NotNow`] while the
-    /// period record's value waits for its scope key; [`crate::PaykitError::Conflict`] when
-    /// the record kept changing; the client's errors. A failure that leaves the batch kept
+    /// [`Refusal::AlreadyPaid`] for a period whose record shows it paid;
+    /// [`crate::PaykitError::Lib`] with `Validation` for details that break Paykit wire 4.9
+    /// against the request, such as a period that isn't one of its own, one that doesn't
+    /// take details now, or details that expired by the device clock;
+    /// [`Refusal::NotNow`] while the period record's value waits for its scope key;
+    /// [`crate::PaykitError::Conflict`] when the record kept changing; the client's errors. A failure that leaves the batch kept
     /// (the network, `429`, `503`) is no error: the details are reported sent,
     /// [`MessageDelivery::Kept`], so the host doesn't send them again.
     pub async fn send_period_details(
@@ -318,6 +346,12 @@ impl Paykit {
         self.require_payee()?;
         let mut tries = 0;
         let msg_id = loop {
+            // Judged on what the switch holds now: the request record read again verifies
+            // the service's time now, which the period-details window is judged on (Paykit
+            // spec 8.2): a time verified a while ago can show a period's deadline not passed
+            // yet.
+            let (target, _) = self.payee_record(record).await?;
+            self.app.read_record(&target.record_target()).await?;
             let (target, bound) = self.payee_record(record).await?;
             let (stored, request) = request_of(&bound).ok_or(Refusal::NotFound)?;
             if !request.is_recurring() {
@@ -336,19 +370,28 @@ impl Paykit {
                 return Err(Refusal::NotSubscribed.into());
             }
             let body = details.to_body_for(request)?;
-            // Only for a period that takes details, the periods the payer stores them for,
-            // on the highest service time verified (Paykit spec 8.2). A
-            // time the app verified a while ago may not show the period started: the
-            // request record is read again, which verifies the service's time now.
             let period = request.named_period(&details.billing_period)?;
-            let recurrence = request.recurrence.ok_or(Refusal::NotFound)?;
             let request_hash = stored.hash();
-            if !takes_details(&recurrence, &period, self.service_time()) {
-                self.app.read_record(&target.record_target()).await?;
+            let into = ActivityTarget::payee(
+                period_key(&self.identity(), &request_hash, &details.billing_period),
+                target.label().as_ref(),
+            );
+            let key = self.activity_key(&into)?;
+            if let Some(held) = self.app.shared_record(&key).await? {
+                if crate::hold::awaits_key(&held.content) {
+                    return Err(crate::hold::value_awaits_key());
+                }
             }
-            if !takes_details(&recurrence, &period, self.service_time()) {
+            let held = self.held_activity(&into).await?;
+            let paid = held.as_ref().is_some_and(ActivityRecord::shows_paid);
+            if paid {
+                return Err(Refusal::AlreadyPaid.into());
+            }
+            // Only for a period that takes details, the periods the payer stores them for,
+            // on the highest service time verified (Paykit spec 8.2).
+            if !takes_details(request, &period, paid, self.service_time()) {
                 return Err(paykit_lib::Error::Validation(
-                    "Paykit spec 8.2: period details for one of the 16 latest periods to have started, or the next one"
+                    "Paykit spec 8.2: period details only for the next period to start, or one started whose payment deadline hasn't passed, or, without one, one of the 16 latest to have started"
                         .into(),
                 )
                 .into());
@@ -359,17 +402,6 @@ impl Paykit {
                 )
                 .into());
             }
-            let period = ActivityTarget::payee(
-                period_key(&self.identity(), &request_hash, &details.billing_period),
-                target.label().as_ref(),
-            );
-            let key = self.activity_key(&period)?;
-            if let Some(held) = self.app.shared_record(&key).await? {
-                if crate::hold::awaits_key(&held.content) {
-                    return Err(crate::hold::value_awaits_key());
-                }
-            }
-            let held = self.held_activity(&period).await?;
             if held.is_some_and(|r| r.details().len() >= MAX_PERIOD_DETAILS) {
                 return Err(Refusal::Usage(
                     "Paykit spec 8.2: a Billing Period has at most 8 period details".into(),
@@ -384,7 +416,7 @@ impl Paykit {
             )?;
             let msg_id = signed.msg_id().to_owned();
             match self
-                .send_with_record(signed, &period, Role::PeriodDetails, Vec::new(), Vec::new())
+                .send_with_record(signed, &into, Role::PeriodDetails, Vec::new(), Vec::new())
                 .await
             {
                 Ok(_) => break msg_id,
@@ -598,18 +630,60 @@ mod tests {
         let second = details(&bob, &alice, request.hash(), "2026-03-01T00:00:00.000Z");
         // No time verified: no period has started, so only the first, not started, takes
         // details.
-        assert!(stores_details(&record, &first, None, false));
-        assert!(!stores_details(&record, &second, None, false));
-        // A verified time decides, the payment deadline 1 s after the start bounding
-        // nothing: in the first period, it and the next take details.
+        assert!(stores_details(&record, None, &first, None, false));
+        assert!(!stores_details(&record, None, &second, None, false));
+        // A verified time decides. 2 s into the first period its payment deadline, 1 s after
+        // its start, has passed: it takes no details, and the next to start does.
         let jan_31 = 1_769_817_600_000;
-        assert!(stores_details(&record, &first, Some(jan_31 + 2_000), false));
+        let t = Some(jan_31 + 2_000);
+        assert!(!stores_details(&record, None, &first, t, false));
+        assert!(stores_details(&record, None, &second, t, false));
+        // Within its deadline, the first period takes them.
         assert!(stores_details(
             &record,
-            &second,
-            Some(jan_31 + 2_000),
+            None,
+            &first,
+            Some(jan_31 + 500),
             false
         ));
+    }
+
+    #[test]
+    fn test_periods_stores_details_not_for_a_period_shown_paid() {
+        let (alice, bob) = parties();
+        let request = bob.message(
+            &alice,
+            "paykit.payment_request",
+            Vec::new(),
+            object(json!({
+                "amount": { "asset": "btc", "value": "1" },
+                "payment_reference": "plan-1",
+                "proposal_expires_at": null,
+                "recurrence": {
+                    "anchor": "2026-01-31T00:00:00.000Z", "ends_at": null, "every": 1,
+                    "starts_at": "2026-01-31T00:00:00.000Z", "unit": "month"
+                }
+            })),
+        );
+        let mut record = empty(ActivitySide::Payer, bob.id());
+        record.request = Some(request.clone());
+        record.response = Some(alice.message(
+            &bob,
+            "paykit.payment_request_acceptance",
+            vec![request.hash()],
+            object(json!({})),
+        ));
+        let second = details(&bob, &alice, request.hash(), "2026-03-01T00:00:00.000Z");
+        let t = Some(1_772_236_800_000);
+        let period = empty(ActivitySide::Payer, bob.id());
+        assert!(stores_details(&record, Some(&period), &second, t, false));
+        // The period record's paid state decides, whatever the time.
+        let (_, body) = request_of(&record).unwrap();
+        let named = body
+            .named_period(second.body().billing_period().unwrap())
+            .unwrap();
+        assert!(takes_details(body, &named, false, t));
+        assert!(!takes_details(body, &named, true, t));
     }
 
     #[test]
@@ -634,15 +708,15 @@ mod tests {
         let mut record = empty(ActivitySide::Payer, bob.id());
         record.request = Some(request.clone());
         // Not accepted: none stored.
-        assert!(!stores_details(&record, &second, t, false));
+        assert!(!stores_details(&record, None, &second, t, false));
         let reply = |kind: &str| alice.message(&bob, kind, vec![request.hash()], object(json!({})));
         record.response = Some(reply("paykit.payment_request_rejection"));
-        assert!(!stores_details(&record, &second, t, false));
+        assert!(!stores_details(&record, None, &second, t, false));
         record.response = Some(reply("paykit.payment_request_acceptance"));
-        assert!(stores_details(&record, &second, t, false));
+        assert!(stores_details(&record, None, &second, t, false));
         // A payee's cancellation kept and not placed yet stops it, as one the record holds.
-        assert!(!stores_details(&record, &second, t, true));
+        assert!(!stores_details(&record, None, &second, t, true));
         record.cancellation = Some(reply("paykit.payment_request_cancellation"));
-        assert!(!stores_details(&record, &second, t, false));
+        assert!(!stores_details(&record, None, &second, t, false));
     }
 }

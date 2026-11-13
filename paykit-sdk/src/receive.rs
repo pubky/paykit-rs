@@ -639,7 +639,19 @@ fn period_details_effect(
     // verify is corrupt state, never taken as a stop that drops the details.
     let kept_stop = key::kept_cancellation(&cx.record_key(&request_target.record_target())?);
     let stopped = state::cx_get::<KeptMessage>(cx, &kept_stop)?.is_some();
-    if !crate::periods::stores_details(&record, stored, cx.highest_service_time(), stopped) {
+    // The period record's paid state decides too; one absent or that doesn't read shows
+    // nothing paid, and `place` below holds the entry while its value waits for its key.
+    let period = cx
+        .record(&target.record_target())?
+        .and_then(|held| held.content.value().map(<[u8]>::to_vec));
+    let period = activity::read(period.as_deref(), &own, ActivitySide::Payer);
+    if !crate::periods::stores_details(
+        &record,
+        period.as_ref(),
+        stored,
+        cx.highest_service_time(),
+        stopped,
+    ) {
         return Ok(());
     }
     // The period record is of the request record's side, whose hold was judged above, and
