@@ -1211,6 +1211,10 @@ mod tests {
             key::MISSED_HOLD,
             serde_json::json!({ "bound_ms": null })
         ));
+        assert!(!reads::<MissedHold>(
+            key::RESTORE_HOLD,
+            serde_json::json!({ "bound_ms": null })
+        ));
     }
 
     #[test]
