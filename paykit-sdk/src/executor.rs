@@ -219,6 +219,40 @@ impl Paykit {
         }
     }
 
+    /// The Allowance `entry`, a journal entry, was paid under, with the proof that the
+    /// stored pointer names the right one (Paykit spec 8.3): the executor's batch named the
+    /// Allowance in the request record in the same batch as the attempt, so the payer record
+    /// held must name it; without a record that reads, the kept ledger version must hold an
+    /// entry for the attempt. An entry naming another Allowance than its proof is a corrupt
+    /// store, checked before money moves and before the outcome's proof or record is built.
+    pub(crate) async fn entry_allowance(
+        &self,
+        entry: &crate::journal::JournalEntry,
+    ) -> Result<Option<AllowanceId>> {
+        let Some(allowance_id) = entry.allowance()? else {
+            return Ok(None);
+        };
+        let target = crate::activity::ActivityTarget::payer(entry.natural_key.clone());
+        if let Some(record) = self.held_activity(&target).await? {
+            if record.allowance_id.as_ref() != Some(&allowance_id) {
+                return Err(PaykitError::corrupt());
+            }
+            return Ok(Some(allowance_id));
+        }
+        let allowance = self
+            .app
+            .record_key(&allowance_target(&entry.payee, &allowance_id))?;
+        let attempt = entry.attempt()?;
+        let in_ledger = self
+            .kept_ledger(&allowance)
+            .await?
+            .is_some_and(|(_, ledger)| ledger.entries.iter().any(|e| e.attempt_id == attempt));
+        if !in_ledger {
+            return Err(PaykitError::corrupt());
+        }
+        Ok(Some(allowance_id))
+    }
+
     /// The kept ledger version of the Allowance at `record`, read bound to its key as a
     /// restore reads it (`state::Stored`).
     async fn kept_ledger(&self, record: &[u8; 32]) -> Result<Option<(KeptLedger, Ledger)>> {

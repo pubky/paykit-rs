@@ -2419,6 +2419,9 @@ impl Paykit {
         let attempt_id = entry.attempt()?;
         let attempt = attempt_id.to_bytes();
         let target = ActivityTarget::payer(entry.natural_key.clone());
+        // The Allowance the proof and a rebuilt record name is the entry's, checked against
+        // what points back at it before either is built (`Paykit::entry_allowance`).
+        self.entry_allowance(entry).await?;
         for _ in 0..OUTCOME_TRIES {
             // A batch kept from before may have been applied since: it finished the entry.
             // Read bound to its key and to the entry's claim: a value of another attempt or
@@ -3412,7 +3415,8 @@ impl Paykit {
         }
         // An executor checks its Allowance again before money moves (Paykit spec 7.2 step 1,
         // 8.3): one ended, rejected, handed off or off the consent list pays nothing.
-        if let Some(allowance_id) = entry.allowance()? {
+        // Checked against its proof first (`Paykit::entry_allowance`): fail closed.
+        if let Some(allowance_id) = self.entry_allowance(entry).await? {
             let target = crate::allowances::allowance_target(&entry.payee, &allowance_id);
             let record = self.app.record_key(&target)?;
             if let Err(refusal) = self.allowance_gate(&record, false).await? {

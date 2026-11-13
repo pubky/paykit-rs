@@ -848,3 +848,47 @@ async fn test_executor_refuses_a_conflict_kept_before_the_record_shows_it() {
     assert!(refused.refusal().is_some(), "{refused:?}");
     assert_eq!(held(&wallet, &record).await.0.grants.len(), grants);
 }
+
+#[tokio::test]
+async fn test_executor_journal_entry_naming_another_allowance_is_corrupt_at_the_outcome() {
+    // The executor batch goes through and the payment is in flight. The journal entry is
+    // then found naming another Allowance than the one the request record names; the payment
+    // completes, and the resume refuses the entry as a corrupt store before it builds the
+    // proof, rather than send a proof and write a record naming the other Allowance.
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let first = request(&w, &mut shop, &mut wallet, "0.5").await;
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let _ = wallet.pay_under_allowance(&first, &record).await;
+    let executed: Vec<_> = w.rail.all_executions().into_keys().collect();
+    assert_eq!(executed.len(), 1);
+    let (key, kept) = wallet.app().protocol_scan(b"j/").await.unwrap().remove(0);
+    let mut value: Value = serde_json::from_slice(&kept).unwrap();
+    assert!(value["d"]["allowance_id"].is_string());
+    value["d"]["allowance_id"] = json!("123e4567-e89b-42d3-a456-426614174000");
+    wallet
+        .app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key,
+            value: serde_json::to_vec(&value).unwrap(),
+        }])
+        .await
+        .unwrap();
+    w.rail.settle(&executed[0], true);
+    // The outcome isn't written: no proof is signed or sent, and the entry stays kept.
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            resumed.as_slice(),
+            [PayOutcome::PaidOutcomeUnwritten { .. }]
+        ),
+        "{resumed:?}"
+    );
+    assert_eq!(wallet.app().protocol_scan(b"j/").await.unwrap().len(), 1);
+    assert!(wallet
+        .requests()
+        .await
+        .unwrap()
+        .iter()
+        .all(|view| view.status != paykit_sdk::RequestStatus::Paid));
+}
