@@ -932,3 +932,94 @@ async fn test_blocked_resend_request_while_the_deny_list_is_unknown_refused_with
     wallet.request_resend(w.bob_id(), selection).await.unwrap();
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
 }
+
+/// Bob is blocked; the wallet's unblock is then kept unanswered, and its batch dropped: sent
+/// again at the next read, the switch refuses it for good, so the list still holds bob.
+/// Then the phone, another own app, blocks bob too.
+async fn unblock_dropped_then_blocked_by_the_phone(w: &World, wallet: &mut Paykit) {
+    wallet.block(&w.bob_id()).await.unwrap();
+    keep_ops(w, 1);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    w.alice.switch().fail_next(Fault::Error {
+        path: "/ops".into(),
+        code: ErrorCode::Conflict,
+        current: serde_json::Value::Null,
+    });
+    let _ = wallet.receive(None).await;
+    let mut phone = w
+        .join_with(
+            &w.alice,
+            "phone",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    phone.block(&w.bob_id()).await.unwrap();
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(lists.deny.contains(&w.bob_id()));
+}
+
+#[tokio::test]
+async fn test_blocked_own_unblock_whose_batch_is_dropped_counts_no_more_for_the_user() {
+    // The wallet's unblock never landed and its batch is gone: it counts no more, so the
+    // user's payment to bob, whom the list holds, needs the confirmation (Paykit spec 8.1).
+    let w = World::new();
+    let (mut wallet, _, request) = received(&w, PaykitConfig::default()).await;
+    unblock_dropped_then_blocked_by_the_phone(&w, &mut wallet).await;
+    let error = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(shown(error).payee, w.bob_id());
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_blocked_own_unblock_whose_batch_is_dropped_counts_no_more_for_a_repeat() {
+    // As above, for the resume's repeat of a payment in flight, an automatic payment: none
+    // is made to bob.
+    let w = World::new();
+    let calls = resumed_repeat(&w, async |wallet| {
+        unblock_dropped_then_blocked_by_the_phone(&w, wallet).await;
+    })
+    .await;
+    assert_eq!(calls, 1);
+}
+
+#[tokio::test]
+async fn test_blocked_own_unblock_kept_unanswered_not_restored() {
+    // Bob is blocked, and the wallet's unblock is kept unanswered when the backup is taken.
+    // The restored app keeps no batch the unblock could count by: it isn't restored, nor
+    // written again, so the list still holds bob and the user's payment to him needs the
+    // confirmation (Paykit spec 8.1).
+    let w = World::new();
+    let (mut wallet, _, request) = received(&w, PaykitConfig::default()).await;
+    wallet.block(&w.bob_id()).await.unwrap();
+    keep_ops(&w, 1);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut wallet = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    wallet.reconcile().await.unwrap();
+    wallet
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_scan(b"bk/").await.unwrap().is_empty());
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(lists.deny.contains(&w.bob_id()));
+    let held = PayOptions::default()
+        .with_possibly_cancelled_confirmed(pubky_switch_client::app::UserConfirmed::new());
+    let error = wallet.pay_request(&request, held).await.unwrap_err();
+    assert_eq!(shown(error).payee, w.bob_id());
+}

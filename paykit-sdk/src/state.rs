@@ -48,7 +48,7 @@
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
-//! | `bk/<pubky>` | this app's block (`true`) or unblock (`false`) of `pubky` whose `deny.put` or `deny.delete` the client keeps unanswered: either counts at once (Paykit spec 8.1); cleared once a read of the list shows it; restored, and written again once after the restore, since the kept batch stays with the device that kept it | |
+//! | `bk/<pubky>` | this app's block or unblock of `pubky` not yet shown by the list (`OwnBlockMark`): a block from before the switch is asked, an unblock only with the batch the client keeps; a block counts until a read of the list shows it, an unblock only while the client still keeps its batch (Paykit spec 8.1); a block is restored, and written again once after the restore, since the kept batch stays with the device that kept it; an unblock isn't | |
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `kw/<sender>` | a mark of a sender's entries the client dropped while they waited for a scope key, as `pd/` holds, with the data epochs they waited for; it asks only while the app holds every key of those epochs (`marks.rs`) | |
@@ -376,9 +376,70 @@ impl Stored for u64 {
     }
 }
 
+/// This app's block or unblock of the identity its key names (`bk/<pubky>`), not yet shown
+/// by a read of the lists (Paykit spec 8.1, "a block or unblock the app wrote counts at
+/// once").
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum OwnBlockMark {
+    /// A block or unblock with the client's kept batch it rides on: `None` for a block not
+    /// yet answered or kept, which needs none.
+    Sent {
+        /// A block (`true`) or an unblock.
+        blocked: bool,
+        /// The batch the client keeps it in.
+        batch: Option<[u8; 16]>,
+    },
+    /// A mark as written before marks named their batch: a block (`true`) or an unblock.
+    Bare(bool),
+}
+
+impl OwnBlockMark {
+    /// A block (`true`) or an unblock.
+    pub(crate) fn blocked(&self) -> bool {
+        match self {
+            Self::Sent { blocked, .. } | Self::Bare(blocked) => *blocked,
+        }
+    }
+
+    /// The batch an unblock rides on, the one the client must still keep for it to count.
+    pub(crate) fn unblock_batch(&self) -> Option<[u8; 16]> {
+        match self {
+            Self::Sent {
+                blocked: false,
+                batch,
+            } => *batch,
+            _ => None,
+        }
+    }
+
+    /// What the mark counts as now, given whether the client still keeps the batch of an
+    /// unblock (`batch_kept`): `Some(true)` for a block, which always counts, failing
+    /// closed; `Some(false)` for an unblock whose batch the client keeps; `None` for an
+    /// unblock that counts no more: its batch dropped or ended, or one named no batch, as a
+    /// mark of the earlier form, so the list decides.
+    pub(crate) fn counts(&self, batch_kept: bool) -> Option<bool> {
+        if self.blocked() {
+            return Some(true);
+        }
+        (self.unblock_batch().is_some() && batch_kept).then_some(false)
+    }
+}
+
+impl sealed::Sealed for OwnBlockMark {}
+
+impl Stored for OwnBlockMark {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::OwnBlock(_) => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for bool {}
 
-/// A mark, which every writer sets `true`, or an own block kept unanswered.
+/// A mark, which every writer sets `true`.
 impl Stored for bool {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
@@ -391,9 +452,6 @@ impl Stored for bool {
             {
                 Ok(())
             }
-            // This app's block (`true`) or unblock (`false`) kept unanswered, or a block not
-            // yet answered, of the identity its key names.
-            StateKey::OwnBlock(_) => Ok(()),
             _ => corrupt(),
         }
     }
@@ -850,13 +908,11 @@ pub(crate) mod key {
         format!("{HELD_LISTS}{}", b64(record_key))
     }
 
-    /// This app's block (`true`) or unblock of `pubky` kept unanswered, or a block not yet
-    /// answered: a block is marked before the switch is asked, so a crash before the call
-    /// leaves it counted, and its mark goes once the switch took it. A kept one goes only
-    /// once a read of the lists shows it, or this app blocks or unblocks `pubky` again: a
-    /// kept batch the client drops (`KeptBatchDropped`, `BatchRefused`) leaves it, so a
-    /// change that never lands keeps counting, over a later change another own app makes,
-    /// until then.
+    /// This app's block or unblock of `pubky` not yet shown by a read of the lists
+    /// ([`OwnBlockMark`]). A block is marked before the switch is asked, so a crash before
+    /// the call leaves it counted; its mark goes once the switch took it, or once a read of
+    /// the lists shows it, and a block whose kept batch the client drops keeps counting until
+    /// then, failing closed. An unblock counts only while the client keeps its batch.
     pub(crate) fn own_block(pubky: &[u8; 32]) -> String {
         format!("{OWN_BLOCKS}{}", b64(pubky))
     }
@@ -1239,6 +1295,31 @@ mod tests {
     }
 
     #[test]
+    fn test_state_own_block_mark_of_the_earlier_form_counts_only_as_a_block() {
+        // A mark written before marks named their batch: a block counts, failing closed; an
+        // unblock can't be tied to a batch the client keeps, so it counts no more.
+        let read = |value: serde_json::Value| -> OwnBlockMark {
+            let bytes = serde_json::to_vec(&serde_json::json!({ "v": 1, "d": value })).unwrap();
+            bound::<OwnBlockMark>(
+                key::own_block(&[1; 32]).as_bytes(),
+                &bytes,
+                &Binder::unblinded([1; 32]),
+            )
+            .unwrap()
+        };
+        assert_eq!(read(serde_json::json!(true)).counts(false), Some(true));
+        assert_eq!(read(serde_json::json!(true)).counts(true), Some(true));
+        assert_eq!(read(serde_json::json!(false)).counts(true), None);
+        // One with its batch: an unblock counts only while the client keeps the batch.
+        let unblock = read(serde_json::json!({ "blocked": false, "batch": vec![7u8; 16] }));
+        assert_eq!(unblock.unblock_batch(), Some([7; 16]));
+        assert_eq!(unblock.counts(true), Some(false));
+        assert_eq!(unblock.counts(false), None);
+        let block = read(serde_json::json!({ "blocked": true, "batch": null }));
+        assert_eq!(block.counts(false), Some(true));
+    }
+
+    #[test]
     fn test_state_restore_hold_written_without_its_asked_reads() {
         // A restore's hold as a run before the `asked` member wrote it, mid-hold when the
         // store is upgraded: a valid run's form, so it reads, having asked none.
@@ -1282,8 +1363,16 @@ mod tests {
         assert!(!reads::<KeyWaitMark>(&kw, waits(1, 5, 6, false, &[2, 2])));
         assert!(!reads::<KeyWaitMark>(&at, waits(1, 5, 6, false, &[2])));
         assert!(!reads::<DropMark>(&kw, mark(1, 5, 6)));
-        // An own block or unblock kept, of any value, and the deny list's copy.
-        assert!(reads::<bool>(
+        // An own block or unblock, in either form, and the deny list's copy.
+        for mark in [
+            serde_json::json!(false),
+            serde_json::json!(true),
+            serde_json::json!({ "blocked": false, "batch": vec![7u8; 16] }),
+            serde_json::json!({ "blocked": true, "batch": null }),
+        ] {
+            assert!(reads::<OwnBlockMark>(&key::own_block(&[1; 32]), mark));
+        }
+        assert!(!reads::<bool>(
             &key::own_block(&[1; 32]),
             serde_json::json!(false)
         ));

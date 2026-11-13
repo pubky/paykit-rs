@@ -648,6 +648,11 @@ impl Paykit {
         // Each step's future goes on the heap: built in this future's poll, every one of them
         // would otherwise take its size of the stack there, beside the client's read, and a
         // host thread of 2 MiB would not hold a deep read in a debug build.
+        // This app's unblocks whose batch the client no longer keeps count no more: they go
+        // first, so the lists are read again below and no step counts them.
+        if self.certificate_refused().is_none() {
+            Box::pin(self.drop_unblocks_not_kept()).await?;
+        }
         // An app holding `contacts` reads the flagged senders again first, at most every 10
         // minutes, for the spam rule (Paykit wire 4.1).
         Box::pin(self.refresh_lists_when_due()).await?;

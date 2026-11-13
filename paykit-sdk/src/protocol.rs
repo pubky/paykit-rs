@@ -348,12 +348,17 @@ pub(crate) fn restore_paykit_layer(
             // list the backup holds may be stale by any time, so the list is read again before
             // any payment (Paykit spec 8.1).
             StateKey::ListsRead => continue,
-            // This app's blocks and unblocks kept unanswered are: the client's kept batches
-            // belong to the device that kept them, so the restored app keeps counting each
-            // and writes it again (`Paykit::send_own_blocks_again`).
+            // This app's blocks kept unanswered are: the client's kept batches belong to the
+            // device that kept them, so the restored app keeps counting each and writes it
+            // again (`Paykit::send_own_blocks_again`). Its unblocks aren't: an unblock counts
+            // only while the client keeps its batch, and the restored app keeps none, so the
+            // list decides.
             StateKey::OwnBlock(_) => {
-                state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
-                writes.push(LocalWrite::Put { key, value });
+                let mark = state::restored::<state::OwnBlockMark>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                if mark.blocked() {
+                    writes.push(LocalWrite::Put { key, value });
+                }
                 continue;
             }
             StateKey::Journal(attempt) => attempt,
