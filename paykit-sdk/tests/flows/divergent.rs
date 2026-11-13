@@ -1540,3 +1540,145 @@ async fn test_divergent_kept_list_written_before_a_payment_to_it() {
     let outcome = wallet.pay_without_request(payment()).await.unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
+
+/// The client's durable divergence report (pubky/pubky-switch#180):
+/// `AppEvent::RecordDivergent { id, key }` is a duty event, delivered until acknowledged, kept
+/// through a restart and a cleared flag, and raised again under a new ID after a restore;
+/// `ScriptedSwitch::make_divergent` makes a record divergent at the switch, as a conflicting
+/// upload does. These tests switch on with the pin that holds it: build them with
+/// `RUSTFLAGS="--cfg switch_durable_divergence"`; the pin move drops the cfg. Paykit is not
+/// released on a pin without them.
+#[cfg(switch_durable_divergence)]
+mod durable_event {
+    use super::*;
+
+    /// The app whose upload conflicts with the record's current write.
+    const UPLOADER: [u8; 16] = [0x5a; 16];
+
+    #[tokio::test]
+    async fn test_divergent_event_pauses_through_a_restart_and_a_cleared_flag() {
+        // The client reads the record divergent and keeps the duty event; Paykit stops before
+        // taking it. The flag then clears, as a newer write the client takes does, and the
+        // app starts again: the load sees no flag, and the duty event alone pauses the record.
+        let w = World::new();
+        let base = store();
+        let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+        let app_id = wallet.app_id();
+        let mut shop = w.shop().await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        let record = wallet.request(&request).await.unwrap().record;
+        w.alice
+            .switch()
+            .make_divergent(UPLOADER, record, [1; 32])
+            .unwrap();
+        wallet.app_mut().receive(None).await.unwrap();
+        assert!(
+            wallet
+                .app()
+                .shared_record(&record)
+                .await
+                .unwrap()
+                .unwrap()
+                .divergent
+        );
+        set_divergent(&base, &wallet, &record, false);
+        drop(wallet);
+        let mut wallet = w
+            .load_on_clock(&w.alice, Arc::clone(&base), app_id, Arc::clone(&w.clock))
+            .await;
+        assert!(wallet.app().protocol_scan(b"dv/").await.unwrap().is_empty());
+        let summary = wallet.receive(None).await.unwrap();
+        assert!(
+            summary.divergent.iter().any(|r| r.record == record),
+            "{summary:?}"
+        );
+        let refused = wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap_err();
+        let named = refused_records(&refused);
+        assert!(
+            named.len() == 1 && named[0].0 == record && named[0].1,
+            "{named:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_divergent_event_pauses_a_record_cleared_after_the_read() {
+        // The receive that reads the record divergent takes the event; the flag clears right
+        // after. No view the app takes later shows it divergent: the event's mark alone keeps
+        // the pause, until the user confirms.
+        let w = World::new();
+        let base = store();
+        let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+        let mut shop = w.shop().await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        let record = wallet.request(&request).await.unwrap().record;
+        w.alice
+            .switch()
+            .make_divergent(UPLOADER, record, [1; 32])
+            .unwrap();
+        let summary = wallet.receive(None).await.unwrap();
+        assert!(
+            summary.divergent.iter().any(|r| r.record == record),
+            "{summary:?}"
+        );
+        set_divergent(&base, &wallet, &record, false);
+        let refused = wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(refused_records(&refused), vec![(record, true, false)]);
+        confirm(&mut wallet, &record).await.unwrap();
+        let outcome = wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn test_divergent_repeat_withheld_when_its_fresh_read_shows_the_record_divergent() {
+        // The wallet's own copy shows the request record clear; the switch holds it
+        // divergent. The repeat's fresh read of the record is the first view that shows it:
+        // the repeat is withheld on that view.
+        let w = World::new();
+        let base = store();
+        let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+        let mut shop = w.shop().await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        w.rail.next(Behaviour::Hang);
+        let PayOutcome::Pending { attempt_id, .. } = wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap()
+        else {
+            panic!("pending");
+        };
+        w.rail.set_declaration(idempotent_without_history());
+        let record = wallet.request(&request).await.unwrap().record;
+        w.alice
+            .switch()
+            .make_divergent(UPLOADER, record, [1; 32])
+            .unwrap();
+        assert!(
+            !wallet
+                .app()
+                .shared_record(&record)
+                .await
+                .unwrap()
+                .unwrap()
+                .divergent
+        );
+        let resumed = wallet.resume_payments().await.unwrap();
+        assert!(
+            matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+            "{resumed:?}"
+        );
+        assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+        assert!(wallet.divergent_records().await.unwrap()[0].paused);
+    }
+}
