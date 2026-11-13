@@ -808,6 +808,7 @@ mod tests {
         resolution: Resolution,
         draft: RequestDraft,
         payment: UnrequestedPayment,
+        details: paykit_lib::bodies::PeriodDetails,
     ) {
         let key = [0; 32];
         let request = RequestRef {
@@ -862,6 +863,11 @@ mod tests {
         assert_send(&wallet.notices());
         assert_send(&wallet.acknowledge_notice(""));
         assert_send(&wallet.receipts(ReceiptsOf::All));
+        assert_send(&wallet.accept_subscription(&request));
+        assert_send(
+            &wallet.accept_subscription_with(&request, crate::requests::AcceptOptions::default()),
+        );
+        assert_send(&wallet.send_period_details(&key, details));
     }
 
     #[test]
