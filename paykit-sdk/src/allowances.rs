@@ -132,6 +132,10 @@ pub struct AllowanceView {
     /// Whether this app's consent list holds it, confirmed since any restore: an executor
     /// pays under an Allowance only then (Paykit spec 8.3).
     pub consented: bool,
+    /// Whether the counterparty is on the identity's deny list, as the app last read it
+    /// (Paykit spec 8.1, "Blocked counterparties"): nothing new from it is taken, and its
+    /// requests are paused, so the host shows the Allowance as blocked.
+    pub blocked: bool,
 }
 
 /// An Allowance proposal this app sent.
@@ -1257,7 +1261,9 @@ impl Paykit {
 
     /// Every Allowance this identity holds a record of, from the `allowances` records this
     /// app holds (Paykit spec 6, 8.3). A record that doesn't bind is left out, as a reader
-    /// doesn't act on it (Paykit wire 5.4).
+    /// doesn't act on it (Paykit wire 5.4). A record held as deleted over which this app
+    /// keeps a conflicting proposal shows as conflicted, from that proposal, with no record
+    /// behind the view, so the host can show it (Paykit spec 8.3, "Ending").
     ///
     /// # Errors
     ///
@@ -1275,6 +1281,8 @@ impl Paykit {
             }
             if let Some(record) = self.held_allowance(&held.key).await? {
                 out.push(self.allowance_view(held.key, &record).await?);
+            } else if let Some(view) = self.deleted_conflict_view(&held.key, &held.content).await? {
+                out.push(view);
             }
         }
         Ok(out)
@@ -1288,11 +1296,63 @@ impl Paykit {
     pub async fn allowance(&self, record: &[u8; 32]) -> Result<AllowanceView> {
         self.refuse_while_unlisted().await?;
         self.refuse_while_awaiting_key(record).await?;
-        let held = self
-            .held_allowance(record)
+        if let Some(held) = self.held_allowance(record).await? {
+            return self.allowance_view(*record, &held).await;
+        }
+        let content = self
+            .app
+            .shared_record(record)
             .await?
+            .map(|held| held.content)
             .ok_or(Refusal::NotFound)?;
-        self.allowance_view(*record, &held).await
+        Ok(self
+            .deleted_conflict_view(record, &content)
+            .await?
+            .ok_or(Refusal::NotFound)?)
+    }
+
+    /// The Allowance whose record this app holds as deleted and over which it keeps a
+    /// conflicting proposal as the stop (Paykit spec 8.3, "Ending"), as the host shows it:
+    /// conflicted, from the kept proposal alone. No record is behind this view: the
+    /// counterparty, Allowance ID, role and terms are the kept proposal's, nothing is
+    /// consented, no executor is named, and nothing is answered, ended or paid under it.
+    /// `None` for a record not held as deleted, or with no such stop.
+    async fn deleted_conflict_view(
+        &self,
+        record: &[u8; 32],
+        content: &RecordContent,
+    ) -> Result<Option<AllowanceView>> {
+        if *content != RecordContent::Deleted {
+            return Ok(None);
+        }
+        // Read bound to its key (`state::Stored`): a proposal of the Allowance this record
+        // key derives from.
+        let Some(kept) = self
+            .local_get::<KeptMessage>(&key::conflict(record))
+            .await?
+        else {
+            return Ok(None);
+        };
+        let stored = kept.stored(&self.identity())?;
+        let Body::AllowanceProposal(proposal) = stored.body() else {
+            return Ok(None);
+        };
+        let role = match proposal.proposer_role {
+            ProposerRole::Allower => AllowanceRole::Allowee,
+            ProposerRole::Allowee => AllowanceRole::Allower,
+        };
+        Ok(Some(AllowanceView {
+            record: *record,
+            counterparty: stored.sender(),
+            allowance_id: proposal.allowance_id.clone(),
+            role,
+            proposed_here: false,
+            terms: proposal.terms.clone(),
+            status: AllowanceStatus::Conflicted,
+            executor_app_id: None,
+            consented: false,
+            blocked: self.denied_as_last_read(&stored.sender()).await?,
+        }))
     }
 
     async fn allowance_view(
@@ -1325,6 +1385,7 @@ impl Paykit {
             ),
             executor_app_id: held.current_grant(&own).map(|(grant, _)| grant.app_id),
             consented: self.consents(&record).await?,
+            blocked: self.denied_as_last_read(&held.counterparty).await?,
         })
     }
 
