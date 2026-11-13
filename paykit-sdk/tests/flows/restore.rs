@@ -1911,22 +1911,6 @@ async fn test_restore_asks_start_bounded_where_they_are_queued() {
     );
 }
 
-/// The restore of `backup`, a backup's JSON, on a fresh store: the app, or the refusal.
-async fn restored_or_refused(
-    w: &World,
-    backup: serde_json::Value,
-) -> Result<Paykit, paykit_sdk::PaykitError> {
-    let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&backup).unwrap()).unwrap();
-    Paykit::restore(
-        w.env(&w.alice, store()),
-        PaykitConfig::default(),
-        &backup,
-        Arc::clone(&w.rail) as Arc<dyn Rail>,
-        w.timer(),
-    )
-    .await
-}
-
 /// `good` with its journaled payment's kept acceptance certificate replaced by `cert`, or
 /// removed with `None`.
 fn with_acceptance_cert(
@@ -1954,11 +1938,104 @@ fn with_acceptance_cert(
 }
 
 #[tokio::test]
-async fn test_restore_acceptance_without_a_kept_certificate_read_under_the_current() {
+async fn test_restore_acceptance_without_its_kept_certificate_refused() {
+    // The acceptance and the certificate it was signed under are kept together: an entry
+    // with the one and not the other is no form a run writes, and the restore refuses it.
     let w = World::new();
-    let (good, _app_id) = backup_with_a_payment(&w).await;
-    let r = restored_or_refused(&w, with_acceptance_cert(&good, None)).await;
-    assert!(r.is_ok(), "{:?}", r.err());
+    let (good, app_id) = backup_with_a_payment(&w).await;
+    refused_writing_nothing(
+        &w,
+        with_acceptance_cert(&good, None),
+        app_id,
+        "an acceptance without its certificate",
+    )
+    .await;
+}
+
+/// `good` with its journal entry's `member` set to `value`, or removed for `None`.
+fn with_journal_member(
+    good: &serde_json::Value,
+    member: &str,
+    value: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut layer = layer_of(good);
+    let entry = &mut layer
+        .iter_mut()
+        .find(|(k, _)| k.starts_with(b"j/"))
+        .map(|(_, v)| v)
+        .unwrap()["d"];
+    assert!(entry.get(member).is_some(), "no {member}");
+    match value {
+        Some(value) => entry[member] = value,
+        None => {
+            entry.as_object_mut().unwrap().remove(member);
+        }
+    }
+    with_layer(good, layer)
+}
+
+#[tokio::test]
+async fn test_restore_journal_entry_of_shapes_no_run_writes_refused() {
+    // Each is refused, writing nothing: a payment with no carrier kept (it is journaled
+    // before the entry is first saved), a payment of a request that keeps no request, one
+    // with no transfer bound that no reconcile rebuilt, and an entry without an always
+    // written member.
+    let w = World::new();
+    let (good, app_id) = backup_with_a_payment(&w).await;
+    let cases = [
+        ("no carrier", "carrier", Some(serde_json::Value::Null)),
+        ("no request kept", "request", Some(serde_json::Value::Null)),
+        (
+            "no transfer bound",
+            "transfer_bound",
+            Some(serde_json::Value::Null),
+        ),
+        ("no failed_on_claim member", "failed_on_claim", None),
+    ];
+    for (what, member, value) in cases {
+        refused_writing_nothing(&w, with_journal_member(&good, member, value), app_id, what).await;
+    }
+}
+
+#[tokio::test]
+async fn test_journal_entry_with_no_carrier_holds_its_payment() {
+    // The live store holds a payment in flight whose entry keeps no carrier: the entry is a
+    // corrupt store, so the resume errors and pays nothing, rather than repeating the
+    // payment unchecked.
+    let w = World::new();
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true),
+    );
+    let mut wallet = w
+        .wallet_with("wallet", store(), crate::common::day_window())
+        .await;
+    let mut shop = w.labelled_shop("shop1", "shop1").await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("in flight");
+    };
+    let held = wallet.app().protocol_scan(b"j/").await.unwrap();
+    assert_eq!(held.len(), 1);
+    let mut value: serde_json::Value = serde_json::from_slice(&held[0].1).unwrap();
+    value["d"]["carrier"] = serde_json::Value::Null;
+    wallet
+        .app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: held[0].0.clone(),
+            value: serde_json::to_vec(&value).unwrap(),
+        }])
+        .await
+        .unwrap();
+    w.clock.advance_ms(60_000);
+    assert!(wallet.resume_payments().await.is_err());
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
 
 #[tokio::test]

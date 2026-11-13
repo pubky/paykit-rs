@@ -238,18 +238,16 @@ pub(crate) struct JournalEntry {
     pub(crate) acceptance_msg_id: Option<String>,
     /// The acceptance's signed plaintext, for its stored copy in the request record, which
     /// the outcome's batch writes (Paykit spec 7.2 step 3).
-    #[serde(default, with = "serde_b64_opt")]
+    #[serde(with = "serde_b64_opt")]
     pub(crate) acceptance_plaintext: Option<Vec<u8>>,
     /// The app's own certificate the acceptance was signed under, kept with it: the
     /// acceptance is checked and placed under it, never under a later renewal, which may no
-    /// longer hold `pay` (Paykit spec 3.2, Switch wire 3.8). `None` for an entry written
-    /// before it was kept, checked under the current certificate as then.
-    #[serde(default)]
+    /// longer hold `pay` (Paykit spec 3.2, Switch wire 3.8). Set and cleared with
+    /// `acceptance_plaintext`.
     pub(crate) acceptance_cert: Option<SignedDoc>,
     /// The acceptance went into the outbox, sendable: only once the payment method's call
     /// was made, or a resume found the payment in the method's history (Paykit spec 7.2
     /// step 2). Until then it is journaled only, never sent and never placed in a record.
-    #[serde(default)]
     pub(crate) acceptance_released: bool,
     /// The rail's proof, once paid.
     pub(crate) rail_proof: Option<Map<String, Value>>,
@@ -260,47 +258,39 @@ pub(crate) struct JournalEntry {
     /// Device time when journaled: the earliest a dispatch could start.
     pub(crate) journaled_at_ms: u64,
     /// The verified message carrying the destination, for the destination check before a
-    /// repeat (Paykit spec 7.2 step 1). Neither it nor `carrier_record` in an entry kept
-    /// before carriers were journaled: such an entry is never dispatched again.
-    #[serde(default)]
+    /// repeat (Paykit spec 7.2 step 1). Exactly one of it and `carrier_record` is kept: the
+    /// carrier is journaled before the entry is first saved.
     pub(crate) carrier: Option<KeptMessage>,
     /// The signed app record carrying a public endpoint, for the same check.
-    #[serde(default)]
     pub(crate) carrier_record: Option<SignedDoc>,
     /// The payment method reported the dispatch failed, and `failed` was written on it: the
     /// method's history is asked again within its retention, and a payment that completed
     /// after all is reported with its proof (Paykit spec 7.2, "What a payment method
     /// declares").
-    #[serde(default)]
     pub(crate) failed_by_method: bool,
     /// The attempt's transition proof, for the service and generation it was written at
     /// (Paykit spec 4, "Fresh before paying"). An entry without one is never dispatched again.
-    #[serde(default)]
     pub(crate) attempt_proof: Option<SignedDoc>,
     /// The request paid, as the payer's request record stored it: with the acceptance and
     /// the proof, what rebuilds that record should it be gone by the outcome, so `done`
-    /// never goes without it (Paykit spec 7.2 step 3). Absent in a payment without a
-    /// request, and in an entry kept before requests were journaled, whose record is then
-    /// never rebuilt: its outcome waits as for one that doesn't read.
-    #[serde(default)]
+    /// never goes without it (Paykit spec 7.2 step 3). Kept for every payment of a request,
+    /// absent in a payment without a request.
     pub(crate) request: Option<KeptMessage>,
     /// The outcome of a payment made waits: the payer's activity record holds a value that
     /// doesn't read, which the SDK doesn't overwrite unasked, so neither `done` nor the
     /// proof is written. The attempt stays open, and nothing pays again. A durable notice
     /// for the host ([`PaymentView::record_held`]), until the record reads again or
     /// [`crate::Paykit::repair_activity_record`] writes it again.
-    #[serde(default)]
     pub(crate) record_held: bool,
-    /// The transfer the attempt may make, as its planning allowed it. `None` in an entry
-    /// kept before it was journaled, held to the app's cap now.
-    #[serde(default)]
+    /// The transfer the attempt may make, as its planning allowed it. `None` only in an
+    /// entry a reconcile rebuilt from its claim (`restored`), which is never dispatched
+    /// again: its repeat would be held to the app's cap now.
     pub(crate) transfer_bound: Option<TransferBound>,
     /// The payment method reported the dispatch failed, `failed` was written on the claim,
     /// and the method's history later showed it paid: its proof went, and `failed` stands on
     /// the claim until the payee's receipt settles it by evidence. A receipt that comes once
     /// the claim is gone raises [`crate::NoticeKind::PaidAfterFailed`] (Paykit spec 7.2,
     /// "What a payment method declares").
-    #[serde(default)]
     pub(crate) failed_on_claim: bool,
 }
 
@@ -383,7 +373,9 @@ impl JournalEntry {
         if let Some(bytes) = &self.acceptance_plaintext {
             MessagePlaintext::decode(bytes).map_err(|_| PaykitError::corrupt())?;
         }
-        if self.acceptance_cert.is_some() && self.acceptance_plaintext.is_none() {
+        // The acceptance and the certificate it was signed under are kept, and cleared,
+        // together.
+        if self.acceptance_cert.is_some() != self.acceptance_plaintext.is_some() {
             return bad();
         }
         let paid_members = self.paid_at_ms.is_some() || self.proof_msg_id.is_some();
@@ -393,11 +385,15 @@ impl JournalEntry {
         if self.failed_by_method && self.rail_proof.is_some() {
             return bad();
         }
-        if let Some(kept) = &self.request {
-            if request_hash.is_none() {
-                return bad();
-            }
-            kept.check_shape()?;
+        // A payment of a request keeps the request, and only such a payment does.
+        match (&self.request, request_hash) {
+            (Some(kept), Some(_)) => kept.check_shape()?,
+            (None, None) => {}
+            _ => return bad(),
+        }
+        // Only a reconcile's rebuilt entry, never dispatched again, has no transfer bound.
+        if self.transfer_bound.is_none() && !self.restored {
+            return bad();
         }
         if (self.record_held || self.failed_on_claim) && self.rail_proof.is_none() {
             return bad();
@@ -416,7 +412,7 @@ impl JournalEntry {
             (None, Some(signed)) => {
                 AppRecord::verify(signed, &self.payee).map_err(|_| PaykitError::corrupt())?;
             }
-            (None, None) => {}
+            (None, None) => return bad(),
         }
         if let Some(signed) = &self.attempt_proof {
             TransitionProof::peek(signed).map_err(|_| PaykitError::corrupt())?;
@@ -463,9 +459,8 @@ impl JournalEntry {
     ///   and its amount, payment reference and label the entry's.
     /// - The destination's carrier: the list message or app record, verified again.
     /// - The acceptance this app signed: read as its own message to the payee, under the
-    ///   certificate it was signed under ([`JournalEntry::acceptance_message`]), `own_cert`
-    ///   only for an entry that kept none, an acceptance of that request with the `msg_id`
-    ///   the entry keeps.
+    ///   certificate it was signed under ([`JournalEntry::acceptance_message`]), an
+    ///   acceptance of that request with the `msg_id` the entry keeps.
     ///
     /// A corrupt store for any mismatch.
     pub(crate) fn check_restored(
@@ -519,8 +514,9 @@ impl JournalEntry {
     }
 
     /// The acceptance this app signed, as its own message to the payee, under the certificate
-    /// it was signed under ([`JournalEntry::acceptance_cert`]), or `current` for an entry
-    /// that kept none. It is read as any reader reads a stored message
+    /// it was signed under ([`JournalEntry::acceptance_cert`]); `current` is this app's
+    /// certificate now, whose App ID the acceptance must carry. It is read as any reader reads
+    /// a stored message
     /// ([`StoredMessage::new`], Paykit wire 5.2: the certificate verified for this identity,
     /// its App ID the plaintext's, the signature, and the sender's scopes); a kept
     /// certificate must also be this app's own. So a later renewal, revocation of a scope or
@@ -536,7 +532,10 @@ impl JournalEntry {
             return Ok(None);
         };
         let plaintext = MessagePlaintext::decode(bytes).map_err(|_| PaykitError::corrupt())?;
-        let cert = self.acceptance_cert.as_ref().unwrap_or(current.signed());
+        let cert = self
+            .acceptance_cert
+            .as_ref()
+            .ok_or_else(PaykitError::corrupt)?;
         let stored = StoredMessage::new(*own, cert, plaintext, None, &self.payee)?;
         // Not another own app's acceptance: the plaintext names the certificate's App ID,
         // which must be this app's.
@@ -554,16 +553,17 @@ impl JournalEntry {
         }
     }
 
-    /// The destination's carrier, verified again for `own`; `None` when the entry keeps none.
-    pub(crate) fn kept_carrier(&self, own: &[u8; 32]) -> Result<Option<Carrier>> {
+    /// The destination's carrier, verified again for `own`. An entry that keeps none is a
+    /// corrupt store ([`JournalEntry::check`] refuses it).
+    pub(crate) fn kept_carrier(&self, own: &[u8; 32]) -> Result<Carrier> {
         if let Some(kept) = &self.carrier {
-            return Ok(Some(Carrier::Message(Box::new(kept.stored(own)?))));
+            return Ok(Carrier::Message(Box::new(kept.stored(own)?)));
         }
         match &self.carrier_record {
             Some(signed) => AppRecord::verify(signed, &self.payee)
-                .map(|record| Some(Carrier::Record(Box::new(record))))
+                .map(|record| Carrier::Record(Box::new(record)))
                 .map_err(|_| PaykitError::corrupt()),
-            None => Ok(None),
+            None => Err(PaykitError::corrupt()),
         }
     }
 

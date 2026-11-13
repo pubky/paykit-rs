@@ -626,7 +626,7 @@ impl Paykit {
         };
         let mut record = match read {
             Some(record) => record,
-            None => match entry.map(|e| self.rebuilt_record(e)).transpose()?.flatten() {
+            None => match entry.map(|e| self.rebuilt_record(e)).transpose()? {
                 Some(record) => record,
                 None => return Err(held("the record is gone, with nothing to rebuild it from")),
             },
