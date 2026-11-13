@@ -3919,11 +3919,12 @@ async fn test_divergent_stored_entry_neither_written_nor_given_up_while_its_reco
 }
 
 #[tokio::test]
-async fn test_divergent_new_message_the_bound_would_drop_kept_until_a_later_one_drops_it() {
-    // One acceptance, then 17 accepted at one same time, delivered highest `msg_id` first:
-    // the last one the step takes sorts below the 16 latest kept, so the bound would drop
-    // it. The step can't forget its own message's pair, so it is kept, one over the bound.
-    // A later acceptance then drops it with its pair forgotten, and its re-send is taken.
+async fn test_divergent_messages_of_one_millisecond_kept_dropped_and_written_in_acceptance_order() {
+    // 18 acceptances accepted in one millisecond, delivered highest `msg_id` first: the
+    // inbox's order is the delivery's, not the `msg_id`'s. Over the paused record the first
+    // delivered is kept as the role's first and the second delivered is the one past the
+    // bound, dropped as never processed so its re-send is taken; once the user confirms, the
+    // first delivered goes into the role and the others are reflected in delivery order.
     let w = World::new();
     let base = store();
     let mut wallet = w.wallet("wallet").await;
@@ -3954,34 +3955,40 @@ async fn test_divergent_new_message_the_bound_would_drop_kept_until_a_later_one_
         .unwrap()
         .msg_id
     };
-    let first = sign(&w);
-    w.deliver(&w.alice, "wallet", &w.bob, &[shop.app_id()], &first);
     w.clock.advance_ms(1);
-    let mut same_time: Vec<_> = (0..17).map(|_| sign(&w)).collect();
+    let mut same_time: Vec<_> = (0..18).map(|_| sign(&w)).collect();
     same_time.sort_by_key(|plaintext| std::cmp::Reverse(msg_id(plaintext)));
     for plaintext in &same_time {
         w.deliver(&w.alice, "wallet", &w.bob, &[shop.app_id()], plaintext);
     }
     shop.receive(None).await.unwrap();
-    let lowest = same_time.last().unwrap();
+    let ids: Vec<String> = same_time.iter().map(msg_id).collect();
     let kept = shop.app().protocol_scan(b"dw/").await.unwrap();
-    assert_eq!(kept.len(), 18);
     let named = |id: &str| {
         kept.iter()
             .any(|(key, _)| String::from_utf8_lossy(key).ends_with(id))
     };
-    assert!(named(&msg_id(lowest)));
-    w.clock.advance_ms(1);
-    let later = sign(&w);
-    w.deliver(&w.alice, "wallet", &w.bob, &[shop.app_id()], &later);
-    shop.receive(None).await.unwrap();
-    let kept = shop.app().protocol_scan(b"dw/").await.unwrap();
     assert_eq!(kept.len(), 17);
-    assert!(!kept
+    assert!(named(&ids[0]) && !named(&ids[1]));
+    assert!(ids[2..].iter().all(|id| named(id)));
+    confirm(&mut shop, &record).await.unwrap();
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    let held = shop.app().shared_record(&record).await.unwrap().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    let reflected: Vec<String> = value["msg_ids"]
+        .as_array()
+        .unwrap()
         .iter()
-        .any(|(key, _)| String::from_utf8_lossy(key).ends_with(&msg_id(lowest))));
+        .map(|id| id.as_str().unwrap().to_owned())
+        .collect();
+    let stored = reflected.len() - (ids.len() - 2);
+    assert!(reflected[..stored].contains(&ids[0]), "{reflected:?}");
+    assert_eq!(reflected[stored..], ids[2..], "{reflected:?}");
+    // The one dropped for the bound was never processed: its re-send is taken.
     w.clock.advance_ms(1);
-    w.deliver(&w.alice, "wallet", &w.bob, &[shop.app_id()], lowest);
+    w.deliver(&w.alice, "wallet", &w.bob, &[shop.app_id()], &same_time[1]);
     let got = shop.receive(None).await.unwrap();
-    assert!(got.applied.contains(&msg_id(lowest)), "{got:?}");
+    assert!(got.applied.contains(&ids[1]), "{got:?}");
 }
