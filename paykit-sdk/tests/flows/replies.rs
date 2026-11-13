@@ -551,15 +551,50 @@ async fn test_replies_dropped_asked_for_from_the_marks_time() {
     assert_eq!(asked(&shop, &w.alice_id()).await.len(), 1);
     record_request(&w, &mut shop, &request).await;
     assert_eq!(shop.receive(None).await.unwrap().resends, 0);
-    // Alice answers from the mark's time: the paid request's two replies come back, as
-    // duplicates for now, and not the earlier payment's.
+    // Alice answers from the mark's time: the paid request's two replies come back, each
+    // taken as a new message, its pair forgotten when it was dropped, and not the earlier
+    // payment's, which would come as duplicates.
     wallet.receive(None).await.unwrap();
     let events = shop.receive(None).await.unwrap().report.events;
-    let again = events
-        .iter()
-        .filter(|e| matches!(e, pubky_switch_client::app::AppEvent::Duplicate { .. }))
-        .count();
-    assert_eq!(again, 2, "{events:?}");
+    let count = |duplicate: bool| {
+        events
+            .iter()
+            .filter(|e| match e {
+                pubky_switch_client::app::AppEvent::Duplicate { .. } => duplicate,
+                pubky_switch_client::app::AppEvent::MessageReceived { .. } => !duplicate,
+                _ => false,
+            })
+            .count()
+    };
+    assert_eq!(count(false), 2, "{events:?}");
+    assert_eq!(count(true), 0, "{events:?}");
+}
+
+#[tokio::test]
+async fn test_replies_dropped_for_the_bound_taken_again_from_a_resend_and_placed() {
+    // The paid request's acceptance and proof, alice's earliest kept replies, are dropped
+    // for the bound by her 64 replies naming records bob never sent, and counted in her
+    // mark. Once the record opens the shop asks her to re-send; the same two messages come
+    // again, are taken as never processed, and are placed in the record (Paykit spec 8.1,
+    // "Replies before their record").
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let n = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    let (request, at) = kept_then_unmatched(&w, &mut wallet, &mut shop, n).await;
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), n);
+    assert_eq!(marks(&shop).await, vec![(at, at)]);
+    record_request(&w, &mut shop, &request).await;
+    assert_eq!(shop.receive(None).await.unwrap().resends, 1);
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    assert_eq!(replies_held(&shop, &record).await, 0);
+    wallet.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(replies_held(&shop, &record).await, 2);
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        PayeeStatus::ProofReceived
+    );
 }
 
 #[tokio::test]

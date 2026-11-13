@@ -1170,15 +1170,22 @@ pub(crate) fn kept_reply_evicted(kept: &[CountedReply], sender: &[u8; 32]) -> Op
 /// Make room for a new reply from `sender` among the kept replies, in the step: the one the
 /// bounds drop ([`kept_reply_evicted`]) goes, and counts in its sender's mark
 /// (`pd/<sender>`, `marks.rs`) with its acceptance time, so the sender is asked to send it
-/// again once the record of one of its requests is held. The client marked it processed
-/// when it was kept, so at this pin a re-sent copy arrives as a duplicate and isn't taken.
+/// again once the record of one of its requests is held. It is dropped as one never
+/// processed (Paykit spec 8.1, "Replies before their record"): the client marked it
+/// processed when it was kept, so the step forgets its pair
+/// ([`ReceiveContext::forget_processed`]), in the commit that drops it and writes the mark,
+/// and a re-sent copy is taken as a new message. This is the one pair a Paykit App forgets
+/// (Switch spec 11); a reply a later copy brings again is never applied twice, since a
+/// record that reflects its `msg_id` isn't written again.
 fn make_room_for_reply(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<(), Fail> {
     let mut kept = Vec::new();
     let mut names = Vec::new();
+    let mut msg_ids = Vec::new();
     for (name, reply) in state::cx_scan::<KeptMessage>(cx, key::KEPT_REPLIES)? {
         let (reply, at) = kept_with_time(cx, &reply)?;
         kept.push((reply.sender(), at));
         names.push(name.into_bytes());
+        msg_ids.push(reply.message().msg_id.clone());
     }
     let Some(index) = kept_reply_evicted(&kept, sender) else {
         return Ok(());
@@ -1190,6 +1197,17 @@ fn make_room_for_reply(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result
             key: names.swap_remove(index),
         },
     );
+    match cx.forget_processed(from, &msg_ids[index]) {
+        Ok(_) => {}
+        // The client still holds the message, in an entry it stores locally or an effect it
+        // keeps to send, and its pair keeps that one from being applied twice: the message
+        // comes to a step again from there, so dropping the kept copy loses nothing.
+        Err(AppError::Refused(ClientRefusal::NotNow(_))) => {}
+        // Past the step's bound on local writes: the context marks the step, and the
+        // client stores the entry as too large, applying none of it (`keep_local`).
+        Err(AppError::Refused(ClientRefusal::Usage(_))) => {}
+        Err(error) => return Err(error.into()),
+    }
     let family = MarkFamily::Replies;
     let mark_key = family.key(&from);
     let held = state::cx_get::<crate::marks::DropMark>(cx, &mark_key)?;
@@ -1356,10 +1374,11 @@ impl Paykit {
     /// batch (Switch spec 8.2, Paykit spec 8.1). A placement that fails now is tried again
     /// at the next receive. Once [`KEPT_MESSAGE_MS`] have passed since a reply's acceptance,
     /// on the highest service time verified:
-    /// - with its record absent or deleted, it is dropped: the payer keeps what it sent that
-    ///   long, and may send it again (Paykit spec 9). Never while the copy of the payee's
-    ///   records may lack records ([`Paykit::side_unlisted`]): the absence decides nothing
-    ///   then;
+    /// - with its record absent or deleted, it is dropped, and stays processed: the payer
+    ///   re-sends nothing first accepted that long ago (Paykit spec 9), so nothing asks for
+    ///   it again, unlike a reply dropped for the bounds on kept replies, whose pair is
+    ///   forgotten (`make_room_for_reply`). Never while the copy of the payee's records may
+    ///   lack records ([`Paykit::side_unlisted`]): the absence decides nothing then;
     /// - with its record held but not open, sealed under a scope key the app doesn't hold
     ///   or a value that doesn't read, or with a sender that isn't the record's
     ///   counterparty, it is given up, and the host told

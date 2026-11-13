@@ -8,8 +8,8 @@
 //!   the app holds the record of a request whose counterparty holds such a mark, it asks
 //!   that sender to re-send what its inbox accepted from the mark's earliest time
 //!   (`resend_request` with `accepted_from`). The client marked such a reply processed when
-//!   it was kept, so at this pin a re-sent copy arrives as a duplicate and isn't taken: the
-//!   client has no outcome yet for a message passed, not taken, that may come again.
+//!   it was kept, so the step that drops it forgets its pair, and a re-sent copy is taken
+//!   as a new message.
 //! - **Entries dropped unverified** (`ud/<sender>`, `stored.rs`). The app asks that sender
 //!   at once to re-send what its inbox accepted from the mark's earliest time to its latest
 //!   (`accepted_from` and `accepted_until`).
