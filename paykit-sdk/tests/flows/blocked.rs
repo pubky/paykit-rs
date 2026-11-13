@@ -1500,3 +1500,61 @@ async fn test_blocked_confirmed_payment_without_a_request_while_the_deny_list_is
     assert!(wallet.payments().await.unwrap().is_empty());
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
 }
+
+/// Alice's wallet holds bob's request but no list of his, and its sends to bob are then
+/// `held`: a payment without a request to him is refused before a list is asked for, and
+/// nothing reaches bob. Once bob is unblocked, or the lists read, the same payment asks
+/// him for his list.
+async fn no_list_asked_while_held(held: Held) {
+    let w = World::new();
+    let (mut wallet, _, _) = received(&w, PaykitConfig::default()).await;
+    match held {
+        Held::Blocked => wallet.block(&w.bob_id()).await.unwrap(),
+        Held::Unknown => {
+            w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+            fail_list_read(&w);
+            wallet.receive(None).await.unwrap();
+            fail_list_read(&w);
+        }
+    }
+    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let refused = wallet
+        .pay_without_request(unrequested_payment(&w, PayOptions::default()))
+        .await
+        .unwrap_err();
+    match held {
+        Held::Blocked => assert!(
+            matches!(refused.refusal(), Some(Refusal::Blocked { .. })),
+            "{refused:?}"
+        ),
+        Held::Unknown => assert!(
+            !matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+            "{refused:?}"
+        ),
+    }
+    wallet.flush().await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    if let Held::Blocked = held {
+        wallet.unblock(&w.bob_id()).await.unwrap();
+    }
+    let waits = wallet
+        .pay_without_request(unrequested_payment(&w, PayOptions::default()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(waits.refusal(), Some(Refusal::WaitingForList)),
+        "{waits:?}"
+    );
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries + 1);
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_blocked_list_request_to_a_blocked_payee_not_sent_unconfirmed() {
+    no_list_asked_while_held(Held::Blocked).await;
+}
+
+#[tokio::test]
+async fn test_blocked_list_request_while_the_deny_list_is_unknown_not_sent() {
+    no_list_asked_while_held(Held::Unknown).await;
+}
