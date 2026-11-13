@@ -972,3 +972,62 @@ async fn test_restore_hold_missed_item_mark_naming_another_time_refused_as_corru
     assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
     assert_eq!(wallet.app().protocol_scan(b"mi/").await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_confirmed_is_held_again_by_a_restore() {
+    // The user confirmed a request a `missed` item held. A restore from a backup taken then
+    // holds it again, as every restore holds every open request (Paykit spec 7.2): a
+    // confirmation belongs to the hold it ended, and a backup carries none.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    missed(&w);
+    wallet.receive(None).await.unwrap();
+    wallet
+        .confirm_possibly_cancelled(&request, UserConfirmed::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+    let mut wallet = restored_from(&w, wallet).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Held
+    );
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_asks_sent_not_sent_again_by_a_restore() {
+    // A `missed` item's ask to bob went, and its mark with it. A restore from a backup taken
+    // then asks bob from the restore's own time as its reconcile ends, and never the item's
+    // ask again.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    missed(&w);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(asks_to(&wallet, &w.bob_id()).await, 1);
+    assert!(wallet.app().protocol_scan(b"mi/").await.unwrap().is_empty());
+    // The restore's own ask goes as its reconcile ends.
+    let mut wallet = restored_from(&w, wallet).await;
+    let before = asks_to(&wallet, &w.bob_id()).await;
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(asks_to(&wallet, &w.bob_id()).await, before);
+    assert!(wallet.app().protocol_scan(b"mi/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan(b"ask/")
+        .await
+        .unwrap()
+        .is_empty());
+}

@@ -1370,3 +1370,41 @@ async fn test_stored_forgotten_entry_sent_again_after_a_restore_writes_nothing_t
     assert!(app.app_mut().parked_entries().await.unwrap().is_empty());
     assert!(kept(&app, "se/").await.is_empty());
 }
+
+#[tokio::test]
+async fn test_stored_entry_dropped_unverified_mark_gone_stays_gone_after_a_restore() {
+    // The mark of an entry dropped unverified goes 30 days after its latest time. A restore
+    // from a backup taken then tells the client's events again: the dropped entry counts
+    // with its own old time, so no mark lives again and nothing is asked (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let (_, at) = dropped_unverified(&w, &mut wallet, &mut shop).await;
+    w.homeserver.set_down(false);
+    wallet.flush().await.unwrap();
+    w.clock.set_ms(at + paykit_sdk::KEPT_MESSAGE_MS);
+    wallet.receive(None).await.unwrap();
+    assert!(unverified_marks(&wallet).await.is_empty());
+    let before = asked(&wallet, &w.bob_id()).await.len();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut wallet = paykit_sdk::Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    wallet.reconcile().await.unwrap();
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(unverified_marks(&wallet).await.is_empty());
+    let after = asked(&wallet, &w.bob_id()).await;
+    assert!(
+        after.iter().skip(before).all(|(_, until)| until.is_none()),
+        "only the restore's own ask: {after:?}"
+    );
+}
