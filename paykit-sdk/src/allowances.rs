@@ -1080,10 +1080,10 @@ impl Paykit {
     /// or while its record isn't held as a value that reads and binds. One whose record is
     /// held as deleted, or doesn't hold that end of this app's, goes with nothing sent: no
     /// record holds the end to send; so does one whose Allowance is conflicted by then, in the
-    /// record or as a kept stop, for which nothing is sent. A message the client refuses for good, past its replay
-    /// window of 30 days from its `created_at`, is neither sent nor told, as at a restore's
-    /// re-send ([`Paykit::queue_stored_again`]); a store failure is the call's error, and the
-    /// mark stays. The mark was read bound to its key (`state::Stored`).
+    /// record or as a kept stop, for which nothing is sent. A message the client refuses for
+    /// good, past its replay window of 30 days from its `created_at`, is neither sent nor
+    /// told, as at a restore's re-send ([`Paykit::queue_stored_again`]); a store failure is the
+    /// call's error, and the mark stays. The mark was read bound to its key (`state::Stored`).
     pub(crate) async fn send_owed_ends(&mut self) -> Result<()> {
         let own = self.identity();
         let app_id = self.app_id();
@@ -2093,8 +2093,9 @@ fn written(result: Result<()>) -> Result<Placed> {
 /// one the record stores to be sent, since every message this app stores in an Allowance
 /// record it also queues in that batch, or, for a crossing end recorded while sends to the
 /// counterparty were held, marks owed in it ([`stores_unqueued`]), while the counterparty
-/// hasn't answered it and no later stop covers it. The proposal goes while the record holds no response and no end;
-/// an acceptance or a rejection while it holds no end; an end, a stop, always. Nothing goes
+/// hasn't answered it and no later stop covers it. The proposal goes while the record holds
+/// no response and no end; an acceptance or a rejection while it holds no end; an end, a
+/// stop, always. Nothing goes
 /// for a conflicted Allowance (Paykit spec 8.3, "Conflicted"); the caller leaves out one
 /// whose conflict or counterparty's end this app keeps as a stop not in the record yet.
 pub(crate) fn own_allowance_to_send_again<'a>(
