@@ -2113,3 +2113,61 @@ async fn test_divergent_failure_goes_on_the_claim_alone_while_divergent() {
     assert_eq!(after.version, before.version);
     assert!(wallet.divergent_records().await.unwrap()[0].paused);
 }
+
+#[tokio::test]
+async fn test_divergent_stored_entry_neither_written_nor_given_up_while_its_record_may_be_missing()
+{
+    // The payer's acceptance and proof are stored entries at the shop: their steps' writes
+    // were refused. The record then turns divergent, another of bob's apps deletes it, and it
+    // is divergent again. Past 30 days, a `missed` item comes and Paykit's listing fails: the
+    // copy may lack the record, so the entries are neither written nor given up, whatever
+    // waits over the record (Paykit spec 8.1, "Stored entries").
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_on(&w, Arc::clone(&base)).await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let record = sale(&shop, &request).await.record;
+    wallet.receive(None).await.unwrap();
+    wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    crate::common::refuse_writes(&w.bob, 4);
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.app().protocol_scan(b"se/").await.unwrap().len(), 2);
+    set_divergent(&base, &shop, &record, true);
+    shop.receive(None).await.unwrap();
+    till.receive(None).await.unwrap();
+    let target = RecordTarget::new(
+        SwitchCollection::new(
+            Collection::PayeeActivity.name(),
+            Collection::PayeeActivity.policy(None),
+        ),
+        &natural_key::request_record(&w.bob_id(), &request.request_hash),
+    );
+    till.app_mut()
+        .delete_record(&target, Vec::new())
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    set_divergent(&base, &shop, &record, true);
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
+    let now = w.clock.now_ms();
+    w.bob.switch().push_missed(1, now - 1_000, now);
+    // The client lists the shop's collection right after the item; Paykit's own listing at
+    // the end of the receive fails.
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "records?collection".into(),
+            after: 1,
+        });
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.records_unlisted.is_some(), "{got:?}");
+    assert_eq!(shop.app().protocol_scan(b"se/").await.unwrap().len(), 2);
+    assert!(shop.notices().await.unwrap().is_empty());
+}

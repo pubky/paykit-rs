@@ -711,20 +711,21 @@ impl Paykit {
         locals: Tx,
     ) -> Result<Placed> {
         let key = self.activity_key(target)?;
-        // Over a divergent record its user hasn't confirmed, only a stop is written, and while
-        // messages kept over it before this one wait to be written, they go first: the
-        // message waits, within its window (Paykit spec 6, 8.1 "Stored entries").
-        if Box::pin(self.divergent_write_waits(&key, &stored)).await? {
-            return Ok(Placed::Not);
-        }
         let content = self.app.shared_record(&key).await?.map(|held| held.content);
         // Absent or deleted while the copy of its side may lack records: the copy decides
         // nothing yet (Paykit spec 8.1, "Records not listed yet"), whatever key the record's
-        // scope waits for.
+        // scope waits for, nor whatever waits over the record: the message is neither written
+        // nor given up meanwhile.
         if matches!(content, None | Some(RecordContent::Deleted))
             && self.side_unlisted(record_side(target)).await?
         {
             return Ok(Placed::Waits);
+        }
+        // Over a divergent record its user hasn't confirmed, only a stop is written, and while
+        // messages kept over it before this one wait to be written, they go first: the
+        // message waits, within its own window (Paykit spec 6, 8.1 "Stored entries").
+        if Box::pin(self.divergent_write_waits(&key, &stored)).await? {
+            return Ok(Placed::Not);
         }
         // Without the current data epoch's key of the record's scope, nothing can be sealed
         // there yet: the message waits for it, within its window.
