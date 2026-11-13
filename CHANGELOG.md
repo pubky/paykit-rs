@@ -110,6 +110,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   reached the app as an internal panic error that included the platform error
   text, and a throw from `SdkStateBlobStore` left that SDK handle failing every
   later call with `state_transaction_lock_poisoned`.
+- `resolve_public_payment_request` in Rust and `resolvePublicPaymentRequest` in
+  Swift, Kotlin and React Native now fail with a policy error for a blocked
+  counterparty, before its App Registry is read, instead of resolving its
+  Payment Request.
 - In the Rust-only SSE-assisted private intake API (`start_private_intake` and
   `PrivateIntakeSupervisor`), one Linked Peer or pending Encrypted Link
   Handshake peer with no resolvable Pubky homeserver no longer makes
@@ -176,6 +180,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Security
 
+- Update `rustls` from 0.23.45 to 0.23.46 for upstream TLS security fixes.
+  Swift, Kotlin and React Native apps need a release rebuilt with this version;
+  Rust integrators must update `rustls` in their own `Cargo.lock`.
 - Update `webpki-roots`, `webpki-root-certs` and `rustls-webpki` so the Pubky HTTP
   client no longer trusts the distrusted emSign G3 certificate paths
   (RUSTSEC-2026-0381, RUSTSEC-2026-0382, RUSTSEC-2026-0383). Requests that use
