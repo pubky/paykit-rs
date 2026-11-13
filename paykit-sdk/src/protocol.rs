@@ -654,6 +654,19 @@ impl Protocol for PaykitProtocol {
                 Err(_) => return Outcome::Retry(StoreFailure::of_entry(StoreError::Corrupt)),
             }
         }
+        // A message given up stays processed (Paykit spec 8.1): a copy the sender sends again,
+        // or the parked entry the host releases, has no effect while its notice is kept.
+        let notice = key::message_notice(&message.sender, &message.message.msg_id);
+        match state::cx_get::<KeptNotice>(cx, &notice) {
+            Ok(Some(_)) => {
+                return Outcome::Drop {
+                    reason: "Paykit spec 8.1: a message given up stays processed".into(),
+                }
+            }
+            Ok(None) => {}
+            Err(Fail::Store(failure)) => return Outcome::Retry(failure),
+            Err(_) => return Outcome::Retry(StoreFailure::of_entry(StoreError::Corrupt)),
+        }
         let stored = match stored_copy(message) {
             Ok(stored) => stored,
             Err(reason) => return Outcome::Drop { reason },

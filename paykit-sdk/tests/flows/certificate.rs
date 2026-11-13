@@ -463,6 +463,53 @@ async fn test_certificate_renewal_dropping_pay_raises_a_notice_for_a_held_paymen
 }
 
 #[tokio::test]
+async fn test_certificate_acknowledged_held_payment_notice_raises_none_again_after_a_restore() {
+    // The held payment's notice is acknowledged under the certificate without `pay`, then
+    // the app is backed up and restored under it: a resume finds the acknowledged notice at
+    // its key and raises nothing again.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let me = wallet.app_id();
+    let mut shop = w.shop().await;
+    let request = crate::common::request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::common::draft("1", w.clock.now_ms()),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    wallet
+        .pay_request(&request, paykit_sdk::PayOptions::default())
+        .await
+        .unwrap();
+    let first = wallet.app().cert().clone();
+    let reduced = renew(&w, me, &AppScopes::new().contacts().build().unwrap(), 1_000);
+    let _ = wallet.receive(None).await;
+    list(&w, me, &first, &reduced);
+    wallet.receive(None).await.unwrap();
+    wallet.resume_payments().await.unwrap();
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    wallet.acknowledge_notice(&notices[0].id).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    let backup = paykit_sdk::PaykitBackup::from_bytes(&backup.to_bytes().unwrap()).unwrap();
+    drop(wallet);
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    let _ = restored.receive(None).await;
+    let _ = restored.resume_payments().await;
+    assert!(restored.notices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn test_certificate_renewal_bringing_pay_back_drops_the_held_payment_notice() {
     // Renewed without `pay` while a payment is in flight, then renewed with it again: the
     // payment finishes, and the notice that it was held without `pay` goes.
