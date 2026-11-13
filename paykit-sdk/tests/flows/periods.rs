@@ -2652,6 +2652,36 @@ async fn test_periods_credit_given_beside_a_record_under_another_policy() {
 }
 
 #[tokio::test]
+async fn test_periods_ended_subscription_of_a_blocked_payee_shows_blocked() {
+    // `Ended` is a view of the time: the deny list overrides it as it does an open
+    // request's status, as do a kept stop and the restore's hold.
+    let w = World::new();
+    let lists = Arc::new(crate::common::ListsStore::default());
+    let mut shop = w.shop().await;
+    let mut wallet = contacts_wallet(&w, &lists).await;
+    let now = w.clock.now_ms();
+    let request = shop
+        .send_request(w.alice_id(), monthly(now, Some(now + 40 * DAY_MS)))
+        .await
+        .unwrap()
+        .request
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.accept_subscription(&request).await.unwrap();
+    w.clock.advance_ms(60 * DAY_MS);
+    wallet.app_mut().read_claim(&[0; 32]).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Ended
+    );
+    wallet.block(&w.bob_id()).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Blocked
+    );
+}
+
+#[tokio::test]
 async fn test_periods_details_expiry_judged_on_the_verified_service_time() {
     // The shop's device clock runs two hours ahead of the service's. Details valid for an
     // hour more on the service time it verified are sent: the device clock never decides.

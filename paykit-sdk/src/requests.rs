@@ -1407,9 +1407,14 @@ impl Paykit {
         let mut status = self.request_status(record, request, &payee, &hash).await?;
         // A cancellation kept for the request and not placed yet is a cancellation all the
         // same (Paykit spec 8.1), a subscription's included (Paykit spec 8.2), read with a
-        // restore's check.
+        // restore's check. A subscription that has ended is a view of the time (Paykit spec
+        // 8.2), so a stop, the restore's hold and the deny list override it as they do an
+        // open request's status.
         let live = |status: &RequestStatus| {
-            matches!(status, RequestStatus::Open | RequestStatus::Subscribed)
+            matches!(
+                status,
+                RequestStatus::Open | RequestStatus::Subscribed | RequestStatus::Ended
+            )
         };
         let stop = key::kept_cancellation(&record_key);
         let stopped = self.local_get::<KeptMessage>(&stop).await?.is_some();
