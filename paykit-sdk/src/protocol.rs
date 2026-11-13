@@ -360,9 +360,16 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::Taken(_) => continue,
             // The time of the last read of the lists isn't restored: the copy of the deny
             // list the backup holds may be stale by any time, so the list is read again before
-            // any payment (Paykit spec 8.1). Nor are this app's blocks kept unanswered: the
-            // client's kept batches belong to the device that kept them.
-            StateKey::ListsRead | StateKey::OwnBlock(_) => continue,
+            // any payment (Paykit spec 8.1).
+            StateKey::ListsRead => continue,
+            // This app's blocks and unblocks kept unanswered are: the client's kept batches
+            // belong to the device that kept them, so the restored app keeps counting each
+            // and writes it again (`Paykit::send_own_blocks_again`).
+            StateKey::OwnBlock(_) => {
+                state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
             StateKey::Journal(attempt) => attempt,
             StateKey::CursorTime => {
                 cursor_time_ms =
