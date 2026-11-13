@@ -3120,7 +3120,7 @@ fn test_activity_record_keeps_unknown_members() {
     )
     .unwrap();
     assert_eq!(written(&again), out);
-    // A record built in code has none, and writes as before.
+    // A record built in code has no members it doesn't know, and writes none.
     assert!(b.unrequested.unknown.is_empty());
     assert!(written(&b.unrequested).get("payment_note").is_none());
 }

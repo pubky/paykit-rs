@@ -2429,7 +2429,7 @@ struct AllowanceOut<'a> {
     proposal: StoredOut,
     response: Option<StoredOut>,
     end: Option<StoredOut>,
-    // Left out when absent, so a record without a conflict is written as before.
+    // Writers leave it out when absent (Paykit wire 5.4).
     #[serde(skip_serializing_if = "Option::is_none")]
     conflicted: Option<StoredOut>,
     grant: Option<Value>,

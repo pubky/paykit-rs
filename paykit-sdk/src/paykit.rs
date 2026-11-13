@@ -688,9 +688,6 @@ impl Paykit {
         // own marks and notes are kept here, and nothing is written at the switch
         // (`stored.rs`).
         Box::pin(self.take_stored_events(&duties)).await?;
-        // A `missed` item the read took holds the open requests from a time on
-        // (`hold.rs`), bounded now that the read verified the service time.
-        Box::pin(self.bound_missed_hold()).await?;
         if account_gone {
             // Nothing more is read or written there: the summary tells the host.
             return Ok(ReceiveSummary {

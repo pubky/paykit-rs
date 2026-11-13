@@ -2173,7 +2173,7 @@ impl Paykit {
                 tx.delete(&key::own_block(pubky));
             }
             Err(error) if error.kept_batch().is_some() => {
-                let mark = OwnBlockMark::Sent {
+                let mark = OwnBlockMark {
                     blocked,
                     batch: error.kept_batch(),
                 };
@@ -2197,7 +2197,7 @@ impl Paykit {
         let mut tx = Tx::default();
         tx.put(
             &mark,
-            &OwnBlockMark::Sent {
+            &OwnBlockMark {
                 blocked: true,
                 batch: None,
             },
@@ -2210,7 +2210,7 @@ impl Paykit {
                 tx.delete(&mark);
             }
             Err(error) if error.kept_batch().is_some() => {
-                let kept = OwnBlockMark::Sent {
+                let kept = OwnBlockMark {
                     blocked: true,
                     batch: error.kept_batch(),
                 };
