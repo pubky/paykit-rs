@@ -773,8 +773,9 @@ impl Paykit {
             Box::pin(self.place_kept_cancellations()).await?;
         }
         // The senders of messages dropped before they were taken: of replies dropped for the
-        // bounds once the app holds the record of one of their requests, of entries dropped
-        // unverified at once, then again at most once a day while the mark lives.
+        // bounds once the app holds the record of a request, of either side, naming them, of
+        // entries dropped unverified at once, then again at most once a day while the mark
+        // lives.
         let marked = Box::pin(self.ask_on_marks()).await?;
         // The payers' replies kept for requests whose record wasn't held yet.
         Box::pin(self.place_kept_replies()).await?;
