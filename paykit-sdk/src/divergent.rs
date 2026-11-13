@@ -2186,7 +2186,7 @@ mod tests {
         let later = after_confirmation(Some(&credit), Some(&sold(false, 5)), false).unwrap();
         let later_credit = after_confirmation(Some(&credit), Some(&sold(false, 5)), true).unwrap();
         let repaused = after_event(Some(&credit), &sold(false, 5), &event(1)).unwrap();
-        let reviewed = after_view(Some(&credit), &sold(true, 6)).unwrap();
+        let paused_again = after_view(Some(&credit), &sold(true, 6)).unwrap();
         let restored = credit.clone().restored();
         let marks = [
             &paused,
@@ -2199,7 +2199,7 @@ mod tests {
             &later,
             &later_credit,
             &repaused,
-            &reviewed,
+            &paused_again,
             &restored,
         ];
         for mark in marks {
