@@ -590,6 +590,44 @@ mod tests {
     }
 
     #[test]
+    fn test_periods_proof_awaits_the_details_it_names_on_every_path() {
+        // The one check of the receive step and both later writes: a proof naming details
+        // its period record doesn't hold, absent or held without them, waits for them.
+        let (alice, bob) = parties();
+        let held = details(&bob, &alice, [7; 32], "2026-03-01T00:00:00.000Z");
+        let body = paykit_lib::bodies::PaymentProof {
+            attempt_id: paykit_lib::AttemptId::from_bytes([9; 16]),
+            billing_period: Some(PeriodRef {
+                starts_at: 1_772_236_800_000,
+                ends_at: 1_774_915_200_000,
+            }),
+            payment_endpoint_identifier: PaymentEndpointIdentifier::new("btc-lightning-bolt11")
+                .unwrap(),
+            payment_app_id: [0; 16],
+            list_version: None,
+            amount: None,
+            allowance_id: None,
+            label: None,
+            payment_reference: None,
+            proof: object(json!({ "preimage": "00" })),
+        }
+        .to_body(2)
+        .unwrap();
+        let proof = alice.message(
+            &bob,
+            "paykit.payment_proof",
+            vec![[7; 32], held.hash()],
+            body,
+        );
+        let awaits = crate::receive::awaits_named_details;
+        assert!(awaits(None, ActivitySide::Payee, &proof));
+        let mut record = empty(ActivitySide::Payee, alice.id());
+        assert!(awaits(Some(&record), ActivitySide::Payee, &proof));
+        assert!(place(&mut record, Role::PeriodDetails, held));
+        assert!(!awaits(Some(&record), ActivitySide::Payee, &proof));
+    }
+
+    #[test]
     fn test_periods_named_period_of_the_request_only() {
         let request = PaymentRequest::from_body(&object(json!({
             "amount": { "asset": "btc", "value": "1" },

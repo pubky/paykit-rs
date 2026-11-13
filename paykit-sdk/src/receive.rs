@@ -741,9 +741,8 @@ fn payer_reply(
             // record, placed once the period record holds them.
             if target != request_target {
                 let period = held_or_unlisted(cx, &target, RecordSide::Payee)?;
-                let held = activity::read(period.as_deref(), &own, ActivitySide::Payee)
-                    .unwrap_or_else(|| activity::empty(ActivitySide::Payee, sender));
-                if activity::names_details_not_held(&held, stored) {
+                let held = activity::read(period.as_deref(), &own, ActivitySide::Payee);
+                if awaits_named_details(held.as_ref(), ActivitySide::Payee, stored) {
                     keep_before_record(cx, stored, scopes, &request_target)?;
                     return Ok(true);
                 }
@@ -1534,21 +1533,10 @@ impl Paykit {
                         .await?
                     {
                         PeriodPlace::Record { into, creates } => {
-                            // A proof naming period details the period record doesn't hold
-                            // waits for them (Paykit wire 5.3), within its window.
-                            let period = self.held_activity(&into).await?.unwrap_or_else(|| {
-                                crate::activity::empty(into.side.side(), reply.sender())
-                            });
-                            if into != target
-                                && crate::activity::names_details_not_held(&period, &reply)
-                            {
-                                Placed::Not
-                            } else {
-                                let mut tx = Tx::default();
-                                tx.delete(&kept_key);
-                                self.place_note(&into, role, creates, reply.clone(), tx)
-                                    .await?
-                            }
+                            let mut tx = Tx::default();
+                            tx.delete(&kept_key);
+                            self.place_note(&into, role, creates, reply.clone(), tx)
+                                .await?
                         }
                         // Invalid against its request, or details the payer doesn't store:
                         // dropped, as at receive.
@@ -1556,6 +1544,9 @@ impl Paykit {
                             self.local_delete(&kept_key).await?;
                             continue;
                         }
+                        // A proof naming details the period record doesn't hold waits for
+                        // them, within its window.
+                        PeriodPlace::AwaitsDetails => Placed::Not,
                     }
                 }
                 // A request record that doesn't open or bind is never written over: the
@@ -1940,6 +1931,22 @@ pub(crate) fn kept_request_target(
             ActivityTarget::payer(natural_key::request_record(&kept.sender(), request))
         }
         body => ActivityTarget::payee(natural_key::request_record(own, request), body.label()),
+    }
+}
+
+/// Whether `stored`, a proof, waits for the period details it names: `period`, the period
+/// record of `side` it goes into (`None` while absent or not read), doesn't hold them, so
+/// placed now the record wouldn't bind (Paykit wire 5.3). The one check of every path that
+/// places a period's proof: the receive step, a stored entry's later write and a message
+/// kept before its record ([`crate::Paykit::period_destination`]).
+pub(crate) fn awaits_named_details(
+    period: Option<&paykit_lib::records::ActivityRecord>,
+    side: ActivitySide,
+    stored: &StoredMessage,
+) -> bool {
+    match period {
+        Some(held) => activity::names_details_not_held(held, stored),
+        None => activity::names_details_not_held(&activity::empty(side, stored.sender()), stored),
     }
 }
 

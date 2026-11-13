@@ -266,6 +266,9 @@ enum Place {
     /// Nowhere: taken with no effect, such as period details the payer doesn't store
     /// ([`crate::periods::stores_details`]).
     Taken,
+    /// Into a period record that doesn't hold the period details the proof names yet: it
+    /// waits for them (Paykit wire 5.3), within its window.
+    AwaitsDetails,
 }
 
 /// Where a message naming a request whose record is held goes ([`Paykit::period_destination`]).
@@ -279,6 +282,9 @@ pub(crate) enum PeriodPlace {
     /// Period details the payer doesn't store ([`crate::periods::stores_details`]): taken
     /// with no effect.
     Taken,
+    /// A proof naming period details the period record doesn't hold
+    /// ([`crate::receive::awaits_named_details`]): it waits for them.
+    AwaitsDetails,
 }
 
 impl Paykit {
@@ -450,7 +456,12 @@ impl Paykit {
                 let (peer, at) = crate::receive::peer_note(&entry.sender, &stored);
                 tx.put(&peer, &at)?;
             }
-            Some(Place::Record { .. } | Place::AwaitsRequest(_) | Place::Taken) => {}
+            Some(
+                Place::Record { .. }
+                | Place::AwaitsRequest(_)
+                | Place::Taken
+                | Place::AwaitsDetails,
+            ) => {}
         }
         let note = StoredNote {
             stored_id,
@@ -583,6 +594,7 @@ impl Paykit {
                 }),
                 PeriodPlace::Invalid => None,
                 PeriodPlace::Taken => Some(Place::Taken),
+                PeriodPlace::AwaitsDetails => Some(Place::AwaitsDetails),
             },
         )
     }
@@ -591,7 +603,9 @@ impl Paykit {
     /// at `target`, is held: the one rule of the later writes, a stored entry's and a message
     /// kept before its record (`pr/`), as the receive step decides it. The period it names
     /// is checked against the request ([`crate::receive::period_or_request`]); details go
-    /// only where the payer stores them ([`crate::periods::stores_details`]).
+    /// only where the payer stores them ([`crate::periods::stores_details`]); a proof naming
+    /// details the period record doesn't hold waits for them
+    /// ([`crate::receive::awaits_named_details`]).
     pub(crate) async fn period_destination(
         &self,
         target: &ActivityTarget,
@@ -615,6 +629,12 @@ impl Paykit {
                 stopped,
             ) {
                 return Ok(PeriodPlace::Taken);
+            }
+        }
+        if into != *target {
+            let period = self.held_activity(&into).await?;
+            if crate::receive::awaits_named_details(period.as_ref(), into.side.side(), stored) {
+                return Ok(PeriodPlace::AwaitsDetails);
             }
         }
         Ok(PeriodPlace::Record {
@@ -662,6 +682,7 @@ impl Paykit {
                         }
                     }
                     Some(Place::Taken) => Placed::Done,
+                    Some(Place::AwaitsDetails) => Placed::Not,
                     None => Placed::Not,
                 };
                 let later = later_write(placed, accepted_at, self.service_time());
