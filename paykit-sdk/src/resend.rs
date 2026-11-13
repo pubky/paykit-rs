@@ -119,7 +119,8 @@ impl Paykit {
     /// (`ask/`), sent and dropped once nothing holds sends to it back
     /// ([`Paykit::sends_held`]): while the counterparty is blocked, or the copy of the deny
     /// list isn't known, the ask stays, and goes once it is unblocked (Paykit spec 8.1,
-    /// "Blocked counterparties"). Returns how many requests went out.
+    /// "Blocked counterparties"), until 30 days after the latest time it asks for, when the
+    /// counterparty keeps none of it any longer. Returns how many requests went out.
     pub(crate) async fn send_asks(&mut self) -> Result<u64> {
         self.queue_missed_asks().await?;
         // Each read bound to its key, as a restore reads it (`state::Stored`).
@@ -131,8 +132,18 @@ impl Paykit {
             self.refresh_lists_when_due().await?;
         }
         let mut sent = 0u64;
+        let service = self.service_time();
         for (rest, ask) in asks {
             if self.sends_held(&ask.sender).await? {
+                // Held back, an ask stays until its counterparty keeps nothing it asks for:
+                // once 30 days have passed since the latest time it names (its `until`, or
+                // its `from` for an ask of everything since), on the highest service time
+                // verified, it goes unsent. So the asks held for a blocked counterparty are
+                // bounded by the `missed` items, losses and unreadable entries of 30 days.
+                let latest = ask.until_ms.unwrap_or(ask.from_ms);
+                if crate::stored::past_window(latest, service) {
+                    self.local_delete(&format!("{}{rest}", key::ASKS)).await?;
+                }
                 continue;
             }
             self.request_resend(
