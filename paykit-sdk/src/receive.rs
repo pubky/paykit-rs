@@ -309,12 +309,16 @@ fn note_cursor_time(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Resu
 /// of the lists failed ([`key::LISTS_READ`] absent): a copy older than the refresh interval
 /// may miss a flag, and [`Paykit::refresh_lists_when_due`] reads the lists again before the
 /// next read of the feed. A failed store read holds the message too: it is never read as a
-/// clean sender. A block or unblock of `sender` this app wrote whose batch the client keeps
-/// unanswered (`bk/`) counts at once, as for a payment (Paykit spec 8.1): the client's copy
-/// of the lists shows it only once the list does. A step can't ask the client about a
-/// batch: an unblock whose batch the client no longer kept was dropped before the read
-/// ([`Paykit::drop_unblocks_not_kept`]), and one of the earlier form, naming no batch,
-/// doesn't count.
+/// clean sender. A block of `sender` this app wrote and the list doesn't show yet (`bk/`)
+/// counts at once, failing closed: the client's copy of the lists shows it only once the
+/// list does. An unblock this app wrote never overrides the copy here, kept unanswered or
+/// not: the copy decides at every read. A step can't ask the client what became of the
+/// unblock's batch, which the switch may refuse for good when the client's read sends it
+/// again before the feed, and a sender the copy shows blocked gets only a count (Paykit
+/// wire 4.1). An unblock the switch applied lets the sender through all the same: the
+/// service refuses a denied sender's appends (Switch spec 7), and the copy drops the sender
+/// at the client's commit of the applied unblock, or at the feed's `deny.delete` item,
+/// which comes before any message the sender appends after the unblock.
 fn admits_new_state(
     cx: &mut ReceiveContext<'_>,
     sender: &[u8; 32],
@@ -331,9 +335,9 @@ fn admits_new_state(
     if standing.lists_as_of_ms.is_none() {
         return Err(unknown());
     }
-    let blocked = state::cx_get::<OwnBlockMark>(cx, &key::own_block(sender))?
-        .and_then(|mark| mark.counts(true))
-        .unwrap_or(standing.blocked);
+    let own_block = state::cx_get::<OwnBlockMark>(cx, &key::own_block(sender))?
+        .is_some_and(|mark| mark.blocked());
+    let blocked = own_block || standing.blocked;
     if !(blocked || standing.flagged) {
         return Ok(true);
     }
@@ -1575,11 +1579,10 @@ impl Paykit {
         Ok(mark.counts(kept))
     }
 
-    /// Drop each of this app's unblocks that counts no more ([`Paykit::own_change`]), before
-    /// a read of the feed, whose steps can't ask the client about a batch: the copy of the
-    /// deny list dropped its counterparty at the unblock, so the lists' read time goes with
-    /// it, and the lists are read again before anything is judged by the copy: until then
-    /// new activity waits and sends are held (Paykit wire 4.1, spec 8.1).
+    /// Drop each of this app's unblocks that counts no more ([`Paykit::own_change`]): the
+    /// copy of the deny list dropped its counterparty at the unblock, so the lists' read
+    /// time goes with it, and the lists are read again before anything is judged by the
+    /// copy: until then new activity waits and sends are held (Paykit wire 4.1, spec 8.1).
     pub(crate) async fn drop_unblocks_not_kept(&mut self) -> crate::error::Result<()> {
         let mut tx = Tx::default();
         for (rest, mark) in self.local_scan::<OwnBlockMark>(key::OWN_BLOCKS).await? {
@@ -1651,8 +1654,11 @@ impl Paykit {
     /// drops the batch unapplied, or after a restore, which keeps none, the unblock counts no
     /// more and the list decides, so a block another own app made since stands. One whose
     /// batch lands outside a receive leaves the views and held sends showing `pubky`
-    /// blocked until the next receive reads the lists. An unblock made through the client
-    /// directly is seen at the next read of the lists.
+    /// blocked until the next receive reads the lists. The spam rule never counts an
+    /// unblock, kept or not: a message from `pubky` creates new activity only once the
+    /// client's copy of the lists drops it, as it does when the switch applies the unblock
+    /// (Paykit wire 4.1). An unblock made through the client directly is seen at the next
+    /// read of the lists.
     ///
     /// # Errors
     ///

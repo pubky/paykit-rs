@@ -48,7 +48,7 @@
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
-//! | `bk/<pubky>` | this app's block or unblock of `pubky` not yet shown by the list (`OwnBlockMark`): a block from before the switch is asked, an unblock only with the batch the client keeps; a block counts until a read of the list shows it, and is written again at a receive while the client neither keeps nor applied its batch, a restored one too, since the kept batch stays with the device that kept it; an unblock counts only while the client still keeps its batch, and isn't restored (Paykit spec 8.1) | |
+//! | `bk/<pubky>` | this app's block or unblock of `pubky` not yet shown by the list (`OwnBlockMark`): a block from before the switch is asked, an unblock only with the batch the client keeps; a block counts until a read of the list shows it, and is written again at a receive while the client neither keeps nor applied its batch, a restored one too, since the kept batch stays with the device that kept it; an unblock counts for payments and held sends only while the client still keeps its batch, never for the spam rule, and isn't restored (Paykit spec 8.1) | |
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `kw/<sender>` | a mark of a sender's entries the client dropped while they waited for a scope key, as `pd/` holds, with the data epochs they waited for; it asks only while the app holds every key of those epochs (`marks.rs`) | |
@@ -378,7 +378,7 @@ impl Stored for u64 {
 
 /// This app's block or unblock of the identity its key names (`bk/<pubky>`), not yet shown
 /// by a read of the lists (Paykit spec 8.1, "a block or unblock the app wrote counts at
-/// once").
+/// once", for payment decisions). The spam rule counts only its block.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub(crate) enum OwnBlockMark {
@@ -421,11 +421,13 @@ impl OwnBlockMark {
         }
     }
 
-    /// What the mark counts as now, given whether the client still keeps the batch of an
-    /// unblock (`batch_kept`): `Some(true)` for a block, which always counts, failing
-    /// closed; `Some(false)` for an unblock whose batch the client keeps; `None` for an
-    /// unblock that counts no more: its batch dropped or ended, or one named no batch, as a
-    /// mark of the earlier form, so the list decides.
+    /// What the mark counts as now for payments and held sends, given whether the client
+    /// still keeps the batch of an unblock (`batch_kept`), as the client answers it:
+    /// `Some(true)` for a block, which always counts, failing closed; `Some(false)` for an
+    /// unblock whose batch the client keeps; `None` for an unblock that counts no more: its
+    /// batch dropped or ended, or one named no batch, as a mark of the earlier form, so the
+    /// list decides. The spam rule asks only [`OwnBlockMark::blocked`]: an unblock never
+    /// overrides the client's copy of the lists there.
     pub(crate) fn counts(&self, batch_kept: bool) -> Option<bool> {
         if self.blocked() {
             return Some(true);
@@ -929,8 +931,8 @@ pub(crate) mod key {
     /// ([`OwnBlockMark`]). A block is marked before the switch is asked, so a crash before
     /// the call leaves it counted; its mark goes once the switch took it, or once a read of
     /// the lists shows it, and until then a block whose batch the client neither keeps nor
-    /// applied is written again at each receive. An unblock counts only while the client
-    /// keeps its batch.
+    /// applied is written again at each receive. An unblock counts for payments and held
+    /// sends only while the client keeps its batch, and never for the spam rule.
     pub(crate) fn own_block(pubky: &[u8; 32]) -> String {
         format!("{OWN_BLOCKS}{}", b64(pubky))
     }

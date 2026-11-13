@@ -649,7 +649,8 @@ impl Paykit {
         // would otherwise take its size of the stack there, beside the client's read, and a
         // host thread of 2 MiB would not hold a deep read in a debug build.
         // This app's unblocks whose batch the client no longer keeps count no more: they go
-        // first, so the lists are read again below and no step counts them.
+        // first, so the lists are read again below, before the copy this app judges by is
+        // used. The steps never count an unblock: the client's copy decides there.
         if self.certificate_refused().is_none() {
             Box::pin(self.drop_unblocks_not_kept()).await?;
         }
