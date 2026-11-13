@@ -1805,10 +1805,14 @@ impl Paykit {
                     .await?,
             );
         }
+        let mut first_ledger_write = None;
         let applied_ledger = match executor {
             Some(ops) => {
                 for write in ops.entries {
                     batch = batch.entry(write);
+                }
+                if ops.first_ledger_write {
+                    first_ledger_write = Some(ops.record_key);
                 }
                 Some((ops.record_key, ops.ledger))
             }
@@ -1821,6 +1825,11 @@ impl Paykit {
         // The attempt ID is journaled before the write (Paykit spec 7.2), once the batch is
         // built: a batch that can't be built leaves no open entry behind it.
         self.save(&entry).await?;
+        // The first grant's empty ledger is sent from here on: this batch carries the
+        // ledger's first write (Paykit spec 8.3, "A grant implies a ledger").
+        if let Some(record) = first_ledger_write {
+            self.empty_ledger_sent(&record, None).await?;
+        }
         // The attempt's age before its dispatch (the pre-dispatch budget,
         // [`crate::PRE_DISPATCH_BUDGET_MS`]) counts from before it is sent, on both device
         // clocks: the request, the answer and the answer's local commit are all in it, so
@@ -2427,7 +2436,10 @@ impl Paykit {
         let target = ActivityTarget::payer(entry.natural_key.clone());
         // The Allowance the proof and a rebuilt record name is the entry's, checked against
         // what points back at it before either is built (`Paykit::entry_allowance`).
-        if self.entry_allowance(entry).await?.is_err() {
+        // Only a payment's proof and rebuilt record name the Allowance: writing `failed`
+        // builds neither, so an entry its proof doesn't bear out is still failed, and the
+        // resume goes on with the rest.
+        if paid && self.entry_allowance(entry).await?.is_err() {
             return Err(PaykitError::corrupt());
         }
         for _ in 0..OUTCOME_TRIES {

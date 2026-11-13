@@ -1407,3 +1407,193 @@ async fn test_executor_restored_with_an_older_ledger_version_builds_on_the_newer
     let (_, ledger) = held(&wallet, &record).await;
     assert_eq!(ledger.unwrap().entries.len(), 3);
 }
+
+#[tokio::test]
+async fn test_executor_missing_ledger_after_its_first_payment_write_is_usage_history_lost() {
+    // The first grant's empty ledger is refused, so the first payment's own batch writes the
+    // ledger, and money moves; the read that would keep that version fails. The switch then
+    // answers `404` for the ledger: the executor pays nothing over the lifetime limit.
+    let w = World::new();
+    let mut shop = allowance_shop(&w).await;
+    let mut wallet = executor_wallet(&w, "wallet").await;
+    let record = accepted(
+        &w,
+        &mut shop,
+        &mut wallet,
+        terms_with(json!({ "lifetime_amount_limit": "1" })),
+    )
+    .await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    wallet
+        .grant_executor(&record, UserConfirmed::new())
+        .await
+        .unwrap();
+    let first = request(&w, &mut shop, &mut wallet, "1").await;
+    let key = ledger_key(&wallet, &record).await;
+    let path = format!("records/{}", pubky_switch_core::enc::b64(&key));
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            current: Value::Null,
+        });
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: path.clone(),
+            after: 1,
+        });
+    let paid = wallet.pay_under_allowance(&first, &record).await.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(w.record_writes(&w.alice, &key), 1);
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path,
+            code: pubky_switch_core::http::ErrorCode::NotFound,
+            current: Value::Null,
+        });
+    let second = request(&w, &mut shop, &mut wallet, "1").await;
+    let refused = wallet
+        .pay_under_allowance(&second, &record)
+        .await
+        .unwrap_err();
+    assert!(refused_for(&refused, "usage history lost"), "{refused:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+/// The target of the wallet's Allowance record of `allowance`.
+fn allowances_target(allowance: &AllowanceRecord) -> pubky_switch_client::app::RecordTarget {
+    pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "allowances",
+            paykit_lib::collections::Collection::Allowances.fixed_policy(),
+        ),
+        &paykit_lib::derive::natural_key::allowance(
+            &allowance.counterparty,
+            &allowance.allowance_id,
+        ),
+    )
+}
+
+#[tokio::test]
+async fn test_executor_confirmation_never_covers_a_removed_apps_write() {
+    // Another own app writes the Allowance record without its acceptance, and the wallet
+    // ignores that write. The app is then removed with a `distrust_from` before that write,
+    // so the write counts for nothing by its writer's standing either. The user's
+    // confirmation covers no such write: no `fc/` is kept, and nothing is paid under the
+    // Allowance while that write is current (Paykit spec 8.3, "Building on a version
+    // accepts it").
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let mut other = executor_wallet(&w, "other").await;
+    other.receive(None).await.unwrap();
+    let (allowance, _) = held(&other, &record).await;
+    let before = w.clock.now_ms();
+    w.clock.advance_ms(60_000);
+    let mut dropped: Value = serde_json::from_slice(&allowance.to_json().unwrap()).unwrap();
+    dropped.as_object_mut().unwrap().remove("response");
+    other
+        .app_mut()
+        .put_record(
+            &allowances_target(&allowance),
+            &serde_json::to_vec(&dropped).unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let other_id = other.app_id();
+    w.alice
+        .next_doc(|body| {
+            body.apps.retain(|a| a.app_id != other_id);
+            body.removed.push(pubky_switch_core::records::RemovedApp {
+                app_id: other_id,
+                distrust_from: before,
+            });
+        })
+        .unwrap();
+    w.clock.advance_ms(1_000);
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().own_identity().lists_removed(&other_id));
+    assert!(
+        wallet
+            .app()
+            .shared_record(&record)
+            .await
+            .unwrap()
+            .unwrap()
+            .flagged
+    );
+    wallet
+        .confirm_allowance_again(&record, UserConfirmed::new())
+        .await
+        .unwrap();
+    assert!(wallet.app().protocol_scan(b"fc/").await.unwrap().is_empty());
+    let refused = wallet
+        .pay_under_allowance(&request, &record)
+        .await
+        .unwrap_err();
+    assert!(refused_for(&refused, "ignores"), "{refused:?}");
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_executor_confirmation_of_an_ignored_write_isnt_restored() {
+    // The user confirmed paying under an ignored current write; the executor is restored
+    // from a backup taken then. The confirmation isn't carried: nothing is paid until the
+    // user confirms again after the restore (Paykit spec 8.3, "After a restore").
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let mut other = executor_wallet(&w, "other").await;
+    other.receive(None).await.unwrap();
+    let (allowance, _) = held(&other, &record).await;
+    let mut dropped: Value = serde_json::from_slice(&allowance.to_json().unwrap()).unwrap();
+    dropped.as_object_mut().unwrap().remove("response");
+    other
+        .app_mut()
+        .put_record(
+            &allowances_target(&allowance),
+            &serde_json::to_vec(&dropped).unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    wallet
+        .confirm_allowance_again(&record, UserConfirmed::new())
+        .await
+        .unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"fc/").await.unwrap().len(), 1);
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut wallet = Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    wallet.reconcile().await.unwrap();
+    wallet.end_reconcile(UserConfirmed::new()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_scan(b"fc/").await.unwrap().is_empty());
+    wallet
+        .confirm_possibly_cancelled(&request, UserConfirmed::new())
+        .await
+        .unwrap();
+    let refused = wallet
+        .pay_under_allowance(&request, &record)
+        .await
+        .unwrap_err();
+    assert!(not_automatic(&refused), "{refused:?}");
+    assert!(w.rail.all_executions().is_empty());
+}

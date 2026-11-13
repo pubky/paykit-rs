@@ -145,6 +145,27 @@ pub(crate) fn check_kept_ledger(record: &[u8; 32], kept: &KeptLedger) -> Result<
     Ledger::from_json(&kept.value).map_err(|_| PaykitError::corrupt())
 }
 
+/// Whether `shared`'s current write is by an app the own `identity.json` lists as removed,
+/// written after its `distrust_from` with the clock tolerance, or with no service time that
+/// dates it (Switch spec 12.2 step 3): a write the executor never builds or pays on, whether
+/// the client flagged it, marked it doubtful, or took it before it learned of the removal.
+fn written_by_removed_app(
+    identity: &pubky_switch_core::records::IdentityDoc,
+    shared: &SharedRecord,
+) -> bool {
+    identity
+        .body()
+        .removed
+        .iter()
+        .find(|removed| removed.app_id == shared.writer)
+        .is_some_and(|removed| {
+            shared.written_at_ms.is_none_or(|at| {
+                at.saturating_add(pubky_switch_core::records::CLOCK_TOLERANCE_MS)
+                    > removed.distrust_from
+            })
+        })
+}
+
 /// The client's target of the ledger of `counterparty`'s Allowance `allowance_id` (Paykit
 /// wire 1.5, 5.5).
 pub(crate) fn ledger_target(counterparty: &[u8; 32], allowance_id: &AllowanceId) -> RecordTarget {
@@ -174,6 +195,9 @@ pub(crate) struct ExecutorOps {
     pub(crate) record_key: [u8; 32],
     /// The ledger's target.
     pub(crate) ledger: RecordTarget,
+    /// Whether this batch carries the ledger's first write: the first grant's empty ledger
+    /// is then marked sent just before the batch goes ([`Paykit::empty_ledger_sent`]).
+    pub(crate) first_ledger_write: bool,
 }
 
 /// The identifiers a payment may use: those the request accepts and, under an Allowance
@@ -379,7 +403,7 @@ impl Paykit {
     /// Mark the first grant's empty ledger sent, before a batch carrying the ledger's first
     /// write is submitted, with the kept batch when its send got no answer: from then on a
     /// missing ledger is usage history lost.
-    async fn empty_ledger_sent(
+    pub(crate) async fn empty_ledger_sent(
         &mut self,
         record: &[u8; 32],
         batch: Option<[u8; 16]>,
@@ -467,10 +491,35 @@ impl Paykit {
             .max())
     }
 
+    /// Whether the latest ignored write of the record at `record` is one a user's
+    /// confirmation may cover: written by an app the own `identity.json` lists now and
+    /// doesn't list as removed. A write the client refuses for its writer's standing, such
+    /// as a removed app's after its `distrust_from`, is never confirmed: no confirmation
+    /// lifts that (Paykit spec 8.3, "Building on a version accepts it"). The client names
+    /// no typed reason for a refused write, so the writer's standing now is the test; a
+    /// current app's write under an earlier certificate after its renewal closed passes it.
+    async fn ignored_write_confirmable(&self, record: &[u8; 32]) -> Result<Option<RecordVersion>> {
+        let latest = self
+            .app
+            .flagged_writes()
+            .await?
+            .into_iter()
+            .filter(|flagged| flagged.key == *record)
+            .max_by_key(|flagged| flagged.version);
+        let Some(latest) = latest else {
+            return Ok(None);
+        };
+        let identity = self.app.own_identity();
+        let current = identity.listed_cert(&latest.writer).is_some()
+            && !identity.lists_removed(&latest.writer);
+        Ok(current.then_some(latest.version))
+    }
+
     /// Whether the user confirmed paying under the Allowance at `record` since its latest
-    /// ignored write (`fc/`).
+    /// ignored write (`fc/`), and that write is one a confirmation may cover
+    /// ([`Paykit::ignored_write_confirmable`]), judged again now.
     pub(crate) async fn ignored_write_confirmed(&self, record: &[u8; 32]) -> Result<bool> {
-        let Some(latest) = self.latest_ignored(record).await? else {
+        let Some(latest) = self.ignored_write_confirmable(record).await? else {
             return Ok(false);
         };
         Ok(self
@@ -532,6 +581,13 @@ impl Paykit {
         let refuse = |why: &str| Ok(Err(Refusal::NotAutomatic(why.into())));
         if shared.divergent || shared.doubtful {
             return refuse("the Allowance record is divergent or untrusted");
+        }
+        // No write of the Allowance record by a removed app after its `distrust_from`
+        // (Paykit spec 8.3, "Building on a version accepts it"): no confirmation lifts it.
+        if written_by_removed_app(self.app.own_identity(), &shared) {
+            return refuse(
+                "the Allowance record's write is a removed app's after its distrust_from",
+            );
         }
         // A current write the app ignores pauses the Allowance until its user confirms it
         // (Paykit spec 8.3, "Executor").
@@ -688,6 +744,11 @@ impl Paykit {
         if shared.divergent || shared.flagged || shared.doubtful {
             return Err(not_automatic("the ledger is divergent or untrusted"));
         }
+        if written_by_removed_app(self.app.own_identity(), &shared) {
+            return Err(not_automatic(
+                "the ledger's write is a removed app's after its distrust_from",
+            ));
+        }
         let value = match &shared.content {
             RecordContent::Value(value) if !value.is_empty() => value.clone(),
             _ => {
@@ -782,10 +843,9 @@ impl Paykit {
         // The first grant's empty ledger, while owed, goes before the first payment.
         self.write_owed_empty_ledger(under).await?;
         let base = self.ledger_base(under).await?;
-        if base.is_none() {
-            // This batch carries the ledger's first write.
-            self.empty_ledger_sent(&under.record_key, None).await?;
-        }
+        // Whether this batch carries the ledger's first write: marked sent just before it
+        // goes, after every check, so a refusal here leaves the empty ledger owed.
+        let first_ledger_write = base.is_none();
         let mut ledger = base.unwrap_or_else(|| {
             Ledger::empty(
                 under.allowance.counterparty,
@@ -866,6 +926,7 @@ impl Paykit {
             entries,
             record_key: under.record_key,
             ledger: lt,
+            first_ledger_write,
         })
     }
 
@@ -1151,10 +1212,15 @@ impl Paykit {
         }
         if next.grants.len() == 1 {
             self.write_empty_ledger(record, &next).await?;
-        } else if ledger_held {
+        } else if ledger_held
+            && previous.is_some_and(|app| app != self.app_id())
+            && self.kept_ledger(record).await?.is_none()
+        {
             // An executor that held a ledger version with an authenticated version before it
             // became the executor, as an app that reads the ledger, keeps it as its last
-            // ledger version (Paykit spec 8.3, "Last ledger version").
+            // ledger version (Paykit spec 8.3, "Last ledger version"). Only at a handoff, and
+            // only when it keeps none: a current executor granting again keeps the version it
+            // checked.
             self.keep_ledger(record, &ledger_key).await?;
         }
         Ok(())
@@ -1249,6 +1315,12 @@ impl Paykit {
     /// after a restore or a `missed` item (Paykit spec 8.3, "After a restore"): the executor
     /// pays under it again. A removal from the list stays for good.
     ///
+    /// The same confirmation covers the record's current write the app ignores, if it holds
+    /// one (Paykit spec 8.3, "Executor"), and only that write: the host must show the user
+    /// that write, and that the record's view is the one the app trusts, before asking.
+    /// A write the client refused for its writer's standing, such as a removed app's after
+    /// its `distrust_from`, is never covered: the Allowance pays nothing while it is current.
+    ///
     /// # Errors
     ///
     /// [`Refusal::NotFound`] for an Allowance not on the list; [`Refusal::Usage`] for one
@@ -1292,13 +1364,19 @@ impl Paykit {
                     }),
                 )?;
                 // The user's confirmation covers the record's current write the app ignores,
-                // if any, and only that one (Paykit spec 8.3, "Executor").
+                // if any, and only that one, and only one a confirmation may cover: never a
+                // write refused for its writer's standing (Paykit spec 8.3, "Executor").
                 let flagged = self
                     .app
                     .shared_record(record)
                     .await?
                     .is_some_and(|held| held.flagged);
-                if let Some(latest) = self.latest_ignored(record).await?.filter(|_| flagged) {
+                let confirmable = if flagged {
+                    self.ignored_write_confirmable(record).await?
+                } else {
+                    None
+                };
+                if let Some(latest) = confirmable {
                     tx.put(
                         &key::flag_confirmed(record),
                         &FlagConfirmed {

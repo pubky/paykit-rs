@@ -778,7 +778,15 @@ impl sealed::Sealed for EmptyLedgerMark {}
 impl Stored for EmptyLedgerMark {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::EmptyLedger(record) if self.record == *record => Ok(()),
+            // A batch is kept only once sent, and a ledger at the key at the first grant is
+            // recorded sent with no batch: any other form no run writes.
+            StateKey::EmptyLedger(record)
+                if self.record == *record
+                    && (self.sent || self.batch.is_none())
+                    && !(self.unaccepted && (!self.sent || self.batch.is_some())) =>
+            {
+                Ok(())
+            }
             _ => corrupt(),
         }
     }
