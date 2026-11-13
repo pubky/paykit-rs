@@ -1825,6 +1825,28 @@ impl Paykit {
         Ok(!self.deny_copy_known().await? || self.denied_as_last_read(pubky).await?)
     }
 
+    /// Refuse a send the user asks for to `pubky` while sends to it are held
+    /// ([`Paykit::sends_held`]), with [`crate::Refusal::NotNow`]: a copy of the deny list not
+    /// known is read first ([`Paykit::refresh_lists_when_due`]), and a read that fails leaves
+    /// it held. Called before anything of the send is signed, recorded or queued.
+    pub(crate) async fn refuse_while_sends_held(
+        &mut self,
+        pubky: &[u8; 32],
+    ) -> crate::error::Result<()> {
+        if !self.deny_copy_known().await? {
+            self.refresh_lists_when_due().await?;
+        }
+        if self.sends_held(pubky).await? {
+            return Err(crate::error::Refusal::NotNow(
+                "Paykit spec 8.1: sends to the counterparty are held while the deny list holds \
+                 it or its copy isn't known"
+                    .into(),
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Whether the copy of the deny list is known ([`Paykit::sends_held`]): always at an app
     /// that doesn't read the lists, which blocks no one.
     pub(crate) async fn deny_copy_known(&self) -> crate::error::Result<bool> {

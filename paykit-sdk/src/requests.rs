@@ -1326,11 +1326,16 @@ impl Paykit {
     /// its claim having no open or paid attempt, then sent. Returns the rejection's `msg_id`.
     /// A recurring request is rejected before its acceptance, conditioned on its proposal
     /// not having expired, as its acceptance would be (Paykit spec 8.2), so a wallet that
-    /// doesn't pay recurring requests can still dismiss one.
+    /// doesn't pay recurring requests can still dismiss one. Nothing is recorded, signed or
+    /// queued while sends to the payee are held: while the copy of the deny list holds it,
+    /// or while that copy isn't known, which a read of the lists is tried for first (Paykit
+    /// spec 8.1, "Blocked counterparties").
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotFound`]; [`Refusal::Rejected`], [`Refusal::Cancelled`],
+    /// [`Refusal::NotNow`] while sends to the payee are held, before anything else is
+    /// judged, with the request record unchanged and nothing queued; [`Refusal::NotFound`];
+    /// [`Refusal::Rejected`], [`Refusal::Cancelled`],
     /// [`Refusal::AlreadyPaid`] or [`Refusal::PaymentInProgress`]; [`Refusal::Recurring`] for
     /// a recurring request already accepted; [`Refusal::DeadlinePassed`] for a recurring
     /// request whose proposal expired, decided once the record the service holds shows it
@@ -1351,11 +1356,13 @@ impl Paykit {
     }
 
     /// The payer cancels a request (Paykit spec 8.1, Paykit wire 4.8), recorded and sent as
-    /// a rejection is. Returns the cancellation's `msg_id`.
+    /// a rejection is, and held as a rejection is: nothing is recorded, signed or queued
+    /// while sends to the payee are held. Returns the cancellation's `msg_id`.
     ///
     /// # Errors
     ///
-    /// As [`Paykit::reject_request`].
+    /// As [`Paykit::reject_request`]: [`Refusal::NotNow`] while sends to the payee are held,
+    /// with the request record unchanged and nothing queued.
     pub async fn cancel_request(
         &mut self,
         request: &RequestRef,
@@ -1374,6 +1381,11 @@ impl Paykit {
         reason: Option<String>,
     ) -> Result<String> {
         self.require_pay()?;
+        // An answer goes to no counterparty whose sends are held (Paykit spec 8.1, "Blocked
+        // counterparties"), refused before the record is touched or anything is signed or
+        // queued: the request stays as it is, and the user answers it once the payee is
+        // unblocked or the lists are read.
+        self.refuse_while_sends_held(&request.payee).await?;
         let (target, record) = self.payer_request(request).await?;
         let (_, body) = request_of(&record).ok_or(Refusal::NotFound)?;
         let recurring = body.is_recurring();
