@@ -1555,6 +1555,10 @@ impl Paykit {
     ///   ([`crate::NoticeKind::MessageGivenUp`]) in the commit that drops it, as a stored
     ///   entry's message (`stored.rs`).
     ///
+    /// A receipt over a payer record paused as divergent waits for the user's confirmation,
+    /// as one kept over the divergent record does, whatever the view shows by then; the
+    /// window runs meanwhile.
+    ///
     /// A reply over a held record goes through the stored entries' later write
     /// ([`Paykit::place_note`]) and its one rule ([`crate::stored::later_write`]): a write the
     /// switch refuses, for good or over a quota, past the window gives the reply up with the
@@ -1590,9 +1594,10 @@ impl Paykit {
                     RecordSide::Payee,
                 ),
             };
+            let record_key = self.activity_key(&target)?;
             let content = self
                 .app
-                .shared_record(&self.activity_key(&target)?)
+                .shared_record(&record_key)
                 .await?
                 .map(|held| held.content);
             // No record yet: the reply waits for it within its window, and past it is dropped
@@ -1614,6 +1619,18 @@ impl Paykit {
             // written: kept no longer than any other.
             let placed = match record {
                 Some(record) if record.counterparty != reply.sender() => crate::stored::Placed::Not,
+                // A receipt kept for a payer record that didn't read waits, once the record
+                // can take it, while the record is paused as divergent, until its user has
+                // confirmed it, also once a newer write has cleared the view, as a receipt
+                // kept over a divergent record waits (Paykit spec 6): neither it nor the
+                // claim's `done` it carries evidence for is written past the pause.
+                _ if role == crate::activity::Role::Receipt
+                    && Box::pin(self.pause_at(&record_key))
+                        .await?
+                        .kept_writes_wait() =>
+                {
+                    crate::stored::Placed::Not
+                }
                 _ => {
                     let mut tx = Tx::default();
                     tx.delete(&kept_key);
