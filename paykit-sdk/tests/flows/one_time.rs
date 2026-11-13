@@ -1404,6 +1404,52 @@ async fn test_one_time_stops_for_requests_not_held_bounded_per_sender() {
 }
 
 #[tokio::test]
+async fn test_one_time_stop_dropped_for_the_bounds_kept_again_when_sent_again() {
+    // Bob cancels 64 requests the wallet holds no record of, a millisecond apart: a 65th
+    // drops the earliest stop for the bounds, as one never processed. Bob sends that first
+    // cancellation again, the same message: it is taken as new and kept again, so the
+    // request it cancels never becomes payable (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let unknown = |i: usize| [u8::try_from(i + 1).unwrap(); 32];
+    let body = paykit_lib::bodies::RequestReply {
+        reason: None,
+        label: None,
+    }
+    .to_body()
+    .unwrap();
+    let first = w.sign_as(
+        &w.bob,
+        "shop",
+        &w.alice,
+        "paykit.payment_request_cancellation",
+        vec![unknown(0)],
+        body,
+    );
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &first);
+    for i in 1..paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER {
+        w.clock.advance_ms(1);
+        cancel_to(&w, &[wallet.app_id()], unknown(i));
+    }
+    wallet.receive(None).await.unwrap();
+    let all = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    assert_eq!(wallet.app().protocol_scan(b"kc/").await.unwrap().len(), all);
+    w.clock.advance_ms(1);
+    cancel_to(&w, &[wallet.app_id()], unknown(all));
+    wallet.receive(None).await.unwrap();
+    assert!(!keeps_stop(&w, &wallet, unknown(0)).await);
+    assert!(keeps_stop(&w, &wallet, unknown(all)).await);
+    // The same cancellation, sent again.
+    w.clock.advance_ms(1);
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &first);
+    wallet.receive(None).await.unwrap();
+    assert!(keeps_stop(&w, &wallet, unknown(0)).await);
+    assert_eq!(wallet.app().protocol_scan(b"kc/").await.unwrap().len(), all);
+    assert!(!keeps_stop(&w, &wallet, unknown(1)).await);
+}
+
+#[tokio::test]
 async fn test_one_time_stop_for_a_request_not_held_goes_30_days_after_its_acceptance() {
     // Bob cancels a request the wallet holds no record of: the stop is kept a day short of 30
     // days from its acceptance, and goes at 30 days, on the service time verified.

@@ -551,9 +551,18 @@ fn keep_cancellation(
 /// loop drops back to it. It is reached only once the copy of the payer's records lacks none:
 /// a cancellation of a request absent or deleted from a copy that may lack records is held
 /// before ([`hold_while_unlisted`]), so every stop is judged from a listed copy.
+///
+/// A stop dropped for the bounds is dropped as one never processed, as a reply is
+/// ([`make_room_for_reply`]): the client marked the cancellation processed when it was
+/// kept, so the step forgets its pair ([`ReceiveContext::forget_processed`]) in the commit
+/// that drops it, and a re-sent copy is taken, and kept again, as a new message. Kept
+/// processed, a re-send would be declined as a duplicate, and the request it cancels could
+/// be paid once it came. When the client won't forget the pair now, the stop stays kept and
+/// the bounds are over by one for this step.
 fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<(), Fail> {
     let mut kept = Vec::new();
     let mut names = Vec::new();
+    let mut msg_ids = Vec::new();
     for (name, stop) in state::cx_scan::<KeptMessage>(cx, key::KEPT_CANCELLATIONS)? {
         let Some(crate::state::StateKey::KeptCancellation(record)) =
             crate::state::StateKey::parse(name.as_bytes())
@@ -573,9 +582,22 @@ fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<
         }
         kept.push((from, at));
         names.push(name.into_bytes());
+        msg_ids.push(cancellation.message().msg_id.clone());
     }
     while let Some(index) = kept_reply_evicted(&kept, sender) {
+        let (from, _) = kept[index];
+        match cx.forget_processed(from, &msg_ids[index]) {
+            Ok(_) => {}
+            // The client won't forget the pair now: dropped without forgetting it, the stop
+            // could never be taken again, so it stays kept.
+            Err(AppError::Refused(ClientRefusal::NotNow(_))) => return Ok(()),
+            // Past the step's bound on local writes: the context marks the step, and the
+            // client stores the entry as too large, applying none of it (`keep_local`).
+            Err(AppError::Refused(ClientRefusal::Usage(_))) => {}
+            Err(error) => return Err(error.into()),
+        }
         kept.swap_remove(index);
+        msg_ids.swap_remove(index);
         keep_local(
             cx,
             LocalWrite::Delete {
