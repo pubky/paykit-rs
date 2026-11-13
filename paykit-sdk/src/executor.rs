@@ -88,6 +88,29 @@ pub(crate) struct KeptLedger {
     pub(crate) value: Vec<u8>,
 }
 
+/// The first grant's empty ledger in the executor's own journal (`el/<Allowance record key>`,
+/// Paykit spec 8.3 "A grant implies a ledger"): written with the grant, `sent` once a batch
+/// carrying the ledger's first write is submitted, and gone once a ledger version is kept.
+/// Never restored: only the executor that wrote the grant, while its own journal shows the
+/// empty ledger not yet sent, takes a missing ledger as empty.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct EmptyLedgerMark {
+    #[serde(with = "serde_b64")]
+    pub(crate) record: [u8; 32],
+    pub(crate) sent: bool,
+}
+
+/// The version of an Allowance record's current write the app ignores (Switch spec 8.2)
+/// that its user confirmed the executor may pay under (`fc/<Allowance record key>`, Paykit
+/// spec 8.3 "Executor"). A later ignored write pauses the Allowance again. Never restored.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FlagConfirmed {
+    #[serde(with = "serde_b64")]
+    pub(crate) record: [u8; 32],
+    pub(crate) generation: u64,
+    pub(crate) version: u64,
+}
+
 impl KeptLedger {
     fn version(&self) -> RecordVersion {
         RecordVersion {
@@ -299,7 +322,66 @@ impl Paykit {
             value: value.to_vec(),
         };
         check_kept_ledger(record, &kept)?;
-        self.local_put(&key::kept_ledger(record), &kept).await
+        let mut tx = Tx::default();
+        tx.put(&key::kept_ledger(record), &kept)?;
+        // A version kept answers the first grant's empty ledger.
+        tx.delete(&key::empty_ledger(record));
+        self.local_commit(tx).await
+    }
+
+    /// Whether this executor's own journal shows the first grant's empty ledger not yet
+    /// sent (`el/`): only then is a missing ledger the empty one (Paykit spec 8.3).
+    async fn empty_ledger_unsent(&self, record: &[u8; 32]) -> Result<bool> {
+        Ok(self
+            .local_get::<EmptyLedgerMark>(&key::empty_ledger(record))
+            .await?
+            .is_some_and(|mark| !mark.sent))
+    }
+
+    /// Mark the first grant's empty ledger sent, before a batch carrying the ledger's first
+    /// write is submitted: from then on a missing ledger is usage history lost.
+    async fn empty_ledger_sent(&mut self, record: &[u8; 32]) -> Result<()> {
+        if self.empty_ledger_unsent(record).await? {
+            self.local_put(
+                &key::empty_ledger(record),
+                &EmptyLedgerMark {
+                    record: *record,
+                    sent: true,
+                },
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// The latest write of the record at `record` the app ignores (Switch spec 8.2), from
+    /// the client's list of refused writes.
+    async fn latest_ignored(&self, record: &[u8; 32]) -> Result<Option<RecordVersion>> {
+        Ok(self
+            .app
+            .flagged_writes()
+            .await?
+            .into_iter()
+            .filter(|flagged| flagged.key == *record)
+            .map(|flagged| flagged.version)
+            .max())
+    }
+
+    /// Whether the user confirmed paying under the Allowance at `record` since its latest
+    /// ignored write (`fc/`).
+    async fn ignored_write_confirmed(&self, record: &[u8; 32]) -> Result<bool> {
+        let Some(latest) = self.latest_ignored(record).await? else {
+            return Ok(false);
+        };
+        Ok(self
+            .local_get::<FlagConfirmed>(&key::flag_confirmed(record))
+            .await?
+            .is_some_and(|mark| {
+                RecordVersion {
+                    generation: mark.generation,
+                    version: mark.version,
+                } == latest
+            }))
     }
 
     /// The Allowance at `record` as an executor may pay under it now (Paykit spec 8.3,
@@ -327,6 +409,12 @@ impl Paykit {
                     reason: pubky_switch_client::app::KeptReason::Unreachable(why),
                     ..
                 } => return Err(Refusal::SwitchUnavailable(why).into()),
+                // The switch's current write is one the app ignores: the copy it trusts is
+                // checked below, flagged, and pays nothing until the user confirms.
+                RecordRead::Kept {
+                    record: Some(shared),
+                    reason: pubky_switch_client::app::KeptReason::Refused,
+                } if shared.flagged => shared,
                 RecordRead::Kept { .. } => {
                     return Ok(Err(Refusal::NotAutomatic(
                         "the Allowance record isn't read from the switch now".into(),
@@ -341,9 +429,23 @@ impl Paykit {
                 .ok_or(Refusal::NotFound)?
         };
         let refuse = |why: &str| Ok(Err(Refusal::NotAutomatic(why.into())));
-        if shared.divergent || shared.flagged || shared.doubtful {
+        if shared.divergent || shared.doubtful {
             return refuse("the Allowance record is divergent or untrusted");
         }
+        // A current write the app ignores pauses the Allowance until its user confirms it
+        // (Paykit spec 8.3, "Executor").
+        if shared.flagged && !self.ignored_write_confirmed(record).await? {
+            return refuse("the Allowance record's current write is one this app ignores");
+        }
+        // Every executor batch is conditioned on the switch's current write: an ignored one,
+        // which the app's next write builds on (Switch spec 8.2), when the record is flagged.
+        let version = if shared.flagged {
+            self.latest_ignored(record)
+                .await?
+                .ok_or_else(PaykitError::corrupt)?
+        } else {
+            shared.version
+        };
         let allowance = self
             .held_allowance(record)
             .await?
@@ -399,7 +501,7 @@ impl Paykit {
         Ok(Ok(Under {
             record_key: *record,
             allowance,
-            version: shared.version,
+            version,
             terms,
         }))
     }
@@ -475,9 +577,10 @@ impl Paykit {
         };
         let first_grant = under.allowance.grants.len() == 1;
         let Some(shared) = shared else {
-            // A grant implies a ledger: only the first grant's executor, which kept none,
-            // takes the absence as empty.
-            if kept.is_none() && first_grant {
+            // A grant implies a ledger: only the first grant's executor, while its own
+            // journal, not one restored from a backup, shows the empty ledger not yet sent,
+            // takes the absence as empty (Paykit spec 8.3).
+            if kept.is_none() && first_grant && self.empty_ledger_unsent(&under.record_key).await? {
                 return Ok(None);
             }
             return Err(not_automatic("usage history lost: the ledger is missing"));
@@ -577,6 +680,10 @@ impl Paykit {
         destination: &Destination,
     ) -> Result<ExecutorOps> {
         let base = self.ledger_base(under).await?;
+        if base.is_none() {
+            // This batch carries the ledger's first write.
+            self.empty_ledger_sent(&under.record_key).await?;
+        }
         let mut ledger = base.unwrap_or_else(|| {
             Ledger::empty(
                 under.allowance.counterparty,
@@ -877,6 +984,22 @@ impl Paykit {
             )?);
             queue.push(notice);
         }
+        // The first grant's empty ledger goes into the executor's own journal with the grant,
+        // unless a ledger record is already at its key, which it takes as one it didn't
+        // accept and writes no empty ledger over (Paykit spec 8.3, "A grant implies a
+        // ledger").
+        let lt = ledger_target(&held.counterparty, &held.allowance_id);
+        let ledger_key = self.app.record_key(&lt)?;
+        let ledger_held = self.app.shared_record(&ledger_key).await?.is_some();
+        if next.grants.len() == 1 && !ledger_held {
+            locals.push(state::local_put(
+                &key::empty_ledger(record),
+                &EmptyLedgerMark {
+                    record: *record,
+                    sent: false,
+                },
+            )?);
+        }
         let sent: Vec<String> = queue.iter().map(|m| m.msg_id().to_owned()).collect();
         let write = self
             .app
@@ -904,6 +1027,11 @@ impl Paykit {
         }
         if next.grants.len() == 1 {
             self.write_empty_ledger(record, &next).await?;
+        } else if ledger_held {
+            // An executor that held a ledger version with an authenticated version before it
+            // became the executor, as an app that reads the ledger, keeps it as its last
+            // ledger version (Paykit spec 8.3, "Last ledger version").
+            self.keep_ledger(record, &ledger_key).await?;
         }
         Ok(())
     }
@@ -925,6 +1053,7 @@ impl Paykit {
             return Ok(());
         }
         let empty = Ledger::empty(allowance.counterparty, allowance.allowance_id.clone());
+        self.empty_ledger_sent(record).await?;
         let write = self
             .app
             .record_op(
@@ -938,7 +1067,20 @@ impl Paykit {
             .await?;
         match self.app.submit_batch(OpBatch::new().entry(write)).await {
             Ok(_) => self.read_and_keep_ledger(record, &lt).await,
+            // Kept, or no answer: sent without a verified answer.
             Err(error) if error.kept_batch().is_some() => Ok(()),
+            // The switch answered that it wrote nothing: the empty ledger is not yet sent.
+            Err(error) if error.code().is_some() => {
+                self.local_put(
+                    &key::empty_ledger(record),
+                    &EmptyLedgerMark {
+                        record: *record,
+                        sent: false,
+                    },
+                )
+                .await?;
+                Err(error.into())
+            }
             Err(error) => Err(error.into()),
         }
     }
@@ -989,6 +1131,23 @@ impl Paykit {
                         confirm_again: false,
                     }),
                 )?;
+                // The user's confirmation covers the record's current write the app ignores,
+                // if any, and only that one (Paykit spec 8.3, "Executor").
+                let flagged = self
+                    .app
+                    .shared_record(record)
+                    .await?
+                    .is_some_and(|held| held.flagged);
+                if let Some(latest) = self.latest_ignored(record).await?.filter(|_| flagged) {
+                    tx.put(
+                        &key::flag_confirmed(record),
+                        &FlagConfirmed {
+                            record: *record,
+                            generation: latest.generation,
+                            version: latest.version,
+                        },
+                    )?;
+                }
                 self.local_commit(tx).await
             }
         }

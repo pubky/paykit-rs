@@ -58,6 +58,9 @@
 //! | `cf/<record key>` | a second, different proposal or response of an Allowance, kept as the stop until the Allowance record holds `conflicted` (`allowances.rs`, Paykit spec 8.3) | |
 //! | `mc` | set by a `missed` item: every entry of the consent list is to be confirmed again, as after a restore; nothing is consented while it is set, and the next receive marks each entry so and clears it (`allowances.rs`); never restored | |
 //! | `en/<msg_id>` | the executor app an `executor_notice` is wrapped to, kept with the batch that queues it | |
+//! | `lv/<record key>` | the last ledger version the executor accepted, with its content (`executor.rs`, Paykit spec 8.3) | |
+//! | `el/<record key>` | the first grant's empty ledger, not yet sent or sent without a verified answer (`executor.rs`); never restored, so a restored executor takes a missing ledger as usage history lost | |
+//! | `fc/<record key>` | the version of the ignored current write of an Allowance record its user confirmed the executor may pay under (`executor.rs`); never restored | |
 
 use paykit_lib::bodies::ResendRequest;
 use paykit_lib::derive::{natural_key, request_obligation_blinded};
@@ -74,7 +77,7 @@ use crate::activity::{ActivityTarget, KeptSide};
 use crate::allowances::{allowance_target, ConsentEntry, NoticeTarget};
 use crate::app_records::SeenRecords;
 use crate::error::{PaykitError, Result};
-use crate::executor::KeptLedger;
+use crate::executor::{EmptyLedgerMark, FlagConfirmed, KeptLedger};
 use crate::hold::MissedHold;
 use crate::hold::RestoreHold;
 use crate::journal::JournalEntry;
@@ -769,6 +772,33 @@ impl Stored for KeptLedger {
     }
 }
 
+impl sealed::Sealed for EmptyLedgerMark {}
+
+/// The first grant's empty ledger mark: of the Allowance record its key names.
+impl Stored for EmptyLedgerMark {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::EmptyLedger(record) if self.record == *record => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for FlagConfirmed {}
+
+/// The user's confirmation of an ignored write: of the Allowance record its key names, at a
+/// version a write gives.
+impl Stored for FlagConfirmed {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::FlagConfirmed(record) if self.record == *record && self.version >= 1 => {
+                Ok(())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for NoticeTarget {}
 
 /// The executor app an `executor_notice` is wrapped to: of the notice's `msg_id` its key
@@ -838,6 +868,14 @@ pub(crate) mod key {
 
     pub(crate) fn kept_ledger(record_key: &[u8; 32]) -> String {
         format!("{KEPT_LEDGERS}{}", b64(record_key))
+    }
+
+    pub(crate) fn empty_ledger(record_key: &[u8; 32]) -> String {
+        format!("el/{}", b64(record_key))
+    }
+
+    pub(crate) fn flag_confirmed(record_key: &[u8; 32]) -> String {
+        format!("fc/{}", b64(record_key))
     }
 
     pub(crate) fn consent(record_key: &[u8; 32]) -> String {
@@ -1059,6 +1097,10 @@ pub(crate) enum StateKey {
     NoticeTarget(String),
     /// `lv/<record key>`: the last ledger version an executor accepted.
     KeptLedger([u8; 32]),
+    /// `el/<record key>`: the first grant's empty ledger, not yet answered.
+    EmptyLedger([u8; 32]),
+    /// `fc/<record key>`: an ignored current write the user confirmed paying under.
+    FlagConfirmed([u8; 32]),
 }
 
 impl StateKey {
@@ -1144,6 +1186,8 @@ impl StateKey {
                     "cf" => Self::Conflict(b64_32(rest)?),
                     "en" => Self::NoticeTarget(msg_id(rest)?),
                     "lv" => Self::KeptLedger(b64_32(rest)?),
+                    "el" => Self::EmptyLedger(b64_32(rest)?),
+                    "fc" => Self::FlagConfirmed(b64_32(rest)?),
                     "rs" => {
                         let (requester, id) = rest.split_once('/')?;
                         Self::Resent {
@@ -1612,6 +1656,8 @@ mod tests {
             (key::conflict(&pubky), StateKey::Conflict(pubky)),
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),
             (key::kept_ledger(&pubky), StateKey::KeptLedger(pubky)),
+            (key::empty_ledger(&pubky), StateKey::EmptyLedger(pubky)),
+            (key::flag_confirmed(&pubky), StateKey::FlagConfirmed(pubky)),
         ];
         for (built, family) in cases {
             assert_eq!(StateKey::parse(built.as_bytes()), Some(family), "{built}");
