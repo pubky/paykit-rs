@@ -50,7 +50,7 @@ use paykit_lib::derive::natural_key;
 use paykit_lib::records::StoredMessage;
 use paykit_lib::Body;
 use pubky_switch_client::app::{
-    AppEvent, ReceiveContext, RecordTarget, SharedRecord, UserConfirmed,
+    AppEvent, ReceiveContext, RecordContent, RecordTarget, SharedRecord, UserConfirmed,
 };
 use pubky_switch_core::enc::serde_b64;
 use serde::{Deserialize, Serialize};
@@ -881,7 +881,26 @@ impl Paykit {
             check_points_to(view.as_ref(), collection, kept.seen)?;
             let stored = kept.message;
             let accepted_at = stored.accepted_at().ok_or_else(PaykitError::corrupt)?;
-            let placed = if self.pause_at(&record).await?.blocks_by_hand() {
+            // A record absent or deleted while the copy of its side may lack records decides
+            // nothing yet: the message waits, never given up meanwhile (Paykit spec 8.1,
+            // "Records not listed yet"), as a stored entry's does.
+            let side = match &kept.target {
+                WriteTarget::Activity { target, .. } => match target.side {
+                    crate::activity::SideTag::Payer => crate::hold::RecordSide::Payer,
+                    crate::activity::SideTag::Payee => crate::hold::RecordSide::Payee,
+                },
+                WriteTarget::List(_) => crate::hold::RecordSide::Payer,
+            };
+            let content = self
+                .app
+                .shared_record(&record)
+                .await?
+                .map(|held| held.content);
+            let placed = if matches!(content, None | Some(RecordContent::Deleted))
+                && self.side_unlisted(side).await?
+            {
+                crate::stored::Placed::Waits
+            } else if self.pause_at(&record).await?.blocks_by_hand() {
                 crate::stored::Placed::Not
             } else {
                 let mut tx = Tx::default();

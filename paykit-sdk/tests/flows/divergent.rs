@@ -684,3 +684,59 @@ async fn test_divergent_kept_value_that_doesnt_read_holds_the_new_message() {
         PayeeStatus::ProofReceived
     );
 }
+
+#[tokio::test]
+async fn test_divergent_kept_write_waits_while_its_record_may_be_missing_from_the_copy() {
+    // The shop keeps the payer's replies over its divergent record; another of bob's apps
+    // then deletes the record. Past 30 days, a `missed` item comes and Paykit's listing
+    // fails: the copy may lack the record, so its absence decides nothing, and the kept
+    // messages wait. Once the records are listed, still deleted and unconfirmed, they go.
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_on(&w, Arc::clone(&base)).await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let record = sale(&shop, &request).await.record;
+    set_divergent(&base, &shop, &record, true);
+    wallet.receive(None).await.unwrap();
+    wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.app().protocol_scan(b"dw/").await.unwrap().len(), 2);
+    till.receive(None).await.unwrap();
+    let target = RecordTarget::new(
+        SwitchCollection::new(
+            Collection::PayeeActivity.name(),
+            Collection::PayeeActivity.policy(None),
+        ),
+        &natural_key::request_record(&w.bob_id(), &request.request_hash),
+    );
+    till.app_mut()
+        .delete_record(&target, Vec::new())
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
+    let now = w.clock.now_ms();
+    w.bob.switch().push_missed(1, now - 1_000, now);
+    // The client lists the shop's collection right after the item; Paykit's own listing at
+    // the end of the receive fails.
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "records?collection".into(),
+            after: 1,
+        });
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.records_unlisted.is_some(), "{got:?}");
+    assert_eq!(shop.app().protocol_scan(b"dw/").await.unwrap().len(), 2);
+    assert!(shop.notices().await.unwrap().is_empty());
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    assert_eq!(shop.notices().await.unwrap().len(), 2);
+}
