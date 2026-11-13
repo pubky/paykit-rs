@@ -1909,12 +1909,26 @@ async fn test_allowances_kept_answer_over_a_record_that_doesnt_read_given_up_wit
 /// the records counts as not listed until a listing of Paykit's own.
 fn missed_and_listing_fails(w: &World) {
     missed(w);
-    w.alice
+    fail_paykit_listing(&w.alice, WALLET_COLLECTIONS);
+}
+
+/// How many collections the client lists for an app of alice's holding `pay` and
+/// `allowance`: the payer's side, `payment_lists` and `allowances`.
+const WALLET_COLLECTIONS: usize = 3;
+
+/// How many collections the client lists for bob's shop, holding `request` and `allowance`:
+/// the payee's side and `allowances`.
+const SHOP_COLLECTIONS: usize = 2;
+
+/// Fail Paykit's own listing at the end of the next receive of `party`'s app after a
+/// `missed` item: the client's listing after the item, of the app's `collections`, goes
+/// through first. A listing that fails inside the client's read fails the read.
+fn fail_paykit_listing(party: &pubky_switch_client::testing::TestSigner, collections: usize) {
+    party
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
-            current: Value::Null,
+            after: collections,
         });
 }
 
@@ -1965,13 +1979,7 @@ async fn test_allowances_kept_answer_past_30_days_kept_while_unlisted() {
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     let now = w.clock.now_ms();
     w.bob.switch().push_missed(1, now - 1_000, now);
-    w.bob
-        .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
-            path: "records?collection".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
-            current: Value::Null,
-        });
+    fail_paykit_listing(&w.bob, SHOP_COLLECTIONS);
     let got = shop.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
     assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
@@ -3166,4 +3174,106 @@ async fn test_allowances_view_blocked_unknown_while_the_deny_copy_is_unknown() {
     assert_eq!(wallet.allowance(&mine).await.unwrap().blocked, None);
     wallet.receive(None).await.unwrap();
     assert_eq!(wallet.allowance(&mine).await.unwrap().blocked, Some(false));
+}
+
+#[tokio::test]
+async fn test_allowances_answer_dropped_for_the_bound_taken_again_from_a_resend_and_placed() {
+    // Bob's shop sends a proposal alone, without writing its record, as another of bob's apps
+    // would before this one holds the record; alice accepts it, and her acceptance is kept
+    // before its record. Her 64 later acceptances of proposals bob never sent drop it for the
+    // bound, its pair forgotten, and it counts in her mark. Once the shop holds the record it
+    // asks her to re-send; the same acceptance comes again, is taken as never processed, and
+    // is placed in the record (Paykit spec 8.1, "Replies before their record").
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    let id = paykit_lib::AllowanceId::generate().unwrap();
+    let body = json!({
+        "allowance_id": id.as_str(),
+        "proposer_role": "allowee",
+        "terms": terms().to_json().unwrap(),
+    });
+    let signed = shop
+        .app()
+        .sign_message(pubky_switch_client::app::OutgoingMessage::new(
+            w.alice_id(),
+            "paykit.allowance_proposal",
+            body.as_object().cloned().unwrap(),
+        ))
+        .unwrap();
+    shop.app_mut().queue_signed(signed.clone()).await.unwrap();
+    shop.app_mut().flush_outbox().await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let mine = wallet.allowances().await.unwrap()[0].record;
+    let accepted = wallet.accept_allowance(&mine).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    assert!(shop.allowances().await.unwrap().is_empty());
+    w.clock.advance_ms(1);
+    let bound = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    for i in 0..bound {
+        w.inject(
+            &w.alice,
+            "wallet",
+            &w.bob,
+            &[shop.app_id()],
+            "paykit.allowance_acceptance",
+            vec![[u8::try_from(i).unwrap(); 32]],
+            json!({ "allowance_id": paykit_lib::AllowanceId::generate().unwrap().as_str() })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        );
+    }
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), bound);
+    // The shop's record of the Allowance is written, as the other app's batch would write it.
+    let proposal = paykit_lib::records::StoredMessage::new(
+        w.bob_id(),
+        shop.app().cert().signed(),
+        signed.plaintext().clone(),
+        None,
+        &w.alice_id(),
+    )
+    .unwrap();
+    let record = AllowanceRecord {
+        counterparty: w.alice_id(),
+        allowance_id: id.clone(),
+        proposal,
+        response: None,
+        end: None,
+        conflicted: None,
+        grant: None,
+        grants: Vec::new(),
+        msg_ids: Vec::new(),
+        unknown: Default::default(),
+    };
+    let target = allowances_target(&w.alice_id(), &id);
+    let op = shop
+        .app_mut()
+        .record_op(&target, Some(&record.to_json().unwrap()), Vec::new())
+        .await
+        .unwrap();
+    shop.app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    assert_eq!(shop.receive(None).await.unwrap().resends, 1);
+    let theirs = shop.allowances().await.unwrap()[0].record;
+    assert_eq!(
+        shop.allowance(&theirs).await.unwrap().status,
+        AllowanceStatus::Proposed
+    );
+    wallet.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.allowance(&theirs).await.unwrap().status,
+        AllowanceStatus::Accepted
+    );
+    let held = AllowanceRecord::read(
+        &serde_json::to_vec(&value(&shop, &theirs).await).unwrap(),
+        &w.bob_id(),
+    )
+    .unwrap();
+    assert_eq!(held.response.unwrap().message().msg_id, accepted);
 }

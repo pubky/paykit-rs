@@ -765,3 +765,955 @@ async fn test_blocked_own_block_kept_unanswered_survives_a_restore_and_is_writte
         "{refused:?}"
     );
 }
+
+#[tokio::test]
+async fn test_blocked_own_block_restored_written_again_after_a_try_that_could_not_go() {
+    // The wallet's block is kept unanswered when the backup is taken. After the restore the
+    // first write of it again can't go: a batch the restored app kept meanwhile still can't
+    // be sent, so the block is neither written nor kept. The next receive writes it again,
+    // and the list at the switch holds bob (Paykit spec 8.1).
+    let w = World::new();
+    let (mut wallet, _, _) = received(&w, PaykitConfig::default()).await;
+    keep_ops(&w, 1);
+    wallet.block(&w.bob_id()).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut wallet = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    keep_ops(&w, 2);
+    let error = wallet.app_mut().deny(&[7; 32]).await.unwrap_err();
+    assert!(error.kept_batch().is_some(), "{error:?}");
+    wallet.receive(None).await.unwrap();
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(!lists.deny.contains(&w.bob_id()));
+    wallet.receive(None).await.unwrap();
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(lists.deny.contains(&w.bob_id()));
+}
+
+/// A store that fails, once only, the first commit of Paykit's own state (`p/`) that
+/// follows the client's first commit of a block the switch applied (`lc/deny/<pubky>`).
+#[derive(Default)]
+struct FailAfterBlock {
+    inner: pubky_switch_client::store::MemoryStore,
+    armed: std::sync::atomic::AtomicBool,
+    used: std::sync::atomic::AtomicBool,
+}
+
+impl pubky_switch_client::store::StateStore for FailAfterBlock {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        use pubky_switch_client::store::Write;
+        use std::sync::atomic::Ordering;
+        let ours = batch.writes.iter().any(|write| {
+            matches!(write, Write::Put { key, .. } | Write::Delete { key, .. } if key.starts_with(b"p/"))
+        });
+        if ours && self.armed.swap(false, Ordering::SeqCst) {
+            return Err(pubky_switch_client::error::StoreError::Unavailable);
+        }
+        let blocked = batch
+            .writes
+            .iter()
+            .any(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"lc/deny/")));
+        self.inner.commit(batch)?;
+        if blocked && !self.used.swap(true, Ordering::SeqCst) {
+            self.armed.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_blocked_block_the_switch_took_counts_though_the_store_then_fails() {
+    // The switch applies the wallet's block, and the next commit of Paykit's own state
+    // fails. The user's payment to bob, judged by the copy read a moment before, still needs
+    // the user's confirmation: the block counted before the switch was asked (Paykit spec
+    // 8.1).
+    let w = World::new();
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            std::sync::Arc::new(FailAfterBlock::default()),
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let _ = wallet.block(&w.bob_id()).await;
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(lists.deny.contains(&w.bob_id()));
+    let error = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(shown(error).payee, w.bob_id());
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_blocked_resend_request_to_a_blocked_counterparty_refused_with_nothing_sent() {
+    // The host asks bob to re-send while the wallet's copy of the deny list holds him:
+    // refused, nothing queued or sent (Paykit spec 8.1, "Blocked counterparties"). Once he
+    // is unblocked the same call goes.
+    let w = World::new();
+    let (mut wallet, _request) = blocked(&w).await;
+    let selection = paykit_sdk::ResendSelection::default().with_accepted_from_ms(0);
+    let before = w.bob.switch().entries_from(&w.alice_id());
+    let refused = wallet
+        .request_resend(w.bob_id(), selection.clone())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{refused:?}"
+    );
+    wallet.flush().await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet.request_resend(w.bob_id(), selection).await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+}
+
+#[tokio::test]
+async fn test_blocked_resend_request_while_the_deny_list_is_unknown_refused_with_nothing_sent() {
+    // The wallet's copy of the lists isn't known: its due read failed, and the read the call
+    // tries first fails too. Asking bob to re-send is refused, nothing queued or sent; once
+    // the lists read again the same call goes (Paykit spec 8.1, wire 4.1).
+    let w = World::new();
+    let (mut wallet, _, _) = received(&w, PaykitConfig::default()).await;
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    fail_list_read(&w);
+    wallet.receive(None).await.unwrap();
+    let selection = paykit_sdk::ResendSelection::default().with_accepted_from_ms(0);
+    let before = w.bob.switch().entries_from(&w.alice_id());
+    fail_list_read(&w);
+    let refused = wallet
+        .request_resend(w.bob_id(), selection.clone())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{refused:?}"
+    );
+    wallet.flush().await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    wallet.request_resend(w.bob_id(), selection).await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+}
+
+/// Bob is blocked; the wallet's unblock is then kept unanswered, and its batch dropped: sent
+/// again at the next read, the switch refuses it for good, so the list still holds bob.
+/// Then the phone, another own app, blocks bob too.
+async fn unblock_dropped_then_blocked_by_the_phone(w: &World, wallet: &mut Paykit) {
+    wallet.block(&w.bob_id()).await.unwrap();
+    keep_ops(w, 1);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    w.alice.switch().fail_next(Fault::Error {
+        path: "/ops".into(),
+        code: ErrorCode::Conflict,
+        current: serde_json::Value::Null,
+    });
+    let _ = wallet.receive(None).await;
+    let mut phone = w
+        .join_with(
+            &w.alice,
+            "phone",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    phone.block(&w.bob_id()).await.unwrap();
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(lists.deny.contains(&w.bob_id()));
+}
+
+#[tokio::test]
+async fn test_blocked_own_unblock_whose_batch_is_dropped_counts_no_more_for_the_user() {
+    // The wallet's unblock never landed and its batch is gone: it counts no more, so the
+    // user's payment to bob, whom the list holds, needs the confirmation (Paykit spec 8.1).
+    let w = World::new();
+    let (mut wallet, _, request) = received(&w, PaykitConfig::default()).await;
+    unblock_dropped_then_blocked_by_the_phone(&w, &mut wallet).await;
+    let error = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(shown(error).payee, w.bob_id());
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_blocked_own_unblock_whose_batch_is_dropped_counts_no_more_for_a_repeat() {
+    // As above, for the resume's repeat of a payment in flight, an automatic payment: none
+    // is made to bob.
+    let w = World::new();
+    let calls = resumed_repeat(&w, async |wallet| {
+        unblock_dropped_then_blocked_by_the_phone(&w, wallet).await;
+    })
+    .await;
+    assert_eq!(calls, 1);
+}
+
+#[tokio::test]
+async fn test_blocked_own_unblock_kept_unanswered_not_restored() {
+    // Bob is blocked, and the wallet's unblock is kept unanswered when the backup is taken.
+    // The restored app keeps no batch the unblock could count by: it isn't restored, nor
+    // written again, so the list still holds bob and the user's payment to him needs the
+    // confirmation (Paykit spec 8.1).
+    let w = World::new();
+    let (mut wallet, _, request) = received(&w, PaykitConfig::default()).await;
+    wallet.block(&w.bob_id()).await.unwrap();
+    keep_ops(&w, 1);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut wallet = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    wallet.reconcile().await.unwrap();
+    wallet
+        .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_scan(b"bk/").await.unwrap().is_empty());
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(lists.deny.contains(&w.bob_id()));
+    let held = PayOptions::default()
+        .with_possibly_cancelled_confirmed(pubky_switch_client::app::UserConfirmed::new());
+    let error = wallet.pay_request(&request, held).await.unwrap_err();
+    assert_eq!(shown(error).payee, w.bob_id());
+}
+
+/// A store whose commit of the client's applied block (`lc/deny/<pubky>`) lands but answers
+/// `Unknown`, once.
+#[derive(Default)]
+struct UnknownBlockCommit {
+    inner: pubky_switch_client::store::MemoryStore,
+    used: std::sync::atomic::AtomicBool,
+}
+
+impl pubky_switch_client::store::StateStore for UnknownBlockCommit {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        use pubky_switch_client::store::Write;
+        use std::sync::atomic::Ordering;
+        let blocked = batch
+            .writes
+            .iter()
+            .any(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"lc/deny/")));
+        self.inner.commit(batch)?;
+        if blocked && !self.used.swap(true, Ordering::SeqCst) {
+            return Err(pubky_switch_client::error::StoreError::Unknown);
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_blocked_block_applied_whose_answer_is_of_unknown_fate_still_counts() {
+    // The switch applies the wallet's block and the client's commit of it lands but answers
+    // `Unknown`: the call fails with the store's error, of unknown fate. The block stays
+    // counted, so the user's payment to bob needs the confirmation (Paykit spec 8.1).
+    let w = World::new();
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            std::sync::Arc::new(UnknownBlockCommit::default()),
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.block(&w.bob_id()).await.is_err());
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(lists.deny.contains(&w.bob_id()));
+    let error = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(shown(error).payee, w.bob_id());
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_blocked_own_unblock_applied_in_the_read_keeps_the_resend_request_owed() {
+    // Bob's request to re-send is kept, and the wallet's unblock of him kept unanswered. The
+    // next read sends the unblock and the switch applies it: the unblock counts no more, so
+    // the copy of the lists isn't known until it is read again, and the request waits for
+    // that, never dropped; the next receive answers it (Paykit spec 8.1, 9).
+    let w = World::new();
+    let (mut wallet, shop, request) = received(&w, PaykitConfig::default()).await;
+    wallet.block(&w.bob_id()).await.unwrap();
+    keep_ops(&w, 1);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    kept_resend_request(&w, &mut wallet, &shop, &request).await;
+    let first = wallet.receive(None).await.unwrap();
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(!lists.deny.contains(&w.bob_id()));
+    let left = wallet.app().protocol_scan(b"ans/").await.unwrap().len();
+    assert_eq!((first.resends, left), (0, 1));
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
+    assert!(wallet
+        .app()
+        .protocol_scan(b"ans/")
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+/// A store that, once armed, fails the client's next commit that keeps a batch
+/// (`opq/<batch_id>`), once, applying nothing.
+#[derive(Default)]
+struct FailNextKeep {
+    inner: pubky_switch_client::store::MemoryStore,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl pubky_switch_client::store::StateStore for FailNextKeep {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        use pubky_switch_client::store::Write;
+        use std::sync::atomic::Ordering;
+        let keeps = batch
+            .writes
+            .iter()
+            .any(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"opq/")));
+        if keeps && self.armed.swap(false, Ordering::SeqCst) {
+            return Err(pubky_switch_client::error::StoreError::Unavailable);
+        }
+        self.inner.commit(batch)
+    }
+}
+
+#[tokio::test]
+async fn test_blocked_block_counted_but_never_kept_written_at_the_next_receive() {
+    // The client's commit that keeps the wallet's block fails, so the block is neither sent
+    // nor kept, though it counts here. The next receive writes it, and the identity's list
+    // holds bob, so the other own apps pause for him too (Paykit spec 8.1).
+    let w = World::new();
+    let target = std::sync::Arc::new(FailNextKeep::default());
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            std::sync::Arc::clone(&target)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    target
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(wallet.block(&w.bob_id()).await.is_err());
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(!lists.deny.contains(&w.bob_id()));
+    let error = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(shown(error).payee, w.bob_id());
+    wallet.receive(None).await.unwrap();
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(lists.deny.contains(&w.bob_id()));
+}
+
+/// A store that counts the client's writes that queue a message (`out/`) or keep a batch
+/// (`opq/`).
+#[derive(Default)]
+struct CountsQueued {
+    inner: pubky_switch_client::store::MemoryStore,
+    queued: std::sync::atomic::AtomicUsize,
+}
+
+impl pubky_switch_client::store::StateStore for CountsQueued {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        use pubky_switch_client::store::Write;
+        let queues = batch
+            .writes
+            .iter()
+            .filter(|write| {
+                matches!(write, Write::Put { key, .. }
+                    if key.starts_with(b"out/") || key.starts_with(b"opq/"))
+            })
+            .count();
+        self.inner.commit(batch)?;
+        self.queued
+            .fetch_add(queues, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Why the wallet's sends to bob are held.
+#[derive(Clone, Copy, Debug)]
+enum Held {
+    /// The wallet blocked him.
+    Blocked,
+    /// The wallet's copy of the deny list isn't known, and a read of it fails.
+    Unknown,
+}
+
+/// The payer's answer to bob's request.
+#[derive(Clone, Copy, Debug)]
+enum Answer {
+    /// A one-time request rejected.
+    Reject,
+    /// A one-time request cancelled.
+    Cancel,
+    /// A recurring request rejected before its acceptance.
+    RejectRecurring,
+}
+
+impl Answer {
+    async fn give(
+        self,
+        wallet: &mut Paykit,
+        request: &RequestRef,
+    ) -> Result<String, paykit_sdk::PaykitError> {
+        match self {
+            Self::Reject | Self::RejectRecurring => wallet.reject_request(request, None).await,
+            Self::Cancel => wallet.cancel_request(request, None).await,
+        }
+    }
+
+    fn status(self) -> RequestStatus {
+        match self {
+            Self::Cancel => RequestStatus::Cancelled,
+            Self::Reject | Self::RejectRecurring => RequestStatus::Rejected,
+        }
+    }
+}
+
+/// Bob's request is held by alice's wallet, and its sends to bob are then `held`: the
+/// wallet's `answer` is refused, the request record unchanged, nothing queued and nothing
+/// reaching bob (Paykit spec 8.1, "Blocked counterparties"). Once bob is unblocked, or the
+/// lists read again, the same answer is recorded and delivered.
+async fn answer_held(held: Held, answer: Answer) {
+    let w = World::new();
+    let counts = std::sync::Arc::new(CountsQueued::default());
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            std::sync::Arc::clone(&counts)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    let request = if let Answer::RejectRecurring = answer {
+        // Entered at alice's switch directly: bob's admits her answer by an invite.
+        shop.app_mut().invite(&w.alice_id()).await.unwrap();
+        let expires_at = w.clock.now_ms() + 24 * crate::common::HOUR_MS;
+        crate::recurring::monthly(&w, &[wallet.app_id()], expires_at, "plan-1");
+        wallet.receive(None).await.unwrap();
+        wallet.requests().await.unwrap()[0].request
+    } else {
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        request
+    };
+    match held {
+        Held::Blocked => wallet.block(&w.bob_id()).await.unwrap(),
+        Held::Unknown => {
+            // The receive's due read fails, and so does the read the answer tries first.
+            w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+            fail_list_read(&w);
+            wallet.receive(None).await.unwrap();
+            fail_list_read(&w);
+        }
+    }
+    let record = wallet.request(&request).await.unwrap().record;
+    let version = wallet
+        .app()
+        .shared_record(&record)
+        .await
+        .unwrap()
+        .unwrap()
+        .version;
+    let queued = counts.queued.load(std::sync::atomic::Ordering::SeqCst);
+    let entries = w.bob.switch().entries_from(&w.alice_id());
+
+    let refused = answer.give(&mut wallet, &request).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{held:?} {answer:?}: {refused:?}"
+    );
+    wallet.flush().await.unwrap();
+    let after = wallet.app().shared_record(&record).await.unwrap().unwrap();
+    assert_eq!(after.version, version, "{held:?} {answer:?}");
+    let value: serde_json::Value = serde_json::from_slice(after.content.value().unwrap()).unwrap();
+    assert!(value["response"].is_null(), "{held:?} {answer:?}: {value}");
+    assert!(
+        value["cancellation"].is_null(),
+        "{held:?} {answer:?}: {value}"
+    );
+    assert_eq!(
+        counts.queued.load(std::sync::atomic::Ordering::SeqCst),
+        queued,
+        "{held:?} {answer:?}"
+    );
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+
+    if let Held::Blocked = held {
+        wallet.unblock(&w.bob_id()).await.unwrap();
+    }
+    answer.give(&mut wallet, &request).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        answer.status()
+    );
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries + 1);
+    if let Answer::Reject | Answer::Cancel = answer {
+        shop.receive(None).await.unwrap();
+        let expected = match answer {
+            Answer::Cancel => paykit_sdk::PayeeStatus::Cancelled,
+            _ => paykit_sdk::PayeeStatus::Rejected,
+        };
+        assert_eq!(shop.payee_activity().await.unwrap()[0].status, expected);
+    }
+}
+
+#[tokio::test]
+async fn test_blocked_rejection_to_a_blocked_payee_refused_with_nothing_sent() {
+    answer_held(Held::Blocked, Answer::Reject).await;
+}
+
+#[tokio::test]
+async fn test_blocked_rejection_while_the_deny_list_is_unknown_refused_with_nothing_sent() {
+    answer_held(Held::Unknown, Answer::Reject).await;
+}
+
+#[tokio::test]
+async fn test_blocked_cancellation_to_a_blocked_payee_refused_with_nothing_sent() {
+    answer_held(Held::Blocked, Answer::Cancel).await;
+}
+
+#[tokio::test]
+async fn test_blocked_cancellation_while_the_deny_list_is_unknown_refused_with_nothing_sent() {
+    answer_held(Held::Unknown, Answer::Cancel).await;
+}
+
+#[tokio::test]
+async fn test_blocked_recurring_rejection_to_a_blocked_payee_refused_with_nothing_sent() {
+    answer_held(Held::Blocked, Answer::RejectRecurring).await;
+}
+
+#[tokio::test]
+async fn test_blocked_recurring_rejection_while_the_deny_list_is_unknown_refused_with_nothing_sent()
+{
+    answer_held(Held::Unknown, Answer::RejectRecurring).await;
+}
+
+/// Bob's request received at alice's wallet, and his list, then bob blocked: the user's
+/// payment of the request and a payment without a request are each refused as blocked,
+/// showing what the user confirms. The wallet's copy of the lists then becomes unknown: the
+/// due read at a receive fails. Returns the wallet and the two payments shown.
+async fn blocked_then_unknown(
+    w: &World,
+) -> (
+    Paykit,
+    RequestRef,
+    paykit_sdk::BlockedPayment,
+    paykit_sdk::BlockedPayment,
+) {
+    let (mut wallet, mut shop, request) = received(w, PaykitConfig::default()).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    wallet.block(&w.bob_id()).await.unwrap();
+    let paid = shown(
+        wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap_err(),
+    );
+    let unrequested = shown(
+        wallet
+            .pay_without_request(unrequested_payment(w, PayOptions::default()))
+            .await
+            .unwrap_err(),
+    );
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    fail_list_read(w);
+    wallet.receive(None).await.unwrap();
+    (wallet, request, paid, unrequested)
+}
+
+/// A payment without a request to bob's list endpoint, with `options`.
+fn unrequested_payment(w: &World, options: PayOptions) -> UnrequestedPayment {
+    UnrequestedPayment::new(w.bob_id(), btc("0.001"))
+        .with_options(options.with_endpoint(endpoint("btc-lightning-bolt12")))
+}
+
+#[tokio::test]
+async fn test_blocked_confirmed_payment_while_the_deny_list_is_unknown_refused() {
+    // The user confirms paying bob's request, blocked, but the wallet's copy of the lists
+    // isn't known and the read the payment makes first fails: the confirmation doesn't stand
+    // for a read, so nothing is paid and nothing, acceptance or proof, reaches bob (Paykit
+    // spec 8.1, "How fresh the deny list is").
+    let w = World::new();
+    let (mut wallet, request, paid, _) = blocked_then_unknown(&w).await;
+    let entries = w.bob.switch().entries_from(&w.alice_id());
+    fail_list_read(&w);
+    let refused = wallet
+        .pay_request(&request, PayOptions::default().with_blocked_confirmed(paid))
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    wallet.flush().await.unwrap();
+    assert!(w.rail.all_executions().is_empty());
+    assert!(wallet.payments().await.unwrap().is_empty());
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+}
+
+#[tokio::test]
+async fn test_blocked_confirmed_payment_without_a_request_while_the_deny_list_is_unknown_refused() {
+    // As above, for a payment without a request: nothing is paid, and no proof or list
+    // request reaches bob.
+    let w = World::new();
+    let (mut wallet, _, _, unrequested) = blocked_then_unknown(&w).await;
+    let entries = w.bob.switch().entries_from(&w.alice_id());
+    fail_list_read(&w);
+    let refused = wallet
+        .pay_without_request(unrequested_payment(
+            &w,
+            PayOptions::default().with_blocked_confirmed(unrequested),
+        ))
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    wallet.flush().await.unwrap();
+    assert!(w.rail.all_executions().is_empty());
+    assert!(wallet.payments().await.unwrap().is_empty());
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+}
+
+/// Alice's wallet holds bob's request but no list of his, and its sends to bob are then
+/// `held`: a payment without a request to him is refused before a list is asked for, and
+/// nothing reaches bob. Once bob is unblocked, or the lists read, the same payment asks
+/// him for his list.
+async fn no_list_asked_while_held(held: Held) {
+    let w = World::new();
+    let (mut wallet, _, _) = received(&w, PaykitConfig::default()).await;
+    match held {
+        Held::Blocked => wallet.block(&w.bob_id()).await.unwrap(),
+        Held::Unknown => {
+            w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+            fail_list_read(&w);
+            wallet.receive(None).await.unwrap();
+            fail_list_read(&w);
+        }
+    }
+    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let refused = wallet
+        .pay_without_request(unrequested_payment(&w, PayOptions::default()))
+        .await
+        .unwrap_err();
+    match held {
+        Held::Blocked => assert!(
+            matches!(refused.refusal(), Some(Refusal::Blocked { .. })),
+            "{refused:?}"
+        ),
+        Held::Unknown => assert!(
+            !matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+            "{refused:?}"
+        ),
+    }
+    wallet.flush().await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    if let Held::Blocked = held {
+        wallet.unblock(&w.bob_id()).await.unwrap();
+    }
+    let waits = wallet
+        .pay_without_request(unrequested_payment(&w, PayOptions::default()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(waits.refusal(), Some(Refusal::WaitingForList)),
+        "{waits:?}"
+    );
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries + 1);
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_blocked_list_request_to_a_blocked_payee_not_sent_unconfirmed() {
+    no_list_asked_while_held(Held::Blocked).await;
+}
+
+#[tokio::test]
+async fn test_blocked_list_request_while_the_deny_list_is_unknown_not_sent() {
+    no_list_asked_while_held(Held::Unknown).await;
+}
+
+/// Bob's till, holding `request` and `manage_contacts`, on `store`, with its copy of the
+/// lists read.
+async fn contacts_till(
+    w: &World,
+    store: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+) -> Paykit {
+    let mut till = w
+        .join_with(
+            &w.bob,
+            "till",
+            AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+            PaykitConfig::default(),
+            store,
+        )
+        .await;
+    till.receive(None).await.unwrap();
+    till
+}
+
+/// The next read of bob's lists fails.
+fn fail_bobs_list_read(w: &World) {
+    w.bob.switch().fail_next(Fault::Error {
+        path: "/allow".into(),
+        code: ErrorCode::Unavailable,
+        current: serde_json::Value::Null,
+    });
+}
+
+/// Bob's till holds `contacts`, and its sends to alice are then `held`: a new request to
+/// her is refused, nothing recorded, queued or reaching her (Paykit spec 8.1, "Blocked
+/// counterparties"). Once alice is unblocked, or the lists read, the same request goes.
+async fn request_held(held: Held) {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let counts = std::sync::Arc::new(CountsQueued::default());
+    let mut till = contacts_till(
+        &w,
+        std::sync::Arc::clone(&counts)
+            as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    )
+    .await;
+    match held {
+        Held::Blocked => till.block(&w.alice_id()).await.unwrap(),
+        Held::Unknown => {
+            // The receive's due read fails, and so does the read the request tries first.
+            w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+            fail_bobs_list_read(&w);
+            till.receive(None).await.unwrap();
+            fail_bobs_list_read(&w);
+        }
+    }
+    let queued = counts.queued.load(std::sync::atomic::Ordering::SeqCst);
+    let entries = w.alice.switch().entries_from(&w.bob_id());
+
+    let refused = till
+        .send_request(w.alice_id(), draft("1", w.clock.now_ms()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{held:?}: {refused:?}"
+    );
+    till.flush().await.unwrap();
+    assert_eq!(
+        counts.queued.load(std::sync::atomic::Ordering::SeqCst),
+        queued,
+        "{held:?}"
+    );
+    assert!(till.payee_activity().await.unwrap().is_empty(), "{held:?}");
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), entries);
+
+    if let Held::Blocked = held {
+        till.unblock(&w.alice_id()).await.unwrap();
+    }
+    let request = request_from(&mut till, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), entries + 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+}
+
+#[tokio::test]
+async fn test_blocked_request_to_a_blocked_payer_refused_with_nothing_sent() {
+    request_held(Held::Blocked).await;
+}
+
+#[tokio::test]
+async fn test_blocked_request_while_the_deny_list_is_unknown_refused_with_nothing_sent() {
+    request_held(Held::Unknown).await;
+}
+
+#[tokio::test]
+async fn test_blocked_request_from_an_app_without_contacts_sent_while_the_lists_dont_read() {
+    // Bob's shop holds no `contacts`, so it reads no lists and holds nothing: a read of them
+    // that would fail decides nothing, and its request goes.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    fail_bobs_list_read(&w);
+    let entries = w.alice.switch().entries_from(&w.bob_id());
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), entries + 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+}
+
+#[tokio::test]
+async fn test_blocked_payees_cancellation_to_a_blocked_payer_delivered() {
+    // A payee's cancellation stops a payment: bob's till, holding `contacts`, cancels its
+    // request to alice after blocking her, and the cancellation reaches her wallet.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut till = contacts_till(&w, store()).await;
+    let request = request_from(&mut till, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    till.block(&w.alice_id()).await.unwrap();
+    let record = till.payee_activity().await.unwrap()[0].record;
+    till.cancel_sent_request(&record, None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn test_blocked_receipt_to_a_blocked_payer_delivered() {
+    // A receipt settles a payment already made: bob's till, holding `contacts`, confirms
+    // alice's payment after blocking her, and the receipt reaches her wallet's record.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut till = contacts_till(&w, store()).await;
+    let request = request_from(&mut till, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    till.receive(None).await.unwrap();
+    till.block(&w.alice_id()).await.unwrap();
+    let record = till.payee_activity().await.unwrap()[0].record;
+    assert!(till.confirm_payment(&record).await.unwrap().is_some());
+    wallet.receive(None).await.unwrap();
+    let key = wallet.request(&request).await.unwrap().record;
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    assert!(!value["receipt"].is_null(), "{value}");
+}

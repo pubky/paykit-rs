@@ -436,7 +436,7 @@ mod own_message_tests {
         // the message in the batch that writes the record (`allowances.rs`, whose own test
         // checks every record write goes through these).
         let allowances = text("allowances.rs");
-        let propose = body(allowances, "propose_allowance");
+        let propose = body(allowances, "propose_allowance_inner");
         assert!(propose.contains("self.own_copy(&signed)"));
         assert!(propose.contains(".queue(signed)"));
         let answer = body(allowances, "answer_allowance");

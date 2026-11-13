@@ -698,10 +698,12 @@ async fn test_notices_acknowledged_late_receipt_raises_none_again_after_a_restor
 }
 
 #[tokio::test]
-async fn test_notices_receipt_waiting_for_its_records_key_given_up_after_30_days() {
+async fn test_notices_receipt_waiting_for_its_records_key_given_up_once_the_client_drops_it() {
     // The wallet holds the payer record unopened after an epoch rotation, as above, and the
-    // key never comes. The receipt waits, shown as waiting for that epoch's key and never as
-    // a store failing; 30 days after its acceptance it is given up, and the host is told.
+    // key doesn't come. The receipt waits in the client's store, shown as waiting for that
+    // epoch's key and never as a store failing. Past 21 days from its acceptance the client
+    // drops it, never processed: the host is told once, naming it. Once the key comes, bob is
+    // asked to send it again, and the copy he sends is taken.
     let w = World::new();
     let mut phone = w.wallet("phone").await;
     let (mut wallet, mut shop, _) = paid_after_failed(&w).await;
@@ -730,6 +732,7 @@ async fn test_notices_receipt_waiting_for_its_records_key_given_up_after_30_days
     crate::unrequested::store_bundle_from(&w, wallet.app_id(), &cert, newest);
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
+    let sent = w.clock.now_ms();
     receipt(&mut shop).await;
     let mut events = Vec::new();
     for _ in 0..pubky_switch_client::app::RETRY_EVENT_READS + 2 {
@@ -745,38 +748,45 @@ async fn test_notices_receipt_waiting_for_its_records_key_given_up_after_30_days
         "{events:?}"
     );
     assert!(wallet.notices().await.unwrap().is_empty());
-    // Past 30 days from its acceptance it is given up: the host is told, and the entry is
-    // waited for no more.
-    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - DAY_MS);
+    // A day short of the 21 days it still waits.
+    w.clock
+        .set_ms(sent + pubky_switch_client::app::MAX_UNVERIFIED_AGE_MS - DAY_MS);
     let summary = wallet.receive(None).await.unwrap();
     assert_eq!(summary.key_epochs_awaited, vec![sealed_at], "{summary:?}");
     assert!(wallet.notices().await.unwrap().is_empty());
-    w.clock.advance_ms(DAY_MS);
+    // Past them the client drops it: the host is told, once, and bob isn't asked while the
+    // key is missing.
+    w.clock.advance_ms(2 * DAY_MS);
     let summary = wallet.receive(None).await.unwrap();
     assert!(summary.key_epochs_awaited.is_empty(), "{summary:?}");
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, NoticeKind::MessageGivenUp);
     assert_eq!(notices[0].counterparty, w.bob_id());
-    // The key comes later: the receipt given up isn't taken again.
+    assert!(notices[0].msg_id.is_some());
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.notices().await.unwrap().len(), 1);
+    assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
+    // The key comes: bob is asked, sends the receipt again, and the wallet records it.
     crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
-    for _ in 0..3 {
+    wallet.receive(None).await.unwrap();
+    assert_eq!(crate::common::asked(&wallet, &w.bob_id()).await.len(), 1);
+    shop.receive(None).await.unwrap();
+    for _ in 0..2 {
         wallet.receive(None).await.unwrap();
     }
     let value = crate::outcome_record::record_value(&mut wallet, &request)
         .await
         .unwrap();
-    assert!(value["receipt"].is_null(), "{value}");
-    // Stored locally while it waited, the entry was tried again by the receive step alone:
-    // nothing of it is kept to write later.
-    assert!(wallet.app().protocol_scan(b"se/").await.unwrap().is_empty());
+    assert!(!value["receipt"].is_null(), "{value}");
 }
 
 #[tokio::test]
 async fn test_notices_receipt_waiting_for_its_key_never_shown_as_a_store_unavailable() {
-    // A receipt whose record is sealed under a key the wallet doesn't hold, over the whole
-    // wait: once the client stores the entry after its bounded wait to try it again later,
-    // the report shows it waiting for the key, never a store cause.
+    // A receipt whose record is sealed under a key the wallet doesn't hold, over more than
+    // the reads that raise `StoreFailing` and the client's bounded wait for a store: the
+    // client stores the entry for its key at once, and the report shows it waiting for the
+    // key, never a store cause.
     let w = World::new();
     let mut phone = w.wallet("phone").await;
     let (mut wallet, mut shop, _) = paid_after_failed(&w).await;
