@@ -34,8 +34,9 @@
 //!   identity sent, can't go into a record holding that acceptance: the app ends the
 //!   Allowance itself, naming both, so the record shows it ended.
 //! - **The consent list** (`ac/`): the Allowances this app, as executor, may pay under. An
-//!   Allowance seen ended or rejected, or named by an `executor_notice`, is removed for
-//!   good: a removed entry never comes back. A restore marks every entry to be confirmed
+//!   Allowance seen ended, rejected or conflicted, or named by an `executor_notice`, is
+//!   removed for good: a removed entry never comes back. Under a record held as deleted it
+//!   pays nothing, its entry kept. A restore marks every entry to be confirmed
 //!   again, since the backup may predate an end, and so does a `missed` item, since an end
 //!   may be among the entries the service deleted (`mc`, Paykit spec 7.2, 8.3).
 //! - **`executor_notice`:** an app that ends an Allowance, or records the counterparty's
@@ -157,7 +158,7 @@ pub(crate) enum Consent {
         /// To be confirmed again by the user.
         confirm_again: bool,
     },
-    /// Removed for good: the Allowance ended, was rejected or handed off.
+    /// Removed for good: the Allowance ended, was rejected, handed off or conflicted.
     Removed {
         /// Why.
         reason: ConsentEnd,
@@ -593,22 +594,56 @@ fn keep_conflict(
     scopes: &[String],
 ) -> std::result::Result<(), Fail> {
     let record_key = cx.record_key(target)?;
-    let stop = key::conflict(&record_key);
-    if state::cx_get::<KeptMessage>(cx, &stop)?.is_none() {
-        receive::keep_local(cx, receive::local(&stop, &KeptMessage::of(stored))?);
-    }
-    if scopes.iter().any(|s| s == "allowance_execute") {
-        let Some(allowance_id) = named_allowance(stored.body()) else {
-            return Err(Fail::corrupt());
-        };
-        drop_consent(
-            cx,
-            &record_key,
-            (stored.sender(), allowance_id),
-            ConsentEnd::Conflicted,
-        )?;
+    let kept = state::cx_get::<KeptMessage>(cx, &key::conflict(&record_key))?.is_some();
+    let consent = state::cx_get::<ConsentEntry>(cx, &key::consent(&record_key))?;
+    let executes = scopes.iter().any(|s| s == "allowance_execute");
+    for write in conflict_writes(&record_key, stored, kept, consent.as_ref(), executes)
+        .map_err(|_| Fail::corrupt())?
+    {
+        receive::keep_local(cx, write);
     }
     receive::note_peer(cx, &stored.sender(), stored)
+}
+
+/// The writes a second, different proposal or response makes, the receive step's and a
+/// later write's alike (Paykit spec 8.3, "Conflicted"): its stop (`cf/<record key>`) unless
+/// one is kept already, the first one kept staying; and, at an app holding
+/// `allowance_execute`, the consent list's entry removed for good, unless it is already.
+fn conflict_writes(
+    record_key: &[u8; 32],
+    stored: &StoredMessage,
+    kept: bool,
+    consent: Option<&ConsentEntry>,
+    executes: bool,
+) -> Result<Vec<LocalWrite>> {
+    let mut writes = Vec::new();
+    if !kept {
+        writes.push(state::local_put(
+            &key::conflict(record_key),
+            &KeptMessage::of(stored),
+        )?);
+    }
+    let removed = matches!(
+        consent,
+        Some(ConsentEntry {
+            consent: Consent::Removed { .. },
+            ..
+        })
+    );
+    if executes && !removed {
+        let allowance_id = named_allowance(stored.body()).ok_or_else(PaykitError::corrupt)?;
+        writes.push(state::local_put(
+            &key::consent(record_key),
+            &ConsentEntry::new(
+                stored.sender(),
+                allowance_id,
+                Consent::Removed {
+                    reason: ConsentEnd::Conflicted,
+                },
+            ),
+        )?);
+    }
+    Ok(writes)
 }
 
 /// A counterparty's end (Paykit spec 8.3, "Ends reach the executor"): kept as the stop in
@@ -999,9 +1034,12 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotFound`]; [`Refusal::AllowanceEnded`] once it ended, or while this app
-    /// keeps the counterparty's end; [`Refusal::Usage`] for a proposal this identity sent or
-    /// one answered already; as [`Paykit::propose_allowance`].
+    /// [`Refusal::NotFound`], also for a record held as deleted; [`Refusal::AllowanceEnded`]
+    /// once it ended, or while this app keeps the counterparty's end;
+    /// [`Refusal::AllowanceConflicted`] for a conflicted one, for good; [`Refusal::NotNow`]
+    /// while the shared records aren't listed or the record waits for its scope key;
+    /// [`Refusal::Usage`] for a proposal this identity sent or one answered already; as
+    /// [`Paykit::propose_allowance`].
     pub async fn accept_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
         self.answer_allowance(record, Kind::AllowanceAcceptance)
             .await
@@ -1028,10 +1066,12 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotFound`]; [`Refusal::AllowanceEnded`] once it ended, or while this app
-    /// keeps the counterparty's end; [`Refusal::Rejected`] for a rejected one;
-    /// [`Refusal::Usage`] for a proposal to this identity not yet answered, which is
-    /// rejected instead; as [`Paykit::propose_allowance`].
+    /// [`Refusal::NotFound`], also for a record held as deleted; [`Refusal::AllowanceEnded`]
+    /// once it ended, or while this app keeps the counterparty's end; [`Refusal::Rejected`]
+    /// for a rejected one; [`Refusal::AllowanceConflicted`] for a conflicted one, for good;
+    /// [`Refusal::NotNow`] while the shared records aren't listed or the record waits for its
+    /// scope key; [`Refusal::Usage`] for a proposal to this identity not yet answered, which
+    /// is rejected instead; as [`Paykit::propose_allowance`].
     pub async fn end_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
         self.answer_allowance(record, Kind::AllowanceEnd).await
     }
@@ -1324,18 +1364,41 @@ impl Paykit {
     // ---------------------------------------------------------------------------------
     // The consent list
 
+    /// Whether the user confirmed paying under the Allowance at `record` since its current
+    /// write the app ignores. No path confirms one yet: the executor's confirmation comes
+    /// with it, so until then an ignored current write pays nothing.
+    pub(crate) async fn ignored_write_confirmed(&self, record: &[u8; 32]) -> Result<bool> {
+        let _ = record;
+        Ok(false)
+    }
+
     /// Whether this app's consent list holds the Allowance at `record`, confirmed since any
     /// restore or `missed` item (Paykit spec 8.3, "Executor"). None is confirmed while a
     /// `missed` item's mark (`mc`) waits for [`Paykit::confirm_consents_again`], nor while
     /// this app keeps a counterparty's end or a conflicting message of the Allowance as a
     /// stop, whatever the entry says: a stop the receive step kept, or one a stored entry
-    /// kept, stops payment before the record shows it.
+    /// kept, stops payment before the record shows it. Nor is one whose record isn't held
+    /// now as a value that reads and binds and shows no end, rejection or conflict, read
+    /// here, so a record that changed outside a receive counts at once: one held as deleted
+    /// pays nothing, and neither does one whose current write the app ignores (Switch spec
+    /// 8.2), until its user confirms it ([`Paykit::ignored_write_confirmed`]; Paykit spec
+    /// 8.3, "Executor", "Ending").
     pub(crate) async fn consents(&self, record: &[u8; 32]) -> Result<bool> {
         if self.consents_unconfirmed().await?
             || self.allowance_stopped(record).await?
             || self.conflict_kept(record).await?
         {
             return Ok(false);
+        }
+        let Some(shared) = self.app.shared_record(record).await? else {
+            return Ok(false);
+        };
+        if shared.flagged && !self.ignored_write_confirmed(record).await? {
+            return Ok(false);
+        }
+        match self.held_allowance(record).await? {
+            Some(held) if held.end.is_none() && !rejected(&held) && held.conflicted.is_none() => {}
+            _ => return Ok(false),
         }
         let held = self
             .local_get::<ConsentEntry>(&key::consent(record))
@@ -1390,7 +1453,9 @@ impl Paykit {
     /// ended, rejected or conflicted, or whose conflicting message it keeps as the stop: the
     /// executor drops it once it sees that, whoever wrote it (Paykit spec 8.3). A kept end
     /// alone removes nothing: it may yet prove not to be this Allowance's, and
-    /// [`Paykit::consents`] refuses payment while it is kept. Run after each receive.
+    /// [`Paykit::consents`] refuses payment while it is kept. Nor does a record held as
+    /// deleted: its entry stays, and only payment is refused, so a delete a faulty own app
+    /// made loses nothing the user consented to. Run after each receive.
     pub(crate) async fn sweep_consents(&mut self) -> Result<()> {
         let mut tx = Tx::default();
         for (rest, entry) in self.local_scan::<ConsentEntry>(key::CONSENTS).await? {
@@ -1475,7 +1540,9 @@ impl Paykit {
     /// only goes, since the record then shows the conflict for good (Paykit wire 5.4, Seen
     /// roles). One whose record isn't held as a value that reads and binds, or that can't be
     /// written now, stays: the Allowance shows conflicted meanwhile, and nothing is paid or
-    /// sent under it.
+    /// sent under it. One over a record held as deleted, a proposal there, stays for good and
+    /// is written nowhere: a record can't hold `conflicted` without its proposal (Paykit
+    /// spec 8.3, "Ending").
     async fn place_conflicts(&mut self) -> Result<()> {
         let own = self.identity();
         for (rest, kept) in self.local_scan::<KeptMessage>(key::CONFLICTS).await? {
@@ -1665,6 +1732,28 @@ impl Paykit {
         Ok(())
     }
 
+    /// A conflicting message met at a later write, kept as the receive step keeps it
+    /// ([`conflict_writes`]), in the commit of `locals`.
+    async fn keep_conflict_later(
+        &mut self,
+        record: &[u8; 32],
+        stored: &StoredMessage,
+        mut locals: Vec<LocalWrite>,
+    ) -> Result<()> {
+        let kept = self.conflict_kept(record).await?;
+        let consent = self
+            .local_get::<ConsentEntry>(&key::consent(record))
+            .await?;
+        locals.extend(conflict_writes(
+            record,
+            stored,
+            kept,
+            consent.as_ref(),
+            self.holds("allowance_execute"),
+        )?);
+        Ok(self.app.protocol_commit(&locals).await?)
+    }
+
     /// A stored entry's proposal, acceptance or rejection (`stored.rs`), written into its
     /// Allowance record by a later write of the app's own ([`Paykit::place_allowance_later`]).
     pub(crate) async fn place_allowance_note(&mut self, stored: StoredMessage) -> Result<Placed> {
@@ -1680,7 +1769,8 @@ impl Paykit {
     ///   given up meanwhile, whatever else holds.
     /// - It isn't written now ([`Placed::Not`]) while the current epoch's `allowance` key is
     ///   missing or the record waits for its key, over a value that doesn't read or bind,
-    ///   never written over, for an answer whose record is absent or deleted, or when the switch
+    ///   never written over, for an answer whose record is absent or deleted (given up past
+    ///   its window with the notice, as Stored entries says), or when the switch
     ///   refuses the write ([`crate::stored::submitted`]): tried again, and given up once
     ///   [`crate::KEPT_MESSAGE_MS`] have passed since its acceptance (Paykit spec 8.1).
     /// - One the record reflects already, or that makes the Allowance conflicted, is done:
@@ -1725,14 +1815,7 @@ impl Paykit {
             // for a record.
             Some(RecordContent::Deleted) => match stored.body() {
                 Body::AllowanceProposal(_) => {
-                    let mut locals = locals;
-                    if !self.conflict_kept(&record).await? {
-                        locals.push(state::local_put(
-                            &key::conflict(&record),
-                            &KeptMessage::of(&stored),
-                        )?);
-                    }
-                    self.app.protocol_commit(&locals).await?;
+                    self.keep_conflict_later(&record, &stored, locals).await?;
                     return Ok(Placed::Done);
                 }
                 _ => None,
@@ -1740,14 +1823,7 @@ impl Paykit {
             Some(content) if crate::hold::awaits_key(&content) => return Ok(Placed::Not),
             Some(RecordContent::Value(_)) => match self.held_allowance(&record).await? {
                 Some(held) if held.conflicted.is_none() && conflicts(&held, &stored) => {
-                    let mut locals = locals;
-                    if !self.conflict_kept(&record).await? {
-                        locals.push(state::local_put(
-                            &key::conflict(&record),
-                            &KeptMessage::of(&stored),
-                        )?);
-                    }
-                    self.app.protocol_commit(&locals).await?;
+                    self.keep_conflict_later(&record, &stored, locals).await?;
                     return Ok(Placed::Done);
                 }
                 Some(mut held) => {

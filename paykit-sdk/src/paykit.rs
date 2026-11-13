@@ -730,7 +730,8 @@ impl Paykit {
         // Lists held over a `payment_lists` record that didn't read, once it reads.
         self.place_held_lists().await?;
         // The counterparties' Allowance ends kept as stops go into their records, with their
-        // executor notices, and the consent list drops every Allowance seen ended or rejected
+        // executor notices, and the consent list drops every Allowance seen ended, rejected or
+        // conflicted
         // (Paykit spec 8.3). After a `missed` item, every Allowance on it is to be confirmed
         // again, as after a restore. An executor notice's target goes once its notice has.
         self.place_allowance_stops().await?;
