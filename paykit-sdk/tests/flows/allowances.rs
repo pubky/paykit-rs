@@ -2390,22 +2390,11 @@ async fn test_allowances_conflicted_kept_through_a_restore_and_resends() {
     );
 }
 
-#[tokio::test]
-async fn test_allowances_proposal_over_a_deleted_record_opens_it_only_as_proposed() {
-    // An accepted Allowance's record is deleted by another own app. The wallet is restored
-    // from a backup taken before the delete, bob sends his messages again, and then proposes
-    // again under the same Allowance ID: the proposal opens the record again over the delete,
-    // as a request's does, and only as proposed, with no response, end or grant, so nothing
-    // brings back the acceptance or its limits (Paykit spec 8.1, 8.3).
-    let w = World::new();
-    let mut shop = shop(&w).await;
-    let mut wallet = wallet(&w).await;
-    let (_, mine) = proposed(&w, &mut shop, &mut wallet).await;
-    wallet.accept_allowance(&mine).await.unwrap();
-    let id = wallet.allowance(&mine).await.unwrap().allowance_id;
-    let backup_wallet = wallet;
+/// Alice's tool app deletes her record of the Allowance with ID `id`, as a faulty own app
+/// could: no app of Paykit's deletes one.
+async fn delete_allowance_record(w: &World, id: &paykit_lib::AllowanceId) {
     let mut tool = alice_app(
-        &w,
+        w,
         "tool",
         AppScopes::new().pay().allowance().build().unwrap(),
     )
@@ -2415,7 +2404,7 @@ async fn test_allowances_proposal_over_a_deleted_record_opens_it_only_as_propose
             "allowances",
             paykit_lib::Collection::Allowances.fixed_policy(),
         ),
-        &paykit_lib::derive::natural_key::allowance(&w.bob_id(), &id),
+        &paykit_lib::derive::natural_key::allowance(&w.bob_id(), id),
     );
     tool.app_mut().read_record(&target).await.unwrap();
     let op = tool
@@ -2427,19 +2416,66 @@ async fn test_allowances_proposal_over_a_deleted_record_opens_it_only_as_propose
         .submit_batch(OpBatch::new().entry(op))
         .await
         .unwrap();
-    let mut restored = restored_and_resent(&w, &mut shop, backup_wallet).await;
-    assert!(restored.accept_allowance(&mine).await.is_err());
+}
+
+/// Whether `app` holds its record at `record` as deleted.
+async fn held_deleted(app: &Paykit, record: &[u8; 32]) -> bool {
+    app.app()
+        .shared_record(record)
+        .await
+        .unwrap()
+        .is_some_and(|held| held.content == pubky_switch_client::app::RecordContent::Deleted)
+}
+
+#[tokio::test]
+async fn test_allowances_proposal_over_a_deleted_record_is_conflicted_after_a_restore() {
+    // An accepted Allowance's record is deleted by another own app. The wallet is restored
+    // from a backup taken before the delete, bob sends his messages again, and then proposes
+    // again under the same Allowance ID: the app can't tell what the deleted record held, so
+    // the proposal is taken as conflicted, kept as the stop, and nothing is written at the
+    // key; the acceptance and its limits never come back (Paykit spec 8.3, "Ending").
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    let (_, mine) = proposed(&w, &mut shop, &mut wallet).await;
+    wallet.accept_allowance(&mine).await.unwrap();
+    let id = wallet.allowance(&mine).await.unwrap().allowance_id;
+    delete_allowance_record(&w, &id).await;
+    let mut restored = restored_and_resent(&w, &mut shop, wallet).await;
     w.clock.advance_ms(HOUR_MS);
     propose_as(&w, &[restored.app_id()], id.as_str(), "0.10");
     restored.receive(None).await.unwrap();
-    let view = restored.allowance(&mine).await.unwrap();
-    assert_eq!(view.status, AllowanceStatus::Proposed);
-    assert_eq!(view.executor_app_id, None);
-    assert!(!view.consented);
-    let record = value(&restored, &mine).await;
-    assert!(record["response"].is_null());
-    assert!(record["end"].is_null());
-    assert!(record["grant"].is_null());
+    assert!(held_deleted(&restored, &mine).await);
+    assert_eq!(restored.app().protocol_scan(b"cf/").await.unwrap().len(), 1);
+    assert!(restored.accept_allowance(&mine).await.is_err());
+    assert!(restored
+        .allowances()
+        .await
+        .unwrap()
+        .iter()
+        .all(|view| view.record != mine));
+}
+
+#[tokio::test]
+async fn test_allowances_proposal_over_a_deleted_record_is_conflicted_at_a_second_app() {
+    // The phone held the record when another own app deleted it; bob then proposes again
+    // under the same Allowance ID. The phone takes the proposal as conflicted and writes
+    // nothing at the key, and its executor consent goes for good (Paykit spec 8.3).
+    let w = World::new();
+    let (_shop, _wallet, _exec, mut phone, _, mine) = executed(&w).await;
+    let id = phone.allowance(&mine).await.unwrap().allowance_id;
+    delete_allowance_record(&w, &id).await;
+    phone.receive(None).await.unwrap();
+    assert!(held_deleted(&phone, &mine).await);
+    w.clock.advance_ms(HOUR_MS);
+    propose_as(&w, &[phone.app_id()], id.as_str(), "0.10");
+    phone.receive(None).await.unwrap();
+    assert!(held_deleted(&phone, &mine).await);
+    assert_eq!(phone.app().protocol_scan(b"cf/").await.unwrap().len(), 1);
+    assert_eq!(
+        consent_entry(&phone, &mine).await,
+        Some(json!({ "removed": { "reason": "conflicted" } }))
+    );
 }
 
 #[tokio::test]
