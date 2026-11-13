@@ -28,7 +28,7 @@ use paykit_lib::bodies::{
 use paykit_lib::derive::{natural_key, payment_obligation};
 use paykit_lib::kinds::Kind;
 use paykit_lib::records::{
-    ActivityRecord, ActivitySide, DestinationSource, PaymentListRecord, UsedEndpoint,
+    ActivityRecord, ActivitySide, DestinationSource, PaymentListRecord, StoredMessage, UsedEndpoint,
 };
 use paykit_lib::{
     AttemptId, Body, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
@@ -681,7 +681,11 @@ impl Paykit {
     /// error: it is [`PayOutcome::Pending`] or [`PayOutcome::Uncertain`]. At an app holding
     /// `contacts`, the deny list as read at most 10 minutes ago, or read first, decides: a
     /// request from a blocked payee is [`Refusal::Blocked`] until the user confirms paying
-    /// it.
+    /// it. A request whose record is divergent, or was seen so, is [`Refusal::Divergent`]
+    /// until the user confirms it ([`Paykit::confirm_divergent`]), unless no confirmation
+    /// could let it be paid: one past its deadline is refused for that, and one whose
+    /// endpoints' app the payee's `identity.json` no longer lists as current is
+    /// [`Refusal::Destination`], that copy read fresh, a read that fails being the refusal.
     pub async fn pay_request(
         &mut self,
         request: &RequestRef,
@@ -722,8 +726,22 @@ impl Paykit {
         // cancelled it, which ends the hold (Paykit spec 7.2, "What a restore loses").
         let record_key = self.activity_key(&target)?;
         // Divergent after a provider loss, or seen so: paid by hand only once the user has
-        // seen that the payee may have cancelled it (Paykit spec 6).
-        Box::pin(self.refuse_while_paused(&[record_key])).await?;
+        // seen that the payee may have cancelled it (Paykit spec 6). A request no
+        // confirmation could let be paid is refused for what stops it instead, as a list that
+        // couldn't be paid anyway pauses nothing (Paykit spec 8.4): one past its deadline
+        // goes on to the deadline's refusal below, which the service's time only moves
+        // further past, and one whose endpoints' app is no longer current is refused as the
+        // destination check refuses it.
+        let deadline = body.attempt_deadline(None)?;
+        if Box::pin(self.pause_at(&record_key)).await?.blocks_by_hand()
+            && !self.deadline_passed(deadline)
+        {
+            if let RequestDestination::Endpoints(_) = &body.destination {
+                Box::pin(self.refuse_unless_sender_current(&request.payee, &stored, &options))
+                    .await?;
+            }
+            Box::pin(self.refuse_while_paused(&[record_key])).await?;
+        }
         let end_hold = if self.held(&record_key, &record).await? {
             if options.possibly_cancelled_confirmed.is_none() {
                 return Err(Refusal::HeldAfterRestore.into());
@@ -741,7 +759,6 @@ impl Paykit {
         };
         refuse_blocked(blocked, shown, &options)?;
         let obligation = self.obligation(&request.payee, &request.request_hash, 0);
-        let deadline = body.attempt_deadline(None)?;
         let restored = self.restored_attempts(&obligation).await?;
         let step = self
             .claim_step(&obligation, deadline, restored, &options)
@@ -1187,6 +1204,34 @@ impl Paykit {
             .into());
         }
         Ok(view.map_or(0, |v| v.step))
+    }
+
+    /// Refused as the destination check refuses it when the app that sent `request`, the
+    /// app its endpoints belong to, isn't current in the payee's `identity.json` (Paykit
+    /// spec 4, 7.2): read fresh, as for a request's endpoint. A read that fails is the
+    /// refusal: the app is taken neither as current nor as removed without it.
+    async fn refuse_unless_sender_current(
+        &mut self,
+        payee: &[u8; 32],
+        request: &StoredMessage,
+        options: &PayOptions,
+    ) -> Result<()> {
+        let identity = match self
+            .payee_identity(
+                payee,
+                Need::FreshCopy,
+                Initiator::User,
+                options.unconfirmed_identity_confirmed,
+            )
+            .await?
+        {
+            Ok(identity) => identity,
+            Err(refusal) => return Err(refusal.into()),
+        };
+        let carrier = Carrier::Message(Box::new(request.clone()));
+        let app_id = request.message().from.app_id;
+        crate::destination::current(&identity.doc, &app_id, &carrier, self.now())
+            .map_err(|why| Refusal::Destination(why).into())
     }
 
     fn refuse_claim(&self, view: &ClaimView) -> Result<()> {

@@ -160,6 +160,98 @@ async fn test_divergent_request_paid_by_hand_only_after_confirmation() {
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
 
+/// Whether `wallet` shows `record` paused ([`Paykit::divergent_records`]).
+async fn shown_paused(wallet: &Paykit, record: &[u8; 32]) -> bool {
+    wallet
+        .divergent_records()
+        .await
+        .unwrap()
+        .iter()
+        .any(|shown| shown.record == *record && shown.paused)
+}
+
+#[tokio::test]
+async fn test_divergent_request_past_its_deadline_refused_for_the_deadline() {
+    // The request record is divergent, and the request's deadline has passed on the
+    // service's clock: no confirmation could let it be paid, so the payment is refused for
+    // the deadline, naming no record. The record stays paused (Paykit spec 6, 7.1).
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    let mut short = draft("1", w.clock.now_ms());
+    short.proposal_expires_at_ms = Some(w.clock.now_ms() + HOUR_MS);
+    let request = request_from(&mut shop, w.alice_id(), short).await;
+    wallet.receive(None).await.unwrap();
+    let record = wallet.request(&request).await.unwrap().record;
+    w.clock.advance_ms(2 * HOUR_MS);
+    wallet.receive(None).await.unwrap();
+    set_divergent(&base, &wallet, &record, true);
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::DeadlinePassed));
+    assert!(w.rail.all_executions().is_empty());
+    assert!(shown_paused(&wallet, &record).await);
+}
+
+#[tokio::test]
+async fn test_divergent_request_from_a_removed_app_refused_for_its_destination() {
+    // The request record is divergent, and Bob's signer has removed the shop that sent the
+    // request and owns its endpoints: no confirmation could let it be paid, so the payment
+    // is refused as the destination check refuses it, naming no record (Paykit spec 4, 7.2).
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let record = wallet.request(&request).await.unwrap().record;
+    set_divergent(&base, &wallet, &record, true);
+    remove_from_bob(&w, shop.app_id());
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::Destination(_))),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    assert!(wallet.payments().await.unwrap().is_empty());
+    assert!(shown_paused(&wallet, &record).await);
+}
+
+#[tokio::test]
+async fn test_divergent_request_unjudged_while_the_payees_identity_is_unreadable() {
+    // The request record is divergent, and bob's identity.json can be read neither from his
+    // Homeserver nor from his switch, the copy held more than 10 minutes old. Whether the
+    // shop is still current can't be told: the payment is refused for that, naming no record.
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let record = wallet.request(&request).await.unwrap().record;
+    set_divergent(&base, &wallet, &record, true);
+    w.homeserver
+        .remove(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH);
+    w.router.remove(crate::common::BOB_ORIGIN);
+    w.clock.advance_ms(11 * 60_000);
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::IdentityUnavailable(_))),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    assert!(wallet.payments().await.unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn test_divergent_confirmation_of_another_write_than_the_one_shown_refused() {
     let w = World::new();
