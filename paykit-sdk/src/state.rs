@@ -54,8 +54,8 @@
 //! | `kw/<sender>` | a mark of a sender's entries the client dropped while they waited for a scope key, as `pd/` holds, with the data epochs they waited for; it asks only while the app holds every key of those epochs (`marks.rs`) | |
 //! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply to a request the app holds no record of yet, kept until it does (`receive.rs`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing, since a dropped entry's time is already in its sender's mark | |
-//! | `dv/<record key>` | the pause mark of a record the app has seen divergent: paused until the user confirms, or the write the user confirmed over (`divergent.rs`); a restore installs it paused | |
-//! | `dw/<record key>/<role>` | a received message whose write over a divergent record waits for the user's confirmation, to write into its record later (`divergent.rs`) | |
+//! | `dv/<record key>` | the pause mark of a record the app has seen divergent: paused until the user confirms, or the write the user confirmed over, with the write a credit's refusal showed it at and the write a credit's confirmation was given over (`divergent.rs`); a restore installs it paused, neither shown nor confirmed for a credit | |
+//! | `dw/<record key>/<role>/<msg_id>` | a received message whose write over a divergent record waits for the user's confirmation, or for the messages kept over the record before it, to write into its record later, in the order its inbox accepted them; given up at its 30 days, also one that no longer points to its record (`divergent.rs`) | |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, with the entry's ID and message hash, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
 
 use paykit_lib::bodies::ResendRequest;

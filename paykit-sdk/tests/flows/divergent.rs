@@ -1858,3 +1858,40 @@ async fn test_divergent_later_write_waits_behind_a_kept_one_not_written_yet() {
         .unwrap()
         .contains(&serde_json::json!(second)));
 }
+
+#[tokio::test]
+async fn test_divergent_credit_flag_set_by_the_host_credits_nothing() {
+    // The host takes a record never shown for a credit and sets its flag itself before the
+    // confirmation: the app keeps no showing of it, so the credit stays refused. The refusal
+    // then shows it so, and a confirmation of that lets the credit go.
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_on(&w, Arc::clone(&base)).await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let paid = sale(&shop, &request).await.record;
+    set_divergent(&base, &shop, &paid, true);
+    let mut shown = shop
+        .divergent_records()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.record == paid)
+        .unwrap();
+    assert!(!shown.may_hold_credit);
+    shown.may_hold_credit = true;
+    shop.confirm_divergent(&shown, UserConfirmed::new())
+        .await
+        .unwrap();
+    let refused = shop.confirm_payment(&paid).await.unwrap_err();
+    assert_eq!(refused_records(&refused), vec![(paid, false, true)]);
+    assert!(shown_for_a_credit(&refused));
+    confirm_refused(&mut shop, &refused).await;
+    assert!(shop.confirm_payment(&paid).await.unwrap().is_some());
+}
