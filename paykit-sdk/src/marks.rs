@@ -4,14 +4,16 @@
 //! Four families, each with one mark per sender identity, the identity its certificate
 //! names:
 //!
-//! - **Replies dropped for the bounds on kept replies** (`pd/<sender>`, `receive.rs`). Once
-//!   the app holds the record of a request whose counterparty holds such a mark, it asks
-//!   that sender to re-send what its inbox accepted from the mark's earliest time
-//!   (`resend_request` with `accepted_from`). The client marked such a reply processed when
-//!   it was kept, so the step that drops it forgets its pair, and a re-sent copy is taken
-//!   as a new message. A payee's cancellation kept as a stop for a request the app holds no
-//!   record of, dropped for the bounds on those stops, counts in the same mark, which is
-//!   then due at once: the request it cancels may come at any time.
+//! - **Replies dropped for the bounds on kept replies** (`pd/<sender>`, `receive.rs`): a
+//!   payer's replies at a payee app, and receipts at a payer app. Once the app holds the
+//!   record of a request, of either side, whose counterparty holds such a mark (not that of
+//!   a Billing Period or of a payment without a request), it asks that sender to re-send
+//!   what its inbox accepted from the mark's earliest time (`resend_request` with
+//!   `accepted_from`). The client marked such a reply processed when it was kept, so the
+//!   step that drops it forgets its pair, and a re-sent copy is taken as a new message. A
+//!   payee's cancellation kept as a stop for a request the app holds no record of, dropped
+//!   for the bounds on those stops, counts in the same mark, which is then due at once: the
+//!   request it cancels may come at any time.
 //! - **Entries dropped unverified** (`ud/<sender>`, `stored.rs`). The app asks that sender
 //!   at once to re-send what its inbox accepted from the mark's earliest time to its latest
 //!   (`accepted_from` and `accepted_until`).
@@ -123,10 +125,10 @@ pub(crate) struct DropMark {
     pub(crate) earliest_ms: u64,
     /// The latest: what the mark expires by.
     pub(crate) latest_ms: u64,
-    /// Whether asking is due: for replies, once the app holds the record of one of the
-    /// sender's requests, or at once once a stop of the sender's is dropped for the bounds;
-    /// for entries dropped unverified, from the start. A mark of key
-    /// waits keeps it `false`: it is due while the app holds the keys it waits for
+    /// Whether asking is due: for replies, once the app holds the record of a request, of
+    /// either side, whose counterparty is the sender, or at once once a stop of the sender's
+    /// is dropped for the bounds; for entries dropped unverified, from the start. A mark of
+    /// key waits keeps it `false`: it is due while the app holds the keys it waits for
     /// ([`KeyWaitMark`]).
     pub(crate) due: bool,
     /// When the outbox last delivered a request for this mark, on the device clock.
@@ -528,9 +530,9 @@ impl Paykit {
     }
 
     /// Ask on the marks, at a receive (module docs): a reply mark becomes due once the app
-    /// holds the record of one of its sender's requests; a mark past its expiry goes; each
-    /// due mark asks its sender when its cadence allows. Returns how many requests were
-    /// queued.
+    /// holds the record of a request, of either side, whose counterparty is its sender; a
+    /// mark past its expiry goes; each due mark asks its sender when its cadence allows.
+    /// Returns how many requests were queued.
     pub(crate) async fn ask_on_marks(&mut self) -> Result<u64> {
         self.note_requests_held().await?;
         let mut asked = 0u64;
@@ -888,10 +890,17 @@ impl Paykit {
         }
     }
 
-    /// Make due the reply mark of each sender whose request's record the app holds: any
-    /// record of the payee's side whose counterparty the mark names, one held before the
-    /// reply was dropped included. The records are read only while a mark waits.
+    /// Make due the reply mark of each sender the record of a request names, of either side
+    /// (Paykit spec 8.1, "Replies before their record"): a request record, read as its side,
+    /// whose counterparty the mark names, one held before the reply was dropped included. On
+    /// the payee's side that is the record of a request to the sender, which a payee app's
+    /// kept replies wait for; on the payer's, of the sender's request, which a payer app's
+    /// kept receipts wait for. A record of a Billing Period or of a payment without a request
+    /// makes no mark due, nor does one that doesn't read. The records are read only while a
+    /// mark waits, and a failed read fails the pass.
     async fn note_requests_held(&mut self) -> Result<()> {
+        use paykit_lib::collections::Collection;
+        use paykit_lib::records::{ActivitySide, RecordBinding};
         let own = self.identity();
         let family = MarkFamily::Replies;
         let mut waiting = std::collections::BTreeMap::new();
@@ -905,25 +914,27 @@ impl Paykit {
             return Ok(());
         }
         let mut tx = crate::state::Tx::default();
-        let records = self
-            .app
-            .records_of(paykit_lib::collections::Collection::PayeeActivity.name())
-            .await?;
-        for held in records {
-            let Some(value) = held.content.value() else {
-                continue;
-            };
-            // A record that doesn't read shows no counterparty: it makes no mark due.
-            let Ok(read) = paykit_lib::records::ActivityRecord::read(
-                value,
-                &own,
-                paykit_lib::records::ActivitySide::Payee,
-            ) else {
-                continue;
-            };
-            if let Some((key, mut mark)) = waiting.remove(&read.counterparty) {
-                mark.due = true;
-                tx.put(&key, &mark)?;
+        for (collection, side) in [
+            (Collection::PayeeActivity, ActivitySide::Payee),
+            (Collection::PayerActivity, ActivitySide::Payer),
+        ] {
+            for held in self.app.records_of(collection.name()).await? {
+                let Some(value) = held.content.value() else {
+                    continue;
+                };
+                // A record that doesn't read shows no counterparty: it makes no mark due.
+                let Ok(read) = paykit_lib::records::ActivityRecord::read(value, &own, side) else {
+                    continue;
+                };
+                // Only the record of a request makes a mark due: one of a Billing Period or of
+                // a payment without a request names its counterparty too, but isn't one.
+                if !matches!(read.binding(), Ok(RecordBinding::Request { .. })) {
+                    continue;
+                }
+                if let Some((key, mut mark)) = waiting.remove(&read.counterparty) {
+                    mark.due = true;
+                    tx.put(&key, &mark)?;
+                }
             }
         }
         self.local_commit(tx).await
