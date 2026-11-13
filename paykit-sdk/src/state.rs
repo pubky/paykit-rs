@@ -391,8 +391,8 @@ impl Stored for bool {
             {
                 Ok(())
             }
-            // This app's block (`true`) or unblock (`false`) kept unanswered, of the identity
-            // its key names.
+            // This app's block (`true`) or unblock (`false`) kept unanswered, or a block not
+            // yet answered, of the identity its key names.
             StateKey::OwnBlock(_) => Ok(()),
             _ => corrupt(),
         }
@@ -850,10 +850,13 @@ pub(crate) mod key {
         format!("{HELD_LISTS}{}", b64(record_key))
     }
 
-    /// This app's block (`true`) or unblock of `pubky` kept unanswered. It goes only once a
-    /// read of the lists shows it, or this app blocks or unblocks `pubky` again: a kept batch
-    /// the client drops (`KeptBatchDropped`, `BatchRefused`) leaves it, so a change that
-    /// never lands keeps counting, over a later change another own app makes, until then.
+    /// This app's block (`true`) or unblock of `pubky` kept unanswered, or a block not yet
+    /// answered: a block is marked before the switch is asked, so a crash before the call
+    /// leaves it counted, and its mark goes once the switch took it. A kept one goes only
+    /// once a read of the lists shows it, or this app blocks or unblocks `pubky` again: a
+    /// kept batch the client drops (`KeptBatchDropped`, `BatchRefused`) leaves it, so a
+    /// change that never lands keeps counting, over a later change another own app makes,
+    /// until then.
     pub(crate) fn own_block(pubky: &[u8; 32]) -> String {
         format!("{OWN_BLOCKS}{}", b64(pubky))
     }
