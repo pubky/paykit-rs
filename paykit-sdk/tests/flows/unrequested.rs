@@ -726,13 +726,24 @@ async fn test_unrequested_list_ask_mark_backs_up_and_restores() {
 
 /// The signer stores app `app`'s key bundle for `cert`, every data epoch up to the current.
 pub(crate) fn store_bundle(w: &World, app: [u8; 16], cert: &pubky_switch_core::records::AppCert) {
+    store_bundle_from(w, app, cert, 1);
+}
+
+/// The signer stores app `app`'s key bundle for `cert`, the data epochs from `first` to the
+/// current.
+pub(crate) fn store_bundle_from(
+    w: &World,
+    app: [u8; 16],
+    cert: &pubky_switch_core::records::AppCert,
+    first: u64,
+) {
     use pubky_switch_client::app::Protocol as _;
     let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
     let protocol = paykit_sdk::PaykitProtocol::new();
     let parts = pubky_switch_core::records::seal_bundle_parts(
         w.alice.identity().key(),
         cert,
-        1,
+        first,
         epoch,
         &|scope| protocol.has_keys(scope),
     )

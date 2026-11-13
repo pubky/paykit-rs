@@ -43,16 +43,19 @@ mod destination;
 mod error;
 mod hold;
 mod journal;
+mod notices;
 mod pay;
 mod paykit;
 mod protocol;
 pub mod rail;
+mod receipts;
 mod receive;
 mod reconcile;
 mod records;
 mod requests;
 mod resend;
 mod state;
+mod stored;
 #[cfg(test)]
 mod testkit;
 mod timer;
@@ -62,6 +65,7 @@ pub use approval::{AppScopes, RequestedScopes};
 pub use destination::IDENTITY_GRACE_MS;
 pub use error::{PaykitError, Refusal, Result};
 pub use journal::{PaymentView, Stage};
+pub use notices::{Notice, NoticeKind};
 pub use pay::{
     PayOptions, PayOutcome, PaymentDoubt, PaymentMode, TransferQuote, UnrequestedPayment,
     UNREQUESTED_DEADLINE_MS,
@@ -75,7 +79,8 @@ pub use rail::{
     CandidateError, CandidateId, EndpointSelection, PaymentEndpointCandidate, Rail,
     RailDeclaration, RailError, RailOutcome, RailPaid, RailPayment, Transfer,
 };
-pub use receive::{HeldList, LISTS_REFRESH_MS};
+pub use receipts::{ReceiptDetails, ReceiptsOf, ReceivedReceipt};
+pub use receive::{HeldList, KEPT_MESSAGE_MS, LISTS_REFRESH_MS};
 pub use reconcile::{Doubtful, ReconcileReport, Resolution};
 pub use requests::{
     MessageDelivery, PayeeActivity, PayeeStatus, RequestDraft, RequestRef, RequestStatus,
@@ -177,6 +182,12 @@ mod tests {
             format!("{draft:?}"),
             format!(
                 "{:?}",
+                ReceiptDetails::new()
+                    .with_metadata(proof())
+                    .with_payment_reference(PaymentReference::new(SECRET).unwrap())
+            ),
+            format!(
+                "{:?}",
                 RequestView {
                     request: RequestRef {
                         payee: [1; 32],
@@ -189,6 +200,17 @@ mod tests {
                     proposal_expires_at_ms: None,
                     recurring: false,
                     status: RequestStatus::Open,
+                    receipt: Some(ReceivedReceipt {
+                        record: [5; 32],
+                        payee: [1; 32],
+                        request_hash: Some([4; 32]),
+                        billing_period: None,
+                        attempt_id: AttemptId::from_bytes([3; 16]),
+                        msg_id: "m".into(),
+                        accepted_at_ms: None,
+                        metadata: Some(proof()),
+                        payment_reference: Some(SECRET.into()),
+                    }),
                 }
             ),
             format!(

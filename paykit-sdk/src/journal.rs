@@ -295,6 +295,13 @@ pub(crate) struct JournalEntry {
     /// kept before it was journaled, held to the app's cap now.
     #[serde(default)]
     pub(crate) transfer_bound: Option<TransferBound>,
+    /// The payment method reported the dispatch failed, `failed` was written on the claim,
+    /// and the method's history later showed it paid: its proof went, and `failed` stands on
+    /// the claim until the payee's receipt settles it by evidence. A receipt that comes once
+    /// the claim is gone raises [`crate::NoticeKind::PaidAfterFailed`] (Paykit spec 7.2,
+    /// "What a payment method declares").
+    #[serde(default)]
+    pub(crate) failed_on_claim: bool,
 }
 
 impl std::fmt::Debug for JournalEntry {
@@ -341,7 +348,8 @@ impl JournalEntry {
     ///   proof message; a `Finished` entry marked failed by the method holds no proof;
     /// - at most one carrier, which reads; the attempt's proof, when kept, reads;
     /// - a kept request only in a payment of a request, and it reads; an outcome held for
-    ///   its record only once paid by the method.
+    ///   its record, and a payment made after `failed` was written, only once paid by the
+    ///   method.
     pub(crate) fn check(&self) -> Result<()> {
         let bad = || Err(PaykitError::corrupt());
         let attempt = self.attempt()?;
@@ -391,7 +399,7 @@ impl JournalEntry {
             }
             kept.check_shape()?;
         }
-        if self.record_held && self.rail_proof.is_none() {
+        if (self.record_held || self.failed_on_claim) && self.rail_proof.is_none() {
             return bad();
         }
         // Owed: a proof, and an acceptance to queue or to place. One queued and not yet
@@ -414,6 +422,16 @@ impl JournalEntry {
             TransitionProof::peek(signed).map_err(|_| PaykitError::corrupt())?;
         }
         Ok(())
+    }
+
+    /// `entry`, read at its attempt's key, bound to `obligation`, the claim its caller looks
+    /// the attempt up for: an entry of the attempt on another claim would decide this claim
+    /// from another payment's state. A corrupt store, never an absent entry.
+    pub(crate) fn on_claim(entry: Option<Self>, obligation: &[u8; 32]) -> Result<Option<Self>> {
+        match entry {
+            Some(entry) if entry.obligation != *obligation => Err(PaykitError::corrupt()),
+            entry => Ok(entry),
+        }
     }
 
     /// [`JournalEntry::check`], and the entry's claim key bound to what it pays: for a
@@ -601,6 +619,12 @@ pub struct PaymentView {
     /// [`crate::Paykit::resume_payments`], or when the user has the record written again
     /// with [`crate::Paykit::repair_activity_record`].
     pub record_held: bool,
+    /// The payee's receipt of this attempt the payer's activity record holds, if any
+    /// (Paykit wire 4.11), as this app's copy shows it: for display. While the records
+    /// aren't listed, after a restore or a certificate that reads more, the copy may lack a
+    /// receipt the switch holds; [`crate::Paykit::receipts`] is refused as not now
+    /// meanwhile.
+    pub receipt: Option<crate::ReceivedReceipt>,
 }
 
 impl JournalEntry {
@@ -615,6 +639,7 @@ impl JournalEntry {
             stage: self.stage,
             restored: self.restored,
             record_held: self.record_held,
+            receipt: None,
         })
     }
 }

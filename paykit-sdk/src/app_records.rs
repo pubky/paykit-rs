@@ -319,6 +319,15 @@ impl Paykit {
         payee: &[u8; 32],
         confirmed: Option<UserConfirmed>,
     ) -> Result<Vec<PublicEndpoint>> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.public_endpoints_inner(payee, confirmed)).await
+    }
+
+    async fn public_endpoints_inner(
+        &mut self,
+        payee: &[u8; 32],
+        confirmed: Option<UserConfirmed>,
+    ) -> Result<Vec<PublicEndpoint>> {
         self.refresh_own()?;
         let records = self
             .public_records(payee, None, Initiator::User, confirmed)

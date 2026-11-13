@@ -75,15 +75,6 @@ pub(crate) struct KeptSide {
     pub(crate) side: SideTag,
 }
 
-impl KeptSide {
-    /// The side kept for the message `msg_id`, from the value under its key; a value naming
-    /// another message is none (Paykit spec 3.4: no side is guessed).
-    pub(crate) fn of(kept: Option<Self>, msg_id: &str) -> Option<SideTag> {
-        kept.filter(|kept| kept.msg_id == msg_id)
-            .map(|kept| kept.side)
-    }
-}
-
 impl SideTag {
     pub(crate) fn side(self) -> ActivitySide {
         match self {
@@ -166,6 +157,12 @@ fn stored_ids(record: &ActivityRecord) -> Vec<String> {
 /// Place `message` in its role of `record` (Paykit spec 6 "One message per role"): stored
 /// when the role is empty, otherwise reflected by its `msg_id` only. Returns `false` when
 /// the record already reflects the message, so nothing changes.
+///
+/// So a re-sent message, or one placed again by a later write of the app's own, is never
+/// applied twice (Paykit spec 8.1, "Stored entries"): one held in its role is reflected for
+/// as long as the record holds it, whatever came since, so its record isn't written again.
+/// One only reflected may fall past the 16 newest other `msg_id`s; placing it again
+/// reflects it again and changes no role or status, since the role was already held.
 pub(crate) fn place(record: &mut ActivityRecord, role: Role, message: StoredMessage) -> bool {
     let msg_id = message.message().msg_id.clone();
     if record.reflects(&msg_id) {
@@ -327,5 +324,39 @@ mod place_tests {
         }
         assert_eq!(record.msg_ids.len(), 17);
         assert!(record.msg_ids.contains(&last));
+    }
+
+    #[test]
+    fn test_activity_place_again_changes_no_role_however_long_ago() {
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let mut record = empty(ActivitySide::Payer, bob.id());
+        let first = request(&bob, &alice, "r0");
+        let second = request(&bob, &alice, "r1");
+        assert!(place(&mut record, Role::Request, first.clone()));
+        assert!(place(&mut record, Role::Request, second.clone()));
+        for i in 2..=20 {
+            assert!(place(
+                &mut record,
+                Role::Request,
+                request(&bob, &alice, &format!("r{i}"))
+            ));
+        }
+        // Held in its role, a message is reflected however many others came since.
+        assert!(!record.msg_ids[1..].contains(&first.message().msg_id));
+        assert!(!place(&mut record, Role::Request, first.clone()));
+        // One only reflected and past the newest 16 is reflected again, and the record's
+        // roles and status stay as they were.
+        assert!(!record.reflects(&second.message().msg_id));
+        let before = record.clone();
+        assert!(place(&mut record, Role::Request, second.clone()));
+        assert!(record.reflects(&second.message().msg_id));
+        assert_eq!(record.stored().len(), before.stored().len());
+        assert_eq!(
+            record.request.as_ref().map(|s| s.hash()),
+            Some(first.hash())
+        );
+        assert_eq!(record.status, before.status);
+        assert!(!place(&mut record, Role::Request, second));
     }
 }

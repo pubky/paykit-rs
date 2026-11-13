@@ -159,6 +159,11 @@ impl Paykit {
     /// pass would miss them. [`Paykit::resume_payments`] still finishes the payments already
     /// dispatched meanwhile.
     pub async fn reconcile(&mut self) -> Result<ReconcileReport> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.reconcile_inner()).await
+    }
+
+    async fn reconcile_inner(&mut self) -> Result<ReconcileReport> {
         self.refresh_own()?;
         self.list_records().await?;
         // After a restore, the counterparties of the open requests the records now show are
@@ -402,6 +407,7 @@ impl Paykit {
             request: Some(KeptMessage::of(stored)),
             record_held: false,
             transfer_bound: None,
+            failed_on_claim: false,
         };
         entry.keep_carrier(&carrier);
         Ok(Some(entry))
@@ -440,6 +446,17 @@ impl Paykit {
         resolution: Resolution,
         _confirmed: UserConfirmed,
     ) -> Result<()> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.resolve_attempt_inner(obligation, attempt, resolution, _confirmed)).await
+    }
+
+    async fn resolve_attempt_inner(
+        &mut self,
+        obligation: &[u8; 32],
+        attempt: AttemptId,
+        resolution: Resolution,
+        _confirmed: UserConfirmed,
+    ) -> Result<()> {
         self.refresh_own()?;
         self.records_known().await?;
         let read = self
@@ -464,11 +481,9 @@ impl Paykit {
         // The journal entry of an own attempt is finished with the resolution, in its batch:
         // the user decided, so it neither blocks another payment as one in progress nor is
         // resumed, and never dispatched again (Paykit spec 7.2, "No second execution").
-        let journal_key = key::journal(&attempt);
-        let mut entry = self.local_get::<JournalEntry>(&journal_key).await?;
-        if let Some(entry) = &entry {
-            self.check_entry(entry)?;
-        }
+        // Read bound to its key and to `obligation`: an entry of another attempt, or of this
+        // attempt on another claim, is a corrupt store, and nothing is written.
+        let mut entry = self.journal_entry_on(&attempt, obligation).await?;
         // An own payment the method reported made is never `failed` or `unknown`: either
         // would free the claim for a second payment, and its proof would never go (Paykit
         // spec 7.2, "Failed means definitively not paid"). It is resolved `done`, or by

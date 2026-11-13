@@ -251,7 +251,8 @@ impl Paykit {
             let kept = self
                 .local_get::<KeptSide>(&key::side(&message.msg_id))
                 .await?;
-            match KeptSide::of(kept, &message.msg_id) {
+            // Bound to its key: a side kept for another message doesn't read.
+            match kept.map(|kept| kept.side) {
                 Some(SideTag::Payee) => Side::Payee,
                 Some(SideTag::Payer) => Side::Payer,
                 None => return Ok(false),
