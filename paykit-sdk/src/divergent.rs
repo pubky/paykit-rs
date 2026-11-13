@@ -560,12 +560,25 @@ impl Pause {
     }
 }
 
-/// Whether `stored` adds a stop to the record it goes into: a cancellation or a rejection,
-/// which go over a divergent view (Paykit spec 6).
+/// The collections whose records the load's sweep and [`Paykit::divergent_records`] look at:
+/// every collection of Paykit's (`Collection::ALL`), `allowance_ledgers` included (Paykit
+/// spec 6).
+fn divergent_collections() -> impl Iterator<Item = &'static str> {
+    Collection::ALL.into_iter().map(Collection::name)
+}
+
+/// Whether `stored` adds a stop to the record it goes into, which goes over a divergent view
+/// (Paykit spec 6): a request's cancellation or rejection, and an Allowance's rejection or
+/// end, each of which stops payment under it. A conflicting proposal or response is a stop
+/// too, kept as one before any write (`allowances.rs`, `keep_conflict`). An Allowance's
+/// proposal and acceptance add none: written over the record, they wait.
 pub(crate) fn adds_stop(stored: &StoredMessage) -> bool {
     matches!(
         stored.body(),
-        Body::PaymentRequestCancellation(_) | Body::PaymentRequestRejection(_)
+        Body::PaymentRequestCancellation(_)
+            | Body::PaymentRequestRejection(_)
+            | Body::AllowanceRejection(_)
+            | Body::AllowanceEnd(_)
     )
 }
 
@@ -1477,8 +1490,8 @@ impl Paykit {
     /// Take the view of every record of Paykit's collections the app holds, once at a load:
     /// a flag a crash left before a receive's events were taken still pauses its record.
     pub(crate) async fn sweep_divergent(&mut self) -> Result<()> {
-        for collection in crate::hold::RecordSide::All.collections() {
-            for held in self.app.records_of(&collection.name).await? {
+        for collection in divergent_collections() {
+            for held in self.app.records_of(collection).await? {
                 if held.divergent {
                     self.pause_of(&held).await?;
                 }
@@ -1810,8 +1823,8 @@ impl Paykit {
         for mark in self.divergent_marks().await? {
             keys.insert(mark.record);
         }
-        for collection in crate::hold::RecordSide::All.collections() {
-            for held in self.app.records_of(&collection.name).await? {
+        for collection in divergent_collections() {
+            for held in self.app.records_of(collection).await? {
                 if held.divergent {
                     keys.insert(held.key);
                 }
@@ -1888,6 +1901,15 @@ impl Paykit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_divergent_collections_cover_every_collection_ledgers_included() {
+        let looked_at: Vec<&str> = divergent_collections().collect();
+        for collection in Collection::ALL {
+            assert!(looked_at.contains(&collection.name()), "{collection:?}");
+        }
+        assert!(looked_at.contains(&"allowance_ledgers"));
+    }
     use crate::state::StateKey;
 
     const RECORD: [u8; 32] = [7; 32];
