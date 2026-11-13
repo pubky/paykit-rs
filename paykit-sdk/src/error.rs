@@ -191,7 +191,12 @@ pub enum Refusal {
     /// what the current write lacks, such as a cancellation of the request, a receipt, or a
     /// newer list in which the payee withdrew a destination. Nothing was written or paid.
     /// The host shows `records` and, once the user has seen that, calls
-    /// [`crate::Paykit::confirm_divergent`] for each, as given here, then calls again. From
+    /// [`crate::Paykit::confirm_divergent`] for each, as given here, then calls again. A
+    /// record given here with [`crate::DivergentRecord::writes_waiting`] is confirmed
+    /// already, and confirming it again writes nothing: only a receive writes the messages
+    /// kept over it, so the host runs [`crate::Paykit::receive`] until
+    /// [`crate::Paykit::divergent_records`] shows it without `writes_waiting`, or no longer
+    /// lists it, and only then calls again. From
     /// [`crate::Paykit::confirm_payment`], each record is shown with
     /// [`crate::DivergentRecord::may_hold_credit`]: only a confirmation of these lets the
     /// credit go, so this refusal comes also after the user confirmed the same record from a

@@ -1708,7 +1708,11 @@ impl Paykit {
     /// confirmation releases no credit. To credit a proof, the host calls
     /// [`Paykit::confirm_payment`] again, has the user confirm each record its
     /// [`Refusal::Divergent`] names, shown with `may_hold_credit`, exactly as that refusal
-    /// gives it, and calls `confirm_payment` once more. The `payment_lists` record of an app
+    /// gives it, and calls `confirm_payment` once more. A record listed or refused with
+    /// [`DivergentRecord::writes_waiting`] is confirmed already: confirming it again writes
+    /// nothing, so the host runs [`Paykit::receive`] until it is listed without
+    /// `writes_waiting`, or no longer listed, before it calls the refused call again. The
+    /// `payment_lists` record of an app
     /// the payee's `identity.json` no longer lists in `apps` is listed too while paused: it
     /// holds back no payment, since no list of that app is paid (Paykit spec 8.4), and
     /// confirming it only ends its pause.
@@ -1753,11 +1757,13 @@ impl Paykit {
     /// refusal didn't set. So a payee app's host that confirmed a record from a receive's
     /// summary or [`Paykit::divergent_records`] doesn't stop there to credit a proof: it calls
     /// [`Paykit::confirm_payment`] again, confirms each record the refusal names, shown with
-    /// `may_hold_credit`, as the refusal gives it, and calls `confirm_payment` once more,
-    /// after a receive while messages kept over one of them wait to be written
-    /// ([`DivergentRecord::writes_waiting`]). The app knows only that it returned that refusal
-    /// to the host; the
-    /// host shows it to the user and passes `UserConfirmed` once the user has seen it. A mark
+    /// `may_hold_credit`, as the refusal gives it, and calls `confirm_payment` once more.
+    /// While a record it returned shows [`DivergentRecord::writes_waiting`], confirming it
+    /// again writes nothing: only [`Paykit::receive`] writes the messages kept over it, so
+    /// the host runs `receive` until [`Paykit::divergent_records`] lists it without
+    /// `writes_waiting`, or no longer lists it, and only then calls the refused call again.
+    /// The app knows only that it returned that refusal to the host; the host shows it to
+    /// the user and passes `UserConfirmed` once the user has seen it. A mark
     /// that doesn't point to the record held is replaced. Confirming a record no longer held
     /// ends its pause and drops the mark. Another own app keeps its own pause until its own
     /// user confirms. A restore from a backup pauses the record again.

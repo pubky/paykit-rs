@@ -259,7 +259,9 @@ pub struct ReceiveSummary {
     /// records exactly as that refusal gives them, then calls `confirm_payment` once more;
     /// while messages kept over one of them wait to be written
     /// ([`crate::DivergentRecord::writes_waiting`]), it is refused again until a receive
-    /// writes them. Every record paused, whenever, is in [`Paykit::divergent_records`].
+    /// writes them: confirming again writes nothing, so the host runs [`Paykit::receive`]
+    /// until no record the refusal names shows `writes_waiting`, and only then calls again.
+    /// Every record paused, whenever, is in [`Paykit::divergent_records`].
     pub divergent: Vec<crate::DivergentRecord>,
 }
 
