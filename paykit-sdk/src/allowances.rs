@@ -1080,10 +1080,13 @@ impl Paykit {
     /// or while its record isn't held as a value that reads and binds. One whose record is
     /// held as deleted, or doesn't hold that end of this app's, goes with nothing sent: no
     /// record holds the end to send; so does one whose Allowance is conflicted by then, in the
-    /// record or as a kept stop, for which nothing is sent. A message the client refuses for
-    /// good, past its replay window of 30 days from its `created_at`, is neither sent nor
-    /// told, as at a restore's re-send ([`Paykit::queue_stored_again`]); a store failure is the
-    /// call's error, and the mark stays. The mark was read bound to its key (`state::Stored`).
+    /// record or as a kept stop, for which nothing is sent. As a message queued again from its
+    /// record it goes only until 30 days after its `created_at`, less the clock tolerance
+    /// (Paykit spec 8.3, "Ending"; 7.2, "What a restore loses"): one the client refuses for
+    /// good past that is neither sent nor told, as at a restore's re-send
+    /// ([`Paykit::queue_stored_again`]), and the end in the record stands either way. A store
+    /// failure is the call's error, and the mark stays. The mark was read bound to its key
+    /// (`state::Stored`).
     pub(crate) async fn send_owed_ends(&mut self) -> Result<()> {
         let own = self.identity();
         let app_id = self.app_id();

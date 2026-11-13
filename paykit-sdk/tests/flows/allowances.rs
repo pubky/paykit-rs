@@ -3813,13 +3813,14 @@ async fn test_allowances_proposal_over_a_deleted_record_from_a_blocked_sender_ke
 /// its record, as another of alice's apps would before this one holds the record; bob's shop
 /// accepts it, and the wallet keeps the acceptance before its record. Bob's 64 later
 /// acceptances of proposals alice never sent drop it for the bound, its pair forgotten, and
-/// it counts in bob's mark. Then the wallet's record of the Allowance is written, as the
-/// other app's batch would write it. Returns the record key on alice's side and the
-/// acceptance's `msg_id`.
+/// it counts in bob's mark. `before` runs then; then the wallet's record of the Allowance is
+/// written, as the other app's batch would write it. Returns the record key on alice's side
+/// and the acceptance's `msg_id`.
 async fn wallet_answer_dropped_then_recorded(
     w: &World,
     wallet: &mut Paykit,
     shop: &mut Paykit,
+    before: impl AsyncFnOnce(&World, &mut Paykit, &mut Paykit),
 ) -> ([u8; 32], String) {
     let id = paykit_lib::AllowanceId::generate().unwrap();
     let body = json!({
@@ -3864,6 +3865,7 @@ async fn wallet_answer_dropped_then_recorded(
         bound
     );
     assert_eq!(wallet.app().protocol_scan(b"pd/").await.unwrap().len(), 1);
+    before(w, wallet, shop).await;
     let proposal = paykit_lib::records::StoredMessage::new(
         w.alice_id(),
         wallet.app().cert().signed(),
@@ -3908,7 +3910,8 @@ async fn test_allowances_answer_dropped_at_a_payer_app_proposer_asked_again_once
     let w = World::new();
     let mut shop = shop(&w).await;
     let mut wallet = wallet(&w).await;
-    let (mine, accepted) = wallet_answer_dropped_then_recorded(&w, &mut wallet, &mut shop).await;
+    let (mine, accepted) =
+        wallet_answer_dropped_then_recorded(&w, &mut wallet, &mut shop, async |_, _, _| {}).await;
     assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
     assert_eq!(
         wallet.allowance(&mine).await.unwrap().status,
@@ -3936,7 +3939,8 @@ async fn test_allowances_answer_dropped_at_a_payer_app_asked_again_only_once_unb
     let w = World::new();
     let mut shop = shop(&w).await;
     let mut wallet = keeper(&w).await;
-    let (mine, accepted) = wallet_answer_dropped_then_recorded(&w, &mut wallet, &mut shop).await;
+    let (mine, accepted) =
+        wallet_answer_dropped_then_recorded(&w, &mut wallet, &mut shop, async |_, _, _| {}).await;
     wallet.block(&w.bob_id()).await.unwrap();
     assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
     assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
@@ -4032,4 +4036,51 @@ async fn test_allowances_owed_crossing_end_kept_through_a_store_failure_and_sent
     wallet.receive(None).await.unwrap();
     assert!(wallet.app().protocol_scan(b"eo/").await.unwrap().is_empty());
     assert_eq!(taken(&mut shop, "paykit.allowance_end").await, 1);
+}
+
+#[tokio::test]
+async fn test_allowances_answer_dropped_mark_not_due_from_a_payment_without_a_request() {
+    // Bob's mark for his dropped Allowance answer waits at alice's wallet. The wallet then pays
+    // bob without a request, which writes a payer record of a payment to him: a record of
+    // bob's, but not a request's, so it makes no mark due, and nothing asks him. Once the
+    // Allowance record arrives the mark is due from it, and asks him once (Paykit spec 8.1,
+    // "Replies before their record").
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    let (mine, accepted) =
+        wallet_answer_dropped_then_recorded(&w, &mut wallet, &mut shop, async |w, wallet, shop| {
+            w.list_to_alice(shop, &[wallet.app_id()], w.clock.now_ms())
+                .await;
+            wallet.receive(None).await.unwrap();
+            let payment =
+                paykit_sdk::UnrequestedPayment::new(w.bob_id(), crate::common::btc("0.0015"))
+                    .with_options(
+                        paykit_sdk::PayOptions::default()
+                            .with_endpoint(crate::common::endpoint("btc-lightning-bolt12")),
+                    );
+            let paid = wallet.pay_without_request(payment).await.unwrap();
+            assert!(
+                matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
+                "{paid:?}"
+            );
+            assert!(!wallet
+                .app()
+                .records_of("payer_activity")
+                .await
+                .unwrap()
+                .is_empty());
+            assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
+            assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
+        })
+        .await;
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
+    shop.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let held = AllowanceRecord::read(
+        &serde_json::to_vec(&value(&wallet, &mine).await).unwrap(),
+        &w.alice_id(),
+    )
+    .unwrap();
+    assert_eq!(held.response.unwrap().message().msg_id, accepted);
 }
