@@ -678,7 +678,7 @@ impl Paykit {
     /// holding it or its copy not known (Paykit spec 8.1, 8.4): it stops payments to
     /// endpoints this app no longer wants paid, and a payer this app blocked can still pay
     /// them. An empty version that doesn't reach its inbox is owed, and goes again at a later
-    /// receive, a restore's included ([`Paykit::tend_lists`]).
+    /// receive, a restore's included ([`Paykit::receive`]).
     ///
     /// # Errors
     ///
