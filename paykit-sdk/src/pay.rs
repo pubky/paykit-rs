@@ -1838,6 +1838,17 @@ impl Paykit {
         // The client checks the attempt's proof: only one that shows this app's own open
         // attempt lets money move (Paykit spec 7.2; Switch wire 6.5 "Binding").
         let submitted = self.app.submit_batch(batch).await;
+        // A batch carrying the ledger's first write that the switch refused, or the client
+        // refused before sending, applied nothing: the first grant's empty ledger is owed
+        // again, as after its own write's refusal.
+        if let (Some(record), Err(error)) = (first_ledger_write, &submitted) {
+            let refused = error.kept_batch().is_none()
+                && !matches!(error, AppError::InvalidData(_))
+                && (error.code().is_some() || matches!(error, AppError::Refused(_)));
+            if refused {
+                self.empty_ledger_owed_again(&record).await?;
+            }
+        }
         let submitted = match submitted {
             Ok(submitted) => submitted,
             Err(error) if error.code() == Some(ErrorCode::Conflict) => {

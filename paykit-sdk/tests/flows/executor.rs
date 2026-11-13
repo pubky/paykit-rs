@@ -536,6 +536,9 @@ async fn test_executor_handoff_stops_the_previous_executor() {
         .unwrap();
     let (allowance, _) = held(&new, &record).await;
     assert_eq!(allowance.grants.len(), 2);
+    // The new executor holds no authenticated ledger version as a reader, so it keeps none
+    // at the handoff: it pays below as an executor that never held one.
+    assert!(new.app().protocol_scan(b"lv/").await.unwrap().is_empty());
     let second = request(&w, &mut shop, &mut old, "0.5").await;
     let refused = old.pay_under_allowance(&second, &record).await.unwrap_err();
     assert!(
@@ -553,6 +556,8 @@ async fn test_executor_handoff_stops_the_previous_executor() {
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     let (_, ledger) = held(&new, &record).await;
     assert_eq!(ledger.unwrap().entries.len(), 2);
+    // From then on it keeps the write it built on.
+    assert_eq!(new.app().protocol_scan(b"lv/").await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -1003,7 +1008,10 @@ async fn test_executor_first_grant_over_a_ledger_at_its_key_writes_no_empty_one(
         .pay_under_allowance(&request, &record)
         .await
         .unwrap_err();
-    assert!(not_automatic(&refused), "{refused:?}");
+    assert!(
+        refused_for(&refused, "isn't one this executor accepted"),
+        "{refused:?}"
+    );
     assert!(w.rail.all_executions().is_empty());
 }
 
@@ -1595,5 +1603,98 @@ async fn test_executor_confirmation_of_an_ignored_write_isnt_restored() {
         .await
         .unwrap_err();
     assert!(not_automatic(&refused), "{refused:?}");
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_executor_refuses_a_removed_apps_record_write_taken_before_its_removal() {
+    // Another own app rewrites the Allowance record as it stands; the wallet takes the write.
+    // The app is then removed with a `distrust_from` before that write: nothing is paid while
+    // that write is current.
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let mut other = executor_wallet(&w, "other").await;
+    other.receive(None).await.unwrap();
+    let (allowance, _) = held(&other, &record).await;
+    let before = w.clock.now_ms();
+    w.clock.advance_ms(60_000);
+    other
+        .app_mut()
+        .put_record(
+            &allowances_target(&allowance),
+            &allowance.to_json().unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    let shared = wallet.app().shared_record(&record).await.unwrap().unwrap();
+    assert_eq!(shared.writer, other.app_id());
+    assert!(!shared.flagged);
+    let other_id = other.app_id();
+    w.alice
+        .next_doc(|body| {
+            body.apps.retain(|a| a.app_id != other_id);
+            body.removed.push(pubky_switch_core::records::RemovedApp {
+                app_id: other_id,
+                distrust_from: before,
+            });
+        })
+        .unwrap();
+    w.clock.advance_ms(1_000);
+    wallet.receive(None).await.unwrap();
+    let refused = wallet
+        .pay_under_allowance(&request, &record)
+        .await
+        .unwrap_err();
+    assert!(not_automatic(&refused), "{refused:?}");
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_executor_restored_over_a_ledger_it_did_not_accept_pays_nothing() {
+    // A ledger was at its key at the first grant; the executor is restored, its empty-ledger
+    // mark not restored: it still pays nothing on that ledger.
+    let w = World::new();
+    let mut shop = allowance_shop(&w).await;
+    let mut wallet = executor_wallet(&w, "wallet").await;
+    let record = accepted(&w, &mut shop, &mut wallet, terms_with(json!({}))).await;
+    let mut other = executor_wallet(&w, "other").await;
+    other.receive(None).await.unwrap();
+    let (allowance, _) = held(&wallet, &record).await;
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "allowance_ledgers",
+            paykit_lib::collections::Collection::AllowanceLedgers.fixed_policy(),
+        ),
+        &paykit_lib::derive::natural_key::allowance(
+            &allowance.counterparty,
+            &allowance.allowance_id,
+        ),
+    );
+    other.app_mut().read_record(&target).await.unwrap();
+    let left = Ledger::empty(allowance.counterparty, allowance.allowance_id.clone());
+    other
+        .app_mut()
+        .put_record(&target, &left.to_json().unwrap(), Vec::new())
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet
+        .grant_executor(&record, UserConfirmed::new())
+        .await
+        .unwrap();
+    let refused = {
+        let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+        let refused = wallet
+            .pay_under_allowance(&request, &record)
+            .await
+            .unwrap_err();
+        assert!(not_automatic(&refused), "{refused:?}");
+        request
+    };
+    let mut wallet = restored_confirmed(&w, wallet, &record, Some(&refused)).await;
+    let after = wallet.pay_under_allowance(&refused, &record).await;
+    assert!(after.as_ref().is_err_and(not_automatic), "{after:?}");
     assert!(w.rail.all_executions().is_empty());
 }

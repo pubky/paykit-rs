@@ -146,8 +146,7 @@ pub(crate) fn check_kept_ledger(record: &[u8; 32], kept: &KeptLedger) -> Result<
 }
 
 /// Whether `shared`'s current write is by an app the own `identity.json` lists as removed,
-/// written after its `distrust_from` with the clock tolerance, or with no service time that
-/// dates it (Switch spec 12.2 step 3): a write the executor never builds or pays on, whether
+/// written at or after its `distrust_from`, or with no service time that dates it (Switch spec 12.2 step 3): a write the executor never builds or pays on, whether
 /// the client flagged it, marked it doubtful, or took it before it learned of the removal.
 fn written_by_removed_app(
     identity: &pubky_switch_core::records::IdentityDoc,
@@ -158,11 +157,12 @@ fn written_by_removed_app(
         .removed
         .iter()
         .find(|removed| removed.app_id == shared.writer)
+        // Both times are on the service's clock, the write's dated by a proof or a verified
+        // stub: no tolerance between them. A write at `distrust_from` counts as after it.
         .is_some_and(|removed| {
-            shared.written_at_ms.is_none_or(|at| {
-                at.saturating_add(pubky_switch_core::records::CLOCK_TOLERANCE_MS)
-                    > removed.distrust_from
-            })
+            shared
+                .written_at_ms
+                .is_none_or(|at| at >= removed.distrust_from)
         })
 }
 
@@ -425,6 +425,30 @@ impl Paykit {
             .await?;
         }
         Ok(())
+    }
+
+    /// Set the first grant's empty ledger back to owed, after a batch carrying the ledger's
+    /// first write applied nothing. A mark of a ledger the executor didn't accept stays.
+    pub(crate) async fn empty_ledger_owed_again(&mut self, record: &[u8; 32]) -> Result<()> {
+        let Some(mark) = self
+            .local_get::<EmptyLedgerMark>(&key::empty_ledger(record))
+            .await?
+        else {
+            return Ok(());
+        };
+        if mark.unaccepted {
+            return Ok(());
+        }
+        self.local_put(
+            &key::empty_ledger(record),
+            &EmptyLedgerMark {
+                record: *record,
+                sent: false,
+                batch: None,
+                unaccepted: false,
+            },
+        )
+        .await
     }
 
     /// The first grant's empty ledger owed again: not yet sent, or sent in a kept batch the
@@ -773,6 +797,13 @@ impl Paykit {
         {
             return Err(not_automatic("the ledger doesn't bind to its Allowance"));
         }
+        // A ledger that was at its key at the first grant is one the executor didn't accept
+        // (Paykit spec 8.3, "A grant implies a ledger"), whoever wrote it.
+        if kept.is_none() && self.ledger_unaccepted(&under.record_key).await? {
+            return Err(not_automatic(
+                "the ledger at its key before the first grant isn't one this executor accepted",
+            ));
+        }
         let op = self
             .held_op(&ledger_key)
             .await?
@@ -791,11 +822,6 @@ impl Paykit {
         // builds on the write shown once it passes every other check, and keeps it from then
         // on (Paykit spec 8.3, "Last ledger version"; open question 32). A ledger that was at
         // its key at the first grant is the exception: one the executor didn't accept.
-        if kept.is_none() && self.ledger_unaccepted(&under.record_key).await? {
-            return Err(not_automatic(
-                "the ledger at its key before the first grant isn't one this executor accepted",
-            ));
-        }
         if let Some((kept, held)) = &kept {
             let item = op.item_hash().map_err(|_| PaykitError::corrupt())?;
             let built_on = match &op.body().kind {
