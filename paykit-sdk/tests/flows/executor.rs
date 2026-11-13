@@ -414,6 +414,30 @@ async fn test_executor_refuses_a_blocked_payee_on_a_fresh_read() {
 }
 
 #[tokio::test]
+async fn test_executor_pays_nothing_while_the_deny_list_doesnt_read() {
+    // The executor's read of the deny list before the dispatch fails: a failed read never
+    // counts as one that doesn't hold the payee, so nothing is paid; the next read pays
+    // (Paykit spec 8.1, "How fresh the deny list is"; 8.3, "Executor").
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/allow".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: Value::Null,
+        });
+    wallet
+        .pay_under_allowance(&request, &record)
+        .await
+        .unwrap_err();
+    assert!(w.rail.all_executions().is_empty());
+    wallet.pay_under_allowance(&request, &record).await.unwrap();
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
 async fn test_executor_refuses_an_ended_allowance() {
     let w = World::new();
     let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
