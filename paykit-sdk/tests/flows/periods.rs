@@ -3669,3 +3669,103 @@ async fn test_periods_proof_from_a_third_party_never_opens_the_period_record() {
     assert_eq!(sale.periods.len(), 1, "{sale:?}");
     assert!(sale.periods[0].paid, "{sale:?}");
 }
+
+#[tokio::test]
+async fn test_periods_proof_over_a_payee_request_record_that_never_opens_held_then_given_up() {
+    // Bob's till writes the shop's request record as a value sealed under a key that isn't
+    // the epoch's: the shop holds the key, so it never opens. Alice's proof of January then
+    // reaches the shop: whether she is the record's counterparty can't be told, so the entry
+    // is held. Past 30 days from its acceptance it is taken as a reply before its record and
+    // given up with the host's notice.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    till.receive(None).await.unwrap();
+    // A new data epoch whose key only the till holds yet.
+    w.bob.next_doc(|body| body.data_epoch += 1).unwrap();
+    store_bob_bundle(&w, till.app_id(), &till.app().cert().clone());
+    till.receive(None).await.unwrap();
+    let collection = Collection::PayeeActivity;
+    let target = RecordTarget::new(
+        SwitchCollection::new(collection.name(), collection.policy(None)),
+        &natural_key::request_record(&request.payee, &request.request_hash),
+    );
+    let value = till
+        .app_mut()
+        .read_record(&target)
+        .await
+        .unwrap()
+        .unwrap()
+        .content
+        .value()
+        .unwrap()
+        .to_vec();
+    let (conditions, kind) = till
+        .app_mut()
+        .record_op(&target, Some(&value), Vec::new())
+        .await
+        .unwrap();
+    let pubky_switch_core::ops::OpKind::RecordPut(mut put) = kind else {
+        panic!("a record op");
+    };
+    let epoch = w.bob.switch().identity_doc().unwrap().data_epoch();
+    put.value_sealed = pubky_switch_core::sealed::SealedValue::seal(
+        &[3; 32],
+        &w.bob_id(),
+        epoch,
+        &put.policy.read_scope,
+        &put.key,
+        &value,
+    )
+    .unwrap();
+    till.app_mut()
+        .submit_batch(
+            OpBatch::new().entry((conditions, pubky_switch_core::ops::OpKind::RecordPut(put))),
+        )
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    // The key comes: the value doesn't open with it, for good.
+    store_bob_bundle(&w, shop.app_id(), &shop.app().cert().clone());
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let key = shop.app().record_key(&target).unwrap();
+    let held = shop.app().shared_record(&key).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            held.content,
+            RecordContent::Unreadable(Unopened::DoesNotOpen)
+        ),
+        "{:?}",
+        held.content
+    );
+    let body = period_proof(&w, shop.app_id(), january()).await;
+    let msg_id = w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        body,
+    );
+    let summary = shop.receive(None).await.unwrap();
+    assert!(!received(&summary, "paykit.payment_proof"), "{summary:?}");
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS + DAY_MS);
+    for _ in 0..3 {
+        shop.receive(None).await.unwrap();
+    }
+    let notices = shop.notices().await.unwrap();
+    assert!(
+        notices
+            .iter()
+            .any(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp
+                && n.msg_id.as_deref() == Some(msg_id.as_str())),
+        "{notices:?}"
+    );
+}
