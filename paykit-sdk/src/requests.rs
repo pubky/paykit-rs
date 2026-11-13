@@ -885,7 +885,7 @@ impl Paykit {
     /// `payer`: it holds a proof of that settlement with its receipt. A record the app holds
     /// but can't open (sealed at a key it doesn't hold, or a value that doesn't read), whose
     /// payer can't be seen, and a copy of the payee's records that may lack records, mean
-    /// it can't be told.
+    /// it can't be told. A record under a policy that isn't Paykit's is ignored.
     async fn other_credit(
         &self,
         record: &[u8; 32],
@@ -898,11 +898,17 @@ impl Paykit {
             .records_of(Collection::PayeeActivity.name())
             .await?
         {
-            if held.key == *record {
+            // A record under a policy Paykit doesn't use is ignored, as every reader ignores
+            // it (Paykit spec 6, Paykit wire 5.1): it holds no credit of Paykit's.
+            if held.key == *record
+                || Collection::PayeeActivity
+                    .policy_label(&held.policy)
+                    .is_none()
+            {
                 continue;
             }
-            // A value that doesn't read or bind can't be told; a failure to read it is the
-            // call's error, never "no other credit".
+            // A value of a Paykit policy that doesn't read or bind can't be told; a failure
+            // to read it is the call's error, never "no other credit".
             let other = match held.content {
                 RecordContent::Deleted => continue,
                 RecordContent::Value(_) => match self.payee_record(&held.key).await {

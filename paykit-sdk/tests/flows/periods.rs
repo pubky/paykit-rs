@@ -2610,6 +2610,48 @@ async fn test_periods_details_over_a_request_record_that_doesnt_read_not_lost() 
 }
 
 #[tokio::test]
+async fn test_periods_credit_given_beside_a_record_under_another_policy() {
+    // A `payee_activity` record under a policy that isn't Paykit's is ignored, as every
+    // reader ignores it (Paykit wire 5.1): it can't hold a credit, so the payment is
+    // credited without the user's confirmation.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let body = period_proof(&w, shop.app_id(), january()).await;
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        body,
+    );
+    shop.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].periods[0].record;
+    let mut policy = Collection::PayeeActivity.fixed_policy();
+    policy.write_scopes = vec!["pay".into(), "request".into()];
+    let foreign = RecordTarget::new(
+        SwitchCollection::new(Collection::PayeeActivity.name(), policy),
+        b"another protocol's record",
+    );
+    let bytes = serde_json::to_vec(&json!({ "v": 1 })).unwrap();
+    let op = shop
+        .app_mut()
+        .record_op(&foreign, Some(&bytes), Vec::new())
+        .await
+        .unwrap();
+    shop.app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    let held = shop.app_mut().read_record(&foreign).await.unwrap().unwrap();
+    assert!(held.content.value().is_some(), "{held:?}");
+    assert!(shop.confirm_payment(&record).await.unwrap().is_some());
+}
+
+#[tokio::test]
 async fn test_periods_details_expiry_judged_on_the_verified_service_time() {
     // The shop's device clock runs two hours ahead of the service's. Details valid for an
     // hour more on the service time it verified are sent: the device clock never decides.
