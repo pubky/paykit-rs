@@ -3141,3 +3141,150 @@ async fn test_periods_proof_over_a_payee_period_record_that_doesnt_bind_kept_not
         "{notices:?}"
     );
 }
+
+#[tokio::test]
+async fn test_periods_stored_proof_waits_for_its_details_after_the_record_is_deleted() {
+    // The shop holds January's details; a proof naming them comes and its record write is
+    // refused for good twice, so it stays a stored entry. The till then deletes the period
+    // record (Paykit spec 6 allows deleting an activity record). The later write never
+    // opens a new period record holding the proof without the details it names: the entry
+    // waits, and past its window it is given up, the host told once.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    let now = w.clock.now_ms();
+    shop.send_period_details(&sale, details(january(), "lnbc1invoice", now + DAY_MS))
+        .await
+        .unwrap();
+    let target = payee_period(&request);
+    let key = shop.app().record_key(&target).unwrap();
+    let value = shop.app().shared_record(&key).await.unwrap().unwrap();
+    let details_hash = paykit_lib::records::ActivityRecord::read(
+        value.content.value().unwrap(),
+        &w.bob_id(),
+        paykit_lib::records::ActivitySide::Payee,
+    )
+    .unwrap()
+    .period_details
+    .unwrap()
+    .hash();
+    let body = period_proof(&w, shop.app_id(), january()).await;
+    for _ in 0..2 {
+        w.bob
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/ops".into(),
+                code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+                current: serde_json::Value::Null,
+            });
+    }
+    let msg_id = w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash, details_hash],
+        body,
+    );
+    shop.receive(None).await.unwrap();
+    assert!(!shop.app_mut().parked_entries().await.unwrap().is_empty());
+    till.receive(None).await.unwrap();
+    let op = till
+        .app_mut()
+        .record_op(&target, None, Vec::new())
+        .await
+        .unwrap();
+    till.app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let held = shop.app().shared_record(&key).await.unwrap().unwrap();
+    assert!(
+        matches!(held.content, RecordContent::Deleted),
+        "{:?}",
+        held.content
+    );
+    assert!(!shop.app_mut().parked_entries().await.unwrap().is_empty());
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS + DAY_MS);
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let held = shop.app().shared_record(&key).await.unwrap().unwrap();
+    assert!(
+        matches!(held.content, RecordContent::Deleted),
+        "{:?}",
+        held.content
+    );
+    let given_up = shop
+        .notices()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|n| {
+            n.kind == paykit_sdk::NoticeKind::MessageGivenUp
+                && n.msg_id.as_deref() == Some(msg_id.as_str())
+        })
+        .count();
+    assert_eq!(given_up, 1);
+}
+
+#[tokio::test]
+async fn test_periods_send_details_window_judged_on_the_time_read_again() {
+    // The shop last verified the service's time when it read the acceptance, within
+    // January's deadline. Two days on, with no read since, the records read again verify
+    // the time now: January's deadline has passed, and its details are refused.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let now = w.clock.now_ms();
+    let draft = monthly(now, None).with_period_deadline_s(86_400);
+    let (_, sale) = subscribed_for(&w, &mut shop, &mut wallet, draft, 0).await;
+    let stale = shop.app().highest_service_time().unwrap();
+    assert!(stale < january().starts_at + DAY_MS);
+    w.clock.advance_ms(2 * DAY_MS);
+    let refused = shop
+        .send_period_details(
+            &sale,
+            details(january(), "lnbc1p", w.clock.now_ms() + DAY_MS),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&refused, PaykitError::Lib(paykit_lib::Error::Validation(_))),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_periods_send_details_after_another_app_cancelled_unseen_refused() {
+    // Bob's till cancels the subscription; the shop hasn't read that write. Its details are
+    // judged on the request record read again, which shows the cancellation: refused, and
+    // nothing reaches the wallet.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    till.receive(None).await.unwrap();
+    let tills = till.payee_activity().await.unwrap()[0].record;
+    till.cancel_sent_request(&tills, None).await.unwrap();
+    let refused = shop
+        .send_period_details(
+            &sale,
+            details(january(), "lnbc1p", w.clock.now_ms() + DAY_MS),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(refusal(&refused), Refusal::Cancelled);
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(!received(&summary, "paykit.payment_period_details"));
+    assert!(wallet.request(&request).await.unwrap().periods.is_empty());
+}

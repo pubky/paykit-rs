@@ -391,10 +391,11 @@ impl Paykit {
         self.require_payee()?;
         let mut tries = 0;
         let msg_id = loop {
-            // Judged on what the switch holds now: the request record read again verifies
-            // the service's time now, which the period-details window is judged on (Paykit
-            // spec 8.2): a time verified a while ago can show a period's deadline not passed
-            // yet.
+            // Judged on what the switch holds now: the request record read again shows a
+            // rejection or a cancellation another own app recorded meanwhile, and it and the
+            // period record read again below verify the service's time now, which the
+            // period-details window is judged on (Paykit spec 8.2): a time verified a while
+            // ago can show a period's deadline not passed yet.
             let (target, _) = self.payee_record(record).await?;
             self.app.read_record(&target.record_target()).await?;
             let (target, bound) = self.payee_record(record).await?;
