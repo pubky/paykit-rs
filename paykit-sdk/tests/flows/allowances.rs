@@ -3951,3 +3951,85 @@ async fn test_allowances_answer_dropped_at_a_payer_app_asked_again_only_once_unb
     .unwrap();
     assert_eq!(held.response.unwrap().message().msg_id, accepted);
 }
+
+#[tokio::test]
+async fn test_allowances_owed_crossing_end_not_sent_once_the_allowance_is_conflicted() {
+    // The keeper's crossing end is recorded while bob is blocked, its message owed; then a
+    // second proposal under the same Allowance ID conflicts it. Nothing is sent for a
+    // conflicted Allowance, as a restore's re-send sends nothing for one: once bob is
+    // unblocked the owed mark goes with nothing sent (Paykit spec 8.3, "Conflicted").
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = keeper(&w).await;
+    let (_, mine) = crossing_while_held(&w, &mut shop, &mut wallet, SendsHeld::Blocked).await;
+    assert_eq!(wallet.app().protocol_scan(b"eo/").await.unwrap().len(), 1);
+    let id = wallet.allowance(&mine).await.unwrap().allowance_id;
+    propose_as(&w, &[wallet.app_id()], id.as_str(), "0.20");
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Conflicted
+    );
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_scan(b"eo/").await.unwrap().is_empty());
+    assert_eq!(taken(&mut shop, "paykit.allowance_end").await, 0);
+}
+
+#[tokio::test]
+async fn test_allowances_owed_crossing_end_dropped_with_its_deleted_record() {
+    // Another own app deletes the record that holds the keeper's owed crossing end: no record
+    // holds the end to send, so the mark goes with nothing sent, and nothing goes once bob is
+    // unblocked.
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = keeper(&w).await;
+    let (_, mine) = crossing_while_held(&w, &mut shop, &mut wallet, SendsHeld::Blocked).await;
+    let id = wallet.allowance(&mine).await.unwrap().allowance_id;
+    delete_allowance_record(&w, &id).await;
+    wallet.receive(None).await.unwrap();
+    assert!(held_deleted(&wallet, &mine).await);
+    assert!(wallet.app().protocol_scan(b"eo/").await.unwrap().is_empty());
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(taken(&mut shop, "paykit.allowance_end").await, 0);
+}
+
+#[tokio::test]
+async fn test_allowances_owed_crossing_end_kept_through_a_store_failure_and_sent_once() {
+    // Bob is unblocked, and the store fails the commit that would queue the keeper's owed
+    // crossing end: the receive returns that failure, the mark stays, and the next receive
+    // sends the end, once.
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let fault = std::sync::Arc::new(pubky_switch_client::store::FaultStore::new(
+        crate::common::store(),
+        pubky_switch_client::store::Fault::None,
+    ));
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "keeper",
+            AppScopes::new()
+                .pay()
+                .allowance()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+            paykit_sdk::PaykitConfig::default(),
+            std::sync::Arc::clone(&fault)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    crossing_while_held(&w, &mut shop, &mut wallet, SendsHeld::Blocked).await;
+    assert_eq!(wallet.app().protocol_scan(b"eo/").await.unwrap().len(), 1);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    fault.fail_put_once(b"out/");
+    assert!(wallet.receive(None).await.is_err());
+    assert_eq!(wallet.app().protocol_scan(b"eo/").await.unwrap().len(), 1);
+    assert_eq!(taken(&mut shop, "paykit.allowance_end").await, 0);
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_scan(b"eo/").await.unwrap().is_empty());
+    assert_eq!(taken(&mut shop, "paykit.allowance_end").await, 1);
+}

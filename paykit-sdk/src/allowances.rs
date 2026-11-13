@@ -1079,7 +1079,8 @@ impl Paykit {
     /// counterparties"; 8.3, "Ending"). A mark stays while sends to the counterparty are held,
     /// or while its record isn't held as a value that reads and binds. One whose record is
     /// held as deleted, or doesn't hold that end of this app's, goes with nothing sent: no
-    /// record holds the end to send. A message the client refuses for good, past its replay
+    /// record holds the end to send; so does one whose Allowance is conflicted by then, in the
+    /// record or as a kept stop, for which nothing is sent. A message the client refuses for good, past its replay
     /// window of 30 days from its `created_at`, is neither sent nor told, as at a restore's
     /// re-send ([`Paykit::queue_stored_again`]); a store failure is the call's error, and the
     /// mark stays. The mark was read bound to its key (`state::Stored`).
@@ -1108,6 +1109,12 @@ impl Paykit {
                 self.local_delete(&mark).await?;
                 continue;
             };
+            // Nothing is sent for a conflicted Allowance (Paykit spec 8.3, "Conflicted"), as
+            // a restore's re-send sends nothing for one: the conflict ended it on both sides.
+            if held.conflicted.is_some() || self.conflict_kept(&owed.record).await? {
+                self.local_delete(&mark).await?;
+                continue;
+            }
             if self.sends_held(&held.counterparty).await? {
                 continue;
             }
@@ -2084,8 +2091,9 @@ fn written(result: Result<()>) -> Result<Placed> {
 /// The messages of the Allowance record `record` this app signed, `app_id` of identity `own`,
 /// that it queues again after a restore (Paykit spec 7.2, "What a restore loses"; 8.3): each
 /// one the record stores to be sent, since every message this app stores in an Allowance
-/// record it also queues ([`stores_unqueued`]), while the counterparty hasn't answered it and
-/// no later stop covers it. The proposal goes while the record holds no response and no end;
+/// record it also queues in that batch, or, for a crossing end recorded while sends to the
+/// counterparty were held, marks owed in it ([`stores_unqueued`]), while the counterparty
+/// hasn't answered it and no later stop covers it. The proposal goes while the record holds no response and no end;
 /// an acceptance or a rejection while it holds no end; an end, a stop, always. Nothing goes
 /// for a conflicted Allowance (Paykit spec 8.3, "Conflicted"); the caller leaves out one
 /// whose conflict or counterparty's end this app keeps as a stop not in the record yet.
@@ -2113,7 +2121,9 @@ pub(crate) fn own_allowance_to_send_again<'a>(
 /// Whether `next` would store a message this app signed, as `own` and `app_id`, that
 /// `before` doesn't hold and `queued` doesn't name: a write that stores without sending,
 /// which no path makes (Paykit spec 8.3, "Recorded first"). Every message of this app's in
-/// an Allowance record is written in the batch that queues it, so one signed by this app
+/// an Allowance record is written in the batch that queues it, or, for a crossing end
+/// recorded while sends to the counterparty are held, in the batch that marks it owed
+/// (`eo/`, which `queued` then names; Paykit spec 8.3, "Ending"), so one signed by this app
 /// there is one to be sent: the re-send after a restore can rely on that.
 fn stores_unqueued(
     before: Option<&AllowanceRecord>,
