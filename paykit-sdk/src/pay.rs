@@ -1211,7 +1211,10 @@ impl Paykit {
     /// ([`Paykit::ask_for_lists`]) and the refusal is [`Refusal::WaitingForList`]; a list in
     /// use that offers no endpoint the payment may use is [`Refusal::NoDestination`]; lists
     /// in use whose endpoints the method pays none of, and no expired list, are
-    /// [`Refusal::UnsupportedEndpoint`], without asking.
+    /// [`Refusal::UnsupportedEndpoint`], without asking. A current app's list paused as
+    /// divergent ([`Paykit::confirm_divergent`]), with no other list to pay, is
+    /// [`Refusal::Divergent`] naming its record, and its app isn't asked; the list of an app
+    /// the payee's `identity.json` doesn't list as current plays no part, paused or not.
     async fn list_destination(
         &mut self,
         payee: &[u8; 32],
@@ -1263,10 +1266,42 @@ impl Paykit {
         }
         let mut lists = self.lists_of(payee).await?;
         lists.retain(|l| app.is_none_or(|a| a == l.app_id));
+        // Only a current app's list counts (Paykit spec 8.4, 7.2): a removed app's list, of
+        // whatever version it chose, would shadow the current apps' and then be refused by
+        // the destination check. The payee's `identity.json` is the copy that check takes,
+        // so a fresh one is read once here, before any list is judged paused: a list of an
+        // app that copy doesn't list as current is never usable, whatever its upload holds,
+        // so it plays no part, paused or not, and only a list that would otherwise be usable
+        // pauses the payment (Paykit spec 8.4). A read that fails is the payment's refusal:
+        // without it, no list is taken as a current app's, nor as a removed app's.
+        let identity = if lists.is_empty() {
+            None
+        } else {
+            match self
+                .payee_identity(
+                    payee,
+                    Need::FreshCopy,
+                    Initiator::User,
+                    options.unconfirmed_identity_confirmed,
+                )
+                .await?
+            {
+                Ok(identity) => Some(identity),
+                Err(refusal) => return Err(refusal.into()),
+            }
+        };
+        if let Some(identity) = &identity {
+            lists.retain(|l| {
+                identity.doc.listed_cert(&l.app_id).is_some()
+                    && !identity.doc.lists_removed(&l.app_id)
+            });
+        }
         // A list whose record is divergent, or was seen so, may be stale: the upload may hold
         // a newer one, withdrawing or replacing a destination. None of its endpoints,
         // single-use or reusable, is paid until the user confirms it (Paykit spec 6); with no
-        // other list to pay, the payment is refused naming those records.
+        // other list to pay, the payment is refused naming those records. The certificate the
+        // held list was signed under decides nothing here: the upload's list may be signed
+        // under the one its current app is listed with now.
         let mut paused_lists = Vec::new();
         let mut usable = Vec::with_capacity(lists.len());
         for list in lists {
@@ -1280,23 +1315,10 @@ impl Paykit {
             }
         }
         let mut lists = usable;
-        // Only a current app's list counts (Paykit spec 8.4, 7.2): a removed app's list, of
-        // whatever version it chose, would shadow the current apps' and then be refused by
-        // the destination check. The payee's `identity.json` is the copy that check takes,
-        // so a fresh one is read once here.
-        if !lists.is_empty() {
-            let identity = match self
-                .payee_identity(
-                    payee,
-                    Need::FreshCopy,
-                    Initiator::User,
-                    options.unconfirmed_identity_confirmed,
-                )
-                .await?
-            {
-                Ok(identity) => identity,
-                Err(refusal) => return Err(refusal.into()),
-            };
+        // Of the lists not paused, only one the destination check takes counts: the
+        // certificate it was signed under passes, and counts in the same copy of the payee's
+        // `identity.json`.
+        if let Some(identity) = &identity {
             let now = self.now();
             lists.retain(|l| {
                 let carrier = Carrier::Message(Box::new(l.list.clone()));

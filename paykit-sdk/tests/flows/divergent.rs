@@ -1975,6 +1975,173 @@ async fn test_divergent_paused_list_asks_the_app_whose_list_expired() {
     assert_eq!(list_asks(&w, &wallet).await, vec![Some(till.app_id())]);
 }
 
+/// Bob's till, joined, sends alice's `wallet` a Private Payment List of version 1 offering
+/// `btc-lightning-bolt12`, used until `expires_at`.
+async fn till_list(w: &World, wallet: &Paykit, expires_at: u64) -> Paykit {
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    till.app_mut().invite(&w.alice_id()).await.unwrap();
+    let mut endpoints = std::collections::BTreeMap::new();
+    endpoints.insert(
+        endpoint("btc-lightning-bolt12"),
+        paykit_lib::bodies::ListEndpoint {
+            payload: paykit_lib::PaymentEndpointPayload::new("lno1till").unwrap(),
+            single_use: false,
+        },
+    );
+    let body = paykit_lib::bodies::PrivatePaymentList {
+        version: 1,
+        payment_endpoints: endpoints,
+        expires_at,
+    }
+    .to_body()
+    .unwrap();
+    w.inject(
+        &w.bob,
+        "till",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.private_payment_list",
+        Vec::new(),
+        body,
+    );
+    till
+}
+
+/// Bob's signer removes `app` from his `identity.json`, and the payer's copy of it is let
+/// grow older than 10 minutes, so the next payment reads the new one.
+fn remove_from_bob(w: &World, app: [u8; 16]) {
+    let now = w.clock.now_ms();
+    w.bob
+        .next_doc(|body| {
+            body.apps.retain(|a| a.app_id != app);
+            body.removed.push(pubky_switch_core::records::RemovedApp {
+                app_id: app,
+                distrust_from: now,
+            });
+        })
+        .unwrap();
+    w.clock.advance_ms(11 * 60_000);
+}
+
+#[tokio::test]
+async fn test_divergent_list_of_a_removed_app_waits_for_a_current_list() {
+    // Bob's shop's list is paused as divergent, and Bob's signer then removes the shop,
+    // leaving his till, which has sent no list. The shop's list can't be paid, whatever its
+    // upload holds, so it pauses nothing: the payment takes the path of no usable list,
+    // asking bob's current apps for a list and waiting for it, and asks no confirmation of
+    // the shop's record (Paykit spec 8.4, 7.2).
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    till.app_mut().invite(&w.alice_id()).await.unwrap();
+    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    wallet.receive(None).await.unwrap();
+    let record = list_record(&w, &wallet, &shop);
+    set_divergent(&base, &wallet, &record, true);
+    remove_from_bob(&w, shop.app_id());
+    let payment = UnrequestedPayment::new(w.bob_id(), btc("1"))
+        .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")));
+    let refused = wallet.pay_without_request(payment).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    assert_eq!(list_asks(&w, &wallet).await, vec![None]);
+    // The record's mark stays, shown to the host until its user confirms it (Paykit spec 6).
+    assert!(wallet
+        .divergent_records()
+        .await
+        .unwrap()
+        .iter()
+        .any(|shown| shown.record == record && shown.paused));
+}
+
+#[tokio::test]
+async fn test_divergent_list_of_a_removed_app_leaves_an_expired_current_list_asked_for() {
+    // Bob's shop's list is paused as divergent and the shop removed; his till's list has
+    // merely expired. The till is asked for its current list and the payment waits for it,
+    // asking no confirmation of the shop's record (Paykit spec 8.4).
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    let till = till_list(&w, &wallet, w.clock.now_ms() + HOUR_MS).await;
+    wallet.receive(None).await.unwrap();
+    let record = list_record(&w, &wallet, &shop);
+    set_divergent(&base, &wallet, &record, true);
+    w.clock.advance_ms(2 * HOUR_MS);
+    remove_from_bob(&w, shop.app_id());
+    let payment = UnrequestedPayment::new(w.bob_id(), btc("1"))
+        .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")));
+    let refused = wallet.pay_without_request(payment).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    assert_eq!(list_asks(&w, &wallet).await, vec![Some(till.app_id())]);
+}
+
+#[tokio::test]
+async fn test_divergent_list_of_a_removed_app_leaves_a_current_list_paid() {
+    // Bob's shop's list is paused as divergent and the shop removed; his till's list is in
+    // use. The till's list is paid, with no refusal (Paykit spec 8.4).
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    let mut till = till_list(&w, &wallet, w.clock.now_ms() + 30 * 24 * HOUR_MS).await;
+    wallet.receive(None).await.unwrap();
+    let record = list_record(&w, &wallet, &shop);
+    set_divergent(&base, &wallet, &record, true);
+    remove_from_bob(&w, shop.app_id());
+    let payment = UnrequestedPayment::new(w.bob_id(), btc("1"))
+        .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")));
+    let outcome = wallet.pay_without_request(payment).await.unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+    till.receive(None).await.unwrap();
+    assert_eq!(till.payee_activity().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_divergent_paused_list_unjudged_while_the_payees_identity_is_unreadable() {
+    // Bob's shop's list is paused as divergent, and bob's identity.json can be read neither
+    // from his Homeserver nor from his switch, the copy held more than 10 minutes old. Whether
+    // the shop is still current can't be told: the payment is refused for that, neither
+    // naming the shop's record for a confirmation nor asking for a newer list.
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    wallet.receive(None).await.unwrap();
+    let record = list_record(&w, &wallet, &shop);
+    set_divergent(&base, &wallet, &record, true);
+    w.homeserver
+        .remove(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH);
+    w.router.remove(crate::common::BOB_ORIGIN);
+    w.clock.advance_ms(11 * 60_000);
+    let payment = UnrequestedPayment::new(w.bob_id(), btc("1"))
+        .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")));
+    let refused = wallet.pay_without_request(payment).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::IdentityUnavailable(_))),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    assert!(list_asks(&w, &wallet).await.is_empty());
+}
+
 #[tokio::test]
 async fn test_divergent_acceptance_dropped_for_the_bound_taken_again_from_a_resend() {
     // Eighteen acceptances come over the divergent record: the earliest and the 16 latest are
