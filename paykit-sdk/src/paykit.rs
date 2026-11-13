@@ -828,6 +828,7 @@ mod tests {
         resolution: Resolution,
         draft: RequestDraft,
         payment: UnrequestedPayment,
+        shown: crate::DivergentRecord,
     ) {
         let key = [0; 32];
         let request = RequestRef {
@@ -883,7 +884,7 @@ mod tests {
         assert_send(&wallet.acknowledge_notice(""));
         assert_send(&wallet.receipts(ReceiptsOf::All));
         assert_send(&wallet.divergent_records());
-        assert_send(&wallet.confirm_divergent(&key, confirmed));
+        assert_send(&wallet.confirm_divergent(&shown, confirmed));
     }
 
     #[test]

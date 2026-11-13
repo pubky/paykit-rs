@@ -2118,18 +2118,17 @@ impl Paykit {
     ///
     /// The acceptance's queueing, or the store: the entry stays owed.
     pub(crate) async fn finish_owed_acceptance(&mut self, entry: &mut JournalEntry) -> Result<()> {
-        self.release_acceptance(entry, None).await?;
         let target = ActivityTarget::payer(entry.natural_key.clone());
         let own = self.identity();
         let key = self.activity_key(&target)?;
-        let held = self.app.shared_record(&key).await?;
-        // A divergent record the user hasn't confirmed takes no own write but a stop (Paykit
-        // spec 6): the entry stays owed, for a resume after the confirmation.
-        if let Some(current) = &held {
-            if self.pause_of(current).await?.write_waits() {
-                return Ok(());
-            }
+        // An acceptance a resume sends is an automatic one: none goes, nor is placed, while
+        // the request record is paused or its view divergent (Paykit spec 6); the entry
+        // stays owed, for a resume after the user's confirmation and a clear view.
+        if self.pause_at(&key).await?.blocks_automatic() {
+            return Ok(());
         }
+        self.release_acceptance(entry, None).await?;
+        let held = self.app.shared_record(&key).await?;
         let write = match held.as_ref().map(|r| &r.content) {
             Some(RecordContent::Value(value)) => {
                 let Some(mut record) = activity::read(Some(value), &own, ActivitySide::Payer)
@@ -2392,6 +2391,13 @@ impl Paykit {
         overwrite: bool,
     ) -> Result<Written> {
         if paid {
+            // A payment made waits for the user's confirmation of a divergent payer record,
+            // before its acceptance is released: nothing of it goes over that record until
+            // then (Paykit spec 6).
+            let record = self.activity_key(&ActivityTarget::payer(entry.natural_key.clone()))?;
+            if self.pause_at(&record).await?.write_waits() {
+                return Ok(Written::Divergent(record));
+            }
             // Every path that writes a payment made goes through here: its acceptance is
             // sendable, if it isn't yet, before the batch places it in the record (Paykit
             // spec 7.2 steps 2, 3). It never holds back the outcome, nor is it dropped: one

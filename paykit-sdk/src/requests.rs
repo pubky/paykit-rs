@@ -1156,16 +1156,19 @@ impl Paykit {
         if status == RequestStatus::Open && stopped {
             status = RequestStatus::Cancelled;
         }
-        let pause = self.pause_seen(&record_key).await?;
-        let divergent = pause.paused || pause.divergent;
-        if status == RequestStatus::Open && pause.paused {
-            status = RequestStatus::Divergent;
-        }
         if status == RequestStatus::Open && self.held(&record_key, record).await? {
             status = RequestStatus::Held;
         }
         if status == RequestStatus::Open && self.denied_as_last_read(&payee).await? {
             status = RequestStatus::Blocked;
+        }
+        // Divergent shows on its own field whatever the status, so a request held after a
+        // restore or blocked shows that too; the status says so only when nothing else holds
+        // the request.
+        let pause = self.pause_seen(&record_key).await?;
+        let divergent = pause.paused || pause.divergent;
+        if status == RequestStatus::Open && pause.paused {
+            status = RequestStatus::Divergent;
         }
         Ok(Some(RequestView {
             request: RequestRef {

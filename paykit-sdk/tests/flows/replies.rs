@@ -1002,9 +1002,7 @@ async fn test_replies_kept_wait_over_a_divergent_record_until_confirmed() {
     assert_eq!(sales[0].status, PayeeStatus::Requested);
     assert!(sales[0].divergent);
     assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 2);
-    shop.confirm_divergent(&record, pubky_switch_client::app::UserConfirmed::new())
-        .await
-        .unwrap();
+    crate::divergent::confirm(&mut shop, &record).await.unwrap();
     shop.receive(None).await.unwrap();
     let sales = shop.payee_activity().await.unwrap();
     assert_eq!(sales[0].status, PayeeStatus::ProofReceived);

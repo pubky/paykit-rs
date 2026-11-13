@@ -599,9 +599,9 @@ impl Paykit {
         {
             return Err(crate::hold::value_awaits_key());
         }
-        // A user's `done` writes the record, adding no stop: over a divergent record it
-        // waits for the user's confirmation of that record first (Paykit spec 6).
-        self.refuse_while_write_waits(&key).await?;
+        // A user's `done` by hand on a record paused after a view showed it divergent waits
+        // for the user's confirmation of that record first (Paykit spec 6).
+        self.refuse_while_paused(&[key]).await?;
         Ok(target)
     }
 

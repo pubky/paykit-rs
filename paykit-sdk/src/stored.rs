@@ -365,6 +365,13 @@ impl Paykit {
                     .await?;
                 true
             }
+            // A record a view showed divergent pauses (`divergent.rs`): its mark is its own
+            // commit, before this event's, and taking the event again changes nothing. While
+            // the client raises it with no ID, it is taken from the read's events instead.
+            AppEvent::RecordDivergent { key: record, .. } => {
+                self.take_divergent_event(record).await?;
+                true
+            }
             _ => false,
         };
         if taken {

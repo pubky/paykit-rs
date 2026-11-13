@@ -694,15 +694,20 @@ impl Stored for crate::divergent::DivergentMark {
 
 impl sealed::Sealed for crate::divergent::DivergentWrite {}
 
-/// A message kept over a divergent record: of the record and role its key names, its
-/// message verified for this app and naming that record
+/// A message kept over a divergent record: of the record, role and `msg_id` its key names,
+/// its message verified for this app and naming that record
 /// ([`crate::divergent::DivergentWrite::bind_to`]).
 impl Stored for crate::divergent::DivergentWrite {
     fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
-        let StateKey::DivergentWrite { record, role } = family else {
+        let StateKey::DivergentWrite {
+            record,
+            role,
+            msg_id,
+        } = family
+        else {
             return corrupt();
         };
-        self.bind_to(record, *role, &binder.own, &|target| {
+        self.bind_to(record, *role, msg_id, &binder.own, &|target| {
             binder.record_key(target)
         })
     }
@@ -750,12 +755,22 @@ pub(crate) mod key {
         format!("{DIVERGENT}{}", b64(record_key))
     }
 
-    /// A message of `role` kept to write over the divergent record `record_key`.
-    pub(crate) fn divergent_write(
+    /// The prefix of the messages of `role` kept to write over the divergent record
+    /// `record_key`.
+    pub(crate) fn divergent_writes_of(
         record_key: &[u8; 32],
         role: crate::divergent::WriteRole,
     ) -> String {
-        format!("{DIVERGENT_WRITES}{}/{}", b64(record_key), role.tag())
+        format!("{DIVERGENT_WRITES}{}/{}/", b64(record_key), role.tag())
+    }
+
+    /// The message `msg_id` of `role` kept to write over the divergent record `record_key`.
+    pub(crate) fn divergent_write(
+        record_key: &[u8; 32],
+        role: crate::divergent::WriteRole,
+        msg_id: &str,
+    ) -> String {
+        format!("{}{msg_id}", divergent_writes_of(record_key, role))
     }
 
     /// The mark of replies from `sender` dropped for the bounds.
@@ -953,10 +968,11 @@ pub(crate) enum StateKey {
     MessageNotice { sender: [u8; 32], msg_id: String },
     /// `dv/<record key>`: the pause mark of a divergent record.
     Divergent([u8; 32]),
-    /// `dw/<record key>/<role>`: a message kept to write over a divergent record.
+    /// `dw/<record key>/<role>/<msg_id>`: a message kept to write over a divergent record.
     DivergentWrite {
         record: [u8; 32],
         role: crate::divergent::WriteRole,
+        msg_id: String,
     },
     /// `nt/<attempt_id>/<kind>`: a notice for the host.
     Notice {
@@ -1087,10 +1103,12 @@ impl StateKey {
                     }
                     "dv" => Self::Divergent(b64_32(rest)?),
                     "dw" => {
-                        let (record, role) = rest.split_once('/')?;
+                        let (record, rest) = rest.split_once('/')?;
+                        let (role, id) = rest.split_once('/')?;
                         Self::DivergentWrite {
                             record: b64_32(record)?,
                             role: crate::divergent::WriteRole::from_tag(role)?,
+                            msg_id: msg_id(id)?,
                         }
                     }
                     "se" => {
@@ -1493,10 +1511,11 @@ mod tests {
             ),
             (key::divergent(&pubky), StateKey::Divergent(pubky)),
             (
-                key::divergent_write(&pubky, crate::divergent::WriteRole::List),
+                key::divergent_write(&pubky, crate::divergent::WriteRole::List, id),
                 StateKey::DivergentWrite {
                     record: pubky,
                     role: crate::divergent::WriteRole::List,
+                    msg_id: id.into(),
                 },
             ),
             (
@@ -1531,7 +1550,8 @@ mod tests {
             "dt/05-7",
             "nt/BQUFBQUFBQUFBQUFBQUFBQ",
             "dv/not-base64",
-            "dw/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM/cancellation",
+            "dw/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM/cancellation/123e4567-e89b-42d3-a456-426614174000",
+            "dw/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM/proof",
             "dw/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
         ] {
             assert_eq!(StateKey::parse(key.as_bytes()), None, "{key}");
