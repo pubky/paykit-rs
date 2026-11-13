@@ -1260,3 +1260,153 @@ async fn test_executor_pays_inside_its_limits_until_ended_through_a_restore() {
     );
     assert_eq!(w.rail.all_executions().len(), 2);
 }
+
+/// An Allowance granted to an executor wallet on an idempotent rail without history, with
+/// a request for 0.5 btc paid under it and the dispatch left in flight. Returns bob's shop,
+/// the wallet, the wallet's record key and the attempt.
+async fn executor_in_flight(w: &World) -> (Paykit, Paykit, [u8; 32], paykit_lib::AttemptId) {
+    w.rail.set_declaration(
+        paykit_sdk::rail::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true),
+    );
+    let mut shop = allowance_shop(w).await;
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new()
+                .pay()
+                .allowance()
+                .allowance_execute()
+                .contacts()
+                .build()
+                .unwrap(),
+            crate::common::day_window(),
+            crate::common::store(),
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let record = accepted(w, &mut shop, &mut wallet, terms_with(json!({}))).await;
+    wallet
+        .grant_executor(&record, UserConfirmed::new())
+        .await
+        .unwrap();
+    let request = request(w, &mut shop, &mut wallet, "0.5").await;
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } =
+        wallet.pay_under_allowance(&request, &record).await.unwrap()
+    else {
+        panic!("in flight");
+    };
+    (shop, wallet, record, attempt_id)
+}
+
+/// The rail's calls for `attempt` once `wallet` resumes a minute later.
+async fn calls_after_resume(
+    w: &World,
+    wallet: &mut Paykit,
+    attempt: &paykit_lib::AttemptId,
+) -> u64 {
+    w.clock.advance_ms(60_000);
+    wallet.resume_payments().await.unwrap();
+    w.rail.pay_calls(attempt)
+}
+
+#[tokio::test]
+async fn test_executor_repeat_goes_under_an_allowance_still_in_force() {
+    // The control: nothing changed since the dispatch, so the resume repeats it on the
+    // idempotent method (Paykit spec 7.2).
+    let w = World::new();
+    let (_shop, mut wallet, _, attempt) = executor_in_flight(&w).await;
+    assert_eq!(calls_after_resume(&w, &mut wallet, &attempt).await, 2);
+}
+
+#[tokio::test]
+async fn test_executor_no_repeat_under_an_allowance_ended_since() {
+    // Bob ends the Allowance while the dispatch is in flight: the repeat's gate finds it
+    // ended, and the method isn't called again (Paykit spec 7.2 step 1, 8.3).
+    let w = World::new();
+    let (mut shop, mut wallet, _, attempt) = executor_in_flight(&w).await;
+    shop.receive(None).await.unwrap();
+    let theirs = shop.allowances().await.unwrap()[0].record;
+    shop.end_allowance(&theirs).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(calls_after_resume(&w, &mut wallet, &attempt).await, 1);
+}
+
+#[tokio::test]
+async fn test_executor_no_repeat_under_an_allowance_conflicted_since() {
+    // Bob proposes again under the Allowance ID while the dispatch is in flight: the
+    // Allowance is conflicted, and the method isn't called again (Paykit spec 8.3,
+    // "Conflicted").
+    let w = World::new();
+    let (_shop, mut wallet, record, attempt) = executor_in_flight(&w).await;
+    propose_again(&w, &wallet, &record).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(calls_after_resume(&w, &mut wallet, &attempt).await, 1);
+}
+
+#[tokio::test]
+async fn test_executor_no_repeat_while_the_allowance_needs_confirming_again() {
+    // A `missed` item while the dispatch is in flight: every Allowance on the consent list
+    // is to be confirmed again, so the method isn't called again until the user does
+    // (Paykit spec 7.2, 8.3).
+    let w = World::new();
+    let (_shop, mut wallet, _, attempt) = executor_in_flight(&w).await;
+    let now = w.clock.now_ms();
+    w.alice.switch().push_missed(1, now - 1_000, now);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(calls_after_resume(&w, &mut wallet, &attempt).await, 1);
+}
+
+#[tokio::test]
+async fn test_executor_restored_with_an_older_ledger_version_builds_on_the_newer_one() {
+    // The executor pays 0.4 under a lifetime limit of 1, is backed up, then pays 0.4 more.
+    // Restored, it keeps the older ledger version; the ledger shown is built on it and
+    // counts no less, so the executor accepts it and counts both payments: after its user
+    // confirms again, a third of 0.4 has no room under the limit, and 0.1 still does (Paykit
+    // spec 8.3, "Last ledger version", "From one version to the next").
+    let w = World::new();
+    let (mut shop, mut wallet, record) =
+        set_up(&w, terms_with(json!({ "lifetime_amount_limit": "1" }))).await;
+    let first = request(&w, &mut shop, &mut wallet, "0.4").await;
+    wallet.pay_under_allowance(&first, &record).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    let second = request(&w, &mut shop, &mut wallet, "0.4").await;
+    wallet.pay_under_allowance(&second, &record).await.unwrap();
+    let third = request(&w, &mut shop, &mut wallet, "0.4").await;
+    let fourth = request(&w, &mut shop, &mut wallet, "0.1").await;
+    drop(wallet);
+    let mut wallet = Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    wallet.reconcile().await.unwrap();
+    wallet.end_reconcile(UserConfirmed::new()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet
+        .confirm_allowance_again(&record, UserConfirmed::new())
+        .await
+        .unwrap();
+    for held in [&third, &fourth] {
+        wallet
+            .confirm_possibly_cancelled(held, UserConfirmed::new())
+            .await
+            .unwrap();
+    }
+    let refused = wallet
+        .pay_under_allowance(&third, &record)
+        .await
+        .unwrap_err();
+    assert!(refused_for(&refused, "lifetime limit"), "{refused:?}");
+    let paid = wallet.pay_under_allowance(&fourth, &record).await.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let (_, ledger) = held(&wallet, &record).await;
+    assert_eq!(ledger.unwrap().entries.len(), 3);
+}
