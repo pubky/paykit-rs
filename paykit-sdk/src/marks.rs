@@ -481,7 +481,9 @@ impl Paykit {
 
     /// Make due the reply mark of each sender whose request's record the app holds: any
     /// record of the payee's side whose counterparty the mark names, one held before the
-    /// reply was dropped included. The records are read only while a mark waits.
+    /// reply was dropped included. An Allowance record with that counterparty, which reads
+    /// and binds, makes it due too: an Allowance answer kept before its record is dropped
+    /// for the same bounds (`allowances.rs`). The records are read only while a mark waits.
     async fn note_requests_held(&mut self) -> Result<()> {
         let own = self.identity();
         let family = MarkFamily::Replies;
@@ -515,6 +517,22 @@ impl Paykit {
             if let Some((key, mut mark)) = waiting.remove(&read.counterparty) {
                 mark.due = true;
                 tx.put(&key, &mark)?;
+            }
+        }
+        if !waiting.is_empty() {
+            let allowances = self
+                .app
+                .records_of(paykit_lib::collections::Collection::Allowances.name())
+                .await?;
+            for held in allowances {
+                // A record that doesn't read or bind shows no counterparty.
+                let Some(record) = self.held_allowance(&held.key).await? else {
+                    continue;
+                };
+                if let Some((key, mut mark)) = waiting.remove(&record.counterparty) {
+                    mark.due = true;
+                    tx.put(&key, &mark)?;
+                }
             }
         }
         self.local_commit(tx).await
