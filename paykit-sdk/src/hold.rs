@@ -56,9 +56,9 @@ pub(crate) struct RestoreHold {
     /// existed, a valid run's form, reads as having asked none.
     #[serde(default)]
     pub(crate) asked: Vec<[u8; 32]>,
-    /// The blocks and unblocks the backup kept unanswered (`bk/`) are written again
-    /// ([`Paykit::send_own_blocks_again`]). A hold written before this member existed had
-    /// none restored.
+    /// The blocks and unblocks the backup kept unanswered (`bk/`) are each written again, or
+    /// kept by the client for a later try ([`Paykit::send_own_blocks_again`]). A hold
+    /// written before this member existed had none restored.
     #[serde(default)]
     pub(crate) own_blocks_sent: bool,
 }

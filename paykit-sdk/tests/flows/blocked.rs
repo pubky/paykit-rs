@@ -765,3 +765,35 @@ async fn test_blocked_own_block_kept_unanswered_survives_a_restore_and_is_writte
         "{refused:?}"
     );
 }
+
+#[tokio::test]
+async fn test_blocked_own_block_restored_written_again_after_a_try_that_could_not_go() {
+    // The wallet's block is kept unanswered when the backup is taken. After the restore the
+    // first write of it again can't go: a batch the restored app kept meanwhile still can't
+    // be sent, so the block is neither written nor kept. The next receive writes it again,
+    // and the list at the switch holds bob (Paykit spec 8.1).
+    let w = World::new();
+    let (mut wallet, _, _) = received(&w, PaykitConfig::default()).await;
+    keep_ops(&w, 1);
+    wallet.block(&w.bob_id()).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut wallet = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    keep_ops(&w, 2);
+    let error = wallet.app_mut().deny(&[7; 32]).await.unwrap_err();
+    assert!(error.kept_batch().is_some(), "{error:?}");
+    wallet.receive(None).await.unwrap();
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(!lists.deny.contains(&w.bob_id()));
+    wallet.receive(None).await.unwrap();
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(lists.deny.contains(&w.bob_id()));
+}

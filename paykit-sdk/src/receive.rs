@@ -1607,7 +1607,8 @@ impl Paykit {
     /// block would be lost at the next read of the lists (Paykit spec 8.1). Each counts at
     /// once meanwhile, as a kept one does. One the switch refuses, or that can't be sent
     /// now, keeps its mark, so it still counts, until the list shows it or the user changes
-    /// it; only a store failure is an error.
+    /// it, and the pass runs again at the next receive: it is done only once each was
+    /// written, or kept by the client for a later try. Only a store failure is an error.
     pub(crate) async fn send_own_blocks_again(&mut self) -> crate::error::Result<()> {
         let Some(mut hold) = self
             .local_get::<crate::hold::RestoreHold>(key::RESTORE_HOLD)
@@ -1618,14 +1619,22 @@ impl Paykit {
         if hold.own_blocks_sent {
             return Ok(());
         }
+        let mut done = true;
         for (rest, blocked) in self.local_scan::<bool>(key::OWN_BLOCKS).await? {
             let pubky = pubky_switch_core::enc::unb64_array::<32>(&rest)
                 .map_err(|_| crate::error::PaykitError::corrupt())?;
             match self.list_own(&pubky, blocked).await {
+                // Neither written nor kept: tried again at the next receive.
                 Err(crate::error::PaykitError::Client(error))
-                    if !matches!(error.unkept(), AppError::Store(_) | AppError::Alarm(_)) => {}
+                    if !matches!(error.unkept(), AppError::Store(_) | AppError::Alarm(_)) =>
+                {
+                    done = false;
+                }
                 other => other?,
             }
+        }
+        if !done {
+            return Ok(());
         }
         hold.own_blocks_sent = true;
         self.local_put(key::RESTORE_HOLD, &hold).await
