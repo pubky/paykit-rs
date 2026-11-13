@@ -420,7 +420,7 @@ impl Paykit {
         let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
         // A record a view showed divergent pauses, also when a crash came before the
         // receive's events were taken (`divergent.rs`): every record held is looked at once.
-        paykit.sweep_divergent().await?;
+        Box::pin(paykit.sweep_divergent()).await?;
         // A restore clamps its cursor time after its commit: a crash between the two leaves
         // it for the next load (`Paykit::bound_restored_cursor_time`, idempotent). Nothing is
         // written under a certificate Paykit refuses.
@@ -672,7 +672,7 @@ impl Paykit {
             Box::pin(self.send_own_blocks_again()).await?;
         }
         // The records paused before this read, for the summary's new ones.
-        let paused_before = self.paused_records().await?;
+        let paused_before = Box::pin(self.paused_records()).await?;
         // Whether the client may list at this read's start ([`Paykit::records_listed`]).
         let keys_held_before = self.holds_scope_keys();
         let report = match Box::pin(self.app.receive(wait)).await {
@@ -684,6 +684,21 @@ impl Paykit {
             }
             Err(error) => return Err(error.into()),
         };
+        // What follows the read is its own future on the heap: its steps' futures are built
+        // in that future's poll, not in this one's, which stays small beside the client's
+        // deep read.
+        Box::pin(self.after_read(report, paused_before, keys_held_before)).await
+    }
+
+    /// The steps of [`Paykit::receive`] after the client's read returned `report`: the
+    /// records paused before it were `paused_before`, and the app held its scope keys at its
+    /// start when `keys_held_before`.
+    async fn after_read(
+        &mut self,
+        report: ReceiveReport,
+        paused_before: std::collections::BTreeSet<[u8; 32]>,
+        keys_held_before: bool,
+    ) -> Result<ReceiveSummary> {
         // The data epochs the entries the client stores for a key wait for, as its report
         // names them at every read while any waits.
         let key_epochs_awaited = key_epochs_awaited(&report.events);
@@ -706,7 +721,7 @@ impl Paykit {
         Box::pin(self.bound_missed_hold()).await?;
         if account_gone {
             // Nothing more is read or written there: the summary tells the host.
-            let divergent = self.newly_paused(&paused_before).await?;
+            let divergent = Box::pin(self.newly_paused(&paused_before)).await?;
             return Ok(ReceiveSummary {
                 report,
                 account_gone,
@@ -718,7 +733,7 @@ impl Paykit {
         // its events and cursor; the Paykit steps below act under the certificate, so none
         // runs.
         if let Some(refused) = self.certificate_refused() {
-            let divergent = self.newly_paused(&paused_before).await?;
+            let divergent = Box::pin(self.newly_paused(&paused_before)).await?;
             return Ok(ReceiveSummary {
                 report,
                 certificate_refused: Some(refused),
@@ -760,7 +775,7 @@ impl Paykit {
         Box::pin(self.place_kept_replies()).await?;
         // The messages kept over divergent records whose user has confirmed them, a list to
         // its held list, placed next (`divergent.rs`), unless the payer's side waits.
-        if !self.payer_waits(keys).await? {
+        if !Box::pin(self.payer_waits(keys)).await? {
             Box::pin(self.place_divergent_writes()).await?;
         }
         // Lists held over a `payment_lists` record that didn't read, once it reads.
@@ -787,7 +802,7 @@ impl Paykit {
         // A confirmed mark goes once its record's view isn't divergent any more, after this
         // read's events were taken.
         Box::pin(self.end_confirmed_marks()).await?;
-        let divergent = self.newly_paused(&paused_before).await?;
+        let divergent = Box::pin(self.newly_paused(&paused_before)).await?;
         Ok(ReceiveSummary {
             report,
             applied,

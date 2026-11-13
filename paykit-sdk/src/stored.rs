@@ -375,7 +375,7 @@ impl Paykit {
             // commit, before this event's, and taking the event again changes nothing. While
             // the client raises it with no ID, it is taken from the read's events instead.
             AppEvent::RecordDivergent { key: record, .. } => {
-                self.take_divergent_event(record).await?;
+                Box::pin(self.take_divergent_event(record)).await?;
                 true
             }
             _ => false,
@@ -714,7 +714,7 @@ impl Paykit {
         let key = self.activity_key(target)?;
         // Over a divergent record its user hasn't confirmed, only a stop is written: the
         // message waits, within its window (Paykit spec 6).
-        if self.divergent_write_waits(&key, &stored).await? {
+        if Box::pin(self.divergent_write_waits(&key, &stored)).await? {
             return Ok(Placed::Not);
         }
         let content = self.app.shared_record(&key).await?.map(|held| held.content);

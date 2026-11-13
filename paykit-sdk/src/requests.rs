@@ -651,7 +651,7 @@ impl Paykit {
                         None => None,
                     };
                     let mut view = payee_view(held.key, &record, request.as_ref());
-                    let pause = self.pause_seen(&held.key).await?;
+                    let pause = Box::pin(self.pause_seen(&held.key)).await?;
                     view.divergent = pause.paused || pause.divergent;
                     out.push(view);
                 }
@@ -761,8 +761,7 @@ impl Paykit {
             // A credit waits for the user while this record, or another of the same
             // counterparty, is divergent or was seen so: its upload may hold a receipt of the
             // same settlement (Paykit spec 6, 8.1 step 4).
-            self.refuse_credit_while_paused(record, &bound.counterparty)
-                .await?;
+            Box::pin(self.refuse_credit_while_paused(record, &bound.counterparty)).await?;
             let proof_stored = bound.proof.as_ref().ok_or(Refusal::NotFound)?;
             let Body::PaymentProof(proof) = proof_stored.body() else {
                 return Err(Refusal::NotFound.into());
@@ -1177,7 +1176,7 @@ impl Paykit {
         // Divergent shows on its own field whatever the status, so a request held after a
         // restore or blocked shows that too; the status says so only when nothing else holds
         // the request.
-        let pause = self.pause_seen(&record_key).await?;
+        let pause = Box::pin(self.pause_seen(&record_key)).await?;
         let divergent = pause.paused || pause.divergent;
         if status == RequestStatus::Open && pause.paused {
             status = RequestStatus::Divergent;

@@ -723,7 +723,7 @@ impl Paykit {
         let record_key = self.activity_key(&target)?;
         // Divergent after a provider loss, or seen so: paid by hand only once the user has
         // seen that the payee may have cancelled it (Paykit spec 6).
-        self.refuse_while_paused(&[record_key]).await?;
+        Box::pin(self.refuse_while_paused(&[record_key])).await?;
         let end_hold = if self.held(&record_key, &record).await? {
             if options.possibly_cancelled_confirmed.is_none() {
                 return Err(Refusal::HeldAfterRestore.into());
@@ -1273,7 +1273,7 @@ impl Paykit {
             let record = self
                 .app
                 .record_key(&list_target(&list.payee, &list.app_id))?;
-            if self.pause_at(&record).await?.blocks_by_hand() {
+            if Box::pin(self.pause_at(&record)).await?.blocks_by_hand() {
                 paused_lists.push(record);
             } else {
                 usable.push(list);
@@ -1374,7 +1374,7 @@ impl Paykit {
             return Ok(chosen);
         }
         if !paused_lists.is_empty() {
-            self.refuse_while_paused(&paused_lists).await?;
+            Box::pin(self.refuse_while_paused(&paused_lists)).await?;
         }
         // Lists in use that offer only endpoints the method doesn't pay, and no app's list to
         // ask again: a newer list needn't differ, so the payee isn't asked. A single-use
@@ -2125,7 +2125,7 @@ impl Paykit {
         // placed, while the request record is paused, by the one gate of the outcome
         // (Paykit spec 6); the entry stays owed, for a resume after the user's confirmation,
         // which sends it also over a view still divergent.
-        if self.dispatched_write_waits(&key).await? {
+        if Box::pin(self.dispatched_write_waits(&key)).await? {
             return Ok(());
         }
         self.release_acceptance(entry, None).await?;
@@ -2396,7 +2396,7 @@ impl Paykit {
             // before its acceptance is released: nothing of it goes over that record until
             // then, and then also over a view still divergent (Paykit spec 6).
             let record = self.activity_key(&ActivityTarget::payer(entry.natural_key.clone()))?;
-            if self.dispatched_write_waits(&record).await? {
+            if Box::pin(self.dispatched_write_waits(&record)).await? {
                 return Ok(Written::Divergent(record));
             }
             // Every path that writes a payment made goes through here: its acceptance is
@@ -2567,7 +2567,7 @@ impl Paykit {
         // own write but a stop, so a failure's `failed` goes alone, its record left as it is
         // (Paykit spec 6).
         if let Some(current) = &held {
-            let pause = self.pause_of(current).await?;
+            let pause = Box::pin(self.pause_of(current)).await?;
             if paid && pause.dispatched_write_waits() {
                 return Ok(OutcomeRecord::Divergent(key));
             }
@@ -3105,7 +3105,7 @@ impl Paykit {
         // A repeat is an automatic payment: none while its request record or its list's
         // record is divergent, or paused since it was seen so (Paykit spec 6). The view held
         // is taken before the record is read again, and the one read after it.
-        if self.divergent_withholds(entry).await? {
+        if Box::pin(self.divergent_withholds(entry)).await? {
             return Ok(true);
         }
         if entry.request_hash()?.is_none() {
@@ -3120,7 +3120,7 @@ impl Paykit {
                 cancelled(&fresh)
                     || rejected(&fresh)
                     || self.held(&self.activity_key(&target)?, &fresh).await?
-                    || self.divergent_withholds(entry).await?
+                    || Box::pin(self.divergent_withholds(entry)).await?
             }
             Fresh::Missing | Fresh::Unreadable => true,
         })
@@ -3140,7 +3140,7 @@ impl Paykit {
             );
         }
         for record in records {
-            if self.pause_at(&record).await?.blocks_automatic() {
+            if Box::pin(self.pause_at(&record)).await?.blocks_automatic() {
                 return Ok(true);
             }
         }

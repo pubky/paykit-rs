@@ -1371,7 +1371,7 @@ impl Paykit {
         }
         // A newer list over a divergent record its user hasn't confirmed stays held (Paykit
         // spec 6).
-        if self.divergent_write_waits(&record_key, &list).await? {
+        if Box::pin(self.divergent_write_waits(&record_key, &list)).await? {
             return Ok(());
         }
         let held = match self
@@ -1944,7 +1944,7 @@ impl Paykit {
             .ok_or(crate::error::Refusal::NotFound)?
             .stored(&own)?;
         // Over a divergent record the user confirms that record first (Paykit spec 6).
-        self.refuse_while_write_waits(&record_key).await?;
+        Box::pin(self.refuse_while_write_waits(&record_key)).await?;
         let held = self.app.shared_record(&record_key).await?;
         // A value only waiting for its scope key holds marks this app can't see yet: it is
         // never written over without them, and the list is placed with them once it opens.
