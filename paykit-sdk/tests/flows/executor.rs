@@ -5,7 +5,7 @@ use paykit_lib::allowances::{AllowanceTerms, Ledger};
 use paykit_lib::records::AllowanceRecord;
 use paykit_sdk::{
     AllowanceRole, AllowanceStatus, AppScopes, PayOptions, PayOutcome, Paykit, PaykitError,
-    Refusal, RequestRef,
+    Refusal, RequestRef, RequestStatus,
 };
 use pubky_switch_client::app::UserConfirmed;
 use pubky_switch_client::clock::Clock;
@@ -1971,4 +1971,110 @@ async fn test_executor_crossing_end_recorded_while_blocked_stops_a_separate_exec
 async fn test_executor_crossing_end_recorded_while_the_deny_copy_is_unknown_stops_a_separate_executor(
 ) {
     crossing_end_recorded_while_held(false).await;
+}
+
+/// Alice's answer to bob's open request, made while sends to bob are held (`blocked`: alice's
+/// user blocks him; otherwise the answering app's copy of the deny list isn't known), at the
+/// executor itself or, with `other_app`, at another own app: a rejection or, with `cancel`, a
+/// payer's cancellation. The answer is recorded at once and only its message waits (Paykit
+/// spec 8.1, "Blocked counterparties"), so once sends aren't held any more the executor pays
+/// nothing under the Allowance for that request.
+async fn held_answer_then_executor(blocked: bool, cancel: bool, other_app: bool) {
+    let w = World::new();
+    let (mut shop, mut x, record) = set_up(&w, terms_with(json!({}))).await;
+    let open = request(&w, &mut shop, &mut x, "0.5").await;
+    let mut contacts = w
+        .join(
+            &w.alice,
+            "contacts",
+            AppScopes::new()
+                .contacts()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+        )
+        .await;
+    let mut other = if other_app {
+        let mut app = w
+            .join(
+                &w.alice,
+                "answers",
+                AppScopes::new().pay().contacts().build().unwrap(),
+            )
+            .await;
+        app.app_mut().invite(&w.bob_id()).await.unwrap();
+        app.receive(None).await.unwrap();
+        Some(app)
+    } else {
+        None
+    };
+    let answering = other.as_mut().unwrap_or(&mut x);
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    let fail_read = || {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/allow".into(),
+                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                current: Value::Null,
+            });
+    };
+    if blocked {
+        contacts.block(&w.bob_id()).await.unwrap();
+        answering.receive(None).await.unwrap();
+        assert_eq!(
+            answering.requests().await.unwrap()[0].status,
+            RequestStatus::Blocked
+        );
+    } else {
+        fail_read();
+        answering.receive(None).await.unwrap();
+        fail_read();
+    }
+    if cancel {
+        answering.cancel_request(&open, None).await.unwrap();
+    } else {
+        answering.reject_request(&open, None).await.unwrap();
+    }
+    if blocked {
+        contacts.unblock(&w.bob_id()).await.unwrap();
+    }
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    x.receive(None).await.unwrap();
+    let refused = x.pay_under_allowance(&open, &record).await.unwrap_err();
+    let expected = if cancel {
+        Refusal::Cancelled
+    } else {
+        Refusal::Rejected
+    };
+    assert_eq!(
+        refused.refusal(),
+        Some(&expected),
+        "blocked {blocked} cancel {cancel} other_app {other_app}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_executor_pays_nothing_for_a_request_rejected_while_its_payee_was_blocked() {
+    held_answer_then_executor(true, false, false).await;
+    held_answer_then_executor(true, false, true).await;
+}
+
+#[tokio::test]
+async fn test_executor_pays_nothing_for_a_request_rejected_while_the_deny_copy_was_unknown() {
+    held_answer_then_executor(false, false, false).await;
+    held_answer_then_executor(false, false, true).await;
+}
+
+#[tokio::test]
+async fn test_executor_pays_nothing_for_a_request_cancelled_while_its_payee_was_blocked() {
+    held_answer_then_executor(true, true, false).await;
+    held_answer_then_executor(true, true, true).await;
+}
+
+#[tokio::test]
+async fn test_executor_pays_nothing_for_a_request_cancelled_while_the_deny_copy_was_unknown() {
+    held_answer_then_executor(false, true, false).await;
+    held_answer_then_executor(false, true, true).await;
 }
