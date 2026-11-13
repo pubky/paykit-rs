@@ -1367,3 +1367,30 @@ async fn test_blocked_return_floor_read_that_fails_at_the_repeat_holds_it() {
     phone.resume_payments().await.unwrap();
     assert_eq!(w.rail.pay_calls(&attempt_id), 2);
 }
+
+#[tokio::test]
+async fn test_blocked_return_floor_write_that_fails_keeps_the_ask_waiting() {
+    // Bob is unblocked and his mark asks, but the batch that raises the floor and queues the
+    // ask is refused: nothing is queued, the read doesn't fail, and the ask waits. The next
+    // receive raises the floor and asks.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    dropped_for_the_block(&w, &mut wallet, &mut shop).await;
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            current: serde_json::Value::Null,
+        });
+    wallet.receive(None).await.unwrap();
+    assert!(asked(&wallet, &w.bob_id()).await.is_empty());
+    assert_eq!(shared_floor(&wallet).await, None);
+    assert_eq!(block_marks(&wallet).await, 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(asked(&wallet, &w.bob_id()).await.len(), 1);
+    assert!(shared_floor(&wallet).await.is_some());
+}
