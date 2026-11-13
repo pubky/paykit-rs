@@ -176,7 +176,8 @@ pub(crate) struct DivergentMark {
     /// The write the user confirmed over, at or after `seen`; `None` while paused.
     confirmed: Option<SeenVersion>,
     /// The write the user confirmed over shown that it may hold a credit
-    /// ([`DivergentRecord::may_hold_credit`]); `None` until then. Never without `confirmed`.
+    /// ([`DivergentRecord::may_hold_credit`]); `None` until then. Always the write
+    /// `credit_shown` names, at or before `confirmed` ([`DivergentMark::bind_to`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     credit_confirmed: Option<SeenVersion>,
     /// The write a refusal of a credit showed the record at, that it may hold a credit
@@ -241,15 +242,21 @@ impl DivergentMark {
 
     /// The mark bound to the key it is read at, `dv/<record>` (`state::Stored`): the record
     /// its key names, of one of Paykit's collections, and a confirmation or a credit's
-    /// showing, if any, not before the write it paused, with a credit's confirmation only
-    /// beside a confirmation, states no run leaves. The one check for a restore and for every read at runtime; a value that fails
-    /// it is a corrupt store, never an absent mark.
+    /// showing, if any, not before the write it paused. A credit's confirmation is only of
+    /// the write its showing names (`credit_shown == credit_confirmed`), beside a plain
+    /// confirmation at that write or a later one (`confirmed >= credit_confirmed`): a
+    /// confirmation for a credit is recorded only at the write a credit's refusal showed,
+    /// and a later plain one only moves `confirmed` on ([`after_confirmation`]). The one
+    /// check for a restore and for every read at runtime; a value that fails it is a corrupt
+    /// store, never an absent mark, so no credit goes from it.
     pub(crate) fn bind_to(&self, record: &[u8; 32]) -> Result<()> {
         if self.record != *record
             || self.confirmed.is_some_and(|at| at < self.seen)
             || self.credit_confirmed.is_some_and(|at| at < self.seen)
             || self.credit_shown.is_some_and(|at| at < self.seen)
-            || (self.credit_confirmed.is_some() && self.confirmed.is_none())
+            || self.credit_confirmed.is_some_and(|credit| {
+                self.credit_shown != Some(credit) || self.confirmed.is_none_or(|at| at < credit)
+            })
             || self
                 .event
                 .as_deref()
@@ -1265,11 +1272,13 @@ impl Paykit {
     /// held, as one that may hold a credit: the one proof [`Paykit::confirm_divergent`]
     /// takes that a confirmation was shown so (Paykit spec 8.1 step 4). A mark that doesn't
     /// point to its record keeps nothing: its confirmation replaces it, and the next
-    /// credit's refusal shows the record again.
+    /// credit's refusal shows the record again. A mark whose credit the user has confirmed
+    /// keeps the showing that confirmation was of ([`DivergentMark::bind_to`]): its credit
+    /// waits for nothing more, and a refusal that names it is for the messages kept over it.
     async fn note_credit_shown(&mut self, record: &[u8; 32]) -> Result<()> {
         let (marked, view) = self.mark_and_view(record).await?;
         if let (Marked::Mark(mut mark), Some(view)) = (marked, view) {
-            if mark.credit_shown != Some(view.version) {
+            if mark.credit_waits() && mark.credit_shown != Some(view.version) {
                 mark.credit_shown = Some(view.version);
                 self.put_mark(record, &mark).await?;
             }
@@ -2061,6 +2070,76 @@ mod tests {
         assert!(crossed.bind_to(&RECORD).is_err());
         // A payer's record needs no credit's confirmation to end.
         assert!(confirmed_mark_ends(&confirmed(3), Some(&view(false, 4))));
+    }
+
+    #[test]
+    fn test_divergent_mark_every_state_a_writer_leaves_binds() {
+        let sold = |divergent, version| View {
+            collection: Collection::PayeeActivity,
+            ..view(divergent, version)
+        };
+        let paused = DivergentMark::paused(&sold(true, 3));
+        let shown = DivergentMark {
+            credit_shown: Some(sold(true, 3).version),
+            ..paused.clone()
+        };
+        let plain = after_confirmation(Some(&paused), Some(&sold(true, 3)), false).unwrap();
+        let plain_shown = after_confirmation(Some(&shown), Some(&sold(true, 3)), false).unwrap();
+        let credit = after_confirmation(Some(&shown), Some(&sold(true, 3)), true).unwrap();
+        let unshown = after_confirmation(Some(&paused), Some(&sold(true, 3)), true).unwrap();
+        let elsewhere = after_confirmation(Some(&shown), Some(&sold(true, 4)), true).unwrap();
+        // A later plain confirmation moves `confirmed` on, the credit's staying.
+        let later = after_confirmation(Some(&credit), Some(&sold(false, 5)), false).unwrap();
+        let later_credit = after_confirmation(Some(&credit), Some(&sold(false, 5)), true).unwrap();
+        let repaused = after_event(Some(&credit), &sold(false, 5), &event(1)).unwrap();
+        let reviewed = after_view(Some(&credit), &sold(true, 6)).unwrap();
+        let restored = credit.clone().restored();
+        let marks = [
+            &paused,
+            &shown,
+            &plain,
+            &plain_shown,
+            &credit,
+            &unshown,
+            &elsewhere,
+            &later,
+            &later_credit,
+            &repaused,
+            &reviewed,
+            &restored,
+        ];
+        for mark in marks {
+            assert!(mark.bind_to(&RECORD).is_ok(), "{mark:?}");
+        }
+        assert!(!credit.credit_waits() && !later.credit_waits());
+        assert_eq!(later.confirmed, Some(sold(false, 5).version));
+        assert_eq!(later.credit_confirmed, Some(sold(true, 3).version));
+    }
+
+    #[test]
+    fn test_divergent_mark_with_a_credit_confirmation_no_writer_leaves_is_corrupt() {
+        let paused = DivergentMark::paused(&view(true, 3));
+        let at = |version| Some(view(true, version).version);
+        for (credit_shown, credit_confirmed, confirmed) in [
+            // A credit's confirmation with no showing.
+            (None, at(3), at(3)),
+            (None, at(5), at(3)),
+            // One of another write than its showing names.
+            (at(4), at(3), at(4)),
+            (at(3), at(4), at(4)),
+            // One newer than the plain confirmation.
+            (at(5), at(5), at(3)),
+            // One with no plain confirmation.
+            (at(3), at(3), None),
+        ] {
+            let mark = DivergentMark {
+                credit_shown,
+                credit_confirmed,
+                confirmed,
+                ..paused.clone()
+            };
+            assert!(mark.bind_to(&RECORD).is_err(), "{mark:?}");
+        }
     }
 
     #[test]

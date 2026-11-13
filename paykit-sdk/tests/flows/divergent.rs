@@ -3240,6 +3240,71 @@ async fn test_divergent_credit_flag_set_by_the_host_credits_nothing() {
     assert!(shop.confirm_payment(&paid).await.unwrap().is_some());
 }
 
+#[tokio::test]
+async fn test_divergent_mark_with_a_credit_confirmation_no_writer_leaves_credits_nothing() {
+    // The shop's user confirmed the paid record plainly, never shown for a credit. Its stored
+    // mark is then made to hold a credit's confirmation with no showing, one of another
+    // write than its showing, or one newer than the plain confirmation: the mark reads as a
+    // corrupt store and the credit is refused, never let go. Put back, the mark still holds
+    // the credit for a confirmation shown for one.
+    for case in ["missing_showing", "mismatched_showing", "newer_than_confirmed"] {
+        let w = World::new();
+        let base = store();
+        let mut wallet = w.wallet("wallet").await;
+        let mut shop = shop_on(&w, Arc::clone(&base)).await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap();
+        shop.receive(None).await.unwrap();
+        let paid = sale(&shop, &request).await.record;
+        set_divergent(&base, &shop, &paid, true);
+        confirm(&mut shop, &paid).await.unwrap();
+        let stored = shop.app().protocol_scan(b"dv/").await.unwrap();
+        assert_eq!(stored.len(), 1, "{case}");
+        let (key, value) = stored[0].clone();
+        let mut mark: serde_json::Value = serde_json::from_slice(&value).unwrap();
+        let confirmed = mark["d"]["confirmed"].clone();
+        let mut newer = confirmed.clone();
+        newer["version"] = serde_json::json!(confirmed["version"].as_u64().unwrap() + 1);
+        let (shown, credit) = match case {
+            "missing_showing" => (serde_json::Value::Null, confirmed),
+            "mismatched_showing" => (newer, confirmed),
+            _ => (newer.clone(), newer),
+        };
+        mark["d"]["credit_shown"] = shown;
+        mark["d"]["credit_confirmed"] = credit;
+        let put = |value: Vec<u8>| pubky_switch_client::app::LocalWrite::Put {
+            key: key.clone(),
+            value,
+        };
+        shop.app_mut()
+            .protocol_commit(&[put(serde_json::to_vec(&mark).unwrap())])
+            .await
+            .unwrap();
+        let refused = shop.confirm_payment(&paid).await.unwrap_err();
+        assert!(
+            matches!(
+                refused,
+                paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Store(
+                    pubky_switch_client::error::StoreError::Corrupt
+                ))
+            ),
+            "{case}: {refused:?}"
+        );
+        assert!(shop.divergent_records().await.is_err(), "{case}");
+        shop.app_mut()
+            .protocol_commit(&[put(value)])
+            .await
+            .unwrap();
+        let refused = shop.confirm_payment(&paid).await.unwrap_err();
+        assert_eq!(refused_records(&refused), vec![(paid, false, true)], "{case}");
+        assert!(shown_for_a_credit(&refused), "{case}");
+    }
+}
+
 /// The publishing apps `wallet` asked bob for a list of, one per list request it sent.
 async fn list_asks(w: &World, wallet: &Paykit) -> Vec<Option<[u8; 16]>> {
     let sent = wallet
