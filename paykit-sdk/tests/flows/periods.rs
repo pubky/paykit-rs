@@ -3496,3 +3496,83 @@ async fn test_periods_proof_from_a_flagged_payer_over_a_payee_period_record_that
         "{notices:?}"
     );
 }
+
+/// After a `missed` item, the next receive's listing fails at Paykit's own listing: the
+/// client's listing right after the item, of the wallet's two collections, goes through.
+fn missed_with_paykits_listing_failing(w: &World) {
+    let now = w.clock.now_ms();
+    w.alice.switch().push_missed(1, now - 1_000, now);
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "records?collection".into(),
+            after: 2,
+        });
+}
+
+#[tokio::test]
+async fn test_periods_details_taken_with_no_effect_held_while_the_records_are_unlisted() {
+    // After a `missed` item whose listing fails, the payer's copy may lack records: details
+    // its copy would take with no effect, for a request it hasn't accepted here, are held,
+    // and taken once the records are listed.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let request = requested(&w, &mut shop, &mut wallet).await;
+    missed_with_paykits_listing_failing(&w);
+    inject_details(&w, &[wallet.app_id()], request.request_hash, january());
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(summary.records_unlisted.is_some(), "{summary:?}");
+    assert!(
+        !received(&summary, "paykit.payment_period_details"),
+        "{summary:?}"
+    );
+    // The next read takes the details while the records are still unlisted: held, and the
+    // listing at its end succeeds; the read after that takes them with no effect.
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(summary.records_unlisted.is_none(), "{summary:?}");
+    assert!(
+        !received(&summary, "paykit.payment_period_details"),
+        "{summary:?}"
+    );
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(
+        received(&summary, "paykit.payment_period_details"),
+        "{summary:?}"
+    );
+    assert!(wallet.request(&request).await.unwrap().periods.is_empty());
+}
+
+#[tokio::test]
+async fn test_periods_kept_details_wait_while_the_records_are_unlisted_then_stored() {
+    // Bob's details reach the wallet before his request, and are kept. The phone takes the
+    // request; after a `missed` item the wallet's client lists it, unaccepted, but Paykit's
+    // own listing fails. The kept details, which that record would take with no effect,
+    // wait while the copy may lack records. The phone then accepts: once the records are
+    // listed the details are stored in the period record.
+    let w = World::new();
+    let _shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let (plaintext, hash) = signed_request(&w);
+    inject_details(&w, &[wallet.app_id()], hash, january());
+    wallet.receive(None).await.unwrap();
+    w.deliver(&w.bob, "shop", &w.alice, &[phone.app_id()], &plaintext);
+    phone.receive(None).await.unwrap();
+    let request = RequestRef {
+        payee: w.bob_id(),
+        request_hash: hash,
+    };
+    missed_with_paykits_listing_failing(&w);
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(summary.records_unlisted.is_some(), "{summary:?}");
+    phone.accept_subscription(&request).await.unwrap();
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    // The request stays held after the `missed` item until the user confirms (Paykit spec
+    // 7.2); its period record holds the details all the same.
+    let view = wallet.request(&request).await.unwrap();
+    assert_eq!(view.periods.len(), 1, "{view:?}");
+    assert_eq!(view.periods[0].details.len(), 1, "{view:?}");
+}
