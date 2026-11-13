@@ -47,7 +47,12 @@
 //!   record, in the order the inbox accepted them, the earliest into its role and the
 //!   others reflected, or given up 30 days after its acceptance with the host's notice, as
 //!   a stored entry's message is, but never while its record's copy may be incomplete; an
-//!   own write of another kind, such as a receipt, waits for the confirmation.
+//!   own write of another kind, such as a receipt, waits for the confirmation. One rule for
+//!   every write that adds no stop ([`Pause::adds_no_stop_waits`]): it waits while the view
+//!   is divergent and unconfirmed, and while messages kept over the record that the inbox
+//!   accepted before it wait to be written, so a message that comes after the confirmation,
+//!   in the receive step or as a stored entry, a kept reply or a held list, is kept or waits
+//!   behind them and never takes their role.
 //! - **A confirmation is of the write shown** ([`DivergentRecord::version`]): one given for
 //!   another write than the one the app holds is refused, and the host shows the record
 //!   again.
@@ -58,8 +63,8 @@
 //!   reads as paused and names nothing. Every gate holds the record, a stop goes over it
 //!   with no mark written, the user's confirmation replaces it at the write held, and every
 //!   other record goes on. A kept message that doesn't point to its record, kept over a
-//!   later write or of another settlement than the rail's names now, is left as it is and
-//!   decides nothing.
+//!   later write or of another settlement than the rail's names now, isn't written, holds
+//!   nothing back, and is given up at its 30 days as any kept message.
 //!
 //! **Seen at every read.** A view is taken wherever the SDK reads a record to act on it, in
 //! the receive step with the cursor move and in its calls. The client's report that a view
@@ -445,6 +450,15 @@ impl Pause {
         self.paused && self.divergent
     }
 
+    /// The one rule of every write over it that adds no stop: it waits while
+    /// [`Pause::write_waits`] holds, and while messages kept over it wait to be written, so
+    /// those go first, in the order the inbox accepted them (Paykit spec 8.1, "Stored
+    /// entries"). A message the inbox accepted reads its own `writes_waiting`, of the kept
+    /// messages accepted before it ([`waits_behind`]).
+    pub(crate) fn adds_no_stop_waits(self) -> bool {
+        self.write_waits() || self.writes_waiting
+    }
+
     /// The messages kept over it wait for the user's confirmation: while it is paused. Once
     /// confirmed they are written, before anything else opens on it.
     pub(crate) fn kept_writes_wait(self) -> bool {
@@ -497,6 +511,15 @@ impl WriteRole {
             Self::Proof => "proof",
             Self::Receipt => "receipt",
             Self::List => "list",
+        }
+    }
+
+    /// The side of the records a message of this role goes into: a request, a receipt and a
+    /// list are the payer's, an acceptance and a proof the payee's.
+    fn side(self) -> crate::hold::RecordSide {
+        match self {
+            Self::Request | Self::Receipt | Self::List => crate::hold::RecordSide::Payer,
+            Self::Response | Self::Proof => crate::hold::RecordSide::Payee,
         }
     }
 
@@ -596,8 +619,8 @@ impl DivergentWrite {
     /// The kept write, read bound, as it is written: its message, where it goes by the
     /// app's rail, `settlement`, and the write it was kept over. `None` when the rail names
     /// another settlement, or none, than the one kept: the value points to another record
-    /// than the one the rail's would, and is left as it is, as one kept over a later write
-    /// than the record held is.
+    /// than the one the rail's would: as one kept over a later write than the record held,
+    /// it isn't written, and is given up at its 30 days ([`Paykit::place_divergent_writes`]).
     pub(crate) fn kept(
         &self,
         own: &[u8; 32],
@@ -750,6 +773,43 @@ fn kept_after(kept: &[StoredMessage], new: &StoredMessage) -> (bool, Vec<String>
     (kept_new, gone)
 }
 
+/// The order the inbox accepted `stored` in, as kept messages are written: by acceptance,
+/// then `msg_id`. A message with no acceptance time comes after every one with one.
+fn accepted_order(stored: &StoredMessage) -> (u64, &str) {
+    (
+        stored.accepted_at().unwrap_or(u64::MAX),
+        stored.message().msg_id.as_str(),
+    )
+}
+
+/// Whether a message of `kept`, the messages kept over the record held as `view`, read bound,
+/// waits to be written: one that still points to the record ([`DivergentWrite::kept`],
+/// [`points_to`]) and, when `behind` is given, that its inbox accepted before `behind`, a
+/// message written over the same record. One that doesn't point to the record any more holds
+/// nothing back (Paykit spec 8.1, "Stored entries").
+fn waits_behind(
+    kept: impl IntoIterator<Item = DivergentWrite>,
+    own: &[u8; 32],
+    settlement: Settlement<'_>,
+    view: Option<&View>,
+    behind: Option<&StoredMessage>,
+) -> Result<bool> {
+    for kept in kept {
+        let Some(kept) = kept.kept(own, settlement)? else {
+            continue;
+        };
+        let collection = kept.target.collection().ok_or_else(PaykitError::corrupt)?;
+        if !points_to(view, collection, kept.seen) {
+            continue;
+        }
+        match behind {
+            Some(behind) if accepted_order(&kept.message) >= accepted_order(behind) => {}
+            _ => return Ok(true),
+        }
+    }
+    Ok(false)
+}
+
 // ---------------------------------------------------------------------------------
 // The receive step
 
@@ -762,7 +822,7 @@ fn step_mark(cx: &ReceiveContext<'_>, view: &View) -> std::result::Result<Marked
 
 /// In the receive step: take the view of `held`, keeping the mark it sets with the cursor
 /// move, and tell what it allows.
-pub(crate) fn step_pause(
+fn step_pause(
     cx: &mut ReceiveContext<'_>,
     held: &SharedRecord,
 ) -> std::result::Result<Pause, Fail> {
@@ -776,6 +836,38 @@ pub(crate) fn step_pause(
         crate::receive::keep_local(cx, write);
     }
     Ok(marked.pause(Some(&view)))
+}
+
+/// In the receive step: take the view of `held` ([`step_pause`]) and tell whether a write of
+/// `stored` over it waits, by the one rule of writes that add no stop
+/// ([`Pause::adds_no_stop_waits`]): a stop never waits; any other message waits while the
+/// view is divergent and unconfirmed, and while messages kept over the record before it
+/// wait to be written, and is then kept beside them ([`step_keep`]).
+pub(crate) fn step_write_waits(
+    cx: &mut ReceiveContext<'_>,
+    held: &SharedRecord,
+    stored: &StoredMessage,
+    settlement: Settlement<'_>,
+) -> std::result::Result<bool, Fail> {
+    let pause = step_pause(cx, held)?;
+    if adds_stop(stored) {
+        return Ok(false);
+    }
+    if pause.write_waits() {
+        return Ok(true);
+    }
+    let Some(view) = View::of(held) else {
+        return Ok(false);
+    };
+    let kept = state::cx_scan::<DivergentWrite>(cx, &key::divergent_writes_at(&held.key))?;
+    waits_behind(
+        kept.into_iter().map(|(_, kept)| kept),
+        &cx.identity(),
+        settlement,
+        Some(&view),
+        Some(stored),
+    )
+    .map_err(|_| Fail::corrupt())
 }
 
 /// In the receive step: keep `stored`, a message whose write over `held`, a divergent
@@ -794,8 +886,8 @@ pub(crate) fn step_keep(
     // The messages kept already for the record and role are read bound, and checked against
     // the record, before anything is decided on them: one that doesn't read holds the entry,
     // and is never a reason to drop this one. One that doesn't point to the record, kept
-    // over a later write or of another settlement than the rail's, is left as it is and
-    // decides nothing; this one is kept beside it.
+    // over a later write or of another settlement than the rail's, decides nothing here; this
+    // one is kept beside it.
     let mut held_messages = Vec::new();
     for (_, kept) in state::cx_scan::<DivergentWrite>(cx, &key::divergent_writes_of(&record, role))?
     {
@@ -876,22 +968,29 @@ impl Paykit {
 
     /// Whether messages kept over the record at `record`, held as `view`, wait to be
     /// written: each read bound and checked against the record, one that doesn't point to
-    /// it, left as it is, deciding nothing.
+    /// it holding nothing back ([`waits_behind`]).
     async fn writes_waiting(&self, record: &[u8; 32], view: Option<&View>) -> Result<bool> {
-        let own = self.identity();
-        for (_, kept) in self
+        self.writes_waiting_before(record, view, None).await
+    }
+
+    /// [`Paykit::writes_waiting`], of the messages the inbox accepted before `behind` when it
+    /// is given.
+    async fn writes_waiting_before(
+        &self,
+        record: &[u8; 32],
+        view: Option<&View>,
+        behind: Option<&StoredMessage>,
+    ) -> Result<bool> {
+        let kept = self
             .local_scan::<DivergentWrite>(&key::divergent_writes_at(record))
-            .await?
-        {
-            let Some(kept) = kept.kept(&own, &|proof| self.rail.settlement_id(proof))? else {
-                continue;
-            };
-            let collection = kept.target.collection().ok_or_else(PaykitError::corrupt)?;
-            if points_to(view, collection, kept.seen) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+            .await?;
+        waits_behind(
+            kept.into_iter().map(|(_, kept)| kept),
+            &self.identity(),
+            &|proof| self.rail.settlement_id(proof),
+            view,
+            behind,
+        )
     }
 
     /// What the record at `record`, held as `view`, allows with `marked`, its kept writes
@@ -998,9 +1097,9 @@ impl Paykit {
     }
 
     /// Refused while an own write of another kind than a stop over the record at `record`
-    /// waits for the user's confirmation ([`Pause::write_waits`]).
+    /// waits, by the one rule of writes that add no stop ([`Pause::adds_no_stop_waits`]).
     pub(crate) async fn refuse_while_write_waits(&mut self, record: &[u8; 32]) -> Result<()> {
-        self.refuse_where(&[*record], Pause::write_waits, false)
+        self.refuse_where(&[*record], Pause::adds_no_stop_waits, false)
             .await
     }
 
@@ -1011,8 +1110,12 @@ impl Paykit {
         Ok(self.pause_at(record).await?.dispatched_write_waits())
     }
 
-    /// Whether a write of `stored` over the record at `record` waits for the user's
-    /// confirmation: it adds no stop and the record's view is divergent and not confirmed.
+    /// Whether a later write of `stored` over the record at `record` waits, by the one rule
+    /// of writes that add no stop ([`Pause::adds_no_stop_waits`]): a stop never waits; any
+    /// other message waits while the record's view is divergent and not confirmed, and while
+    /// messages kept over the record that its inbox accepted before `stored` wait to be
+    /// written, so those go first. The stored entries, the kept replies, the held lists and
+    /// the kept messages themselves are written through here.
     pub(crate) async fn divergent_write_waits(
         &mut self,
         record: &[u8; 32],
@@ -1021,7 +1124,13 @@ impl Paykit {
         if adds_stop(stored) {
             return Ok(false);
         }
-        Ok(self.pause_at(record).await?.write_waits())
+        if self.pause_at(record).await?.write_waits() {
+            return Ok(true);
+        }
+        let held = self.app.shared_record(record).await?;
+        let view = held.as_ref().and_then(View::of);
+        self.writes_waiting_before(record, view.as_ref(), Some(stored))
+            .await
     }
 
     /// A payee app's credit of a proof in `record`, from `counterparty`, waits for the user
@@ -1142,73 +1251,81 @@ impl Paykit {
     /// confirmed, each as a later write of the app's own with its kept copy dropped in the
     /// batch, through the stored entries' later write ([`Paykit::place_note`]) and its one
     /// rule ([`crate::stored::later_write`]); a list goes to its held list (`lh/`), which
-    /// the receive places next. One whose record is still paused waits, and is given up
-    /// [`crate::KEPT_MESSAGE_MS`] after its acceptance, on the highest service time
+    /// the receive places next. They go in the order the inbox accepted them, and one waits
+    /// while one accepted before it over the same record waits
+    /// ([`Paykit::divergent_write_waits`]). One whose record is still paused waits, and is
+    /// given up [`crate::KEPT_MESSAGE_MS`] after its acceptance, on the highest service time
     /// verified, with the host's notice ([`crate::NoticeKind::MessageGivenUp`]) (Paykit spec
-    /// 8.1, "Stored entries"). An error is returned, and the message stays kept.
+    /// 8.1, "Stored entries"). One that doesn't point to its record any more is never
+    /// written, and is given up the same way. An error is returned, and the message stays
+    /// kept.
     pub(crate) async fn place_divergent_writes(&mut self) -> Result<()> {
         let own = self.identity();
         // Each record's kept messages in the order they were accepted: the first is stored in
         // its role, the later ones reflected, as the receive step would have placed them.
         let mut all = Vec::new();
-        for (rest, kept) in self
+        for (rest, value) in self
             .local_scan::<DivergentWrite>(key::DIVERGENT_WRITES)
             .await?
         {
             let kept_key = format!("{}{rest}", key::DIVERGENT_WRITES);
-            let record = kept.record;
-            // One of another settlement than the rail's names now is left as it is.
-            let Some(kept) = kept.kept(&own, &|proof| self.rail.settlement_id(proof))? else {
-                continue;
-            };
-            all.push((record, kept.message.accepted_at(), kept_key, kept));
+            let stored = value.message.stored(&own)?;
+            // `None` for one of another settlement than the rail's names now: it doesn't
+            // point to its record.
+            let kept = value.kept(&own, &|proof| self.rail.settlement_id(proof))?;
+            all.push((value.record, value.role, kept_key, stored, kept));
         }
-        all.sort_by(|a, b| (a.0, a.1, &a.2).cmp(&(b.0, b.1, &b.2)));
-        for (record, _, kept_key, kept) in all {
+        all.sort_by(|a, b| (a.0, accepted_order(&a.3)).cmp(&(b.0, accepted_order(&b.3))));
+        for (record, role, kept_key, stored, kept) in all {
+            let accepted_at = stored.accepted_at().ok_or_else(PaykitError::corrupt)?;
             // What it points to is checked before anything is written: the record held at its
             // key is of its target's collection, at the write it was kept over or a later one.
-            // One that doesn't is left as it is, neither written nor given up, and the other
-            // records' messages go on. The record's mark is judged by the one check below
-            // (`Paykit::pause_at`): one that doesn't point to its record is paused.
+            // The record's mark is judged by the one check below (`Paykit::pause_at`): one
+            // that doesn't point to its record is paused.
             let held = self.app.shared_record(&record).await?;
             let view = held.as_ref().and_then(View::of);
-            let collection = kept.target.collection().ok_or_else(PaykitError::corrupt)?;
-            if !points_to(view.as_ref(), collection, kept.seen) {
-                continue;
-            }
-            let stored = kept.message;
-            let accepted_at = stored.accepted_at().ok_or_else(PaykitError::corrupt)?;
+            let kept = match kept {
+                Some(kept) => {
+                    let collection = kept.target.collection().ok_or_else(PaykitError::corrupt)?;
+                    points_to(view.as_ref(), collection, kept.seen).then_some(kept)
+                }
+                None => None,
+            };
             // A record absent or deleted while the copy of its side may lack records decides
             // nothing yet: the message waits, never given up meanwhile (Paykit spec 8.1,
             // "Records not listed yet"), as a stored entry's does.
-            let side = match &kept.target {
-                WriteTarget::Activity { target, .. } => crate::stored::record_side(target),
-                WriteTarget::List(_) => crate::hold::RecordSide::Payer,
-            };
             let content = held.map(|held| held.content);
             let placed = if matches!(content, None | Some(RecordContent::Deleted))
-                && self.side_unlisted(side).await?
+                && self.side_unlisted(role.side()).await?
             {
                 crate::stored::Placed::Waits
-            } else if self.pause_at(&record).await?.kept_writes_wait() {
-                crate::stored::Placed::Not
-            } else {
-                let mut tx = Tx::default();
-                tx.delete(&kept_key);
-                match kept.target {
-                    WriteTarget::List(_) => {
-                        self.hold_kept_list(record, &stored, tx).await?;
-                        crate::stored::Placed::Done
-                    }
-                    WriteTarget::Activity {
-                        target,
-                        role,
-                        creates,
-                    } => {
-                        self.place_note(&target, role, creates, stored.clone(), tx)
-                            .await?
+            } else if let Some(kept) = kept {
+                if self.pause_at(&record).await?.kept_writes_wait() {
+                    crate::stored::Placed::Not
+                } else {
+                    let mut tx = Tx::default();
+                    tx.delete(&kept_key);
+                    match kept.target {
+                        WriteTarget::List(_) => {
+                            self.hold_kept_list(record, &stored, tx).await?;
+                            crate::stored::Placed::Done
+                        }
+                        WriteTarget::Activity {
+                            target,
+                            role,
+                            creates,
+                        } => {
+                            self.place_note(&target, role, creates, stored.clone(), tx)
+                                .await?
+                        }
                     }
                 }
+            } else {
+                // One that doesn't point to its record any more, kept over a later write than
+                // the one held or of another settlement than the rail's names now, isn't
+                // written: it is given up at its 30 days as any kept message, and nothing
+                // waits for it meanwhile ([`waits_behind`]).
+                crate::stored::Placed::Not
             };
             if crate::stored::later_write(placed, accepted_at, self.service_time())
                 == crate::stored::LaterWrite::GiveUp
@@ -1586,7 +1703,7 @@ mod tests {
             paykit_lib::derive::settlement_id(proof)
         };
         assert!(kept.kept(&bob.id(), &rail).unwrap().is_some());
-        // The rail names another settlement now, or none: left as it is, no error.
+        // The rail names another settlement now, or none: it doesn't point, no error.
         assert!(kept
             .kept(&bob.id(), &|_| Some(b"t2".to_vec()))
             .unwrap()

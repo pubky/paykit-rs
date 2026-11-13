@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
+use paykit_lib::records::ActivitySide;
 use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{
     AppScopes, NoticeKind, PayOptions, PayOutcome, PayeeStatus, Paykit, PaykitConfig, Rail,
@@ -846,7 +847,8 @@ async fn test_divergent_kept_writes_wait_after_the_view_clears_until_confirmed()
 #[tokio::test]
 async fn test_divergent_kept_write_pointing_past_its_record_never_written() {
     // A kept message whose recorded write is later than the record held isn't that record's:
-    // it is left as it is, neither written nor given up, and the receive goes on.
+    // it isn't written, nothing waits for it, and it is given up at its 30 days with the
+    // host's notice, as any kept message (Paykit spec 8.1, "Stored entries").
     let w = World::new();
     let (_base, mut shop, _wallet, request, record) = kept_at_the_shop(&w).await;
     let mut writes = Vec::new();
@@ -863,6 +865,21 @@ async fn test_divergent_kept_write_pointing_past_its_record_never_written() {
     shop.receive(None).await.unwrap();
     assert_eq!(sale(&shop, &request).await.status, PayeeStatus::Requested);
     assert_eq!(shop.app().protocol_scan(b"dw/").await.unwrap().len(), 2);
+    assert!(shop.notices().await.unwrap().is_empty());
+    // Nothing waits for them: the record shows no writes waiting.
+    assert!(shop
+        .divergent_records()
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| r.record != record || !r.writes_waiting));
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    let notices = shop.notices().await.unwrap();
+    assert_eq!(notices.len(), 2, "{notices:?}");
+    assert!(notices.iter().all(|n| n.kind == NoticeKind::MessageGivenUp));
+    assert_eq!(sale(&shop, &request).await.status, PayeeStatus::Requested);
 }
 
 #[tokio::test]
@@ -1677,4 +1694,167 @@ mod durable_event {
         assert_eq!(w.rail.pay_calls(&attempt_id), 1);
         assert!(wallet.divergent_records().await.unwrap()[0].paused);
     }
+}
+
+/// The `msg_id` of the message the shop's record at `record` holds in its role `role`.
+async fn in_role(shop: &Paykit, record: &[u8; 32], role: &str) -> Option<String> {
+    let held = shop.app().shared_record(record).await.unwrap().unwrap();
+    let value = held.content.value().unwrap();
+    let read =
+        paykit_lib::records::ActivityRecord::read(value, &shop.identity(), ActivitySide::Payee)
+            .unwrap();
+    let stored = match role {
+        "response" => read.response,
+        "proof" => read.proof,
+        _ => panic!("a role"),
+    };
+    stored.map(|stored| stored.message().msg_id.clone())
+}
+
+#[tokio::test]
+async fn test_divergent_acceptance_after_a_confirmation_written_after_the_kept_one() {
+    // An acceptance is kept over the divergent record; the user confirms; a second one comes
+    // in the next read, whose step runs before the kept messages are written. It waits behind
+    // the kept one, which goes into its role first, in the order the inbox accepted them
+    // (Paykit spec 8.1, "Stored entries").
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_on(&w, Arc::clone(&base)).await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let record = sale(&shop, &request).await.record;
+    set_divergent(&base, &shop, &record, true);
+    wallet.receive(None).await.unwrap();
+    let body = || {
+        serde_json::json!({ "label": null })
+            .as_object()
+            .cloned()
+            .unwrap()
+    };
+    let shop_app = shop.app_id();
+    let acceptance = |w: &World| {
+        w.inject(
+            &w.alice,
+            "wallet",
+            &w.bob,
+            &[shop_app],
+            "paykit.payment_request_acceptance",
+            vec![request.request_hash],
+            body(),
+        )
+    };
+    let first = acceptance(&w);
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.app().protocol_scan(b"dw/").await.unwrap().len(), 1);
+    confirm(&mut shop, &record).await.unwrap();
+    w.clock.advance_ms(1_000);
+    let second = acceptance(&w);
+    shop.receive(None).await.unwrap();
+    assert_eq!(in_role(&shop, &record, "response").await, Some(first));
+    let held = shop.app().shared_record(&record).await.unwrap().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    assert!(value["msg_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(second)));
+    assert!(shop.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_divergent_proof_after_a_confirmation_leaves_the_kept_one_credited() {
+    // The acceptance and the proof of a payment are kept over the divergent record; the user
+    // confirms; a second proof comes in the next read. The kept proof takes the role, and is
+    // the one credited.
+    let w = World::new();
+    let (_base, mut shop, wallet, request, record) = kept_at_the_shop(&w).await;
+    let sent = wallet
+        .app()
+        .sent_to(&w.bob_id(), 0, u64::MAX)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|sent| sent.kind == "paykit.payment_proof")
+        .unwrap();
+    let message = pubky_switch_core::message::Message::parse(
+        sent.plaintext.json(),
+        paykit_lib::kinds::OPAQUE_MEMBERS,
+    )
+    .unwrap();
+    confirm(&mut shop, &record).await.unwrap();
+    w.clock.advance_ms(1_000);
+    let again = w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        message.body.clone(),
+    );
+    assert_ne!(again, message.msg_id);
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        in_role(&shop, &record, "proof").await,
+        Some(message.msg_id.clone())
+    );
+    assert_eq!(
+        sale(&shop, &request).await.status,
+        PayeeStatus::ProofReceived
+    );
+}
+
+#[tokio::test]
+async fn test_divergent_later_write_waits_behind_a_kept_one_not_written_yet() {
+    // The kept acceptance can't be written at the receive after the confirmation: its write
+    // meets the quota. A later acceptance in that read waits behind it, kept, and the kept
+    // one goes first once the switch takes it.
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_on(&w, Arc::clone(&base)).await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let record = sale(&shop, &request).await.record;
+    set_divergent(&base, &shop, &record, true);
+    wallet.receive(None).await.unwrap();
+    let body = || {
+        serde_json::json!({ "label": null })
+            .as_object()
+            .cloned()
+            .unwrap()
+    };
+    let shop_app = shop.app_id();
+    let acceptance = |w: &World| {
+        w.inject(
+            &w.alice,
+            "wallet",
+            &w.bob,
+            &[shop_app],
+            "paykit.payment_request_acceptance",
+            vec![request.request_hash],
+            body(),
+        )
+    };
+    let first = acceptance(&w);
+    shop.receive(None).await.unwrap();
+    confirm(&mut shop, &record).await.unwrap();
+    w.clock.advance_ms(1_000);
+    let second = acceptance(&w);
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::QuotaExceeded,
+            current: serde_json::Value::Null,
+        });
+    shop.receive(None).await.unwrap();
+    assert_eq!(in_role(&shop, &record, "response").await, None);
+    assert_eq!(shop.app().protocol_scan(b"dw/").await.unwrap().len(), 2);
+    shop.receive(None).await.unwrap();
+    assert_eq!(in_role(&shop, &record, "response").await, Some(first));
+    let held = shop.app().shared_record(&record).await.unwrap().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    assert!(value["msg_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(second)));
 }

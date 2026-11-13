@@ -138,7 +138,7 @@ pub(crate) fn past_window(accepted_at: u64, service: Option<u64>) -> bool {
 }
 
 /// The side of the shared records `target` is of.
-pub(crate) fn record_side(target: &ActivityTarget) -> crate::hold::RecordSide {
+fn record_side(target: &ActivityTarget) -> crate::hold::RecordSide {
     match target.side {
         crate::activity::SideTag::Payer => crate::hold::RecordSide::Payer,
         crate::activity::SideTag::Payee => crate::hold::RecordSide::Payee,
@@ -711,8 +711,9 @@ impl Paykit {
         locals: Tx,
     ) -> Result<Placed> {
         let key = self.activity_key(target)?;
-        // Over a divergent record its user hasn't confirmed, only a stop is written: the
-        // message waits, within its window (Paykit spec 6).
+        // Over a divergent record its user hasn't confirmed, only a stop is written, and while
+        // messages kept over it before this one wait to be written, they go first: the
+        // message waits, within its window (Paykit spec 6, 8.1 "Stored entries").
         if Box::pin(self.divergent_write_waits(&key, &stored)).await? {
             return Ok(Placed::Not);
         }

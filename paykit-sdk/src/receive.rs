@@ -500,11 +500,11 @@ fn place(
         return Ok(());
     }
     // Over a divergent record its user hasn't confirmed, only a stop is written; any other
-    // message is kept, and written once the user confirms (Paykit spec 6). The view is
-    // taken either way: a stop written over it leaves the record paused.
+    // message is kept, and written once the user confirms (Paykit spec 6), as one is while
+    // messages kept over the record before it wait to be written. The view is taken either
+    // way: a stop written over it leaves the record paused.
     if let Some(held) = cx.record(&target.record_target())? {
-        let pause = crate::divergent::step_pause(cx, &held)?;
-        if !crate::divergent::adds_stop(stored) && pause.write_waits() {
+        if crate::divergent::step_write_waits(cx, &held, stored, settlement)? {
             return crate::divergent::step_keep(cx, &held, stored, settlement);
         }
     }
@@ -728,11 +728,11 @@ fn receipt_effect(
     let Some(value) = held_or_unlisted(cx, &target, RecordSide::Payer)? else {
         return Ok(());
     };
-    // Over a divergent record its user hasn't confirmed, the receipt is kept whole, its
-    // effects on the claim and the journal with it, and taken once the user confirms
-    // (Paykit spec 6).
+    // Over a divergent record its user hasn't confirmed, or while messages kept over it
+    // before it wait to be written, the receipt is kept whole, its effects on the claim and
+    // the journal with it, and taken once the user confirms (Paykit spec 6).
     if let Some(held) = cx.record(&target.record_target())? {
-        if crate::divergent::step_pause(cx, &held)?.write_waits() {
+        if crate::divergent::step_write_waits(cx, &held, stored, settlement)? {
             return crate::divergent::step_keep(cx, &held, stored, settlement);
         }
     }
@@ -1078,10 +1078,10 @@ fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Result<()
     }
     let own = cx.identity();
     let target = list_target(&payee, &app_id);
-    // Over a divergent record its user hasn't confirmed, the list is kept, and written once
-    // the user confirms (Paykit spec 6).
+    // Over a divergent record its user hasn't confirmed, or while a list kept over it waits
+    // to be written, the list is kept, and written once the user confirms (Paykit spec 6).
     if let Some(held) = cx.record(&target)? {
-        if crate::divergent::step_pause(cx, &held)?.write_waits() {
+        if crate::divergent::step_write_waits(cx, &held, stored, &|_| None)? {
             return crate::divergent::step_keep(cx, &held, stored, &|_| None);
         }
     }

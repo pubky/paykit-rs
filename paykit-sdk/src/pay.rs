@@ -2563,15 +2563,16 @@ impl Paykit {
         }
         // A payment made waits while the record is paused, by the one gate of the outcome
         // ([`crate::divergent::Pause::dispatched_write_waits`]), `done` never going without
-        // the record's update; a divergent record the user hasn't confirmed takes no other
-        // own write but a stop, so a failure's `failed` goes alone, its record left as it is
-        // (Paykit spec 6).
+        // the record's update; a divergent record the user hasn't confirmed, or one whose
+        // kept messages wait to be written, takes no other own write but a stop
+        // ([`crate::divergent::Pause::adds_no_stop_waits`]), so a failure's `failed` goes
+        // alone, its record left as it is (Paykit spec 6).
         if let Some(current) = &held {
             let pause = Box::pin(self.pause_of(current)).await?;
             if paid && pause.dispatched_write_waits() {
                 return Ok(OutcomeRecord::Divergent(key));
             }
-            if !paid && pause.write_waits() {
+            if !paid && pause.adds_no_stop_waits() {
                 return Ok(OutcomeRecord::Unchanged);
             }
         }
