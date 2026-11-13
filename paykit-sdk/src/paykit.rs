@@ -504,6 +504,12 @@ impl Paykit {
         .await?;
         let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
         paykit.bound_restored_cursor_time().await?;
+        // The backup's lists that may still be in the restored outbox, with endpoints the
+        // user may have removed since, are withdrawn behind it before the host can flush it
+        // (`Paykit::withdraw_restored_lists`); one that doesn't go now goes at a receive.
+        if paykit.certificate_refused().is_none() {
+            Box::pin(paykit.withdraw_restored_lists()).await?;
+        }
         Ok(paykit)
     }
 
@@ -807,7 +813,8 @@ impl Paykit {
             Box::pin(self.queue_own_again()).await?;
         }
         let asked = Box::pin(self.send_asks()).await?;
-        // The lists owed or due (Paykit spec 8.4).
+        // The lists owed or due (Paykit spec 8.4), after the withdrawals a restore owes.
+        Box::pin(self.withdraw_restored_lists()).await?;
         let lists = Box::pin(self.tend_lists(false, &duties)).await?;
         Ok(ReceiveSummary {
             report,

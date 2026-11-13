@@ -332,6 +332,15 @@ pub(crate) struct Recipient {
     /// the last 24 hours.
     pub(crate) answers: Vec<u64>,
     pub(crate) versions: Vec<Offered>,
+    /// A restore withdrew the list from it, as the backup's version it holds may carry
+    /// endpoints the user removed since ([`Paykit::withdraw_restored_lists`]): it gets the
+    /// lists again when the host sets its list, unless the host withdraws it itself first.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) paused_by_restore: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Recipient {
@@ -350,6 +359,7 @@ impl Recipient {
             failed_since_ms: None,
             answers: Vec::new(),
             versions: Vec::new(),
+            paused_by_restore: false,
         }
     }
 
@@ -701,8 +711,18 @@ impl Paykit {
         tx.put(key::LIST, &list)?
             .delete(key::LISTS_AWAIT_HOST)
             .delete(key::LISTS_NOTICE);
+        // A counterparty the restore withdrew from gets the lists again, as before the
+        // restore ([`Paykit::withdraw_restored_lists`]).
         let mut active = Vec::new();
         for mut recipient in self.recipients().await? {
+            if recipient.paused_by_restore {
+                recipient.paused_by_restore = false;
+                recipient.active = true;
+                recipient.owed = true;
+                tx.put(&key::list_recipient(&recipient.counterparty), &recipient)?;
+                active.push(recipient.counterparty);
+                continue;
+            }
             if recipient.active {
                 active.push(recipient.counterparty);
                 if !recipient.owed {
@@ -759,18 +779,98 @@ impl Paykit {
     /// them. An empty version that doesn't reach its inbox is owed, and goes again at a later
     /// receive, a restore's included ([`Paykit::receive`]).
     ///
+    /// After a restore, while the lists wait for the host ([`Paykit::lists_await_host`]), a
+    /// withdrawal also goes to a counterparty the backup holds nothing of: the device the
+    /// backup came from may have sent it a list since. The host re-applies every withdrawal
+    /// the user made since the backup this way, then sets its list. Its version is above
+    /// anything an app of this identity sent before the restore: while the lists wait, a
+    /// version is above the later of the device clock and the highest service time verified,
+    /// plus twice the clock tolerance. The host's withdrawal also ends the restore's own
+    /// (a list the restored outbox carried, withdrawn behind it): the counterparty doesn't
+    /// get the lists again when the host sets its list.
+    ///
     /// # Errors
     ///
-    /// [`Refusal::NotFound`] for a counterparty that never got a list;
-    /// [`Refusal::CertificateRefused`]; [`Refusal::ScopeMissing`] without `request` or a
-    /// label; a store failure.
+    /// [`Refusal::NotFound`] for a counterparty that never got a list, outside the wait
+    /// after a restore; [`Refusal::CertificateRefused`]; [`Refusal::ScopeMissing`] without
+    /// `request` or a label; a store failure.
     pub async fn withdraw_list_from(&mut self, counterparty: &[u8; 32]) -> Result<ListsPublished> {
         self.refresh_own()?;
         self.require_payee()?;
-        if self.recipient(counterparty).await?.is_none() {
-            return Err(Refusal::NotFound.into());
+        if counterparty == &self.identity() {
+            return Err(
+                Refusal::Usage("Paykit spec 8.4: a list goes to another identity".into()).into(),
+            );
+        }
+        match self.recipient(counterparty).await? {
+            Some(mut recipient) if recipient.paused_by_restore => {
+                recipient.paused_by_restore = false;
+                self.local_put(&key::list_recipient(counterparty), &recipient)
+                    .await?;
+            }
+            Some(_) => {}
+            None if self.lists_await_host().await? => {}
+            None => return Err(Refusal::NotFound.into()),
         }
         self.publish_to(&[*counterparty], true, None).await
+    }
+
+    /// After a restore, while the lists wait for the host, withdraw the list from each
+    /// counterparty that gets the lists whose newest version the restore brought back before
+    /// it was seen delivered, that offers endpoints, and that the restored outbox carries
+    /// (Paykit spec 7.2, 8.4). The restored outbox delivers that version after the restore,
+    /// and it holds the backup's endpoints, which the user may have removed since. The empty version goes behind it, newer, so a payer that
+    /// takes both holds no list; one that takes the old version alone holds it until the
+    /// empty one comes. Such a counterparty gets the lists again when the host sets its list
+    /// ([`Paykit::set_list_endpoints`]). Run by the restore before the app is handed to the
+    /// host, and again at each receive until each has gone; a version the app can't tell was
+    /// delivered counts as not delivered.
+    ///
+    /// # Errors
+    ///
+    /// A store failure or an alarm.
+    pub(crate) async fn withdraw_restored_lists(&mut self) -> Result<()> {
+        if !self.lists_await_host().await? || self.require_payee().is_err() {
+            return Ok(());
+        }
+        for mut recipient in self.recipients().await? {
+            let Some(newest) = recipient
+                .current()
+                .filter(|newest| recipient.active && newest.restored)
+                .filter(|newest| !newest.endpoints.is_empty())
+                .cloned()
+            else {
+                continue;
+            };
+            // Only a version the restored outbox carries goes after the restore: one queued
+            // still, or delivered from it since. One the client doesn't know was not carried,
+            // so nothing of this restore sends it. An answer that can't be read counts as
+            // carried.
+            let carried = match self.app.delivery(&newest.msg_id).await {
+                Ok(Some(Delivery::Queued { .. } | Delivery::Accepted { .. })) => true,
+                Ok(_) => false,
+                Err(error @ (AppError::Store(_) | AppError::Alarm(_))) => return Err(error.into()),
+                Err(_) => true,
+            };
+            if !carried {
+                continue;
+            }
+            let counterparty = recipient.counterparty;
+            if !recipient.paused_by_restore {
+                recipient.paused_by_restore = true;
+                self.local_put(&key::list_recipient(&counterparty), &recipient)
+                    .await?;
+            }
+            match Box::pin(self.publish_to(&[counterparty], true, None)).await {
+                Ok(_) => {}
+                Err(error @ PaykitError::Client(AppError::Store(_) | AppError::Alarm(_))) => {
+                    return Err(error)
+                }
+                // Tried again at the next receive.
+                Err(_) => {}
+            }
+        }
+        Ok(())
     }
 
     /// Every counterparty this app sends its lists to, or did, with the newest version sent.
@@ -1071,7 +1171,19 @@ impl Paykit {
         let now = self.now();
         let last = self.local_get(key::LAST_VERSION).await?;
         check_last_version(last, recipient.current().map(|o| o.version))?;
-        let version = next_version(now, last);
+        // While the lists wait for the host after a restore, a version is also above the
+        // later of the device clock and the highest service time verified, plus twice the
+        // clock tolerance: an app of this identity on the device the backup came from
+        // published before the restore, by a clock within the tolerance of the service's, so
+        // every version it sent is below that (Switch spec 10.1). The backup's last version
+        // alone can't bound what it sent since.
+        let floor = if self.lists_await_host().await? {
+            now.max(self.service_time().unwrap_or(0))
+                .saturating_add(2 * pubky_switch_core::records::CLOCK_TOLERANCE_MS)
+        } else {
+            now
+        };
+        let version = next_version(floor, last);
         let expires_at_ms = now.saturating_add(LIST_LIFETIME_MS);
         let mut issued = Releases {
             counterparty,

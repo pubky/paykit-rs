@@ -412,10 +412,11 @@ impl Paykit {
         Ok(true)
     }
 
-    /// The activity record this app holds that holds the message `msg_id`, in a role or
-    /// by its `msg_id`: of `payer_activity`, then of `payee_activity` under every label,
-    /// each bound to its key (Paykit wire 5.3). A record that doesn't read or bind is
-    /// passed over, as a reader doesn't act on it.
+    /// The activity record this app holds that holds its own message `msg_id`, one this
+    /// identity and app signed, in a role: of `payer_activity`, then of `payee_activity`
+    /// under every label, each bound to its key (Paykit wire 5.3). A counterparty's message
+    /// under the same `msg_id` holds nothing of this app's. A record that doesn't read or
+    /// bind is passed over, as a reader doesn't act on it.
     async fn record_holding(&self, msg_id: &str) -> Result<Option<ActivityRecord>> {
         let own = self.identity();
         for (collection, side) in [
@@ -440,7 +441,15 @@ impl Paykit {
                 ) else {
                     continue;
                 };
-                if record.reflects(msg_id) {
+                // Only a message this identity and app signed: a counterparty's message under
+                // the same `msg_id` names no message of this app's.
+                let own_app = self.app.cert().app_id();
+                let holds = record.stored().iter().any(|(_, stored)| {
+                    stored.message().msg_id == msg_id
+                        && stored.sender() == own
+                        && stored.cert().app_id() == own_app
+                });
+                if holds {
                     return Ok(Some(record));
                 }
             }
@@ -667,12 +676,20 @@ impl Paykit {
                                 );
                                 tx.put(&notice, &given_up)?;
                             }
-                            Some(mut kept) if kept.stored.as_ref() != Some(&handle) => {
+                            Some(mut kept)
+                                if kept.kind == crate::NoticeKind::MessageGivenUp
+                                    && kept.stored.as_ref() != Some(&handle) =>
+                            {
                                 kept.stored = Some(handle);
                                 kept.origin = None;
                                 tx.put(&notice, &kept)?;
                             }
-                            Some(_) => {}
+                            Some(kept) if kept.kind == crate::NoticeKind::MessageGivenUp => {}
+                            // The key holds this app's own message given up undelivered to
+                            // that sender, under the same `msg_id`: the give-up waits, the note
+                            // and its entry kept, until the host acknowledges that notice.
+                            // Nothing is dropped and neither notice is overwritten.
+                            Some(_) => continue,
                         }
                         self.local_commit(tx).await?;
                     }

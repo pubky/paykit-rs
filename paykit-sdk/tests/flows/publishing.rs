@@ -1922,12 +1922,10 @@ async fn test_publishing_last_version_below_a_version_sent_refused_as_corrupt() 
     );
 }
 
-// Probe tests of the independent pre-review; each asserts the behaviour the part claims.
-
 /// A changed list whose queueing fails (as a crash between its record and its queueing
 /// leaves it) still reaches the counterparty: the change is owed until it is sent.
 #[tokio::test]
-async fn test_publishing_probe_changed_list_owed_after_its_queueing_failed() {
+async fn test_publishing_changed_list_owed_after_its_queueing_failed() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let base = Arc::new(FailingCommits::default());
@@ -1959,7 +1957,7 @@ async fn test_publishing_probe_changed_list_owed_after_its_queueing_failed() {
 /// A restore gives back no single-use payload of a version the payer received before the
 /// backup: she can still pay it.
 #[tokio::test]
-async fn test_publishing_probe_restore_keeps_the_payload_of_a_delivered_version() {
+async fn test_publishing_restore_keeps_the_payload_of_a_delivered_version() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -1985,7 +1983,7 @@ async fn test_publishing_probe_restore_keeps_the_payload_of_a_delivered_version(
 
 /// The same with the version settled before the backup: seen reached, nothing goes back.
 #[tokio::test]
-async fn test_publishing_probe_restore_keeps_the_payload_of_a_version_settled_before_the_backup() {
+async fn test_publishing_restore_keeps_the_payload_of_a_version_settled_before_the_backup() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -2101,7 +2099,7 @@ async fn test_publishing_restored_list_not_republished_until_the_host_sets_it() 
 /// The same for a counterparty also blocked: the shared deny list still holds her after
 /// the restore, so no renewal goes.
 #[tokio::test]
-async fn test_publishing_probe_withdrawal_after_the_backup_lost_but_the_block_holds() {
+async fn test_publishing_withdrawal_after_the_backup_lost_but_the_block_holds() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = shop_reading_lists(&w, &mut wallet).await;
@@ -2141,4 +2139,104 @@ async fn test_publishing_change_reaches_a_counterparty_the_failed_fan_out_never_
     assert_eq!(got.lists.sent.len(), 2, "{:?}", got.lists);
     assert_eq!(lists_taken(&mut wallet).await, 1);
     assert_eq!(lists_taken(&mut other).await, 1);
+}
+
+/// The backup's list still queued at the backup goes from the restored outbox; the restore
+/// queues an empty newer version behind it, so a payer that takes both holds no list and
+/// can't pay the endpoints the user removed since. Once the host sets its list, she gets it.
+#[tokio::test]
+async fn test_publishing_restored_outbox_list_superseded_by_a_withdrawal_behind_it() {
+    let w = World::new();
+    // Alice's wallet doesn't admit bob yet: what he sends her stays queued.
+    let mut wallet = w
+        .join(&w.alice, "wallet", AppScopes::new().pay().build().unwrap())
+        .await;
+    let mut shop = w.shop().await;
+    w.publish_to_alice(&mut shop).await;
+    let backup = shop.backup().await.unwrap();
+    // The user removes the reusable endpoint after the backup; the device is lost.
+    shop.set_list_endpoints(list("lno1changed")).await.unwrap();
+    drop(shop);
+    let mut shop = restored_shop(&w, &backup).await;
+    assert!(shop.lists_await_host().await.unwrap());
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    shop.flush().await.unwrap();
+    // She takes both: the newer, empty one is what she holds.
+    lists_taken(&mut wallet).await;
+    assert!(no_usable_list(&w, &mut wallet).await);
+    assert!(wallet
+        .pay_without_request(to_bob(&w, "btc-lightning-bolt12"))
+        .await
+        .is_err());
+    // The host sets its list: she is sent it, though the restore withdrew it.
+    let set = shop.set_list_endpoints(list("lno1changed")).await.unwrap();
+    assert_eq!(set.sent.len(), 1, "{set:?}");
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    wallet
+        .pay_without_request(to_bob(&w, "btc-lightning-bolt12"))
+        .await
+        .unwrap();
+    assert_eq!(last_offered(&w, "btc-lightning-bolt12"), "lno1changed");
+}
+
+/// After a restore the host re-applies a withdrawal from a counterparty first sent a list
+/// after the backup, which the restored state doesn't know: it goes, and supersedes the
+/// list she holds.
+#[tokio::test]
+async fn test_publishing_restored_withdrawal_reaches_a_counterparty_sent_a_list_since() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.set_list_endpoints(alice_list()).await.unwrap();
+    let backup = shop.backup().await.unwrap();
+    // Sent after the backup, then the device is lost.
+    shop.publish_list_to(&[w.alice_id()]).await.unwrap();
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    drop(shop);
+    let mut shop = restored_shop(&w, &backup).await;
+    // A backup holding a list it never sent waits for the host as well.
+    assert!(shop.lists_await_host().await.unwrap());
+    let withdrawn = shop.withdraw_list_from(&w.alice_id()).await;
+    assert!(withdrawn.is_ok(), "{withdrawn:?}");
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    assert!(no_usable_list(&w, &mut wallet).await);
+    // Withdrawn by the host, she isn't sent the list when it is set.
+    let set = shop.set_list_endpoints(alice_list()).await.unwrap();
+    assert!(set.sent.is_empty(), "{set:?}");
+}
+
+/// Outside the wait after a restore, a withdrawal from a counterparty that never got a
+/// list is refused.
+#[tokio::test]
+async fn test_publishing_withdrawal_from_a_counterparty_never_sent_a_list_refused() {
+    let w = World::new();
+    let mut shop = w.shop().await;
+    shop.set_list_endpoints(alice_list()).await.unwrap();
+    let refused = shop.withdraw_list_from(&w.alice_id()).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotFound)),
+        "{refused:?}"
+    );
+}
+
+/// The host's own withdrawal ends the restore's: withdrawn by the host after the restore
+/// withdrew it, she isn't sent the list when it is set.
+#[tokio::test]
+async fn test_publishing_host_withdrawal_ends_the_restores() {
+    let w = World::new();
+    let mut wallet = w
+        .join(&w.alice, "wallet", AppScopes::new().pay().build().unwrap())
+        .await;
+    let mut shop = w.shop().await;
+    w.publish_to_alice(&mut shop).await;
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let mut shop = restored_shop(&w, &backup).await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    shop.flush().await.unwrap();
+    shop.withdraw_list_from(&w.alice_id()).await.unwrap();
+    let set = shop.set_list_endpoints(list("lno1changed")).await.unwrap();
+    assert!(set.sent.is_empty(), "{set:?}");
+    lists_taken(&mut wallet).await;
+    assert!(no_usable_list(&w, &mut wallet).await);
 }

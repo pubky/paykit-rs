@@ -1560,8 +1560,9 @@ impl Paykit {
     /// mark of it. The request is queued before its mark is kept: a crash between the two
     /// asks again, rather than never. While sends to `payee` are held
     /// ([`Paykit::sends_held`]: the deny list holds it, or its copy isn't known) nothing is
-    /// queued and no mark is kept, so the next payment or receive asks again once they
-    /// aren't (Paykit spec 8.1, "Blocked counterparties").
+    /// queued and no mark is kept, so only the next payment asks again once they aren't: no
+    /// receive asks for a request that never went (Paykit spec 8.1, "Blocked
+    /// counterparties").
     async fn send_list_ask(
         &mut self,
         payee: [u8; 32],

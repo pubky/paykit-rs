@@ -314,10 +314,14 @@ impl KeptNotice {
     }
 
     /// Whether the message given up stays processed, so a copy sent again has no effect while
-    /// the notice is kept: every give-up but the client's drop of an entry waiting for a
-    /// key, which was never processed ([`GivenUpOrigin::KeyWait`]).
+    /// the notice is kept: a message received and given up, but for the client's drop of an
+    /// entry waiting for a key, which was never processed ([`GivenUpOrigin::KeyWait`]). A
+    /// notice of another kind at a message's key, such as this app's own message given up
+    /// undelivered to that counterparty, says nothing of a message received: a counterparty
+    /// that sends a message under that `msg_id` neither has it dropped nor takes the notice
+    /// over.
     pub(crate) fn keeps_processed(&self) -> bool {
-        self.origin != Some(GivenUpOrigin::KeyWait)
+        self.kind == NoticeKind::MessageGivenUp && self.origin != Some(GivenUpOrigin::KeyWait)
     }
 
     /// The notice read whole, at the attempt and kind its key names: one that doesn't is a
@@ -634,5 +638,33 @@ mod tests {
             NoticeKind::from_tag(NoticeKind::MessageUndelivered.tag()),
             Some(NoticeKind::MessageUndelivered)
         );
+    }
+
+    #[test]
+    fn test_notices_undelivered_notice_keeps_no_message_processed() {
+        // Only a message received and given up stays processed: a notice of this app's own
+        // message given up undelivered, at the same key form, isn't one, so neither the
+        // stored-entry writers nor the receive step take it as one.
+        let id = "123e4567-e89b-42d3-a456-426614174000";
+        let undelivered = KeptNotice::undelivered([1; 32], id, None, 3);
+        assert!(!undelivered.keeps_processed());
+        let given_up = KeptNotice::given_up(
+            [1; 32],
+            id,
+            None,
+            3,
+            GivenUpFrom::Stored(StoredHandle {
+                stored_id: 4,
+                hash: [5; 32],
+            }),
+        );
+        assert!(given_up.keeps_processed());
+        // Adopted as a given-up one, an undelivered notice would read corrupt.
+        let mut adopted = undelivered.clone();
+        adopted.stored = Some(StoredHandle {
+            stored_id: 4,
+            hash: [5; 32],
+        });
+        assert!(adopted.check_message(&[1; 32], id).is_err());
     }
 }
