@@ -1252,3 +1252,118 @@ async fn test_blocked_return_dispatch_of_a_request_dated_before_the_floor_not_re
     wallet.resume_payments().await.unwrap();
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
+
+/// Alice's wallet and phone, carol's request opened on the phone, and bob's request on its
+/// way to being dropped for the block: the setup of the floor's two windows at a dispatch.
+async fn phone_paying_carol(w: &World) -> (Paykit, Paykit, Paykit, paykit_sdk::RequestRef) {
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true),
+    );
+    let mut wallet = contacts_wallet(w, store()).await;
+    wallet.app_mut().invite(&w.carol_id()).await.unwrap();
+    let mut phone = w
+        .join_with(
+            &w.alice,
+            "phone",
+            AppScopes::new().pay().build().unwrap(),
+            crate::common::day_window(),
+            store(),
+        )
+        .await;
+    let mut carol_shop = w
+        .join(
+            &w.carol,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let carols = request_from(&mut carol_shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    phone.receive(None).await.unwrap();
+    assert!(!phone.request(&carols).await.unwrap().manual_only);
+    w.clock.advance_ms(MINUTE_MS);
+    (wallet, phone, w.shop().await, carols)
+}
+
+/// The wallet drops bob's request for the block and asks for it again, raising the floor
+/// past carol's request; the phone reads nothing meanwhile.
+async fn wallet_raises_the_floor(w: &World, wallet: &mut Paykit, shop: &mut Paykit) {
+    request_from(shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(block_marks(wallet).await, 1);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(asked(wallet, &w.bob_id()).await.len(), 1);
+    assert!(shared_floor(wallet).await.is_some());
+}
+
+/// The phone pays carol's request by hand, left in flight.
+async fn paid_in_flight(
+    w: &World,
+    phone: &mut Paykit,
+    carols: &paykit_sdk::RequestRef,
+) -> paykit_lib::AttemptId {
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = phone
+        .pay_request(carols, paykit_sdk::PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("in flight");
+    };
+    attempt_id
+}
+
+#[tokio::test]
+async fn test_blocked_return_floor_raised_before_the_attempt_read_again_at_the_repeat() {
+    // The wallet raises the floor past carol's request before the phone's attempt on it is
+    // committed; the phone's copy doesn't hold the raise. At the resume, the floor read
+    // again immediately before the repeat holds it: no repeat.
+    let w = World::new();
+    let (mut wallet, mut phone, mut shop, carols) = phone_paying_carol(&w).await;
+    wallet_raises_the_floor(&w, &mut wallet, &mut shop).await;
+    assert_eq!(shared_floor(&phone).await, None);
+    let attempt_id = paid_in_flight(&w, &mut phone, &carols).await;
+    w.clock.advance_ms(MINUTE_MS);
+    phone.resume_payments().await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_blocked_return_floor_raised_after_the_attempt_read_again_at_the_repeat() {
+    // The phone's attempt on carol's request is committed and dispatched first; the wallet
+    // then raises the floor past it, and the phone's copy doesn't hold the raise. At the
+    // resume, the floor read again immediately before the repeat holds it: no repeat.
+    let w = World::new();
+    let (mut wallet, mut phone, mut shop, carols) = phone_paying_carol(&w).await;
+    let attempt_id = paid_in_flight(&w, &mut phone, &carols).await;
+    wallet_raises_the_floor(&w, &mut wallet, &mut shop).await;
+    assert_eq!(shared_floor(&phone).await, None);
+    w.clock.advance_ms(MINUTE_MS);
+    phone.resume_payments().await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_blocked_return_floor_read_that_fails_at_the_repeat_holds_it() {
+    // No raise at all, but the read of the floor before the repeat fails: it never counts as
+    // a floor that doesn't hold the request, so no repeat on that read. A read that works
+    // lets the next resume repeat.
+    let w = World::new();
+    let (_wallet, mut phone, _shop, carols) = phone_paying_carol(&w).await;
+    let attempt_id = paid_in_flight(&w, &mut phone, &carols).await;
+    w.clock.advance_ms(MINUTE_MS);
+    // The resume reads the request record again first, then the floor, which fails.
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/records/".into(),
+            after: 1,
+        });
+    phone.resume_payments().await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    phone.resume_payments().await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt_id), 2);
+}

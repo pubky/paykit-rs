@@ -28,7 +28,11 @@
 //! - **Applied before every automatic attempt:** no app pays a one-time request dated before
 //!   the floor plus the tolerance automatically, whatever its record holds. Read after the
 //!   app's read of the feed, the floor is at least every raise applied before an entry the
-//!   app took, so this one holds whatever the order of the apps' reads.
+//!   app took, so this one holds whatever the order of the apps' reads. And immediately
+//!   before each automatic dispatch the record is read again from the switch
+//!   ([`Paykit::floor_holds_fresh`]), as the deny list is: a raise the app's copy doesn't
+//!   hold yet, applied before the attempt's commit or after it, still holds the dispatch. A
+//!   raise after the dispatch began is too late for that payment.
 //! - **Unknown holds:** while the floor can't be read (the payer's records not listed yet, its
 //!   value sealed under a key not held, or a value that doesn't read with none seen before),
 //!   every one-time request counts as dated before it.
@@ -127,6 +131,30 @@ impl Paykit {
         }
         let owed = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
         Ok(dated_before(stored, self.shared_floor().await?, owed))
+    }
+
+    /// Whether `stored` is a one-time request dated before the floor as a read of the record
+    /// made now, from the switch, shows it, with the floor this app holds and a raise it owes
+    /// (module docs, "Applied before every automatic attempt"): the check immediately before
+    /// an automatic dispatch, as the deny list is read again there (Paykit spec 8.1, How fresh
+    /// the deny list is). It waits for no raise. A read that fails, or a value that doesn't
+    /// read with none seen, holds the request.
+    pub(crate) async fn floor_holds_fresh(&mut self, stored: &StoredMessage) -> Result<bool> {
+        if !matches!(stored.body(), Body::PaymentRequest(r) if !r.is_recurring()) {
+            return Ok(false);
+        }
+        let owed = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
+        let target = floor_target(&self.identity());
+        let Ok(read) = self.app.read_record(&target).await else {
+            return Ok(true);
+        };
+        let key = self.app.record_key(&target)?;
+        let seen = self.app.record_seen(&key).await?;
+        Ok(dated_before(
+            stored,
+            shared_floor_of(read.as_ref(), seen.as_deref()),
+            owed,
+        ))
     }
 
     /// The time the floor must reach before an ask to `to` goes: its live block mark's latest

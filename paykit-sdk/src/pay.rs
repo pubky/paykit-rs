@@ -3057,7 +3057,9 @@ impl Paykit {
     /// spec 4, 7.2). In order:
     ///
     /// 0. for an automatic payment, the deny list, read again: a blocked payee, or a list
-    ///    that can't be read, holds it ([`FinalCheck::Hold`], Paykit spec 8.1);
+    ///    that can't be read, holds it ([`FinalCheck::Hold`], Paykit spec 8.1); and the
+    ///    block floor, read again: a one-time request dated before it, or a floor that can't
+    ///    be read, holds it too (`crate::floor`);
     /// 1. a switch lookup kept for the payee whose answer has come is taken, so a late
     ///    answer that removes the destination's app is acted on (Switch spec 4.3), and one
     ///    the client refuses, such as an equivocation, stops the payment
@@ -3100,6 +3102,13 @@ impl Paykit {
         if by == Initiator::Automatic && self.denied(&entry.payee).await.unwrap_or(true) {
             return Ok((FinalCheck::Hold, payee));
         }
+        // Nor of a one-time request dated before the block floor, as a read of its record
+        // made now shows it, a read that fails holding it too (`crate::floor`): the attempt's
+        // batch doesn't condition on the floor, so a raise the copy doesn't hold yet, made
+        // before the attempt's commit or after it, is met here.
+        if by == Initiator::Automatic && self.floor_holds_dispatch(entry).await? {
+            return Ok((FinalCheck::Hold, payee));
+        }
         let payee = match self.take_kept_lookup(&entry.payee).await? {
             Ok(Some(answered)) => answered,
             Ok(None) => payee,
@@ -3107,6 +3116,24 @@ impl Paykit {
         };
         let check = self.final_gates(entry, &payee, by, confirmed, kind)?;
         Ok((check, payee))
+    }
+
+    /// Whether the block floor, read now, holds the request `entry` pays
+    /// ([`Paykit::floor_holds_fresh`]): `false` for a payment without a request or a request
+    /// record that doesn't read, which the checks before this one judge.
+    async fn floor_holds_dispatch(&mut self, entry: &JournalEntry) -> Result<bool> {
+        if entry.request_hash()?.is_none() {
+            return Ok(false);
+        }
+        let target = ActivityTarget::payer(entry.natural_key.clone());
+        let Some(record) = self.held_activity(&target).await? else {
+            return Ok(false);
+        };
+        let Some((stored, _)) = crate::requests::request_of(&record) else {
+            return Ok(false);
+        };
+        let stored = stored.clone();
+        self.floor_holds_fresh(&stored).await
     }
 
     /// The fence after the journal write of `Paying` (Paykit spec 7.2): that commit is an
