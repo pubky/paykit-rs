@@ -2171,3 +2171,71 @@ async fn test_divergent_stored_entry_neither_written_nor_given_up_while_its_reco
     assert_eq!(shop.app().protocol_scan(b"se/").await.unwrap().len(), 2);
     assert!(shop.notices().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn test_divergent_new_message_the_bound_would_drop_kept_until_a_later_one_drops_it() {
+    // One acceptance, then 17 accepted at one same time, delivered highest `msg_id` first:
+    // the last one the step takes sorts below the 16 latest kept, so the bound would drop
+    // it. The step can't forget its own message's pair, so it is kept, one over the bound.
+    // A later acceptance then drops it with its pair forgotten, and its re-send is taken.
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_on(&w, Arc::clone(&base)).await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let record = sale(&shop, &request).await.record;
+    set_divergent(&base, &shop, &record, true);
+    wallet.receive(None).await.unwrap();
+    let body = serde_json::json!({ "label": null })
+        .as_object()
+        .cloned()
+        .unwrap();
+    let sign = |w: &World| {
+        w.sign_as(
+            &w.alice,
+            "wallet",
+            &w.bob,
+            "paykit.payment_request_acceptance",
+            vec![request.request_hash],
+            body.clone(),
+        )
+    };
+    let msg_id = |plaintext: &pubky_switch_core::message::MessagePlaintext| {
+        pubky_switch_core::message::Message::parse(
+            plaintext.json(),
+            paykit_lib::kinds::OPAQUE_MEMBERS,
+        )
+        .unwrap()
+        .msg_id
+    };
+    let first = sign(&w);
+    w.deliver(&w.alice, "wallet", &w.bob, &[shop.app_id()], &first);
+    w.clock.advance_ms(1);
+    let mut same_time: Vec<_> = (0..17).map(|_| sign(&w)).collect();
+    same_time.sort_by_key(|plaintext| std::cmp::Reverse(msg_id(plaintext)));
+    for plaintext in &same_time {
+        w.deliver(&w.alice, "wallet", &w.bob, &[shop.app_id()], plaintext);
+    }
+    shop.receive(None).await.unwrap();
+    let lowest = same_time.last().unwrap();
+    let kept = shop.app().protocol_scan(b"dw/").await.unwrap();
+    assert_eq!(kept.len(), 18);
+    let named = |id: &str| {
+        kept.iter()
+            .any(|(key, _)| String::from_utf8_lossy(key).ends_with(id))
+    };
+    assert!(named(&msg_id(lowest)));
+    w.clock.advance_ms(1);
+    let later = sign(&w);
+    w.deliver(&w.alice, "wallet", &w.bob, &[shop.app_id()], &later);
+    shop.receive(None).await.unwrap();
+    let kept = shop.app().protocol_scan(b"dw/").await.unwrap();
+    assert_eq!(kept.len(), 17);
+    assert!(!kept
+        .iter()
+        .any(|(key, _)| String::from_utf8_lossy(key).ends_with(&msg_id(lowest))));
+    w.clock.advance_ms(1);
+    w.deliver(&w.alice, "wallet", &w.bob, &[shop.app_id()], lowest);
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.applied.contains(&msg_id(lowest)), "{got:?}");
+}

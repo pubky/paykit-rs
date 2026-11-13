@@ -44,7 +44,9 @@
 //!   rejection) is written; any other receive-step write is kept here (`p/dw/<record
 //!   key>/<role>/<msg_id>`: of each role, the earliest the inbox accepted and the 16 latest
 //!   after it, one dropped for this bound dropped as one never processed, its pair forgotten
-//!   so a re-send of it is taken; of lists, the newest alone), and written once the user has confirmed the
+//!   so a re-send of it is taken, and the message just received, whose pair its own step
+//!   writes, kept over the bound until a later one drops it so; one the client won't forget
+//!   yet stays kept, over the bound; of lists, the newest alone), and written once the user has confirmed the
 //!   record, in the order the inbox accepted them, the earliest into its role and the
 //!   others reflected, or given up 30 days after its acceptance with the host's notice, as
 //!   a stored entry's message is, but never while its record's copy may be incomplete; an
@@ -920,22 +922,28 @@ pub(crate) fn step_keep(
         }
     }
     let (keep, gone) = kept_after(&held_messages, stored);
+    // This step's own message, when the bound would drop it (it was accepted before the 16
+    // latest kept, or at their time with a lower `msg_id`), can't be dropped as one never
+    // processed: the step's outcome writes its pair. It is kept instead, one over the bound,
+    // until a later message of the role drops it with its pair forgotten.
+    let keep = keep || gone.contains(&stored.message().msg_id);
     for msg_id in gone {
-        // A message dropped for the bound is dropped as one never processed: its pair is
-        // forgotten in this step's commit, so a later re-send of it is taken. One the client
-        // won't forget yet stays kept, the bound over by one for this step.
-        if let Some(dropped) = held_messages
+        let Some(dropped) = held_messages
             .iter()
             .find(|held| held.message().msg_id == msg_id)
-        {
-            match cx.forget_processed(dropped.sender(), &msg_id) {
-                Ok(_) => {}
-                Err(AppError::Refused(ClientRefusal::NotNow(_))) => continue,
-                // Past the step's bound on local writes: the context marks the step, and the
-                // client stores the entry as too large, applying none of it.
-                Err(AppError::Refused(ClientRefusal::Usage(_))) => {}
-                Err(error) => return Err(error.into()),
-            }
+        else {
+            continue;
+        };
+        // A message kept already and dropped for the bound is dropped as one never processed:
+        // its pair is forgotten in this step's commit, so a later re-send of it is taken. One
+        // the client won't forget yet stays kept, the bound over by one for this step.
+        match cx.forget_processed(dropped.sender(), &msg_id) {
+            Ok(_) => {}
+            Err(AppError::Refused(ClientRefusal::NotNow(_))) => continue,
+            // Past the step's bound on local writes: the context marks the step, and the
+            // client stores the entry as too large, applying none of it.
+            Err(AppError::Refused(ClientRefusal::Usage(_))) => {}
+            Err(error) => return Err(error.into()),
         }
         crate::receive::keep_local(
             cx,
