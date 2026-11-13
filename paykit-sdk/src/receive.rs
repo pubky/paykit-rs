@@ -1649,8 +1649,10 @@ impl Paykit {
     /// and so does every fresh read of the list before an automatic payment until the list
     /// shows it dropped (`bk/`), but only while the client keeps its batch: once the client
     /// drops the batch unapplied, or after a restore, which keeps none, the unblock counts no
-    /// more and the list decides, so a block another own app made since stands. An unblock
-    /// made through the client directly is seen at the next read of the lists.
+    /// more and the list decides, so a block another own app made since stands. One whose
+    /// batch lands outside a receive leaves the views and held sends showing `pubky`
+    /// blocked until the next receive reads the lists. An unblock made through the client
+    /// directly is seen at the next read of the lists.
     ///
     /// # Errors
     ///
@@ -1926,6 +1928,9 @@ impl Paykit {
     /// the lists. Returns how many were answered.
     pub(crate) async fn answer_kept_resends(&mut self) -> crate::error::Result<u64> {
         let mut answered = 0u64;
+        // An own unblock that counts no more, such as one the read just applied, makes the
+        // copy unknown: the answers wait for the next read of the lists, never dropped.
+        self.drop_unblocks_not_kept().await?;
         if !self.deny_copy_known().await? {
             return Ok(answered);
         }

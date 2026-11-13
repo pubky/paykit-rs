@@ -1100,6 +1100,32 @@ async fn test_blocked_block_applied_whose_answer_is_of_unknown_fate_still_counts
     assert!(w.rail.all_executions().is_empty());
 }
 
+#[tokio::test]
+async fn test_blocked_own_unblock_applied_in_the_read_keeps_the_resend_request_owed() {
+    // Bob's request to re-send is kept, and the wallet's unblock of him kept unanswered. The
+    // next read sends the unblock and the switch applies it: the unblock counts no more, so
+    // the copy of the lists isn't known until it is read again, and the request waits for
+    // that, never dropped; the next receive answers it (Paykit spec 8.1, 9).
+    let w = World::new();
+    let (mut wallet, shop, request) = received(&w, PaykitConfig::default()).await;
+    wallet.block(&w.bob_id()).await.unwrap();
+    keep_ops(&w, 1);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    kept_resend_request(&w, &mut wallet, &shop, &request).await;
+    let first = wallet.receive(None).await.unwrap();
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(!lists.deny.contains(&w.bob_id()));
+    let left = wallet.app().protocol_scan(b"ans/").await.unwrap().len();
+    assert_eq!((first.resends, left), (0, 1));
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
+    assert!(wallet
+        .app()
+        .protocol_scan(b"ans/")
+        .await
+        .unwrap()
+        .is_empty());
+}
+
 /// A store that, once armed, fails the client's next commit that keeps a batch
 /// (`opq/<batch_id>`), once, applying nothing.
 #[derive(Default)]
