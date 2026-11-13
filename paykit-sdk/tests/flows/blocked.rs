@@ -797,3 +797,54 @@ async fn test_blocked_own_block_restored_written_again_after_a_try_that_could_no
     let lists = wallet.app_mut().allow_list().await.unwrap();
     assert!(lists.deny.contains(&w.bob_id()));
 }
+
+#[tokio::test]
+async fn test_blocked_resend_request_to_a_blocked_counterparty_refused_with_nothing_sent() {
+    // The host asks bob to re-send while the wallet's copy of the deny list holds him:
+    // refused, nothing queued or sent (Paykit spec 8.1, "Blocked counterparties"). Once he
+    // is unblocked the same call goes.
+    let w = World::new();
+    let (mut wallet, _request) = blocked(&w).await;
+    let selection = paykit_sdk::ResendSelection::default().with_accepted_from_ms(0);
+    let before = w.bob.switch().entries_from(&w.alice_id());
+    let refused = wallet
+        .request_resend(w.bob_id(), selection.clone())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{refused:?}"
+    );
+    wallet.flush().await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet.request_resend(w.bob_id(), selection).await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+}
+
+#[tokio::test]
+async fn test_blocked_resend_request_while_the_deny_list_is_unknown_refused_with_nothing_sent() {
+    // The wallet's copy of the lists isn't known: its due read failed, and the read the call
+    // tries first fails too. Asking bob to re-send is refused, nothing queued or sent; once
+    // the lists read again the same call goes (Paykit spec 8.1, wire 4.1).
+    let w = World::new();
+    let (mut wallet, _, _) = received(&w, PaykitConfig::default()).await;
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    fail_list_read(&w);
+    wallet.receive(None).await.unwrap();
+    let selection = paykit_sdk::ResendSelection::default().with_accepted_from_ms(0);
+    let before = w.bob.switch().entries_from(&w.alice_id());
+    fail_list_read(&w);
+    let refused = wallet
+        .request_resend(w.bob_id(), selection.clone())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{refused:?}"
+    );
+    wallet.flush().await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    wallet.request_resend(w.bob_id(), selection).await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+}

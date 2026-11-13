@@ -23,7 +23,7 @@ use pubky_switch_core::records::DAY_MS;
 use pubky_switch_core::sig::SignedDoc;
 
 use crate::activity::{KeptSide, SideTag};
-use crate::error::{PaykitError, Result};
+use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
 use crate::protocol::{body_label, holds_role, MissedItemMark, QueuedAsk};
 use crate::state::{key, Tx};
@@ -77,10 +77,15 @@ impl ResendSelection {
 
 impl Paykit {
     /// Ask `counterparty` to re-send messages (Paykit spec 9, Paykit wire 4.12). Best effort:
-    /// the counterparty can't be made to answer. Returns the request's `msg_id`.
+    /// the counterparty can't be made to answer. Returns the request's `msg_id`. Nothing is
+    /// queued while sends to `counterparty` are held: while the
+    /// copy of the deny list holds it, or, at an app holding `contacts`, while that copy
+    /// isn't known, which a read of the lists is tried for first (Paykit spec 8.1, "Blocked
+    /// counterparties").
     ///
     /// # Errors
     ///
+    /// [`Refusal::NotNow`] while sends to `counterparty` are held, with nothing queued;
     /// [`paykit_lib::Error::Validation`] for a selection that selects nothing; the client's
     /// errors.
     pub async fn request_resend(
@@ -89,6 +94,17 @@ impl Paykit {
         selection: ResendSelection,
     ) -> Result<String> {
         self.refresh_own()?;
+        if !self.deny_copy_known().await? {
+            self.refresh_lists_when_due().await?;
+        }
+        if self.sends_held(&counterparty).await? {
+            return Err(Refusal::NotNow(
+                "Paykit spec 8.1: sends to the counterparty are held while the deny list holds \
+                 it or its copy isn't known"
+                    .into(),
+            )
+            .into());
+        }
         let signed = self.resend_request_message(counterparty, selection)?;
         let msg_id = self.app.queue_signed(signed).await?;
         self.app.flush_message(&msg_id).await?;
