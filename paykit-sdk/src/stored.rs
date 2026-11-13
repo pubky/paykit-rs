@@ -131,7 +131,7 @@ pub(crate) fn past_window(accepted_at: u64, service: Option<u64>) -> bool {
 }
 
 /// The side of the shared records `target` is of.
-fn record_side(target: &ActivityTarget) -> crate::hold::RecordSide {
+pub(crate) fn record_side(target: &ActivityTarget) -> crate::hold::RecordSide {
     match target.side {
         crate::activity::SideTag::Payer => crate::hold::RecordSide::Payer,
         crate::activity::SideTag::Payee => crate::hold::RecordSide::Payee,

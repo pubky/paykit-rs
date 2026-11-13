@@ -8,54 +8,81 @@
 //! app takes the current write as any other, but the upload may hold what it lacks, such as
 //! a cancellation, a receipt or a newer list. So:
 //!
-//! - **A pause mark per record** (`p/dv/<record key>`): set the first time a view the app
-//!   reads shows the record divergent, and kept until the user confirms
+//! - **A pause mark per record** (`p/dv/<record key>`): kept for each record seen divergent,
+//!   with the write shown and whether the user confirmed it. It is set the first time a view
+//!   the app reads shows the record divergent, and kept until the user confirms
 //!   ([`Paykit::confirm_divergent`]), also once a newer write has cleared the view. A
 //!   confirmation keeps the version of the write it was given over: the same divergent view
 //!   asks nothing again, a later divergent view of another write pauses the record again,
 //!   and the confirmed mark goes at the end of the first receive whose view of the record
-//!   shows it no longer divergent. Marks are of any Paykit collection, so an Allowance's
-//!   `allowances` and `allowance_ledgers` records take them the same way.
-//! - **No automatic payment or acceptance** while a record is paused or its view divergent
+//!   shows it no longer divergent, once the messages kept over it are written. Confirming a
+//!   record no longer held ends its pause and drops the mark. Marks are of any Paykit
+//!   collection, so an Allowance's `allowances` and `allowance_ledgers` records take them
+//!   the same way.
+//! - **No automatic decision that starts or repeats a payment, or accepts a request**, while
+//!   a record is paused or its view divergent, confirmed or not
 //!   ([`Pause::blocks_automatic`]): today a resume's repeat of a dispatched payment, against
-//!   its request record or the `payment_lists` record of its destination, and the
-//!   acceptance a resume would send or place.
+//!   its request record or the `payment_lists` record of its destination.
+//! - **A payment already dispatched is recorded once the user has confirmed**
+//!   ([`Pause::dispatched_write_waits`]): its owed acceptance, its outcome and its proof
+//!   wait while the record is paused, and go once it is confirmed, also over a view still
+//!   divergent, so the payee gets the proof of a payment made.
 //! - **By hand only after the user's confirmation** ([`Pause::blocks_by_hand`]): paying a
-//!   request, paying to an endpoint of a paused list, single-use or reusable, a user's
-//!   `done`, and a payee's credit of a proof ([`crate::Refusal::Divergent`]). A payee app
-//!   also credits no proof while another record of the same counterparty is paused: it can't
-//!   tell what that record's upload holds (Paykit spec 8.1 step 4).
+//!   request, paying to an endpoint of a paused list, single-use or reusable, and a user's
+//!   `done` ([`crate::Refusal::Divergent`]).
+//! - **A credit only after a confirmation shown for a credit** ([`Pause::blocks_credit`],
+//!   Paykit spec 8.1 step 4): a payee app credits no proof while its record, or another
+//!   record of the same counterparty, was seen divergent and its user hasn't confirmed it
+//!   shown that it may hold a credit of a settlement its current write lacks
+//!   ([`DivergentRecord::may_hold_credit`], which only a credit's refusal shows). A plain
+//!   confirmation releases payments and writes, not a credit.
+//! - **The kept messages go first.** Once the user confirms a record, the messages kept
+//!   over it, receipts included, are written at the next receive, before anything is paid,
+//!   accepted or credited on it: until they are, every gate above holds the record
+//!   ([`DivergentRecord::writes_waiting`]).
 //! - **Writes over a divergent view** ([`Pause::write_waits`]): a stop (a cancellation or a
 //!   rejection) is written; any other receive-step write is kept here (`p/dw/<record
-//!   key>/<role>/<msg_id>`, the first of a role and the 16 latest after it, the newest list
-//!   alone), and written once the user has confirmed the record, in the order the inbox
-//!   accepted them, the first into its role and the others reflected, or given up 30 days
-//!   after its acceptance with the host's notice, as a stored entry's message is, but never
-//!   while its record's copy may be incomplete; an own write of another kind, such as a
-//!   payment's outcome with its acceptance and proof, or a receipt, waits for the
-//!   confirmation.
+//!   key>/<role>/<msg_id>`: of each role, the earliest the inbox accepted and the 16 latest
+//!   after it; of lists, the newest alone), and written once the user has confirmed the
+//!   record, in the order the inbox accepted them, the earliest into its role and the
+//!   others reflected, or given up 30 days after its acceptance with the host's notice, as
+//!   a stored entry's message is, but never while its record's copy may be incomplete; an
+//!   own write of another kind, such as a receipt, waits for the confirmation.
 //! - **A confirmation is of the write shown** ([`DivergentRecord::version`]): one given for
 //!   another write than the one the app holds is refused, and the host shows the record
 //!   again.
 //! - **Pointers are proven** before anything acts on them: a mark and a kept message keep
 //!   the collection of their record and the write they were seen at, and a record held at
-//!   their key of another collection or at an earlier write isn't theirs. Such a value is
-//!   left as it is, paused, and acts on nothing; every other record goes on.
+//!   their key of another collection or at an earlier write isn't theirs. Every reader of a
+//!   mark goes through one check ([`Marked::of`]): a mark that doesn't name its record
+//!   reads as paused and names nothing. Every gate holds the record, a stop goes over it
+//!   with no mark written, the user's confirmation replaces it at the write held, and every
+//!   other record goes on. A kept message that doesn't point to its record, kept over a
+//!   later write or of another settlement than the rail's names now, is left as it is and
+//!   decides nothing.
 //!
 //! **Seen at every read.** A view is taken wherever the SDK reads a record to act on it, in
 //! the receive step with the cursor move and in its calls; at every receive, each record the
 //! client reported divergent (`RecordDivergent`) is marked, as the client saw it so even if
 //! a later write in the same read cleared it; and at a load, every record held is looked at
 //! once, so a flag a crash left before the receive's events were taken still pauses. The
-//! report is taken as a duty event too, at its first sight, with a mark, for a client that
-//! keeps it so. Residual for a client that keeps it in memory only: a record that goes
-//! divergent and is cleared within one read, followed by a crash before the read's events
-//! are taken, leaves no pause.
+//! report is taken as a duty event too, at its first sight, with a mark.
+//!
+//! **Condition for release.** The client at the current pin raises `RecordDivergent` in
+//! memory only: a record that goes divergent and is cleared within one read, followed by a
+//! crash before the read's events are taken, leaves no pause. This is closed only by the
+//! client's durable report (pubky/pubky-switch#180: `AppEvent::RecordDivergent { id, key }`
+//! as a duty event, delivered until acknowledged, kept through a restart and a cleared flag,
+//! raised again under a new ID after a restore). This module is not released on a pin
+//! without it. Its duty-event arm is written against that interface, and the flow tests
+//! that drive the event are built only with `--cfg switch_durable_divergence`, on a pin
+//! that holds #180.
 //!
 //! **Restore.** A backup carries the marks and the kept writes. A restore installs every
-//! mark paused, a confirmation given before it included: the restored app pauses each record
-//! it had seen divergent until its user confirms again. A `missed` item changes no mark: it
-//! loses inbox entries, not the records' views, which the listing after it reads again.
+//! mark unconfirmed, a confirmation given before it included: the restored app pauses each
+//! record it had seen divergent until its user confirms again. A `missed` item changes no
+//! mark: it loses inbox entries, not the records' views, which the listing after it reads
+//! again.
 //!
 //! **Two own apps** keep their own marks: one app's confirmation releases nothing in another,
 //! which pauses until it has seen the record itself and its own user has confirmed.
@@ -97,6 +124,16 @@ pub struct DivergentRecord {
     /// The write of the record the app holds, the one shown; `None` for a record it holds
     /// no more. [`Paykit::confirm_divergent`] confirms only that write.
     pub version: Option<RecordVersion>,
+    /// Shown for a credit (Paykit spec 8.1 step 4): the record may hold a credit of a
+    /// settlement its current write lacks, a receipt in its upload, so the app can't tell a
+    /// proof isn't credited already. Only a refusal of a credit
+    /// ([`Paykit::confirm_payment`]) shows it; a confirmation counts for a credit only when
+    /// given over a record shown with it, and a plain one leaves the credit refused.
+    pub may_hold_credit: bool,
+    /// The user has confirmed it, and the messages kept over it, receipts included, are
+    /// written at the next receive ([`Paykit::receive`]): until then nothing is paid,
+    /// accepted or credited on it, by hand or automatically.
+    pub writes_waiting: bool,
 }
 
 /// The version of a record's write, as a mark keeps it: by generation, then `seq`, the
@@ -119,7 +156,7 @@ impl SeenVersion {
 /// The pause mark of one record (`p/dv/<record key>`). The record and its collection repeat
 /// in it, so a reader binds the value to its key, and the version of the write whose view
 /// showed it divergent is the proof of what it points to: a record held at that key is of
-/// that collection, at that version or a later one ([`check_points_to`]).
+/// that collection, at that version or a later one ([`Marked::of`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DivergentMark {
     #[serde(with = "serde_b64")]
@@ -129,6 +166,10 @@ pub(crate) struct DivergentMark {
     seen: SeenVersion,
     /// The write the user confirmed over, at or after `seen`; `None` while paused.
     confirmed: Option<SeenVersion>,
+    /// The write the user confirmed over shown that it may hold a credit
+    /// ([`DivergentRecord::may_hold_credit`]); `None` until then. Never without `confirmed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credit_confirmed: Option<SeenVersion>,
 }
 
 impl DivergentMark {
@@ -138,7 +179,14 @@ impl DivergentMark {
             collection: view.collection.name().to_owned(),
             seen: view.version,
             confirmed: None,
+            credit_confirmed: None,
         }
+    }
+
+    /// Whether a credit waits for the user's confirmation of this record shown that it may
+    /// hold one (Paykit spec 8.1 step 4).
+    fn credit_waits(&self) -> bool {
+        self.credit_confirmed.is_none()
     }
 
     /// Whether the record is paused: seen divergent and not confirmed since.
@@ -153,10 +201,15 @@ impl DivergentMark {
 
     /// The mark bound to the key it is read at, `dv/<record>` (`state::Stored`): the record
     /// its key names, of one of Paykit's collections, and a confirmation, if any, not before
-    /// the write it paused, a state no run leaves. The one check for a restore and for every
-    /// read at runtime; a value that fails it is a corrupt store, never an absent mark.
+    /// the write it paused, with a credit's confirmation only beside one, states no run
+    /// leaves. The one check for a restore and for every read at runtime; a value that fails
+    /// it is a corrupt store, never an absent mark.
     pub(crate) fn bind_to(&self, record: &[u8; 32]) -> Result<()> {
-        if self.record != *record || self.confirmed.is_some_and(|at| at < self.seen) {
+        if self.record != *record
+            || self.confirmed.is_some_and(|at| at < self.seen)
+            || self.credit_confirmed.is_some_and(|at| at < self.seen)
+            || (self.credit_confirmed.is_some() && self.confirmed.is_none())
+        {
             return Err(PaykitError::corrupt());
         }
         self.collection().map(|_| ())
@@ -166,43 +219,104 @@ impl DivergentMark {
     /// included (module docs, "Restore").
     pub(crate) fn restored(mut self) -> Self {
         self.confirmed = None;
+        self.credit_confirmed = None;
         self
-    }
-
-    /// The mark checked against the record held at its key, `view`, before it decides
-    /// anything ([`check_points_to`]).
-    fn checked(self, view: Option<&View>) -> Result<Self> {
-        check_points_to(view, self.collection()?, self.seen)?;
-        Ok(self)
     }
 }
 
 /// Whether a value that points to the record held as `view`, of `collection`, seen at the
 /// write `seen`, points to it: the record held there is of that collection, at that write or
 /// a later one, a record's versions only growing. A record not held proves nothing either
-/// way: a pause stays. Anything else is a corrupt store, never a record to act on.
-pub(crate) fn check_points_to(
-    view: Option<&View>,
-    collection: Collection,
-    seen: SeenVersion,
-) -> Result<()> {
+/// way: a pause stays.
+fn points_to(view: Option<&View>, collection: Collection, seen: SeenVersion) -> bool {
     match view {
-        Some(view) if view.collection != collection || view.version < seen => {
-            Err(PaykitError::corrupt())
-        }
-        _ => Ok(()),
+        Some(view) => view.collection == collection && view.version >= seen,
+        None => true,
     }
 }
 
-/// [`check_points_to`] as a yes or no, for the loops that leave a value that doesn't point
-/// to its record as it is and go on with the others.
-fn points_to(view: Option<&View>, collection: Collection, seen: SeenVersion) -> bool {
-    check_points_to(view, collection, seen).is_ok()
+/// A record's mark as every reader takes it ([`Marked::of`]): read bound to its key, then
+/// checked against the record held there before anything is decided on it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Marked {
+    /// No mark.
+    Clear,
+    /// A mark that points to the record held at its key.
+    Mark(DivergentMark),
+    /// A mark that doesn't point to the record held at its key: one of another collection,
+    /// or seen at a later write than the one held. It reads as paused and names nothing:
+    /// every gate holds the record as paused, a stop goes over it without a mark written,
+    /// only the user's confirmation replaces it, and every other record goes on (Paykit spec
+    /// 6).
+    Mismatch,
 }
 
-/// Whether `mark`, if any, points to the record held as `view` ([`DivergentMark::checked`]).
-fn mark_points_to(mark: Option<DivergentMark>, view: Option<View>) -> bool {
-    mark.is_none_or(|mark| mark.checked(view.as_ref()).is_ok())
+impl Marked {
+    /// The one check of a mark, `mark` as read bound at the key of the record held as
+    /// `view`, for every reader: the receive step, the calls, the gates, the loops and the
+    /// confirmation. A mismatch is never an error: it is [`Marked::Mismatch`].
+    pub(crate) fn of(mark: Option<DivergentMark>, view: Option<&View>) -> Self {
+        match mark {
+            None => Self::Clear,
+            Some(mark)
+                if mark
+                    .collection()
+                    .is_ok_and(|collection| points_to(view, collection, mark.seen)) =>
+            {
+                Self::Mark(mark)
+            }
+            Some(_) => Self::Mismatch,
+        }
+    }
+
+    /// The mark it holds, if it points to its record.
+    fn mark(&self) -> Option<&DivergentMark> {
+        match self {
+            Self::Mark(mark) => Some(mark),
+            Self::Clear | Self::Mismatch => None,
+        }
+    }
+
+    /// What the record allows, the view `view` taken: a mismatch is paused.
+    pub(crate) fn pause(&self, view: Option<&View>) -> Pause {
+        match self {
+            Self::Mismatch => Pause {
+                paused: true,
+                divergent: view.is_some_and(|view| view.divergent),
+                writes_waiting: false,
+                credit_waits: true,
+            },
+            _ => Pause::of(self.mark(), view),
+        }
+    }
+
+    /// The mark `view` sets ([`after_view`]); none over a mismatch, left as it is.
+    fn after_view(&self, view: &View) -> Option<DivergentMark> {
+        match self {
+            Self::Mismatch => None,
+            _ => after_view(self.mark(), view),
+        }
+    }
+
+    /// The mark the client's report sets ([`after_event`]); none over a mismatch.
+    fn after_event(&self, view: &View) -> Option<DivergentMark> {
+        match self {
+            Self::Mismatch => None,
+            _ => after_event(self.mark(), view),
+        }
+    }
+
+    /// The mark after the user's confirmation ([`after_confirmation`]): a mismatch is
+    /// replaced by a mark confirmed at the write held, or goes for a record not held.
+    fn after_confirmation(&self, view: Option<&View>, credit: bool) -> Option<DivergentMark> {
+        after_confirmation(self.mark(), view, credit)
+    }
+
+    /// Whether the mark goes at a receive's end ([`confirmed_mark_ends`]); a mismatch never.
+    fn ends(&self, view: Option<&View>) -> bool {
+        self.mark()
+            .is_some_and(|mark| confirmed_mark_ends(mark, view))
+    }
 }
 
 /// A record's view, as the pause rules read it.
@@ -254,16 +368,21 @@ pub(crate) fn after_event(mark: Option<&DivergentMark>, view: &View) -> Option<D
 }
 
 /// Whether a confirmed mark goes at a receive's end: the record isn't held, or its view
-/// isn't divergent any more. A paused mark never goes but by the user's confirmation.
+/// isn't divergent any more, and for a payee's record, whose upload may hold a credit, the
+/// user has confirmed it shown so (Paykit spec 8.1 step 4). A paused mark never goes but by
+/// the user's confirmation.
 pub(crate) fn confirmed_mark_ends(mark: &DivergentMark, view: Option<&View>) -> bool {
-    !mark.is_paused() && view.is_none_or(|view| !view.divergent)
+    let credit_told = mark.collection != Collection::PayeeActivity.name() || !mark.credit_waits();
+    !mark.is_paused() && view.is_none_or(|view| !view.divergent && credit_told)
 }
 
-/// The mark after the user's confirmation of the record held as `view`, `mark` before it:
-/// confirmed at the version held, or none for a record no longer held.
+/// The mark after the user's confirmation of the record held as `view`, `mark` before it,
+/// shown that it may hold a credit when `credit`: confirmed at the version held, or none for
+/// a record no longer held. A credit's confirmation given before stays.
 pub(crate) fn after_confirmation(
     mark: Option<&DivergentMark>,
     view: Option<&View>,
+    credit: bool,
 ) -> Option<DivergentMark> {
     let view = view?;
     Some(DivergentMark {
@@ -271,6 +390,11 @@ pub(crate) fn after_confirmation(
         collection: view.collection.name().to_owned(),
         seen: mark.map_or(view.version, |mark| mark.seen.min(view.version)),
         confirmed: Some(view.version),
+        credit_confirmed: if credit {
+            Some(view.version)
+        } else {
+            mark.and_then(|mark| mark.credit_confirmed)
+        },
     })
 }
 
@@ -281,36 +405,68 @@ pub(crate) struct Pause {
     pub(crate) paused: bool,
     /// The latest view shows it divergent.
     pub(crate) divergent: bool,
+    /// Messages kept over it wait to be written: they go first, once the user has confirmed
+    /// it, before anything is paid, accepted or credited on it ([`Paykit::pause_of`]).
+    pub(crate) writes_waiting: bool,
+    /// Seen divergent, and not confirmed since shown that it may hold a credit.
+    pub(crate) credit_waits: bool,
 }
 
 impl Pause {
-    /// The pause of a record with `mark` and `view`, `mark` as `view` leaves it.
+    /// The pause of a record with `mark` and `view`, `mark` as `view` leaves it; the kept
+    /// writes are the caller's to add ([`Paykit::pause_of`]).
     pub(crate) fn of(mark: Option<&DivergentMark>, view: Option<&View>) -> Self {
         let after = view.and_then(|view| after_view(mark, view));
+        let mark = after.as_ref().or(mark);
         Self {
-            paused: after
-                .as_ref()
-                .or(mark)
-                .is_some_and(DivergentMark::is_paused),
+            paused: mark.is_some_and(DivergentMark::is_paused),
             divergent: view.is_some_and(|view| view.divergent),
+            writes_waiting: false,
+            credit_waits: mark.is_some_and(DivergentMark::credit_waits),
         }
     }
 
-    /// No automatic payment or acceptance: while the view shows it divergent, the user's
-    /// confirmation included, and while it is paused (Paykit spec 6).
+    /// No automatic decision that starts or repeats a payment, or accepts a request: while
+    /// the view shows it divergent, the user's confirmation included, while it is paused,
+    /// and while the messages kept over it wait to be written (Paykit spec 6). Recording a
+    /// payment already dispatched is [`Pause::dispatched_write_waits`].
     pub(crate) fn blocks_automatic(self) -> bool {
-        self.paused || self.divergent
+        self.paused || self.divergent || self.writes_waiting
     }
 
-    /// A payment, acceptance or credit by hand waits for the user's confirmation.
+    /// A payment, acceptance or `done` by hand waits for the user's confirmation, and then
+    /// for the messages kept over the record to be written.
     pub(crate) fn blocks_by_hand(self) -> bool {
-        self.paused
+        self.paused || self.writes_waiting
+    }
+
+    /// A credit waits as [`Pause::blocks_by_hand`] does, and until the user has confirmed
+    /// the record shown that it may hold a credit (Paykit spec 8.1 step 4,
+    /// [`DivergentRecord::may_hold_credit`]).
+    pub(crate) fn blocks_credit(self) -> bool {
+        self.blocks_by_hand() || self.credit_waits
     }
 
     /// A write over it that adds no stop waits for the user's confirmation: while the view
     /// shows it divergent and the user hasn't confirmed it (Paykit spec 6).
     pub(crate) fn write_waits(self) -> bool {
         self.paused && self.divergent
+    }
+
+    /// The messages kept over it wait for the user's confirmation: while it is paused. Once
+    /// confirmed they are written, before anything else opens on it.
+    pub(crate) fn kept_writes_wait(self) -> bool {
+        self.paused
+    }
+
+    /// A write that records a payment already dispatched, its acceptance owed, its outcome
+    /// and its proof, at a payment, a resume or a repair, waits while the record is paused
+    /// and while the messages kept over it wait to be written, and goes once the user has
+    /// confirmed it and they are written, also over a view still divergent: the payee gets
+    /// the proof of a payment made. [`Pause::blocks_automatic`] is for what starts or
+    /// repeats a payment, not for recording one made.
+    pub(crate) fn dispatched_write_waits(self) -> bool {
+        self.paused || self.writes_waiting
     }
 }
 
@@ -383,7 +539,7 @@ impl WriteRole {
 /// value to its key; the record is the one its message names, derived again at every read;
 /// and the version of the divergent write it was kept over is the proof that the record
 /// held there later is that record, of its collection, at that write or a later one
-/// ([`check_points_to`]).
+/// ([`points_to`]).
 ///
 /// A proof of a payment without a request goes into the payee's record of its settlement:
 /// the settlement its rail named when it was kept persists with it, the proof that the
@@ -446,21 +602,27 @@ impl DivergentWrite {
     }
 
     /// The kept write, read bound, as it is written: its message, where it goes by the
-    /// app's rail, `settlement`, and the write it was kept over. A settlement the rail names
-    /// otherwise than the one kept is a corrupt store.
-    pub(crate) fn kept(&self, own: &[u8; 32], settlement: Settlement<'_>) -> Result<KeptWrite> {
+    /// app's rail, `settlement`, and the write it was kept over. `None` when the rail names
+    /// another settlement, or none, than the one kept: the value points to another record
+    /// than the one the rail's would, and is left as it is, as one kept over a later write
+    /// than the record held is.
+    pub(crate) fn kept(
+        &self,
+        own: &[u8; 32],
+        settlement: Settlement<'_>,
+    ) -> Result<Option<KeptWrite>> {
         let message = self.message.stored(own)?;
-        let target = write_target(&message, own, settlement).ok_or_else(PaykitError::corrupt)?;
         if let Body::PaymentProof(proof) = message.body() {
             if message.message().refs.is_empty() && settlement(&proof.proof) != self.settlement()? {
-                return Err(PaykitError::corrupt());
+                return Ok(None);
             }
         }
-        Ok(KeptWrite {
+        let target = write_target(&message, own, settlement).ok_or_else(PaykitError::corrupt)?;
+        Ok(Some(KeptWrite {
             message,
             target,
             seen: self.seen,
-        })
+        }))
     }
 }
 
@@ -600,18 +762,10 @@ fn kept_after(kept: &[StoredMessage], new: &StoredMessage) -> (bool, Vec<String>
 // The receive step
 
 /// The mark of the record held as `view` in the receive step, read bound and checked
-/// against it ([`DivergentMark::read`], [`check_points_to`]).
-fn step_mark(
-    cx: &ReceiveContext<'_>,
-    view: &View,
-) -> std::result::Result<Option<DivergentMark>, Fail> {
-    match state::cx_get::<DivergentMark>(cx, &key::divergent(&view.record))? {
-        None => Ok(None),
-        Some(mark) => mark
-            .checked(Some(view))
-            .map(Some)
-            .map_err(|_| Fail::corrupt()),
-    }
+/// against it ([`Marked::of`]).
+fn step_mark(cx: &ReceiveContext<'_>, view: &View) -> std::result::Result<Marked, Fail> {
+    let mark = state::cx_get::<DivergentMark>(cx, &key::divergent(&view.record))?;
+    Ok(Marked::of(mark, Some(view)))
 }
 
 /// In the receive step: take the view of `held`, keeping the mark it sets with the cursor
@@ -623,13 +777,13 @@ pub(crate) fn step_pause(
     let Some(view) = View::of(held) else {
         return Ok(Pause::default());
     };
-    let mark = step_mark(cx, &view)?;
-    if let Some(after) = after_view(mark.as_ref(), &view) {
+    let marked = step_mark(cx, &view)?;
+    if let Some(after) = marked.after_view(&view) {
         let write =
             state::local_put(&key::divergent(&held.key), &after).map_err(|_| Fail::corrupt())?;
         crate::receive::keep_local(cx, write);
     }
-    Ok(Pause::of(mark.as_ref(), Some(&view)))
+    Ok(marked.pause(Some(&view)))
 }
 
 /// In the receive step: keep `stored`, a message whose write over `held`, a divergent
@@ -647,20 +801,22 @@ pub(crate) fn step_keep(
     let record = held.key;
     // The messages kept already for the record and role are read bound, and checked against
     // the record, before anything is decided on them: one that doesn't read holds the entry,
-    // and is never a reason to drop this one.
+    // and is never a reason to drop this one. One that doesn't point to the record, kept
+    // over a later write or of another settlement than the rail's, is left as it is and
+    // decides nothing; this one is kept beside it.
     let mut held_messages = Vec::new();
     for (_, kept) in state::cx_scan::<DivergentWrite>(cx, &key::divergent_writes_of(&record, role))?
     {
-        let kept = kept
+        let Some(kept) = kept
             .kept(&cx.identity(), settlement)
-            .map_err(|_| Fail::corrupt())?;
-        check_points_to(
-            Some(&view),
-            kept.target.collection().ok_or_else(Fail::corrupt)?,
-            kept.seen,
-        )
-        .map_err(|_| Fail::corrupt())?;
-        held_messages.push(kept.message);
+            .map_err(|_| Fail::corrupt())?
+        else {
+            continue;
+        };
+        let collection = kept.target.collection().ok_or_else(Fail::corrupt)?;
+        if points_to(Some(&view), collection, kept.seen) {
+            held_messages.push(kept.message);
+        }
     }
     let (keep, gone) = kept_after(&held_messages, stored);
     for msg_id in gone {
@@ -694,45 +850,21 @@ pub(crate) fn step_keep(
 }
 
 impl Paykit {
-    /// The mark at `record`, read bound ([`DivergentMark::read`]) and checked against the
-    /// record held there, `view` ([`check_points_to`]), before anything is decided on it.
-    async fn divergent_mark(
-        &self,
-        record: &[u8; 32],
-        view: Option<&View>,
-    ) -> Result<Option<DivergentMark>> {
-        match self
-            .local_get::<DivergentMark>(&key::divergent(record))
-            .await?
-        {
-            None => Ok(None),
-            Some(mark) => mark.checked(view).map(Some),
-        }
-    }
-
-    /// The record held at `record`, as a view, and its mark, bound to its key but not checked
-    /// against the record: for the loops that judge the pointer themselves.
-    async fn mark_and_view_or_mismatch(
-        &self,
-        record: &[u8; 32],
-    ) -> Result<(Option<DivergentMark>, Option<View>)> {
-        let held = self.app.shared_record(record).await?;
-        let view = held.as_ref().and_then(View::of);
+    /// The mark at `record`, read bound ([`state::Stored`]) and checked against the record
+    /// held there, `view` ([`Marked::of`]), before anything is decided on it.
+    async fn marked(&self, record: &[u8; 32], view: Option<&View>) -> Result<Marked> {
         let mark = self
             .local_get::<DivergentMark>(&key::divergent(record))
             .await?;
-        Ok((mark, view))
+        Ok(Marked::of(mark, view))
     }
 
     /// The record held at `record`, as a view, and its mark checked against it.
-    async fn mark_and_view(
-        &self,
-        record: &[u8; 32],
-    ) -> Result<(Option<DivergentMark>, Option<View>)> {
+    async fn mark_and_view(&self, record: &[u8; 32]) -> Result<(Marked, Option<View>)> {
         let held = self.app.shared_record(record).await?;
         let view = held.as_ref().and_then(View::of);
-        let mark = self.divergent_mark(record, view.as_ref()).await?;
-        Ok((mark, view))
+        let marked = self.marked(record, view.as_ref()).await?;
+        Ok((marked, view))
     }
 
     /// Every mark, each read bound to its key.
@@ -750,47 +882,75 @@ impl Paykit {
         self.local_put(&key::divergent(record), after).await
     }
 
+    /// Whether messages kept over the record at `record`, held as `view`, wait to be
+    /// written: each read bound and checked against the record, one that doesn't point to
+    /// it, left as it is, deciding nothing.
+    async fn writes_waiting(&self, record: &[u8; 32], view: Option<&View>) -> Result<bool> {
+        let own = self.identity();
+        for (_, kept) in self
+            .local_scan::<DivergentWrite>(&key::divergent_writes_at(record))
+            .await?
+        {
+            let Some(kept) = kept.kept(&own, &|proof| self.rail.settlement_id(proof))? else {
+                continue;
+            };
+            let collection = kept.target.collection().ok_or_else(PaykitError::corrupt)?;
+            if points_to(view, collection, kept.seen) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// What the record at `record`, held as `view`, allows with `marked`, its kept writes
+    /// included: every gate reads a record through here.
+    async fn pause_with(
+        &self,
+        record: &[u8; 32],
+        marked: &Marked,
+        view: Option<&View>,
+    ) -> Result<Pause> {
+        Ok(Pause {
+            writes_waiting: self.writes_waiting(record, view).await?,
+            ..marked.pause(view)
+        })
+    }
+
     /// Take the view of `held`, keeping the mark it sets, and tell what it allows.
     pub(crate) async fn pause_of(&mut self, held: &SharedRecord) -> Result<Pause> {
         let Some(view) = View::of(held) else {
             return Ok(Pause::default());
         };
-        let mark = self.divergent_mark(&held.key, Some(&view)).await?;
-        if let Some(after) = after_view(mark.as_ref(), &view) {
+        let marked = self.marked(&held.key, Some(&view)).await?;
+        if let Some(after) = marked.after_view(&view) {
             self.put_mark(&held.key, &after).await?;
         }
-        Ok(Pause::of(mark.as_ref(), Some(&view)))
+        self.pause_with(&held.key, &marked, Some(&view)).await
     }
 
     /// [`Paykit::pause_of`] for the record at `record`: a mark alone for one not held.
     pub(crate) async fn pause_at(&mut self, record: &[u8; 32]) -> Result<Pause> {
         match self.app.shared_record(record).await? {
             Some(held) => self.pause_of(&held).await,
-            None => Ok(Pause::of(
-                self.divergent_mark(record, None).await?.as_ref(),
-                None,
-            )),
+            None => {
+                let marked = self.marked(record, None).await?;
+                self.pause_with(record, &marked, None).await
+            }
         }
     }
 
     /// What the record at `record` allows, as its mark and view stand, writing nothing: for
     /// the views.
     pub(crate) async fn pause_seen(&self, record: &[u8; 32]) -> Result<Pause> {
-        let (mark, view) = self.mark_and_view_or_mismatch(record).await?;
-        // A mark that doesn't point to its record shows paused: it acts on nothing.
-        if !mark_points_to(mark.clone(), view) {
-            return Ok(Pause {
-                paused: true,
-                divergent: view.is_some_and(|view| view.divergent),
-            });
-        }
-        Ok(Pause::of(mark.as_ref(), view.as_ref()))
+        let (marked, view) = self.mark_and_view(record).await?;
+        self.pause_with(record, &marked, view.as_ref()).await
     }
 
-    /// The host's view of the record at `record`, `pause` as it allows.
-    async fn shown(&self, record: [u8; 32], pause: Pause) -> Result<DivergentRecord> {
-        let (mark, view) = self.mark_and_view_or_mismatch(&record).await?;
-        let collection = match (view, mark) {
+    /// The host's view of the record at `record`, `pause` as it allows, shown for a credit
+    /// when `credit` ([`DivergentRecord::may_hold_credit`]).
+    async fn shown(&self, record: [u8; 32], pause: Pause, credit: bool) -> Result<DivergentRecord> {
+        let (marked, view) = self.mark_and_view(&record).await?;
+        let collection = match (view, marked.mark()) {
             (Some(view), _) => view.collection,
             (None, Some(mark)) => mark.collection()?,
             (None, None) => return Err(PaykitError::corrupt()),
@@ -801,29 +961,44 @@ impl Paykit {
             paused: pause.paused,
             divergent: pause.divergent,
             version: view.map(|view| view.version.record_version()),
+            may_hold_credit: credit,
+            writes_waiting: pause.writes_waiting && !pause.paused,
         })
     }
 
-    /// Refused for an action by hand while any of `records` is paused, naming those, for
-    /// the user to confirm ([`Refusal::Divergent`]). Each record's view is taken first.
+    /// Refused for an action by hand while any of `records` is paused, or its kept
+    /// messages wait to be written, naming those, for the user to confirm
+    /// ([`Refusal::Divergent`]). Each record's view is taken first.
     pub(crate) async fn refuse_while_paused(&mut self, records: &[[u8; 32]]) -> Result<()> {
-        let mut paused = Vec::new();
+        self.refuse_where(records, Pause::blocks_by_hand, false)
+            .await
+    }
+
+    /// Refused while `gate` holds any of `records`, naming those, each shown for a credit
+    /// when `credit`. Each record's view is taken first.
+    async fn refuse_where(
+        &mut self,
+        records: &[[u8; 32]],
+        gate: fn(Pause) -> bool,
+        credit: bool,
+    ) -> Result<()> {
+        let mut held = Vec::new();
         for record in records {
             let pause = self.pause_at(record).await?;
-            if pause.blocks_by_hand() {
-                paused.push(self.shown(*record, pause).await?);
+            if gate(pause) {
+                held.push(self.shown(*record, pause, credit).await?);
             }
         }
-        if paused.is_empty() {
+        if held.is_empty() {
             return Ok(());
         }
-        Err(Refusal::Divergent { records: paused }.into())
+        Err(Refusal::Divergent { records: held }.into())
     }
 
     /// The refusal of an own write over the divergent record `record`, naming it.
     pub(crate) async fn divergent_refusal(&mut self, record: [u8; 32]) -> Result<PaykitError> {
         let pause = self.pause_at(&record).await?;
-        let shown = self.shown(record, pause).await?;
+        let shown = self.shown(record, pause, false).await?;
         Ok(Refusal::Divergent {
             records: vec![shown],
         }
@@ -833,15 +1008,15 @@ impl Paykit {
     /// Refused while an own write of another kind than a stop over the record at `record`
     /// waits for the user's confirmation ([`Pause::write_waits`]).
     pub(crate) async fn refuse_while_write_waits(&mut self, record: &[u8; 32]) -> Result<()> {
-        let pause = self.pause_at(record).await?;
-        if pause.write_waits() {
-            let shown = self.shown(*record, pause).await?;
-            return Err(Refusal::Divergent {
-                records: vec![shown],
-            }
-            .into());
-        }
-        Ok(())
+        self.refuse_where(&[*record], Pause::write_waits, false)
+            .await
+    }
+
+    /// Whether a write that records a payment already dispatched, its acceptance owed, its
+    /// outcome and its proof, over the record at `record` waits
+    /// ([`Pause::dispatched_write_waits`]): the one gate of every path that writes one.
+    pub(crate) async fn dispatched_write_waits(&mut self, record: &[u8; 32]) -> Result<bool> {
+        Ok(self.pause_at(record).await?.dispatched_write_waits())
     }
 
     /// Whether a write of `stored` over the record at `record` waits for the user's
@@ -858,9 +1033,13 @@ impl Paykit {
     }
 
     /// A payee app's credit of a proof in `record`, from `counterparty`, waits for the user
-    /// while `record` or any other record of the same counterparty it holds is paused
+    /// while `record` or any other record of the same counterparty it holds is paused, its
+    /// kept messages wait to be written, or it was seen divergent and the user hasn't
+    /// confirmed it shown that it may hold a credit of a settlement its current write lacks
     /// (Paykit spec 8.1 step 4): the upload may hold a receipt of the same settlement, so
-    /// the app can't tell it isn't credited already. Refused naming them.
+    /// the app can't tell it isn't credited already. Refused naming them, each shown so
+    /// ([`DivergentRecord::may_hold_credit`]): a confirmation of what the refusal shows
+    /// counts for the credit, a plain one doesn't.
     pub(crate) async fn refuse_credit_while_paused(
         &mut self,
         record: &[u8; 32],
@@ -883,7 +1062,8 @@ impl Paykit {
                 Err(error) => return Err(error),
             }
         }
-        self.refuse_while_paused(&records).await
+        self.refuse_where(&records, Pause::blocks_credit, true)
+            .await
     }
 
     /// The marks every record the client reported divergent (`RecordDivergent` in `events`)
@@ -900,19 +1080,12 @@ impl Paykit {
     /// The mark the client's report that `record` was seen divergent sets: a view showed it
     /// so, whatever its view shows now. Taking it again changes nothing, so the report may
     /// come both as a duty event, at first sight, and in a read's events. A mark that
-    /// doesn't point to its record is left as it is: it stays paused, and acts on nothing.
+    /// doesn't point to its record is left as it is ([`Marked::Mismatch`]).
     pub(crate) async fn take_divergent_event(&mut self, record: &[u8; 32]) -> Result<()> {
-        let Some(held) = self.app.shared_record(record).await? else {
+        let (marked, Some(view)) = self.mark_and_view(record).await? else {
             return Ok(());
         };
-        let Some(view) = View::of(&held) else {
-            return Ok(());
-        };
-        let (mark, _) = self.mark_and_view_or_mismatch(record).await?;
-        if !mark_points_to(mark.clone(), Some(view)) {
-            return Ok(());
-        }
-        if let Some(after) = after_event(mark.as_ref(), &view) {
+        if let Some(after) = marked.after_event(&view) {
             self.put_mark(record, &after).await?;
         }
         Ok(())
@@ -923,13 +1096,7 @@ impl Paykit {
     pub(crate) async fn sweep_divergent(&mut self) -> Result<()> {
         for collection in crate::hold::RecordSide::All.collections() {
             for held in self.app.records_of(&collection.name).await? {
-                if !held.divergent {
-                    continue;
-                }
-                // A mark that doesn't point to its record is left as it is, paused: the load
-                // goes on.
-                let (mark, view) = self.mark_and_view_or_mismatch(&held.key).await?;
-                if mark_points_to(mark, view) {
+                if held.divergent {
                     self.pause_of(&held).await?;
                 }
             }
@@ -938,33 +1105,40 @@ impl Paykit {
     }
 
     /// At a receive's end: the confirmed marks whose record's view isn't divergent any more,
-    /// or that the app holds no more, go ([`confirmed_mark_ends`]).
+    /// or that the app holds no more, go ([`confirmed_mark_ends`]). A mark that doesn't
+    /// point to its record stays.
     pub(crate) async fn end_confirmed_marks(&mut self) -> Result<()> {
         let mut tx = Tx::default();
         for mark in self.divergent_marks().await? {
-            let held = self.app.shared_record(&mark.record).await?;
+            let record = mark.record;
+            let held = self.app.shared_record(&record).await?;
             let view = held.as_ref().and_then(View::of);
-            // A mark that doesn't point to its record is left as it is, paused, and acts on
-            // nothing: it never fails every receive for good.
-            let Ok(mark) = mark.checked(view.as_ref()) else {
-                continue;
-            };
-            if confirmed_mark_ends(&mark, view.as_ref()) {
-                tx.delete(&key::divergent(&mark.record));
+            // Nor while messages kept over it wait to be written: it stays shown until then.
+            if Marked::of(Some(mark), view.as_ref()).ends(view.as_ref())
+                && !self.writes_waiting(&record, view.as_ref()).await?
+            {
+                tx.delete(&key::divergent(&record));
             }
         }
         self.local_commit(tx).await
     }
 
-    /// The records paused now, by key.
+    /// The records paused now, by key, each mark checked against its record: a mark that
+    /// doesn't point to it is paused.
     pub(crate) async fn paused_records(&self) -> Result<std::collections::BTreeSet<[u8; 32]>> {
-        Ok(self
-            .divergent_marks()
-            .await?
-            .into_iter()
-            .filter(DivergentMark::is_paused)
-            .map(|mark| mark.record)
-            .collect())
+        let mut paused = std::collections::BTreeSet::new();
+        for mark in self.divergent_marks().await? {
+            let record = mark.record;
+            let held = self.app.shared_record(&record).await?;
+            let view = held.as_ref().and_then(View::of);
+            if Marked::of(Some(mark), view.as_ref())
+                .pause(view.as_ref())
+                .paused
+            {
+                paused.insert(record);
+            }
+        }
+        Ok(paused)
     }
 
     /// The records paused now that weren't in `before`, for a receive's summary.
@@ -976,7 +1150,7 @@ impl Paykit {
         for record in self.paused_records().await? {
             if !before.contains(&record) {
                 let pause = self.pause_seen(&record).await?;
-                out.push(self.shown(record, pause).await?);
+                out.push(self.shown(record, pause, false).await?);
             }
         }
         Ok(out)
@@ -1001,7 +1175,10 @@ impl Paykit {
         {
             let kept_key = format!("{}{rest}", key::DIVERGENT_WRITES);
             let record = kept.record;
-            let kept = kept.kept(&own, &|proof| self.rail.settlement_id(proof))?;
+            // One of another settlement than the rail's names now is left as it is.
+            let Some(kept) = kept.kept(&own, &|proof| self.rail.settlement_id(proof))? else {
+                continue;
+            };
             all.push((record, kept.message.accepted_at(), kept_key, kept));
         }
         all.sort_by(|a, b| (a.0, a.1, &a.2).cmp(&(b.0, b.1, &b.2)));
@@ -1009,10 +1186,12 @@ impl Paykit {
             // What it points to is checked before anything is written: the record held at its
             // key is of its target's collection, at the write it was kept over or a later one.
             // One that doesn't is left as it is, neither written nor given up, and the other
-            // records' messages go on.
-            let (mark, view) = self.mark_and_view_or_mismatch(&record).await?;
+            // records' messages go on. The record's mark is judged by the one check below
+            // (`Paykit::pause_at`): one that doesn't point to its record is paused.
+            let held = self.app.shared_record(&record).await?;
+            let view = held.as_ref().and_then(View::of);
             let collection = kept.target.collection().ok_or_else(PaykitError::corrupt)?;
-            if !points_to(view.as_ref(), collection, kept.seen) || !mark_points_to(mark, view) {
+            if !points_to(view.as_ref(), collection, kept.seen) {
                 continue;
             }
             let stored = kept.message;
@@ -1021,22 +1200,15 @@ impl Paykit {
             // nothing yet: the message waits, never given up meanwhile (Paykit spec 8.1,
             // "Records not listed yet"), as a stored entry's does.
             let side = match &kept.target {
-                WriteTarget::Activity { target, .. } => match target.side {
-                    crate::activity::SideTag::Payer => crate::hold::RecordSide::Payer,
-                    crate::activity::SideTag::Payee => crate::hold::RecordSide::Payee,
-                },
+                WriteTarget::Activity { target, .. } => crate::stored::record_side(target),
                 WriteTarget::List(_) => crate::hold::RecordSide::Payer,
             };
-            let content = self
-                .app
-                .shared_record(&record)
-                .await?
-                .map(|held| held.content);
+            let content = held.map(|held| held.content);
             let placed = if matches!(content, None | Some(RecordContent::Deleted))
                 && self.side_unlisted(side).await?
             {
                 crate::stored::Placed::Waits
-            } else if self.pause_at(&record).await?.blocks_by_hand() {
+            } else if self.pause_at(&record).await?.kept_writes_wait() {
                 crate::stored::Placed::Not
             } else {
                 let mut tx = Tx::default();
@@ -1110,13 +1282,15 @@ impl Paykit {
         self.local_commit(tx).await
     }
 
-    /// The records the app has seen divergent and its user hasn't confirmed, and those whose
-    /// latest view shows them divergent (Paykit spec 6), by record key: for the host to show,
-    /// each with what the user is asked to see, such as a request the payee may have
-    /// cancelled or a list that may be stale, and to confirm
-    /// ([`Paykit::confirm_divergent`]). While one is paused, nothing is paid, accepted or
-    /// credited on it automatically, and by hand only once the user confirms it; a write over
-    /// it that adds no stop waits too.
+    /// The records the app has seen divergent and its user hasn't confirmed, those whose
+    /// latest view shows them divergent, and those whose kept messages wait to be written
+    /// (Paykit spec 6), by record key: for the host to show, each with what the user is asked
+    /// to see, such as a request the payee may have cancelled or a list that may be stale,
+    /// and to confirm ([`Paykit::confirm_divergent`]). While one is paused, nothing is paid,
+    /// accepted or credited on it automatically, and by hand only once the user confirms it
+    /// and its kept messages are written; a write over it that adds no stop waits too. A
+    /// record listed here is never shown for a credit
+    /// ([`DivergentRecord::may_hold_credit`]): a credit's refusal shows it so.
     ///
     /// # Errors
     ///
@@ -1136,8 +1310,8 @@ impl Paykit {
         let mut out = Vec::new();
         for record in keys {
             let pause = self.pause_seen(&record).await?;
-            if pause.paused || pause.divergent {
-                out.push(self.shown(record, pause).await?);
+            if pause.paused || pause.divergent || pause.writes_waiting {
+                out.push(self.shown(record, pause, false).await?);
             }
         }
         Ok(out)
@@ -1149,10 +1323,15 @@ impl Paykit {
     /// its payments and writes go on (Paykit spec 6): the record's pause ends in this app.
     /// The confirmation is of the write shown: given while the view shows it divergent, it
     /// holds for that write, and a later divergent view of another write pauses it again.
-    /// The messages kept over it are written at the next receive. No automatic payment or
-    /// acceptance is made on it while its view still shows it divergent. Another own app
-    /// keeps its own pause until its own user confirms. A restore from a backup pauses the
-    /// record again.
+    /// The messages kept over it are written at the next receive, before anything is paid,
+    /// accepted or credited on it. No automatic payment is started or repeated on it, nor a
+    /// request accepted, while its view still shows it divergent; a payment already made is
+    /// recorded. Given over a record shown for a credit
+    /// ([`DivergentRecord::may_hold_credit`]), it also lets a credit go (Paykit spec 8.1
+    /// step 4); a plain one doesn't. A mark that doesn't point to the record held is
+    /// replaced. Confirming a record no longer held ends its pause and drops the mark.
+    /// Another own app keeps its own pause until its own user confirms. A restore from a
+    /// backup pauses the record again.
     ///
     /// # Errors
     ///
@@ -1160,7 +1339,7 @@ impl Paykit {
     /// shown, or no longer held: the host shows it again; [`Refusal::NotFound`] for a record
     /// the app neither has seen divergent nor holds divergent now;
     /// [`Refusal::CertificateRefused`] while the app's certificate fails Paykit's checks; a
-    /// store failure, or a mark that doesn't point to its record.
+    /// store failure, or a mark that doesn't read.
     pub async fn confirm_divergent(
         &mut self,
         shown: &DivergentRecord,
@@ -1168,8 +1347,8 @@ impl Paykit {
     ) -> Result<()> {
         self.refresh_own()?;
         let record = &shown.record;
-        let (mark, view) = self.mark_and_view(record).await?;
-        if mark.is_none() && !view.is_some_and(|view| view.divergent) {
+        let (marked, view) = self.mark_and_view(record).await?;
+        if marked == Marked::Clear && !view.is_some_and(|view| view.divergent) {
             return Err(Refusal::NotFound.into());
         }
         if view.map(|view| view.version.record_version()) != shown.version {
@@ -1177,7 +1356,9 @@ impl Paykit {
                 "the record changed since it was shown".into(),
             ));
         }
-        match after_confirmation(mark.as_ref(), view.as_ref()) {
+        // A mark that doesn't point to its record is replaced by one confirmed at the write
+        // held ([`Marked::after_confirmation`]).
+        match marked.after_confirmation(view.as_ref(), shown.may_hold_credit) {
             Some(after) => self.put_mark(record, &after).await,
             None => self.local_delete(&key::divergent(record)).await,
         }
@@ -1204,7 +1385,7 @@ mod tests {
     }
 
     fn confirmed(version: u64) -> DivergentMark {
-        after_confirmation(None, Some(&view(true, version))).unwrap()
+        after_confirmation(None, Some(&view(true, version)), false).unwrap()
     }
 
     #[test]
@@ -1260,11 +1441,14 @@ mod tests {
 
     #[test]
     fn test_divergent_confirmation_of_a_record_not_held_drops_the_mark() {
-        assert!(after_confirmation(Some(&DivergentMark::paused(&view(true, 3))), None).is_none());
+        assert!(
+            after_confirmation(Some(&DivergentMark::paused(&view(true, 3))), None, false).is_none()
+        );
         // Confirmed at the write held, keeping the write it was first seen divergent at.
         let mark = after_confirmation(
             Some(&DivergentMark::paused(&view(true, 3))),
             Some(&view(false, 4)),
+            false,
         )
         .unwrap();
         assert_eq!(mark.seen, view(true, 3).version);
@@ -1299,18 +1483,133 @@ mod tests {
     #[test]
     fn test_divergent_mark_points_to_its_record_by_collection_and_version() {
         let mark = DivergentMark::paused(&view(true, 3));
-        assert!(mark.clone().checked(Some(&view(true, 3))).is_ok());
-        assert!(mark.clone().checked(Some(&view(false, 9))).is_ok());
+        let marked = |view: Option<&View>| Marked::of(Some(mark.clone()), view);
+        assert_eq!(marked(Some(&view(true, 3))), Marked::Mark(mark.clone()));
+        assert_eq!(marked(Some(&view(false, 9))), Marked::Mark(mark.clone()));
         // Not held proves nothing: the pause stays.
-        assert!(mark.clone().checked(None).is_ok());
+        assert_eq!(marked(None), Marked::Mark(mark.clone()));
         // A record held at an earlier write than the one seen divergent isn't it.
-        assert!(mark.clone().checked(Some(&view(true, 2))).is_err());
+        assert_eq!(marked(Some(&view(true, 2))), Marked::Mismatch);
         // Nor is one of another collection.
         let lists = View {
             collection: Collection::PaymentLists,
             ..view(true, 3)
         };
-        assert!(mark.checked(Some(&lists)).is_err());
+        assert_eq!(marked(Some(&lists)), Marked::Mismatch);
+        assert_eq!(Marked::of(None, Some(&view(true, 3))), Marked::Clear);
+    }
+
+    #[test]
+    fn test_divergent_mismatched_mark_reads_paused_and_names_nothing() {
+        // Confirmed, then held at an earlier write: it doesn't point to the record.
+        let marked = Marked::of(Some(confirmed(5)), Some(&view(false, 4)));
+        assert_eq!(marked, Marked::Mismatch);
+        for divergent in [true, false] {
+            let held = view(divergent, 4);
+            let pause = marked.pause(Some(&held));
+            assert!(pause.paused && pause.blocks_by_hand() && pause.blocks_automatic());
+            assert!(pause.blocks_credit() && pause.dispatched_write_waits());
+            assert_eq!(pause.write_waits(), divergent);
+            // No mark is written over it, and it never goes by itself.
+            assert!(marked.after_view(&held).is_none());
+            assert!(marked.after_event(&held).is_none());
+            assert!(!marked.ends(Some(&held)));
+        }
+        // The user's confirmation replaces it at the write held.
+        let replaced = marked
+            .after_confirmation(Some(&view(true, 4)), false)
+            .unwrap();
+        assert_eq!(replaced, confirmed(4));
+        assert!(replaced.bind_to(&RECORD).is_ok());
+        assert!(marked.after_confirmation(None, false).is_none());
+    }
+
+    #[test]
+    fn test_divergent_dispatched_write_waits_while_paused_and_goes_once_confirmed() {
+        let paused = DivergentMark::paused(&view(true, 3));
+        assert!(Pause::of(Some(&paused), Some(&view(true, 3))).dispatched_write_waits());
+        // Paused with the view cleared: still waits for the confirmation.
+        assert!(Pause::of(Some(&paused), Some(&view(false, 4))).dispatched_write_waits());
+        // Confirmed over a view still divergent: the record of a payment made goes, while
+        // nothing starts or repeats a payment automatically.
+        let pause = Pause::of(Some(&confirmed(3)), Some(&view(true, 3)));
+        assert!(!pause.dispatched_write_waits() && pause.blocks_automatic());
+        // Messages kept over it go first.
+        let waiting = Pause {
+            writes_waiting: true,
+            ..pause
+        };
+        assert!(waiting.dispatched_write_waits() && waiting.blocks_by_hand());
+        assert!(waiting.blocks_credit() && !waiting.kept_writes_wait());
+    }
+
+    #[test]
+    fn test_divergent_credit_waits_for_a_confirmation_shown_for_a_credit() {
+        let sold = View {
+            collection: Collection::PayeeActivity,
+            ..view(true, 3)
+        };
+        let clear = View {
+            collection: Collection::PayeeActivity,
+            ..view(false, 4)
+        };
+        let paused = DivergentMark::paused(&sold);
+        let plain = after_confirmation(Some(&paused), Some(&sold), false).unwrap();
+        let pause = Pause::of(Some(&plain), Some(&clear));
+        assert!(!pause.blocks_by_hand() && pause.blocks_credit());
+        // The mark stays once the view clears: the credit still waits for it.
+        assert!(!confirmed_mark_ends(&plain, Some(&clear)));
+        let credit = after_confirmation(Some(&plain), Some(&sold), true).unwrap();
+        assert!(!Pause::of(Some(&credit), Some(&clear)).blocks_credit());
+        assert!(confirmed_mark_ends(&credit, Some(&clear)));
+        assert!(credit.bind_to(&RECORD).is_ok());
+        // A plain confirmation after keeps the credit's.
+        let again = after_confirmation(Some(&credit), Some(&sold), false).unwrap();
+        assert!(!again.credit_waits());
+        // A restore drops it with the confirmation; one without a confirmation is corrupt.
+        assert!(credit.clone().restored().credit_waits());
+        let crossed = DivergentMark {
+            confirmed: None,
+            ..credit
+        };
+        assert!(crossed.bind_to(&RECORD).is_err());
+        // A payer's record needs no credit's confirmation to end.
+        assert!(confirmed_mark_ends(&confirmed(3), Some(&view(false, 4))));
+    }
+
+    #[test]
+    fn test_divergent_kept_proof_of_another_settlement_than_the_rails_points_elsewhere() {
+        let alice = crate::testkit::Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = crate::testkit::Party::new("bob", "shop", &["request"]);
+        let proof = alice.message(
+            &bob,
+            "paykit.payment_proof",
+            Vec::new(),
+            crate::testkit::object(serde_json::json!({
+                "attempt_id": "mAFdg5_0tVNjmrgiTUZW4g",
+                "payment_app_id": "brrz3m6g5rci6iqnzke44q4djc",
+                "payment_endpoint_identifier": "btc-bitcoin-p2wpkh",
+                "amount": { "asset": "btc", "value": "0.1" },
+                "proof": { "rail": "fake", "tx": "t1" },
+            })),
+        );
+        let kept = DivergentWrite {
+            record: RECORD,
+            role: WriteRole::Proof,
+            seen: view(true, 3).version,
+            settlement: Some(pubky_switch_core::enc::b64(b"t1")),
+            message: KeptMessage::of(&proof),
+        };
+        let rail = |proof: &serde_json::Map<String, serde_json::Value>| {
+            paykit_lib::derive::settlement_id(proof)
+        };
+        assert!(kept.kept(&bob.id(), &rail).unwrap().is_some());
+        // The rail names another settlement now, or none: left as it is, no error.
+        assert!(kept
+            .kept(&bob.id(), &|_| Some(b"t2".to_vec()))
+            .unwrap()
+            .is_none());
+        assert!(kept.kept(&bob.id(), &|_| None).unwrap().is_none());
     }
 
     #[test]

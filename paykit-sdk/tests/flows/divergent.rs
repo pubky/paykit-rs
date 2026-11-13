@@ -62,6 +62,40 @@ fn refused_records(error: &paykit_sdk::PaykitError) -> Vec<([u8; 32], bool, bool
     }
 }
 
+/// Confirm every record `refused`, a divergent refusal, names, as it shows them.
+async fn confirm_refused(app: &mut Paykit, refused: &paykit_sdk::PaykitError) {
+    let Some(Refusal::Divergent { records }) = refused.refusal() else {
+        panic!("not a divergent refusal: {refused:?}");
+    };
+    for shown in records.clone() {
+        app.confirm_divergent(&shown, UserConfirmed::new())
+            .await
+            .unwrap();
+    }
+}
+
+/// Whether every record `refused`, a divergent refusal, names is shown for a credit.
+fn shown_for_a_credit(refused: &paykit_sdk::PaykitError) -> bool {
+    matches!(refused.refusal(), Some(Refusal::Divergent { records })
+        if records.iter().all(|r| r.may_hold_credit))
+}
+
+/// Push every pause mark of `app` past the record it names: each then names a later write
+/// than the one held, so it doesn't point to its record.
+async fn mark_past_its_record(app: &mut Paykit) {
+    let mut writes = Vec::new();
+    for (key, value) in app.app().protocol_scan(b"dv/").await.unwrap() {
+        let mut mark: serde_json::Value = serde_json::from_slice(&value).unwrap();
+        mark["d"]["seen"]["generation"] = serde_json::json!(u64::MAX);
+        writes.push(pubky_switch_client::app::LocalWrite::Put {
+            key,
+            value: serde_json::to_vec(&mark).unwrap(),
+        });
+    }
+    assert!(!writes.is_empty());
+    app.app_mut().protocol_commit(&writes).await.unwrap();
+}
+
 /// Bob's shop on `store`.
 async fn shop_on(w: &World, store: Arc<dyn StateStore>) -> Paykit {
     w.join_with(
@@ -357,6 +391,12 @@ async fn test_divergent_payee_keeps_a_proof_and_writes_it_after_confirmation() {
     shop.receive(None).await.unwrap();
     let held = sale(&shop, &request).await;
     assert_eq!(held.status, PayeeStatus::ProofReceived);
+    // A plain confirmation lets the writes go, not a credit: the upload may hold a receipt
+    // of the same settlement. The refusal shows it so, and a confirmation of that does.
+    let refused = shop.confirm_payment(&record).await.unwrap_err();
+    assert_eq!(refused_records(&refused), vec![(record, false, false)]);
+    assert!(shown_for_a_credit(&refused));
+    confirm_refused(&mut shop, &refused).await;
     assert!(shop.confirm_payment(&record).await.unwrap().is_some());
     assert_eq!(sale(&shop, &request).await.status, PayeeStatus::Receipted);
 }
@@ -429,13 +469,20 @@ async fn test_divergent_credit_waits_for_the_record_and_another_of_the_payer() {
     set_divergent(&base, &shop, &other, true);
     let refused = shop.confirm_payment(&paid).await.unwrap_err();
     assert_eq!(refused_records(&refused), vec![(other, true, true)]);
+    assert!(shown_for_a_credit(&refused));
+    // A plain confirmation, as the listing shows the record, doesn't count for a credit.
+    let listed = shop.divergent_records().await.unwrap();
+    assert!(listed.iter().all(|r| !r.may_hold_credit));
     crate::divergent::confirm(&mut shop, &other).await.unwrap();
+    let refused = shop.confirm_payment(&paid).await.unwrap_err();
+    assert_eq!(refused_records(&refused), vec![(other, false, true)]);
+    confirm_refused(&mut shop, &refused).await;
 
     // The record itself divergent: the credit waits for it too.
     set_divergent(&base, &shop, &paid, true);
     let refused = shop.confirm_payment(&paid).await.unwrap_err();
     assert_eq!(refused_records(&refused), vec![(paid, true, true)]);
-    crate::divergent::confirm(&mut shop, &paid).await.unwrap();
+    confirm_refused(&mut shop, &refused).await;
     assert!(shop.confirm_payment(&paid).await.unwrap().is_some());
 }
 
@@ -1102,10 +1149,11 @@ async fn test_divergent_ended_mark_stays_ended_through_a_restore_and_a_listing()
 }
 
 #[tokio::test]
-async fn test_divergent_resume_sends_no_acceptance_over_a_divergent_record() {
+async fn test_divergent_resume_records_a_payment_made_once_confirmed_over_a_divergent_view() {
     // The wallet stops right after the method's payment is journaled, before its acceptance
     // is released. The request record is then divergent: the resume holds the outcome, and
-    // the acceptance with it, until the user confirms.
+    // the acceptance with it, until the user confirms; then both go, the view still
+    // divergent, so the payee gets the proof of the payment made.
     use pubky_switch_client::store::{Fault, FaultStore};
     for n in 1..96 {
         let w = World::new();
@@ -1144,6 +1192,8 @@ async fn test_divergent_resume_sends_no_acceptance_over_a_divergent_record() {
         shop.receive(None).await.unwrap();
         assert_eq!(sale(&shop, &request).await.status, PayeeStatus::Requested);
         confirm(&mut wallet, &record).await.unwrap();
+        let listed = wallet.divergent_records().await.unwrap();
+        assert!(!listed[0].paused && listed[0].divergent, "{listed:?}");
         let resumed = wallet.resume_payments().await.unwrap();
         assert!(
             matches!(resumed.as_slice(), [PayOutcome::Paid { .. }]),
@@ -1162,7 +1212,8 @@ async fn test_divergent_resume_sends_no_acceptance_over_a_divergent_record() {
 #[tokio::test]
 async fn test_divergent_mark_not_pointing_to_its_record_fails_no_receive() {
     // A mark whose recorded write is later than the record held isn't that record's: it
-    // stays as it is, paused, and the receives go on.
+    // reads as paused and names nothing. The receives go on, a payment by hand is refused
+    // as for any paused record, and the user's confirmation replaces the mark.
     let w = World::new();
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
@@ -1175,23 +1226,139 @@ async fn test_divergent_mark_not_pointing_to_its_record_fails_no_receive() {
         .pay_request(&request, PayOptions::default())
         .await
         .is_err());
-    let mut writes = Vec::new();
-    for (key, value) in wallet.app().protocol_scan(b"dv/").await.unwrap() {
-        let mut mark: serde_json::Value = serde_json::from_slice(&value).unwrap();
-        mark["d"]["seen"]["generation"] = serde_json::json!(u64::MAX);
-        writes.push(pubky_switch_client::app::LocalWrite::Put {
-            key,
-            value: serde_json::to_vec(&mark).unwrap(),
-        });
-    }
-    wallet.app_mut().protocol_commit(&writes).await.unwrap();
+    mark_past_its_record(&mut wallet).await;
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert!(wallet.request(&request).await.unwrap().divergent);
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(refused_records(&refused), vec![(record, true, true)]);
+    confirm(&mut wallet, &record).await.unwrap();
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+}
+
+#[tokio::test]
+async fn test_divergent_mismatched_mark_lets_the_payers_cancel_go() {
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let record = wallet.request(&request).await.unwrap().record;
+    set_divergent(&base, &wallet, &record, true);
     assert!(wallet
         .pay_request(&request, PayOptions::default())
         .await
         .is_err());
+    mark_past_its_record(&mut wallet).await;
+    // A stop goes over it, no mark written, and the payee gets it.
+    wallet.cancel_request(&request, None).await.unwrap();
+    wallet.flush().await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(sale(&shop, &request).await.status, PayeeStatus::Cancelled);
+    assert!(wallet.divergent_records().await.unwrap()[0].paused);
+}
+
+#[tokio::test]
+async fn test_divergent_mismatched_mark_takes_a_payees_cancellation() {
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let record = wallet.request(&request).await.unwrap().record;
+    set_divergent(&base, &wallet, &record, true);
+    assert!(wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .is_err());
+    mark_past_its_record(&mut wallet).await;
+    let sold = shop.payee_activity().await.unwrap()[0].record;
+    shop.cancel_sent_request(&sold, None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn test_divergent_mismatched_mark_lets_the_payees_cancel_go() {
+    let w = World::new();
+    let (_base, mut shop, mut wallet, request, record) = kept_at_the_shop(&w).await;
+    mark_past_its_record(&mut shop).await;
+    shop.cancel_sent_request(&record, None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(sale(&shop, &request).await.status, PayeeStatus::Cancelled);
+    wallet.receive(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_divergent_mismatched_mark_writes_a_payers_rejection_in_the_receive_step() {
+    // The shop's record is seen divergent at a load, and its mark then names a later write
+    // than the one held: the payer's rejection, a stop, is written over it at the step.
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet("wallet").await;
+    let shop = shop_on(&w, Arc::clone(&base)).await;
+    let app_id = shop.app_id();
+    let mut shop = shop;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let record = sale(&shop, &request).await.record;
+    set_divergent(&base, &shop, &record, true);
+    drop(shop);
+    let mut shop = w
+        .load_on_clock(&w.bob, Arc::clone(&base), app_id, Arc::clone(&w.clock))
+        .await;
+    mark_past_its_record(&mut shop).await;
+    wallet.receive(None).await.unwrap();
+    wallet.reject_request(&request, None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(sale(&shop, &request).await.status, PayeeStatus::Rejected);
+}
+
+#[tokio::test]
+async fn test_divergent_mismatched_mark_beside_a_held_list_fails_no_receive() {
+    // A list is held over a `payment_lists` record that doesn't read, and kept over it once
+    // divergent; then the record's mark names a later write than the one held. Every receive
+    // goes on, the list held.
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    wallet.receive(None).await.unwrap();
+    let record = list_record(&w, &wallet, &shop);
+    let target = RecordTarget::new(
+        SwitchCollection::new(
+            Collection::PaymentLists.name(),
+            Collection::PaymentLists.fixed_policy(),
+        ),
+        &natural_key::payment_list(&w.bob_id(), &shop.app_id()),
+    );
+    wallet
+        .app_mut()
+        .put_record(&target, b"{}", Vec::new())
+        .await
+        .unwrap();
+    w.list_to_alice(&mut shop, &[wallet.app_id()], 3).await;
+    wallet.receive(None).await.unwrap();
+    set_divergent(&base, &wallet, &record, true);
+    w.list_to_alice(&mut shop, &[wallet.app_id()], 2).await;
+    wallet.receive(None).await.unwrap();
+    mark_past_its_record(&mut wallet).await;
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.held_lists().await.unwrap()[0].version, 3);
 }
 
 #[tokio::test]
@@ -1246,4 +1413,130 @@ async fn test_divergent_later_message_kept_is_reflected_once_written() {
         .collect();
     assert!(ids.contains(&first) && ids.contains(&second), "{value}");
     assert_eq!(sale(&shop, &request).await.status, PayeeStatus::Accepted);
+}
+
+#[tokio::test]
+async fn test_divergent_kept_value_at_a_key_without_its_msg_id_holds_the_new_message() {
+    // A value at a kept proof's key that names no `msg_id` doesn't read: the receive step
+    // holds the proof, and once the value is removed and the user confirms, it is written.
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_on(&w, Arc::clone(&base)).await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let record = sale(&shop, &request).await.record;
+    set_divergent(&base, &shop, &record, true);
+    let ns = pubky_switch_client::store::client_namespace(&shop.app_id());
+    let kept = format!("p/dw/{}/proof", pubky_switch_core::enc::b64(&record));
+    let mut batch = WriteBatch::new();
+    batch
+        .put(&ns, kept.clone().into_bytes(), b"not a kept write".to_vec())
+        .unwrap();
+    base.commit(batch).unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(shop.receive(None).await.is_err());
+    let mut batch = WriteBatch::new();
+    batch.delete(&ns, kept.into_bytes()).unwrap();
+    base.commit(batch).unwrap();
+    confirm(&mut shop, &record).await.unwrap();
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        sale(&shop, &request).await.status,
+        PayeeStatus::ProofReceived
+    );
+}
+
+#[tokio::test]
+async fn test_divergent_outcome_waits_after_the_view_clears_until_confirmed() {
+    // A payment made over a paused record: its outcome, acceptance and proof wait while the
+    // record is paused, also once a newer write has cleared the view, and go once the user
+    // confirms.
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    let record = wallet.request(&request).await.unwrap().record;
+    set_divergent(&base, &wallet, &record, true);
+    w.rail.settle(&attempt_id, true);
+    w.rail.set_declaration(
+        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true)
+            .with_history(true),
+    );
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::RecordDivergent { .. }]),
+        "{resumed:?}"
+    );
+    set_divergent(&base, &wallet, &record, false);
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::RecordDivergent { record: r, .. }] if *r == record),
+        "{resumed:?}"
+    );
+    shop.receive(None).await.unwrap();
+    assert_ne!(
+        sale(&shop, &request).await.status,
+        PayeeStatus::ProofReceived
+    );
+    confirm(&mut wallet, &record).await.unwrap();
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Paid { .. }]),
+        "{resumed:?}"
+    );
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        sale(&shop, &request).await.status,
+        PayeeStatus::ProofReceived
+    );
+}
+
+#[tokio::test]
+async fn test_divergent_kept_list_written_before_a_payment_to_it() {
+    // A newer list is kept over the divergent `payment_lists` record; the user confirms.
+    // Until the next receive writes the kept list, no payment goes to the list: the
+    // refusal shows its writes waiting. Then the payment goes.
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    wallet.receive(None).await.unwrap();
+    let record = list_record(&w, &wallet, &shop);
+    set_divergent(&base, &wallet, &record, true);
+    w.list_to_alice(&mut shop, &[wallet.app_id()], 2).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"dw/").await.unwrap().len(), 1);
+    confirm(&mut wallet, &record).await.unwrap();
+    let payment = || {
+        UnrequestedPayment::new(w.bob_id(), btc("1"))
+            .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")))
+    };
+    let refused = wallet.pay_without_request(payment()).await.unwrap_err();
+    assert_eq!(refused_records(&refused), vec![(record, false, true)]);
+    let Some(Refusal::Divergent { records }) = refused.refusal() else {
+        panic!("{refused:?}");
+    };
+    assert!(records[0].writes_waiting);
+    assert!(w.rail.all_executions().is_empty());
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    let outcome = wallet.pay_without_request(payment()).await.unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }

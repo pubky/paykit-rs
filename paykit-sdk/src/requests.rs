@@ -707,7 +707,11 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// As [`Paykit::verify_payment`]; the client's errors.
+    /// As [`Paykit::verify_payment`]; the client's errors; [`crate::Refusal::Divergent`] while the
+    /// record, or another of the same payer, was seen divergent and its user hasn't
+    /// confirmed it as the refusal shows it, that it may hold a credit
+    /// ([`crate::DivergentRecord::may_hold_credit`]), or the messages kept over it wait to
+    /// be written.
     pub async fn confirm_payment(&mut self, record: &[u8; 32]) -> Result<Option<String>> {
         self.confirm_payment_with(record, ReceiptDetails::new())
             .await

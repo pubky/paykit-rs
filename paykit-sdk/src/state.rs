@@ -755,6 +755,11 @@ pub(crate) mod key {
         format!("{DIVERGENT}{}", b64(record_key))
     }
 
+    /// The prefix of every message kept to write over the divergent record `record_key`.
+    pub(crate) fn divergent_writes_at(record_key: &[u8; 32]) -> String {
+        format!("{DIVERGENT_WRITES}{}/", b64(record_key))
+    }
+
     /// The prefix of the messages of `role` kept to write over the divergent record
     /// `record_key`.
     pub(crate) fn divergent_writes_of(

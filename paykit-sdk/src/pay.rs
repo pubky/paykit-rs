@@ -2121,10 +2121,11 @@ impl Paykit {
         let target = ActivityTarget::payer(entry.natural_key.clone());
         let own = self.identity();
         let key = self.activity_key(&target)?;
-        // An acceptance a resume sends is an automatic one: none goes, nor is placed, while
-        // the request record is paused or its view divergent (Paykit spec 6); the entry
-        // stays owed, for a resume after the user's confirmation and a clear view.
-        if self.pause_at(&key).await?.blocks_automatic() {
+        // The acceptance of a payment already made records that payment: none goes, nor is
+        // placed, while the request record is paused, by the one gate of the outcome
+        // (Paykit spec 6); the entry stays owed, for a resume after the user's confirmation,
+        // which sends it also over a view still divergent.
+        if self.dispatched_write_waits(&key).await? {
             return Ok(());
         }
         self.release_acceptance(entry, None).await?;
@@ -2391,11 +2392,11 @@ impl Paykit {
         overwrite: bool,
     ) -> Result<Written> {
         if paid {
-            // A payment made waits for the user's confirmation of a divergent payer record,
+            // A payment made waits for the user's confirmation of a paused payer record,
             // before its acceptance is released: nothing of it goes over that record until
-            // then (Paykit spec 6).
+            // then, and then also over a view still divergent (Paykit spec 6).
             let record = self.activity_key(&ActivityTarget::payer(entry.natural_key.clone()))?;
-            if self.pause_at(&record).await?.write_waits() {
+            if self.dispatched_write_waits(&record).await? {
                 return Ok(Written::Divergent(record));
             }
             // Every path that writes a payment made goes through here: its acceptance is
@@ -2560,16 +2561,18 @@ impl Paykit {
         {
             return Err(crate::hold::value_awaits_key());
         }
-        // A divergent record the user hasn't confirmed takes no own write but a stop (Paykit
-        // spec 6): a payment made waits, `done` never going without the record's update; a
-        // failure's `failed` goes alone, its record left as it is.
+        // A payment made waits while the record is paused, by the one gate of the outcome
+        // ([`crate::divergent::Pause::dispatched_write_waits`]), `done` never going without
+        // the record's update; a divergent record the user hasn't confirmed takes no other
+        // own write but a stop, so a failure's `failed` goes alone, its record left as it is
+        // (Paykit spec 6).
         if let Some(current) = &held {
-            if self.pause_of(current).await?.write_waits() {
-                return Ok(if paid {
-                    OutcomeRecord::Divergent(key)
-                } else {
-                    OutcomeRecord::Unchanged
-                });
+            let pause = self.pause_of(current).await?;
+            if paid && pause.dispatched_write_waits() {
+                return Ok(OutcomeRecord::Divergent(key));
+            }
+            if !paid && pause.write_waits() {
+                return Ok(OutcomeRecord::Unchanged);
             }
         }
         let read = match held.as_ref().map(|r| &r.content) {
