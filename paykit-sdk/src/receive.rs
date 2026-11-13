@@ -677,7 +677,10 @@ fn keep_until_placed(
 /// - an Allowance's stop over a record held that doesn't read, or that reads and holds what
 ///   the end names ([`crate::allowances::end_bounded`]), and one whose Allowance has a stored
 ///   message kept to write ([`crate::allowances::keeps_stored_message`]): the message could
-///   open the record, and the stop must then be there.
+///   open the record, and the stop must then be there. Of the ends kept for one Allowance,
+///   only the earliest accepted is judged so; each later one counts, since until the record
+///   reads none of them can be told to name what it holds, and a sender's ends past its
+///   bound are asked for again like any stop dropped for the bounds.
 ///
 /// A stop dropped for the bounds, a cancellation or an end, is dropped as one never
 /// processed, as a reply is ([`make_room_for_reply`]): the client marked it processed when
@@ -726,22 +729,33 @@ pub(crate) fn make_room_for_stop(
         }
     }
     if !side_may_lack(cx, RecordSide::Allowances)? {
+        // Every end kept for one Allowance record, earliest first: the earliest is judged as
+        // the record's stop, and each later one counts.
+        let mut ends: std::collections::BTreeMap<[u8; 32], Vec<_>> =
+            std::collections::BTreeMap::new();
         for (name, stop) in state::cx_scan::<KeptMessage>(cx, key::ALLOWANCE_ENDS)? {
-            let Some(crate::state::StateKey::AllowanceEnd(record)) =
+            let Some(crate::state::StateKey::AllowanceEnd { record, .. }) =
                 crate::state::StateKey::parse(name.as_bytes())
             else {
                 return Err(Fail::corrupt());
             };
             let (end, at) = kept_with_time(cx, &stop)?;
+            ends.entry(record).or_default().push((at, name, end));
+        }
+        for (record, mut group) in ends {
+            group.sort_by(|a, b| (a.0, &a.2.message().msg_id).cmp(&(b.0, &b.2.message().msg_id)));
             let content = cx.record_at(&record)?.map(|held| held.content);
-            if !crate::allowances::end_bounded(cx, content.as_ref(), &end)?
-                || crate::allowances::keeps_stored_message(cx, &record)?
-            {
-                continue;
+            for (index, (at, name, end)) in group.into_iter().enumerate() {
+                if index == 0
+                    && (!crate::allowances::end_bounded(cx, content.as_ref(), &end)?
+                        || crate::allowances::keeps_stored_message(cx, &record)?)
+                {
+                    continue;
+                }
+                kept.push((end.sender(), at));
+                names.push(name.into_bytes());
+                msg_ids.push(end.message().msg_id.clone());
             }
-            kept.push((end.sender(), at));
-            names.push(name.into_bytes());
-            msg_ids.push(end.message().msg_id.clone());
         }
     }
     let mut dropped: std::collections::BTreeMap<[u8; 32], (u64, u64)> =

@@ -933,17 +933,27 @@ fn allowance_record(w: &World, i: usize) -> pubky_switch_client::app::RecordTarg
     )
 }
 
-/// Whether `wallet` keeps bob's end of the Allowance with ID number `i` as a stop.
+/// Whether `wallet` keeps an end of bob's of the Allowance with ID number `i` as a stop.
 async fn keeps_end(w: &World, wallet: &Paykit, i: usize) -> bool {
     let target = allowance_record(w, i);
     let key = wallet.app().record_key(&target).unwrap();
-    let stop = format!("ae/{}", pubky_switch_core::enc::b64(&key));
+    Box::pin(keeps_end_at(wallet, &key)).await
+}
+
+/// How many ends `wallet` keeps as the stops of the Allowance whose record is `record`.
+async fn ends_kept_at(wallet: &Paykit, record: &[u8; 32]) -> usize {
+    let stops = format!("ae/{}/", pubky_switch_core::enc::b64(record));
     wallet
         .app()
-        .protocol_get(stop.as_bytes())
+        .protocol_scan(stops.as_bytes())
         .await
         .unwrap()
-        .is_some()
+        .len()
+}
+
+/// Whether `wallet` keeps an end as the stop of the Allowance whose record is `record`.
+async fn keeps_end_at(wallet: &Paykit, record: &[u8; 32]) -> bool {
+    Box::pin(ends_kept_at(wallet, record)).await > 0
 }
 
 #[tokio::test]
@@ -1016,13 +1026,7 @@ async fn test_allowances_stop_over_a_readable_record_counted_in_the_bound() {
     }
     wallet.receive(None).await.unwrap();
     assert_eq!(Box::pin(stops(&wallet)).await, bound);
-    let held = format!("ae/{}", pubky_switch_core::enc::b64(&mine));
-    assert!(wallet
-        .app()
-        .protocol_get(held.as_bytes())
-        .await
-        .unwrap()
-        .is_none());
+    assert!(!Box::pin(keeps_end_at(&wallet, &mine)).await);
     assert!(Box::pin(keeps_end(&w, &wallet, 0)).await);
     assert!(Box::pin(keeps_end(&w, &wallet, bound - 1)).await);
 }
@@ -2057,7 +2061,9 @@ async fn test_allowances_stop_under_another_record_key_is_corrupt() {
     end_unknown(&w, &wallet, 0);
     wallet.receive(None).await.unwrap();
     let (key, value) = wallet.app().protocol_scan(b"ae/").await.unwrap().remove(0);
-    let other = format!("ae/{}", pubky_switch_core::enc::b64(&[3; 32]));
+    let msg_id = String::from_utf8(key.clone()).unwrap();
+    let msg_id = msg_id.rsplit_once('/').unwrap().1;
+    let other = format!("ae/{}/{msg_id}", pubky_switch_core::enc::b64(&[3; 32]));
     wallet
         .app_mut()
         .protocol_commit(&[
@@ -2166,13 +2172,7 @@ async fn test_allowances_stop_over_a_readable_record_makes_room_when_kept() {
     wallet.receive(None).await.unwrap();
     assert_eq!(Box::pin(stops(&wallet)).await, bound);
     assert!(!Box::pin(keeps_end(&w, &wallet, 0)).await);
-    let held = format!("ae/{}", pubky_switch_core::enc::b64(&mine));
-    assert!(wallet
-        .app()
-        .protocol_get(held.as_bytes())
-        .await
-        .unwrap()
-        .is_some());
+    assert!(Box::pin(keeps_end_at(&wallet, &mine)).await);
 }
 
 #[tokio::test]
@@ -4381,5 +4381,236 @@ async fn test_allowances_restore_own_acceptance_over_a_record_left_unreadable_se
     assert_eq!(
         shop.allowance(&theirs).await.unwrap().status,
         AllowanceStatus::Accepted
+    );
+}
+
+/// Bob proposes an Allowance and alice's wallet accepts it. Her tool then writes the record
+/// as a value no reader reads, before her phone has read anything: the phone holds the record
+/// as that value. Returns the shop, the phone, the tool, the record keys on bob's side and on
+/// alice's, the record's target and its value before.
+async fn accepted_then_unreadable(
+    w: &World,
+) -> (
+    Paykit,
+    Paykit,
+    Paykit,
+    [u8; 32],
+    [u8; 32],
+    pubky_switch_client::app::RecordTarget,
+    Vec<u8>,
+) {
+    let mut shop = Box::pin(shop(w)).await;
+    let mut wallet = Box::pin(wallet(w)).await;
+    let both = || AppScopes::new().pay().allowance().build().unwrap();
+    let mut tool = Box::pin(alice_app(w, "tool", both())).await;
+    let mut phone = Box::pin(alice_app(w, "phone", both())).await;
+    let (theirs, mine) = Box::pin(proposed(w, &mut shop, &mut wallet)).await;
+    wallet.accept_allowance(&mine).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let id = wallet.allowance(&mine).await.unwrap().allowance_id;
+    let target = allowances_target(&w.bob_id(), &id);
+    let held = tool.app_mut().read_record(&target).await.unwrap().unwrap();
+    let good = held.content.value().unwrap().to_vec();
+    let unreadable = serde_json::to_vec(&json!({ "v": 99 })).unwrap();
+    Box::pin(crate::periods::writes_value(
+        &mut tool,
+        &target,
+        &unreadable,
+    ))
+    .await;
+    phone.receive(None).await.unwrap();
+    assert_eq!(Box::pin(raw(&phone, &mine)).await, unreadable);
+    (shop, phone, tool, theirs, mine, target, good)
+}
+
+/// `signer`'s app `app` sends alice's wallet an end of the Allowance `mine` names, with
+/// `refs`.
+async fn end_with_refs(
+    w: &World,
+    signer: &pubky_switch_client::testing::TestSigner,
+    app: &str,
+    wallet: &Paykit,
+    allowance_id: &paykit_lib::AllowanceId,
+    refs: Vec<[u8; 32]>,
+) -> String {
+    w.clock.advance_ms(1);
+    w.inject(
+        signer,
+        app,
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.allowance_end",
+        refs,
+        json!({ "allowance_id": allowance_id.as_str() })
+            .as_object()
+            .cloned()
+            .unwrap(),
+    )
+}
+
+/// The `msg_id` of the end the wallet's record of the Allowance at `record` holds.
+async fn recorded_end(w: &World, wallet: &Paykit, record: &[u8; 32]) -> Option<String> {
+    let value = serde_json::to_vec(&Box::pin(value(wallet, record)).await).unwrap();
+    AllowanceRecord::read(&value, &w.alice_id())
+        .unwrap()
+        .end
+        .map(|end| end.message().msg_id.clone())
+}
+
+#[tokio::test]
+async fn test_allowances_end_with_wrong_references_over_an_unreadable_record_keeps_a_later_one() {
+    // While the wallet can't read the Allowance record, bob sends an end naming another
+    // proposal, then his real end. Neither can be checked yet, so both are kept as stops, the
+    // second not dropped for the first. Once the record reads, the end naming the record's
+    // proposal and acceptance ends the Allowance and the other is dropped; a re-sent copy of
+    // the real end changes nothing (Paykit spec 8.3, "Ends reach the executor").
+    let w = World::new();
+    let (mut shop, mut wallet, mut phone, theirs, mine, target, good) =
+        Box::pin(accepted_then_unreadable(&w)).await;
+    let id = shop.allowance(&theirs).await.unwrap().allowance_id;
+    Box::pin(end_with_refs(
+        &w,
+        &w.bob,
+        "shop",
+        &wallet,
+        &id,
+        vec![[7; 32]],
+    ))
+    .await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(Box::pin(ends_kept_at(&wallet, &mine)).await, 1);
+    w.clock.advance_ms(1);
+    let ended = shop.end_allowance(&theirs).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(Box::pin(ends_kept_at(&wallet, &mine)).await, 2);
+    Box::pin(crate::periods::writes_value(&mut phone, &target, &good)).await;
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Ended
+    );
+    assert_eq!(
+        Box::pin(recorded_end(&w, &wallet, &mine)).await,
+        Some(ended.clone())
+    );
+    assert_eq!(Box::pin(ends_kept_at(&wallet, &mine)).await, 0);
+    // Bob's shop sends the real end again, asked for by its `msg_id`.
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.resend_request",
+        Vec::new(),
+        json!({ "msg_ids": [ended] }).as_object().cloned().unwrap(),
+    );
+    shop.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Ended
+    );
+    assert_eq!(
+        Box::pin(recorded_end(&w, &wallet, &mine)).await,
+        Some(ended)
+    );
+    assert_eq!(Box::pin(ends_kept_at(&wallet, &mine)).await, 0);
+}
+
+#[tokio::test]
+async fn test_allowances_third_identity_end_over_an_unreadable_record_keeps_no_stop_of_it() {
+    // Carol, whom alice admits, sends an end under the Allowance ID of bob's Allowance with
+    // made-up references while the wallet can't read the record. Its stop is under the record
+    // key of an Allowance of carol's, which alice doesn't hold: it takes nothing of bob's
+    // record, and bob's end, coming after it, ends the Allowance once the record reads.
+    let w = World::new();
+    let (mut shop, mut wallet, mut phone, theirs, mine, target, good) =
+        Box::pin(accepted_then_unreadable(&w)).await;
+    wallet.app_mut().invite(&w.carol_id()).await.unwrap();
+    let mut carol = w
+        .join(
+            &w.carol,
+            "shop",
+            AppScopes::new().request().allowance().build().unwrap(),
+        )
+        .await;
+    carol.app_mut().invite(&w.alice_id()).await.unwrap();
+    let id = shop.allowance(&theirs).await.unwrap().allowance_id;
+    Box::pin(end_with_refs(
+        &w,
+        &w.carol,
+        "shop",
+        &wallet,
+        &id,
+        vec![[7; 32]],
+    ))
+    .await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(Box::pin(ends_kept_at(&wallet, &mine)).await, 0);
+    assert_eq!(Box::pin(stops(&wallet)).await, 1);
+    w.clock.advance_ms(1);
+    let ended = shop.end_allowance(&theirs).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(Box::pin(ends_kept_at(&wallet, &mine)).await, 1);
+    Box::pin(crate::periods::writes_value(&mut phone, &target, &good)).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Ended
+    );
+    assert_eq!(
+        Box::pin(recorded_end(&w, &wallet, &mine)).await,
+        Some(ended)
+    );
+}
+
+#[tokio::test]
+async fn test_allowances_second_end_over_an_unreadable_record_dropped_for_the_bound_asked_again() {
+    // Over the record the wallet can't read, bob's end naming another proposal is kept as the
+    // record's stop, outside the bounds; his real end after it counts. His 64 ends of
+    // Allowances alice holds no record of then push the real end out: its pair is forgotten
+    // and bob is asked at once. His re-sent copy is taken and kept again, and once the record
+    // reads it ends the Allowance (Paykit spec 8.3, "Ends reach the executor"; Switch spec
+    // 11).
+    let w = World::new();
+    let (mut shop, mut wallet, mut phone, theirs, mine, target, good) =
+        Box::pin(accepted_then_unreadable(&w)).await;
+    let id = shop.allowance(&theirs).await.unwrap().allowance_id;
+    Box::pin(end_with_refs(
+        &w,
+        &w.bob,
+        "shop",
+        &wallet,
+        &id,
+        vec![[7; 32]],
+    ))
+    .await;
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(1);
+    let ended = shop.end_allowance(&theirs).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(Box::pin(ends_kept_at(&wallet, &mine)).await, 2);
+    let bound = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    for i in 0..bound {
+        w.clock.advance_ms(1);
+        end_unknown(&w, &wallet, i);
+    }
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
+    assert_eq!(Box::pin(ends_kept_at(&wallet, &mine)).await, 1);
+    assert_eq!(wallet.app().protocol_scan(b"pd/").await.unwrap().len(), 1);
+    shop.receive(None).await.unwrap();
+    let got = wallet.receive(None).await.unwrap();
+    assert!(received(&got, "paykit.allowance_end"), "{got:?}");
+    assert_eq!(Box::pin(ends_kept_at(&wallet, &mine)).await, 2);
+    Box::pin(crate::periods::writes_value(&mut phone, &target, &good)).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Ended
+    );
+    assert_eq!(
+        Box::pin(recorded_end(&w, &wallet, &mine)).await,
+        Some(ended)
     );
 }

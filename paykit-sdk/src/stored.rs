@@ -612,7 +612,7 @@ impl Paykit {
                 if !crate::receive::holds_record(content.as_ref()) {
                     return Ok(None);
                 }
-                let stop = key::allowance_end(&record);
+                let stop = key::allowance_end(&record, &stored.message().msg_id);
                 let kept = self.local_get::<KeptMessage>(&stop).await?.is_some();
                 Some(Place::Stop(
                     (!kept).then(|| (stop, KeptMessage::of(stored))),

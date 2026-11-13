@@ -56,7 +56,7 @@
 //! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply, or a payee's period details, for a request the app holds no record of yet, kept until it does, or a receipt for a payer record the app holds but can't read, kept until it reads (`receive.rs`), or a counterparty's Allowance answer before the app holds its Allowance record (`allowances.rs`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing, since a dropped entry's time is already in its sender's mark | |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, with the entry's ID and message hash, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
-//! | `ae/<record key>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection (`allowances.rs`, Paykit spec 8.3) | |
+//! | `ae/<record key>/<msg_id>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection; every distinct end is kept, each under its `msg_id`, until the record shows which one names what it holds (`allowances.rs`, Paykit spec 8.3) | |
 //! | `ac/<record key>` | the consent list: an Allowance this app may pay under, or removed from it for good (`allowances.rs`, Paykit spec 8.3); a restore marks every entry to confirm again | |
 //! | `cf/<record key>` | a second, different proposal or response of an Allowance, kept as the stop until the Allowance record holds `conflicted` (`allowances.rs`, Paykit spec 8.3) | |
 //! | `mc` | set by a `missed` item: every entry of the consent list is to be confirmed again, as after a restore; nothing is consented while it is set, and the next receive marks each entry so and clears it (`allowances.rs`); never restored | |
@@ -608,9 +608,10 @@ impl sealed::Sealed for KeptMessage {}
 ///   inbox accepted before this app held the proposal's record, from that sender and of that
 ///   `msg_id`, kept under the record key of the Allowance record it names (Paykit spec 8.1,
 ///   8.3).
-/// - At `ae/<record key>`, a counterparty's `paykit.allowance_end` its inbox accepted, kept
-///   as the stop under the record key of the Allowance record of its sender and the
-///   Allowance it names (Paykit spec 8.3, "Ends reach the executor").
+/// - At `ae/<record key>/<msg_id>`, a counterparty's `paykit.allowance_end` its inbox
+///   accepted, of that `msg_id`, kept as the stop under the record key of the Allowance
+///   record of its sender and the Allowance it names (Paykit spec 8.3, "Ends reach the
+///   executor").
 /// - At `cf/<record key>`, a second, different proposal, acceptance or rejection, kept as
 ///   the stop under the record key of the Allowance record of its sender and the Allowance
 ///   it names (Paykit spec 8.3, "Conflicted").
@@ -686,14 +687,16 @@ impl Stored for KeptMessage {
             {
                 (allowance_target(sender, &answer.allowance_id), record)
             }
-            (StateKey::AllowanceEnd(record_key), Body::AllowanceEnd(end))
-                if message.accepted_at().is_some() =>
-            {
-                (
-                    allowance_target(&message.sender(), &end.allowance_id),
-                    record_key,
-                )
-            }
+            (
+                StateKey::AllowanceEnd {
+                    record: record_key,
+                    msg_id,
+                },
+                Body::AllowanceEnd(end),
+            ) if message.message().msg_id == *msg_id && message.accepted_at().is_some() => (
+                allowance_target(&message.sender(), &end.allowance_id),
+                record_key,
+            ),
             (StateKey::Conflict(record_key), Body::AllowanceProposal(proposal)) => (
                 allowance_target(&message.sender(), &proposal.allowance_id),
                 record_key,
@@ -985,9 +988,16 @@ pub(crate) mod key {
         format!("{OWED_ENDS}{}", b64(record_key))
     }
 
-    /// A counterparty's end of the Allowance whose record is `record_key`, kept as the stop.
-    pub(crate) fn allowance_end(record_key: &[u8; 32]) -> String {
-        format!("{ALLOWANCE_ENDS}{}", b64(record_key))
+    /// A counterparty's end `msg_id` of the Allowance whose record is `record_key`, kept as
+    /// the stop.
+    pub(crate) fn allowance_end(record_key: &[u8; 32], msg_id: &str) -> String {
+        format!("{}{msg_id}", allowance_ends(record_key))
+    }
+
+    /// The prefix of every end kept as the stop of the Allowance whose record is
+    /// `record_key`.
+    pub(crate) fn allowance_ends(record_key: &[u8; 32]) -> String {
+        format!("{ALLOWANCE_ENDS}{}/", b64(record_key))
     }
 
     /// A conflicting proposal or response of the Allowance whose record is `record_key`,
@@ -1228,8 +1238,8 @@ pub(crate) enum StateKey {
         attempt: AttemptId,
         kind: crate::notices::NoticeKind,
     },
-    /// `ae/<record key>`: a counterparty's Allowance end kept as the stop.
-    AllowanceEnd([u8; 32]),
+    /// `ae/<record key>/<msg_id>`: a counterparty's Allowance end kept as the stop.
+    AllowanceEnd { record: [u8; 32], msg_id: String },
     /// `ac/<record key>`: an entry of the consent list.
     Consent([u8; 32]),
     /// `cf/<record key>`: a conflicting proposal or response kept as the stop.
@@ -1327,7 +1337,13 @@ impl StateKey {
                         }
                     }
                     "spam" => Self::Spam(b64_32(rest)?),
-                    "ae" => Self::AllowanceEnd(b64_32(rest)?),
+                    "ae" => {
+                        let (record, id) = rest.split_once('/')?;
+                        Self::AllowanceEnd {
+                            record: b64_32(record)?,
+                            msg_id: msg_id(id)?,
+                        }
+                    }
                     "ac" => Self::Consent(b64_32(rest)?),
                     "cf" => Self::Conflict(b64_32(rest)?),
                     "en" => Self::NoticeTarget(msg_id(rest)?),
@@ -1931,7 +1947,13 @@ mod tests {
                     kind: crate::notices::NoticeKind::HeldWithoutPay,
                 },
             ),
-            (key::allowance_end(&pubky), StateKey::AllowanceEnd(pubky)),
+            (
+                key::allowance_end(&pubky, id),
+                StateKey::AllowanceEnd {
+                    record: pubky,
+                    msg_id: id.into(),
+                },
+            ),
             (key::consent(&pubky), StateKey::Consent(pubky)),
             (key::conflict(&pubky), StateKey::Conflict(pubky)),
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),

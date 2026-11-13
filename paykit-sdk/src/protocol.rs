@@ -451,7 +451,7 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::AllowanceEnd(_) | StateKey::Conflict(_) => {
+            StateKey::AllowanceEnd { .. } | StateKey::Conflict(_) => {
                 state::restored::<KeptMessage>(&key, &value, &binder).map_err(|_| {
                     String::from(
                         "Paykit spec 8.3: a kept Allowance stop in the backup doesn't verify",
@@ -1403,23 +1403,26 @@ mod receive_tests {
             panic!("an end");
         };
         let target = allowance_target(&bob.id(), &reply.allowance_id);
-        let key = key::allowance_end(&fake_key(&target));
+        let key = key::allowance_end(&fake_key(&target), &end.message().msg_id);
         let value = state::encode(&KeptMessage::of(&end)).unwrap();
         assert!(restores::<KeptMessage>(&alice, key.as_bytes(), &value));
+        // Under another `msg_id` of the same record: refused.
+        let other = key::allowance_end(&fake_key(&target), "0d6f5b9e-3c1a-4e8b-9f2d-7a4c1e5b8d30");
+        assert!(!restores::<KeptMessage>(&alice, other.as_bytes(), &value));
     }
 
     #[test]
     fn test_protocol_restore_refuses_a_kept_end_at_another_key_or_of_another_kind() {
         let (alice, bob, proposal, end) = allowance_end();
         let value = state::encode(&KeptMessage::of(&end)).unwrap();
-        let other = key::allowance_end(&[9; 32]);
+        let other = key::allowance_end(&[9; 32], &end.message().msg_id);
         assert!(!restores::<KeptMessage>(&alice, other.as_bytes(), &value));
         // The proposal under the end's key isn't an end.
         let Body::AllowanceProposal(body) = proposal.body() else {
             panic!("a proposal");
         };
         let target = allowance_target(&bob.id(), &body.allowance_id);
-        let key = key::allowance_end(&fake_key(&target));
+        let key = key::allowance_end(&fake_key(&target), &proposal.message().msg_id);
         let proposal = state::encode(&KeptMessage::of(&proposal)).unwrap();
         assert!(!restores::<KeptMessage>(&alice, key.as_bytes(), &proposal));
     }
@@ -1560,7 +1563,10 @@ mod receive_tests {
         let Body::AllowanceEnd(reply) = end.body() else {
             panic!("an end");
         };
-        let key = key::allowance_end(&fake_key(&allowance_target(&bob.id(), &reply.allowance_id)));
+        let key = key::allowance_end(
+            &fake_key(&allowance_target(&bob.id(), &reply.allowance_id)),
+            &end.message().msg_id,
+        );
         let value = state::encode(&KeptMessage::of(&end)).unwrap();
         assert!(!restores::<KeptMessage>(
             &alice,

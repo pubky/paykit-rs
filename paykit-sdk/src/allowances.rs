@@ -704,6 +704,13 @@ fn conflict_writes(
 /// or a rejection already is kept too, so the later write reflects its `msg_id` (Paykit wire
 /// 4.16). A sealed value is checked once it opens ([`Paykit::place_allowance_stops`]).
 ///
+/// Every distinct end is kept, each under its `msg_id` (`ae/<record key>/<msg_id>`), none in
+/// place of another: over a record that doesn't read, none can be told yet to name what the
+/// record holds, so an earlier end naming another proposal or acceptance never keeps a
+/// later, right one out. Once the record reads, the first kept that names what it holds
+/// ends the Allowance, and the others are reflected or dropped. Only the counterparty's
+/// ends share a record's stops: the record key derives from the end's sender.
+///
 /// One for an Allowance the app holds no record of, or holds deleted, is new state, which
 /// the spam rule gates, held while the copy of `allowances` may lack records, when the
 /// absence decides nothing. A stop is kept under the bounds of the stops for records not
@@ -755,9 +762,16 @@ fn keep_end(
         }
     }
     let record_key = cx.record_key(target)?;
-    let stop = key::allowance_end(&record_key);
+    let stop = key::allowance_end(&record_key, &stored.message().msg_id);
     if state::cx_get::<KeptMessage>(cx, &stop)?.is_none() {
-        if end_bounded(cx, content.as_ref(), stored)? && !keeps_stored_message(cx, &record_key)? {
+        // A second end of the Allowance counts under the bounds whatever the record holds
+        // (`receive::make_room_for_stop`).
+        let second =
+            !state::cx_scan::<KeptMessage>(cx, &key::allowance_ends(&record_key))?.is_empty();
+        if second
+            || (end_bounded(cx, content.as_ref(), stored)?
+                && !keeps_stored_message(cx, &record_key)?)
+        {
             receive::make_room_for_stop(cx, &sender)?;
         }
         receive::keep_local(cx, receive::local(&stop, &KeptMessage::of(stored))?);
@@ -963,7 +977,12 @@ impl Paykit {
     /// Whether this app keeps the counterparty's end of the Allowance at `record` as its
     /// stop.
     pub(crate) async fn allowance_stopped(&self, record: &[u8; 32]) -> Result<bool> {
-        Box::pin(self.allowance_stop(&key::allowance_end(record))).await
+        // Each read bound to its key, as a restore reads it (`state::Stored`).
+        Ok(
+            !Box::pin(self.local_scan::<KeptMessage>(&key::allowance_ends(record)))
+                .await?
+                .is_empty(),
+        )
     }
 
     /// Whether this app keeps a conflicting proposal or response of the Allowance at
@@ -1697,10 +1716,23 @@ impl Paykit {
             return Ok(());
         }
         let own = self.identity();
+        // Read bound to its key (`state::Stored`). The ends of one Allowance go earliest
+        // accepted first: once one ends it, the later ones are reflected or dropped.
+        let mut ends = Vec::new();
         for (rest, kept) in Box::pin(self.local_scan::<KeptMessage>(key::ALLOWANCE_ENDS)).await? {
-            let stop = format!("{}{rest}", key::ALLOWANCE_ENDS);
-            // Read bound to its key (`state::Stored`).
             let end = kept.stored(&own)?;
+            let record = rest.split_once('/').map(|(record, _)| record.to_owned());
+            ends.push((
+                record,
+                end.accepted_at(),
+                end.message().msg_id.clone(),
+                rest,
+                end,
+            ));
+        }
+        ends.sort_by(|a, b| (&a.0, a.1, &a.2).cmp(&(&b.0, b.1, &b.2)));
+        for (_, _, _, rest, end) in ends {
+            let stop = format!("{}{rest}", key::ALLOWANCE_ENDS);
             let Some(allowance_id) = named_allowance(end.body()).cloned() else {
                 return Err(PaykitError::corrupt());
             };
