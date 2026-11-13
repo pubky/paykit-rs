@@ -258,6 +258,8 @@ enum Place {
     /// Into a period record that doesn't hold the period details the proof names yet: it
     /// waits for them (Paykit wire 5.3), within its window.
     AwaitsDetails,
+    /// Period details that wait for a verified service time ([`PeriodPlace::AwaitsTime`]).
+    AwaitsTime,
 }
 
 /// Where a message naming a request whose record is held goes ([`Paykit::period_destination`]).
@@ -274,6 +276,9 @@ pub(crate) enum PeriodPlace {
     /// A proof naming period details the period record doesn't hold
     /// ([`crate::receive::awaits_named_details`]): it waits for them.
     AwaitsDetails,
+    /// Period details with no service time verified yet, so whether the payer stores them
+    /// can't be told ([`crate::periods::Window::NoTime`]): they wait for one.
+    AwaitsTime,
 }
 
 impl Paykit {
@@ -472,7 +477,8 @@ impl Paykit {
                 Place::Record { .. }
                 | Place::AwaitsRequest(_)
                 | Place::Taken
-                | Place::AwaitsDetails,
+                | Place::AwaitsDetails
+                | Place::AwaitsTime,
             ) => {}
         }
         let note = StoredNote {
@@ -607,6 +613,7 @@ impl Paykit {
                 PeriodPlace::Invalid => None,
                 PeriodPlace::Taken => Some(Place::Taken),
                 PeriodPlace::AwaitsDetails => Some(Place::AwaitsDetails),
+                PeriodPlace::AwaitsTime => Some(Place::AwaitsTime),
             },
         )
     }
@@ -640,8 +647,9 @@ impl Paykit {
                 self.service_time(),
                 stopped,
             ) {
-                Ok(true) => {}
-                Ok(false) => return Ok(PeriodPlace::Taken),
+                Ok(crate::periods::Window::Takes) => {}
+                Ok(crate::periods::Window::Closed) => return Ok(PeriodPlace::Taken),
+                Ok(crate::periods::Window::NoTime) => return Ok(PeriodPlace::AwaitsTime),
                 // A payment deadline past 64 bits: no attempt on the period can be made.
                 Err(_) => return Ok(PeriodPlace::Invalid),
             }
@@ -698,6 +706,8 @@ impl Paykit {
                     }
                     Some(Place::Taken) => Placed::Done,
                     Some(Place::AwaitsDetails) => Placed::Not,
+                    // With no service time verified no window runs: it waits for one.
+                    Some(Place::AwaitsTime) => Placed::Waits,
                     None => Placed::Not,
                 };
                 let later = later_write(placed, accepted_at, self.service_time());

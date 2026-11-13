@@ -154,11 +154,24 @@ pub(crate) fn named_period(
 /// earlier one.
 pub(crate) const STARTED_PERIODS_WITH_DETAILS: i64 = 16;
 
+/// Whether a Billing Period takes period details now ([`takes_details`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Window {
+    /// It does: the payee sends them, and the payer stores them.
+    Takes,
+    /// It doesn't: the payee refuses them, and the payer takes them with no effect.
+    Closed,
+    /// No service time is verified yet, so which periods have started can't be told: the
+    /// payee refuses them for now, and the payer holds them until a time is verified, never
+    /// taking them with no effect on a time it hasn't verified.
+    NoTime,
+}
+
 /// Whether the payer stores the period details `stored` for the request `record` holds
 /// (Paykit spec 8.2), `period` the payer's period record of the period they name, if it
-/// reads: the one rule every path that stores them follows: at receive, once a request
-/// record comes for details kept before it, and when a write the switch refused is made
-/// later.
+/// reads and binds: the one rule every path that stores them follows: at receive, once a
+/// request record comes for details kept before it, and when a write the switch refused is
+/// made later.
 ///
 /// - **A subscription running:** only for a request the payer accepted, as v0.1 holds
 ///   details before acceptance invalid, and that neither side rejected or cancelled, nor
@@ -177,19 +190,19 @@ pub(crate) fn stores_details(
     stored: &StoredMessage,
     t: Option<u64>,
     stopped: bool,
-) -> std::result::Result<bool, paykit_lib::Error> {
+) -> std::result::Result<Window, paykit_lib::Error> {
     if record.response.is_none() || rejected(record) || cancelled(record) || stopped {
-        return Ok(false);
+        return Ok(Window::Closed);
     }
     let Some((_, request)) = request_of(record) else {
-        return Ok(false);
+        return Ok(Window::Closed);
     };
     let Some(Ok(named)) = stored
         .body()
         .billing_period()
         .map(|named| request.named_period(named))
     else {
-        return Ok(false);
+        return Ok(Window::Closed);
     };
     takes_details(
         request,
@@ -207,9 +220,9 @@ pub(crate) fn stores_details(
 /// attempt's `deadline` is the millisecond after it ([`PaymentRequest::attempt_deadline`],
 /// Paykit spec 7.1), so its own millisecond takes details. The payee sends details only for
 /// such a period, and the payer stores them only for one, by this same rule. With no time
-/// verified yet, no period has started, as for every time the SDK judges on the service's
-/// clock, never on the device's: only the request's first period, the next to start, takes
-/// details then.
+/// verified yet, which periods have started can't be told, as for every time the SDK judges
+/// on the service's clock, never on the device's: [`Window::NoTime`], for a period not
+/// shown paid.
 ///
 /// # Errors
 ///
@@ -220,36 +233,48 @@ pub(crate) fn takes_details(
     period: &BillingPeriod,
     paid: bool,
     t: Option<u64>,
-) -> std::result::Result<bool, paykit_lib::Error> {
+) -> std::result::Result<Window, paykit_lib::Error> {
     let Some(recurrence) = request.recurrence.as_ref() else {
-        return Ok(false);
+        return Ok(Window::Closed);
     };
     let Ok(first) = recurrence.first() else {
-        return Ok(false);
+        return Ok(Window::Closed);
     };
     if paid {
-        return Ok(false);
+        return Ok(Window::Closed);
     }
+    let Some(t) = t else {
+        return Ok(Window::NoTime);
+    };
+    let open = |takes: bool| {
+        if takes {
+            Window::Takes
+        } else {
+            Window::Closed
+        }
+    };
     // The latest period to have started, the request's last once it has ended; none
     // before the first starts.
     let last = recurrence.last().ok().flatten().map(|last| last.index);
-    let latest = t
-        .and_then(|t| recurrence.rule().index_at(t).ok())
+    let latest = recurrence
+        .rule()
+        .index_at(t)
+        .ok()
         .map(|k| last.map_or(k, |last| k.min(last)))
         .filter(|k| *k >= first.index);
-    let (Some(k), Some(t)) = (latest, t) else {
-        return Ok(period.index == first.index);
+    let Some(k) = latest else {
+        return Ok(open(period.index == first.index));
     };
     if Some(period.index) == k.checked_add(1) {
-        return Ok(true);
+        return Ok(Window::Takes);
     }
     if period.index > k {
-        return Ok(false);
+        return Ok(Window::Closed);
     }
-    Ok(match request.attempt_deadline(Some(period))? {
+    Ok(open(match request.attempt_deadline(Some(period))? {
         Some(deadline) => t < deadline,
         None => k.saturating_sub(period.index) < STARTED_PERIODS_WITH_DETAILS,
-    })
+    }))
 }
 
 /// The natural key of the period record of `request_hash`'s Billing Period `period`, the
@@ -350,10 +375,12 @@ impl Paykit {
     /// take details now, or details expired on the highest service time verified;
     /// [`Refusal::NotNow`] while the period record's value waits for its scope key, is held
     /// as a value that doesn't read, or the switch holds a newer write of it this app
-    /// refused; [`Refusal::SwitchUnavailable`] when the records can't be read again now;
-    /// [`crate::PaykitError::Conflict`] when the record kept changing; the client's errors. A failure that leaves the batch kept
-    /// (the network, `429`, `503`) is no error: the details are reported sent,
-    /// [`MessageDelivery::Kept`], so the host doesn't send them again.
+    /// refused, and while no service time is verified to judge the period by;
+    /// [`Refusal::SwitchUnavailable`] when the records can't be read again now;
+    /// [`crate::PaykitError::Conflict`] when the record kept changing; the client's errors.
+    /// A failure that leaves the batch kept (the network, `429`, `503`) is no error: the
+    /// details are reported sent, [`MessageDelivery::Kept`], so the host doesn't send them
+    /// again.
     pub async fn send_period_details(
         &mut self,
         record: &[u8; 32],
@@ -432,12 +459,22 @@ impl Paykit {
             }
             // Only for a period that takes details, the periods the payer stores them for,
             // on the highest service time verified (Paykit spec 8.2).
-            if !takes_details(request, &period, paid, self.service_time())? {
-                return Err(paykit_lib::Error::Validation(
-                    "Paykit spec 8.2: period details only for the next period to start, or one started whose payment deadline hasn't passed, or, without one, one of the 16 latest to have started"
-                        .into(),
-                )
-                .into());
+            match takes_details(request, &period, paid, self.service_time())? {
+                Window::Takes => {}
+                Window::Closed => {
+                    return Err(paykit_lib::Error::Validation(
+                        "Paykit spec 8.2: period details only for the next period to start, or one started whose payment deadline hasn't passed, or, without one, one of the 16 latest to have started"
+                            .into(),
+                    )
+                    .into());
+                }
+                Window::NoTime => {
+                    return Err(Refusal::NotNow(
+                        "Paykit spec 8.2: no service time verified yet to judge the period by"
+                            .into(),
+                    )
+                    .into());
+                }
             }
             // Expired on the highest service time verified, as every time the SDK judges:
             // details are valid until their `expires_at`, that millisecond included (Paykit
@@ -672,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn test_periods_stores_details_with_no_verified_time_first_period_only() {
+    fn test_periods_stores_details_with_no_verified_time_waits_for_one() {
         // A monthly request from 2026-01-31, each period due 1 s after its start.
         let (alice, bob) = parties();
         let request = bob.message(
@@ -712,22 +749,25 @@ mod tests {
             })),
         );
         let second = details(&bob, &alice, request.hash(), "2026-03-01T00:00:00.000Z");
-        // No time verified: no period has started, so only the first, not started, takes
-        // details.
-        assert!(stores_details(&record, None, &first, None, false).unwrap());
-        assert!(!stores_details(&record, None, &second, None, false).unwrap());
+        // No time verified: which periods have started can't be told, so the details wait
+        // for a verified time, the first period's as any other's.
+        let window = |details: &StoredMessage, t: Option<u64>| {
+            stores_details(&record, None, details, t, false).unwrap()
+        };
+        assert_eq!(window(&first, None), Window::NoTime);
+        assert_eq!(window(&second, None), Window::NoTime);
         // A verified time decides. 2 s into the first period its payment deadline, 1 s after
         // its start, has passed: it takes no details, and the next to start does.
         let jan_31 = 1_769_817_600_000;
         let t = Some(jan_31 + 2_000);
-        assert!(!stores_details(&record, None, &first, t, false).unwrap());
-        assert!(stores_details(&record, None, &second, t, false).unwrap());
+        assert_eq!(window(&first, t), Window::Closed);
+        assert_eq!(window(&second, t), Window::Takes);
         // Within its deadline, the first period takes them.
-        assert!(stores_details(&record, None, &first, Some(jan_31 + 500), false).unwrap());
+        assert_eq!(window(&first, Some(jan_31 + 500)), Window::Takes);
         // The deadline's own millisecond is within it: an attempt is still taken then, the
         // attempt's `deadline` being the millisecond after it.
-        assert!(stores_details(&record, None, &first, Some(jan_31 + 1_000), false).unwrap());
-        assert!(!stores_details(&record, None, &first, Some(jan_31 + 1_001), false).unwrap());
+        assert_eq!(window(&first, Some(jan_31 + 1_000)), Window::Takes);
+        assert_eq!(window(&first, Some(jan_31 + 1_001)), Window::Closed);
     }
 
     #[test]
@@ -758,14 +798,28 @@ mod tests {
         let second = details(&bob, &alice, request.hash(), "2026-03-01T00:00:00.000Z");
         let t = Some(1_772_236_800_000);
         let period = empty(ActivitySide::Payer, bob.id());
-        assert!(stores_details(&record, Some(&period), &second, t, false).unwrap());
+        assert_eq!(
+            stores_details(&record, Some(&period), &second, t, false).unwrap(),
+            Window::Takes
+        );
         // The period record's paid state decides, whatever the time.
         let (_, body) = request_of(&record).unwrap();
         let named = body
             .named_period(second.body().billing_period().unwrap())
             .unwrap();
-        assert!(takes_details(body, &named, false, t).unwrap());
-        assert!(!takes_details(body, &named, true, t).unwrap());
+        assert_eq!(
+            takes_details(body, &named, false, t).unwrap(),
+            Window::Takes
+        );
+        assert_eq!(
+            takes_details(body, &named, true, t).unwrap(),
+            Window::Closed
+        );
+        // Shown paid, it takes none with no time verified too.
+        assert_eq!(
+            takes_details(body, &named, true, None).unwrap(),
+            Window::Closed
+        );
     }
 
     #[test]
@@ -790,15 +844,30 @@ mod tests {
         let mut record = empty(ActivitySide::Payer, bob.id());
         record.request = Some(request.clone());
         // Not accepted: none stored.
-        assert!(!stores_details(&record, None, &second, t, false).unwrap());
+        assert_eq!(
+            stores_details(&record, None, &second, t, false).unwrap(),
+            Window::Closed
+        );
         let reply = |kind: &str| alice.message(&bob, kind, vec![request.hash()], object(json!({})));
         record.response = Some(reply("paykit.payment_request_rejection"));
-        assert!(!stores_details(&record, None, &second, t, false).unwrap());
+        assert_eq!(
+            stores_details(&record, None, &second, t, false).unwrap(),
+            Window::Closed
+        );
         record.response = Some(reply("paykit.payment_request_acceptance"));
-        assert!(stores_details(&record, None, &second, t, false).unwrap());
+        assert_eq!(
+            stores_details(&record, None, &second, t, false).unwrap(),
+            Window::Takes
+        );
         // A payee's cancellation kept and not placed yet stops it, as one the record holds.
-        assert!(!stores_details(&record, None, &second, t, true).unwrap());
+        assert_eq!(
+            stores_details(&record, None, &second, t, true).unwrap(),
+            Window::Closed
+        );
         record.cancellation = Some(reply("paykit.payment_request_cancellation"));
-        assert!(!stores_details(&record, None, &second, t, false).unwrap());
+        assert_eq!(
+            stores_details(&record, None, &second, t, false).unwrap(),
+            Window::Closed
+        );
     }
 }

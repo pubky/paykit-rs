@@ -618,6 +618,7 @@ fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<
 /// Details invalid against the request are dropped. Those the payer doesn't store, for a
 /// request it hasn't accepted, or rejected, or either side cancelled, or for a period that
 /// doesn't take details now ([`crate::periods::stores_details`]), are taken with no effect.
+/// With no service time verified yet, the entry is held until one is.
 ///
 /// The spam rule (Paykit wire 4.1) doesn't gate the details stored here: they go only into
 /// the period record of a subscription the payer accepted, an update of activity it holds
@@ -667,8 +668,17 @@ fn period_details_effect(
         stopped,
     )
     .map_err(|_| Fail::Drop("Paykit wire 4.5: a payment deadline past 64 bits".into()))?;
-    if !stores {
-        return Ok(());
+    match stores {
+        crate::periods::Window::Takes => {}
+        crate::periods::Window::Closed => return Ok(()),
+        // No service time verified yet: the entry is held, as for a store unavailable for
+        // now, and read again at a later read, never taken with no effect on a time the
+        // app hasn't verified.
+        crate::periods::Window::NoTime => {
+            return Err(Fail::Store(StoreFailure::unavailable(
+                StoreError::Unavailable,
+            )));
+        }
     }
     // The period record is of the request record's side, whose hold was judged above, and
     // `place` holds the entry while its value waits for its key.
@@ -1583,6 +1593,8 @@ impl Paykit {
                         // A proof naming details the period record doesn't hold waits for
                         // them, within its window.
                         PeriodPlace::AwaitsDetails => Placed::Not,
+                        // Details with no service time verified yet wait for one.
+                        PeriodPlace::AwaitsTime => Placed::Waits,
                     }
                 }
                 // A request record that doesn't open or bind is never written over: the
