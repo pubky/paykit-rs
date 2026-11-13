@@ -1359,6 +1359,24 @@ impl Paykit {
                 }
                 None => None,
             };
+            // A record that reads names its counterparty: a message kept over it from anyone
+            // else, kept while the record didn't read, is never written and holds nothing
+            // back. It goes now, as the receive step drops it over a record that reads
+            // (`receive::place`), paused or not.
+            if let Some(KeptWrite {
+                target: WriteTarget::Activity { target, .. },
+                ..
+            }) = &kept
+            {
+                if self
+                    .held_activity(target)
+                    .await?
+                    .is_some_and(|read| read.counterparty != stored.sender())
+                {
+                    self.local_delete(&kept_key).await?;
+                    continue;
+                }
+            }
             // A record absent or deleted while the copy of its side may lack records decides
             // nothing yet: the message waits, never given up meanwhile (Paykit spec 8.1,
             // "Records not listed yet"), as a stored entry's does.
@@ -1402,6 +1420,89 @@ impl Paykit {
             }
         }
         Ok(())
+    }
+
+    /// Move `stored`, a message kept at `kept_key` before its record `held` read (`pr/`),
+    /// over that record now that it reads paused as divergent (`dw/`): from then on it is one
+    /// of the messages kept over the record (Paykit spec 6), counted under their bound, held
+    /// to their order and gates, and written once the user has confirmed the record. Its
+    /// processed pair stays as it is, so it is applied once; the copy kept before goes in
+    /// the commit that keeps it here. A message kept over the record already, at the same
+    /// `msg_id`, stays as it is. A kept message the bound drops is dropped as one never
+    /// processed, its pair forgotten in the commit that drops it, as in the receive step
+    /// ([`step_keep`]); one the client won't forget yet stays, over the bound, and so does
+    /// this one when the bound would drop it, until a later message of its role drops it so.
+    pub(crate) async fn keep_over_paused(
+        &mut self,
+        held: &SharedRecord,
+        stored: &StoredMessage,
+        kept_key: &str,
+    ) -> Result<()> {
+        let (Some(role), Some(view)) = (WriteRole::of(stored), View::of(held)) else {
+            return Ok(());
+        };
+        let record = held.key;
+        let own = self.identity();
+        let mut held_messages = Vec::new();
+        for (_, kept) in self
+            .local_scan::<DivergentWrite>(&key::divergent_writes_of(&record, role))
+            .await?
+        {
+            let Some(kept) = kept.kept(&own, &|proof| self.rail.settlement_id(proof))? else {
+                continue;
+            };
+            let collection = kept.target.collection().ok_or_else(PaykitError::corrupt)?;
+            if points_to(Some(&view), collection, kept.seen) {
+                held_messages.push(kept.message);
+            }
+        }
+        let msg_id = stored.message().msg_id.clone();
+        let kept_already = held_messages
+            .iter()
+            .any(|held| held.message().msg_id == msg_id);
+        let (keep, gone) = kept_after(&held_messages, stored);
+        for dropped_id in gone.iter().filter(|gone| **gone != msg_id) {
+            let Some(dropped) = held_messages
+                .iter()
+                .find(|held| held.message().msg_id == *dropped_id)
+            else {
+                continue;
+            };
+            let delete = pubky_switch_client::app::LocalWrite::Delete {
+                key: key::divergent_write(&record, role, dropped_id).into_bytes(),
+            };
+            match self
+                .app
+                .forget_processed(dropped.sender(), dropped_id, &[delete])
+                .await
+            {
+                Ok(_) | Err(AppError::Refused(ClientRefusal::NotNow(_))) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let mut tx = Tx::default();
+        tx.delete(kept_key);
+        if !kept_already && (keep || gone.contains(&msg_id)) {
+            let settlement = match stored.body() {
+                Body::PaymentProof(proof) if stored.message().refs.is_empty() => {
+                    let settled = self
+                        .rail
+                        .settlement_id(&proof.proof)
+                        .ok_or_else(PaykitError::corrupt)?;
+                    Some(pubky_switch_core::enc::b64(&settled))
+                }
+                _ => None,
+            };
+            let kept = DivergentWrite {
+                record,
+                role,
+                seen: view.version,
+                settlement,
+                message: KeptMessage::of(stored),
+            };
+            tx.put(&key::divergent_write(&record, role, &msg_id), &kept)?;
+        }
+        self.local_commit(tx).await
     }
 
     /// Hold `list`, kept over its divergent record `record` and confirmed since, as a list

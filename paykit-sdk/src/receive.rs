@@ -468,7 +468,8 @@ fn side_may_lack(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<bool, Fail
 /// Place `stored` in its `role` of the record at `target`, in the effect's batch, built on
 /// the version the app holds. A record that doesn't read is written again with the message
 /// (the reader doesn't act on an invalid record, Paykit wire 5.3). Nothing is written when
-/// the record already reflects the message.
+/// the record already reflects the message. A message whose sender, `counterparty`, isn't
+/// the counterparty of a record that reads is dropped, never placed nor kept.
 fn place(
     cx: &mut ReceiveContext<'_>,
     target: &ActivityTarget,
@@ -494,8 +495,20 @@ fn place(
     let own = cx.identity();
     let side = target.side.side();
     let current = held_value(cx, target)?;
-    let mut record = activity::read(current.as_deref(), &own, side)
-        .unwrap_or_else(|| activity::empty(side, counterparty));
+    let read = activity::read(current.as_deref(), &own, side);
+    // A record that reads names its counterparty: a message about it from anyone else is
+    // never placed, written or kept over it, paused or not (Paykit spec 8.1, "Replies before
+    // their record"). A record held is never taken for its sender being the counterparty.
+    if read
+        .as_ref()
+        .is_some_and(|record| record.counterparty != counterparty)
+    {
+        return Err(Fail::Drop(
+            "Paykit spec 8.1: a message about a record from anyone but its counterparty".into(),
+        ));
+    }
+    let unread = read.is_none();
+    let mut record = read.unwrap_or_else(|| activity::empty(side, counterparty));
     if !activity::place(&mut record, role, stored.clone()) {
         return Ok(());
     }
@@ -505,6 +518,17 @@ fn place(
     // way: a stop written over it leaves the record paused.
     if let Some(held) = cx.record(&target.record_target())? {
         if crate::divergent::step_write_waits(cx, &held, stored, settlement)? {
+            // Over a record held that doesn't read, its counterparty can't be told. A request
+            // names a record whose key derives from its sender; any other message names one
+            // that anyone naming the request or settlement reaches, so it is kept only as new
+            // state, under the spam rule (Paykit wire 4.1), as a reply over a payee record
+            // that doesn't open is ([`payer_reply`]).
+            if unread && role != Role::Request && holds_record(Some(&held.content)) {
+                let scopes = cx.cert().scopes().to_vec();
+                if !admits_new_state(cx, &counterparty, &scopes)? {
+                    return Ok(());
+                }
+            }
             return crate::divergent::step_keep(cx, &held, stored, settlement);
         }
     }
@@ -776,6 +800,15 @@ fn receipt_effect(
     let record = value
         .as_deref()
         .and_then(|value| activity::read(Some(value), &own, target.side.side()));
+    // A record that reads names its counterparty: a receipt from anyone else does nothing,
+    // paused or not, and is never kept over it.
+    let found = match &record {
+        Some(record) => match receipt_on_record(record, stored) {
+            Some(found) => Some(found),
+            None => return Ok(()),
+        },
+        None => None,
+    };
     // The pause comes first. Over a divergent record its user hasn't confirmed, or while
     // messages kept over it before this one wait to be written, the receipt is kept whole
     // beside them (`dw/`), its effects on the claim and the journal with it, and taken once
@@ -792,15 +825,12 @@ fn receipt_effect(
             return crate::divergent::step_keep(cx, &held, stored, settlement);
         }
     }
-    let Some(record) = record else {
+    let (Some(record), Some(found)) = (record, found) else {
         // No record, or one deleted: the record says the receipt has nowhere to go. Held,
         // though, it may read later.
         if holds_record(content.as_ref()) {
             return receipt_over_unread_record(cx, &target, stored);
         }
-        return Ok(());
-    };
-    let Some(found) = receipt_on_record(&record, stored) else {
         return Ok(());
     };
     if found.names_held_proof {
@@ -1555,9 +1585,9 @@ impl Paykit {
     ///   ([`crate::NoticeKind::MessageGivenUp`]) in the commit that drops it, as a stored
     ///   entry's message (`stored.rs`).
     ///
-    /// A receipt over a payer record paused as divergent waits for the user's confirmation,
-    /// as one kept over the divergent record does, whatever the view shows by then; the
-    /// window runs meanwhile.
+    /// A receipt whose payer record reads paused as divergent moves over that record
+    /// (`dw/`, [`Paykit::keep_over_paused`]): it is then one of the messages kept over it,
+    /// holds the record's gates, and is written once the user has confirmed it.
     ///
     /// A reply over a held record goes through the stored entries' later write
     /// ([`Paykit::place_note`]) and its one rule ([`crate::stored::later_write`]): a write the
@@ -1619,17 +1649,24 @@ impl Paykit {
             // written: kept no longer than any other.
             let placed = match record {
                 Some(record) if record.counterparty != reply.sender() => crate::stored::Placed::Not,
-                // A receipt kept for a payer record that didn't read waits, once the record
-                // can take it, while the record is paused as divergent, until its user has
-                // confirmed it, also once a newer write has cleared the view, as a receipt
-                // kept over a divergent record waits (Paykit spec 6): neither it nor the
-                // claim's `done` it carries evidence for is written past the pause.
-                _ if role == crate::activity::Role::Receipt
-                    && Box::pin(self.pause_at(&record_key))
-                        .await?
-                        .kept_writes_wait() =>
+                // A receipt kept for a payer record that didn't read, once that record reads
+                // paused as divergent, counts as a message kept over it (Paykit spec 6): it
+                // moves there, in one commit, and from then on holds the record's gates,
+                // waits for the user's confirmation and is written in the order the inbox
+                // accepted the messages kept over the record, as they are.
+                Some(_)
+                    if role == crate::activity::Role::Receipt
+                        && Box::pin(self.pause_at(&record_key))
+                            .await?
+                            .kept_writes_wait() =>
                 {
-                    crate::stored::Placed::Not
+                    let held = self
+                        .app
+                        .shared_record(&record_key)
+                        .await?
+                        .ok_or_else(crate::error::PaykitError::corrupt)?;
+                    Box::pin(self.keep_over_paused(&held, &reply, &kept_key)).await?;
+                    continue;
                 }
                 _ => {
                     let mut tx = Tx::default();
