@@ -846,6 +846,45 @@ async fn test_notices_receipt_waiting_for_its_key_never_shown_as_a_store_unavail
     assert!(store_causes.is_empty(), "{store_causes:?}");
 }
 
+#[tokio::test]
+async fn test_notices_list_left_out_of_a_backup_keeps_its_payload() {
+    let w = World::new();
+    // Alice's wallet never admits bob: what he sends her stays queued.
+    w.join(&w.alice, "wallet", AppScopes::new().pay().build().unwrap())
+        .await;
+    let mut shop = w.shop().await;
+    queue_fillers(&w, &mut shop, 60_000, MAX_CARRIED_OUTBOX_BYTES).await;
+    w.clock.advance_ms(1);
+    queue_fillers(&w, &mut shop, 8_000, 100_000).await;
+    w.clock.advance_ms(1);
+    // Queued last and larger than the small ones, the list fits no room left.
+    let mut endpoints = std::collections::BTreeMap::new();
+    endpoints.insert(
+        crate::common::endpoint("btc-bitcoin-p2wpkh"),
+        paykit_sdk::OfferedEndpoint::SingleUse,
+    );
+    endpoints.insert(
+        crate::common::endpoint("btc-lightning-bolt12"),
+        paykit_sdk::OfferedEndpoint::Reusable(
+            paykit_lib::PaymentEndpointPayload::new(&format!("lno1{}", "x".repeat(15_000)))
+                .unwrap(),
+        ),
+    );
+    shop.set_list_endpoints(endpoints).await.unwrap();
+    let published = shop.publish_list_to(&[w.alice_id()]).await.unwrap();
+    let sent = published.sent[0].clone();
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let mut shop = restored_shop(&w, &backup).await;
+    let events = shop.app_mut().unacknowledged_events().await.unwrap();
+    assert!(undelivered(&events, &sent.msg_id), "{events:?}");
+    // The restore gave it up, never accepted by this store: the device the backup came from
+    // may have delivered it, so its single-use payload isn't given back.
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(w.rail.released().is_empty(), "{:?}", w.rail.released());
+}
+
 /// Whether `events` hold the client's word that `msg_id` was given up undelivered.
 fn undelivered(events: &[AppEvent], msg_id: &str) -> bool {
     events.iter().any(|e| {
