@@ -29,7 +29,8 @@ use paykit_lib::collections::Collection;
 use paykit_lib::records::ActivityRecord;
 use pubky_switch_client::app::Protocol as _;
 use pubky_switch_client::app::{
-    AppError, Collection as SwitchCollection, PolicyFamily, RecordContent, Unopened,
+    AppError, Collection as SwitchCollection, PolicyFamily, RecordContent,
+    Refusal as ClientRefusal, Unopened,
 };
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::records::{AppCert, CLOCK_TOLERANCE_MS};
@@ -79,13 +80,22 @@ impl RestoreHold {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct MissedHold {
     /// A time no earlier than the last acceptance time of the entries the item tells of:
-    /// the highest service time verified once the read that took the item returned, as
-    /// the client at this pin tells only the item's first time. `None` until then, when
-    /// every open request is held.
+    /// the item's own last acceptance time (`MissedEntries::accepted_until_ms`), or, for an
+    /// item kept owed by a build that didn't keep it, the highest service time verified once
+    /// the read that took the item returned ([`Paykit::bound_missed_hold`]). `None` until
+    /// then, when every open request is held.
     pub(crate) bound_ms: Option<u64>,
 }
 
 impl MissedHold {
+    /// The hold of an item whose last acceptance time is `accepted_until_ms`: bounded by it,
+    /// or unbounded until the read returns when the client knows no end (`u64::MAX`).
+    pub(crate) fn of_item(accepted_until_ms: u64) -> Self {
+        Self {
+            bound_ms: (accepted_until_ms != u64::MAX).then_some(accepted_until_ms),
+        }
+    }
+
     /// Whether the open request `request` is held (Paykit spec 7.2, 9). One the app held at
     /// the item, its inbox having accepted it no later than the bound, is held. One first
     /// seen after the item is held only when its signed `created_at` is earlier than the
@@ -372,9 +382,9 @@ impl Paykit {
             .is_none())
     }
 
-    /// Bound a `missed` item's hold set by the read that just returned
-    /// ([`MissedHold::bound_ms`]) with the highest service time verified: the item came no
-    /// later. Without a verified time, it stays unbounded.
+    /// Bound a `missed` item's hold set by the read that just returned with no last
+    /// acceptance time ([`MissedHold::bound_ms`]) by the highest service time verified: the
+    /// item came no later. Without a verified time, it stays unbounded.
     pub(crate) async fn bound_missed_hold(&mut self) -> Result<()> {
         let Some(hold) = self.local_get::<MissedHold>(key::MISSED_HOLD).await? else {
             return Ok(());
@@ -425,7 +435,7 @@ impl Paykit {
 
     /// A restored time above the backup's highest verified service time plus the clock
     /// tolerance is clamped to that bound: the cursor time (`ct`), with the hold's re-send
-    /// time, the two times of each mark of dropped messages (`pd/`, `ud/`), and the
+    /// time, the two times of each mark of dropped messages (`pd/`, `ud/`, `kw/`), and the
     /// acceptance time of each stop (`kc/`) and kept reply (`pr/`). A cursor time ahead of
     /// any the backup verified would ask counterparties to re-send from the future, so
     /// nothing would come back (Paykit spec 7.2, "What a restore loses"); a mark or a kept
@@ -456,11 +466,18 @@ impl Paykit {
                 .local_scan::<crate::marks::DropMark>(family.prefix())
                 .await?
             {
-                if mark.latest_ms > bound {
-                    mark.latest_ms = bound;
-                    mark.earliest_ms = mark.earliest_ms.min(bound);
+                if mark.clamp(bound) {
                     tx.put(&format!("{}{rest}", family.prefix()), &mark)?;
                 }
+            }
+        }
+        let family = crate::marks::MarkFamily::KeyWaits;
+        for (rest, mut held) in self
+            .local_scan::<crate::marks::KeyWaitMark>(family.prefix())
+            .await?
+        {
+            if held.mark.clamp(bound) {
+                tx.put(&format!("{}{rest}", family.prefix()), &held)?;
             }
         }
         for prefix in [key::KEPT_CANCELLATIONS, key::KEPT_REPLIES] {
@@ -623,6 +640,92 @@ impl Paykit {
         Ok(false)
     }
 
+    /// Queue again, once after a restore, the messages this app signed that its activity
+    /// records store to be sent ([`own_to_send_again`]), with the signed plaintext each
+    /// record stores (Switch spec 11, "Queued again by its signer"): a batch the backup kept
+    /// unanswered queued its message only with an answer the restored app never gets, so
+    /// no outbox holds it. Called once the copy of the records is listed and no scope key
+    /// is awaited. A message the outbox holds, or that was sent, is queued once; one the
+    /// client refuses ([`pubky_switch_client::app::WontDeliver`]: past its replay window of
+    /// 30 days from its `created_at`, given up already, too large) is not sent again,
+    /// nothing is told the host, and it is never asked for again; one the client refuses as
+    /// not this app's own is not sent either. The pass waits while a record of the copy is
+    /// sealed under a scope key the app doesn't hold yet ([`Paykit::copy_awaits_key`]), so
+    /// what such a record stores is sent once it opens; a record that doesn't read shows
+    /// nothing to send. Messages to a counterparty whose sends are held wait, the mark naming
+    /// it, for a later receive.
+    pub(crate) async fn queue_own_again(&mut self) -> Result<()> {
+        let Some(owed) = self
+            .local_get::<OwnResendOwed>(key::OWN_RESEND_OWED)
+            .await?
+        else {
+            return Ok(());
+        };
+        if self.copy_awaits_key().await? {
+            return Ok(());
+        }
+        let own = self.identity();
+        let app_id = self.app.cert().app_id();
+        let mut waiting = std::collections::BTreeSet::new();
+        for (collection, side) in [
+            (
+                Collection::PayerActivity,
+                paykit_lib::records::ActivitySide::Payer,
+            ),
+            (
+                Collection::PayeeActivity,
+                paykit_lib::records::ActivitySide::Payee,
+            ),
+        ] {
+            for held in self.app.records_of(collection.name()).await? {
+                let Some(value) = held.content.value() else {
+                    continue;
+                };
+                // A record that doesn't read shows nothing to send.
+                let Ok(record) = ActivityRecord::read(value, &own, side) else {
+                    continue;
+                };
+                let counterparty = record.counterparty;
+                if owed
+                    .waiting
+                    .as_ref()
+                    .is_some_and(|waiting| waiting.binary_search(&counterparty).is_err())
+                {
+                    continue;
+                }
+                let messages = own_to_send_again(&record, &own, &app_id);
+                if messages.is_empty() {
+                    continue;
+                }
+                if self.sends_held(&counterparty).await? {
+                    waiting.insert(counterparty);
+                    continue;
+                }
+                for stored in messages {
+                    match self.app.queue_stored(stored.plaintext()).await {
+                        Ok(msg_id) => {
+                            let _ = self.app.flush_message(&msg_id).await;
+                        }
+                        // Refused for good, or not this app's own: nothing is queued and
+                        // nothing is told; the pass doesn't ask again.
+                        Err(AppError::Refused(
+                            ClientRefusal::WontDeliver(_) | ClientRefusal::Usage(_),
+                        )) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
+        }
+        if waiting.is_empty() {
+            self.local_delete(key::OWN_RESEND_OWED).await
+        } else {
+            let owed = OwnResendOwed {
+                waiting: Some(waiting.into_iter().collect()),
+            };
+            self.local_put(key::OWN_RESEND_OWED, &owed).await
+        }
+    }
+
     /// Queue, once after a restore, a `resend_request` to every counterparty with an open
     /// request, from the restore's re-send time; [`Paykit::receive`] sends them. The start is
     /// bounded where it is used as well as at the restore and the load: no ordering of a
@@ -675,6 +778,49 @@ impl Paykit {
         tx.put(key::RESTORE_HOLD, &hold)?;
         self.local_commit(tx).await
     }
+}
+
+/// The restore's re-send of this app's own messages, owed (`p/ro`): set by a restore, never
+/// restored, gone once every message it covers was queued again or refused
+/// ([`Paykit::queue_own_again`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OwnResendOwed {
+    /// `None` while no pass ran: every counterparty's messages are owed. After a pass, the
+    /// counterparties whose sends were held then, a blocked one or every one while the copy
+    /// of the deny list isn't known, ascending, each once: only their messages are owed.
+    pub(crate) waiting: Option<Vec<[u8; 32]>>,
+}
+
+/// The messages of `record` this app signed, `app_id` of identity `own`, that it queues again
+/// after a restore (Paykit spec 7.2, "What a restore loses"): each a record stores to be
+/// sent, since every message this app stores in a record it also queues
+/// (`records::own_message_tests`), while the counterparty hasn't answered it and no later
+/// stop covers it. A request or a Billing Period's details goes while the record holds no
+/// response and no cancellation; an acceptance or a rejection while it holds no
+/// cancellation and no receipt; a proof while it holds no receipt; a cancellation always. A
+/// receipt never goes this way: a payee may store one it doesn't send (Paykit spec 8.1), and
+/// the record doesn't tell the two apart.
+pub(crate) fn own_to_send_again<'a>(
+    record: &'a ActivityRecord,
+    own: &[u8; 32],
+    app_id: &[u8; 16],
+) -> Vec<&'a paykit_lib::records::StoredMessage> {
+    let answered = record.response.is_some() || record.cancellation.is_some();
+    let candidates = [
+        (&record.request, !answered),
+        (&record.period_details, !answered),
+        (
+            &record.response,
+            record.cancellation.is_none() && record.receipt.is_none(),
+        ),
+        (&record.proof, record.receipt.is_none()),
+        (&record.cancellation, true),
+    ];
+    candidates
+        .into_iter()
+        .filter_map(|(stored, send)| stored.as_ref().filter(|_| send))
+        .filter(|stored| stored.sender() == *own && stored.cert().app_id() == *app_id)
+        .collect()
 }
 
 /// The refusal while the shared records aren't listed since a restore.

@@ -482,7 +482,7 @@ async fn test_restore_given_up_notice_without_its_entry_refused() {
     nothing_restored(&w, target, app_id).await;
 }
 
-/// A message given up with no entry stored, from `origin` (`receive_step` or `kept_reply`).
+/// A message given up with no entry stored, from `origin` (`key_wait` or `kept_reply`).
 fn given_up_notice_from(w: &World, origin: &str) -> serde_json::Value {
     let mut notice = given_up_notice(w);
     let object = notice.as_object_mut().unwrap();
@@ -493,9 +493,10 @@ fn given_up_notice_from(w: &World, origin: &str) -> serde_json::Value {
 
 #[tokio::test]
 async fn test_restore_given_up_notice_with_no_entry_from_its_origin_restored() {
-    // A message the receive step gave up waiting for its key, or a kept reply given up, has
-    // no entry stored: its notice names where it came from, and restores with no handle.
-    for origin in ["receive_step", "kept_reply"] {
+    // A message whose entry the client dropped while it waited for a key, or a kept reply
+    // given up, has no entry stored: its notice names where it came from, and restores with
+    // no handle.
+    for origin in ["key_wait", "kept_reply"] {
         let w = World::new();
         let (good, _) = backup_with_a_payment(&w).await;
         let backup = with_given_up_notice(&w, &good, given_up_notice_from(&w, origin));
@@ -519,7 +520,7 @@ async fn test_restore_given_up_notice_with_no_entry_from_its_origin_restored() {
 async fn test_restore_given_up_notice_with_an_origin_and_a_handle_refused() {
     // A notice naming an origin has no entry stored: one that also holds a handle is a
     // state no run leaves.
-    for origin in ["receive_step", "kept_reply"] {
+    for origin in ["key_wait", "kept_reply"] {
         let w = World::new();
         let (good, app_id) = backup_with_a_payment(&w).await;
         let mut notice = given_up_notice(&w);
@@ -1394,7 +1395,16 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
             "asked_at_ms": 1,
         })
     };
-    let cases: [(&str, String, serde_json::Value); 19] = [
+    // A mark of entries dropped while they waited for a scope key, of the sender its key
+    // names, waiting for `epochs`.
+    let key_waits = |sender: [u8; 32], epochs: serde_json::Value| {
+        serde_json::json!({
+            "sender": pubky_switch_core::enc::b64(&sender),
+            "earliest_ms": 5, "latest_ms": 6, "due": false,
+            "asked_at_ms": null, "queued": null, "epochs": epochs,
+        })
+    };
+    let cases: [(&str, String, serde_json::Value); 22] = [
         (
             "kept cancellation of another kind",
             key_of("kc/"),
@@ -1490,6 +1500,25 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
             key_of("ask/"),
             kept(serde_json::json!({ "sender": 1 })),
         ),
+        (
+            "key-wait mark under another sender's key",
+            key_of("kw/"),
+            kept(key_waits(w.bob_id(), serde_json::json!([2]))),
+        ),
+        (
+            "key-wait mark naming no epoch",
+            key_of("kw/"),
+            kept(key_waits([7; 32], serde_json::json!([]))),
+        ),
+        (
+            "key-wait mark without its epochs",
+            key_of("kw/"),
+            kept(serde_json::json!({
+                "sender": pubky_switch_core::enc::b64(&[7u8; 32]),
+                "earliest_ms": 5, "latest_ms": 6, "due": false,
+                "asked_at_ms": null, "queued": null,
+            })),
+        ),
     ];
     for (what, key, value) in cases {
         let mut state = layer.clone();
@@ -1520,6 +1549,11 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
     state.push((
         format!("missed/{:020}", 5).into_bytes(),
         kept(serde_json::json!(5)),
+    ));
+    // And a key-wait mark of the sender its key names, with its epochs.
+    state.push((
+        key_of("kw/").into_bytes(),
+        kept(key_waits([7; 32], serde_json::json!([2, 3]))),
     ));
     let backup = with_layer(&good, state);
     let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&backup).unwrap()).unwrap();
@@ -2112,4 +2146,79 @@ async fn test_restore_unrequested_entry_naming_another_payments_record_refused()
     assert_ne!(state[journal[0]].1["d"]["natural_key"], other);
     state[journal[0]].1["d"]["natural_key"] = other;
     refused_writing_nothing(&w, with_layer(&good, state), wallet.app_id(), "record").await;
+}
+
+/// Bob's shop sends alice a request whose batch the switch applies and whose answer is lost:
+/// the client keeps the batch unanswered, so its message is in no outbox, and the shop is
+/// backed up then and restored onto a new store, which keeps no such batch. Returns the
+/// restored shop.
+async fn shop_restored_with_its_request_unqueued(w: &World, wallet: &mut Paykit) -> Paykit {
+    let mut shop = w.shop().await;
+    wallet.receive(None).await.unwrap();
+    let mut unexpiring = crate::common::draft("1", w.clock.now_ms());
+    unexpiring.proposal_expires_at_ms = None;
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    let _ = shop.send_request(w.alice_id(), unexpiring).await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.requests().await.unwrap().is_empty());
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    Paykit::restore(
+        w.env(&w.bob, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_restore_own_request_kept_unanswered_queued_again_from_its_record() {
+    // The restored shop lists its records, finds its request, which no outbox holds, and
+    // queues it again with the bytes the record stores, once (Paykit spec 7.2, "What a
+    // restore loses"; Switch spec 11): alice gets it.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_restored_with_its_request_unqueued(&w, &mut wallet).await;
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    wallet.receive(None).await.unwrap();
+    let requests = wallet.requests().await.unwrap();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    // Once: a later receive queues nothing more.
+    let before = w.alice.switch().entries_from(&w.bob_id());
+    shop.receive(None).await.unwrap();
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+}
+
+#[tokio::test]
+async fn test_restore_own_request_past_its_replay_window_not_sent_again_nothing_told() {
+    // Restored past 30 days from the request's `created_at`: the client refuses to queue it
+    // again (`WontDeliver::PastReplayWindow`). Nothing is sent, nothing is told the host,
+    // and the re-send is not owed any more.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_restored_with_its_request_unqueued(&w, &mut wallet).await;
+    w.clock.advance_ms(31 * pubky_switch_core::records::DAY_MS);
+    let before = w.alice.switch().entries_from(&w.bob_id());
+    let summary = shop.receive(None).await.unwrap();
+    assert!(
+        !summary.report.events.iter().any(|e| matches!(
+            e,
+            pubky_switch_client::app::AppEvent::MessageUndelivered { .. }
+        )),
+        "{:?}",
+        summary.report.events
+    );
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(shop.notices().await.unwrap().is_empty());
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.requests().await.unwrap().is_empty());
 }

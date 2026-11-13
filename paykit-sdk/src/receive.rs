@@ -79,9 +79,8 @@ pub(crate) enum Fail {
     /// held, or parked, never consumed (Switch spec 8.2).
     Store(StoreFailure),
     /// The message's record holds a value sealed at data epoch `data_epoch`, whose scope key
-    /// the app doesn't hold yet ([`wait_for_key`]): the entry waits for the key, and is given
-    /// up once [`crate::KEPT_MESSAGE_MS`] have passed since its acceptance
-    /// (`PaykitProtocol`'s receive step).
+    /// the app doesn't hold yet ([`wait_for_key`]): the entry waits for the key in the
+    /// client's store (`Outcome::AwaitKey`, `PaykitProtocol`'s receive step).
     AwaitsKey {
         /// The data epoch the value is sealed at.
         data_epoch: u64,
@@ -385,16 +384,6 @@ fn wait_for_key(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<(), 
     Ok(())
 }
 
-/// Whether a message accepted at `accepted_at` that waits for a key is given up now: once
-/// [`KEPT_MESSAGE_MS`] have passed since its acceptance, on the highest service time
-/// verified (Paykit spec 8.1).
-pub(crate) fn key_wait_over(cx: &ReceiveContext<'_>, accepted_at: Option<u64>) -> bool {
-    accepted_at.is_none_or(|at| {
-        cx.highest_service_time()
-            .is_some_and(|t| at.saturating_add(KEPT_MESSAGE_MS) <= t)
-    })
-}
-
 /// Whether the app's copy holds the record at `target` ([`holds_record`]).
 fn held_request(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<bool, Fail> {
     Ok(holds_record(
@@ -476,6 +465,19 @@ fn place(
     stored: &StoredMessage,
 ) -> Result<(), Fail> {
     wait_for_key(cx, target)?;
+    // A record the copy holds deleted, at an app that saw its messages: what it saw stays
+    // seen (Switch spec 8.2), so a message that may open it is one for the record it saw,
+    // taken with nothing written: a request sent again changes nothing, and a proof of a
+    // settlement it saw credited isn't credited again (Paykit spec 8.1, "Records not listed
+    // yet"). Only an app holding no seen state of it opens it again.
+    let record_target = target.record_target();
+    if cx
+        .record(&record_target)?
+        .is_some_and(|held| held.content == RecordContent::Deleted)
+        && cx.record_seen(&cx.record_key(&record_target)?)?.is_some()
+    {
+        return Ok(());
+    }
     let own = cx.identity();
     let side = target.side.side();
     let current = held_value(cx, target)?;

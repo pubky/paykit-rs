@@ -118,8 +118,10 @@ pub(crate) struct KeptNotice {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum GivenUpOrigin {
-    /// The receive step gave it up waiting for its record's scope key: it was processed.
-    ReceiveStep,
+    /// The client dropped its entry, stored while it waited for a scope key, past the
+    /// bounds of Switch spec 8.2: it was never processed, so a copy its sender sends again is
+    /// taken as a new message.
+    KeyWait,
     /// A payer's reply kept for its record (`pr/`) was given up.
     KeptReply,
 }
@@ -205,6 +207,13 @@ impl KeptNotice {
         }
     }
 
+    /// Whether the message given up stays processed, so a copy sent again has no effect while
+    /// the notice is kept: every give-up but the client's drop of an entry waiting for a
+    /// key, which was never processed ([`GivenUpOrigin::KeyWait`]).
+    pub(crate) fn keeps_processed(&self) -> bool {
+        self.origin != Some(GivenUpOrigin::KeyWait)
+    }
+
     /// The notice read whole, at the attempt and kind its key names: one that doesn't is a
     /// corrupt store.
     pub(crate) fn check(&self, attempt: &AttemptId, kind: NoticeKind) -> Result<()> {
@@ -226,7 +235,7 @@ impl KeptNotice {
         // A message notice is deleted at its acknowledgement, after its entry is forgotten,
         // so a valid run keeps none acknowledged. It holds its entry's handle exactly when it
         // names no origin: one raised for a stored entry always has it, and one with no
-        // entry stored (the receive step's, a kept reply's) names where it came from instead.
+        // entry stored (a key wait's, a kept reply's) names where it came from instead.
         if self.kind != NoticeKind::MessageGivenUp
             || self.attempt_id.is_some()
             || self.msg_id.as_deref() != Some(msg_id)

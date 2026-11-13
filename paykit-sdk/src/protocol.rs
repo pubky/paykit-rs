@@ -48,7 +48,7 @@ use serde_json::{Map, Value};
 use crate::activity::{self, KeptSide, SideTag};
 use crate::hold::RestoreHold;
 use crate::journal::JournalEntry;
-use crate::marks::DropMark;
+use crate::marks::{DropMark, KeyWaitMark};
 use crate::notices::KeptNotice;
 use crate::pay::ListAsk;
 use crate::rail::Rail;
@@ -111,9 +111,6 @@ pub struct PaykitProtocol {
     /// The app's rail, which names a proof's settlement (Paykit wire 1.5); without one, the
     /// methods `paykit-lib` knows.
     rail: Option<Arc<dyn Rail>>,
-    /// The entries this read held because their record's value waits for its scope key:
-    /// each `seq` with the data epoch it waits for, taken by [`crate::Paykit::receive`].
-    key_waits: std::sync::Mutex<std::collections::BTreeMap<u64, u64>>,
 }
 
 impl std::fmt::Debug for PaykitProtocol {
@@ -134,7 +131,6 @@ impl PaykitProtocol {
         Self {
             own: RwLock::new(None),
             rail: None,
-            key_waits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         }
     }
 
@@ -160,17 +156,6 @@ impl PaykitProtocol {
     pub fn set_own(&self, identity: [u8; 32], cert: AppCert) {
         let mut own = self.own.write().unwrap_or_else(PoisonError::into_inner);
         *own = Some(Own { identity, cert });
-    }
-
-    /// The entries held for a key since the last call, each `seq` with the data epoch it
-    /// waits for ([`receive::Fail::AwaitsKey`]).
-    pub(crate) fn take_key_waits(&self) -> std::collections::BTreeMap<u64, u64> {
-        std::mem::take(
-            &mut *self
-                .key_waits
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-        )
     }
 
     fn own(&self) -> Option<Own> {
@@ -355,6 +340,7 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::RecordsUnlisted
             | StateKey::MissedUnlisted
             | StateKey::PayerPassOwed
+            | StateKey::OwnResendOwed
             | StateKey::ListedCert
             | StateKey::StoredNote { .. }
             | StateKey::Taken(_) => continue,
@@ -409,6 +395,12 @@ pub(crate) fn restore_paykit_layer(
                 // A mark is restored whole, its times and when it was last asked, so a restore
                 // neither loses nor resets it (Paykit spec 8.1), bound to its key's sender.
                 state::restored::<DropMark>(&key, &value, &binder).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::KeyWaits { .. } => {
+                // So is a mark of key waits, with the epochs it waits for.
+                state::restored::<KeyWaitMark>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -518,6 +510,12 @@ pub(crate) fn restore_paykit_layer(
     let owed = state::local_put(key::PAYER_PASS_OWED, &true)
         .map_err(|_| String::from("the restore's payer pass mark can't be written"))?;
     writes.push(owed);
+    // The messages this app signed that a batch the backup kept unanswered queued are in no
+    // outbox: they are queued again from the records once they are listed
+    // (`Paykit::queue_own_again`).
+    let resend = state::local_put(key::OWN_RESEND_OWED, &crate::hold::OwnResendOwed::default())
+        .map_err(|_| String::from("the restore's re-send mark can't be written"))?;
+    writes.push(resend);
     Ok(writes)
 }
 
@@ -662,15 +660,17 @@ impl Protocol for PaykitProtocol {
             }
         }
         // A message given up stays processed (Paykit spec 8.1): a copy the sender sends again,
-        // or the parked entry the host releases, has no effect while its notice is kept.
+        // or the parked entry the host releases, has no effect while its notice is kept. One
+        // the client dropped while it waited for a key was never processed: a copy sent again
+        // is a new message.
         let notice = key::message_notice(&message.sender, &message.message.msg_id);
         match state::cx_get::<KeptNotice>(cx, &notice) {
-            Ok(Some(_)) => {
+            Ok(Some(notice)) if notice.keeps_processed() => {
                 return Outcome::Drop {
                     reason: "Paykit spec 8.1: a message given up stays processed".into(),
                 }
             }
-            Ok(None) => {}
+            Ok(_) => {}
             Err(Fail::Store(failure)) => return Outcome::Retry(failure),
             Err(_) => return Outcome::Retry(StoreFailure::of_entry(StoreError::Corrupt)),
         }
@@ -685,26 +685,11 @@ impl Protocol for PaykitProtocol {
             Err(Fail::Need(needs)) => Outcome::Need(needs),
             Err(Fail::Drop(reason)) => Outcome::Drop { reason },
             Err(Fail::Store(failure)) => Outcome::Retry(failure),
-            // A record value waits for its scope key: the entry waits for it, held as for a
-            // store unavailable for now, until 30 days after its acceptance; then it is given
-            // up, processed with the host's notice as its only write (Paykit spec 8.1). The
-            // notice can't go with `Outcome::Drop`, which keeps none of the step's writes.
-            Err(Fail::AwaitsKey { .. }) if receive::key_wait_over(cx, stored.accepted_at()) => {
-                match crate::stored::given_up_write(&stored, cx.highest_service_time()) {
-                    Ok(notice) => Outcome::Apply(Effect {
-                        ops: Vec::new(),
-                        local: vec![notice],
-                    }),
-                    Err(_) => Outcome::Retry(StoreFailure::of_entry(StoreError::Corrupt)),
-                }
-            }
-            Err(Fail::AwaitsKey { data_epoch }) => {
-                self.key_waits
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(message.seq, data_epoch);
-                Outcome::Retry(StoreFailure::unavailable(StoreError::Unavailable))
-            }
+            // A record value waits for its scope key: the client stores the entry and passes
+            // it at once, and runs the step again once the key comes (Switch spec 8.2). One
+            // it drops past its bounds first was never processed: the SDK tells the host and
+            // marks its sender to ask again once the key is held (`stored.rs`, `marks.rs`).
+            Err(Fail::AwaitsKey { data_epoch }) => Outcome::AwaitKey { data_epoch },
         }
     }
 
@@ -726,13 +711,14 @@ impl Protocol for PaykitProtocol {
     /// (Paykit spec 7.2; `hold.rs`): a payee's cancellation may be among
     /// the entries the service deleted. Every request the app holds is held, and one first
     /// seen later only when created before the item's last acceptance time plus the clock
-    /// tolerance. The confirmations of an earlier hold go in the same commit, so
-    /// none releases the new one. The copy of the shared records counts as not listed from
-    /// the item on (`ml`, Paykit spec 8.1, "Records not listed yet"), until Paykit's own
-    /// listing at the end of the receive (`Paykit::list_records`): the client lists
-    /// them again only at the start of its next read, so entries later in this read decide
-    /// nothing from an absence. A mark of its own, not `nl`, which the same read's end
-    /// would clear.
+    /// tolerance, the time the item carries (`MissedEntries::accepted_until_ms`). The
+    /// confirmations of an earlier hold go in the same commit, so none releases the new
+    /// one. The copy of the shared records counts as not listed from the item on (`ml`,
+    /// Paykit spec 8.1, "Records not listed yet"), until Paykit's own listing at the end of
+    /// the receive (`Paykit::list_records`): the client lists them right after the item,
+    /// inside its read, but Paykit judges the copy listed only from a listing of its own,
+    /// so what the app decides between the item and that listing decides nothing from an
+    /// absence. A mark of its own, not `nl`, which the same read's end would clear.
     fn missed(&self, missed: &MissedEntries) -> Result<Vec<LocalWrite>, StoreFailure> {
         Ok(vec![
             local_write(
@@ -742,7 +728,10 @@ impl Protocol for PaykitProtocol {
                     asked: Vec::new(),
                 },
             )?,
-            local_write(key::MISSED_HOLD, &crate::hold::MissedHold::default())?,
+            local_write(
+                key::MISSED_HOLD,
+                &crate::hold::MissedHold::of_item(missed.accepted_until_ms),
+            )?,
             local_write(key::MISSED_UNLISTED, &true)?,
             LocalWrite::DeletePrefix {
                 prefix: key::HOLD_CONFIRMED.as_bytes().to_vec(),
@@ -1450,6 +1439,44 @@ mod receive_tests {
                 &value
             ));
         }
+    }
+
+    #[test]
+    fn test_protocol_own_receipt_never_sent_again_after_a_restore() {
+        // A restore queues again a payee's own cancellation from its record, but never its
+        // receipt, which it may have stored without sending it (Paykit spec 7.2, 8.1); nor a
+        // message another app signed.
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let till = Party::new("bob", "till", &["request"]);
+        let mut record = ActivityRecord::new(paykit_lib::records::ActivitySide::Payee, alice.id());
+        record.receipt = Some(bob.message(
+            &alice,
+            "paykit.payment_receipt",
+            vec![[4; 32], [5; 32]],
+            object(json!({ "attempt_id": "DgCVYQKL1eyDacZvG6YhZg" })),
+        ));
+        let own = |record: &ActivityRecord| {
+            crate::hold::own_to_send_again(record, &bob.id(), &bob.cert.app_id())
+                .into_iter()
+                .map(|stored| stored.message().kind.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(own(&record).is_empty());
+        record.cancellation = Some(bob.message(
+            &alice,
+            "paykit.payment_request_cancellation",
+            vec![[4; 32]],
+            object(json!({ "reason": null })),
+        ));
+        assert_eq!(own(&record), ["paykit.payment_request_cancellation"]);
+        record.cancellation = Some(till.message(
+            &alice,
+            "paykit.payment_request_cancellation",
+            vec![[4; 32]],
+            object(json!({ "reason": null })),
+        ));
+        assert!(own(&record).is_empty());
     }
 
     #[test]

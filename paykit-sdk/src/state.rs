@@ -43,6 +43,7 @@
 //! | `rsd/<pubky>/<day>` | how many messages were re-sent to a requester that day | |
 //! | `nl` | set by a restore: the shared records aren't listed since, so the client's copy is empty and a record's absence means nothing yet; cleared once they are listed; never restored | |
 //! | `lc` | the certificate the shared records were last listed under, signed: a certificate held now other than it means the copy may lack records until Paykit lists them, since one held between may have read less (`hold.rs`); written only by a Paykit listing, in its commit; absent from a join or a restore until that listing, which leaves the records unlisted; never restored | |
+//! | `ro` | set by a restore: this app's own messages its activity records store to be sent are queued again once the records are listed (`hold.rs`, `Paykit::queue_own_again`); after a pass, the counterparties whose sends were held then, whose messages wait; never restored | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
@@ -50,6 +51,7 @@
 //! | `bk/<pubky>` | this app's block (`true`) or unblock (`false`) of `pubky` whose `deny.put` or `deny.delete` the client keeps unanswered: either counts at once (Paykit spec 8.1); cleared once a read of the list shows it; restored, and written again once after the restore, since the kept batch stays with the device that kept it | |
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
+//! | `kw/<sender>` | a mark of a sender's entries the client dropped while they waited for a scope key, as `pd/` holds, with the data epochs they waited for; it asks only while the app holds every key of those epochs (`marks.rs`) | |
 //! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply to a request the app holds no record of yet, kept until it does (`receive.rs`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing, since a dropped entry's time is already in its sender's mark | |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, with the entry's ID and message hash, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
@@ -69,9 +71,10 @@ use crate::activity::{ActivityTarget, KeptSide};
 use crate::app_records::SeenRecords;
 use crate::error::{PaykitError, Result};
 use crate::hold::MissedHold;
+use crate::hold::OwnResendOwed;
 use crate::hold::RestoreHold;
 use crate::journal::JournalEntry;
-use crate::marks::DropMark;
+use crate::marks::{DropMark, KeyWaitMark};
 use crate::notices::KeptNotice;
 use crate::pay::ListAsk;
 use crate::paykit::Paykit;
@@ -647,6 +650,26 @@ impl Stored for MissedHold {
     }
 }
 
+impl sealed::Sealed for OwnResendOwed {}
+
+/// The restore's re-send owed: the counterparties still waiting, if a pass ran, ascending,
+/// each once, which name no key.
+impl Stored for OwnResendOwed {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::OwnResendOwed
+                if self
+                    .waiting
+                    .as_ref()
+                    .is_none_or(|waiting| waiting.windows(2).all(|pair| pair[0] < pair[1])) =>
+            {
+                Ok(())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for Vec<[u8; 32]> {}
 
 /// The copy of the deny list: identities, which name no key.
@@ -669,6 +692,30 @@ impl Stored for DropMark {
         match family {
             StateKey::DroppedReplies { sender } | StateKey::DroppedUnverified { sender }
                 if self.sender == *sender && self.earliest_ms <= self.latest_ms =>
+            {
+                Ok(())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for KeyWaitMark {}
+
+/// A mark of a sender's entries dropped while they waited for a scope key: of the sender its
+/// key names, its times not crossed, never due by its flag (it is due while the app holds
+/// its keys), and naming at least one data epoch, ascending, each once (`marks.rs`). Its
+/// request is checked as a [`DropMark`]'s is.
+impl Stored for KeyWaitMark {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        let mark = &self.mark;
+        match family {
+            StateKey::KeyWaits { sender }
+                if mark.sender == *sender
+                    && mark.earliest_ms <= mark.latest_ms
+                    && !mark.due
+                    && !self.epochs.is_empty()
+                    && self.epochs.windows(2).all(|pair| pair[0] < pair[1]) =>
             {
                 Ok(())
             }
@@ -705,12 +752,14 @@ pub(crate) mod key {
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
     pub(crate) const MISSED_UNLISTED: &str = "ml";
     pub(crate) const PAYER_PASS_OWED: &str = "pp";
+    pub(crate) const OWN_RESEND_OWED: &str = "ro";
     pub(crate) const LISTED_CERT: &str = "lc";
     pub(crate) const NOTICES: &str = "nt/";
     pub(crate) const STORED_NOTES: &str = "se/";
     pub(crate) const KEPT_REPLIES: &str = "pr/";
     pub(crate) const DROPPED_REPLIES: &str = "pd/";
     pub(crate) const DROPPED_UNVERIFIED: &str = "ud/";
+    pub(crate) const KEY_WAITS: &str = "kw/";
 
     /// The mark of replies from `sender` dropped for the bounds.
     pub(crate) fn dropped_replies(sender: &[u8; 32]) -> String {
@@ -720,6 +769,11 @@ pub(crate) mod key {
     /// The mark of entries from `sender` dropped unverified.
     pub(crate) fn dropped_unverified(sender: &[u8; 32]) -> String {
         format!("{DROPPED_UNVERIFIED}{}", b64(sender))
+    }
+
+    /// The mark of `sender`'s entries dropped while they waited for a scope key.
+    pub(crate) fn key_waits(sender: &[u8; 32]) -> String {
+        format!("{KEY_WAITS}{}", b64(sender))
     }
     pub(crate) const DENIED: &str = "dl";
     pub(crate) const OWN_BLOCKS: &str = "bk/";
@@ -862,6 +916,8 @@ pub(crate) enum StateKey {
     MissedUnlisted,
     /// `pp`: no reconcile ran the payer pass since a restore.
     PayerPassOwed,
+    /// `ro`: the restore's re-send of this app's own messages is owed.
+    OwnResendOwed,
     /// `lc`: the certificate the shared records were last listed under.
     ListedCert,
     /// `hc/<record key>`: the user's confirmation of a held request.
@@ -895,6 +951,8 @@ pub(crate) enum StateKey {
     DroppedReplies { sender: [u8; 32] },
     /// `ud/<sender>`: the mark of a sender's entries dropped unverified.
     DroppedUnverified { sender: [u8; 32] },
+    /// `kw/<sender>`: the mark of a sender's entries dropped while they waited for a key.
+    KeyWaits { sender: [u8; 32] },
     /// `pr/<sender>/<record key>/<msg_id>`: a payer's reply kept for its record.
     KeptReply {
         sender: [u8; 32],
@@ -945,6 +1003,7 @@ impl StateKey {
             "nl" => Self::RecordsUnlisted,
             "ml" => Self::MissedUnlisted,
             "pp" => Self::PayerPassOwed,
+            "ro" => Self::OwnResendOwed,
             "lc" => Self::ListedCert,
             "lr" => Self::ListsRead,
             "dl" => Self::Denied,
@@ -1021,6 +1080,9 @@ impl StateKey {
                         sender: b64_32(rest)?,
                     },
                     "ud" => Self::DroppedUnverified {
+                        sender: b64_32(rest)?,
+                    },
+                    "kw" => Self::KeyWaits {
                         sender: b64_32(rest)?,
                     },
                     "pr" => {
@@ -1196,6 +1258,24 @@ mod tests {
         assert!(!reads::<DropMark>(&at, mark(2, 5, 6)));
         assert!(!reads::<DropMark>(&at, mark(1, 7, 6)));
         assert!(!reads::<DropMark>(&key::peer(&[1; 32]), mark(1, 5, 6)));
+        // A mark of key waits: its own type at its own family, naming its epochs ascending,
+        // each once, never due by its flag.
+        let waits = |sender: u8, earliest: u64, latest: u64, due: bool, epochs: &[u64]| {
+            let mut value = mark(sender, earliest, latest);
+            value["due"] = serde_json::json!(due);
+            value["epochs"] = serde_json::json!(epochs);
+            value
+        };
+        let kw = key::key_waits(&[1; 32]);
+        assert!(reads::<KeyWaitMark>(&kw, waits(1, 5, 6, false, &[2, 4])));
+        assert!(!reads::<KeyWaitMark>(&kw, waits(2, 5, 6, false, &[2])));
+        assert!(!reads::<KeyWaitMark>(&kw, waits(1, 7, 6, false, &[2])));
+        assert!(!reads::<KeyWaitMark>(&kw, waits(1, 5, 6, true, &[2])));
+        assert!(!reads::<KeyWaitMark>(&kw, waits(1, 5, 6, false, &[])));
+        assert!(!reads::<KeyWaitMark>(&kw, waits(1, 5, 6, false, &[4, 2])));
+        assert!(!reads::<KeyWaitMark>(&kw, waits(1, 5, 6, false, &[2, 2])));
+        assert!(!reads::<KeyWaitMark>(&at, waits(1, 5, 6, false, &[2])));
+        assert!(!reads::<DropMark>(&kw, mark(1, 5, 6)));
         // An own block or unblock kept, of any value, and the deny list's copy.
         assert!(reads::<bool>(
             &key::own_block(&[1; 32]),
@@ -1236,6 +1316,26 @@ mod tests {
             serde_json::json!(false)
         ));
         assert!(!reads::<bool>(&key::peer(&pubky), serde_json::json!(true)));
+        // The restore's re-send owed at its key only, its waiting counterparties ascending.
+        let owed = |waiting: serde_json::Value| serde_json::json!({ "waiting": waiting });
+        assert!(reads::<OwnResendOwed>(
+            key::OWN_RESEND_OWED,
+            owed(serde_json::Value::Null)
+        ));
+        let one = vec![1u8; 32];
+        let two = vec![2u8; 32];
+        assert!(reads::<OwnResendOwed>(
+            key::OWN_RESEND_OWED,
+            owed(serde_json::json!([one, two]))
+        ));
+        assert!(!reads::<OwnResendOwed>(
+            key::OWN_RESEND_OWED,
+            owed(serde_json::json!([two, one]))
+        ));
+        assert!(!reads::<OwnResendOwed>(
+            key::PAYER_PASS_OWED,
+            owed(serde_json::Value::Null)
+        ));
         // A restore's hold at its key only.
         let hold = serde_json::json!({ "resend_from_ms": 1, "asks_queued": false, "asked": [] });
         assert!(reads::<RestoreHold>(key::RESTORE_HOLD, hold.clone()));
@@ -1346,6 +1446,7 @@ mod tests {
             (key::RECORDS_UNLISTED.into(), StateKey::RecordsUnlisted),
             (key::MISSED_UNLISTED.into(), StateKey::MissedUnlisted),
             (key::PAYER_PASS_OWED.into(), StateKey::PayerPassOwed),
+            (key::OWN_RESEND_OWED.into(), StateKey::OwnResendOwed),
             (key::LISTED_CERT.into(), StateKey::ListedCert),
             (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),
             (key::LISTS_READ.into(), StateKey::ListsRead),
@@ -1409,6 +1510,7 @@ mod tests {
                 key::dropped_unverified(&pubky),
                 StateKey::DroppedUnverified { sender: pubky },
             ),
+            (key::key_waits(&pubky), StateKey::KeyWaits { sender: pubky }),
             (
                 key::stored_note(&pubky, id),
                 StateKey::StoredNote {

@@ -29,6 +29,13 @@
 //!   once to send again what its inbox accepted from the mark's earliest time to its latest,
 //!   while it may still keep them, and again at most once a day while the mark lives (Paykit
 //!   spec 8.1, 9).
+//! - **An entry dropped while it waited for a scope key** (`StoredEntryDropped` with its
+//!   `awaited_epoch`): the message was never processed. The host is told once that it is
+//!   given up ([`crate::NoticeKind::MessageGivenUp`]), by the event that names its `msg_id`,
+//!   even while the copy of the records may lack its record, and the drop counts in its
+//!   sender's mark of key waits (`kw/<sender>`, `marks.rs`), which asks that sender, on the
+//!   same cadence, only once the app holds every key those messages waited for. A copy
+//!   sent again is processed as a new message.
 //!
 //! **Taken at first sight.** The SDK acts on each such event the first time a receive sees
 //! it, and keeps a mark of it (`p/dt/<event ID>`) in the same commit as what the event says,
@@ -154,24 +161,6 @@ pub(crate) struct StoredNote {
     pub(crate) message: KeptMessage,
     /// The effect is in place: written by the app, or found in the record already.
     pub(crate) placed: bool,
-}
-
-/// The write of the host's notice that `stored` was given up (`nt/<sender>/<msg_id>`),
-/// raised at `service`, the highest service time verified.
-pub(crate) fn given_up_write(
-    stored: &StoredMessage,
-    service: Option<u64>,
-) -> Result<pubky_switch_client::app::LocalWrite> {
-    let sender = stored.sender();
-    let msg_id = &stored.message().msg_id;
-    crate::state::local_put(
-        &key::message_notice(&sender, msg_id),
-        &given_up_notice(
-            stored,
-            service.unwrap_or(0),
-            crate::notices::GivenUpOrigin::ReceiveStep,
-        ),
-    )
 }
 
 /// The host's notice that `stored`, which no entry keeps stored, was given up at `origin`,
@@ -355,6 +344,23 @@ impl Paykit {
                 tx.delete(&key::stored_note(sender, msg_id));
                 true
             }
+            // Dropped while it waited for a scope key: never processed. Its sender is asked
+            // again once the app holds the key, and the host is told once, by the copy that
+            // names the message, even while the copy of the records may lack its record.
+            AppEvent::StoredEntryDropped {
+                sender,
+                accepted_at_ms,
+                awaited_epoch: Some(epoch),
+                msg_id,
+                ..
+            } => {
+                self.count_key_wait(&mut tx, *sender, *accepted_at_ms, *epoch)
+                    .await?;
+                if let Some(msg_id) = msg_id {
+                    self.give_up_key_wait(&mut tx, *sender, msg_id).await?;
+                }
+                true
+            }
             AppEvent::StoredEntryDropped {
                 sender,
                 accepted_at_ms,
@@ -397,7 +403,13 @@ impl Paykit {
             return Ok(false);
         };
         let notice_key = key::message_notice(&entry.sender, &stored.message().msg_id);
-        if let Some(mut given_up) = self.kept_notice(&notice_key).await? {
+        // One the client dropped while it waited for a key was never processed: a copy sent
+        // again is a new message, kept as any other.
+        if let Some(mut given_up) = self
+            .kept_notice(&notice_key)
+            .await?
+            .filter(KeptNotice::keeps_processed)
+        {
             let handle = StoredHandle {
                 stored_id,
                 hash: stored.hash(),
@@ -625,6 +637,32 @@ impl Paykit {
         Ok(())
     }
 
+    /// Tell the host, in `tx`, that the message `msg_id` from `sender`, whose entry the client
+    /// dropped while it waited for a scope key, is given up ([`NoticeKind::MessageGivenUp`],
+    /// from a key wait, with no entry's handle and no request named: the entry is gone). The
+    /// notice is raised once: none is raised over one kept already. A `msg_id` that isn't
+    /// one a message carries raises none, since no notice could be kept for it.
+    async fn give_up_key_wait(&self, tx: &mut Tx, sender: [u8; 32], msg_id: &str) -> Result<()> {
+        if pubky_switch_core::json::check_uuid_v4(msg_id).is_err() {
+            return Ok(());
+        }
+        let notice = key::message_notice(&sender, msg_id);
+        if self.kept_notice(&notice).await?.is_none() {
+            let at = self.service_time().unwrap_or(0);
+            tx.put(
+                &notice,
+                &KeptNotice::given_up(
+                    sender,
+                    msg_id,
+                    None,
+                    at,
+                    crate::notices::GivenUpFrom::Origin(crate::notices::GivenUpOrigin::KeyWait),
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
     /// Give up `stored`, a payer's reply kept at `kept_key` (`pr/`): the kept copy goes and
     /// the host is told ([`NoticeKind::MessageGivenUp`], from a kept reply, with no entry's
     /// handle), in one commit. The notice is raised once.
@@ -685,6 +723,12 @@ impl Paykit {
             None | Some(RecordContent::Deleted) => {
                 if !creates {
                     return Ok(Placed::Not);
+                }
+                // Held deleted at an app that saw its messages: the message is one for the
+                // record it saw, written nowhere (Paykit spec 8.1, "Records not listed yet";
+                // `receive::place`).
+                if content.is_some() && self.app.record_seen(&key).await?.is_some() {
+                    return Ok(Placed::Done);
                 }
             }
             // A value sealed under a key the app doesn't hold yet: the message waits for it,
