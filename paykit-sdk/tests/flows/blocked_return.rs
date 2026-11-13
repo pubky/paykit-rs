@@ -761,3 +761,46 @@ async fn test_blocked_return_request_written_later_still_paid_only_by_hand() {
     assert_eq!(views[0].status, paykit_sdk::RequestStatus::Open);
     assert!(views[0].manual_only);
 }
+
+#[tokio::test]
+async fn test_blocked_return_marks_and_widenings_dated_past_the_backup_bounded_at_a_restore() {
+    // A backup carries a block mark and a widening dated two days past any service time it
+    // verified: a restore bounds them by that time plus the clock tolerance.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let ahead = w.clock.now_ms() + 2 * 24 * 60 * MINUTE_MS;
+    crate::common::seed_marks(&mut wallet, "bd/", 1, ahead).await;
+    let widening = serde_json::json!({ "v": 1, "d": { "from_ms": ahead, "until_ms": u64::MAX } });
+    wallet
+        .app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: format!("bw/{ahead:020}").into_bytes(),
+            value: serde_json::to_vec(&widening).unwrap(),
+        }])
+        .await
+        .unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    let bound = w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+    let marks = restored.app().protocol_scan(b"bd/").await.unwrap();
+    assert_eq!(marks.len(), 1);
+    let mark: serde_json::Value = serde_json::from_slice(&marks[0].1).unwrap();
+    assert!(mark["d"]["latest_ms"].as_u64().unwrap() <= bound, "{mark}");
+    for (key, value) in restored.app().protocol_scan(b"bw/").await.unwrap() {
+        let window: serde_json::Value = serde_json::from_slice(&value).unwrap();
+        assert!(
+            window["d"]["from_ms"].as_u64().unwrap() <= bound,
+            "{window}"
+        );
+        assert!(String::from_utf8(key).unwrap() <= format!("bw/{bound:020}"));
+    }
+}
