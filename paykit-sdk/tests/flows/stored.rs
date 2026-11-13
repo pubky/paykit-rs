@@ -2048,22 +2048,14 @@ async fn test_stored_receipt_dropped_payee_blocked_asked_only_once_unblocked() {
     assert_eq!(asked(&k.wallet, &bob).await, vec![(Some(k.at), None)]);
 }
 
-#[tokio::test]
-async fn test_stored_receipt_dropped_mark_due_once_a_payment_without_a_request_is_held() {
-    // Alice's wallet holds a mark of bob's dropped receipts, and only his payment list:
-    // nothing is asked. Once she pays him without a request, the payer record of that
-    // payment names him, and the wallet asks him.
-    let w = World::new();
-    let mut wallet = w.wallet("wallet").await;
-    let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
-        .await;
-    wallet.receive(None).await.unwrap();
+/// `app` holds a mark of `sender`'s dropped replies, accepted at the time returned, not
+/// due yet: as the bounds on kept replies leave one.
+async fn seed_reply_mark(w: &World, app: &mut Paykit, sender: &[u8; 32]) -> u64 {
     let at = w.clock.now_ms();
     let value = serde_json::json!({
         "v": 1,
         "d": {
-            "sender": pubky_switch_core::enc::b64(&w.bob_id()),
+            "sender": pubky_switch_core::enc::b64(sender),
             "earliest_ms": at,
             "latest_ms": at,
             "due": false,
@@ -2071,16 +2063,29 @@ async fn test_stored_receipt_dropped_mark_due_once_a_payment_without_a_request_i
             "queued": null,
         }
     });
-    wallet
-        .app_mut()
+    app.app_mut()
         .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: format!("pd/{}", pubky_switch_core::enc::b64(&w.bob_id())).into_bytes(),
+            key: format!("pd/{}", pubky_switch_core::enc::b64(sender)).into_bytes(),
             value: serde_json::to_vec(&value).unwrap(),
         }])
         .await
         .unwrap();
-    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
-    assert!(asked(&wallet, &w.bob_id()).await.is_empty());
+    at
+}
+
+/// Over three receives a day apart, `app` asks `sender` nothing, and `sender`'s mark,
+/// accepted at `at`, stays not due.
+async fn asks_nothing_for_days(w: &World, app: &mut Paykit, sender: &[u8; 32], at: u64) {
+    for _ in 0..3 {
+        assert_eq!(app.receive(None).await.unwrap().resends, 0);
+        w.clock.advance_ms(DAY_MS);
+    }
+    assert_eq!(reply_marks(app).await, vec![(*sender, at, false)]);
+    assert!(asked(app, sender).await.is_empty());
+}
+
+/// Alice pays bob from `wallet`, without a request, to his list's reusable endpoint.
+async fn paid_without_a_request(w: &World, wallet: &mut Paykit) {
     let payment = paykit_sdk::UnrequestedPayment::new(w.bob_id(), crate::common::btc("0.0015"))
         .with_options(
             PayOptions::default().with_endpoint(crate::common::endpoint("btc-lightning-bolt12")),
@@ -2090,6 +2095,127 @@ async fn test_stored_receipt_dropped_mark_due_once_a_payment_without_a_request_i
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
         "{outcome:?}"
     );
+}
+
+#[tokio::test]
+async fn test_stored_receipt_dropped_mark_waits_over_a_payment_without_a_request() {
+    // The payer record of a payment to bob without a request names him, but isn't the
+    // record of a request: his mark waits, and nothing is asked. Once the record of his
+    // request is held, the wallet asks him (Paykit spec 8.1, "Replies before their record").
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    let bob = w.bob_id();
+    let at = seed_reply_mark(&w, &mut wallet, &bob).await;
+    paid_without_a_request(&w, &mut wallet).await;
+    asks_nothing_for_days(&w, &mut wallet, &bob, at).await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
-    assert_eq!(asked(&wallet, &w.bob_id()).await, vec![(Some(at), None)]);
+    assert_eq!(asked(&wallet, &bob).await, vec![(Some(at), None)]);
+}
+
+#[tokio::test]
+async fn test_stored_receipt_dropped_mark_waits_over_a_billing_period_record() {
+    // The wallet holds a record of a Billing Period of bob's, as another own app writes it.
+    // It names him, but isn't the record of a request: his mark waits, and nothing is asked.
+    // Once the record of his request is held, the wallet asks him.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let bob = w.bob_id();
+    let at = seed_reply_mark(&w, &mut wallet, &bob).await;
+    let request_hash = [5; 32];
+    let period = paykit_lib::periods::PeriodRef {
+        starts_at: 1_769_817_600_000,
+        ends_at: 1_772_236_800_000,
+    };
+    let receipt = paykit_lib::bodies::PaymentReceipt {
+        attempt_id: paykit_lib::AttemptId::from_bytes([3; 16]),
+        billing_period: Some(period),
+        metadata: None,
+        payment_reference: None,
+    }
+    .to_body(2)
+    .unwrap();
+    let plaintext = w.sign_as(
+        &w.bob,
+        "shop",
+        &w.alice,
+        "paykit.payment_receipt",
+        vec![[7; 32], request_hash],
+        receipt,
+    );
+    let keys = w.bob.identity().app_keys("shop");
+    let cert = w.bob.switch().app(&keys.app_id_bytes()).cert.unwrap();
+    let stored = paykit_lib::records::StoredMessage::new(
+        bob,
+        cert.signed(),
+        plaintext,
+        Some(w.clock.now_ms()),
+        &w.alice_id(),
+    )
+    .unwrap();
+    let mut record =
+        paykit_lib::records::ActivityRecord::new(paykit_lib::records::ActivitySide::Payer, bob);
+    record.request_hash = Some(request_hash);
+    record.billing_period = Some(period);
+    record.receipt = Some(stored);
+    assert!(matches!(
+        record.binding(),
+        Ok(paykit_lib::records::RecordBinding::Period { .. })
+    ));
+    let collection = paykit_lib::collections::Collection::PayerActivity;
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(collection.name(), collection.policy(None)),
+        &paykit_lib::derive::natural_key::period_record(
+            &bob,
+            &request_hash,
+            period.starts_at / 1000,
+        ),
+    );
+    wallet
+        .app_mut()
+        .put_record(&target, &record.to_json().unwrap(), Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        wallet
+            .app()
+            .records_of(collection.name())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    asks_nothing_for_days(&w, &mut wallet, &bob, at).await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
+    assert_eq!(asked(&wallet, &bob).await, vec![(Some(at), None)]);
+}
+
+#[tokio::test]
+async fn test_stored_reply_dropped_mark_waits_at_the_payee_over_a_payment_without_a_request() {
+    // At bob's shop, the payee record of alice's payment without a request names her, but
+    // isn't the record of a request: her mark waits, and nothing is asked. Once the shop
+    // holds the record of a request to her, it asks her.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    let alice = w.alice_id();
+    let at = seed_reply_mark(&w, &mut shop, &alice).await;
+    paid_without_a_request(&w, &mut wallet).await;
+    shop.receive(None).await.unwrap();
+    let sales = shop.payee_activity().await.unwrap();
+    assert_eq!(sales.len(), 1, "{sales:?}");
+    assert_eq!((sales[0].payer, sales[0].request_hash), (alice, None));
+    asks_nothing_for_days(&w, &mut shop, &alice, at).await;
+    request_from(&mut shop, alice, draft("1", w.clock.now_ms())).await;
+    assert_eq!(shop.receive(None).await.unwrap().resends, 1);
+    assert_eq!(asked(&shop, &alice).await, vec![(Some(at), None)]);
 }
