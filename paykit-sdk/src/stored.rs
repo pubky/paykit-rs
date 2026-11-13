@@ -633,14 +633,17 @@ impl Paykit {
         if matches!(stored.body(), Body::PaymentPeriodDetails(_)) {
             let stopped = self.kept_stop(target).await?;
             let period = self.held_activity(&into).await?;
-            if !crate::periods::stores_details(
+            match crate::periods::stores_details(
                 record,
                 period.as_ref(),
                 stored,
                 self.service_time(),
                 stopped,
             ) {
-                return Ok(PeriodPlace::Taken);
+                Ok(true) => {}
+                Ok(false) => return Ok(PeriodPlace::Taken),
+                // A payment deadline past 64 bits: no attempt on the period can be made.
+                Err(_) => return Ok(PeriodPlace::Invalid),
             }
         }
         if into != *target {

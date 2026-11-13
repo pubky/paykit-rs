@@ -659,13 +659,15 @@ fn period_details_effect(
         .record(&target.record_target())?
         .and_then(|held| held.content.value().map(<[u8]>::to_vec));
     let period = activity::read(period.as_deref(), &own, ActivitySide::Payer);
-    if !crate::periods::stores_details(
+    let stores = crate::periods::stores_details(
         &record,
         period.as_ref(),
         stored,
         cx.highest_service_time(),
         stopped,
-    ) {
+    )
+    .map_err(|_| Fail::Drop("Paykit wire 4.5: a payment deadline past 64 bits".into()))?;
+    if !stores {
         return Ok(());
     }
     // The period record is of the request record's side, whose hold was judged above, and

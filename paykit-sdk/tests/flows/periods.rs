@@ -170,6 +170,8 @@ async fn test_periods_details_refused_before_acceptance_and_out_of_the_request()
     wallet.accept_subscription(&request).await.unwrap();
     shop.receive(None).await.unwrap();
     // A period that isn't one of the request's, and details that expired, are refused.
+    // Details are valid until their `expires_at`, that millisecond included: these expired
+    // the millisecond before.
     let mut off = january();
     off.starts_at += 1;
     let refused = shop
@@ -178,7 +180,7 @@ async fn test_periods_details_refused_before_acceptance_and_out_of_the_request()
         .unwrap_err();
     assert!(matches!(refused, PaykitError::Lib(_)), "{refused:?}");
     let refused = shop
-        .send_period_details(&sale, details(january(), "lnbc1p", now))
+        .send_period_details(&sale, details(january(), "lnbc1p", w.clock.now_ms() - 1))
         .await
         .unwrap_err();
     assert!(matches!(refused, PaykitError::Lib(_)), "{refused:?}");
@@ -214,6 +216,30 @@ async fn test_periods_details_refused_before_acceptance_and_out_of_the_request()
     let view = wallet.request(&request).await.unwrap();
     assert_eq!(view.status, RequestStatus::Cancelled);
     assert!(view.periods.is_empty());
+}
+
+#[tokio::test]
+async fn test_periods_details_valid_at_their_own_expiry_sent_and_stored() {
+    // Details are valid until their `expires_at`, that millisecond included (Paykit wire
+    // 4.9): on a verified service time equal to it, they are sent and stored.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    let expires_at = w.clock.now_ms();
+    let sent = shop
+        .send_period_details(&sale, details(january(), "lnbc1p", expires_at))
+        .await
+        .unwrap();
+    assert_eq!(shop.app().highest_service_time(), Some(expires_at));
+    wallet.receive(None).await.unwrap();
+    let view = wallet.request(&request).await.unwrap();
+    assert!(
+        view.periods
+            .iter()
+            .any(|p| p.details.iter().any(|d| d.msg_id == sent.msg_id)),
+        "{view:?}"
+    );
 }
 
 #[tokio::test]
@@ -1062,6 +1088,37 @@ async fn test_periods_details_bound_within_a_long_deadline_taken_past_sixteen() 
     let sub = subscribed_for(&w, &mut shop, &mut wallet, draft, 20).await;
     w.clock.advance_ms(HOUR_MS);
     assert!(details_stored(&w, &mut shop, &mut wallet, &sub, day(2)).await);
+}
+
+#[tokio::test]
+async fn test_periods_details_window_deadlines_own_millisecond_taken() {
+    // A period's payment deadline is the last instant an attempt on it is taken: the
+    // attempt's `deadline` is the millisecond after it (Paykit spec 7.1). At January's
+    // deadline itself, a day after its start, the payee sends its details and the payer
+    // stores them; a millisecond later neither does.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let now = w.clock.now_ms();
+    let draft = monthly(now, None).with_period_deadline_s(86_400);
+    let sub = subscribed_for(&w, &mut shop, &mut wallet, draft, 0).await;
+    let deadline = january().starts_at + DAY_MS;
+    w.clock.advance_ms(deadline - w.clock.now_ms());
+    assert!(details_stored(&w, &mut shop, &mut wallet, &sub, month(0)).await);
+    w.clock.advance_ms(1);
+    let refused = shop
+        .send_period_details(&sub.1, details(month(0), "lnbc1late", deadline + DAY_MS))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&refused, PaykitError::Lib(paykit_lib::Error::Validation(_))),
+        "{refused:?}"
+    );
+    inject_details(&w, &[wallet.app_id()], sub.0.request_hash, month(0));
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(received(&summary, "paykit.payment_period_details"));
+    let view = wallet.request(&sub.0).await.unwrap();
+    assert_eq!(view.periods[0].details.len(), 1, "{view:?}");
 }
 
 /// A daily request for 1 btc, from now, paid to one invoice of the sending app, its
