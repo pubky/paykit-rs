@@ -597,8 +597,30 @@ fn keep_cancellation(
     if !held {
         make_room_for_stop(cx, &stored.sender())?;
     }
-    keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
+    let intake = stop_intake(cx)?;
+    keep_local(cx, local(&kept, &KeptMessage::taken(stored, intake))?);
     Ok(())
+}
+
+/// The intake of the next stop the step keeps: the kept cancellations (`kc/`) and the
+/// Allowance ends (`ae/`) are one pool, counted under one bound
+/// ([`make_room_for_stop`]), so they take their intakes from one counter
+/// (`records::KeptOrder`).
+pub(crate) fn stop_intake(cx: &ReceiveContext<'_>) -> Result<u64, Fail> {
+    let mut kept = state::cx_scan::<KeptMessage>(cx, key::KEPT_CANCELLATIONS)?;
+    kept.extend(state::cx_scan::<KeptMessage>(cx, key::ALLOWANCE_ENDS)?);
+    Ok(crate::records::next_intake(
+        kept.iter().map(|(_, kept)| kept),
+    ))
+}
+
+/// The intake of the next reply the step keeps (`pr/`, every kind): one pool under one
+/// bound ([`make_room_for_reply`]), one counter (`records::KeptOrder`).
+pub(crate) fn reply_intake(cx: &ReceiveContext<'_>) -> Result<u64, Fail> {
+    let kept = state::cx_scan::<KeptMessage>(cx, key::KEPT_REPLIES)?;
+    Ok(crate::records::next_intake(
+        kept.iter().map(|(_, kept)| kept),
+    ))
 }
 
 /// Keep `stored`, a message whose record this app holds no record of yet, as a message
@@ -663,6 +685,12 @@ fn keep_until_placed(
     keep_before_record(cx, stored, scopes, record)
 }
 
+/// The order a kept message of a bounded pool was accepted in (`records::KeptOrder`), in
+/// the step: one without it is a corrupt store.
+fn ordered(kept: &KeptMessage) -> Result<crate::records::KeptOrder, Fail> {
+    kept.order().map_err(|_| Fail::corrupt())
+}
+
 /// Make room for a new stop from `sender` among the stops kept for records not held, in the
 /// step: those the bounds drop ([`kept_reply_evicted`]) go, until there is room. The payees'
 /// cancellations of requests not held (`kc/`) and the counterparties' ends of Allowances not
@@ -711,7 +739,7 @@ pub(crate) fn make_room_for_stop(
             else {
                 return Err(Fail::corrupt());
             };
-            let (cancellation, at) = kept_with_time(cx, &stop)?;
+            let (cancellation, _) = kept_with_time(cx, &stop)?;
             let content = cx.record_at(&record)?.map(|held| held.content);
             if holds_record(content.as_ref()) {
                 continue;
@@ -723,7 +751,7 @@ pub(crate) fn make_room_for_stop(
                 }
             }
             counted.push((
-                (at, stop.order().1),
+                ordered(&stop)?,
                 from,
                 name.into_bytes(),
                 cancellation.message().msg_id.clone(),
@@ -741,10 +769,10 @@ pub(crate) fn make_room_for_stop(
             else {
                 return Err(Fail::corrupt());
             };
-            let (end, at) = kept_with_time(cx, &stop)?;
+            let (end, _) = kept_with_time(cx, &stop)?;
             ends.entry(record)
                 .or_default()
-                .push(((at, stop.order().1), name, end));
+                .push((ordered(&stop)?, name, end));
         }
         for (record, mut group) in ends {
             group.sort_by_key(|(order, _, _)| *order);
@@ -1073,7 +1101,8 @@ fn keep_reply(
     // One kept already is read bound to its key, and stays as it is.
     if state::cx_get::<KeptMessage>(cx, &kept)?.is_none() {
         make_room_for_reply(cx, &sender)?;
-        keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
+        let intake = reply_intake(cx)?;
+        keep_local(cx, local(&kept, &KeptMessage::taken(stored, intake))?);
     }
     Ok(())
 }
@@ -1621,8 +1650,8 @@ pub(crate) fn make_room_for_reply(
     // within one millisecond the one its inbox took first, never by `msg_id`.
     let mut counted = Vec::new();
     for (name, kept) in state::cx_scan::<KeptMessage>(cx, key::KEPT_REPLIES)? {
-        let (reply, at) = kept_with_time(cx, &kept)?;
-        counted.push(((at, kept.order().1), reply, name));
+        let (reply, _) = kept_with_time(cx, &kept)?;
+        counted.push((ordered(&kept)?, reply, name));
     }
     counted.sort_by_key(|(order, ..)| *order);
     let mut kept = Vec::new();
@@ -1884,7 +1913,7 @@ impl Paykit {
             let reply = kept.stored(&own)?;
             if crate::allowances::is_allowance_response(reply.body()) {
                 let record = rest.rsplit_once('/').map(|(record, _)| record.to_owned());
-                answers.push((record, kept.order(), rest.clone(), reply));
+                answers.push((record, kept.order()?, rest.clone(), reply));
             }
         }
         answers.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));

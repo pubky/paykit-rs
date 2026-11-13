@@ -561,11 +561,7 @@ pub(crate) fn receive_effect(
                     let kept = key::kept_reply(&sender, &record, &stored.message().msg_id);
                     if state::cx_get::<KeptMessage>(cx, &kept)?.is_none() {
                         receive::make_room_for_reply(cx, &sender)?;
-                        let intake = crate::records::next_intake(
-                            state::cx_scan::<KeptMessage>(cx, key::KEPT_REPLIES)?
-                                .iter()
-                                .map(|(_, kept)| kept),
-                        );
+                        let intake = receive::reply_intake(cx)?;
                         receive::keep_local(
                             cx,
                             receive::local(&kept, &KeptMessage::taken(stored, intake))?,
@@ -806,11 +802,7 @@ fn keep_end(
         {
             receive::make_room_for_stop(cx, &sender)?;
         }
-        let intake = crate::records::next_intake(
-            state::cx_scan::<KeptMessage>(cx, key::ALLOWANCE_ENDS)?
-                .iter()
-                .map(|(_, kept)| kept),
-        );
+        let intake = receive::stop_intake(cx)?;
         receive::keep_local(
             cx,
             receive::local(&stop, &KeptMessage::taken(stored, intake))?,
@@ -1765,7 +1757,7 @@ impl Paykit {
         for (rest, kept) in Box::pin(self.local_scan::<KeptMessage>(key::ALLOWANCE_ENDS)).await? {
             let end = kept.stored(&own)?;
             let record = rest.split_once('/').map(|(record, _)| record.to_owned());
-            ends.push((record, kept.order(), rest, end));
+            ends.push((record, kept.order()?, rest, end));
         }
         ends.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
         for (_, _, rest, end) in ends {

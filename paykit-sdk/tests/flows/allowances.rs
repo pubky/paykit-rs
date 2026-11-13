@@ -5079,3 +5079,278 @@ async fn test_allowances_answers_of_one_millisecond_placed_in_acceptance_order()
         Some(SENT_SECOND.to_owned())
     );
 }
+
+/// A fourth identity, dave, with its own switch, and an app of his, `name`, with `scopes`.
+async fn dave_app(
+    w: &World,
+    name: &str,
+    scopes: RequestedScopes,
+) -> (pubky_switch_client::testing::TestSigner, Paykit) {
+    let dave = pubky_switch_client::testing::TestSigner::at(
+        pubky_switch_client::testing::TestIdentity::new(
+            &pubky_switch_client::testing::Seeds::default(),
+            "dave",
+        ),
+        "https://dave-switch.example",
+        std::sync::Arc::clone(&w.clock),
+        std::sync::Arc::clone(&w.homeserver),
+        crate::common::spec(),
+    );
+    w.router.add_switch(dave.origin(), dave.switch());
+    let app = w.join(&dave, name, scopes).await;
+    (dave, app)
+}
+
+/// `signer`'s app `app` sends `to`'s app `target` a message of `kind`, with `refs` and `body`,
+/// in the current millisecond. Returns its `msg_id`.
+#[allow(clippy::too_many_arguments)]
+fn send(
+    w: &World,
+    signer: &pubky_switch_client::testing::TestSigner,
+    app: &str,
+    to: &pubky_switch_client::testing::TestSigner,
+    target: [u8; 16],
+    kind: &str,
+    refs: Vec<[u8; 32]>,
+    body: Value,
+) -> String {
+    w.inject(
+        signer,
+        app,
+        to,
+        &[target],
+        kind,
+        refs,
+        body.as_object().cloned().unwrap(),
+    )
+}
+
+/// Whether `app` keeps a message `msg_id` under `prefix`.
+async fn keeps(app: &Paykit, prefix: &[u8], msg_id: &str) -> bool {
+    app.app()
+        .protocol_scan(prefix)
+        .await
+        .unwrap()
+        .iter()
+        .any(|(key, _)| String::from_utf8_lossy(key).ends_with(msg_id))
+}
+
+/// Alice's wallet, in one millisecond, sends bob's shop an acceptance of a proposal the shop
+/// holds no record of, then an acceptance of a request it holds none of: both are kept
+/// before their records, in one pool (`pr/`). Then `more` acceptances of other requests,
+/// each a millisecond later. Returns the two first `msg_id`s.
+fn replies_tied_then(w: &World, shop: &Paykit, more: usize) -> (String, String) {
+    let allowance = send(
+        w,
+        &w.alice,
+        "wallet",
+        &w.bob,
+        shop.app_id(),
+        "paykit.allowance_acceptance",
+        vec![[0xaa; 32]],
+        json!({ "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4" }),
+    );
+    let request = send(
+        w,
+        &w.alice,
+        "wallet",
+        &w.bob,
+        shop.app_id(),
+        "paykit.payment_request_acceptance",
+        vec![[0; 32]],
+        json!({}),
+    );
+    for i in 0..more {
+        w.clock.advance_ms(1);
+        send(
+            w,
+            &w.alice,
+            "wallet",
+            &w.bob,
+            shop.app_id(),
+            "paykit.payment_request_acceptance",
+            vec![[u8::try_from(i + 1).unwrap(); 32]],
+            json!({}),
+        );
+    }
+    (allowance, request)
+}
+
+#[tokio::test]
+async fn test_allowances_reply_pool_drops_the_first_accepted_of_one_millisecond_per_sender() {
+    // An Allowance acceptance and a request's acceptance from alice share a millisecond, the
+    // Allowance's accepted first, and 62 more of hers come later: 64 kept replies of one
+    // sender. One more drops the one her inbox accepted first, the Allowance's, whatever the
+    // family (Paykit spec 8.1, "Replies before their record").
+    let w = World::new();
+    let shop = Box::pin(shop(&w)).await;
+    let mut shop = shop;
+    let _wallet = Box::pin(wallet(&w)).await;
+    let bound = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    let (allowance, request) = replies_tied_then(&w, &shop, bound - 2);
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), bound);
+    w.clock.advance_ms(1);
+    send(
+        &w,
+        &w.alice,
+        "wallet",
+        &w.bob,
+        shop.app_id(),
+        "paykit.payment_request_acceptance",
+        vec![[0xbb; 32]],
+        json!({}),
+    );
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), bound);
+    assert!(!Box::pin(keeps(&shop, b"pr/", &allowance)).await);
+    assert!(Box::pin(keeps(&shop, b"pr/", &request)).await);
+}
+
+#[tokio::test]
+async fn test_allowances_reply_pool_drops_the_first_accepted_of_one_millisecond_in_all() {
+    // The same tie in alice's 64 kept replies, with carol's 63 and one of dave's: 128 in
+    // all. Dave's second drops the earliest of the sender holding the most, alice: the one
+    // her inbox accepted first, the Allowance's (Paykit spec 8.1).
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let _wallet = Box::pin(wallet(&w)).await;
+    let payer = || AppScopes::new().pay().build().unwrap();
+    let mut carol = w.join(&w.carol, "wallet", payer()).await;
+    carol.app_mut().invite(&w.bob_id()).await.unwrap();
+    let (dave, mut dave_wallet) = Box::pin(dave_app(&w, "wallet", payer())).await;
+    dave_wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    shop.app_mut().invite(&w.carol_id()).await.unwrap();
+    shop.app_mut()
+        .invite(&dave.identity().public())
+        .await
+        .unwrap();
+    let bound = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    let (allowance, request) = replies_tied_then(&w, &shop, bound - 2);
+    for (from, count, base) in [(&w.carol, bound - 1, 0x40u8), (&dave, 1, 0x90)] {
+        for i in 0..count {
+            w.clock.advance_ms(1);
+            send(
+                &w,
+                from,
+                "wallet",
+                &w.bob,
+                shop.app_id(),
+                "paykit.payment_request_acceptance",
+                vec![[base.wrapping_add(u8::try_from(i).unwrap()); 32]],
+                json!({}),
+            );
+        }
+    }
+    shop.receive(None).await.unwrap();
+    let all = paykit_sdk::MAX_KEPT_REPLIES;
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), all);
+    w.clock.advance_ms(1);
+    send(
+        &w,
+        &dave,
+        "wallet",
+        &w.bob,
+        shop.app_id(),
+        "paykit.payment_request_acceptance",
+        vec![[0xfe; 32]],
+        json!({}),
+    );
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), all);
+    assert!(!Box::pin(keeps(&shop, b"pr/", &allowance)).await);
+    assert!(Box::pin(keeps(&shop, b"pr/", &request)).await);
+}
+
+/// `from`'s app `app` ends alice's wallet's Allowance number `i`, which she holds no record
+/// of, in the current millisecond. Returns its `msg_id`.
+fn end_from(
+    w: &World,
+    from: &pubky_switch_client::testing::TestSigner,
+    app: &str,
+    wallet: &Paykit,
+    i: usize,
+) -> String {
+    send(
+        w,
+        from,
+        app,
+        &w.alice,
+        wallet.app_id(),
+        "paykit.allowance_end",
+        vec![[0xee; 32]],
+        json!({ "allowance_id": format!("d0efffb7-191b-4709-b6c7-e343af55{i:04x}") }),
+    )
+}
+
+/// Bob, in one millisecond, ends an Allowance the wallet holds no record of, then cancels a
+/// request it holds none of: both are kept as stops, in one pool. Then `more` ends, each a
+/// millisecond later. Returns the two first `msg_id`s.
+fn stops_tied_then(w: &World, wallet: &Paykit, more: usize) -> (String, String) {
+    let end = end_from(w, &w.bob, "shop", wallet, 0);
+    let cancellation = crate::one_time::cancel_to(w, &[wallet.app_id()], [0xcc; 32]);
+    for i in 0..more {
+        w.clock.advance_ms(1);
+        end_from(w, &w.bob, "shop", wallet, i + 1);
+    }
+    (end, cancellation)
+}
+
+#[tokio::test]
+async fn test_allowances_stop_pool_drops_the_first_accepted_of_one_millisecond_per_sender() {
+    // Bob's end and his cancellation share a millisecond, the end accepted first, and 62
+    // more of his ends come later: 64 stops of one sender. One more drops the one his inbox
+    // accepted first, the end, whatever the family (Paykit spec 8.1, 8.3).
+    let w = World::new();
+    let _shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(wallet(&w)).await;
+    let bound = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    let (end, cancellation) = stops_tied_then(&w, &wallet, bound - 2);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(Box::pin(stops(&wallet)).await, bound);
+    w.clock.advance_ms(1);
+    end_from(&w, &w.bob, "shop", &wallet, bound);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(Box::pin(stops(&wallet)).await, bound);
+    assert!(!Box::pin(keeps(&wallet, b"ae/", &end)).await);
+    assert!(!wallet.app().protocol_scan(b"kc/").await.unwrap().is_empty());
+    let _ = cancellation;
+}
+
+#[tokio::test]
+async fn test_allowances_stop_pool_drops_the_first_accepted_of_one_millisecond_in_all() {
+    // The same tie in bob's 64 stops, with carol's 63 ends and one of dave's: 128 in all.
+    // Dave's second drops the earliest of the sender holding the most, bob: the one his
+    // inbox accepted first, the end (Paykit spec 8.1, 8.3).
+    let w = World::new();
+    let _shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(wallet(&w)).await;
+    let allowance = || AppScopes::new().allowance().build().unwrap();
+    let mut carol = w.join(&w.carol, "shop", allowance()).await;
+    carol.app_mut().invite(&w.alice_id()).await.unwrap();
+    let (dave, mut dave_shop) = Box::pin(dave_app(&w, "shop", allowance())).await;
+    dave_shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    wallet.app_mut().invite(&w.carol_id()).await.unwrap();
+    wallet
+        .app_mut()
+        .invite(&dave.identity().public())
+        .await
+        .unwrap();
+    let bound = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    let (end, _) = stops_tied_then(&w, &wallet, bound - 2);
+    for i in 0..bound - 1 {
+        w.clock.advance_ms(1);
+        end_from(&w, &w.carol, "shop", &wallet, 0x100 + i);
+    }
+    w.clock.advance_ms(1);
+    end_from(&w, &dave, "shop", &wallet, 0x200);
+    wallet.receive(None).await.unwrap();
+    let all = paykit_sdk::MAX_KEPT_REPLIES;
+    assert_eq!(Box::pin(stops(&wallet)).await, all);
+    w.clock.advance_ms(1);
+    end_from(&w, &dave, "shop", &wallet, 0x201);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(Box::pin(stops(&wallet)).await, all);
+    assert!(!Box::pin(keeps(&wallet, b"ae/", &end)).await);
+    assert!(!wallet.app().protocol_scan(b"kc/").await.unwrap().is_empty());
+}

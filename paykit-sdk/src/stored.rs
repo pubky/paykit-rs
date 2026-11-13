@@ -614,13 +614,13 @@ impl Paykit {
                 }
                 let stop = key::allowance_end(&record, &stored.message().msg_id);
                 let kept = self.local_get::<KeptMessage>(&stop).await?.is_some();
-                // Taken now, after every end kept before it (`records::KeptOrder`).
-                let intake = crate::records::next_intake(
-                    self.local_scan::<KeptMessage>(key::ALLOWANCE_ENDS)
-                        .await?
-                        .iter()
-                        .map(|(_, kept)| kept),
-                );
+                // Taken now, after every stop kept before it, of the pool the kept
+                // cancellations and the ends share (`records::KeptOrder`).
+                let mut pool = self
+                    .local_scan::<KeptMessage>(key::KEPT_CANCELLATIONS)
+                    .await?;
+                pool.extend(self.local_scan::<KeptMessage>(key::ALLOWANCE_ENDS).await?);
+                let intake = crate::records::next_intake(pool.iter().map(|(_, kept)| kept));
                 Some(Place::Stop(
                     (!kept).then(|| (stop, KeptMessage::taken(stored, intake))),
                 ))

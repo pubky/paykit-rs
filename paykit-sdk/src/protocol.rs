@@ -1357,7 +1357,7 @@ mod receive_tests {
             vec![[4; 32]],
             object(json!({})),
         );
-        let value = state::encode(&KeptMessage::of(&reply)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&reply, 0)).unwrap();
         let target = ActivityTarget::payee(natural_key::request_record(&bob.id(), &[4; 32]), None);
         (reply, value, fake_key(&target.record_target()))
     }
@@ -1508,7 +1508,7 @@ mod receive_tests {
             vec![[4; 32], [5; 32]],
             object(json!({ "attempt_id": "DgCVYQKL1eyDacZvG6YhZg" })),
         );
-        let value = state::encode(&KeptMessage::of(&receipt)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&receipt, 0)).unwrap();
         let at = key::kept_reply(&carol.id(), &record, &receipt.message().msg_id);
         assert!(!restores::<KeptMessage>(&bob, at.as_bytes(), &value));
     }
@@ -1558,10 +1558,11 @@ mod receive_tests {
     }
 
     #[test]
-    fn test_protocol_restore_refuses_kept_allowance_messages_it_cannot_order() {
-        // Which of an Allowance's kept ends stops it, and which of its kept answers is the
-        // record's response, is decided by the order their inbox accepted them in: an end or
-        // an answer without its intake can't be ordered, so a restore refuses it.
+    fn test_protocol_restore_refuses_a_pooled_kept_message_it_cannot_order() {
+        // The kept replies and the kept stops are bounded pools ordered by when their inbox
+        // accepted each member, which decides what the bounds drop, which of an Allowance's
+        // ends stops it and which of its answers is the record's response: a member without
+        // its intake can't be ordered, so a restore refuses it, of every family of a pool.
         let (alice, bob, _, end) = allowance_end();
         let Body::AllowanceEnd(reply) = end.body() else {
             panic!("an end");
@@ -1576,6 +1577,26 @@ mod receive_tests {
         let at = key::kept_reply(&alice.id(), &record, &answer.message().msg_id);
         let unordered = state::encode(&KeptMessage::of(&answer)).unwrap();
         assert!(!restores::<KeptMessage>(&bob, at.as_bytes(), &unordered));
+        let (reply, _, record) = kept_reply(&alice, &bob);
+        let at = key::kept_reply(&alice.id(), &record, &reply.message().msg_id);
+        let unordered = state::encode(&KeptMessage::of(&reply)).unwrap();
+        assert!(!restores::<KeptMessage>(&bob, at.as_bytes(), &unordered));
+        let wallet = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let shop = Party::new("bob", "shop", &["request"]);
+        let cancellation = shop.message(
+            &wallet,
+            "paykit.payment_request_cancellation",
+            vec![[4; 32]],
+            object(json!({})),
+        );
+        let target = ActivityTarget::payer(natural_key::request_record(&shop.id(), &[4; 32]));
+        let key = key::kept_cancellation(&fake_key(&target.record_target()));
+        let unordered = state::encode(&KeptMessage::of(&cancellation)).unwrap();
+        assert!(!restores::<KeptMessage>(
+            &wallet,
+            key.as_bytes(),
+            &unordered
+        ));
     }
 
     #[test]
@@ -1696,7 +1717,7 @@ mod receive_tests {
             vec![[4; 32]],
             object(json!({})),
         );
-        let value = state::encode(&KeptMessage::of(&cancellation)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&cancellation, 0)).unwrap();
         let target = ActivityTarget::payer(natural_key::request_record(&bob.id(), &[4; 32]));
         let record = fake_key(&target.record_target());
         (key::kept_cancellation(&record).into_bytes(), value)

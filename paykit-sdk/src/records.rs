@@ -49,11 +49,13 @@ pub(crate) struct KeptMessage {
     #[serde(with = "serde_b64_vec")]
     plaintext: Vec<u8>,
     accepted_at: Option<u64>,
-    /// Where the receive step took it among the kept messages of its family, for an
-    /// Allowance's end (`ae/`) and an Allowance answer kept before its record (`pr/`): the
-    /// inbox's order within one millisecond ([`KeptMessage::order`]), which decides which end
-    /// stops the Allowance and which answer is its record's response; the binding refuses an
-    /// end or an answer without it (`state::Stored`). The other families have none.
+    /// Where the receive step took it among the messages of its bounded pool, for the kept
+    /// replies (`pr/`, every kind) and the kept stops (`kc/` and `ae/`, counted together):
+    /// the inbox's order within one millisecond ([`KeptMessage::order`]), which decides
+    /// which one the pool's bounds drop, which of an Allowance's ends stops it and which of
+    /// its answers is its record's response. The binding refuses a value of those families
+    /// without it (`state::Stored`). A held list (`lh/`) and a conflict (`cf/`) are no
+    /// pool's members and have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     intake: Option<u64>,
 }
@@ -63,10 +65,9 @@ pub(crate) struct KeptMessage {
 /// `msg_id`, which its sender chooses. The step takes the feed's entries in the order of
 /// their `seq`, the position the inbox gives each entry as it accepts it, whoever sent it
 /// (Switch spec 8.3), within one read and across reads: the order it keeps them in is the
-/// inbox's. Where one list holds families with and without an intake, as the stops' bounds
-/// count a payee's kept cancellations (`kc/`) with Allowance ends, a message without one
-/// orders before every message of its millisecond that has one.
-pub(crate) type KeptOrder = (u64, Option<u64>);
+/// inbox's. Every member of a pool takes its intake from one counter for the pool
+/// ([`next_intake`]), so any two members compare, whatever their families.
+pub(crate) type KeptOrder = (u64, u64);
 
 impl std::fmt::Debug for KeptMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -95,15 +96,18 @@ impl KeptMessage {
         }
     }
 
-    /// Where the receive step took it among the kept messages of its family, for the
-    /// families that keep one ([`KeptOrder`]).
+    /// Where the receive step took it among the members of its pool ([`KeptOrder`]).
     pub(crate) fn intake(&self) -> Option<u64> {
         self.intake
     }
 
-    /// The order its inbox accepted it in ([`KeptOrder`]).
-    pub(crate) fn order(&self) -> KeptOrder {
-        (self.accepted_at.unwrap_or(0), self.intake)
+    /// The order its inbox accepted it in, a member of a bounded pool ([`KeptOrder`]): one
+    /// without its acceptance time or its intake is a corrupt store.
+    pub(crate) fn order(&self) -> Result<KeptOrder> {
+        match (self.accepted_at, self.intake) {
+            (Some(at), Some(intake)) => Ok((at, intake)),
+            _ => Err(PaykitError::corrupt()),
+        }
     }
 
     /// Whether the kept plaintext reads, without the recipient a full check needs.
@@ -140,8 +144,8 @@ impl KeptMessage {
     }
 }
 
-/// The intake the receive step gives the next message it keeps in a family, `kept` the
-/// messages kept in it already: one after the latest.
+/// The intake the receive step gives the next message it keeps in a pool, `kept` the
+/// messages kept in it already, of every family of the pool: one after the latest.
 pub(crate) fn next_intake<'a>(kept: impl IntoIterator<Item = &'a KeptMessage>) -> u64 {
     kept.into_iter()
         .filter_map(|kept| kept.intake)

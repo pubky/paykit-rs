@@ -718,18 +718,17 @@ impl Stored for KeptMessage {
         if binder.record_key(&target)? != *record_key {
             return corrupt();
         }
-        // Which of an Allowance's kept ends stops it, and which of its kept answers is the
-        // record's response, goes by the order their inbox accepted them in
-        // (`records::KeptOrder`): one without its intake can't be ordered.
-        let ordered = matches!(
-            (family, message.body()),
-            (StateKey::AllowanceEnd { .. }, _)
-                | (
-                    StateKey::KeptReply { .. },
-                    Body::AllowanceAcceptance(_) | Body::AllowanceRejection(_)
-                )
+        // A member of a bounded pool, the kept replies or the kept stops, is ordered by when
+        // its inbox accepted it (`records::KeptOrder`): which one the bounds drop, which of
+        // an Allowance's ends stops it and which of its answers is the record's response.
+        // One without its intake can't be ordered.
+        let pooled = matches!(
+            family,
+            StateKey::KeptCancellation(_)
+                | StateKey::KeptReply { .. }
+                | StateKey::AllowanceEnd { .. }
         );
-        if ordered && self.intake().is_none() {
+        if pooled && self.intake().is_none() {
             return corrupt();
         }
         Ok(())
