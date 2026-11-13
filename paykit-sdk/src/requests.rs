@@ -323,6 +323,13 @@ pub struct RequestView {
     /// certificate that reads more, the copy may lack a receipt the switch holds;
     /// [`Paykit::receipts`] is refused as not now meanwhile.
     pub receipt: Option<ReceivedReceipt>,
+    /// The request is paid only by hand: its record holds `manual_only` (Paykit wire 5.3),
+    /// which is never lifted (Paykit spec 8.3, "Manual only"). A one-time request that came
+    /// back after the user's block is opened so (Paykit spec 8.1, "Blocked counterparties"):
+    /// the host shows that it came from a sender the user had blocked. No app pays it
+    /// automatically, a resume's repeat of a payment the user started included; the user
+    /// pays it with [`Paykit::pay_request`].
+    pub manual_only: bool,
 }
 
 impl std::fmt::Debug for RequestView {
@@ -340,6 +347,7 @@ impl std::fmt::Debug for RequestView {
             .field("recurring", &self.recurring)
             .field("status", &self.status)
             .field("receipt", &self.receipt)
+            .field("manual_only", &self.manual_only)
             .finish()
     }
 }
@@ -1159,6 +1167,7 @@ impl Paykit {
             recurring: request.is_recurring(),
             status,
             receipt: received_receipt(record_key, record, Some(request)),
+            manual_only: record.manual_only,
         }))
     }
 

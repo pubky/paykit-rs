@@ -14,17 +14,48 @@ const MINUTE_MS: u64 = 60_000;
 
 /// Alice's wallet holding `pay` and `manage_contacts`, on `store`, inviting bob.
 async fn contacts_wallet(w: &World, store: Arc<dyn StateStore>) -> Paykit {
+    contacts_wallet_with(w, store, PaykitConfig::default()).await
+}
+
+/// [`contacts_wallet`], with `config`.
+async fn contacts_wallet_with(
+    w: &World,
+    store: Arc<dyn StateStore>,
+    config: PaykitConfig,
+) -> Paykit {
     let mut wallet = w
         .join_with(
             &w.alice,
             "wallet",
             AppScopes::new().pay().manage_contacts().build().unwrap(),
-            PaykitConfig::default(),
+            config,
             store,
         )
         .await;
     wallet.app_mut().invite(&w.bob_id()).await.unwrap();
     wallet
+}
+
+/// How many lost-messages notices `app` shows.
+async fn lost_count(app: &Paykit) -> usize {
+    app.notices()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|n| n.kind == NoticeKind::BlockedMessagesLost)
+        .count()
+}
+
+/// Bob's request dropped for the block, bob unblocked, asked, and the request back.
+async fn came_back(w: &World, wallet: &mut Paykit, shop: &mut Paykit) {
+    dropped_for_the_block(w, wallet, shop).await;
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(asked(wallet, &w.bob_id()).await.len(), 1);
+    shop.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.requests().await.unwrap().len(), 1);
 }
 
 /// The marks of messages dropped for a block that `app` keeps.
@@ -83,12 +114,16 @@ async fn test_blocked_return_request_comes_back_held_for_the_user() {
     wallet.receive(None).await.unwrap();
     assert_eq!(wallet.requests().await.unwrap().len(), 1);
     assert!(held_for_the_user(&wallet).await);
+    // The host sees that it is paid only by hand.
+    assert!(wallet.requests().await.unwrap()[0].manual_only);
     // A request bob makes later, after the block's messages, isn't held.
     w.clock.advance_ms(60 * MINUTE_MS);
     request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     assert_eq!(wallet.requests().await.unwrap().len(), 2);
     assert_eq!(held_for_the_user_count(&wallet).await, 1);
+    let views = wallet.requests().await.unwrap();
+    assert_eq!(views.iter().filter(|v| v.manual_only).count(), 1);
 }
 
 #[tokio::test]
@@ -440,4 +475,289 @@ async fn test_blocked_return_late_start_asks_what_is_kept_and_tells_the_rest_los
     assert_eq!(lost.len(), 1, "{lost:?}");
     assert_eq!(lost[0].lost_from_ms, Some(earliest));
     assert!(lost[0].lost_until_ms.is_some_and(|until| until > earliest));
+}
+
+#[tokio::test]
+async fn test_blocked_return_no_ask_while_the_deny_list_holds_the_sender() {
+    // The client's view shows bob blocked, as a block another own app made, which the client
+    // learned from the feed, while this app's copy of the deny list, read after the
+    // message's acceptance but before the block, doesn't: no ask may go to him.
+    let w = World::new();
+    let lists = Arc::new(ListsStore::default());
+    let mut wallet = contacts_wallet(&w, Arc::clone(&lists) as Arc<dyn StateStore>).await;
+    let mut shop = w.shop().await;
+    wallet.receive(None).await.unwrap();
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    // The client's copy isn't known: the entry waits; Paykit reads the lists, bob not
+    // blocked.
+    lists.lists_unknown(true);
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.requests().await.unwrap().is_empty());
+    assert!(wallet.app().protocol_get(b"lr").await.unwrap().is_some());
+    // Bob is blocked at the client, with no own block mark of Paykit's.
+    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    lists.lists_unknown(false);
+    w.clock.advance_ms(MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(block_marks(&wallet).await, 1);
+    assert!(asked(&wallet, &w.bob_id()).await.is_empty());
+    // Unblocked, the ask's own read shows it: he is asked.
+    wallet.app_mut().undeny(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(asked(&wallet, &w.bob_id()).await.len(), 1);
+}
+
+#[tokio::test]
+async fn test_blocked_return_late_start_told_once() {
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let now = w.clock.now_ms();
+    let earliest = now - paykit_sdk::KEPT_MESSAGE_MS - 24 * 60 * MINUTE_MS;
+    seed_block_mark(&mut wallet, &w.bob_id(), earliest, now - 1_000).await;
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(lost_count(&wallet).await, 1);
+    for _ in 0..3 {
+        w.clock.advance_ms(MINUTE_MS);
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(lost_count(&wallet).await, 1);
+    assert_eq!(asked(&wallet, &w.bob_id()).await.len(), 1);
+}
+
+#[tokio::test]
+async fn test_blocked_return_asked_window_not_told_lost_at_expiry() {
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    came_back(&w, &mut wallet, &mut shop).await;
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + 11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(block_marks(&wallet).await, 0);
+    assert_eq!(lost_count(&wallet).await, 0);
+}
+
+#[tokio::test]
+async fn test_blocked_return_asked_window_not_told_lost_near_its_end() {
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    came_back(&w, &mut wallet, &mut shop).await;
+    // Near the end of the 30 days, then past them.
+    let target = t0 + paykit_sdk::KEPT_MESSAGE_MS - 2 * MINUTE_MS;
+    w.clock.advance_ms(target - w.clock.now_ms());
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(lost_count(&wallet).await, 0);
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(lost_count(&wallet).await, 0);
+}
+
+#[tokio::test]
+async fn test_blocked_return_new_window_after_an_ask_told_lost_alone() {
+    // Asked and back, bob is blocked again and sends another request: a new window, which
+    // expires unasked and alone is told lost.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    came_back(&w, &mut wallet, &mut shop).await;
+    w.clock.advance_ms(60 * MINUTE_MS);
+    let second = w.clock.now_ms();
+    request_from(&mut shop, w.alice_id(), draft("2", second)).await;
+    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.requests().await.unwrap().len(), 1);
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + 11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    let lost: Vec<_> = wallet
+        .notices()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|n| n.kind == NoticeKind::BlockedMessagesLost)
+        .collect();
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert!(lost[0].lost_from_ms.is_some_and(|from| from >= second));
+}
+
+#[tokio::test]
+async fn test_blocked_return_queued_ask_not_flushed_by_a_receive_once_blocked_again() {
+    // Unblocked, the ask is queued and bob's inbox doesn't take it yet; the user blocks him
+    // again: no receive delivers it while he is blocked. (A host's own `Paykit::flush`
+    // delivers what the client's outbox holds, as for every queued message.)
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    dropped_for_the_block(&w, &mut wallet, &mut shop).await;
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "inbox".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    wallet.receive(None).await.unwrap();
+    assert!(asked(&wallet, &w.bob_id()).await.is_empty());
+    wallet.block(&w.bob_id()).await.unwrap();
+    for _ in 0..2 {
+        w.clock.advance_ms(11 * MINUTE_MS);
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(asked(&wallet, &w.bob_id()).await.is_empty());
+}
+
+#[tokio::test]
+async fn test_blocked_return_sixty_five_in_one_read_all_come_back() {
+    // 65 messages from one blocked sender in one read: 64 marked, the 65th held, none lost.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    for i in 0..65 {
+        request_from(
+            &mut shop,
+            w.alice_id(),
+            draft(&format!("{}", i + 1), w.clock.now_ms()),
+        )
+        .await;
+    }
+    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 64);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 65);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(asked(&wallet, &w.bob_id()).await.len(), 1);
+    shop.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.requests().await.unwrap().len(), 65);
+}
+
+#[tokio::test]
+async fn test_blocked_return_repeat_of_a_request_paid_only_by_hand_not_made() {
+    // The request that came back is paid by hand; its dispatch is left in flight, and a
+    // resume makes no repeat: a repeat is an automatic payment.
+    let w = World::new();
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true),
+    );
+    let mut wallet = contacts_wallet_with(&w, store(), crate::common::day_window()).await;
+    let mut shop = w.shop().await;
+    came_back(&w, &mut wallet, &mut shop).await;
+    let request = wallet.requests().await.unwrap()[0].request;
+    assert!(wallet.requests().await.unwrap()[0].manual_only);
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, paykit_sdk::PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("in flight");
+    };
+    w.clock.advance_ms(60_000);
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_blocked_return_entry_held_while_no_mark_may_go() {
+    // Past the bound on marks, with every mark naming pairs still to forget, bob's message
+    // waits: no mark goes with its pairs unforgotten. Once they are forgotten, it is marked.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    let mut writes = Vec::new();
+    let now = w.clock.now_ms();
+    for i in 0..paykit_sdk::MAX_DROPPED_MARKS {
+        let sender = [u8::try_from(i + 100).unwrap(); 32];
+        let value = serde_json::json!({
+            "v": 1,
+            "d": {
+                "sender": pubky_switch_core::enc::b64(&sender),
+                "earliest_ms": now - 2_000 - i as u64,
+                "latest_ms": now - 1_000 - i as u64,
+                "due": true,
+                "asked_at_ms": now,
+                "queued": null,
+                "pending_forget": ["123e4567-e89b-42d3-a456-426614174000"],
+            }
+        });
+        writes.push(pubky_switch_client::app::LocalWrite::Put {
+            key: format!("bd/{}", pubky_switch_core::enc::b64(&sender)).into_bytes(),
+            value: serde_json::to_vec(&value).unwrap(),
+        });
+    }
+    wallet.app_mut().protocol_commit(&writes).await.unwrap();
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let senders = crate::common::mark_senders(&wallet, "bd/").await;
+    assert!(!senders.contains(&w.bob_id()));
+    assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 0);
+    // The pass after that read forgot the seeded pairs: the next read marks bob.
+    wallet.receive(None).await.unwrap();
+    let senders = crate::common::mark_senders(&wallet, "bd/").await;
+    assert!(senders.contains(&w.bob_id()));
+    assert_eq!(senders.len(), paykit_sdk::MAX_DROPPED_MARKS);
+}
+
+/// A block mark of `sender`, unasked, from `earliest` to `latest`.
+async fn seed_block_mark(app: &mut Paykit, sender: &[u8; 32], earliest: u64, latest: u64) {
+    let mark = serde_json::json!({
+        "v": 1,
+        "d": {
+            "sender": pubky_switch_core::enc::b64(sender),
+            "earliest_ms": earliest,
+            "latest_ms": latest,
+            "due": false,
+            "asked_at_ms": null,
+            "queued": null,
+        }
+    });
+    app.app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: format!("bd/{}", pubky_switch_core::enc::b64(sender)).into_bytes(),
+            value: serde_json::to_vec(&mark).unwrap(),
+        }])
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_blocked_return_request_written_later_still_paid_only_by_hand() {
+    // The request comes back, and its record's write is refused for good: it is shown
+    // unrecorded, paid only by hand, and the record written later holds the hold.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    dropped_for_the_block(&w, &mut wallet, &mut shop).await;
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(asked(&wallet, &w.bob_id()).await.len(), 1);
+    shop.receive(None).await.unwrap();
+    crate::common::refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    let views = wallet.requests().await.unwrap();
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0].status, paykit_sdk::RequestStatus::Unrecorded);
+    assert!(views[0].manual_only);
+    assert!(!held_for_the_user(&wallet).await);
+    wallet.receive(None).await.unwrap();
+    assert!(held_for_the_user(&wallet).await);
+    let views = wallet.requests().await.unwrap();
+    assert_eq!(views[0].status, paykit_sdk::RequestStatus::Open);
+    assert!(views[0].manual_only);
 }

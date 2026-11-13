@@ -455,6 +455,7 @@ impl Paykit {
         for family in [
             crate::marks::MarkFamily::Replies,
             crate::marks::MarkFamily::Unverified,
+            crate::marks::MarkFamily::Blocked,
         ] {
             for (rest, mut mark) in self
                 .local_scan::<crate::marks::DropMark>(family.prefix())
@@ -472,6 +473,29 @@ impl Paykit {
         {
             if held.mark.clamp(bound) {
                 tx.put(&format!("{}{rest}", family.prefix()), &held)?;
+            }
+        }
+        // So is a widening of the block marks owed: one from the backup's cursor time, dated
+        // past the bound, starts at the bound, at its own key.
+        for (_, window) in self
+            .local_scan::<crate::marks::BlockedWindow>(key::BLOCKED_WIDENINGS)
+            .await?
+        {
+            if window.from_ms > bound {
+                tx.delete(&key::blocked_widening(window.from_ms));
+                // Its end was at or past its start, so past the bound too.
+                let until = if window.until_ms == crate::marks::BlockedWindow::TO_NOW {
+                    window.until_ms
+                } else {
+                    bound
+                };
+                tx.put(
+                    &key::blocked_widening(bound),
+                    &crate::marks::BlockedWindow {
+                        from_ms: bound,
+                        until_ms: until,
+                    },
+                )?;
             }
         }
         for prefix in [key::KEPT_CANCELLATIONS, key::KEPT_REPLIES] {

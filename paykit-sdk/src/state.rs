@@ -809,7 +809,9 @@ impl Stored for DropMark {
             StateKey::DroppedReplies { sender } | StateKey::DroppedUnverified { sender }
                 if self.sender == *sender
                     && self.earliest_ms <= self.latest_ms
-                    && self.pending_forget.is_empty() =>
+                    && self.pending_forget.is_empty()
+                    && !self.speculative
+                    && !self.late_told =>
             {
                 Ok(())
             }
@@ -868,6 +870,9 @@ impl Stored for KeyWaitMark {
                 if mark.sender == *sender
                     && mark.earliest_ms <= mark.latest_ms
                     && !mark.due
+                    && mark.pending_forget.is_empty()
+                    && !mark.speculative
+                    && !mark.late_told
                     && !self.epochs.is_empty()
                     && self.epochs.windows(2).all(|pair| pair[0] < pair[1]) =>
             {

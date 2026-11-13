@@ -363,16 +363,18 @@ fn admits_new_state(
 }
 
 /// Count `stored`, from `sender` the user blocked, in the sender's mark (`bd/<sender>`,
-/// `marks.rs`), with its `msg_id` among the pairs to forget once the step has committed
-/// ([`crate::Paykit::forget_blocked_pairs`]). A mark already holding
-/// [`crate::marks::MAX_PENDING_FORGETS`] pairs to forget holds the entry instead, so none is
-/// lost; a mark the bound on marks drops raises the notice that its messages can no longer
-/// come back.
+/// `marks.rs`, [`crate::marks::count_blocked`]), with its `msg_id` among the pairs to forget
+/// once the step has committed ([`crate::Paykit::forget_blocked_pairs`]). The entry is held
+/// instead, so none is lost and no pair is left unforgotten: while the mark already names
+/// [`crate::marks::MAX_PENDING_FORGETS`] pairs, or while past the bound on marks every mark
+/// that could go still names pairs to forget. A mark the bound drops before it asked raises
+/// the notice that its window can no longer come back.
 fn mark_blocked(
     cx: &mut ReceiveContext<'_>,
     sender: &[u8; 32],
     stored: &StoredMessage,
 ) -> Result<(), Fail> {
+    let held_entry = || Fail::Store(StoreFailure::unavailable(StoreError::Unavailable));
     let at = stored.accepted_at().unwrap_or(0);
     let msg_id = stored.message().msg_id.clone();
     let family = MarkFamily::Blocked;
@@ -382,54 +384,37 @@ fn mark_blocked(
         .as_ref()
         .is_some_and(|mark| mark.pending_forget.len() >= crate::marks::MAX_PENDING_FORGETS)
     {
-        return Err(Fail::Store(StoreFailure::unavailable(
-            StoreError::Unavailable,
-        )));
+        return Err(held_entry());
     }
-    let mut others = Vec::new();
-    let mut by_sender = std::collections::BTreeMap::new();
-    if held.is_none() {
-        for (_, mark) in state::cx_scan::<crate::marks::DropMark>(cx, family.prefix())? {
-            others.push((mark.sender, mark.latest_ms));
-            by_sender.insert(mark.sender, mark);
-        }
-    }
+    let others: Vec<crate::marks::DropMark> = match held {
+        Some(_) => Vec::new(),
+        None => state::cx_scan::<crate::marks::DropMark>(cx, family.prefix())?
+            .into_iter()
+            .map(|(_, mark)| mark)
+            .collect(),
+    };
     let raised = state::cx_get::<u64>(cx, key::CURSOR_TIME)?.unwrap_or(at);
-    let counted = count_dropped(held, &others, *sender, at, true);
-    if let Some(gone) = counted.evicted {
-        if let Some(evicted) = by_sender.get(&gone) {
-            let notice = crate::notices::KeptNotice::blocked_lost(
-                gone,
-                evicted.earliest_ms,
-                evicted.latest_ms,
-                raised,
-            );
-            keep_local(
-                cx,
-                local(&key::blocked_lost(&gone, evicted.earliest_ms), &notice)?,
-            );
-        }
-        keep_local(
-            cx,
-            LocalWrite::Delete {
-                key: family.key(&gone).into_bytes(),
-            },
-        );
-    }
-    match counted.put {
-        Some(mut mark) => {
+    match crate::marks::count_blocked(held, &others, *sender, (at, at), true) {
+        crate::marks::BlockedCount::Put { mut mark, evicted } => {
+            if let Some(gone) = evicted {
+                let mut tx = Tx::default();
+                crate::marks::tell_lost_if_unasked(&mut tx, &gone, raised)
+                    .map_err(|_| Fail::corrupt())?;
+                tx.delete(&family.key(&gone.sender));
+                for write in tx.into_writes() {
+                    keep_local(cx, write);
+                }
+            }
             if !mark.pending_forget.contains(&msg_id) {
                 mark.pending_forget.push(msg_id);
             }
-            keep_local(cx, local(&mark_key, &mark)?);
+            keep_local(cx, local(&mark_key, &*mark)?);
+            Ok(())
         }
-        // The new mark is the one the bound drops: its message can't come back, told now.
-        None => {
-            let notice = crate::notices::KeptNotice::blocked_lost(*sender, at, at, raised);
-            keep_local(cx, local(&key::blocked_lost(sender, at), &notice)?);
-        }
+        // A real message's new mark is never the one dropped; past the bound with every
+        // mark naming pairs still to forget, it waits.
+        crate::marks::BlockedCount::Held | crate::marks::BlockedCount::Dropped => Err(held_entry()),
     }
-    Ok(())
 }
 
 /// Whether `stored`, a request from `sender`, came back after a block (`marks.rs`): the
@@ -449,6 +434,31 @@ fn came_back_from_block(
     };
     let tolerance = pubky_switch_core::records::CLOCK_TOLERANCE_MS;
     Ok(stored.message().created_at_ms < mark.latest_ms.saturating_add(tolerance))
+}
+
+impl Paykit {
+    /// Whether `stored` is a one-time request that came back after the user's block
+    /// ([`came_back_from_block`]), as the app's state shows it now: for a request written
+    /// after its first read, or shown before it is.
+    ///
+    /// # Errors
+    ///
+    /// A store failure, or a corrupt mark.
+    pub(crate) async fn came_back_from_block(
+        &self,
+        stored: &StoredMessage,
+    ) -> crate::error::Result<bool> {
+        if !matches!(stored.body(), Body::PaymentRequest(r) if !r.is_recurring()) {
+            return Ok(false);
+        }
+        let mark = self
+            .local_get::<crate::marks::DropMark>(&MarkFamily::Blocked.key(&stored.sender()))
+            .await?;
+        let tolerance = pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+        Ok(mark.is_some_and(|mark| {
+            stored.message().created_at_ms < mark.latest_ms.saturating_add(tolerance)
+        }))
+    }
 }
 
 /// Keep the flagged senders a read of the lists gave (`fg`), in `tx`: none past
@@ -999,9 +1009,9 @@ fn receipt_effect(
 /// which the spam rule gates (Paykit wire 4.1). One from a sender the user blocked is
 /// dropped as never processed, to ask for again once it is unblocked (`marks.rs`); one from
 /// a sender only flagged counts; and while the copy of the lists isn't known the entry
-/// waits on the feed. So no blocked
-/// third party keeps anything through a record that doesn't read, and a kept receipt whose
-/// sender the record, once read, doesn't name does nothing.
+/// waits on the feed. So no blocked third party keeps anything through a record that
+/// doesn't read, and a kept receipt whose sender the record, once read, doesn't name does
+/// nothing.
 fn receipt_over_unread_record(
     cx: &mut ReceiveContext<'_>,
     target: &ActivityTarget,
@@ -1765,6 +1775,37 @@ impl Paykit {
             Err(error @ (AppError::Alarm(_) | AppError::Store(_))) => Err(error.into()),
             Err(_) if last.is_some() => self.local_delete(key::LISTS_READ).await,
             Err(_) => Ok(()),
+        }
+    }
+
+    /// Read the lists now, whatever the copy's age, as [`Paykit::refresh_lists_when_due`]
+    /// does when the copy is due: the copy of the deny list, of the flagged senders and
+    /// the widenings owed follow the answer. Whether the read succeeded: one that fails
+    /// leaves the copy not known, so every send it gates is held. A block mark's ask reads
+    /// the lists so, after the receive's steps (`marks.rs`).
+    ///
+    /// # Errors
+    ///
+    /// A store failure or an alarm.
+    pub(crate) async fn read_lists_now(&mut self) -> crate::error::Result<bool> {
+        if self.certificate_refused().is_some() || !reads_lists(self.app.cert().scopes()) {
+            return Ok(false);
+        }
+        let now = self.now();
+        match self.app.allow_list().await {
+            Ok(lists) => {
+                let (deny, mut tx) = self.judged_deny(lists.deny).await?;
+                tx.put(key::LISTS_READ, &now)?.put(key::DENIED, &deny)?;
+                put_flagged(&mut tx, &lists.flagged)?;
+                self.local_commit(tx).await?;
+                Box::pin(self.apply_block_widenings(&deny)).await?;
+                Ok(true)
+            }
+            Err(error @ (AppError::Alarm(_) | AppError::Store(_))) => Err(error.into()),
+            Err(_) => {
+                self.local_delete(key::LISTS_READ).await?;
+                Ok(false)
+            }
         }
     }
 

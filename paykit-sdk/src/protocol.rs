@@ -773,13 +773,15 @@ impl Protocol for PaykitProtocol {
             local_write(key::MISSED_UNLISTED, &true)?,
             // What a blocked counterparty's inbox accepted among the missed entries is asked
             // for once it is unblocked: every counterparty the deny list holds at the next
-            // read of the lists is marked for the item's times (`marks.rs`).
+            // read of the lists is marked for the item's times (`marks.rs`). An item that
+            // gives no end (`u64::MAX`, kept owed by an older build) runs to that read, as
+            // the missed hold reads it unbounded: an unknown end never narrows the window.
             local_write(
                 &key::blocked_widening(missed.accepted_from_ms),
                 &crate::marks::BlockedWindow {
                     from_ms: missed.accepted_from_ms,
                     until_ms: if missed.accepted_until_ms == u64::MAX {
-                        missed.accepted_from_ms
+                        crate::marks::BlockedWindow::TO_NOW
                     } else {
                         missed.accepted_until_ms
                     },
@@ -1048,6 +1050,39 @@ mod receive_tests {
             released: false,
             conflict: None,
         }
+    }
+
+    /// The block widening a `missed` item owes, from `missed()`'s writes.
+    fn widening(missed: &MissedEntries) -> serde_json::Value {
+        let writes = PaykitProtocol::new().missed(missed).unwrap();
+        let value = writes
+            .iter()
+            .find_map(|write| match write {
+                LocalWrite::Put { key, value } if key.starts_with(b"bw/") => Some(value.clone()),
+                _ => None,
+            })
+            .unwrap();
+        serde_json::from_slice(&value).unwrap()
+    }
+
+    #[test]
+    fn test_missed_widening_runs_to_the_read_when_the_item_gives_no_end() {
+        let bounded = MissedEntries {
+            seq: 1,
+            entries: 1,
+            accepted_from_ms: 10,
+            accepted_until_ms: 20,
+        };
+        assert_eq!(widening(&bounded)["d"]["until_ms"], 20);
+        // No end known: it runs to the read that applies it, never to its start alone.
+        let unbounded = MissedEntries {
+            accepted_until_ms: u64::MAX,
+            ..bounded
+        };
+        assert_eq!(
+            widening(&unbounded)["d"]["until_ms"],
+            crate::marks::BlockedWindow::TO_NOW
+        );
     }
 
     fn protocol_of(own: &Party) -> PaykitProtocol {

@@ -1,7 +1,7 @@
 //! Marks of a sender's messages dropped before they were taken, and the re-sends they ask
 //! for (Paykit spec 8.1, "Replies before their record" and "Stored entries"; Paykit spec 9).
 //!
-//! Three families, each with one mark per sender identity, the identity its certificate
+//! Four families, each with one mark per sender identity, the identity its certificate
 //! names:
 //!
 //! - **Replies dropped for the bounds on kept replies** (`pd/<sender>`, `receive.rs`). Once
@@ -22,15 +22,23 @@
 //!   is given: a copy sent before would wait for the same key.
 //!
 //! - **Messages dropped for the user's block** (`bd/<sender>`, `receive.rs`): a message
-//!   that would create state from a sender the user blocked (the copy's deny list, this
-//!   app's own block) is dropped as one never processed, its pair forgotten in the commit
-//!   that counts it. Once the copy of the lists shows the sender neither blocked nor
-//!   flagged, the app asks it to re-send what its inbox accepted from the mark's earliest
-//!   time to its latest. While the flagged senders aren't known, the ask waits. What can no
-//!   longer come back is told to the host ([`crate::NoticeKind::BlockedMessagesLost`]): a
-//!   mark that expires unasked, the part of a mark older than its sender keeps when it
-//!   asks, and a mark the bound drops. A restore and a `missed` item widen these marks for
-//!   every counterparty the deny list holds then (`bw/`), at the next read of the lists.
+//!   that would create state from a sender the user blocked (the client's view of the deny
+//!   list, this app's own block) is dropped as one never processed. The step that counts it
+//!   names its pair in the mark, and the pass after the read forgets it
+//!   ([`Paykit::forget_blocked_pairs`]). The mark asks the sender to re-send what its inbox
+//!   accepted from the mark's earliest time to its latest only once every pair it names is
+//!   forgotten, no block or unblock of the sender this app wrote is still to be shown by the
+//!   lists, and a read of the lists made in the same pass, after the receive's steps, shows
+//!   the sender neither blocked nor flagged: the ask reads the lists itself, so it never
+//!   judges a sender by a copy older than the block the step saw. A read that fails, or a
+//!   copy of the flagged senders that isn't kept, asks nothing. A mark covers one window:
+//!   once an ask for it is delivered, the next message counted starts a new one. What can
+//!   no longer come back is told to the host, once per sender and window
+//!   ([`crate::NoticeKind::BlockedMessagesLost`]): a window that expires before an ask for it
+//!   was delivered, the part of a window its sender no longer keeps at the window's first
+//!   ask, and a window the bound drops before it asked. A restore and a `missed` item widen
+//!   these marks for every counterparty the deny list holds then (`bw/`), at the next read
+//!   of the lists; such a speculative mark is the first the bound drops.
 //!
 //! **Two times.** A mark holds the earliest acceptance time among the messages it covers,
 //! which a re-send asks from, and the latest, which the mark expires by. Each message
@@ -65,8 +73,10 @@ use crate::resend::ResendSelection;
 use crate::state::key;
 
 /// How many marks of each family the app keeps (module docs: replies dropped for the bounds,
-/// entries dropped unverified, entries dropped while they waited for a scope key): past it,
-/// the mark whose latest time is earliest goes, a tie going to the lower sender identity.
+/// entries dropped unverified, entries dropped while they waited for a scope key, messages
+/// dropped for the user's block): past it, the mark whose latest time is earliest goes, a tie
+/// going to the lower sender identity. For a block's mark, a speculative one goes first, and
+/// one with pairs still to forget never goes.
 pub const MAX_DROPPED_MARKS: usize = 128;
 
 /// The most flagged senders the app keeps a copy of (`fg`): past it, the copy isn't kept,
@@ -115,6 +125,18 @@ pub(crate) struct DropMark {
     /// [`MAX_PENDING_FORGETS`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) pending_forget: Vec<String>,
+    /// For a block's mark: its window comes only from a restore's or a `missed` item's
+    /// widening, no message counted in it. The bound drops such a mark first.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) speculative: bool,
+    /// For a block's mark: the part of its window its sender no longer kept at the window's
+    /// first ask was told to the host, once.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) late_told: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// The most messages a block's mark holds whose pair is still to be forgotten: past it, the
@@ -190,7 +212,7 @@ impl MarkValue for KeyWaitMark {
     }
 }
 
-/// The three families of marks.
+/// The four families of marks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MarkFamily {
     /// Replies dropped for the bounds on kept replies.
@@ -272,6 +294,8 @@ pub(crate) fn count_dropped(
         asked_at_ms: None,
         queued: None,
         pending_forget: Vec::new(),
+        speculative: false,
+        late_told: false,
     };
     let mut all: Vec<([u8; 32], u64)> = others.to_vec();
     all.push((sender, at));
@@ -288,6 +312,100 @@ pub(crate) fn count_dropped(
             put: Some(mark),
             evicted: Some(all[gone].0),
         },
+    }
+}
+
+/// What counting a window from `from` to `until` does to the block marks
+/// ([`count_blocked`]).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BlockedCount {
+    /// The sender's mark to put, and the mark the bound drops for it, if any.
+    Put {
+        mark: Box<DropMark>,
+        evicted: Option<Box<DropMark>>,
+    },
+    /// The new mark is the one the bound drops: a speculative one, past the bound with no
+    /// speculative mark to drop before it.
+    Dropped,
+    /// No mark may go: every one the bound could drop still names pairs to forget, so the
+    /// message counted must wait (`receive.rs`), or the widening be applied again later.
+    Held,
+}
+
+/// Count, in the sender's block mark, a window from `from` to `until`: a message dropped for
+/// the user's block (`real`, from = until = its acceptance time), or a restore's or a
+/// `missed` item's widening. `held` is the sender's mark if it holds one, `others` every
+/// block mark, read only when it holds none.
+///
+/// - A held mark whose window an ask was delivered for starts a new window; otherwise its
+///   window widens. A request queued for it and not yet seen delivered is forgotten: the
+///   next ask covers the whole window.
+/// - A new mark past [`MAX_DROPPED_MARKS`] takes the place of another. Only a mark with no
+///   pair left to forget may go; a speculative one goes before a real one, then the one
+///   whose latest time is earliest, a tie going to the lower sender identity. A real
+///   message's new mark is never the one dropped: it waits instead ([`BlockedCount::Held`])
+///   while no other may go. A speculative new mark may be the one dropped.
+pub(crate) fn count_blocked(
+    held: Option<DropMark>,
+    others: &[DropMark],
+    sender: [u8; 32],
+    window: (u64, u64),
+    real: bool,
+) -> BlockedCount {
+    let (from, until) = window;
+    if let Some(mut mark) = held {
+        if mark.asked_at_ms.is_some() {
+            mark.earliest_ms = from;
+            mark.latest_ms = until;
+            mark.asked_at_ms = None;
+            mark.late_told = false;
+            mark.speculative = !real;
+        } else {
+            mark.earliest_ms = mark.earliest_ms.min(from);
+            mark.latest_ms = mark.latest_ms.max(until);
+            mark.speculative &= !real;
+        }
+        mark.queued = None;
+        return BlockedCount::Put {
+            mark: Box::new(mark),
+            evicted: None,
+        };
+    }
+    let mark = DropMark {
+        sender,
+        earliest_ms: from,
+        latest_ms: until,
+        due: true,
+        asked_at_ms: None,
+        queued: None,
+        pending_forget: Vec::new(),
+        speculative: !real,
+        late_told: false,
+    };
+    if others.len() < MAX_DROPPED_MARKS {
+        return BlockedCount::Put {
+            mark: Box::new(mark),
+            evicted: None,
+        };
+    }
+    let rank = |m: &DropMark| (!m.speculative, m.latest_ms, m.sender);
+    let mut candidates: Vec<&DropMark> = others
+        .iter()
+        .filter(|m| m.pending_forget.is_empty())
+        .collect();
+    if !real {
+        candidates.push(&mark);
+    }
+    match candidates.into_iter().min_by_key(|m| rank(m)) {
+        None => BlockedCount::Held,
+        Some(chosen) if chosen.sender == sender => BlockedCount::Dropped,
+        Some(chosen) => {
+            let evicted = Some(Box::new(chosen.clone()));
+            BlockedCount::Put {
+                mark: Box::new(mark),
+                evicted,
+            }
+        }
     }
 }
 
@@ -415,26 +533,55 @@ impl Paykit {
                 .all(|epoch| self.holds_epoch_keys(*epoch));
             asked = asked.saturating_add(self.on_mark(family, &rest, held, due).await?);
         }
-        // A mark of a block asks only once the copy of the lists shows its sender flagged by
-        // no one: a copy sent to a flagged sender's re-send would be counted only, and lost.
-        // While the flagged senders aren't known, it waits.
-        // It also waits for a read of the lists made after its latest message: the receive
-        // step judged the block by the client's view of the sender, which this app's copy of
-        // the deny list shows only from its next read.
+        asked = asked.saturating_add(Box::pin(self.ask_on_block_marks()).await?);
+        Ok(asked)
+    }
+
+    /// Ask on the block marks (module docs). A mark asks only once every pair it names is
+    /// forgotten and no block or unblock of its sender this app wrote is still to be shown
+    /// by the lists (`bk/`): asking for a blocked sender's messages is the permissive
+    /// direction, which no mark about an own write decides. Then the lists are read, once,
+    /// after this receive's steps: the step judged the block by the client's view of the
+    /// sender, which a copy read before may not show, so no older copy decides the ask. The
+    /// read's copy must show the sender neither blocked nor flagged: a copy sent to a flagged
+    /// sender's re-send would be counted only, and lost. A read that fails, or a copy of the
+    /// flagged senders that isn't kept, asks nothing. No time of the device is compared with
+    /// a service time.
+    async fn ask_on_block_marks(&mut self) -> Result<u64> {
         let family = MarkFamily::Blocked;
-        let flagged = self.local_get::<Vec<[u8; 32]>>(key::FLAGGED).await?;
-        let read = self.local_get::<u64>(key::LISTS_READ).await?;
+        let now = self.now();
+        let service = self.service_time();
+        let mut ready = Vec::new();
         for (rest, mark) in self.local_scan::<DropMark>(family.prefix()).await? {
-            // Nor while this app's own block or unblock of the sender is still to be shown by
-            // the list (`bk/`): asking for a blocked sender's messages is the permissive
-            // direction, which no mark about an own write decides.
             let own_change = self
                 .local_get::<crate::state::OwnBlockMark>(&key::own_block(&mark.sender))
                 .await?
                 .is_some();
-            let due = mark.pending_forget.is_empty()
+            // Whether it would send now: a request queued, or none delivered in the last 24
+            // hours; one past its expiry only goes.
+            let would_send = mark.queued.is_some()
+                || mark
+                    .asked_at_ms
+                    .is_none_or(|at| at > now || now - at >= DAY_MS);
+            let ready_now = mark.pending_forget.is_empty()
                 && !own_change
-                && read.is_some_and(|read| read > mark.latest_ms)
+                && would_send
+                && !mark.expired(service);
+            ready.push((rest, mark, ready_now));
+        }
+        let read = if ready.iter().any(|(_, _, ready_now)| *ready_now) {
+            Box::pin(self.read_lists_now()).await?
+        } else {
+            false
+        };
+        let flagged = if read {
+            self.local_get::<Vec<[u8; 32]>>(key::FLAGGED).await?
+        } else {
+            None
+        };
+        let mut asked = 0u64;
+        for (rest, mark, ready_now) in ready {
+            let due = ready_now
                 && flagged
                     .as_ref()
                     .is_some_and(|flagged| !flagged.contains(&mark.sender));
@@ -443,54 +590,47 @@ impl Paykit {
         Ok(asked)
     }
 
-    /// Count a message from `sender` accepted at `at` to `until`, dropped for the user's
-    /// block, in `tx`: its mark (`bd/<sender>`). A mark the bound drops raises the notice
-    /// that its messages can no longer come back.
-    pub(crate) async fn count_dropped_blocked(
+    /// Count a widening's window from `from` to `until` in `sender`'s block mark, in `tx`
+    /// ([`count_blocked`]): a mark the bound drops before it asked raises the notice that
+    /// its window can no longer come back. Returns whether it was counted: `false` while no
+    /// mark may go for it, every one naming pairs still to forget, so the widening stays to
+    /// be applied again.
+    pub(crate) async fn count_widened_blocked(
         &self,
         tx: &mut crate::state::Tx,
         sender: [u8; 32],
-        at: u64,
+        from: u64,
         until: u64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let family = MarkFamily::Blocked;
         let held = self.local_get::<DropMark>(&family.key(&sender)).await?;
-        let others = match held {
+        let others: Vec<DropMark> = match held {
             Some(_) => Vec::new(),
-            None => self.marks_of(family).await?,
+            None => self
+                .local_scan::<DropMark>(family.prefix())
+                .await?
+                .into_iter()
+                .map(|(_, mark)| mark)
+                .collect(),
         };
-        let mut counted = count_dropped(held, &others, sender, at, true);
-        if let Some(mark) = counted.put.as_mut() {
-            mark.latest_ms = mark.latest_ms.max(until);
-        }
         let raised = self.service_time().unwrap_or(0);
-        if let Some(gone) = counted.evicted {
-            if let Some(evicted) = self.local_get::<DropMark>(&family.key(&gone)).await? {
+        match count_blocked(held, &others, sender, (from, until), false) {
+            BlockedCount::Held => return Ok(false),
+            BlockedCount::Dropped => {
                 tx.put(
-                    &key::blocked_lost(&gone, evicted.earliest_ms),
-                    &crate::notices::KeptNotice::blocked_lost(
-                        gone,
-                        evicted.earliest_ms,
-                        evicted.latest_ms,
-                        raised,
-                    ),
+                    &key::blocked_lost(&sender, from),
+                    &crate::notices::KeptNotice::blocked_lost(sender, from, until, raised),
                 )?;
             }
-            tx.delete(&family.key(&gone));
-        }
-        match counted.put {
-            Some(mark) => {
-                tx.put(&family.key(&sender), &mark)?;
-            }
-            // The new mark is the one the bound drops: told at once.
-            None => {
-                tx.put(
-                    &key::blocked_lost(&sender, at),
-                    &crate::notices::KeptNotice::blocked_lost(sender, at, until, raised),
-                )?;
+            BlockedCount::Put { mark, evicted } => {
+                if let Some(gone) = evicted {
+                    tell_lost_if_unasked(tx, &gone, raised)?;
+                    tx.delete(&family.key(&gone.sender));
+                }
+                tx.put(&family.key(&sender), &*mark)?;
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Forget the processed pair of every message a block's mark counted (module docs), each
@@ -548,14 +688,19 @@ impl Paykit {
             } else {
                 window.until_ms
             };
+            let mut applied = true;
             for counterparty in deny {
                 let mut tx = crate::state::Tx::default();
-                self.count_dropped_blocked(&mut tx, *counterparty, window.from_ms, until)
+                applied &= self
+                    .count_widened_blocked(&mut tx, *counterparty, window.from_ms, until)
                     .await?;
                 self.local_commit(tx).await?;
             }
-            self.local_delete(&key::blocked_widening(window.from_ms))
-                .await?;
+            // A window some counterparty couldn't be marked for yet stays, for the next read.
+            if applied {
+                self.local_delete(&key::blocked_widening(window.from_ms))
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -574,18 +719,11 @@ impl Paykit {
         if mark.drop_mark().expired(self.service_time()) {
             let mut tx = crate::state::Tx::default();
             tx.delete(&key);
-            // A block's mark that expires unasked: its messages can no longer come back.
+            // A block's window that expires before an ask for it was delivered: its messages
+            // can no longer come back. One asked for in time tells nothing.
             if family == MarkFamily::Blocked {
                 let gone = mark.drop_mark().clone();
-                tx.put(
-                    &key::blocked_lost(&gone.sender, gone.earliest_ms),
-                    &crate::notices::KeptNotice::blocked_lost(
-                        gone.sender,
-                        gone.earliest_ms,
-                        gone.latest_ms,
-                        self.service_time().unwrap_or(0),
-                    ),
-                )?;
+                tell_lost_if_unasked(&mut tx, &gone, self.service_time().unwrap_or(0))?;
             }
             self.local_commit(tx).await?;
             return Ok(0);
@@ -596,27 +734,6 @@ impl Paykit {
         // its cadence, until it expires.
         if !due || self.sends_held(&sender).await? {
             return Ok(0);
-        }
-        // A block's mark asks only for what its sender still keeps: the part older than that
-        // can no longer come back, and the host is told.
-        if family == MarkFamily::Blocked {
-            if let Some(service) = self.service_time() {
-                let kept_from = service
-                    .saturating_sub(crate::KEPT_MESSAGE_MS)
-                    .saturating_add(pubky_switch_core::records::CLOCK_TOLERANCE_MS);
-                let held = mark.drop_mark();
-                if held.earliest_ms < kept_from {
-                    let lost = (held.earliest_ms, kept_from.min(held.latest_ms));
-                    held.earliest_ms = kept_from.min(held.latest_ms);
-                    let mut tx = crate::state::Tx::default();
-                    tx.put(
-                        &key::blocked_lost(&sender, lost.0),
-                        &crate::notices::KeptNotice::blocked_lost(sender, lost.0, lost.1, service),
-                    )?;
-                    tx.put(&key, &mark)?;
-                    self.local_commit(tx).await?;
-                }
-            }
         }
         self.ask_on_mark(family, &key, mark).await
     }
@@ -664,6 +781,28 @@ impl Paykit {
             .is_some_and(|at| at <= now && now - at < DAY_MS)
         {
             return Ok(0);
+        }
+        // A block's window asks only for what its sender still keeps: at the window's first
+        // ask, the part older than that can no longer come back, and the host is told, once.
+        if family == MarkFamily::Blocked {
+            if let Some(service) = self.service_time() {
+                let kept_from = service
+                    .saturating_sub(crate::KEPT_MESSAGE_MS)
+                    .saturating_add(pubky_switch_core::records::CLOCK_TOLERANCE_MS);
+                let mark = held.drop_mark();
+                if mark.asked_at_ms.is_none() && !mark.late_told && mark.earliest_ms < kept_from {
+                    let lost = (mark.earliest_ms, kept_from.min(mark.latest_ms));
+                    mark.earliest_ms = lost.1;
+                    mark.late_told = true;
+                    let mut tx = crate::state::Tx::default();
+                    tx.put(
+                        &key::blocked_lost(&sender, lost.0),
+                        &crate::notices::KeptNotice::blocked_lost(sender, lost.0, lost.1, service),
+                    )?;
+                    tx.put(key, &held)?;
+                    self.local_commit(tx).await?;
+                }
+            }
         }
         let selection = family.selection(held.drop_mark());
         let signed = self.resend_request_message(sender, selection)?;
@@ -750,6 +889,27 @@ impl Paykit {
     }
 }
 
+/// Tell the host, in `tx`, that `gone`'s window can no longer come back, when no ask for it
+/// was delivered: a block's mark that expires or that the bound drops (module docs).
+pub(crate) fn tell_lost_if_unasked(
+    tx: &mut crate::state::Tx,
+    gone: &DropMark,
+    raised: u64,
+) -> Result<()> {
+    if gone.asked_at_ms.is_none() {
+        tx.put(
+            &key::blocked_lost(&gone.sender, gone.earliest_ms),
+            &crate::notices::KeptNotice::blocked_lost(
+                gone.sender,
+                gone.earliest_ms,
+                gone.latest_ms,
+                raised,
+            ),
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -763,7 +923,101 @@ mod tests {
             asked_at_ms: Some(3),
             queued: None,
             pending_forget: Vec::new(),
+            speculative: false,
+            late_told: false,
         }
+    }
+
+    /// `n` block marks of senders `100..`, unasked, with latest times `latest + i`.
+    fn block_marks(n: usize, latest: u64, speculative: bool) -> Vec<DropMark> {
+        (0..n)
+            .map(|i| DropMark {
+                asked_at_ms: None,
+                due: true,
+                speculative,
+                ..mark(u8::try_from(i + 100).unwrap(), latest, latest + i as u64)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_count_blocked_asked_window_starts_anew() {
+        let mut asked = mark(1, 10, 20);
+        asked.queued = Some(QueuedRequest {
+            msg_id: "m".into(),
+            hash: [0; 32],
+        });
+        let BlockedCount::Put {
+            mark: next,
+            evicted,
+        } = count_blocked(Some(asked), &[], [1; 32], (50, 50), true)
+        else {
+            panic!("counted");
+        };
+        assert_eq!((next.earliest_ms, next.latest_ms), (50, 50));
+        assert_eq!((next.asked_at_ms, next.queued, evicted), (None, None, None));
+        // Unasked, the window widens, and a request in flight is forgotten.
+        let mut unasked = mark(1, 10, 20);
+        unasked.asked_at_ms = None;
+        unasked.queued = Some(QueuedRequest {
+            msg_id: "m".into(),
+            hash: [0; 32],
+        });
+        let BlockedCount::Put { mark: next, .. } =
+            count_blocked(Some(unasked), &[], [1; 32], (5, 30), true)
+        else {
+            panic!("counted");
+        };
+        assert_eq!(
+            (next.earliest_ms, next.latest_ms, next.queued),
+            (5, 30, None)
+        );
+    }
+
+    #[test]
+    fn test_count_blocked_speculative_marks_go_before_real_ones() {
+        // Past the bound, a real message evicts the speculative mark, though it is newer
+        // than every real one.
+        let mut others = block_marks(MAX_DROPPED_MARKS - 1, 10, false);
+        others.extend(block_marks(1, 1_000, true).into_iter().map(|mut m| {
+            m.sender = [250; 32];
+            m
+        }));
+        let BlockedCount::Put { evicted, .. } =
+            count_blocked(None, &others, [1; 32], (2_000, 2_000), true)
+        else {
+            panic!("counted");
+        };
+        assert_eq!(evicted.map(|m| m.sender), Some([250; 32]));
+        // A widening past the bound of real marks drops its own speculative mark.
+        let real = block_marks(MAX_DROPPED_MARKS, 10, false);
+        assert_eq!(
+            count_blocked(None, &real, [1; 32], (5, 3_000), false),
+            BlockedCount::Dropped
+        );
+    }
+
+    #[test]
+    fn test_count_blocked_mark_with_pairs_to_forget_never_goes() {
+        let mut others = block_marks(MAX_DROPPED_MARKS, 10, false);
+        for mark in &mut others {
+            mark.pending_forget = vec!["m".into()];
+        }
+        assert_eq!(
+            count_blocked(None, &others, [1; 32], (2_000, 2_000), true),
+            BlockedCount::Held
+        );
+        // One free of them goes, however new.
+        others[MAX_DROPPED_MARKS - 1].pending_forget.clear();
+        let BlockedCount::Put { evicted, .. } =
+            count_blocked(None, &others, [1; 32], (2_000, 2_000), true)
+        else {
+            panic!("counted");
+        };
+        assert_eq!(
+            evicted.map(|m| m.sender),
+            Some(others[MAX_DROPPED_MARKS - 1].sender)
+        );
     }
 
     #[test]

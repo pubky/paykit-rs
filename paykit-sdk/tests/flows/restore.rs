@@ -2339,13 +2339,21 @@ async fn test_restore_own_rejection_to_a_blocked_payee_waits_until_unblocked() {
     assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_some());
     wallet.unblock(&w.bob_id()).await.unwrap();
     wallet.receive(None).await.unwrap();
-    // The rejection goes. The restore's block mark of bob asks only once a read of the lists
-    // shows the unblock landed (Paykit spec 8.1, "Blocked counterparties"), not in these
-    // reads, whose copy is younger than 10 minutes.
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+    // The rejection goes, once. So does the ask of the restore's block mark of bob, once:
+    // the ask reads the lists itself, and they show the unblock landed (Paykit spec 8.1,
+    // "Blocked counterparties").
+    let asks = crate::common::asked(&wallet, &w.bob_id()).await.len();
+    assert_eq!(asks, 1);
+    assert_eq!(
+        w.bob.switch().entries_from(&w.alice_id()),
+        before + 1 + asks
+    );
     assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
     wallet.receive(None).await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+    assert_eq!(
+        w.bob.switch().entries_from(&w.alice_id()),
+        before + 1 + asks
+    );
     shop.receive(None).await.unwrap();
     assert_eq!(
         shop.payee_activity().await.unwrap()[0].status,

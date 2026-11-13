@@ -215,6 +215,7 @@ mod tests {
                         metadata: Some(proof()),
                         payment_reference: Some(SECRET.into()),
                     }),
+                    manual_only: false,
                 }
             ),
             format!(
