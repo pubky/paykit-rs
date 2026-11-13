@@ -2099,3 +2099,25 @@ async fn test_one_time_cancellation_of_a_request_missing_from_a_copy_not_listed_
     assert!(applied.contains(&cancellation), "{applied:?}");
     assert!(keeps_stop(&w, &wallet, hash).await);
 }
+
+#[tokio::test]
+async fn test_one_time_stop_at_another_key_refuses_the_receive_steps_bounds() {
+    // A stop is found at another request's key when a new cancellation, of a request the
+    // wallet holds no record of, is taken: the receive step reads the stops for their bounds,
+    // bound to their keys, and refuses the misplaced one as corrupt, keeping nothing new.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    cancel_to(&w, &[wallet.app_id()], [7; 32]);
+    wallet.receive(None).await.unwrap();
+    let value = state_value(&wallet, &stop_key(&w, &wallet, [7; 32])).await;
+    let key = stop_key(&w, &wallet, [8; 32]);
+    wallet
+        .app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put { key, value }])
+        .await
+        .unwrap();
+    cancel_to(&w, &[wallet.app_id()], [9; 32]);
+    let _ = wallet.receive(None).await;
+    assert!(!keeps_stop(&w, &wallet, [9; 32]).await);
+}
