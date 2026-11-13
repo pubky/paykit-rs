@@ -4268,3 +4268,183 @@ async fn test_periods_proof_over_a_payee_request_record_that_never_opens_held_th
         "{notices:?}"
     );
 }
+
+/// Alice's payer record of `request`.
+fn payer_request_at(request: &RequestRef) -> RecordTarget {
+    let collection = Collection::PayerActivity;
+    RecordTarget::new(
+        SwitchCollection::new(collection.name(), collection.policy(None)),
+        &natural_key::request_record(&request.payee, &request.request_hash),
+    )
+}
+
+/// How alice's wallet holds her record of bob's subscription while his details come.
+#[derive(Clone, Copy, Debug)]
+enum RecordWhile {
+    /// Deleted by her phone: the wallet holds no record of the request.
+    Gone,
+    /// Written by her phone as a value that doesn't read, which her wallet, restored from
+    /// a backup, holds as the switch does.
+    Unreadable,
+}
+
+/// Bob's shop sends January's details while alice's wallet holds no record of the
+/// subscription that binds (`record_while`), so they are kept before their record, and then `more`
+/// details of bob's naming a period that isn't the request's are kept after them. Past the
+/// 64 kept per sender the earliest, the shop's, is dropped and marked, and the mark isn't
+/// due. Once the phone writes the record back, the wallet asks bob to send again, once,
+/// from the mark's earliest time, after he is unblocked when `blocked`, and the copy the
+/// shop sends again is stored; with nothing dropped, nothing is asked and the kept details
+/// are stored (Paykit spec 8.1, "Replies before their record"; Paykit spec 9).
+async fn details_dropped_for_the_bounds(record_while: RecordWhile, more: usize, blocked: bool) {
+    let w = World::new();
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    phone.receive(None).await.unwrap();
+    let target = payer_request_at(&request);
+    let held = phone.app_mut().read_record(&target).await.unwrap().unwrap();
+    let good = held.content.value().unwrap().to_vec();
+    match record_while {
+        RecordWhile::Gone => {
+            let op = phone
+                .app_mut()
+                .record_op(&target, None, Vec::new())
+                .await
+                .unwrap();
+            phone
+                .app_mut()
+                .submit_batch(OpBatch::new().entry(op))
+                .await
+                .unwrap();
+        }
+        RecordWhile::Unreadable => {
+            // A value that doesn't read, which the wallet's copy, holding the record's
+            // value, refuses as a write over it: the wallet is restored from a backup
+            // onto a new store, whose copy holds the record as the switch does.
+            let backup = wallet.backup().await.unwrap();
+            let mut value: serde_json::Value = serde_json::from_slice(&good).unwrap();
+            value["v"] = json!(99);
+            writes_value(&mut phone, &target, &serde_json::to_vec(&value).unwrap()).await;
+            drop(wallet);
+            wallet = Paykit::restore(
+                w.env(&w.alice, store()),
+                PaykitConfig::default(),
+                &backup,
+                Arc::clone(&w.rail) as Arc<dyn Rail>,
+                w.timer(),
+            )
+            .await
+            .unwrap();
+        }
+    }
+    wallet.receive(None).await.unwrap();
+    let first_at = w.clock.now_ms();
+    let first = shop
+        .send_period_details(&sale, january_details(first_at + DAY_MS))
+        .await
+        .unwrap();
+    w.clock.advance_ms(1_000);
+    let mut off = january();
+    off.starts_at += 1;
+    for _ in 0..more {
+        inject_details(&w, &[wallet.app_id()], request.request_hash, off);
+    }
+    wallet.receive(None).await.unwrap();
+    let dropped = more + 1 > paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    let marks: Vec<serde_json::Value> = wallet
+        .app()
+        .protocol_scan(b"pd/")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, value)| serde_json::from_slice::<serde_json::Value>(&value).unwrap()["d"].clone())
+        .collect();
+    assert_eq!(
+        marks.len(),
+        usize::from(dropped),
+        "{record_while:?}: {marks:?}"
+    );
+    if dropped {
+        assert_eq!(marks[0]["due"], json!(false), "{record_while:?}");
+        assert_eq!(marks[0]["earliest_ms"], json!(first_at), "{record_while:?}");
+    }
+    if blocked {
+        wallet.block(&w.bob_id()).await.unwrap();
+    }
+    match record_while {
+        RecordWhile::Gone => {
+            let op = phone
+                .app_mut()
+                .record_op(&target, Some(&good), Vec::new())
+                .await
+                .unwrap();
+            phone
+                .app_mut()
+                .submit_batch(OpBatch::new().entry(op))
+                .await
+                .unwrap();
+        }
+        RecordWhile::Unreadable => {
+            phone.receive(None).await.unwrap();
+            writes_value(&mut phone, &target, &good).await;
+        }
+    }
+    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let mut summary = wallet.receive(None).await.unwrap();
+    if blocked {
+        assert_eq!(summary.resends, 0, "{record_while:?}");
+        summary = wallet.receive(None).await.unwrap();
+        assert_eq!(summary.resends, 0, "{record_while:?}");
+        assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+        wallet.unblock(&w.bob_id()).await.unwrap();
+        summary = wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(summary.resends, u64::from(dropped), "{record_while:?}");
+    shop.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    // Once: a later receive asks nothing more.
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
+    let view = wallet.request(&request).await.unwrap();
+    let stored: Vec<&str> = view
+        .periods
+        .iter()
+        .flat_map(|p| p.details.iter().map(|d| d.msg_id.as_str()))
+        .collect();
+    assert_eq!(
+        stored,
+        [first.msg_id.as_str()],
+        "{record_while:?}: {view:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_periods_details_dropped_for_the_bounds_before_their_record_asked_again() {
+    details_dropped_for_the_bounds(RecordWhile::Gone, 64, false).await;
+}
+
+#[tokio::test]
+async fn test_periods_details_dropped_for_the_bounds_over_an_unreadable_record_asked_again() {
+    details_dropped_for_the_bounds(RecordWhile::Unreadable, 64, false).await;
+}
+
+#[tokio::test]
+async fn test_periods_details_within_the_bounds_before_their_record_none_dropped() {
+    details_dropped_for_the_bounds(RecordWhile::Gone, 63, false).await;
+    details_dropped_for_the_bounds(RecordWhile::Unreadable, 63, false).await;
+}
+
+#[tokio::test]
+async fn test_periods_details_dropped_for_the_bounds_of_a_blocked_payee_asked_once_unblocked() {
+    details_dropped_for_the_bounds(RecordWhile::Unreadable, 64, true).await;
+}
