@@ -501,7 +501,15 @@ pub(crate) fn receive_effect(
         Body::AllowanceProposal(_) => match held {
             // Kept as the stop, and nothing written at the key: a record can't hold
             // `conflicted` without its proposal.
-            Held::None if deleted => keep_conflict(cx, &target, stored, scopes),
+            // A record held as deleted holds nothing the message updates: the stop is new
+            // state, which the spam rule gates, so a blocked or flagged sender creates
+            // none. Dropping it loses nothing: nothing is paid under a deleted record.
+            Held::None if deleted => {
+                if receive::admits_new_state(cx, &sender, scopes)? {
+                    keep_conflict(cx, &target, stored, scopes)?;
+                }
+                Ok(())
+            }
             Held::None => {
                 if receive::admits_new_state(cx, &sender, scopes)? {
                     // Terms that aren't valid were dropped at check 10 (Paykit wire 4.15).
@@ -551,12 +559,12 @@ fn stored_entry(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
 ) -> std::result::Result<(), Fail> {
-    // Past its window on the highest service time verified (Paykit spec 8.1); one with no
-    // acceptance time has no window to wait out.
-    let over = stored.accepted_at().is_none_or(|at| {
-        cx.highest_service_time()
-            .is_some_and(|t| at.saturating_add(receive::KEPT_MESSAGE_MS) <= t)
-    });
+    // Past its window on the highest service time verified (Paykit spec 8.1). A stored
+    // message without its acceptance time is a corrupt store, never one past its window.
+    let at = stored.accepted_at().ok_or_else(Fail::corrupt)?;
+    let over = cx
+        .highest_service_time()
+        .is_some_and(|t| at.saturating_add(receive::KEPT_MESSAGE_MS) <= t);
     if over {
         let sender = stored.sender();
         let msg_id = &stored.message().msg_id;
@@ -1106,12 +1114,11 @@ impl Paykit {
     /// [`Refusal::NotFound`], also for a record held as deleted; [`Refusal::AllowanceEnded`]
     /// once it ended, or while this app keeps the counterparty's end; [`Refusal::Rejected`]
     /// for a rejected one; [`Refusal::AllowanceConflicted`] for a conflicted one, for good;
-    /// [`Refusal::NotNow`] while the shared records aren't listed, the record waits for its
-    /// scope key, or sends to the counterparty are held, as [`Paykit::propose_allowance`]
-    /// says, with nothing changed: the user ends it once the counterparty is unblocked, and
-    /// meanwhile nothing is paid to it automatically; [`Refusal::Usage`] for a proposal to
-    /// this identity not yet answered, which is rejected instead; as
-    /// [`Paykit::propose_allowance`].
+    /// [`Refusal::NotNow`] while the shared records aren't listed or the record waits for its
+    /// scope key; never for the deny list: an end stops payment, so it is recorded and sent
+    /// at once to a counterparty blocked or not, as a payee's cancellation is (Paykit spec
+    /// 8.1, "Blocked counterparties"); [`Refusal::Usage`] for a proposal to this identity not
+    /// yet answered, which is rejected instead; as [`Paykit::propose_allowance`].
     pub async fn end_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
         Box::pin(self.answer_allowance(record, Kind::AllowanceEnd)).await
     }
@@ -1139,7 +1146,14 @@ impl Paykit {
             if held.end.is_some() || self.allowance_stopped(record).await? {
                 return Err(Refusal::AllowanceEnded.into());
             }
-            self.refuse_while_sends_held(&held.counterparty).await?;
+            // A proposal, acceptance or rejection to a counterparty whose sends are held is
+            // refused, which moves no money in either role (Paykit spec 8.1, "Blocked
+            // counterparties"). The user's end is never held: it stops payment, so it is
+            // recorded and sent at once, as a payee's cancellation is (Paykit spec 8.1,
+            // "What stops or settles a payment still goes"; 8.3).
+            if kind != Kind::AllowanceEnd {
+                self.refuse_while_sends_held(&held.counterparty).await?;
+            }
             let proposal = held.proposal.hash();
             let to_here = held.proposal.message().to == own;
             let refs = match kind {
@@ -1994,11 +2008,6 @@ fn written(result: Result<()>) -> Result<Placed> {
     }
 }
 
-/// Whether `next` would store a message this app signed, as `own` and `app_id`, that
-/// `before` doesn't hold and `queued` doesn't name: a write that stores without sending,
-/// which no path makes (Paykit spec 8.3, "Recorded first"). Every message of this app's in
-/// an Allowance record is written in the batch that queues it, so one signed by this app
-/// there is one to be sent: the re-send after a restore can rely on that.
 /// The messages of the Allowance record `record` this app signed, `app_id` of identity `own`,
 /// that it queues again after a restore (Paykit spec 7.2, "What a restore loses"; 8.3): each
 /// one the record stores to be sent, since every message this app stores in an Allowance
@@ -2028,6 +2037,11 @@ pub(crate) fn own_allowance_to_send_again<'a>(
         .collect()
 }
 
+/// Whether `next` would store a message this app signed, as `own` and `app_id`, that
+/// `before` doesn't hold and `queued` doesn't name: a write that stores without sending,
+/// which no path makes (Paykit spec 8.3, "Recorded first"). Every message of this app's in
+/// an Allowance record is written in the batch that queues it, so one signed by this app
+/// there is one to be sent: the re-send after a restore can rely on that.
 fn stores_unqueued(
     before: Option<&AllowanceRecord>,
     next: &AllowanceRecord,

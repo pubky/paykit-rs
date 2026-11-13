@@ -589,6 +589,10 @@ fn keep_cancellation(
 ///   message kept to write ([`crate::allowances::keeps_stored_message`]): the message could
 ///   open the record, and the stop must then be there.
 ///
+/// An Allowance end dropped for the bounds has its processed pair forgotten in the same
+/// commit, so its sender's re-send is taken; a cancellation keeps its pair, as Paykit spec
+/// 8.1 has a Paykit App forget only a kept reply's.
+///
 /// One that is left out no longer counts again from then on, which can put its sender past
 /// the bound: the loop drops back to it. A new stop is reached here only once its own side's
 /// copy lacks no record: an entry over a record absent or deleted from a copy that may lack
@@ -601,6 +605,8 @@ pub(crate) fn make_room_for_stop(
 ) -> Result<(), Fail> {
     let mut kept = Vec::new();
     let mut names = Vec::new();
+    // For an Allowance end, its sender and `msg_id`, whose pair goes with it.
+    let mut ends: Vec<Option<([u8; 32], String)>> = Vec::new();
     if !side_may_lack(cx, RecordSide::Payer)? {
         for (name, stop) in state::cx_scan::<KeptMessage>(cx, key::KEPT_CANCELLATIONS)? {
             let Some(crate::state::StateKey::KeptCancellation(record)) =
@@ -621,6 +627,7 @@ pub(crate) fn make_room_for_stop(
             }
             kept.push((from, at));
             names.push(name.into_bytes());
+            ends.push(None);
         }
     }
     if !side_may_lack(cx, RecordSide::Allowances)? {
@@ -639,10 +646,29 @@ pub(crate) fn make_room_for_stop(
             }
             kept.push((end.sender(), at));
             names.push(name.into_bytes());
+            ends.push(Some((end.sender(), end.message().msg_id.clone())));
         }
     }
     while let Some(index) = kept_reply_evicted(&kept, sender) {
+        // An Allowance end dropped for the bounds is dropped as one never processed: the
+        // client marked it processed when the stop was kept, so its pair is forgotten in the
+        // commit that drops it, and a copy its sender sends again is taken (Switch spec 11),
+        // as for a kept reply ([`make_room_for_reply`]).
+        if let Some((from, msg_id)) = &ends[index] {
+            match cx.forget_processed(*from, msg_id) {
+                Ok(_) => {}
+                // The client won't forget the pair now: dropped without it, the end could
+                // never be taken again, so the stop stays, and the bounds are over by one
+                // for this step.
+                Err(AppError::Refused(ClientRefusal::NotNow(_))) => return Ok(()),
+                // Past the step's bound on local writes: the context marks the step, and
+                // the client stores the entry as too large, applying none of it.
+                Err(AppError::Refused(ClientRefusal::Usage(_))) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         kept.swap_remove(index);
+        ends.swap_remove(index);
         keep_local(
             cx,
             LocalWrite::Delete {
