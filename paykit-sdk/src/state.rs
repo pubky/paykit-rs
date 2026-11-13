@@ -612,9 +612,10 @@ impl sealed::Sealed for KeptMessage {}
 ///   accepted, of that `msg_id`, kept as the stop under the record key of the Allowance
 ///   record of its sender and the Allowance it names (Paykit spec 8.3, "Ends reach the
 ///   executor").
-/// - At `cf/<record key>`, a second, different proposal, acceptance or rejection, kept as
-///   the stop under the record key of the Allowance record of its sender and the Allowance
-///   it names (Paykit spec 8.3, "Conflicted").
+/// - At `cf/<record key>`, a second, different proposal, acceptance or rejection its inbox
+///   accepted, with its acceptance time, kept as the stop under the record key of the
+///   Allowance record of its sender and the Allowance it names (Paykit spec 8.3,
+///   "Conflicted").
 impl Stored for KeptMessage {
     fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
         let message = self.stored(&binder.own)?;
@@ -697,14 +698,18 @@ impl Stored for KeptMessage {
                 allowance_target(&message.sender(), &end.allowance_id),
                 record_key,
             ),
-            (StateKey::Conflict(record_key), Body::AllowanceProposal(proposal)) => (
-                allowance_target(&message.sender(), &proposal.allowance_id),
-                record_key,
-            ),
+            (StateKey::Conflict(record_key), Body::AllowanceProposal(proposal))
+                if message.accepted_at().is_some() =>
+            {
+                (
+                    allowance_target(&message.sender(), &proposal.allowance_id),
+                    record_key,
+                )
+            }
             (
                 StateKey::Conflict(record_key),
                 Body::AllowanceAcceptance(answer) | Body::AllowanceRejection(answer),
-            ) => (
+            ) if message.accepted_at().is_some() => (
                 allowance_target(&message.sender(), &answer.allowance_id),
                 record_key,
             ),

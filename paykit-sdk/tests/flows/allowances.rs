@@ -4787,3 +4787,163 @@ async fn test_allowances_two_senders_answers_with_one_msg_id_kept_apart() {
     assert_eq!(wallet.app().protocol_scan(b"pr/").await.unwrap().len(), 2);
     drop(shop);
 }
+
+/// Alice's wallet proposes an Allowance to bob as allower and bob's shop accepts it; her
+/// `exec` app is its executor, consented by her `phone`. Bob is the proposal's recipient.
+/// Returns the apps and the record keys on bob's side and on alice's.
+async fn alice_proposed_executed(
+    w: &World,
+) -> (Paykit, Paykit, Paykit, Paykit, [u8; 32], [u8; 32]) {
+    let mut shop = Box::pin(shop(w)).await;
+    let mut wallet = Box::pin(wallet(w)).await;
+    let executor = AppScopes::new().allowance_execute().build().unwrap();
+    let mut exec = Box::pin(alice_app(w, "exec", executor.clone())).await;
+    let mut phone = Box::pin(alice_app(w, "phone", executor)).await;
+    let sent = wallet
+        .propose_allowance(w.bob_id(), AllowanceRole::Allower, terms())
+        .await
+        .unwrap();
+    let mine = sent.record;
+    shop.receive(None).await.unwrap();
+    let theirs = shop.allowances().await.unwrap()[0].record;
+    shop.accept_allowance(&theirs).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    exec.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    Box::pin(grant(w, &mut exec, &mine)).await;
+    Box::pin(consent(&mut phone, &mine)).await;
+    wallet.receive(None).await.unwrap();
+    exec.receive(None).await.unwrap();
+    assert!(exec.allowance(&mine).await.unwrap().consented);
+    (shop, wallet, exec, phone, theirs, mine)
+}
+
+/// Bob's shop sends alice's `apps` a message of `kind` under the Allowance at `mine`, with
+/// `refs` built from the record as `exec` holds it.
+async fn bob_sends(
+    w: &World,
+    exec: &Paykit,
+    apps: &[[u8; 16]],
+    mine: &[u8; 32],
+    kind: &str,
+    refs: impl FnOnce(&AllowanceRecord) -> Vec<[u8; 32]>,
+) {
+    let record = AllowanceRecord::read(
+        &serde_json::to_vec(&Box::pin(value(exec, mine)).await).unwrap(),
+        &w.alice_id(),
+    )
+    .unwrap();
+    w.clock.advance_ms(1);
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        apps,
+        kind,
+        refs(&record),
+        json!({ "allowance_id": record.allowance_id.as_str() })
+            .as_object()
+            .cloned()
+            .unwrap(),
+    );
+}
+
+#[tokio::test]
+async fn test_allowances_recipient_end_naming_the_proposal_alone_leaves_consent() {
+    // An end naming the proposal alone is the proposal's withdrawal by its sender (Paykit
+    // wire 4.16). Bob received alice's proposal and accepted it: his end naming the proposal
+    // alone is no end of this Allowance. The executor's consent stays, nothing is recorded,
+    // and no stop is left.
+    let w = World::new();
+    let (_shop, wallet, mut exec, _phone, _, mine) = Box::pin(alice_proposed_executed(&w)).await;
+    Box::pin(bob_sends(
+        &w,
+        &exec,
+        &[exec.app_id(), wallet.app_id()],
+        &mine,
+        "paykit.allowance_end",
+        |record| vec![record.proposal.hash()],
+    ))
+    .await;
+    let got = exec.receive(None).await.unwrap();
+    assert!(received(&got, "paykit.allowance_end"), "{got:?}");
+    assert_eq!(
+        Box::pin(consent_entry(&exec, &mine)).await,
+        Some(json!({ "held": { "confirm_again": false } }))
+    );
+    assert!(exec.allowance(&mine).await.unwrap().consented);
+    assert!(Box::pin(value(&exec, &mine)).await["end"].is_null());
+    assert!(exec.app().protocol_scan(b"ae/").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_allowances_second_response_naming_another_proposal_keeps_no_conflict() {
+    // Bob accepted alice's proposal; a rejection of his naming another proposal answers no
+    // proposal of this Allowance (Paykit wire 4.16): it is dropped, with no conflict kept,
+    // nothing written, and the executor's consent unchanged.
+    let w = World::new();
+    let (_shop, mut wallet, mut exec, _phone, _, mine) =
+        Box::pin(alice_proposed_executed(&w)).await;
+    Box::pin(bob_sends(
+        &w,
+        &exec,
+        &[exec.app_id(), wallet.app_id()],
+        &mine,
+        "paykit.allowance_rejection",
+        |_| vec![[7; 32]],
+    ))
+    .await;
+    exec.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    for app in [&exec, &wallet] {
+        assert!(app.app().protocol_scan(b"cf/").await.unwrap().is_empty());
+        assert!(Box::pin(value(app, &mine)).await["conflicted"].is_null());
+        assert_eq!(
+            app.allowance(&mine).await.unwrap().status,
+            AllowanceStatus::Accepted
+        );
+    }
+    assert_eq!(
+        Box::pin(consent_entry(&exec, &mine)).await,
+        Some(json!({ "held": { "confirm_again": false } }))
+    );
+    assert!(exec.allowance(&mine).await.unwrap().consented);
+}
+
+#[tokio::test]
+async fn test_allowances_restored_end_acceptance_time_ahead_is_clamped() {
+    // A kept end dated a day ahead of anything the backup verified is restored with its
+    // acceptance time brought down to that time plus the clock tolerance, as a kept
+    // cancellation is: dated there, it would never go (Paykit spec 7.2, 8.3).
+    let w = World::new();
+    let _shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(wallet(&w)).await;
+    end_unknown(&w, &wallet, 0);
+    wallet.receive(None).await.unwrap();
+    let backup: Value =
+        serde_json::from_slice(&wallet.backup().await.unwrap().to_bytes().unwrap()).unwrap();
+    drop(wallet);
+    let mut state = crate::restore::layer_of(&backup);
+    let end = state
+        .iter_mut()
+        .find(|(k, _)| k.starts_with(b"ae/"))
+        .expect("the backup keeps the end");
+    end.1["d"]["accepted_at"] = json!(w.clock.now_ms() + 24 * HOUR_MS);
+    let backup = paykit_sdk::PaykitBackup::from_bytes(
+        &serde_json::to_vec(&crate::restore::with_layer(&backup, state)).unwrap(),
+    )
+    .unwrap();
+    let restored = Box::pin(restored_unreceived(&w, &backup)).await;
+    let bound = w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+    let (_, value) = restored
+        .app()
+        .protocol_scan(b"ae/")
+        .await
+        .unwrap()
+        .remove(0);
+    let value: Value = serde_json::from_slice(&value).unwrap();
+    assert!(
+        value["d"]["accepted_at"].as_u64().unwrap() <= bound,
+        "{value}"
+    );
+}

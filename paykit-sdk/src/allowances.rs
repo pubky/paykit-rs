@@ -337,13 +337,16 @@ fn stored_ids(record: &AllowanceRecord) -> Vec<String> {
 /// Whether `stored` makes the Allowance of `record` conflicted (Paykit spec 8.3,
 /// "Conflicted"): a proposal under its Allowance ID whose hash differs from the record's
 /// proposal, from either side, or, beside the record's response, an acceptance or rejection
-/// from the proposal's recipient whose hash differs from that response. A re-sent copy, with
-/// the same hash, is the message itself.
+/// from the proposal's recipient, referring to the record's proposal alone (Paykit wire
+/// 4.16), whose hash differs from that response. A re-sent copy, with the same hash, is the
+/// message itself. A response referring to anything else is no response of this Allowance
+/// ([`misreferenced`]) and conflicts with nothing.
 pub(crate) fn conflicts(record: &AllowanceRecord, stored: &StoredMessage) -> bool {
     match stored.body() {
         Body::AllowanceProposal(_) => stored.hash() != record.proposal.hash(),
         Body::AllowanceAcceptance(_) | Body::AllowanceRejection(_) => {
             stored.sender() == record.proposal.message().to
+                && !misreferenced(record, stored)
                 && record
                     .response
                     .as_ref()
@@ -351,6 +354,16 @@ pub(crate) fn conflicts(record: &AllowanceRecord, stored: &StoredMessage) -> boo
         }
         _ => false,
     }
+}
+
+/// Whether `stored`, an acceptance or a rejection, refers to anything but `record`'s
+/// proposal alone (Paykit wire 4.16): it answers no proposal of this Allowance, so it is
+/// dropped, writing nothing and keeping no stop.
+pub(crate) fn misreferenced(record: &AllowanceRecord, stored: &StoredMessage) -> bool {
+    matches!(
+        stored.body(),
+        Body::AllowanceAcceptance(_) | Body::AllowanceRejection(_)
+    ) && stored.message().refs != [record.proposal.hash()]
 }
 
 /// Whether `record` reflects the message `msg_id`: holds it, or names it among the others.
@@ -611,6 +624,11 @@ fn put_placed(
     stored: &StoredMessage,
     scopes: &[String],
 ) -> std::result::Result<(), Fail> {
+    if misreferenced(&record, stored) && !reflects(&record, &stored.message().msg_id) {
+        return Err(Fail::Drop(
+            "Paykit wire 4.16: a response refers to its Allowance's proposal alone".into(),
+        ));
+    }
     if record.conflicted.is_none()
         && !reflects(&record, &stored.message().msg_id)
         && conflicts(&record, stored)
@@ -749,11 +767,17 @@ fn keep_end(
                 "Paykit wire 4.16: an end refers to its Allowance's proposal".into(),
             ));
         }
+        // Only an end the record shows ends the Allowance removes consent: the proposal's
+        // withdrawal by its sender, naming the proposal alone, or an end naming the proposal
+        // and the acceptance the record holds (Paykit wire 4.16). Any other is kept as the
+        // stop only, which `record_end` judges and drops; consent stays.
         checked = record.end.is_none()
             && !rejected(record)
-            && (refs.len() == 1
-                || acceptance(record)
-                    .is_some_and(|accepted| refs.get(1) == Some(&accepted.hash())));
+            && match refs.len() {
+                1 => sender == record.proposal.sender(),
+                2 => acceptance(record).is_some_and(|accepted| refs[1] == accepted.hash()),
+                _ => false,
+            };
     }
     if !held {
         receive::hold_while_unlisted(cx, RecordSide::Allowances)?;
@@ -2079,6 +2103,14 @@ impl Paykit {
             },
             Some(content) if crate::hold::awaits_key(&content) => return Ok(Placed::Not),
             Some(RecordContent::Value(_)) => match Box::pin(self.held_allowance(&record)).await? {
+                // A response to no proposal of this Allowance is dropped, as at receive.
+                Some(held)
+                    if misreferenced(&held, &stored)
+                        && !reflects(&held, &stored.message().msg_id) =>
+                {
+                    Box::pin(self.app.protocol_commit(&locals)).await?;
+                    return Ok(Placed::Done);
+                }
                 Some(held) if held.conflicted.is_none() && conflicts(&held, &stored) => {
                     Box::pin(self.keep_conflict_later(&record, &stored, locals)).await?;
                     return Ok(Placed::Done);

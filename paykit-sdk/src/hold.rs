@@ -435,7 +435,8 @@ impl Paykit {
     /// A restored time above the backup's highest verified service time plus the clock
     /// tolerance is clamped to that bound: the cursor time (`ct`), with the hold's re-send
     /// time, the two times of each mark of dropped messages (`pd/`, `ud/`, `kw/`), and the
-    /// acceptance time of each stop (`kc/`) and kept reply (`pr/`). A cursor time ahead of
+    /// acceptance time of each stop (`kc/`, an Allowance's `ae/`) and kept reply (`pr/`). A
+    /// cursor time ahead of
     /// any the backup verified would ask counterparties to re-send from the future, so
     /// nothing would come back (Paykit spec 7.2, "What a restore loses"); a mark or a kept
     /// message dated there would never expire. Clamped, not refused: the times decide only
@@ -479,7 +480,11 @@ impl Paykit {
                 tx.put(&format!("{}{rest}", family.prefix()), &held)?;
             }
         }
-        for prefix in [key::KEPT_CANCELLATIONS, key::KEPT_REPLIES] {
+        for prefix in [
+            key::KEPT_CANCELLATIONS,
+            key::KEPT_REPLIES,
+            key::ALLOWANCE_ENDS,
+        ] {
             for (rest, mut kept) in self
                 .local_scan::<crate::records::KeptMessage>(prefix)
                 .await?

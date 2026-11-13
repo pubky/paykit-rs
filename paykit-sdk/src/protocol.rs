@@ -1624,6 +1624,34 @@ mod receive_tests {
     }
 
     #[test]
+    fn test_protocol_restore_refuses_a_kept_conflict_without_its_acceptance_time() {
+        // Every writer of `cf/` keeps a message its inbox accepted, with the time: a proposal
+        // or a response conflict without it is no state a run leaves, and the restore
+        // refuses it rather than install a stop for good.
+        let (alice, bob, proposal, _) = allowance_end();
+        let Body::AllowanceProposal(body) = proposal.body() else {
+            panic!("a proposal");
+        };
+        let record = fake_key(&allowance_target(&bob.id(), &body.allowance_id));
+        let at = key::conflict(&record);
+        let response = bob.message(
+            &alice,
+            "paykit.allowance_rejection",
+            vec![proposal.hash()],
+            object(json!({ "allowance_id": body.allowance_id.as_str() })),
+        );
+        for conflict in [&proposal, &response] {
+            let value = state::encode(&KeptMessage::of(conflict)).unwrap();
+            assert!(restores::<KeptMessage>(&alice, at.as_bytes(), &value));
+            assert!(!restores::<KeptMessage>(
+                &alice,
+                at.as_bytes(),
+                &without_acceptance(&value)
+            ));
+        }
+    }
+
+    #[test]
     fn test_protocol_restore_refuses_a_kept_reply_without_its_acceptance_time() {
         // A reply is kept only as its inbox accepted it: one without the time can't come
         // from a valid run.
