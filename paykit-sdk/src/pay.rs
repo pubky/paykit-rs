@@ -200,9 +200,13 @@ pub struct BlockedPayment {
 }
 
 /// Refuse a payment the user starts to a payee the deny list holds, `blocked`, unless the
-/// user confirmed `shown`, the same payment (Paykit spec 8.1).
-fn refuse_blocked(blocked: bool, shown: BlockedPayment, options: &PayOptions) -> Result<()> {
-    if blocked && options.blocked_confirmed.as_ref() != Some(&shown) {
+/// user `confirmed` `shown`, the same payment (Paykit spec 8.1).
+pub(crate) fn refuse_blocked(
+    blocked: bool,
+    shown: BlockedPayment,
+    confirmed: Option<&BlockedPayment>,
+) -> Result<()> {
+    if blocked && confirmed != Some(&shown) {
         return Err(Refusal::Blocked {
             payment: Box::new(shown),
         }
@@ -717,7 +721,7 @@ impl Paykit {
             request: Some(*request),
             amount: body.amount.clone(),
         };
-        refuse_blocked(blocked, shown, &options)?;
+        refuse_blocked(blocked, shown, options.blocked_confirmed.as_ref())?;
         let obligation = self.obligation(&request.payee, &request.request_hash, 0);
         let deadline = body.attempt_deadline(None)?;
         let restored = self.restored_attempts(&obligation).await?;
@@ -868,7 +872,7 @@ impl Paykit {
             request: None,
             amount: payment.amount.clone(),
         };
-        refuse_blocked(blocked, shown, &options)?;
+        refuse_blocked(blocked, shown, options.blocked_confirmed.as_ref())?;
         let (destination, carrier, reserve, bound) = self
             .list_destination(
                 &payment.payee,

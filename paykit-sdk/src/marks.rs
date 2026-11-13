@@ -5,8 +5,9 @@
 //! names:
 //!
 //! - **Replies dropped for the bounds on kept replies** (`pd/<sender>`, `receive.rs`): a
-//!   payer's replies at a payee app, and receipts at a payer app. Once the app holds the
-//!   record of a request, of either side, whose counterparty holds such a mark (not that of
+//!   payer's replies at a payee app, and receipts and period details at a payer app. Once
+//!   the app holds the record of a request, of either side, whose counterparty holds such
+//!   a mark (not that of
 //!   a Billing Period or of a payment without a request), it asks that sender to re-send
 //!   what its inbox accepted from the mark's earliest time (`resend_request` with
 //!   `accepted_from`). The client marked such a reply processed when it was kept, so the
@@ -906,9 +907,9 @@ impl Paykit {
     /// whose counterparty the mark names, one held before the reply was dropped included. On
     /// the payee's side that is the record of a request to the sender, which a payee app's
     /// kept replies wait for; on the payer's, of the sender's request, which a payer app's
-    /// kept receipts wait for. A record of a Billing Period or of a payment without a request
-    /// makes no mark due, nor does one that doesn't read. The records are read only while a
-    /// mark waits, and a failed read fails the pass.
+    /// kept receipts and period details wait for. A record of a Billing Period or of a
+    /// payment without a request makes no mark due, nor does one that doesn't read. The
+    /// records are read only while a mark waits, and a failed read fails the pass.
     async fn note_requests_held(&mut self) -> Result<()> {
         use paykit_lib::collections::Collection;
         use paykit_lib::records::{ActivitySide, RecordBinding};
