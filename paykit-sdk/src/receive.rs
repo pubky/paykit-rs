@@ -234,7 +234,7 @@ pub(crate) fn effect(
             receipt_effect(cx, stored, receipt.attempt_id)?;
         }
         Body::PaymentPeriodDetails(_) if pay => {
-            period_details_effect(cx, stored, &scopes)?;
+            period_details_effect(cx, stored, &scopes, settlement)?;
         }
         Body::PrivatePaymentList(_) if pay => {
             let target = list_target(&sender, &stored.message().from.app_id);
@@ -400,6 +400,28 @@ fn wait_for_key(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<(), 
         return Err(Fail::AwaitsKey { data_epoch });
     }
     Ok(())
+}
+
+/// `value`, the activity record value the app's copy holds at `target`, read bound to its
+/// key ([`crate::records::bind_activity`]), as the later writes read it
+/// ([`crate::Paykit::held_activity`]): `None` for a value that doesn't read or bind, which
+/// the reader doesn't act on (Paykit wire 5.3).
+fn bound_activity(
+    cx: &ReceiveContext<'_>,
+    target: &ActivityTarget,
+    value: &[u8],
+    settlement: Settlement<'_>,
+) -> Result<Option<paykit_lib::records::ActivityRecord>, Fail> {
+    let key = cx.record_key(&target.record_target())?;
+    Ok(crate::records::bind_activity(
+        value,
+        &cx.identity(),
+        target.side.side(),
+        target.label().as_ref(),
+        &key,
+        |t| cx.record_key(t).ok(),
+        settlement,
+    ))
 }
 
 /// Whether the app's copy holds the record at `target` ([`holds_record`]).
@@ -618,7 +640,11 @@ fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<
 /// Details invalid against the request are dropped. Those the payer doesn't store, for a
 /// request it hasn't accepted, or rejected, or either side cancelled, or for a period that
 /// doesn't take details now ([`crate::periods::stores_details`]), are taken with no effect.
-/// With no service time verified yet, the entry is held until one is.
+/// With no service time verified yet, the entry is held until one is. Both records are read
+/// bound to their keys, as the later writes read them: a request record or period record
+/// whose value doesn't read or bind decides nothing and is never written over here, so the
+/// details are kept as before their record ([`keep_before_record`]), and the later write
+/// waits for a value that binds ([`crate::Paykit::place_kept_replies`]).
 ///
 /// The spam rule (Paykit wire 4.1) doesn't gate the details stored here: they go only into
 /// the period record of a subscription the payer accepted, an update of activity it holds
@@ -628,6 +654,7 @@ fn period_details_effect(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
     scopes: &[String],
+    settlement: Settlement<'_>,
 ) -> Result<(), Fail> {
     let sender = stored.sender();
     let own = cx.identity();
@@ -638,8 +665,8 @@ fn period_details_effect(
     let Some(value) = held_or_unlisted(cx, &request_target, RecordSide::Payer)? else {
         return keep_before_record(cx, stored, scopes, &request_target);
     };
-    let Some(record) = activity::read(Some(&value), &own, ActivitySide::Payer) else {
-        return Ok(());
+    let Some(record) = bound_activity(cx, &request_target, &value, settlement)? else {
+        return keep_before_record(cx, stored, scopes, &request_target);
     };
     if record.counterparty != sender || record.request.is_none() {
         return Ok(());
@@ -654,12 +681,15 @@ fn period_details_effect(
     // verify is corrupt state, never taken as a stop that drops the details.
     let kept_stop = key::kept_cancellation(&cx.record_key(&request_target.record_target())?);
     let stopped = state::cx_get::<KeptMessage>(cx, &kept_stop)?.is_some();
-    // The period record's paid state decides too; one absent or that doesn't read shows
-    // nothing paid, and `place` below holds the entry while its value waits for its key.
-    let period = cx
-        .record(&target.record_target())?
-        .and_then(|held| held.content.value().map(<[u8]>::to_vec));
-    let period = activity::read(period.as_deref(), &own, ActivitySide::Payer);
+    // The period record's paid state decides too; one absent shows nothing paid, and `place`
+    // below holds the entry while its value waits for its key.
+    let period = match held_value(cx, &target)? {
+        None => None,
+        Some(value) => match bound_activity(cx, &target, &value, settlement)? {
+            Some(period) => Some(period),
+            None => return keep_before_record(cx, stored, scopes, &request_target),
+        },
+    };
     let stores = crate::periods::stores_details(
         &record,
         period.as_ref(),
@@ -764,10 +794,20 @@ fn payer_reply(
             // A proof naming period details the period record doesn't hold, such as ones
             // another own app sent whose record this app hasn't taken yet, would leave the
             // record unbound (Paykit wire 5.3): it waits for them as a reply before its
-            // record, placed once the period record holds them.
+            // record, placed once the period record holds them. The period record is read
+            // bound to its key, as the later writes read it: one whose value doesn't read or
+            // bind is never written over here, and the proof waits the same way.
             if target != request_target {
-                let period = held_or_unlisted(cx, &target, RecordSide::Payee)?;
-                let held = activity::read(period.as_deref(), &own, ActivitySide::Payee);
+                let held = match held_or_unlisted(cx, &target, RecordSide::Payee)? {
+                    None => None,
+                    Some(value) => match bound_activity(cx, &target, &value, settlement)? {
+                        Some(period) => Some(period),
+                        None => {
+                            keep_before_record(cx, stored, scopes, &request_target)?;
+                            return Ok(true);
+                        }
+                    },
+                };
                 if awaits_named_details(held.as_ref(), ActivitySide::Payee, stored) {
                     keep_before_record(cx, stored, scopes, &request_target)?;
                     return Ok(true);

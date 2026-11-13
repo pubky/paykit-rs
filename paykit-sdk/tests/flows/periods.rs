@@ -2856,3 +2856,288 @@ async fn test_periods_credit_stays_given_after_a_restore() {
         .count();
     assert_eq!(receipts, 1);
 }
+
+/// Alice's payer period record of `request`'s `period`.
+fn payer_period_at(request: &RequestRef, period: PeriodRef) -> RecordTarget {
+    let collection = Collection::PayerActivity;
+    RecordTarget::new(
+        SwitchCollection::new(collection.name(), collection.policy(None)),
+        &natural_key::period_record(&request.payee, &request.request_hash, period.start_secs()),
+    )
+}
+
+/// Alice's `phone` reads her period record of `request`'s `period`, adds her proof of
+/// its payment, as an own app that paid it writes it, and writes the value at `at`: the
+/// period's own record, which then shows it paid, or another record's key.
+async fn payer_period_paid(
+    w: &World,
+    phone: &mut Paykit,
+    request: &RequestRef,
+    payee_app: [u8; 16],
+    period: PeriodRef,
+    at: &RecordTarget,
+) {
+    let held = phone
+        .app_mut()
+        .read_record(&payer_period_at(request, period))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut record = paykit_lib::records::ActivityRecord::read(
+        held.content.value().unwrap(),
+        &w.alice_id(),
+        paykit_lib::records::ActivitySide::Payer,
+    )
+    .unwrap();
+    let body = period_proof(w, payee_app, period).await;
+    let plaintext = w.sign_as(
+        &w.alice,
+        "phone",
+        &w.bob,
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        body,
+    );
+    record.proof = Some(
+        paykit_lib::records::StoredMessage::new(
+            w.alice_id(),
+            phone.app().cert().signed(),
+            plaintext,
+            None,
+            &w.bob_id(),
+        )
+        .unwrap(),
+    );
+    let value = record.to_json().unwrap();
+    let op = phone
+        .app_mut()
+        .record_op(at, Some(&value), Vec::new())
+        .await
+        .unwrap();
+    phone
+        .app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+}
+
+/// Bob's shop's later details for January of the request `hash`, entered at alice's switch
+/// for `targets`. Returns their `msg_id`.
+fn inject_later_details(w: &World, targets: &[[u8; 16]], hash: [u8; 32]) -> String {
+    w.clock.advance_ms(1_000);
+    let body = details(january(), "lnbc1later", w.clock.now_ms() + DAY_MS)
+        .to_body()
+        .unwrap();
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        targets,
+        "paykit.payment_period_details",
+        vec![hash],
+        body,
+    )
+}
+
+#[tokio::test]
+async fn test_periods_details_for_a_period_the_payer_shows_paid_taken_at_receive() {
+    // The phone paid January: alice's period record holds its proof. Bob's later details
+    // for January reach the wallet, which stores none for a period shown paid (Paykit spec
+    // 8.2): the receive step reads the period record's paid state.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    let now = w.clock.now_ms();
+    shop.send_period_details(&sale, details(january(), "lnbc1a", now + DAY_MS))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let january_record = payer_period(&request);
+    payer_period_paid(
+        &w,
+        &mut phone,
+        &request,
+        shop.app_id(),
+        january(),
+        &january_record,
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.request(&request).await.unwrap().periods[0].paid);
+    inject_later_details(&w, &[wallet.app_id()], request.request_hash);
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(received(&summary, "paykit.payment_period_details"));
+    let view = wallet.request(&request).await.unwrap();
+    assert_eq!(view.periods[0].details.len(), 1, "{view:?}");
+}
+
+#[tokio::test]
+async fn test_periods_details_for_a_period_the_payer_shows_paid_taken_at_the_later_write() {
+    // Bob's later details for January reach the wallet, whose record write of them is
+    // refused for good twice, so they stay a stored entry. The phone then pays January:
+    // alice's period record holds its proof. The stored entry's later write takes the
+    // details with no effect, as the period shows paid (Paykit spec 8.2).
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    let now = w.clock.now_ms();
+    shop.send_period_details(&sale, details(january(), "lnbc1a", now + DAY_MS))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    inject_later_details(&w, &[wallet.app_id()], request.request_hash);
+    for _ in 0..2 {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/ops".into(),
+                code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+                current: serde_json::Value::Null,
+            });
+    }
+    wallet.receive(None).await.unwrap();
+    assert!(!wallet.app_mut().parked_entries().await.unwrap().is_empty());
+    let january_record = payer_period(&request);
+    payer_period_paid(
+        &w,
+        &mut phone,
+        &request,
+        shop.app_id(),
+        january(),
+        &january_record,
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let view = wallet.request(&request).await.unwrap();
+    assert!(view.periods[0].paid, "{view:?}");
+    assert_eq!(view.periods[0].details.len(), 1, "{view:?}");
+    assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_periods_details_over_a_period_record_that_doesnt_bind_kept_not_dropped() {
+    // The phone writes, at January's period record, February's record with a proof in it:
+    // a value that reads but doesn't bind to that key, which the reader doesn't act on
+    // (Paykit wire 5.3). Bob's January details then reach the wallet. Its paid state can't
+    // be told from that value, so the details are neither taken with no effect nor written
+    // over it: they are kept, and given up with the host's notice past their 30 days.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    let now = w.clock.now_ms();
+    shop.send_period_details(&sale, details(month(1), "lnbc1feb", now + DAY_MS))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let january_record = payer_period(&request);
+    payer_period_paid(
+        &w,
+        &mut phone,
+        &request,
+        shop.app_id(),
+        month(1),
+        &january_record,
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    let key = wallet.app().record_key(&january_record).unwrap();
+    let phones = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    let msg_id = inject_later_details(&w, &[wallet.app_id()], request.request_hash);
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(received(&summary, "paykit.payment_period_details"));
+    wallet.receive(None).await.unwrap();
+    let after = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    assert_eq!(after.version, phones.version);
+    assert_eq!(after.content, phones.content);
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS + DAY_MS);
+    wallet.receive(None).await.unwrap();
+    let notices = wallet.notices().await.unwrap();
+    assert!(
+        notices
+            .iter()
+            .any(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp
+                && n.msg_id.as_deref() == Some(msg_id.as_str())),
+        "{notices:?}"
+    );
+    let after = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    assert_eq!(after.content, phones.content);
+}
+
+#[tokio::test]
+async fn test_periods_proof_over_a_payee_period_record_that_doesnt_bind_kept_not_written() {
+    // Bob's till writes, at the shop's January period record, February's record: a value
+    // that reads but doesn't bind to that key (Paykit wire 5.3). Alice's proof of January
+    // then reaches the shop. It is never written over that value: it is kept as a reply
+    // before its record, and given up with the host's notice past its 30 days.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    let now = w.clock.now_ms();
+    shop.send_period_details(&sale, details(month(1), "lnbc1feb", now + DAY_MS))
+        .await
+        .unwrap();
+    till.receive(None).await.unwrap();
+    let february = till
+        .app_mut()
+        .read_record(&payee_period_at(&request, month(1)))
+        .await
+        .unwrap()
+        .unwrap();
+    let january_record = payee_period(&request);
+    let op = till
+        .app_mut()
+        .record_op(
+            &january_record,
+            Some(february.content.value().unwrap()),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    till.app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let key = shop.app().record_key(&january_record).unwrap();
+    let tills = shop.app().shared_record(&key).await.unwrap().unwrap();
+    let body = period_proof(&w, shop.app_id(), january()).await;
+    let msg_id = w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        body,
+    );
+    let summary = shop.receive(None).await.unwrap();
+    assert!(received(&summary, "paykit.payment_proof"));
+    shop.receive(None).await.unwrap();
+    let after = shop.app().shared_record(&key).await.unwrap().unwrap();
+    assert_eq!(after.version, tills.version);
+    assert_eq!(after.content, tills.content);
+    w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS + DAY_MS);
+    shop.receive(None).await.unwrap();
+    let notices = shop.notices().await.unwrap();
+    assert!(
+        notices
+            .iter()
+            .any(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp
+                && n.msg_id.as_deref() == Some(msg_id.as_str())),
+        "{notices:?}"
+    );
+}
