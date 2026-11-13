@@ -477,7 +477,8 @@ fn missed(w: &World) {
 }
 
 /// Fail Paykit's own listing at the end of the next receive, after a `missed` item: the
-/// client's listing after the item, of the wallet's two collections, goes through first.
+/// client's listing after the item, of the wallet's two collections, goes through first. A
+/// listing that fails inside the client's read fails the read.
 fn fail_paykit_listing(w: &World) {
     w.alice
         .switch()
@@ -1011,4 +1012,104 @@ async fn test_restore_hold_missed_item_asks_sent_not_sent_again_by_a_restore() {
         .await
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_listing_failing_in_the_read_fails_the_receive() {
+    // The client lists right after a `missed` item, inside its read, before it hands over
+    // any later entry (Switch spec 8.2): a listing that fails there fails the read, and the
+    // receive returns its error, the request after the item not taken. The next receive
+    // lists first and takes it.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    wallet.receive(None).await.unwrap();
+    missed(&w);
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "records?collection".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    assert!(wallet.receive(None).await.is_err());
+    // The item was passed: the records count as not listed by Paykit since.
+    assert!(wallet.app().protocol_get(b"ml").await.unwrap().is_some());
+    let mut applied = Vec::new();
+    for _ in 0..2 {
+        applied.extend(wallet.receive(None).await.unwrap().applied);
+    }
+    assert_eq!(applied.len(), 1, "{applied:?}");
+    assert!(wallet.app().protocol_get(b"ml").await.unwrap().is_none());
+    assert!(wallet.request(&request).await.is_ok());
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_item_bounded_by_its_last_acceptance_time() {
+    // The item's last acceptance time is an hour before the read: a request bob created
+    // since, past that time plus the clock tolerance, can't have had its cancellation among
+    // the entries missed and isn't held, though the read's service time is later. One
+    // created at the item's last time is held.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let now = w.clock.now_ms();
+    w.alice
+        .switch()
+        .push_missed(1, now - 2 * HOUR_MS, now - HOUR_MS);
+    wallet.receive(None).await.unwrap();
+    let after = signed_request(&w, "order-1");
+    w.clock.set_ms(now - HOUR_MS);
+    let within = signed_request(&w, "order-2");
+    w.clock.set_ms(now);
+    for request in [&within, &after] {
+        w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], request);
+    }
+    wallet.receive(None).await.unwrap();
+    assert_eq!(status_of(&w, &wallet, &within).await, RequestStatus::Held);
+    assert_eq!(status_of(&w, &wallet, &after).await, RequestStatus::Open);
+}
+
+#[tokio::test]
+async fn test_restore_hold_request_sent_again_over_its_seen_deleted_record_changes_nothing() {
+    // The wallet took bob's request; alice's phone then deletes its record. Past the 30
+    // days the wallet keeps the request as processed, the same request comes again: the
+    // wallet saw the record's messages, so it takes the request as one for the record it
+    // saw and writes nothing over the delete (Paykit spec 8.1, "Records not listed yet").
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let _shop = w.shop().await;
+    let request = signed_request(&w, "order-1");
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &request);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(status_of(&w, &wallet, &request).await, RequestStatus::Open);
+    phone.receive(None).await.unwrap();
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            paykit_lib::collections::Collection::PayerActivity.name(),
+            paykit_lib::collections::Collection::PayerActivity.policy(None),
+        ),
+        &paykit_lib::derive::natural_key::request_record(&w.bob_id(), &request.hash()),
+    );
+    phone
+        .app_mut()
+        .delete_record(&target, Vec::new())
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let key = wallet.app().record_key(&target).unwrap();
+    w.clock.advance_ms(31 * pubky_switch_core::records::DAY_MS);
+    wallet.receive(None).await.unwrap();
+    let written = w.record_writes(&w.alice, &key);
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &request);
+    let got = wallet.receive(None).await.unwrap();
+    assert_eq!(got.applied.len(), 1, "{got:?}");
+    assert_eq!(w.record_writes(&w.alice, &key), written);
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    assert_eq!(
+        held.content,
+        pubky_switch_client::app::RecordContent::Deleted
+    );
 }

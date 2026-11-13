@@ -1683,23 +1683,6 @@ async fn in_flight_under_a_wider_certificate_without_keys(
     paykit_sdk::RequestRef,
     paykit_lib::AttemptId,
 ) {
-    in_flight_under_a_wider_certificate_without_keys_rotated(w, false).await
-}
-
-/// As [`in_flight_under_a_wider_certificate_without_keys`], with the data epoch rotated
-/// first when `rotate`, so the wallet lacks the current `pay` key as well. The rotation is
-/// read before the wider certificate: once it is taken, the listing it owes waits for its
-/// keys, and the app reads no feed meanwhile.
-async fn in_flight_under_a_wider_certificate_without_keys_rotated(
-    w: &World,
-    rotate: bool,
-) -> (
-    Paykit,
-    Paykit,
-    paykit_sdk::RequestRef,
-    paykit_sdk::RequestRef,
-    paykit_lib::AttemptId,
-) {
     let mut wallet = w.wallet("wallet").await;
     let me = wallet.app_id();
     let mut shop = w.shop().await;
@@ -1724,10 +1707,6 @@ async fn in_flight_under_a_wider_certificate_without_keys_rotated(
     else {
         panic!("in flight");
     };
-    if rotate {
-        w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
-        wallet.receive(None).await.unwrap();
-    }
     let old = wallet.app().cert().clone();
     let wider = renew(
         w,
@@ -1865,7 +1844,9 @@ async fn test_certificate_wider_without_the_pay_key_writes_nothing_and_journals_
     // and sends nothing until the keys come.
     let w = World::new();
     let (mut wallet, _shop, _paid, _other, attempt_id) =
-        in_flight_under_a_wider_certificate_without_keys_rotated(&w, true).await;
+        in_flight_under_a_wider_certificate_without_keys(&w).await;
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    wallet.receive(None).await.unwrap();
     let entries = w.bob.switch().entries_from(&w.alice_id());
     w.rail.settle(&attempt_id, true);
     let before = w.router.log().len();
@@ -2115,7 +2096,7 @@ async fn test_certificate_narrowed_then_stopped_taking_the_wider_one_holds_a_rep
 
 #[tokio::test]
 async fn test_certificate_narrowed_on_one_side_widened_on_another_then_back_holds_a_receipt() {
-    // `request` reads the payee's side, and no longer the payer's.
+    // `request` reads the payee's side, whose keys wait, and no longer the payer's.
     narrowed_on_the_payer_side_then_back(AppScopes::new().request().build().unwrap()).await;
 }
 
@@ -2288,9 +2269,6 @@ async fn payer_side_widened(narrowed: RequestedScopes, cancelled: bool) {
     };
     let first = wallet.app().cert().clone();
     let narrow = renew(&w, me, &narrowed, 1_000);
-    // The narrowed certificate's keys are stored, so the listing it owes isn't left waiting,
-    // which would hold the feed and the wider renewal behind it.
-    store_bundle(&w, me, &narrow);
     let _ = wallet.receive(None).await;
     list(&w, me, &first, &narrow);
     wallet.receive(None).await.unwrap();
@@ -2471,10 +2449,6 @@ async fn test_certificate_payee_side_widening_with_a_data_epoch_rotation_writes_
         wallet.payments().await.unwrap()[0].stage,
         paykit_sdk::Stage::Attempted
     );
-    // The rotation is read first: once the wider certificate is taken, the listing it owes
-    // waits for its keys, and the app reads no feed meanwhile.
-    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
-    wallet.receive(None).await.unwrap();
     let old = wallet.app().cert().clone();
     let wider = renew(
         &w,
@@ -2484,6 +2458,8 @@ async fn test_certificate_payee_side_widening_with_a_data_epoch_rotation_writes_
     );
     wallet.receive(None).await.unwrap();
     list(&w, me, &old, &wider);
+    wallet.receive(None).await.unwrap();
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
     let summary = wallet.receive(None).await.unwrap();
     assert_eq!(wallet.app().cert().hash(), wider.hash());
     assert!(summary.scope_keys_awaited, "{summary:?}");
