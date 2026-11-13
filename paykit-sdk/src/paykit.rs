@@ -737,6 +737,9 @@ impl Paykit {
         // The senders of messages dropped before they were taken: of replies dropped for the
         // bounds once the app holds the record of one of their requests, of entries dropped
         // unverified at once, then again at most once a day while the mark lives.
+        // The pairs a block's marks counted are forgotten first, so their asks may go
+        // (`marks.rs`).
+        Box::pin(self.forget_blocked_pairs()).await?;
         let marked = Box::pin(self.ask_on_marks()).await?;
         // The payers' replies kept for requests whose record wasn't held yet.
         Box::pin(self.place_kept_replies()).await?;

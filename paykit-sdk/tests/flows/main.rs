@@ -5,6 +5,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod blocked;
+mod blocked_return;
 mod certificate;
 mod common;
 mod crash;

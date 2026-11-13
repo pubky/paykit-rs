@@ -342,6 +342,7 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::PayerPassOwed
             | StateKey::OwnResendOwed
             | StateKey::ListedCert
+            | StateKey::Flagged
             | StateKey::StoredNote { .. }
             | StateKey::Taken(_) => continue,
             // The time of the last read of the lists isn't restored: the copy of the deny
@@ -396,7 +397,9 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::DroppedReplies { .. } | StateKey::DroppedUnverified { .. } => {
+            StateKey::DroppedReplies { .. }
+            | StateKey::DroppedUnverified { .. }
+            | StateKey::DroppedBlocked { .. } => {
                 // A mark is restored whole, its times and when it was last asked, so a restore
                 // neither loses nor resets it (Paykit spec 8.1), bound to its key's sender.
                 state::restored::<DropMark>(&key, &value, &binder).map_err(|_| unread())?;
@@ -461,7 +464,15 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::MessageNotice { .. } | StateKey::Notice { .. } => {
+            StateKey::BlockedWidening { .. } => {
+                state::restored::<crate::marks::BlockedWindow>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::MessageNotice { .. }
+            | StateKey::Notice { .. }
+            | StateKey::BlockedLost { .. } => {
                 let notice =
                     state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
                 // An acknowledged notice of an attempt is kept only while the journal holds
@@ -521,6 +532,19 @@ pub(crate) fn restore_paykit_layer(
     let resend = state::local_put(key::OWN_RESEND_OWED, &crate::hold::OwnResendOwed::default())
         .map_err(|_| String::from("the restore's re-send mark can't be written"))?;
     writes.push(resend);
+    // What a blocked counterparty's inbox accepted after the backup is gone with the
+    // restore: every counterparty the deny list holds at the next read of the lists is
+    // marked from the backup's cursor time, to ask once it is unblocked (`marks.rs`).
+    let from = cursor_time_ms.saturating_sub(pubky_switch_core::records::CLOCK_TOLERANCE_MS);
+    let widening = state::local_put(
+        &key::blocked_widening(from),
+        &crate::marks::BlockedWindow {
+            from_ms: from,
+            until_ms: crate::marks::BlockedWindow::TO_NOW,
+        },
+    )
+    .map_err(|_| String::from("the restore's block widening can't be written"))?;
+    writes.push(widening);
     Ok(writes)
 }
 
@@ -738,6 +762,20 @@ impl Protocol for PaykitProtocol {
                 &crate::hold::MissedHold::of_item(missed.accepted_until_ms),
             )?,
             local_write(key::MISSED_UNLISTED, &true)?,
+            // What a blocked counterparty's inbox accepted among the missed entries is asked
+            // for once it is unblocked: every counterparty the deny list holds at the next
+            // read of the lists is marked for the item's times (`marks.rs`).
+            local_write(
+                &key::blocked_widening(missed.accepted_from_ms),
+                &crate::marks::BlockedWindow {
+                    from_ms: missed.accepted_from_ms,
+                    until_ms: if missed.accepted_until_ms == u64::MAX {
+                        missed.accepted_from_ms
+                    } else {
+                        missed.accepted_until_ms
+                    },
+                },
+            )?,
             LocalWrite::DeletePrefix {
                 prefix: key::HOLD_CONFIRMED.as_bytes().to_vec(),
             },
