@@ -102,12 +102,10 @@ pub(crate) struct EmptyLedgerMark {
     /// The kept batch carrying the empty ledger, when its send got no answer: a batch the
     /// client drops as refused or unsent was never applied, so the empty ledger is owed
     /// again.
-    #[serde(default)]
     pub(crate) batch: Option<[u8; 16]>,
     /// A ledger was already at its key at the first grant: the executor writes no empty
     /// ledger over it and takes it as one it didn't accept, paying nothing on it until its
     /// user confirms a repair (Paykit spec 8.3, "A grant implies a ledger").
-    #[serde(default)]
     pub(crate) unaccepted: bool,
 }
 

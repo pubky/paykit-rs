@@ -304,7 +304,6 @@ pub(crate) struct JournalEntry {
     pub(crate) failed_on_claim: bool,
     /// The Allowance an executor pays the request under, which its proof names (Paykit spec
     /// 8.3 step 4); `None` for a payment the user made.
-    #[serde(default)]
     pub(crate) allowance_id: Option<String>,
 }
 
