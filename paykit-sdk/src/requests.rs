@@ -900,6 +900,9 @@ impl Paykit {
         payer: &[u8; 32],
         settlement: &[u8],
     ) -> Result<OtherCredit> {
+        // Both callers list the records first ([`Paykit::records_known`]), which refuses
+        // while the copy may lack records; held here all the same, a copy that may lack
+        // records can't tell.
         let mut cant_tell = self.side_unlisted(crate::hold::RecordSide::Payee).await?;
         for held in self
             .app

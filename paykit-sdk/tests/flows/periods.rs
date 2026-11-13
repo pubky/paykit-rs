@@ -2112,9 +2112,10 @@ async fn test_periods_credit_given_on_the_users_confirmation_while_a_record_is_s
 }
 
 #[tokio::test]
-async fn test_periods_credit_held_while_the_copy_is_unlisted_then_given() {
+async fn test_periods_credit_not_given_while_the_records_cant_be_listed_then_given() {
     // Restored, the shop's copy of its records lacks records until it lists them: a
-    // listing that fails holds the credit, and once it lists, the payment is credited.
+    // listing that fails is the credit's error, nothing credited, and once it lists, the
+    // payment is credited.
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
