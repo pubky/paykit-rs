@@ -122,7 +122,8 @@ impl Paykit {
     /// "Blocked counterparties"). Returns how many requests went out.
     pub(crate) async fn send_asks(&mut self) -> Result<u64> {
         self.queue_missed_asks().await?;
-        let asks = self.app.protocol_scan(key::ASKS.as_bytes()).await?;
+        // Each read bound to its key, as a restore reads it (`state::Stored`).
+        let asks = self.local_scan::<QueuedAsk>(key::ASKS).await?;
         // A copy of the deny list not known, as after a restore, is read first when there is
         // an ask to send, so the asks a reconcile queues go now; a read that fails leaves
         // them waiting.
@@ -130,8 +131,7 @@ impl Paykit {
             self.refresh_lists_when_due().await?;
         }
         let mut sent = 0u64;
-        for (key, value) in asks {
-            let ask = QueuedAsk::bound(&key, &value).map_err(|_| PaykitError::corrupt())?;
+        for (rest, ask) in asks {
             if self.sends_held(&ask.sender).await? {
                 continue;
             }
@@ -144,8 +144,7 @@ impl Paykit {
                 },
             )
             .await?;
-            let key = String::from_utf8(key).map_err(|_| PaykitError::corrupt())?;
-            self.local_delete(&key).await?;
+            self.local_delete(&format!("{}{rest}", key::ASKS)).await?;
             sent = sent.saturating_add(1);
         }
         Ok(sent)
@@ -224,9 +223,9 @@ impl Paykit {
         from_ms: u64,
     ) -> Result<()> {
         let ask_key = key::ask(&counterparty, from_ms);
-        if let Some(value) = self.app.protocol_get(ask_key.as_bytes()).await? {
-            QueuedAsk::bound(ask_key.as_bytes(), &value).map_err(|_| PaykitError::corrupt())?;
-        }
+        // One kept already is read bound to its key: a value that isn't its key's is a
+        // corrupt store, never written over.
+        self.local_get::<QueuedAsk>(&ask_key).await?;
         tx.put(
             &ask_key,
             &QueuedAsk {
@@ -238,47 +237,22 @@ impl Paykit {
         Ok(())
     }
 
-    /// The marks of missed entries under `prefix` (`missed/`), each read with the check a
-    /// restore makes ([`crate::protocol::missed_mark_at`]), bound to the time its key names:
-    /// one that fails it is a corrupt store, never no mark.
+    /// The marks of missed entries under `prefix` (`missed/`), each read bound to its key,
+    /// whose time it must be (`state::Stored`): one that fails it is a corrupt store, never
+    /// no mark.
     async fn missed_marks(&self, prefix: &str) -> Result<Vec<(String, u64)>> {
-        let mut out = Vec::new();
-        for (key, value) in self.app.protocol_scan(prefix.as_bytes()).await? {
-            let Some(crate::state::StateKey::Missed { from_ms }) =
-                crate::state::StateKey::parse(&key)
-            else {
-                return Err(PaykitError::corrupt());
-            };
-            let from = crate::protocol::missed_mark_at(from_ms, &value)
-                .map_err(|_| PaykitError::corrupt())?;
-            let rest = String::from_utf8(key)
-                .ok()
-                .and_then(|key| key.get(prefix.len()..).map(str::to_owned))
-                .ok_or_else(PaykitError::corrupt)?;
-            out.push((rest, from));
-        }
-        Ok(out)
+        self.local_scan::<u64>(prefix).await
     }
 
-    /// The marks of `missed` items (`mi/`), each read with the check a restore makes
-    /// ([`crate::protocol::missed_item_mark_at`]), bound to the time its key names, with its
-    /// key: one that fails it is a corrupt store, never no mark.
+    /// The marks of `missed` items (`mi/`), each read bound to its key (`state::Stored`),
+    /// with its full key: one that fails it is a corrupt store, never no mark.
     async fn missed_item_marks(&self) -> Result<Vec<(String, MissedItemMark)>> {
-        let mut out = Vec::new();
-        for (key, value) in self.app.protocol_scan(key::MISSED_ITEMS.as_bytes()).await? {
-            let Some(crate::state::StateKey::MissedItem { from_ms }) =
-                crate::state::StateKey::parse(&key)
-            else {
-                return Err(PaykitError::corrupt());
-            };
-            let mark = crate::protocol::missed_item_mark_at(from_ms, &value)
-                .map_err(|_| PaykitError::corrupt())?;
-            out.push((
-                String::from_utf8(key).map_err(|_| PaykitError::corrupt())?,
-                mark,
-            ));
-        }
-        Ok(out)
+        Ok(self
+            .local_scan::<MissedItemMark>(key::MISSED_ITEMS)
+            .await?
+            .into_iter()
+            .map(|(rest, mark)| (format!("{}{rest}", key::MISSED_ITEMS), mark))
+            .collect())
     }
 
     /// The counterparties a `missed` item asks to send again (Paykit spec 9): a payee's
@@ -427,7 +401,8 @@ impl Paykit {
             let kept = self
                 .local_get::<KeptSide>(&key::side(&message.msg_id))
                 .await?;
-            match KeptSide::of(kept, &message.msg_id) {
+            // Bound to its key: a side kept for another message doesn't read.
+            match kept.map(|kept| kept.side) {
                 Some(SideTag::Payee) => Side::Payee,
                 Some(SideTag::Payer) => Side::Payer,
                 None => return Ok(false),

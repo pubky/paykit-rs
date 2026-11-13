@@ -75,15 +75,6 @@ pub(crate) struct KeptSide {
     pub(crate) side: SideTag,
 }
 
-impl KeptSide {
-    /// The side kept for the message `msg_id`, from the value under its key; a value naming
-    /// another message is none (Paykit spec 3.4: no side is guessed).
-    pub(crate) fn of(kept: Option<Self>, msg_id: &str) -> Option<SideTag> {
-        kept.filter(|kept| kept.msg_id == msg_id)
-            .map(|kept| kept.side)
-    }
-}
-
 impl SideTag {
     pub(crate) fn side(self) -> ActivitySide {
         match self {

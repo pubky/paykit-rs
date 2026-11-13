@@ -295,8 +295,8 @@ impl Paykit {
     /// A store failure, or a kept notice that doesn't read.
     pub async fn notices(&self) -> Result<Vec<Notice>> {
         let mut out = Vec::new();
+        // Each read whole and bound to its key ([`bind_notice`]).
         for (id, kept) in self.local_scan::<KeptNotice>(key::NOTICES).await? {
-            bind_notice(&format!("{}{id}", key::NOTICES), &kept)?;
             if !kept.acknowledged {
                 out.push(kept.view(id)?);
             }
@@ -340,7 +340,7 @@ impl Paykit {
         // The entry a message given up left stored is forgotten first: a failure keeps the
         // notice, for the host to acknowledge again.
         if let Some(stored) = &kept.stored {
-            self.forget_stored(stored).await?;
+            self.forget_stored(stored, &kept).await?;
         }
         if !held {
             return self.local_delete(&key).await;
@@ -355,25 +355,32 @@ impl Paykit {
     ///
     /// A store failure, or a value that doesn't read or isn't the notice its key names.
     pub(crate) async fn kept_notice(&self, key: &str) -> Result<Option<KeptNotice>> {
-        let Some(kept) = self.local_get::<KeptNotice>(key).await? else {
-            return Ok(None);
-        };
-        bind_notice(key, &kept)?;
-        Ok(Some(kept))
+        self.local_get::<KeptNotice>(key).await
     }
 
     /// Forget the entry `stored` names, if the client still keeps it: by its local ID and
     /// hash, or, after a restore onto another store, which tells of its entries again, by
     /// its hash. One gone already, such as one the host forgot itself, is not looked for.
-    async fn forget_stored(&mut self, stored: &StoredHandle) -> Result<()> {
+    /// The entry found is bound to `notice`: one holding another message than the sender's
+    /// `msg_id` the notice names is a corrupt store, and nothing is forgotten.
+    async fn forget_stored(&mut self, stored: &StoredHandle, notice: &KeptNotice) -> Result<()> {
         let entries = self.app.parked_entries().await?;
         let entry = entries
             .iter()
             .find(|e| e.stored_id == stored.stored_id && e.hash == stored.hash)
             .or_else(|| entries.iter().find(|e| e.hash == stored.hash));
-        if let Some(entry) = entry {
-            self.app.forget_parked(entry.stored_id, &entry.hash).await?;
+        let Some(entry) = entry.cloned() else {
+            return Ok(());
+        };
+        let message = self.app.parked_entry(entry.stored_id).await?;
+        let names = message.as_ref().is_some_and(|parked| {
+            parked.sender == notice.counterparty
+                && parked.message.as_ref().map(|m| m.msg_id.as_str()) == notice.msg_id.as_deref()
+        });
+        if !names {
+            return Err(PaykitError::corrupt());
         }
+        self.app.forget_parked(entry.stored_id, &entry.hash).await?;
         Ok(())
     }
 

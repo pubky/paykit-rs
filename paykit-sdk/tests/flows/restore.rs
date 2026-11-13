@@ -1130,7 +1130,7 @@ async fn test_restore_unrebuildable_failure_stays_doubtful_then_paid_is_not_lost
 
 /// A message bob's app `app` signs for `to`, of `kind` with `body`, kept as a journal entry
 /// keeps a request, with the certificate of bob's app `cert_app`.
-fn kept_message(
+pub(crate) fn kept_message(
     w: &World,
     app: &str,
     cert_app: &str,
@@ -1142,7 +1142,7 @@ fn kept_message(
 }
 
 /// [`kept_message`], naming `refs`.
-fn kept_message_with_refs(
+pub(crate) fn kept_message_with_refs(
     w: &World,
     app: &str,
     cert_app: &str,
@@ -1310,7 +1310,7 @@ async fn test_restore_kept_request_that_doesnt_verify_writes_nothing() {
 }
 
 /// `value` as Paykit's local state keeps it.
-fn kept(value: serde_json::Value) -> serde_json::Value {
+pub(crate) fn kept(value: serde_json::Value) -> serde_json::Value {
     serde_json::json!({ "v": 1, "d": value })
 }
 
@@ -2080,4 +2080,36 @@ async fn test_restore_acceptance_of_another_own_app_refused() {
         "another own app's acceptance",
     )
     .await;
+}
+
+#[tokio::test]
+async fn test_restore_unrequested_entry_naming_another_payments_record_refused() {
+    // Two payments without a request; in the backup, the first's entry names the second's
+    // record. A restore binds it as every runtime read does, and refuses it.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    for value in ["0.0015", "0.0025"] {
+        let payment = paykit_sdk::UnrequestedPayment::new(w.bob_id(), crate::common::btc(value))
+            .with_options(
+                PayOptions::default()
+                    .with_endpoint(crate::common::endpoint("btc-lightning-bolt12")),
+            );
+        let paid = wallet.pay_without_request(payment).await.unwrap();
+        assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    }
+    let bytes = wallet.backup().await.unwrap().to_bytes().unwrap();
+    let good: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let mut state = layer_of(&good);
+    let journal: Vec<usize> = (0..state.len())
+        .filter(|i| state[*i].0.starts_with(b"j/"))
+        .collect();
+    assert_eq!(journal.len(), 2);
+    let other = state[journal[1]].1["d"]["natural_key"].clone();
+    assert_ne!(state[journal[0]].1["d"]["natural_key"], other);
+    state[journal[0]].1["d"]["natural_key"] = other;
+    refused_writing_nothing(&w, with_layer(&good, state), wallet.app_id(), "record").await;
 }

@@ -423,8 +423,8 @@ impl Paykit {
     /// nothing would come back (Paykit spec 7.2, "What a restore loses"); a mark or a kept
     /// message dated there would never expire. Clamped, not refused: the times decide only
     /// where the re-sends start and when the items go, and a restore must not fail on them.
-    /// Without a verified time the device clock is the bound. Each value is read with its
-    /// restore check first.
+    /// Without a verified time the device clock is the bound. Each value is read bound to its
+    /// key first, as a restore reads it.
     pub(crate) async fn bound_restored_cursor_time(&mut self) -> Result<()> {
         let bound = self
             .service_time()
@@ -444,46 +444,28 @@ impl Paykit {
             crate::marks::MarkFamily::Replies,
             crate::marks::MarkFamily::Unverified,
         ] {
-            for (mark_key, value) in self.app.protocol_scan(family.prefix().as_bytes()).await? {
-                let mark_key = String::from_utf8(mark_key).map_err(|_| PaykitError::corrupt())?;
-                let mut mark = crate::marks::read_mark(family, &mark_key, &value)?;
+            for (rest, mut mark) in self
+                .local_scan::<crate::marks::DropMark>(family.prefix())
+                .await?
+            {
                 if mark.latest_ms > bound {
                     mark.latest_ms = bound;
                     mark.earliest_ms = mark.earliest_ms.min(bound);
-                    tx.put(&mark_key, &mark)?;
+                    tx.put(&format!("{}{rest}", family.prefix()), &mark)?;
                 }
             }
         }
-        let own = self.identity();
-        for (stop_key, value) in self
-            .app
-            .protocol_scan(key::KEPT_CANCELLATIONS.as_bytes())
-            .await?
-        {
-            crate::protocol::kept_cancellation_at(&stop_key, &value, &own, &|target| {
-                self.app
-                    .record_key(target)
-                    .map_err(|error| error.to_string())
-            })
-            .map_err(|_| PaykitError::corrupt())?;
-            self.bound_kept(&mut tx, stop_key, &value, bound)?;
-        }
-        for (reply_key, value) in self.app.protocol_scan(key::KEPT_REPLIES.as_bytes()).await? {
-            self.checked_reply(&reply_key, &value)?;
-            self.bound_kept(&mut tx, reply_key, &value, bound)?;
+        for prefix in [key::KEPT_CANCELLATIONS, key::KEPT_REPLIES] {
+            for (rest, mut kept) in self
+                .local_scan::<crate::records::KeptMessage>(prefix)
+                .await?
+            {
+                if kept.bound_acceptance(bound) {
+                    tx.put(&format!("{prefix}{rest}"), &kept)?;
+                }
+            }
         }
         self.local_commit(tx).await
-    }
-
-    /// Put in `tx` the kept message `value` at `key`, already checked, with its acceptance
-    /// time bounded to `bound`, when it was later.
-    fn bound_kept(&self, tx: &mut Tx, key: Vec<u8>, value: &[u8], bound: u64) -> Result<()> {
-        let mut kept = crate::state::decode::<crate::records::KeptMessage>(value)?;
-        if kept.bound_acceptance(bound) {
-            let key = String::from_utf8(key).map_err(|_| PaykitError::corrupt())?;
-            tx.put(&key, &kept)?;
-        }
-        Ok(())
     }
 
     /// The shared records known, not an empty copy: after a restore the client's copy is

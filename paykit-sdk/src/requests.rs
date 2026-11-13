@@ -40,7 +40,7 @@ use crate::paykit::Paykit;
 use crate::rail::ProofCheck;
 use crate::receipts::{received_receipt, ReceiptDetails, ReceivedReceipt};
 use crate::receive::KEPT_MESSAGE_MS;
-use crate::records::conflict;
+use crate::records::{conflict, KeptMessage};
 use crate::state::{key, Tx};
 
 /// How many times a payee's write is built again after its record changed meanwhile.
@@ -943,24 +943,14 @@ impl Paykit {
     }
 
     /// The payee's cancellation kept as the stop for the request record at `target`, read
-    /// with the check a restore makes ([`crate::protocol::kept_cancellation_at`]): one that
-    /// fails it is a corrupt store, never no stop.
+    /// bound to its key, as a restore reads it (`state::Stored`): one that fails it is a
+    /// corrupt store, never no stop.
     async fn kept_stop_message(&self, target: &ActivityTarget) -> Result<Option<StoredMessage>> {
         let kept_key = key::kept_cancellation(&self.activity_key(target)?);
-        match self.app.protocol_get(kept_key.as_bytes()).await? {
-            None => Ok(None),
-            Some(value) => self.checked_stop(kept_key.as_bytes(), &value).map(Some),
-        }
-    }
-
-    /// A stop's value `value` at `key`, checked as [`Paykit::kept_stop_message`] checks it.
-    fn checked_stop(&self, key: &[u8], value: &[u8]) -> Result<StoredMessage> {
-        crate::protocol::kept_cancellation_at(key, value, &self.identity(), &|target| {
-            self.app
-                .record_key(target)
-                .map_err(|error| error.to_string())
-        })
-        .map_err(|_| PaykitError::corrupt())
+        self.local_get::<KeptMessage>(&kept_key)
+            .await?
+            .map(|kept| kept.stored(&self.identity()))
+            .transpose()
     }
 
     /// Place every kept cancellation whose request record this app holds, each as a later
@@ -975,14 +965,15 @@ impl Paykit {
     /// may be one, waiting for a write that failed or for a listing, and written without
     /// the stop the request would be payable.
     pub(crate) async fn place_kept_cancellations(&mut self) -> Result<()> {
-        for (stop_key, value) in self
-            .app
-            .protocol_scan(key::KEPT_CANCELLATIONS.as_bytes())
+        let own = self.identity();
+        for (rest, kept) in self
+            .local_scan::<KeptMessage>(key::KEPT_CANCELLATIONS)
             .await?
         {
-            // Read with a restore's check: a stop that fails it is a corrupt store, so the
-            // receive fails rather than drop or place it.
-            let cancellation = self.checked_stop(&stop_key, &value)?;
+            // Read bound to its key, as a restore reads it: a stop that fails it is a corrupt
+            // store, so the receive fails rather than drop or place it.
+            let cancellation = kept.stored(&own)?;
+            let stop_key = format!("{}{rest}", key::KEPT_CANCELLATIONS);
             let Some(request) = cancellation.message().refs.first().copied() else {
                 return Err(PaykitError::corrupt());
             };
@@ -1017,7 +1008,6 @@ impl Paykit {
                     .keeps_stored_of(&cancellation.sender(), &request)
                     .await?
             {
-                let stop_key = String::from_utf8(stop_key).map_err(|_| PaykitError::corrupt())?;
                 self.local_delete(&stop_key).await?;
             }
         }
@@ -1028,12 +1018,11 @@ impl Paykit {
     /// ([`crate::stored::writes_request`]).
     async fn keeps_stored_of(&self, sender: &[u8; 32], request: &[u8; 32]) -> Result<bool> {
         let own = self.identity();
-        for (note_key, value) in self
-            .app
-            .protocol_scan(key::stored_notes_of(sender).as_bytes())
+        for (_, note) in self
+            .local_scan::<crate::stored::StoredNote>(&key::stored_notes_of(sender))
             .await?
         {
-            if crate::stored::writes_request(&note_key, &value, &own, request)? {
+            if crate::stored::writes_request(&note, &own, request)? {
                 return Ok(true);
             }
         }
@@ -1139,13 +1128,7 @@ impl Paykit {
         // A cancellation kept for the request and not placed yet is a cancellation all the
         // same (Paykit spec 8.1).
         let stop = key::kept_cancellation(&record_key);
-        let stopped = match self.app.protocol_get(stop.as_bytes()).await? {
-            Some(value) => {
-                self.checked_stop(stop.as_bytes(), &value)?;
-                true
-            }
-            None => false,
-        };
+        let stopped = self.local_get::<KeptMessage>(&stop).await?.is_some();
         if status == RequestStatus::Open && stopped {
             status = RequestStatus::Cancelled;
         }
