@@ -1860,3 +1860,115 @@ async fn test_executor_handoff_notice_store_failure_is_the_grants_error() {
     let granted = new.grant_executor(&record, UserConfirmed::new()).await;
     assert!(granted.is_err(), "{granted:?}");
 }
+
+/// How many `allowance_end`s `app` takes at one receive.
+async fn ends_taken(app: &mut Paykit) -> usize {
+    app.receive(None)
+        .await
+        .unwrap()
+        .report
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(e, pubky_switch_client::app::AppEvent::MessageReceived { kind, .. }
+                if kind == "paykit.allowance_end")
+        })
+        .count()
+}
+
+/// The conformance case `crossing_end_recorded_while_held` (Paykit spec 8.3, "Ending"): alice,
+/// the allower, has two apps, W, where her user answers proposals, and X, her executor; bob,
+/// the allowee, has his shop S. S proposes, W accepts and X grants; S withdraws before it has
+/// the acceptance, and sends to bob are held at W (`blocked`: alice's user blocks bob;
+/// otherwise W's read of the lists fails) before W reads the withdrawal.
+/// (a) W reads it: the record holds W's end naming the proposal and the acceptance, X is sent
+/// the executor notice, and nothing reaches S.
+/// (b) Sends aren't held any more, and X runs before W runs again, with an open request the
+/// Allowance would cover: X pays nothing. At W's next run the end's message reaches S, once.
+async fn crossing_end_recorded_while_held(blocked: bool) {
+    let w = World::new();
+    let mut s = allowance_shop(&w).await;
+    let mut wapp = w
+        .join(
+            &w.alice,
+            "answers",
+            AppScopes::new()
+                .pay()
+                .allowance()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+        )
+        .await;
+    wapp.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut x = executor_wallet(&w, "executor").await;
+    let sent = s
+        .propose_allowance(w.alice_id(), AllowanceRole::Allowee, terms_with(json!({})))
+        .await
+        .unwrap();
+    wapp.receive(None).await.unwrap();
+    let record = wapp.allowances().await.unwrap()[0].record;
+    wapp.accept_allowance(&record).await.unwrap();
+    x.receive(None).await.unwrap();
+    x.grant_executor(&record, UserConfirmed::new())
+        .await
+        .unwrap();
+    assert!(x.allowance(&record).await.unwrap().consented);
+    wapp.receive(None).await.unwrap();
+    // S withdraws before it has the acceptance.
+    s.end_allowance(&sent.record).await.unwrap();
+    if blocked {
+        wapp.block(&w.bob_id()).await.unwrap();
+    } else {
+        w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/allow".into(),
+                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                current: Value::Null,
+            });
+    }
+    // (a)
+    wapp.receive(None).await.unwrap();
+    let (held, _) = held(&wapp, &record).await;
+    let end = held.end.as_ref().expect("the end is recorded at once");
+    assert_eq!(end.sender(), w.alice_id());
+    assert_eq!(
+        end.message().refs,
+        vec![held.proposal.hash(), held.response.as_ref().unwrap().hash()]
+    );
+    assert_eq!(wapp.app().protocol_scan(b"eo/").await.unwrap().len(), 1);
+    assert_eq!(ends_taken(&mut s).await, 0);
+    x.receive(None).await.unwrap();
+    assert!(!x.allowance(&record).await.unwrap().consented);
+    // (b)
+    if blocked {
+        wapp.unblock(&w.bob_id()).await.unwrap();
+    }
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    let open = request(&w, &mut s, &mut x, "0.5").await;
+    let refused = x.pay_under_allowance(&open, &record).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::AllowanceEnded)),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    assert_eq!(ends_taken(&mut s).await, 0);
+    wapp.receive(None).await.unwrap();
+    assert_eq!(ends_taken(&mut s).await, 1);
+    wapp.receive(None).await.unwrap();
+    assert_eq!(ends_taken(&mut s).await, 0);
+    assert!(wapp.app().protocol_scan(b"eo/").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_executor_crossing_end_recorded_while_blocked_stops_a_separate_executor() {
+    crossing_end_recorded_while_held(true).await;
+}
+
+#[tokio::test]
+async fn test_executor_crossing_end_recorded_while_the_deny_copy_is_unknown_stops_a_separate_executor(
+) {
+    crossing_end_recorded_while_held(false).await;
+}
