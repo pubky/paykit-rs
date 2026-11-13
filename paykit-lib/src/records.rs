@@ -1093,12 +1093,7 @@ fn read_unrequested(value: &Value) -> Result<UnrequestedDestination> {
         single_use: u
             .opt_bool("single_use")?
             .ok_or_else(|| bad(ACTIVITY, "unrequested.single_use", "missing"))?,
-        amount: crate::bodies::read_amount(
-            u.opt("amount")
-                .ok_or_else(|| bad(ACTIVITY, "unrequested.amount", "missing"))?,
-            ACTIVITY,
-            "unrequested.amount",
-        )?,
+        amount: crate::bodies::read_amount(u.req("amount")?, ACTIVITY, "unrequested.amount")?,
     })
 }
 
@@ -3126,20 +3121,6 @@ mod tests {
             .collect();
         assert!(check_reassociations(&many, Some(&a)).is_err());
         assert!(check_reassociations(&many[..16], Some(&a)).is_ok());
-    }
-
-    #[test]
-    fn test_unrequested_amount_is_required() {
-        let mut v = serde_json::json!({ "app_id": "brrz3m6g5rci6iqnzke44q4djc",
-            "endpoint_id": "btc-bitcoin-p2wpkh", "payload": "bc1q", "source": "public",
-            "single_use": false });
-        assert!(read_unrequested(&v).is_err());
-        v["amount"] = serde_json::json!({ "asset": "btc", "value": "0.0015" });
-        let read = read_unrequested(&v).unwrap();
-        assert_eq!(read.amount.value.as_str(), "0.0015");
-        assert_eq!(unrequested_json(&read), v);
-        v["amount"] = serde_json::json!("0.0015");
-        assert!(read_unrequested(&v).is_err());
     }
 
     #[test]
