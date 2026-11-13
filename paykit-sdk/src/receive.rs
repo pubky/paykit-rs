@@ -1696,14 +1696,16 @@ impl Paykit {
             let placed = match record {
                 Some(record) if record.counterparty != reply.sender() => Placed::Not,
                 Some(record) => {
-                    match self
-                        .period_destination(&target, &record, &reply, &request)
+                    // The decision goes on the heap, as `receive`'s steps do: it nests deep.
+                    match Box::pin(self.period_destination(&target, &record, &reply, &request))
                         .await?
                     {
                         PeriodPlace::Record { into, creates } => {
                             let mut tx = Tx::default();
                             tx.delete(&kept_key);
-                            self.place_note(&into, role, creates, reply.clone(), tx)
+                            // The write goes on the heap, as `receive`'s steps do: it nests
+                            // deep.
+                            Box::pin(self.place_note(&into, role, creates, reply.clone(), tx))
                                 .await?
                         }
                         // Invalid against its request, or details the payer doesn't store:
@@ -1724,8 +1726,7 @@ impl Paykit {
                 None => {
                     let mut tx = Tx::default();
                     tx.delete(&kept_key);
-                    self.place_note(&target, role, false, reply.clone(), tx)
-                        .await?
+                    Box::pin(self.place_note(&target, role, false, reply.clone(), tx)).await?
                 }
             };
             if crate::stored::later_write(placed, accepted_at, self.service_time())

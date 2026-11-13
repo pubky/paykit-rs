@@ -413,6 +413,15 @@ impl Paykit {
         record: &[u8; 32],
         details: PeriodDetails,
     ) -> Result<SentMessage> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.send_period_details_inner(record, details)).await
+    }
+
+    async fn send_period_details_inner(
+        &mut self,
+        record: &[u8; 32],
+        details: PeriodDetails,
+    ) -> Result<SentMessage> {
         self.refresh_own()?;
         self.records_known().await?;
         self.require_payee()?;

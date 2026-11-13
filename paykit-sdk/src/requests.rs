@@ -812,7 +812,8 @@ impl Paykit {
     async fn verify_payment_inner(&mut self, record: &[u8; 32]) -> Result<Option<u64>> {
         self.refresh_own()?;
         self.records_known().await?;
-        self.verified(record, false).await
+        // The check goes on the heap, as `receive`'s steps do: it nests deep.
+        Box::pin(self.verified(record, false)).await
     }
 
     /// [`Paykit::verify_payment`], the "can't tell" hold skipped when the user
@@ -1008,7 +1009,8 @@ impl Paykit {
         self.refresh_own()?;
         self.records_known().await?;
         let confirmed = details.maybe_credited_confirmed.is_some();
-        if self.verified(record, confirmed).await?.is_none() {
+        // The check goes on the heap, as `receive`'s steps do: it nests deep.
+        if Box::pin(self.verified(record, confirmed)).await?.is_none() {
             return Ok(None);
         }
         let mut tries = 0;

@@ -548,13 +548,15 @@ impl Paykit {
                     Some(request)
                         if crate::protocol::writes_payee_label(&scopes, label.as_ref()) =>
                     {
-                        self.period_place(stored, &request).await?
+                        // The period's place goes on the heap, as `receive`'s steps do: it
+                        // nests deep.
+                        Box::pin(self.period_place(stored, &request)).await?
                     }
                     _ => None,
                 }
             }
             Body::PaymentPeriodDetails(_) if pay => match first {
-                Some(request) => self.period_place(stored, &request).await?,
+                Some(request) => Box::pin(self.period_place(stored, &request)).await?,
                 None => None,
             },
             Body::PaymentReceipt(receipt) if pay => record(
