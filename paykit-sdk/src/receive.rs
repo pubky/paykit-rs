@@ -1576,8 +1576,8 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// The client's errors but a kept batch, such as without `manage_contacts`; nothing is
-    /// written then.
+    /// The client's errors but a kept batch, such as without `manage_contacts`: the copy is
+    /// then as it was. A store failure after the switch took the block leaves it counted.
     pub async fn block(&mut self, pubky: &[u8; 32]) -> crate::error::Result<()> {
         self.refresh_own()?;
         self.list_own(pubky, true).await
@@ -1600,13 +1600,15 @@ impl Paykit {
 
     /// Write `pubky` to the deny list (`blocked`) or drop it, and the copy with it; a batch
     /// the client keeps unanswered is marked (`bk/`) as [`Paykit::block`] says. The mark and
-    /// the copy go in one commit, so no crash leaves the one without the other.
+    /// the copy go in one commit, so no crash leaves the one without the other. Each fails
+    /// closed: a block counts, marked and in the copy, before the switch is asked, and an
+    /// unblock only once the switch took it or keeps it, so a commit that fails or a crash
+    /// between the call and the commit leaves `pubky` counted as blocked.
     async fn list_own(&mut self, pubky: &[u8; 32], blocked: bool) -> crate::error::Result<()> {
-        let sent = if blocked {
-            self.app.deny(pubky).await
-        } else {
-            self.app.undeny(pubky).await
-        };
+        if blocked {
+            return self.block_own(pubky).await;
+        }
+        let sent = self.app.undeny(pubky).await;
         let mut tx = Tx::default();
         match sent {
             Ok(()) => {
@@ -1618,6 +1620,39 @@ impl Paykit {
             Err(error) => return Err(error.into()),
         }
         self.copy_denied(&mut tx, pubky, blocked).await?;
+        self.local_commit(tx).await
+    }
+
+    /// The block of [`Paykit::list_own`]: marked and in the copy first, then sent. The mark
+    /// goes once the switch took it; a block the client neither applied nor kept puts the
+    /// mark and the copy back as they were.
+    async fn block_own(&mut self, pubky: &[u8; 32]) -> crate::error::Result<()> {
+        let mark = key::own_block(pubky);
+        let held = self.local_get::<bool>(&mark).await?;
+        let copy = self.local_get::<Vec<[u8; 32]>>(key::DENIED).await?;
+        let mut tx = Tx::default();
+        tx.put(&mark, &true)?;
+        self.copy_denied(&mut tx, pubky, true).await?;
+        self.local_commit(tx).await?;
+        let mut tx = Tx::default();
+        match self.app.deny(pubky).await {
+            Ok(()) => {
+                tx.delete(&mark);
+            }
+            Err(error) if error.kept_batch().is_some() => return Ok(()),
+            Err(error) => {
+                match held {
+                    Some(held) => tx.put(&mark, &held)?,
+                    None => tx.delete(&mark),
+                };
+                match copy {
+                    Some(copy) => tx.put(key::DENIED, &copy)?,
+                    None => tx.delete(key::DENIED),
+                };
+                self.local_commit(tx).await?;
+                return Err(error.into());
+            }
+        }
         self.local_commit(tx).await
     }
 

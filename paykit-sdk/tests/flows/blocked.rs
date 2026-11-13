@@ -798,6 +798,90 @@ async fn test_blocked_own_block_restored_written_again_after_a_try_that_could_no
     assert!(lists.deny.contains(&w.bob_id()));
 }
 
+/// A store that fails, once only, the first commit of Paykit's own state (`p/`) that
+/// follows the client's first commit of a block the switch applied (`lc/deny/<pubky>`).
+#[derive(Default)]
+struct FailAfterBlock {
+    inner: pubky_switch_client::store::MemoryStore,
+    armed: std::sync::atomic::AtomicBool,
+    used: std::sync::atomic::AtomicBool,
+}
+
+impl pubky_switch_client::store::StateStore for FailAfterBlock {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        use pubky_switch_client::store::Write;
+        use std::sync::atomic::Ordering;
+        let ours = batch.writes.iter().any(|write| {
+            matches!(write, Write::Put { key, .. } | Write::Delete { key, .. } if key.starts_with(b"p/"))
+        });
+        if ours && self.armed.swap(false, Ordering::SeqCst) {
+            return Err(pubky_switch_client::error::StoreError::Unavailable);
+        }
+        let blocked = batch
+            .writes
+            .iter()
+            .any(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"lc/deny/")));
+        self.inner.commit(batch)?;
+        if blocked && !self.used.swap(true, Ordering::SeqCst) {
+            self.armed.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_blocked_block_the_switch_took_counts_though_the_store_then_fails() {
+    // The switch applies the wallet's block, and the next commit of Paykit's own state
+    // fails. The user's payment to bob, judged by the copy read a moment before, still needs
+    // the user's confirmation: the block counted before the switch was asked (Paykit spec
+    // 8.1).
+    let w = World::new();
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            std::sync::Arc::new(FailAfterBlock::default()),
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let _ = wallet.block(&w.bob_id()).await;
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(lists.deny.contains(&w.bob_id()));
+    let error = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(shown(error).payee, w.bob_id());
+    assert!(w.rail.all_executions().is_empty());
+}
+
 #[tokio::test]
 async fn test_blocked_resend_request_to_a_blocked_counterparty_refused_with_nothing_sent() {
     // The host asks bob to re-send while the wallet's copy of the deny list holds him:
