@@ -114,6 +114,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   Swift, Kotlin and React Native now fail with a policy error for a blocked
   counterparty, before its App Registry is read, instead of resolving its
   Payment Request.
+- In the Rust-only SSE-assisted private intake API (`start_private_intake` and
+  `PrivateIntakeSupervisor`), one Linked Peer or pending Encrypted Link
+  Handshake peer with no resolvable Pubky homeserver no longer makes
+  `start_private_intake` fail for every peer, and no longer freezes a running
+  supervisor's peer set while marking every stream `Stale`. That peer reserves
+  no stream, is reported `Stale` in health, and is retried on each topology
+  refresh.
 
 ### Integration
 

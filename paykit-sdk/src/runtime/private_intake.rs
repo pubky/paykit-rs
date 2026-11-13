@@ -71,7 +71,8 @@ pub enum PrivateIntakeTransportState {
     Replaying,
     /// Startup or healthy audit reached absent next expected slot.
     CaughtUp,
-    /// Audit or stream failed; remote absence cannot be claimed.
+    /// Audit or stream failed, or the Linked Peer's Pubky homeserver could not
+    /// be resolved; remote absence cannot be claimed.
     Stale,
     /// Durable packet capacity stopped cursor progress for this peer.
     Backpressured,
@@ -329,6 +330,80 @@ fn group_private_intake_peers_by_homeserver(
             .then_with(|| left.peers[0].as_str().cmp(right.peers[0].as_str()))
     });
     groups
+}
+
+/// Supervised peers split by whether a Pubky homeserver is known for them.
+struct PrivateIntakeTopology {
+    /// One reserved stream per group.
+    groups: Vec<SubscriptionGroup>,
+    /// Supervised peers with no resolvable Pubky homeserver and no previously
+    /// resolved one. They reserve no stream and report `Stale`.
+    unresolved: Vec<PubkyPublicKey>,
+}
+
+/// Build the topology from one homeserver lookup per supervised peer.
+///
+/// One peer's failed lookup never fails the whole pass: that would stop
+/// intake for every other peer at startup and freeze a running supervisor's
+/// peer set on refresh.
+fn private_intake_topology_from_lookups(
+    lookups: Vec<(PubkyPublicKey, Result<Option<paykit_lib::PublicKey>>)>,
+    current: &[SubscriptionGroup],
+) -> PrivateIntakeTopology {
+    let mut resolved = Vec::new();
+    let mut unresolved = Vec::new();
+    for (peer, lookup) in lookups {
+        match lookup {
+            Ok(Some(homeserver)) => resolved.push((homeserver.to_string(), homeserver, peer)),
+            // A Pkarr not-found can be a DHT miss rather than a removed record,
+            // so a peer that already has a stream keeps its last resolved
+            // homeserver instead of restarting every stream. The lookup error
+            // is dropped on purpose: the supervisor has no error channel, and
+            // `Stale` health is the caller-visible signal for an uncovered peer.
+            Ok(None) | Err(_) => match current.iter().find(|group| group.peers.contains(&peer)) {
+                Some(group) => resolved.push((
+                    group.homeserver_name.clone(),
+                    group.homeserver.clone(),
+                    peer,
+                )),
+                None => unresolved.push(peer),
+            },
+        }
+    }
+    PrivateIntakeTopology {
+        groups: group_private_intake_peers_by_homeserver(resolved),
+        unresolved,
+    }
+}
+
+/// Align health with the supervised topology: drop peers no longer
+/// supervised, keep existing states for streamed peers, and report peers
+/// without a resolvable homeserver as `Stale`.
+fn apply_private_intake_topology_health(
+    health: &mut PrivateIntakeHealth,
+    groups: &[SubscriptionGroup],
+    unresolved: &[PubkyPublicKey],
+) {
+    let streamed = || groups.iter().flat_map(|group| group.peers.iter());
+    let supervised = streamed()
+        .chain(unresolved)
+        .collect::<std::collections::HashSet<_>>();
+    health.peers.retain(|peer, _| supervised.contains(peer));
+    health
+        .last_successful_audit_at
+        .retain(|peer, _| supervised.contains(peer));
+    health.reserved_streams = groups.len();
+    for peer in streamed() {
+        health
+            .peers
+            .entry(peer.clone())
+            .or_insert(PrivateIntakeTransportState::Connecting);
+    }
+    for peer in unresolved {
+        health
+            .peers
+            .insert(peer.clone(), PrivateIntakeTransportState::Stale);
+    }
 }
 
 #[cfg(test)]
@@ -771,15 +846,38 @@ fn is_transient_private_intake_storage_error(error: &PaykitSdkError) -> bool {
     )
 }
 
+/// Replace the stored admissions with `admitted_homeservers`, carrying forward
+/// the stored admission of every still-supervised peer the map does not place.
 async fn replace_private_intake_admissions<S: StorageAdapter, C: Clock>(
     storage: &S,
     clock: &C,
     lease_id: u64,
-    admitted_homeservers: HashMap<PubkyPublicKey, String>,
+    mut admitted_homeservers: HashMap<PubkyPublicKey, String>,
 ) -> Result<bool> {
     let clock = clock.clone();
     storage
         .transaction(move |tx| {
+            // `admitted_homeservers` was computed from a peer snapshot taken
+            // before the homeserver lookups, so it can miss a peer whose
+            // lookup failed or whose Encrypted Link Handshake became pending,
+            // through another SDK handle, while the lookups ran. That handshake
+            // reserved capacity through `reserve_private_intake_admission`.
+            // Dropping it here would let identity-wide capacity be
+            // over-admitted until a later refresh. So the carry-forward is
+            // decided from current storage, atomically with the replacement:
+            // a peer the map does not place keeps its stored admission while
+            // it is still supervised (pending handshake or established link).
+            // Only an admission already stored is kept; none is invented.
+            // Admissions of peers no longer supervised (cancelled handshake,
+            // unlinked, blocked) are not carried, so they are released.
+            let state = tx.export_storage_state();
+            for (peer, homeserver) in &state.private_intake_admitted_homeservers {
+                if !admitted_homeservers.contains_key(peer)
+                    && private_intake_peer_phase(&state, peer).is_some()
+                {
+                    admitted_homeservers.insert(peer.clone(), homeserver.clone());
+                }
+            }
             tx.replace_private_intake_admissions(lease_id, clock.now(), admitted_homeservers)
         })
         .await
@@ -841,7 +939,15 @@ where
     P: PaymentAdapter + 'static,
     C: Clock,
 {
-    async fn resolve_private_intake_groups(&self) -> Result<Vec<SubscriptionGroup>> {
+    /// Resolve every supervised peer's Pubky homeserver.
+    ///
+    /// Identity-wide failures (session, Noise key, key authorization) fail the
+    /// pass. A per-peer lookup failure only leaves that peer unresolved, or on
+    /// its last resolved homeserver when `current` already streams it.
+    async fn resolve_private_intake_topology(
+        &self,
+        current: &[SubscriptionGroup],
+    ) -> Result<PrivateIntakeTopology> {
         let (access, _, peers) = self
             .load_session_access_and_refresh_identity_with(|tx| {
                 let state = tx.export_storage_state();
@@ -861,24 +967,23 @@ where
         })?;
         access.paykit_noise_secret_key()?;
         self.validate_local_noise_key_authorization(&access).await?;
-        let mut resolved = Vec::new();
+        // Release the session read guard before the per-peer network lookups.
+        let client = access.outbox_client.clone();
+        drop(access);
+        let mut lookups = Vec::new();
         for peer in peers.expect("active session reads private intake peers") {
-            let remote = peer.to_public_key()?;
-            let homeserver = access
-                .outbox_client
-                .get_homeserver_of(&remote)
-                .await
-                .map_err(|error| PaykitSdkError::Transport {
-                    context: "resolve private intake homeserver".into(),
-                    source: Some(error.into()),
-                })?
-                .ok_or_else(|| PaykitSdkError::NotFound {
-                    context: "Linked Peer has no Pubky homeserver".into(),
-                    source: None,
-                })?;
-            resolved.push((homeserver.to_string(), homeserver, peer));
+            let lookup = match peer.to_public_key() {
+                Ok(remote) => client.get_homeserver_of(&remote).await.map_err(|error| {
+                    PaykitSdkError::Transport {
+                        context: "resolve private intake homeserver".into(),
+                        source: Some(error.into()),
+                    }
+                }),
+                Err(error) => Err(error),
+            };
+            lookups.push((peer, lookup));
         }
-        Ok(group_private_intake_peers_by_homeserver(resolved))
+        Ok(private_intake_topology_from_lookups(lookups, current))
     }
 
     /// Start caller-owned SSE-assisted intake for every established Linked Peer.
@@ -886,30 +991,41 @@ where
     /// SSE events are hints only. Each hint and healthy audit fetches only next
     /// expected immutable Noise slot, then commits ciphertext with per-user cursor.
     /// No Noise receive checkpoint advances until explicit buffered processing.
+    ///
+    /// A Linked Peer whose Pubky homeserver cannot be resolved reserves no
+    /// stream and is reported `Stale`. It is retried on each topology refresh,
+    /// and its failed lookup does not stop intake for other peers. When it
+    /// later resolves, it is placed like any other topology change, so an
+    /// over-capacity result marks the resolved topology stale and stops
+    /// supervision. A topology refresh keeps the stored handshake admission of
+    /// every peer that is still supervised but that the refresh did not
+    /// place, such as a peer whose homeserver lookup failed or a handshake
+    /// that became pending while the refresh was resolving, so reserved
+    /// capacity stays reserved.
     pub async fn start_private_intake(
         self: &Arc<Self>,
         config: PrivateIntakeConfig,
     ) -> Result<PrivateIntakeSupervisor> {
         config.validate()?;
-        let groups = self.resolve_private_intake_groups().await?;
+        let topology = self.resolve_private_intake_topology(&[]).await?;
+        let groups = &topology.groups;
+        // Capacity and admissions come from streamed groups only: an
+        // unresolved peer has no homeserver to admit and reserves no stream.
         let reserved_streams = reserve_stream_capacity(config.stream_capacity, groups.len())?;
         let lease = claim_private_intake_lease(
             &self.storage,
             self.clock.now(),
             config.stream_capacity,
-            admitted_homeservers(&groups),
+            admitted_homeservers(groups),
         )
         .await?;
         let lease_id = lease.lease_id;
-        let health = Arc::new(AsyncRwLock::new(PrivateIntakeHealth {
-            peers: groups
-                .iter()
-                .flat_map(|group| group.peers.iter().cloned())
-                .map(|peer| (peer, PrivateIntakeTransportState::Connecting))
-                .collect(),
+        let mut initial_health = PrivateIntakeHealth {
             reserved_streams,
-            last_successful_audit_at: HashMap::new(),
-        }));
+            ..PrivateIntakeHealth::default()
+        };
+        apply_private_intake_topology_health(&mut initial_health, groups, &topology.unresolved);
+        let health = Arc::new(AsyncRwLock::new(initial_health));
         let work = Arc::new(Notify::new());
         let capacity_released = Arc::new(Notify::new());
         let notifications = PrivateIntakeNotifications {
@@ -955,7 +1071,7 @@ where
             tasks.push(tokio::spawn(async move {
                 sdk.clone()
                     .run_private_intake_topology(
-                        groups,
+                        topology,
                         config,
                         lease_id,
                         stop_rx,
@@ -983,13 +1099,17 @@ where
 
     async fn run_private_intake_topology(
         self: Arc<Self>,
-        mut groups: Vec<SubscriptionGroup>,
+        topology: PrivateIntakeTopology,
         config: PrivateIntakeConfig,
         lease_id: u64,
         mut stop: watch::Receiver<bool>,
         health: Arc<AsyncRwLock<PrivateIntakeHealth>>,
         notifications: PrivateIntakeNotifications,
     ) {
+        let PrivateIntakeTopology {
+            mut groups,
+            mut unresolved,
+        } = topology;
         let mut topology_refresh = tokio::time::interval(TOPOLOGY_REFRESH_INTERVAL);
         topology_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         topology_refresh.tick().await;
@@ -1027,25 +1147,7 @@ where
                 continue;
             }
 
-            {
-                let mut current = health.write().await;
-                let active_peers = groups
-                    .iter()
-                    .flat_map(|group| group.peers.iter())
-                    .cloned()
-                    .collect::<std::collections::HashSet<_>>();
-                current.peers.retain(|peer, _| active_peers.contains(peer));
-                current
-                    .last_successful_audit_at
-                    .retain(|peer, _| active_peers.contains(peer));
-                current.reserved_streams = groups.len();
-                for peer in active_peers {
-                    current
-                        .peers
-                        .entry(peer)
-                        .or_insert(PrivateIntakeTransportState::Connecting);
-                }
-            }
+            apply_private_intake_topology_health(&mut *health.write().await, &groups, &unresolved);
             let (epoch_stop, _) = watch::channel(false);
             let mut handles = Vec::with_capacity(groups.len());
             for group in groups.clone() {
@@ -1081,8 +1183,20 @@ where
                     }
                     PrivateIntakeTopologyTrigger::Refresh
                     | PrivateIntakeTopologyTrigger::TopologyChanged => {
-                        match self.resolve_private_intake_groups().await {
-                            Ok(resolved) if resolved != groups => {
+                        match self.resolve_private_intake_topology(&groups).await {
+                            Ok(next) if next.groups == groups => {
+                                // Same streams: only the unresolved set may
+                                // have changed, so no epoch restart.
+                                unresolved = next.unresolved;
+                                apply_private_intake_topology_health(
+                                    &mut *health.write().await,
+                                    &groups,
+                                    &unresolved,
+                                );
+                            }
+                            Ok(next) => {
+                                unresolved = next.unresolved;
+                                let resolved = next.groups;
                                 let admissions = admitted_homeservers(&resolved);
                                 for group in &resolved {
                                     set_group_state(
@@ -1115,7 +1229,8 @@ where
                                     }
                                 }
                             }
-                            Ok(_) => {}
+                            // Only identity-wide failures reach this arm; one
+                            // peer's lookup failure leaves that peer unresolved.
                             Err(_) => {
                                 for group in &groups {
                                     set_group_state(
@@ -1956,6 +2071,198 @@ mod tests {
         assert_eq!(groups[1].peers.len(), 1);
     }
 
+    fn homeserver_lookup_error() -> Result<Option<paykit_lib::PublicKey>> {
+        Err(PaykitSdkError::Transport {
+            context: "resolve private intake homeserver".into(),
+            source: None,
+        })
+    }
+
+    fn grouped_peers(groups: &[SubscriptionGroup]) -> Vec<PubkyPublicKey> {
+        groups
+            .iter()
+            .flat_map(|group| group.peers.iter().cloned())
+            .collect()
+    }
+
+    fn assert_topology_skips_unresolved_peer(lookup: Result<Option<paykit_lib::PublicKey>>) {
+        let homeserver_a = pubky::Keypair::random().public_key();
+        let homeserver_b = pubky::Keypair::random().public_key();
+        let peers = users(3);
+
+        let topology = private_intake_topology_from_lookups(
+            vec![
+                (peers[0].clone(), Ok(Some(homeserver_a))),
+                (peers[1].clone(), lookup),
+                (peers[2].clone(), Ok(Some(homeserver_b))),
+            ],
+            &[],
+        );
+
+        assert_eq!(topology.groups.len(), 2);
+        assert!(!grouped_peers(&topology.groups).contains(&peers[1]));
+        assert_eq!(topology.unresolved, vec![peers[1].clone()]);
+    }
+
+    #[test]
+    fn test_private_intake_topology_skips_peer_without_homeserver() {
+        assert_topology_skips_unresolved_peer(Ok(None));
+    }
+
+    #[test]
+    fn test_private_intake_topology_skips_peer_on_lookup_error() {
+        assert_topology_skips_unresolved_peer(homeserver_lookup_error());
+    }
+
+    #[test]
+    fn test_private_intake_topology_keeps_covered_peer_homeserver_on_lookup_failure() {
+        let first_homeserver = pubky::Keypair::random().public_key();
+        let second_homeserver = pubky::Keypair::random().public_key();
+        let peers = users(2);
+        let (resolving_peer, failing_peer) = (&peers[0], &peers[1]);
+
+        // Groups are ordered by homeserver name, so run both assignments: in
+        // one of them the failing peer's group is not the first group.
+        for (homeserver_a, homeserver_b) in [
+            (&first_homeserver, &second_homeserver),
+            (&second_homeserver, &first_homeserver),
+        ] {
+            let current = group_private_intake_peers_by_homeserver(vec![
+                (
+                    homeserver_a.to_string(),
+                    homeserver_a.clone(),
+                    resolving_peer.clone(),
+                ),
+                (
+                    homeserver_b.to_string(),
+                    homeserver_b.clone(),
+                    failing_peer.clone(),
+                ),
+            ]);
+
+            for failed_lookup in [Ok(None), homeserver_lookup_error()] {
+                let topology = private_intake_topology_from_lookups(
+                    vec![
+                        (resolving_peer.clone(), Ok(Some(homeserver_a.clone()))),
+                        (failing_peer.clone(), failed_lookup),
+                    ],
+                    &current,
+                );
+
+                assert!(topology.groups == current);
+                assert!(topology.unresolved.is_empty());
+                let failing_group = topology
+                    .groups
+                    .iter()
+                    .find(|group| group.peers.contains(failing_peer))
+                    .expect("failing peer keeps a stream");
+                assert_eq!(failing_group.homeserver_name, homeserver_b.to_string());
+                assert!(!failing_group.peers.contains(resolving_peer));
+            }
+        }
+    }
+
+    #[test]
+    fn test_private_intake_topology_groups_peer_once_homeserver_resolves() {
+        let homeserver_a = pubky::Keypair::random().public_key();
+        let homeserver_b = pubky::Keypair::random().public_key();
+        let peers = users(2);
+
+        let first = private_intake_topology_from_lookups(
+            vec![
+                (peers[0].clone(), Ok(Some(homeserver_a.clone()))),
+                (peers[1].clone(), Ok(None)),
+            ],
+            &[],
+        );
+        assert_eq!(first.groups.len(), 1);
+        assert_eq!(first.unresolved, vec![peers[1].clone()]);
+
+        let second = private_intake_topology_from_lookups(
+            vec![
+                (peers[0].clone(), Ok(Some(homeserver_a))),
+                (peers[1].clone(), Ok(Some(homeserver_b))),
+            ],
+            &first.groups,
+        );
+
+        assert!(second.groups != first.groups);
+        assert_eq!(second.groups.len(), 2);
+        assert!(grouped_peers(&second.groups).contains(&peers[1]));
+        assert!(second.unresolved.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_health_reports_unresolved_peer_stale() {
+        let homeserver = pubky::Keypair::random().public_key();
+        let peers = users(4);
+        let (new_streamed, caught_up_streamed, unresolved, removed) =
+            (&peers[0], &peers[1], &peers[2], &peers[3]);
+        let groups = group_private_intake_peers_by_homeserver(
+            [new_streamed, caught_up_streamed]
+                .into_iter()
+                .map(|peer| (homeserver.to_string(), homeserver.clone(), peer.clone()))
+                .collect(),
+        );
+        let audited_at = Utc::now();
+        let mut health = PrivateIntakeHealth {
+            peers: HashMap::from([
+                (
+                    caught_up_streamed.clone(),
+                    PrivateIntakeTransportState::CaughtUp,
+                ),
+                (unresolved.clone(), PrivateIntakeTransportState::CaughtUp),
+                (removed.clone(), PrivateIntakeTransportState::CaughtUp),
+            ]),
+            reserved_streams: 3,
+            last_successful_audit_at: HashMap::from([
+                (caught_up_streamed.clone(), audited_at),
+                (removed.clone(), audited_at),
+            ]),
+        };
+
+        apply_private_intake_topology_health(
+            &mut health,
+            &groups,
+            std::slice::from_ref(unresolved),
+        );
+
+        assert_eq!(health.reserved_streams, groups.len());
+        assert_eq!(health.peers.len(), 3);
+        assert_eq!(
+            health.peers[new_streamed],
+            PrivateIntakeTransportState::Connecting
+        );
+        assert_eq!(
+            health.peers[caught_up_streamed],
+            PrivateIntakeTransportState::CaughtUp
+        );
+        assert_eq!(health.peers[unresolved], PrivateIntakeTransportState::Stale);
+        assert!(!health.peers.contains_key(removed));
+        assert_eq!(
+            health.last_successful_audit_at,
+            HashMap::from([(caught_up_streamed.clone(), audited_at)])
+        );
+
+        let (stop, _) = watch::channel(false);
+        let supervisor = PrivateIntakeSupervisor {
+            lease_id: 1,
+            stop,
+            tasks: AsyncMutex::new(Vec::new()),
+            task_handles: Vec::new(),
+            health: Arc::new(AsyncRwLock::new(health)),
+            work: Arc::new(Notify::new()),
+            capacity_released: Arc::new(Notify::new()),
+        };
+        assert_eq!(
+            supervisor.peer_freshness(unresolved).await,
+            Some(PrivateIntakePeerFreshness {
+                transport_state: PrivateIntakeTransportState::Stale,
+                last_successful_audit_at: None,
+            })
+        );
+    }
+
     #[test]
     fn test_private_intake_private_subscription_is_single_user() {
         let users = users(2);
@@ -2644,6 +2951,192 @@ mod tests {
                 .unwrap()
                 .private_intake_admitted_homeservers,
             current
+        );
+    }
+
+    /// Store `peer` as a pending Encrypted Link Handshake, reserving its
+    /// admission on `homeserver` in the same transaction, as
+    /// `save_link_handshake_state_inner` does.
+    async fn seed_pending_handshake(
+        storage: &crate::storage::InMemoryStorage,
+        peer: PubkyPublicKey,
+        homeserver: Option<&str>,
+        now: DateTime<Utc>,
+    ) {
+        let homeserver = homeserver.map(str::to_owned);
+        storage
+            .transaction(move |tx| {
+                if let Some(homeserver) = homeserver {
+                    assert!(tx.reserve_private_intake_admission(peer.clone(), homeserver, now)?);
+                }
+                tx.save_linked_peer(LinkedPeerRecord {
+                    state: LinkedPeerState::Linking,
+                    last_sync_at: Some(now),
+                    ..default_linked_peer(peer.clone())
+                });
+                tx.save_encrypted_link_state(crate::storage::EncryptedLinkStateRecord {
+                    counterparty: peer,
+                    link_snapshot: None,
+                    handshake_snapshot: Some(vec![1, 2, 3]),
+                    handshake_role: Some(EncryptedLinkHandshakeRole::Initiator),
+                    generation: 0,
+                    checkpointed_at: now,
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_admission_replacement_keeps_supervised_peer_admission() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let peers = users(4);
+        let (streamed, pending, never_admitted, unsupervised) =
+            (&peers[0], &peers[1], &peers[2], &peers[3]);
+        let now = Utc::now();
+        let lease = claim_private_intake_lease(
+            &storage,
+            now,
+            2,
+            HashMap::from([(streamed.clone(), "homeserver-1".to_owned())]),
+        )
+        .await
+        .unwrap();
+        seed_pending_handshake(&storage, pending.clone(), Some("homeserver-2"), now).await;
+        seed_pending_handshake(&storage, never_admitted.clone(), None, now).await;
+        // An admission whose peer has no pending handshake or link state, as
+        // after a cancelled handshake, must be released by the replacement.
+        let released_peer = unsupervised.clone();
+        assert!(storage
+            .transaction(move |tx| {
+                tx.reserve_private_intake_admission(released_peer, "homeserver-2".into(), now)
+            })
+            .await
+            .unwrap());
+        let (_stop_tx, mut stop_rx) = watch::channel(false);
+
+        assert!(replace_private_intake_admissions_with_retry(
+            &storage,
+            &MutableClock::new(now),
+            lease.lease_id,
+            HashMap::from([(streamed.clone(), "homeserver-1".to_owned())]),
+            &mut stop_rx,
+        )
+        .await
+        .unwrap());
+
+        assert_eq!(
+            storage
+                .snapshot()
+                .unwrap()
+                .private_intake_admitted_homeservers,
+            HashMap::from([
+                (streamed.clone(), "homeserver-1".to_owned()),
+                (pending.clone(), "homeserver-2".to_owned()),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_admission_replacement_counts_supervised_peer_admission_toward_capacity(
+    ) {
+        let storage = crate::storage::InMemoryStorage::new();
+        let peers = users(3);
+        let (streamed, pending, newcomer) = (&peers[0], &peers[1], &peers[2]);
+        let now = Utc::now();
+        let lease = claim_private_intake_lease(
+            &storage,
+            now,
+            2,
+            HashMap::from([(streamed.clone(), "homeserver-1".to_owned())]),
+        )
+        .await
+        .unwrap();
+        seed_pending_handshake(&storage, pending.clone(), Some("homeserver-2"), now).await;
+        let before = storage
+            .snapshot()
+            .unwrap()
+            .private_intake_admitted_homeservers;
+        let (_stop_tx, mut stop_rx) = watch::channel(false);
+
+        // The resolved map alone needs two streams and fits, but the carried
+        // admission on "homeserver-2" makes it three.
+        let result = replace_private_intake_admissions_with_retry(
+            &storage,
+            &MutableClock::new(now),
+            lease.lease_id,
+            HashMap::from([
+                (streamed.clone(), "homeserver-1".to_owned()),
+                (newcomer.clone(), "homeserver-3".to_owned()),
+            ]),
+            &mut stop_rx,
+        )
+        .await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
+        assert_eq!(
+            storage
+                .snapshot()
+                .unwrap()
+                .private_intake_admitted_homeservers,
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_admission_replacement_keeps_handshake_reserved_during_resolution()
+    {
+        let storage = crate::storage::InMemoryStorage::new();
+        let peers = users(3);
+        let (streamed, newcomer, late_handshake) = (&peers[0], &peers[1], &peers[2]);
+        let now = Utc::now();
+        let lease = claim_private_intake_lease(
+            &storage,
+            now,
+            3,
+            HashMap::from([(streamed.clone(), "homeserver-1".to_owned())]),
+        )
+        .await
+        .unwrap();
+        // The map a refresh pass computed from its peer snapshot, taken before
+        // the late handshake existed.
+        let stale_replacement = HashMap::from([
+            (streamed.clone(), "homeserver-1".to_owned()),
+            (newcomer.clone(), "homeserver-3".to_owned()),
+        ]);
+        // While that pass resolves homeservers, another SDK handle over the
+        // same identity state makes a handshake pending and reserves it.
+        let alternate_handle = storage.clone();
+        seed_pending_handshake(
+            &alternate_handle,
+            late_handshake.clone(),
+            Some("homeserver-2"),
+            now,
+        )
+        .await;
+        let (_stop_tx, mut stop_rx) = watch::channel(false);
+
+        assert!(replace_private_intake_admissions_with_retry(
+            &storage,
+            &MutableClock::new(now),
+            lease.lease_id,
+            stale_replacement,
+            &mut stop_rx,
+        )
+        .await
+        .unwrap());
+
+        assert_eq!(
+            storage
+                .snapshot()
+                .unwrap()
+                .private_intake_admitted_homeservers,
+            HashMap::from([
+                (streamed.clone(), "homeserver-1".to_owned()),
+                (newcomer.clone(), "homeserver-3".to_owned()),
+                (late_handshake.clone(), "homeserver-2".to_owned()),
+            ])
         );
     }
 

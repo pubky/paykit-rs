@@ -193,9 +193,19 @@ supervisor.stop().await;
 subscriptions group at most 50 users from one homeserver per connection, so 51
 users on one homeserver require two reserved streams; peers on different
 homeservers require separate streams. Startup fails instead of silently leaving
-peers uncovered when capacity is insufficient. Active supervisor capacity is
-identity-wide: new handshakes are rejected before becoming pending when their
-resolved homeserver would need another stream. A later topology move that no
+peers uncovered when capacity is insufficient. A Linked Peer whose Pubky
+homeserver cannot be resolved does not stop intake for other peers while its
+lookup fails: it reserves no stream, stays visible in health as `Stale`, and is
+retried on each topology refresh. When it later resolves, it is placed like any
+other topology change, so a result that exceeds capacity stops supervision as
+described below. A topology refresh keeps the stored handshake admission of
+every peer that is still supervised but that the refresh did not place, such as
+a peer whose homeserver lookup failed or a handshake that became pending while
+the refresh was resolving, so reserved capacity stays reserved. A peer that
+already has a stream keeps its last resolved homeserver while a later
+lookup fails. Active supervisor capacity is identity-wide: new
+handshakes are rejected before becoming pending when their resolved homeserver
+would need another stream. A later topology move that no
 longer fits marks affected health stale and stops supervision instead of keeping
 old streams plus healthy-audit polling for an uncovered peer. Queue limits are 64 ciphertext
 packets per Linked Peer and 1,024 per identity. A full peer is detached without
@@ -204,7 +214,8 @@ resume.
 
 Inspect `PrivateIntakeSupervisor::health` and each buffered result's `freshness`.
 `Connecting`, `Replaying`, `Stale`, `Backpressured`, `Unsupported`, and `Stopped`
-must not be interpreted as remote queue emptiness. A homeserver that rejects or
+must not be interpreted as remote queue emptiness. `Stale` also covers a peer
+whose Pubky homeserver could not be resolved. A homeserver that rejects or
 does not implement SSE is `Unsupported`; SSE mode does not fall back to
 continuous slot polling. Already buffered packets remain drainable during an
 outage. Reconnects reuse durable per-user cursors and reconcile expected slots.
