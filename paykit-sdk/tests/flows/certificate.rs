@@ -40,7 +40,12 @@ fn is_cert_refused(error: &PaykitError) -> bool {
 
 /// Alice's signer renews her `wallet`'s certificate for `scopes`, issued `after_ms` from now,
 /// and stores it at her switch (Switch wire 3.8). Not listed yet.
-fn renew(w: &World, app_id: [u8; 16], scopes: &RequestedScopes, after_ms: u64) -> AppCert {
+pub(crate) fn renew(
+    w: &World,
+    app_id: [u8; 16],
+    scopes: &RequestedScopes,
+    after_ms: u64,
+) -> AppCert {
     let keys = w.alice.identity().app_keys("wallet");
     let names: Vec<&str> = scopes.scopes.iter().map(String::as_str).collect();
     let renewed = issue_cert(
@@ -61,7 +66,7 @@ fn renew(w: &World, app_id: [u8; 16], scopes: &RequestedScopes, after_ms: u64) -
 }
 
 /// Alice's next `identity.json` lists `renewed` for the app, renewing `old`.
-fn list(w: &World, app_id: [u8; 16], old: &AppCert, renewed: &AppCert) {
+pub(crate) fn list(w: &World, app_id: [u8; 16], old: &AppCert, renewed: &AppCert) {
     w.alice
         .next_doc(|body| {
             body.apps.retain(|a| a.app_id != app_id);
@@ -1877,7 +1882,7 @@ async fn test_certificate_wider_without_the_pay_key_writes_nothing_and_journals_
 }
 
 /// The signer stores `cert`'s key bundle for app `me`, every data epoch up to the current.
-fn store_bundle(w: &World, me: [u8; 16], cert: &AppCert) {
+pub(crate) fn store_bundle(w: &World, me: [u8; 16], cert: &AppCert) {
     let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
     let parts = pubky_switch_core::records::seal_bundle_parts(
         w.alice.identity().key(),

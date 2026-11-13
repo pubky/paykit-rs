@@ -7,7 +7,9 @@
 //!   permission_missing`), or one over a quota: the message is kept (`p/se/<sender>/<msg_id>`)
 //!   and written into its record by a later write of the app's own, tried at every receive
 //!   until it lands, as room frees: a request, a payer's reply, a proof of a payment without
-//!   a request into the record of its settlement, a receipt beside the proof it names.
+//!   a request into the record of its settlement, a receipt beside the proof it names, and
+//!   period details and a Billing Period's proof into the period record, once the request
+//!   record they are checked against is held.
 //!   Meanwhile a Private Payment List is held over its record (`lh/`), the newer kept, and a
 //!   request is shown unrecorded ([`crate::RequestStatus::Unrecorded`]). A payee's
 //!   cancellation needs nothing here: its stop is kept with the cursor move, with no write
@@ -138,7 +140,7 @@ pub(crate) fn past_window(accepted_at: u64, service: Option<u64>) -> bool {
 }
 
 /// The side of the shared records `target` is of.
-fn record_side(target: &ActivityTarget) -> crate::hold::RecordSide {
+pub(crate) fn record_side(target: &ActivityTarget) -> crate::hold::RecordSide {
     match target.side {
         crate::activity::SideTag::Payer => crate::hold::RecordSide::Payer,
         crate::activity::SideTag::Payee => crate::hold::RecordSide::Payee,
@@ -247,6 +249,39 @@ enum Place {
     },
     /// A list, held over its record: the hold to keep, `None` when a list as new is held.
     List(Option<(String, KeptMessage)>),
+    /// Into a period record of a request whose record of this side the app doesn't hold yet:
+    /// which period record is decided once it does (Paykit spec 8.2).
+    AwaitsRequest(crate::hold::RecordSide),
+    /// Nowhere: taken with no effect, such as period details the payer doesn't store
+    /// ([`crate::periods::stores_details`]).
+    Taken,
+    /// Into a period record that doesn't hold the period details the proof names yet: it
+    /// waits for them (Paykit wire 5.3), within its window.
+    AwaitsDetails,
+    /// Period details whose storing can't be decided yet ([`PeriodPlace::Undecided`]).
+    Undecided,
+}
+
+/// Where a message naming a request whose record is held goes ([`Paykit::period_destination`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PeriodPlace {
+    /// Into the record at `into`: the request record, or the period record of the Billing
+    /// Period it names, which it may open (`creates`).
+    Record { into: ActivityTarget, creates: bool },
+    /// Invalid against its request (Paykit wire 4.4, 4.9): dropped.
+    Invalid,
+    /// Period details the payer doesn't store ([`crate::periods::stores_details`]): taken
+    /// with no effect.
+    Taken,
+    /// A proof naming period details the period record doesn't hold
+    /// ([`crate::receive::awaits_named_details`]): it waits for them.
+    AwaitsDetails,
+    /// Period details whose storing can't be decided yet: no service time is verified
+    /// ([`crate::periods::Window::NoTime`]), or they would be taken with no effect while the
+    /// copy of the payer's records may lack records, a newer write such as another own app's
+    /// acceptance among them, so the records the copy holds decide nothing then (Paykit spec
+    /// 8.1, "Records not listed yet"). They wait, never given up meanwhile.
+    Undecided,
 }
 
 impl Paykit {
@@ -283,8 +318,10 @@ impl Paykit {
                 label: request.label.as_ref().map(|l| l.as_str().to_owned()),
                 proposal_expires_at_ms: request.proposal_expires_at,
                 recurring: request.is_recurring(),
+                recurrence: request.recurrence,
                 status: RequestStatus::Unrecorded,
                 receipt: None,
+                periods: Vec::new(),
             });
         }
         Ok(out)
@@ -439,7 +476,13 @@ impl Paykit {
                 let (peer, at) = crate::receive::peer_note(&entry.sender, &stored);
                 tx.put(&peer, &at)?;
             }
-            Some(Place::Record { .. }) => {}
+            Some(
+                Place::Record { .. }
+                | Place::AwaitsRequest(_)
+                | Place::Taken
+                | Place::AwaitsDetails
+                | Place::Undecided,
+            ) => {}
         }
         let note = StoredNote {
             stored_id,
@@ -505,18 +548,17 @@ impl Paykit {
                     Some(request)
                         if crate::protocol::writes_payee_label(&scopes, label.as_ref()) =>
                     {
-                        record(
-                            ActivityTarget::payee(
-                                natural_key::request_record(&own, &request),
-                                label.as_ref(),
-                            ),
-                            Role::of(stored.body()).unwrap_or(Role::Response),
-                            false,
-                        )
+                        // The period's place goes on the heap, as `receive`'s steps do: it
+                        // nests deep.
+                        Box::pin(self.period_place(stored, &request)).await?
                     }
                     _ => None,
                 }
             }
+            Body::PaymentPeriodDetails(_) if pay => match first {
+                Some(request) => Box::pin(self.period_place(stored, &request)).await?,
+                None => None,
+            },
             Body::PaymentReceipt(receipt) if pay => record(
                 crate::receive::receipt_target(stored, &own, &receipt.attempt_id),
                 Role::Receipt,
@@ -535,6 +577,110 @@ impl Paykit {
                 Some(Place::List(newer.then(|| (held, KeptMessage::of(stored)))))
             }
             _ => None,
+        })
+    }
+
+    /// Where `stored`, a payer's reply or a payee's period details naming `request`, goes: a
+    /// Billing Period's into its period record, once the request record is held to check the
+    /// period against, else into the request record ([`Paykit::period_destination`]); `None`
+    /// for a period that isn't the request's (Paykit wire 4.4, 5.3).
+    async fn period_place(
+        &self,
+        stored: &StoredMessage,
+        request: &[u8; 32],
+    ) -> Result<Option<Place>> {
+        let own = self.identity();
+        let target = crate::receive::kept_request_target(&own, stored, request);
+        let periodic = matches!(stored.body(), Body::PaymentPeriodDetails(_))
+            || stored.body().billing_period().is_some();
+        let role = Role::of(stored.body()).unwrap_or(Role::Response);
+        let Some(record) = self.held_activity(&target).await? else {
+            return Ok(Some(if periodic {
+                Place::AwaitsRequest(record_side(&target))
+            } else {
+                Place::Record {
+                    target,
+                    role,
+                    creates: false,
+                }
+            }));
+        };
+        Ok(
+            match self
+                .period_destination(&target, &record, stored, request)
+                .await?
+            {
+                PeriodPlace::Record { into, creates } => Some(Place::Record {
+                    target: into,
+                    role,
+                    creates,
+                }),
+                PeriodPlace::Invalid => None,
+                PeriodPlace::Taken => Some(Place::Taken),
+                PeriodPlace::AwaitsDetails => Some(Place::AwaitsDetails),
+                PeriodPlace::Undecided => Some(Place::Undecided),
+            },
+        )
+    }
+
+    /// Where `stored`, a message naming `request`, goes now that `record`, the request record
+    /// at `target`, is held: the one rule of the later writes, a stored entry's and a message
+    /// kept before its record (`pr/`), as the receive step decides it. A message from anyone
+    /// but the record's counterparty is [`PeriodPlace::Invalid`]. The period it names
+    /// is checked against the request ([`crate::receive::period_or_request`]); details go
+    /// only where the payer stores them ([`crate::periods::stores_details`]), and are taken
+    /// with no effect only once the copy of the payer's records lacks none; a proof naming
+    /// details the period record doesn't hold waits for them
+    /// ([`crate::receive::awaits_named_details`]).
+    pub(crate) async fn period_destination(
+        &self,
+        target: &ActivityTarget,
+        record: &ActivityRecord,
+        stored: &StoredMessage,
+        request: &[u8; 32],
+    ) -> Result<PeriodPlace> {
+        // Only the record's counterparty writes into it or its period records: a message from
+        // anyone else is no update of this activity, and goes nowhere.
+        if record.counterparty != stored.sender() {
+            return Ok(PeriodPlace::Invalid);
+        }
+        let own = self.identity();
+        let Some(into) = crate::receive::period_or_request(&own, target, record, stored, request)
+        else {
+            return Ok(PeriodPlace::Invalid);
+        };
+        if matches!(stored.body(), Body::PaymentPeriodDetails(_)) {
+            let stopped = self.kept_stop(target).await?;
+            let period = self.held_activity(&into).await?;
+            match crate::periods::stores_details(
+                record,
+                period.as_ref(),
+                stored,
+                self.service_time(),
+                stopped,
+            ) {
+                Ok(crate::periods::Window::Takes) => {}
+                Ok(crate::periods::Window::Closed) => {
+                    return Ok(if self.side_unlisted(record_side(target)).await? {
+                        PeriodPlace::Undecided
+                    } else {
+                        PeriodPlace::Taken
+                    });
+                }
+                Ok(crate::periods::Window::NoTime) => return Ok(PeriodPlace::Undecided),
+                // A payment deadline past 64 bits: no attempt on the period can be made.
+                Err(_) => return Ok(PeriodPlace::Invalid),
+            }
+        }
+        if into != *target {
+            let period = self.held_activity(&into).await?;
+            if crate::receive::awaits_named_details(period.as_ref(), into.side.side(), stored) {
+                return Ok(PeriodPlace::AwaitsDetails);
+            }
+        }
+        Ok(PeriodPlace::Record {
+            creates: into != *target,
+            into,
         })
     }
 
@@ -569,6 +715,17 @@ impl Paykit {
                         self.place_note(&target, role, creates, stored.clone(), Tx::default())
                             .await?
                     }
+                    Some(Place::AwaitsRequest(side)) => {
+                        if self.side_unlisted(side).await? {
+                            Placed::Waits
+                        } else {
+                            Placed::Not
+                        }
+                    }
+                    Some(Place::Taken) => Placed::Done,
+                    Some(Place::AwaitsDetails) => Placed::Not,
+                    // Not decided yet: it waits, never given up meanwhile.
+                    Some(Place::Undecided) => Placed::Waits,
                     None => Placed::Not,
                 };
                 let later = later_write(placed, accepted_at, self.service_time());
