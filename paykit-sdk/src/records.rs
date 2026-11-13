@@ -442,11 +442,21 @@ mod own_message_tests {
         let answer = body(allowances, "answer_allowance");
         assert!(answer.contains("self.own_copy(&signed)"));
         assert!(answer.contains("let mut queue = vec![signed];"));
-        assert!(answer.contains(".submit_with_record(&target, &next, queue, locals)"));
+        assert!(answer.contains(".submit_with_record(&target, &next, queue, locals, None)"));
         let crossing = body(allowances, "record_end");
         assert!(crossing.contains("self.own_copy(&own_end)"));
         assert!(crossing.contains("queue.push(own_end);"));
-        assert!(crossing.contains(".submit_with_record(target, &next, queue, locals)"));
+        assert!(
+            crossing.contains(".submit_with_record(target, &next, queue, locals, owed.as_ref())")
+        );
+        // While sends are held the crossing end is recorded unqueued, with its owed mark
+        // (`eo/`) written in the same batch by `submit_with_record`, and sent from the record
+        // later (`send_owed_ends`).
+        assert!(crossing.contains("owed = Some(OwedEnd {"));
+        let submit = body(allowances, "submit_with_record");
+        assert!(
+            submit.contains("locals.push(state::local_put(&key::owed_end(&owed.record), owed)?);")
+        );
         // The journal's own check reads it; only the outcome places it.
         assert_eq!(
             count(".acceptance_message("),

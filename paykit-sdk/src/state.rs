@@ -76,7 +76,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::activity::{ActivityTarget, KeptSide};
-use crate::allowances::{allowance_target, ConsentEntry, NoticeTarget};
+use crate::allowances::{allowance_target, ConsentEntry, NoticeTarget, OwedEnd};
 use crate::app_records::SeenRecords;
 use crate::error::{PaykitError, Result};
 use crate::executor::{EmptyLedgerMark, FlagConfirmed, KeptLedger};
@@ -916,6 +916,24 @@ impl Stored for EmptyLedgerMark {
     }
 }
 
+impl sealed::Sealed for OwedEnd {}
+
+/// An own crossing end owed while sends were held: of the Allowance record its key names,
+/// with a `msg_id` a message carries (`allowances.rs`, [`OwedEnd`]).
+impl Stored for OwedEnd {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::OwedEnd(record)
+                if self.record == *record
+                    && pubky_switch_core::json::check_uuid_v4(&self.msg_id).is_ok() =>
+            {
+                Ok(())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for FlagConfirmed {}
 
 /// The user's confirmation of an ignored write: of the Allowance record its key names, at a
@@ -985,6 +1003,13 @@ pub(crate) mod key {
     pub(crate) const CONFLICTS: &str = "cf/";
     pub(crate) const CONSENTS: &str = "ac/";
     pub(crate) const NOTICE_TARGETS: &str = "en/";
+    pub(crate) const OWED_ENDS: &str = "eo/";
+
+    /// This app's own crossing end of the Allowance whose record is `record_key`, recorded
+    /// while sends to the counterparty were held, whose message is owed.
+    pub(crate) fn owed_end(record_key: &[u8; 32]) -> String {
+        format!("{OWED_ENDS}{}", b64(record_key))
+    }
 
     /// A counterparty's end of the Allowance whose record is `record_key`, kept as the stop.
     pub(crate) fn allowance_end(record_key: &[u8; 32]) -> String {
@@ -1250,6 +1275,9 @@ pub(crate) enum StateKey {
     EmptyLedger([u8; 32]),
     /// `fc/<record key>`: an ignored current write the user confirmed paying under.
     FlagConfirmed([u8; 32]),
+    /// `eo/<record key>`: this app's own crossing end, recorded while sends were held, whose
+    /// message is owed.
+    OwedEnd([u8; 32]),
 }
 
 impl StateKey {
@@ -1338,6 +1366,7 @@ impl StateKey {
                     "lv" => Self::KeptLedger(b64_32(rest)?),
                     "el" => Self::EmptyLedger(b64_32(rest)?),
                     "fc" => Self::FlagConfirmed(b64_32(rest)?),
+                    "eo" => Self::OwedEnd(b64_32(rest)?),
                     "rs" => {
                         let (requester, id) = rest.split_once('/')?;
                         Self::Resent {
@@ -1711,6 +1740,24 @@ mod tests {
             target(other)
         ));
         assert!(!reads::<NoticeTarget>(&key::side(id), target(id)));
+        // An owed crossing end, of the record its key names, with a `msg_id`.
+        let owed = |record: [u8; 32], msg_id: &str| serde_json::json!({ "record": pubky_switch_core::enc::b64(&record), "msg_id": msg_id });
+        assert!(reads::<OwedEnd>(
+            &key::owed_end(&[6; 32]),
+            owed([6; 32], id)
+        ));
+        assert!(!reads::<OwedEnd>(
+            &key::owed_end(&[6; 32]),
+            owed([7; 32], id)
+        ));
+        assert!(!reads::<OwedEnd>(
+            &key::owed_end(&[6; 32]),
+            owed([6; 32], "not-a-msg-id")
+        ));
+        assert!(!reads::<OwedEnd>(
+            &key::consent(&[6; 32]),
+            owed([6; 32], id)
+        ));
         // A key the SDK doesn't write reads nothing, nor does a certificate that isn't one.
         assert!(!reads::<u64>("zz/1", serde_json::json!(1)));
         assert!(!reads::<SignedDoc>(

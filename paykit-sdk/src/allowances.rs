@@ -250,6 +250,19 @@ pub(crate) struct NoticeTarget {
     pub(crate) app_id: [u8; 16],
 }
 
+/// This app's own crossing end recorded while sends to the counterparty were held, whose
+/// message is owed (`eo/<record key>`; Paykit spec 8.1, "Blocked counterparties"; 8.3,
+/// "Ending"): it names the record and the end's `msg_id`, and is written in the batch that
+/// records the end. The message goes from the record once sends to the counterparty aren't
+/// held ([`Paykit::send_owed_ends`]). Never restored: a restore queues the record's own end
+/// again itself, under the same gate (`hold.rs`, `queue_own_again`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OwedEnd {
+    #[serde(with = "serde_b64")]
+    pub(crate) record: [u8; 32],
+    pub(crate) msg_id: String,
+}
+
 /// The client's target of the `allowances` record of `counterparty`'s Allowance
 /// `allowance_id` (Paykit wire 1.5, 5.4).
 pub(crate) fn allowance_target(
@@ -1008,7 +1021,7 @@ impl Paykit {
     ) -> Result<SentAllowance> {
         self.refresh_own()?;
         self.require_allowance()?;
-        self.refuse_while_sends_held(&to).await?;
+        Box::pin(self.refuse_while_sends_held(&to)).await?;
         let allowance_id = AllowanceId::generate()?;
         let proposer_role = match role {
             AllowanceRole::Allower => ProposerRole::Allower,
@@ -1058,6 +1071,50 @@ impl Paykit {
             msg_id,
             delivery,
         })
+    }
+
+    /// Send each own crossing end recorded while sends to its counterparty were held (`eo/`,
+    /// [`OwedEnd`]) once they aren't, from the signed plaintext its record stores, with the
+    /// client's `queue_stored`, and drop the mark after it (Paykit spec 8.1, "Blocked
+    /// counterparties"; 8.3, "Ending"). A mark stays while sends to the counterparty are held,
+    /// or while its record isn't held as a value that reads and binds. One whose record is
+    /// held as deleted, or doesn't hold that end of this app's, goes with nothing sent: no
+    /// record holds the end to send. A message the client refuses for good, past its replay
+    /// window of 30 days from its `created_at`, is neither sent nor told, as at a restore's
+    /// re-send ([`Paykit::queue_stored_again`]); a store failure is the call's error, and the
+    /// mark stays. The mark was read bound to its key (`state::Stored`).
+    pub(crate) async fn send_owed_ends(&mut self) -> Result<()> {
+        let own = self.identity();
+        let app_id = self.app_id();
+        for (_, owed) in self.local_scan::<OwedEnd>(key::OWED_ENDS).await? {
+            let mark = key::owed_end(&owed.record);
+            let Some(held) = self.held_allowance(&owed.record).await? else {
+                let deleted = self
+                    .app
+                    .shared_record(&owed.record)
+                    .await?
+                    .is_some_and(|held| held.content == RecordContent::Deleted);
+                if deleted {
+                    self.local_delete(&mark).await?;
+                }
+                continue;
+            };
+            let end = held.end.as_ref().filter(|end| {
+                end.message().msg_id == owed.msg_id
+                    && end.sender() == own
+                    && end.message().from.app_id == app_id
+            });
+            let Some(end) = end else {
+                self.local_delete(&mark).await?;
+                continue;
+            };
+            if self.sends_held(&held.counterparty).await? {
+                continue;
+            }
+            self.queue_stored_again(end).await?;
+            self.local_delete(&mark).await?;
+        }
+        Ok(())
     }
 
     /// Where `msg_id`, recorded and queued, is after one try to deliver it now: a try that
@@ -1152,7 +1209,7 @@ impl Paykit {
             // recorded and sent at once, as a payee's cancellation is (Paykit spec 8.1,
             // "What stops or settles a payment still goes"; 8.3).
             if kind != Kind::AllowanceEnd {
-                self.refuse_while_sends_held(&held.counterparty).await?;
+                Box::pin(self.refuse_while_sends_held(&held.counterparty)).await?;
             }
             let proposal = held.proposal.hash();
             let to_here = held.proposal.message().to == own;
@@ -1206,9 +1263,9 @@ impl Paykit {
                 .skip(1)
                 .map(|m| m.msg_id().to_owned())
                 .collect();
-            match self.submit_with_record(&target, &next, queue, locals).await {
+            match Box::pin(self.submit_with_record(&target, &next, queue, locals, None)).await {
                 Ok(()) => {
-                    self.delivered(&msg_id).await?;
+                    Box::pin(self.delivered(&msg_id)).await?;
                     // A notice not delivered now goes with the next flush.
                     for notice in notices {
                         let _ = self.app.flush_message(&notice).await;
@@ -1231,16 +1288,25 @@ impl Paykit {
     /// answering now counts as written: it goes with the app's next write or read. After
     /// `409 conflict` the record is read again. This and [`Paykit::propose_allowance`] are
     /// the only writes of an Allowance record: a write storing a message this app signed
-    /// that isn't queued with it is refused before anything is sent ([`stores_unqueued`]).
+    /// that isn't queued with it is refused before anything is sent ([`stores_unqueued`]),
+    /// but for a crossing end owed while sends to the counterparty are held, `owed`, whose
+    /// mark goes in the same batch.
     async fn submit_with_record(
         &mut self,
         target: &RecordTarget,
         next: &AllowanceRecord,
         queue: Vec<SignedMessage>,
-        locals: Vec<LocalWrite>,
+        mut locals: Vec<LocalWrite>,
+        owed: Option<&OwedEnd>,
     ) -> Result<()> {
         let before = self.held_allowance(&self.app.record_key(target)?).await?;
-        let queued: Vec<String> = queue.iter().map(|m| m.msg_id().to_owned()).collect();
+        let mut queued: Vec<String> = queue.iter().map(|m| m.msg_id().to_owned()).collect();
+        // A crossing end owed while sends are held counts as queued: its mark goes in this
+        // batch, and its message goes from the record later ([`Paykit::send_owed_ends`]).
+        if let Some(owed) = owed {
+            locals.push(state::local_put(&key::owed_end(&owed.record), owed)?);
+            queued.push(owed.msg_id.clone());
+        }
         if stores_unqueued(
             before.as_ref(),
             next,
@@ -1716,7 +1782,7 @@ impl Paykit {
             // A write the switch refuses now is tried at the next run; the stop stands
             // meanwhile. Any other failure is the call's error.
             written(
-                self.submit_with_record(&target, &next, Vec::new(), locals)
+                self.submit_with_record(&target, &next, Vec::new(), locals, None)
                     .await,
             )?;
         }
@@ -1750,12 +1816,13 @@ impl Paykit {
                 key: stop.as_bytes().to_vec(),
             }];
             return self
-                .submit_with_record(target, &next, Vec::new(), locals)
+                .submit_with_record(target, &next, Vec::new(), locals, None)
                 .await;
         }
         let conflicted = held.conflicted.is_some() || self.conflict_kept(&record).await?;
         let mut next = held.clone();
         let mut queue = Vec::new();
+        let mut owed = None;
         place(&mut next, end.clone());
         if !reflects_stored(&next, &end.message().msg_id) {
             match acceptance(&held) {
@@ -1769,13 +1836,6 @@ impl Paykit {
                     place(&mut next, end.clone());
                 }
                 Some(accepted) if refs == [proposal] && end.sender() == held.proposal.sender() => {
-                    // Nothing goes to a counterparty whose sends are held (Paykit spec 8.1,
-                    // "Blocked counterparties"): the withdrawal's stop stays, so nothing is
-                    // paid under the Allowance, and this end is owed by that stop, made at
-                    // the first run after sends to it are no longer held.
-                    if self.sends_held(&held.counterparty).await? {
-                        return Ok(());
-                    }
                     let body = AllowanceReply {
                         allowance_id: held.allowance_id.clone(),
                         executor_app_id: None,
@@ -1790,7 +1850,20 @@ impl Paykit {
                     next = held.clone();
                     place(&mut next, self.own_copy(&own_end)?);
                     place(&mut next, end.clone());
-                    queue.push(own_end);
+                    // While sends to the counterparty are held (Paykit spec 8.1, "Blocked
+                    // counterparties"), the end is recorded all the same, with its executor
+                    // notice to the own apps, so every own app finds the Allowance ended and
+                    // a batch built on the record's earlier version fails; only its message
+                    // to the counterparty waits, owed (`eo/`), sent from the record once
+                    // sends to it aren't held (Paykit spec 8.3, "Ending").
+                    if self.sends_held(&held.counterparty).await? {
+                        owed = Some(OwedEnd {
+                            record,
+                            msg_id: own_end.msg_id().to_owned(),
+                        });
+                    } else {
+                        queue.push(own_end);
+                    }
                 }
                 // An end naming an acceptance the record doesn't hold, none yet or another
                 // than the one it holds, waits for it, 30 days from its acceptance.
@@ -1816,7 +1889,7 @@ impl Paykit {
             key: stop.as_bytes().to_vec(),
         });
         let sent: Vec<String> = queue.iter().map(|m| m.msg_id().to_owned()).collect();
-        self.submit_with_record(target, &next, queue, locals)
+        self.submit_with_record(target, &next, queue, locals, owed.as_ref())
             .await?;
         // The write went through with the messages queued in its batch: one not delivered
         // now goes with the next flush, and the write's outcome doesn't wait for it.
@@ -1990,7 +2063,7 @@ impl Paykit {
             return Ok(Placed::Not);
         };
         written(
-            self.submit_with_record(&target, &next, Vec::new(), locals)
+            self.submit_with_record(&target, &next, Vec::new(), locals, None)
                 .await,
         )
     }

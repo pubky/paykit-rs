@@ -764,7 +764,7 @@ impl Paykit {
     /// plaintext, and try to deliver it now ([`Paykit::queue_own_again`]). One the client
     /// refuses for good, or as not this app's own, is neither queued nor told, and isn't
     /// asked for again; a store failure is the call's error.
-    async fn queue_stored_again(
+    pub(crate) async fn queue_stored_again(
         &mut self,
         stored: &paykit_lib::records::StoredMessage,
     ) -> Result<()> {

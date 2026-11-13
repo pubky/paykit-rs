@@ -358,6 +358,10 @@ pub(crate) fn restore_paykit_layer(
             // spec 8.3, "A grant implies a ledger"). A user's confirmation of an ignored write
             // isn't restored either: a restore asks the user to confirm again.
             StateKey::EmptyLedger(_) | StateKey::FlagConfirmed(_) => continue,
+            // An own crossing end owed while sends were held isn't restored: the restore queues
+            // the record's own end again itself, under the same gate (`hold.rs`,
+            // `queue_own_again`).
+            StateKey::OwedEnd(_) => continue,
             // The time of the last read of the lists isn't restored: the copy of the deny
             // list the backup holds may be stale by any time, so the list is read again before
             // any payment (Paykit spec 8.1).

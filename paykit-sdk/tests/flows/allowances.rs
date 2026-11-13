@@ -3166,48 +3166,120 @@ async fn test_allowances_end_while_the_deny_copy_is_unknown_recorded_and_sent_at
     end_goes_while_held(SendsHeld::Unknown, AllowanceRole::Allowee).await;
 }
 
-/// Bob's withdrawal crosses the keeper's acceptance while sends to him are held: the
-/// withdrawal's stop ends the Allowance at once, but the keeper's own end isn't sent, and
-/// the record waits for it; it is made and sent at the first receive once sends aren't
-/// held (Paykit spec 8.1, "Blocked counterparties"; Paykit wire 4.16).
-async fn crossing_end_held(how: SendsHeld) {
-    let w = World::new();
-    let mut shop = shop(&w).await;
-    let mut wallet = keeper(&w).await;
-    let (theirs, mine) = proposed(&w, &mut shop, &mut wallet).await;
+/// Bob's withdrawal crosses the keeper's acceptance, and sends to him are held, `how`, when
+/// the keeper reads it. Returns the record keys on bob's side and on alice's.
+async fn crossing_while_held(
+    w: &World,
+    shop: &mut Paykit,
+    wallet: &mut Paykit,
+    how: SendsHeld,
+) -> ([u8; 32], [u8; 32]) {
+    let (theirs, mine) = proposed(w, shop, wallet).await;
     wallet.accept_allowance(&mine).await.unwrap();
     shop.end_allowance(&theirs).await.unwrap();
     match how {
         SendsHeld::Blocked => wallet.block(&w.bob_id()).await.unwrap(),
         SendsHeld::Unknown => {
             w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
-            fail_list_read(&w);
+            fail_list_read(w);
         }
     }
     wallet.receive(None).await.unwrap();
+    (theirs, mine)
+}
+
+/// Whether `app`'s record at `record` holds an end naming the proposal and the acceptance.
+async fn ends_naming_both(app: &Paykit, record: &[u8; 32]) -> bool {
+    let held = AllowanceRecord::read(
+        &serde_json::to_vec(&value(app, record).await).unwrap(),
+        &app.identity(),
+    )
+    .unwrap();
+    let accepted = held.response.as_ref().map(|r| r.hash());
+    held.end.is_some_and(|end| {
+        end.sender() == app.identity()
+            && end.message().refs == vec![held.proposal.hash(), accepted.unwrap()]
+    })
+}
+
+/// Bob's withdrawal crosses the keeper's acceptance while sends to him are held: the keeper
+/// makes its own end and records it in the Allowance record at once, naming the proposal and
+/// the acceptance, so every own app finds the Allowance ended; only the end's message to bob
+/// waits, owed, and goes from the record, once, at the first receive after sends aren't
+/// held (Paykit spec 8.1, "Blocked counterparties"; 8.3, "Ending"; Paykit wire 4.16).
+async fn crossing_end_held(how: SendsHeld) {
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = keeper(&w).await;
+    let (_, mine) = crossing_while_held(&w, &mut shop, &mut wallet, how).await;
     assert_eq!(
         wallet.allowance(&mine).await.unwrap().status,
         AllowanceStatus::Ended
     );
-    assert!(value(&wallet, &mine).await["end"].is_null(), "{how:?}");
-    assert_eq!(wallet.app().protocol_scan(b"ae/").await.unwrap().len(), 1);
+    assert!(ends_naming_both(&wallet, &mine).await, "{how:?}");
+    assert!(wallet.app().protocol_scan(b"ae/").await.unwrap().is_empty());
+    assert_eq!(wallet.app().protocol_scan(b"eo/").await.unwrap().len(), 1);
     wallet.app_mut().flush_outbox().await.unwrap();
     assert_eq!(taken(&mut shop, "paykit.allowance_end").await, 0);
+    if let SendsHeld::Blocked = how {
+        // Still held at a later receive while bob is blocked.
+        wallet.receive(None).await.unwrap();
+        assert_eq!(taken(&mut shop, "paykit.allowance_end").await, 0);
+    }
     release_sends(&w, &mut wallet, how).await;
     wallet.receive(None).await.unwrap();
-    assert!(!value(&wallet, &mine).await["end"].is_null());
-    assert!(wallet.app().protocol_scan(b"ae/").await.unwrap().is_empty());
+    assert!(wallet.app().protocol_scan(b"eo/").await.unwrap().is_empty());
     assert_eq!(taken(&mut shop, "paykit.allowance_end").await, 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(taken(&mut shop, "paykit.allowance_end").await, 0);
 }
 
 #[tokio::test]
-async fn test_allowances_crossing_end_to_a_blocked_counterparty_sent_once_unblocked() {
+async fn test_allowances_crossing_end_to_a_blocked_counterparty_recorded_at_once_sent_once_unblocked(
+) {
     crossing_end_held(SendsHeld::Blocked).await;
 }
 
 #[tokio::test]
-async fn test_allowances_crossing_end_while_the_deny_copy_is_unknown_sent_once_it_reads() {
+async fn test_allowances_crossing_end_while_the_deny_copy_is_unknown_recorded_at_once_sent_once_it_reads(
+) {
     crossing_end_held(SendsHeld::Unknown).await;
+}
+
+#[tokio::test]
+async fn test_allowances_crossing_end_recorded_while_blocked_sent_once_after_a_restore() {
+    // As above, blocked, and the keeper is backed up with its end recorded and its message
+    // owed, then restored. The owed mark isn't restored: the restore's re-send queues the
+    // record's own end, and holds it while bob is blocked; once he is unblocked it goes,
+    // once (Paykit spec 7.2, "What a restore loses"; 8.3, "Ending").
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = keeper(&w).await;
+    let (theirs, mine) = crossing_while_held(&w, &mut shop, &mut wallet, SendsHeld::Blocked).await;
+    assert!(ends_naming_both(&wallet, &mine).await);
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut restored = restored_unreceived(&w, &backup).await;
+    for _ in 0..2 {
+        restored.receive(None).await.unwrap();
+    }
+    assert!(restored
+        .app()
+        .protocol_scan(b"eo/")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(restored.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert_eq!(taken(&mut shop, "paykit.allowance_end").await, 0);
+    restored.unblock(&w.bob_id()).await.unwrap();
+    restored.receive(None).await.unwrap();
+    assert_eq!(taken(&mut shop, "paykit.allowance_end").await, 1);
+    restored.receive(None).await.unwrap();
+    assert_eq!(taken(&mut shop, "paykit.allowance_end").await, 0);
+    assert_eq!(
+        shop.allowance(&theirs).await.unwrap().status,
+        AllowanceStatus::Ended
+    );
 }
 
 #[tokio::test]
