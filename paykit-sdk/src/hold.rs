@@ -647,7 +647,12 @@ impl Paykit {
     /// sealed under a scope key the app doesn't hold yet ([`Paykit::copy_awaits_key`]), so
     /// what such a record stores is sent once it opens; a record that doesn't bind to its key
     /// shows nothing to send. Messages to a counterparty whose sends are held wait, the mark naming
-    /// it, for a later receive.
+    /// it, for a later receive. Period details go only while no later stop covers them: none
+    /// once their period is credited or their request is rejected or cancelled; while their
+    /// request record isn't held, or doesn't read or bind, they wait the same way, neither
+    /// sent nor dropped, and are judged again at each later receive, until the record shows
+    /// it or every one of them is past the replay window the client would refuse it by
+    /// ([`Paykit::details_stop`]). The other messages of their record go meanwhile.
     pub(crate) async fn queue_own_again(&mut self) -> Result<()> {
         let Some(owed) = self
             .local_get::<OwnResendOwed>(key::OWN_RESEND_OWED)
@@ -696,13 +701,30 @@ impl Paykit {
                 {
                     continue;
                 }
-                let messages = own_to_send_again(&record, &own, &app_id);
-                if messages.is_empty() {
+                // Period details go only while no later stop covers them: one their request
+                // record can't show yet holds them, unless the client would refuse them by
+                // now anyway.
+                let details = own_details(&record, &own, &app_id);
+                let stop = if details.is_empty() {
+                    DetailsStop::Goes
+                } else {
+                    Box::pin(self.details_stop(&record, label.as_ref())).await?
+                };
+                let details_wait = stop == DetailsStop::Unknown
+                    && details
+                        .iter()
+                        .any(|stored| !self.past_replay_window(stored));
+                let details_go = stop == DetailsStop::Goes;
+                let messages = own_to_send_again(&record, &own, &app_id, details_go);
+                if messages.is_empty() && !details_wait {
                     continue;
                 }
                 if self.sends_held(&counterparty).await? {
                     waiting.insert(counterparty);
                     continue;
+                }
+                if details_wait {
+                    waiting.insert(counterparty);
                 }
                 for stored in messages {
                     match self.app.queue_stored(stored.plaintext()).await {
@@ -727,6 +749,47 @@ impl Paykit {
             };
             self.local_put(key::OWN_RESEND_OWED, &owed).await
         }
+    }
+
+    /// Whether a later stop covers the period details the payee period record `record`,
+    /// under `label`, keeps (Paykit spec 7.2, "What a restore loses"): its period credited,
+    /// the record holding the receipt every credit leaves in it, or its request record
+    /// holding a rejection or a cancellation from either side. A request record the app
+    /// doesn't hold, or holds as a value that doesn't read or bind, can't show it:
+    /// [`DetailsStop::Unknown`].
+    async fn details_stop(
+        &self,
+        record: &ActivityRecord,
+        label: Option<&paykit_lib::Label>,
+    ) -> Result<DetailsStop> {
+        if record.receipt.is_some() {
+            return Ok(DetailsStop::Stopped);
+        }
+        let Ok(paykit_lib::records::RecordBinding::Period { request_hash, .. }) = record.binding()
+        else {
+            return Ok(DetailsStop::Unknown);
+        };
+        let target = crate::activity::ActivityTarget::payee(
+            paykit_lib::derive::natural_key::request_record(&self.identity(), &request_hash),
+            label,
+        );
+        Ok(match self.held_activity(&target).await? {
+            None => DetailsStop::Unknown,
+            Some(request) if rejected(&request) || cancelled(&request) => DetailsStop::Stopped,
+            Some(_) => DetailsStop::Goes,
+        })
+    }
+
+    /// Whether the client refuses to queue `stored` again by now: past 30 days from its
+    /// `created_at`, less the clock tolerance, by the later of the device clock and the
+    /// service time verified (Switch spec 11, `App::queue_stored`).
+    fn past_replay_window(&self, stored: &paykit_lib::records::StoredMessage) -> bool {
+        let until = stored
+            .message()
+            .created_at_ms
+            .saturating_sub(CLOCK_TOLERANCE_MS)
+            .saturating_add(pubky_switch_client::app::SENT_RETENTION_MS);
+        self.now().max(self.service_time().unwrap_or(0)) > until
     }
 
     /// Queue, once after a restore, a `resend_request` to every counterparty with an open
@@ -789,34 +852,72 @@ impl Paykit {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct OwnResendOwed {
     /// `None` while no pass ran: every counterparty's messages are owed. After a pass, the
-    /// counterparties whose sends were held then, a blocked one or every one while the copy
-    /// of the deny list isn't known, ascending, each once: only their messages are owed.
+    /// counterparties some of whose messages wait, ascending, each once: only their messages
+    /// are owed. Those whose sends were held then, a blocked one or every one while the copy
+    /// of the deny list isn't known, and those with period details whose request record
+    /// couldn't show yet whether a later stop covers them ([`DetailsStop::Unknown`]).
     pub(crate) waiting: Option<Vec<[u8; 32]>>,
+}
+
+/// Whether a later stop covers the period details a payee period record keeps, for the
+/// restore's re-send ([`Paykit::queue_own_again`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DetailsStop {
+    /// None does: they are queued again.
+    Goes,
+    /// The period is credited, or its request is rejected or cancelled: they aren't.
+    Stopped,
+    /// The request record can't show it yet: they wait, neither sent nor dropped, until it
+    /// can or the client would refuse them by now anyway.
+    Unknown,
+}
+
+/// The period details `record` keeps that this app signed, `app_id` of identity `own`, that
+/// go again after a restore while no later stop covers them: every one, the earlier ones
+/// (`earlier_details`) and then the current one, while the record holds no response and no
+/// cancellation.
+pub(crate) fn own_details<'a>(
+    record: &'a ActivityRecord,
+    own: &[u8; 32],
+    app_id: &[u8; 16],
+) -> Vec<&'a paykit_lib::records::StoredMessage> {
+    if record.response.is_some() || record.cancellation.is_some() {
+        return Vec::new();
+    }
+    record
+        .earlier_details
+        .iter()
+        .chain(record.period_details.iter())
+        .filter(|stored| own_signed(stored, own, app_id))
+        .collect()
 }
 
 /// The messages of `record` this app signed, `app_id` of identity `own`, that it queues again
 /// after a restore (Paykit spec 7.2, "What a restore loses"): each a record stores to be
 /// sent, since every message this app stores in a record it also queues
 /// (`records::own_message_tests`), while the counterparty hasn't answered it and no later
-/// stop covers it. A request or a Billing Period's details goes while the record holds no
-/// response and no cancellation, every details a period record keeps, the earlier ones
-/// (`earlier_details`) and then the current one; an acceptance or a rejection while it
-/// holds no cancellation and no receipt; a proof while it holds no receipt; a cancellation
-/// and a receipt always. A receipt the app stored without sending it is never sent this way: this
-/// app stores its own receipt only in the batch that queues it
-/// ([`Paykit::confirm_payment_with`]), so its receipt in a record is one it sent.
+/// stop covers it. A request goes while the record holds no response and no cancellation;
+/// a Billing Period's details too ([`own_details`]), and only while `details_go`: no stop
+/// the period's request record or the period's credit shows covers them
+/// ([`DetailsStop`]); an acceptance or a rejection while it holds no cancellation and no
+/// receipt; a proof while it holds no receipt; a cancellation and a receipt always. A
+/// receipt the app stored without sending it is never sent this way: this app stores its
+/// own receipt only in the batch that queues it ([`Paykit::confirm_payment_with`]), so its
+/// receipt in a record is one it sent.
 pub(crate) fn own_to_send_again<'a>(
     record: &'a ActivityRecord,
     own: &[u8; 32],
     app_id: &[u8; 16],
+    details_go: bool,
 ) -> Vec<&'a paykit_lib::records::StoredMessage> {
     let answered = record.response.is_some() || record.cancellation.is_some();
-    let earlier = record
-        .earlier_details
-        .iter()
-        .map(|stored| (stored, !answered));
+    let request = record.request.iter().filter(|_| !answered);
+    let details = if details_go {
+        own_details(record, own, app_id)
+    } else {
+        Vec::new()
+    };
     let later = [
-        (&record.period_details, !answered),
         (
             &record.response,
             record.cancellation.is_none() && record.receipt.is_none(),
@@ -826,17 +927,22 @@ pub(crate) fn own_to_send_again<'a>(
         (&record.receipt, true),
     ]
     .into_iter()
-    .filter_map(|(stored, send)| stored.as_ref().map(|stored| (stored, send)));
-    record
-        .request
-        .iter()
-        .map(|stored| (stored, !answered))
-        .chain(earlier)
-        .chain(later)
-        .filter(|(_, send)| *send)
-        .map(|(stored, _)| stored)
-        .filter(|stored| stored.sender() == *own && stored.cert().app_id() == *app_id)
-        .collect()
+    .filter_map(|(stored, send)| stored.as_ref().filter(|_| send));
+    let mut all: Vec<_> = request
+        .filter(|stored| own_signed(stored, own, app_id))
+        .collect();
+    all.extend(details);
+    all.extend(later.filter(|stored| own_signed(stored, own, app_id)));
+    all
+}
+
+/// Whether `stored` is a message this app, `app_id` of identity `own`, signed.
+fn own_signed(
+    stored: &paykit_lib::records::StoredMessage,
+    own: &[u8; 32],
+    app_id: &[u8; 16],
+) -> bool {
+    stored.sender() == *own && stored.cert().app_id() == *app_id
 }
 
 /// The refusal while the shared records aren't listed since a restore.

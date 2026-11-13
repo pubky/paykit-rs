@@ -2816,15 +2816,15 @@ async fn test_periods_acceptance_stays_after_a_restore() {
 }
 
 /// Bob's `till`, alice's `wallet` subscribed to its monthly request, sends her January's
-/// details twice, `apart_ms` apart, and is backed up then: its period record keeps the
-/// first in `earlier_details` and the second in `period_details`. Returns the two
-/// `msg_id`s, the earlier first, and the backup.
-async fn details_twice_backed_up(
+/// details twice, `apart_ms` apart: its period record keeps the first in `earlier_details`
+/// and the second in `period_details`. Returns the request, the till's record of it, and
+/// the two `msg_id`s, the earlier first.
+async fn details_twice(
     w: &World,
     till: &mut Paykit,
     wallet: &mut Paykit,
     apart_ms: u64,
-) -> ([String; 2], paykit_sdk::PaykitBackup) {
+) -> (RequestRef, [u8; 32], [String; 2]) {
     let request = requested(w, till, wallet).await;
     wallet.accept_subscription(&request).await.unwrap();
     till.receive(None).await.unwrap();
@@ -2848,7 +2848,7 @@ async fn details_twice_backed_up(
     let held: Vec<&str> = period.details.iter().map(|d| d.msg_id.as_str()).collect();
     assert_eq!(held, [second.msg_id.as_str(), first.msg_id.as_str()]);
     wallet.receive(None).await.unwrap();
-    ([first.msg_id, second.msg_id], till.backup().await.unwrap())
+    (request, sale, [first.msg_id, second.msg_id])
 }
 
 /// `backup` restored onto a new store as an app of bob's, without a receive: no outbox holds
@@ -2878,7 +2878,8 @@ async fn test_periods_restore_queues_each_own_details_again_once() {
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
-    let (sent, backup) = details_twice_backed_up(&w, &mut shop, &mut wallet, 1_000).await;
+    let (_, _, sent) = details_twice(&w, &mut shop, &mut wallet, 1_000).await;
+    let backup = shop.backup().await.unwrap();
     drop(shop);
     let mut shop = bob_restored(&w, &backup).await;
     for msg_id in &sent {
@@ -2954,7 +2955,8 @@ async fn test_periods_restore_own_details_wait_while_sends_to_the_payer_are_held
                 .unwrap(),
         )
         .await;
-    let (sent, backup) = details_twice_backed_up(&w, &mut till, &mut wallet, 1_000).await;
+    let (_, _, sent) = details_twice(&w, &mut till, &mut wallet, 1_000).await;
+    let backup = till.backup().await.unwrap();
     drop(till);
     let mut till = bob_restored(&w, &backup).await;
     till.block(&w.alice_id()).await.unwrap();
@@ -2987,7 +2989,8 @@ async fn test_periods_restore_own_details_past_their_replay_window_not_sent_agai
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
-    let (sent, backup) = details_twice_backed_up(&w, &mut shop, &mut wallet, 20 * DAY_MS).await;
+    let (_, _, sent) = details_twice(&w, &mut shop, &mut wallet, 20 * DAY_MS).await;
+    let backup = shop.backup().await.unwrap();
     drop(shop);
     let mut shop = bob_restored(&w, &backup).await;
     w.clock.advance_ms(11 * DAY_MS);
@@ -3009,6 +3012,165 @@ async fn test_periods_restore_own_details_past_their_replay_window_not_sent_agai
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 1);
     shop.receive(None).await.unwrap();
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 1);
+}
+
+/// Bob's payee request record of `request`.
+fn payee_request_at(request: &RequestRef) -> RecordTarget {
+    let collection = Collection::PayeeActivity;
+    RecordTarget::new(
+        SwitchCollection::new(collection.name(), collection.policy(None)),
+        &natural_key::request_record(&request.payee, &request.request_hash),
+    )
+}
+
+/// `app` writes `bytes` as the value of the record at `target`.
+async fn writes_value(app: &mut Paykit, target: &RecordTarget, bytes: &[u8]) {
+    let op = app
+        .app_mut()
+        .record_op(target, Some(bytes), Vec::new())
+        .await
+        .unwrap();
+    app.app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_periods_restore_after_the_payee_cancelled_queues_no_details() {
+    // The shop cancelled the subscription after sending January's details: the request
+    // record's cancellation is a later stop that covers them, so the restored shop queues
+    // the cancellation again and neither details (Paykit spec 7.2, "What a restore loses").
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (_, sale, sent) = details_twice(&w, &mut shop, &mut wallet, 1_000).await;
+    let cancellation = shop.cancel_sent_request(&sale, None).await.unwrap();
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let mut shop = bob_restored(&w, &backup).await;
+    let before = w.alice.switch().entries_from(&w.bob_id());
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(queued(&shop, &cancellation).await);
+    for msg_id in &sent {
+        assert!(!queued(&shop, msg_id).await, "{msg_id}");
+    }
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 1);
+}
+
+#[tokio::test]
+async fn test_periods_restore_after_the_period_is_credited_queues_no_details() {
+    // January is credited after its details were sent, its receipt in its period record: a
+    // later stop that covers the details. The restored shop queues the receipt again and
+    // neither details (Paykit spec 7.2, "What a restore loses").
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _, sent) = details_twice(&w, &mut shop, &mut wallet, 1_000).await;
+    let body = period_proof(&w, shop.app_id(), january()).await;
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        body,
+    );
+    shop.receive(None).await.unwrap();
+    let period = shop.payee_activity().await.unwrap()[0].periods[0].record;
+    let receipt = shop.confirm_payment(&period).await.unwrap().unwrap();
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let mut shop = bob_restored(&w, &backup).await;
+    let before = w.alice.switch().entries_from(&w.bob_id());
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(queued(&shop, &receipt).await);
+    for msg_id in &sent {
+        assert!(!queued(&shop, msg_id).await, "{msg_id}");
+    }
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 1);
+}
+
+#[tokio::test]
+async fn test_periods_restore_own_details_wait_while_their_request_record_doesnt_read() {
+    // After the backup the till writes the shop's request record as a value no reader reads:
+    // the restored shop can't tell whether a stop covers the details, so they wait, neither
+    // sent nor dropped, the re-send still owed. Once the till writes the record back, they
+    // go, each once (Paykit spec 7.2, "What a restore loses").
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _, sent) = details_twice(&w, &mut shop, &mut wallet, 1_000).await;
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    till.receive(None).await.unwrap();
+    let target = payee_request_at(&request);
+    let good = till.app_mut().read_record(&target).await.unwrap().unwrap();
+    let good = good.content.value().unwrap().to_vec();
+    let mut value: serde_json::Value = serde_json::from_slice(&good).unwrap();
+    value["v"] = json!(99);
+    writes_value(&mut till, &target, &serde_json::to_vec(&value).unwrap()).await;
+    let mut shop = bob_restored(&w, &backup).await;
+    let before = w.alice.switch().entries_from(&w.bob_id());
+    for _ in 0..2 {
+        shop.receive(None).await.unwrap();
+    }
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    for msg_id in &sent {
+        assert!(!queued(&shop, msg_id).await, "{msg_id}");
+    }
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    writes_value(&mut till, &target, &good).await;
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    for msg_id in &sent {
+        assert!(queued(&shop, msg_id).await, "{msg_id}");
+    }
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 2);
+    shop.receive(None).await.unwrap();
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 2);
+}
+
+#[tokio::test]
+async fn test_periods_restore_own_details_waiting_on_their_request_record_end_past_their_window() {
+    // The request record stays a value no reader reads: the details wait until both are
+    // past the 30 days the client would queue them again in, and then the re-send is owed
+    // no more, with nothing sent and nothing told (Paykit spec 7.2, "What a restore loses").
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _, sent) = details_twice(&w, &mut shop, &mut wallet, 1_000).await;
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    till.receive(None).await.unwrap();
+    let target = payee_request_at(&request);
+    writes_value(
+        &mut till,
+        &target,
+        &serde_json::to_vec(&json!({ "v": 99 })).unwrap(),
+    )
+    .await;
+    let mut shop = bob_restored(&w, &backup).await;
+    let before = w.alice.switch().entries_from(&w.bob_id());
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    w.clock.advance_ms(31 * DAY_MS);
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    for msg_id in &sent {
+        assert!(!queued(&shop, msg_id).await, "{msg_id}");
+    }
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
+    assert!(shop.notices().await.unwrap().is_empty());
 }
 
 #[tokio::test]

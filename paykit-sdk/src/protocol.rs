@@ -1466,7 +1466,7 @@ mod receive_tests {
         };
         record.receipt = Some(receipt(&bob));
         let own = |record: &ActivityRecord| {
-            crate::hold::own_to_send_again(record, &bob.id(), &bob.cert.app_id())
+            crate::hold::own_to_send_again(record, &bob.id(), &bob.cert.app_id(), true)
                 .into_iter()
                 .map(|stored| stored.message().kind.clone())
                 .collect::<Vec<_>>()
@@ -1533,7 +1533,7 @@ mod receive_tests {
         }
         assert_eq!(record.earlier_details.len(), 2);
         let own = |record: &ActivityRecord| {
-            crate::hold::own_to_send_again(record, &bob.id(), &bob.cert.app_id())
+            crate::hold::own_to_send_again(record, &bob.id(), &bob.cert.app_id(), true)
                 .into_iter()
                 .map(|stored| stored.hash())
                 .collect::<Vec<_>>()
@@ -1585,6 +1585,15 @@ mod receive_tests {
         sent.sort();
         expected.sort();
         assert_eq!(sent, expected);
+        assert_eq!(
+            crate::hold::own_details(&record, &bob.id(), &bob.cert.app_id()).len(),
+            2
+        );
+        // A stop the request record or the period's credit shows covers them: none goes.
+        assert!(
+            crate::hold::own_to_send_again(&record, &bob.id(), &bob.cert.app_id(), false)
+                .is_empty()
+        );
         // A later stop covers every one of them: only the stop goes again.
         let cancellation = bob.message(
             &alice,
