@@ -194,6 +194,25 @@ impl FakeRail {
         inner.declaration = Some(declaration);
     }
 
+    /// Pay `amount` to `payload` under `key` outside any attempt of this SDK, as an app of
+    /// another version would, with the next behaviour: the proof a payer would send with it.
+    pub async fn pay_outside(
+        &self,
+        endpoint_id: PaymentEndpointIdentifier,
+        payload: PaymentEndpointPayload,
+        amount: PaymentAmount,
+        key: AttemptId,
+    ) -> Result<RailOutcome, RailError> {
+        self.pay(RailPayment {
+            endpoint_id,
+            payload,
+            amount,
+            idempotency_key: key,
+            payment_reference: None,
+        })
+        .await
+    }
+
     /// How many times [`Rail::pay`] was called under `key`, repeats included.
     pub fn pay_calls(&self, key: &AttemptId) -> u64 {
         self.lock().calls.get(key).copied().unwrap_or(0)

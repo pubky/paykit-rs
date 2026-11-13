@@ -57,18 +57,19 @@ use crate::receive::{self, Fail, QueuedAnswer};
 use crate::records::KeptMessage;
 use crate::state::{self, key, StateKey};
 
-/// The kinds this SDK handles (Paykit wire 4.3): the one-time request flow, payments without
-/// a request, the payer's side of Private Payment Lists, re-sends, and the Allowance
-/// messages with `executor_notice`. Recurring requests and publishing Private Payment Lists
-/// come later. A `private_payment_list_request` this SDK receives is taken with no effect:
-/// it publishes no list at all yet, so the Publishing rule's answer to a request naming a
-/// used version (Paykit spec 8.4) comes with list publishing, with that rule's other
-/// triggers.
-pub const HANDLED_KINDS: [Kind; 14] = [
+/// The kinds this SDK handles (Paykit wire 4.3): the one-time request flow, recurring
+/// requests' acceptance and period details, payments without a request, the payer's side of
+/// Private Payment Lists, re-sends, and the Allowance messages with `executor_notice`.
+/// Publishing Private Payment Lists comes later. A `private_payment_list_request` this SDK
+/// receives is taken with no effect: it publishes no list at all yet, so the Publishing
+/// rule's answer to a request naming a used version (Paykit spec 8.4) comes with list
+/// publishing, with that rule's other triggers.
+pub const HANDLED_KINDS: [Kind; 15] = [
     Kind::PaymentRequest,
     Kind::PaymentRequestAcceptance,
     Kind::PaymentRequestRejection,
     Kind::PaymentRequestCancellation,
+    Kind::PaymentPeriodDetails,
     Kind::PaymentProof,
     Kind::PaymentReceipt,
     Kind::ResendRequest,
@@ -455,7 +456,7 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::AllowanceEnd(_) | StateKey::Conflict(_) => {
+            StateKey::AllowanceEnd { .. } | StateKey::Conflict(_) => {
                 state::restored::<KeptMessage>(&key, &value, &binder).map_err(|_| {
                     String::from(
                         "Paykit spec 8.3: a kept Allowance stop in the backup doesn't verify",
@@ -578,7 +579,8 @@ pub(crate) fn restore_paykit_layer(
     writes.push(owed);
     // The messages this app signed that a batch the backup kept unanswered queued are in no
     // outbox: they are queued again from the records once they are listed
-    // (`Paykit::queue_own_again`).
+    // (`Paykit::queue_own_again`). This step reads no clock: `Paykit::restore` writes the
+    // restore's time into the mark right after this commit (`Paykit::stamp_restore_time`).
     let resend = state::local_put(key::OWN_RESEND_OWED, &crate::hold::OwnResendOwed::default())
         .map_err(|_| String::from("the restore's re-send mark can't be written"))?;
     writes.push(resend);
@@ -1414,23 +1416,26 @@ mod receive_tests {
             panic!("an end");
         };
         let target = allowance_target(&bob.id(), &reply.allowance_id);
-        let key = key::allowance_end(&fake_key(&target));
+        let key = key::allowance_end(&fake_key(&target), &end.message().msg_id);
         let value = state::encode(&KeptMessage::of(&end)).unwrap();
         assert!(restores::<KeptMessage>(&alice, key.as_bytes(), &value));
+        // Under another `msg_id` of the same record: refused.
+        let other = key::allowance_end(&fake_key(&target), "0d6f5b9e-3c1a-4e8b-9f2d-7a4c1e5b8d30");
+        assert!(!restores::<KeptMessage>(&alice, other.as_bytes(), &value));
     }
 
     #[test]
     fn test_protocol_restore_refuses_a_kept_end_at_another_key_or_of_another_kind() {
         let (alice, bob, proposal, end) = allowance_end();
         let value = state::encode(&KeptMessage::of(&end)).unwrap();
-        let other = key::allowance_end(&[9; 32]);
+        let other = key::allowance_end(&[9; 32], &end.message().msg_id);
         assert!(!restores::<KeptMessage>(&alice, other.as_bytes(), &value));
         // The proposal under the end's key isn't an end.
         let Body::AllowanceProposal(body) = proposal.body() else {
             panic!("a proposal");
         };
         let target = allowance_target(&bob.id(), &body.allowance_id);
-        let key = key::allowance_end(&fake_key(&target));
+        let key = key::allowance_end(&fake_key(&target), &proposal.message().msg_id);
         let proposal = state::encode(&KeptMessage::of(&proposal)).unwrap();
         assert!(!restores::<KeptMessage>(&alice, key.as_bytes(), &proposal));
     }
@@ -1571,7 +1576,10 @@ mod receive_tests {
         let Body::AllowanceEnd(reply) = end.body() else {
             panic!("an end");
         };
-        let key = key::allowance_end(&fake_key(&allowance_target(&bob.id(), &reply.allowance_id)));
+        let key = key::allowance_end(
+            &fake_key(&allowance_target(&bob.id(), &reply.allowance_id)),
+            &end.message().msg_id,
+        );
         let value = state::encode(&KeptMessage::of(&end)).unwrap();
         assert!(!restores::<KeptMessage>(
             &alice,
@@ -1626,6 +1634,34 @@ mod receive_tests {
         let mut json: serde_json::Value = serde_json::from_slice(value).unwrap();
         json["d"]["accepted_at"] = serde_json::Value::Null;
         serde_json::to_vec(&json).unwrap()
+    }
+
+    #[test]
+    fn test_protocol_restore_refuses_a_kept_conflict_without_its_acceptance_time() {
+        // Every writer of `cf/` keeps a message its inbox accepted, with the time: a proposal
+        // or a response conflict without it is no state a run leaves, and the restore
+        // refuses it rather than install a stop for good.
+        let (alice, bob, proposal, _) = allowance_end();
+        let Body::AllowanceProposal(body) = proposal.body() else {
+            panic!("a proposal");
+        };
+        let record = fake_key(&allowance_target(&bob.id(), &body.allowance_id));
+        let at = key::conflict(&record);
+        let response = bob.message(
+            &alice,
+            "paykit.allowance_rejection",
+            vec![proposal.hash()],
+            object(json!({ "allowance_id": body.allowance_id.as_str() })),
+        );
+        for conflict in [&proposal, &response] {
+            let value = state::encode(&KeptMessage::of(conflict)).unwrap();
+            assert!(restores::<KeptMessage>(&alice, at.as_bytes(), &value));
+            assert!(!restores::<KeptMessage>(
+                &alice,
+                at.as_bytes(),
+                &without_acceptance(&value)
+            ));
+        }
     }
 
     #[test]
@@ -1784,7 +1820,7 @@ mod receive_tests {
         };
         record.receipt = Some(receipt(&bob));
         let own = |record: &ActivityRecord| {
-            crate::hold::own_to_send_again(record, &bob.id(), &bob.cert.app_id())
+            crate::hold::own_to_send_again(record, &bob.id(), &bob.cert.app_id(), true)
                 .into_iter()
                 .map(|stored| stored.message().kind.clone())
                 .collect::<Vec<_>>()
@@ -1811,6 +1847,116 @@ mod receive_tests {
         ));
         record.receipt = Some(receipt(&till));
         assert!(own(&record).is_empty());
+    }
+
+    #[test]
+    fn test_protocol_own_period_details_each_sent_again_after_a_restore() {
+        // A period record keeps every details the payee sent for its period, the latest in
+        // `period_details` and the others in `earlier_details`: a restore queues again each
+        // this app signed, the earlier ones first, and none another app signed (Paykit spec
+        // 7.2, "What a restore loses").
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let till = Party::new("bob", "till", &["request"]);
+        let details = |by: &Party, expires: &str| {
+            by.message(
+                &alice,
+                "paykit.payment_period_details",
+                vec![[7; 32]],
+                object(json!({
+                    "billing_period": {
+                        "starts_at": "2026-02-28T00:00:00.000Z",
+                        "ends_at": "2026-03-31T00:00:00.000Z"
+                    },
+                    "expires_at": expires,
+                    "payment_endpoints": { "btc-lightning-bolt11": "lnbc1period" }
+                })),
+            )
+        };
+        let mut record = activity::empty(ActivitySide::Payee, alice.id());
+        for (by, expires) in [
+            (&bob, "2026-03-01T00:00:00.000Z"),
+            (&bob, "2026-03-02T00:00:00.000Z"),
+            (&till, "2026-03-03T00:00:00.000Z"),
+        ] {
+            assert!(activity::place(
+                &mut record,
+                activity::Role::PeriodDetails,
+                details(by, expires)
+            ));
+        }
+        assert_eq!(record.earlier_details.len(), 2);
+        let own = |record: &ActivityRecord| {
+            crate::hold::own_to_send_again(record, &bob.id(), &bob.cert.app_id(), true)
+                .into_iter()
+                .map(|stored| stored.hash())
+                .collect::<Vec<_>>()
+        };
+        let mut expected: Vec<[u8; 32]> = record
+            .earlier_details
+            .iter()
+            .chain(record.period_details.iter())
+            .filter(|stored| stored.cert().app_id() == bob.cert.app_id())
+            .map(|stored| stored.hash())
+            .collect();
+        assert_eq!(expected.len(), 2);
+        assert_eq!(own(&record), expected);
+        // Whichever the record holds as current: a proof naming the earliest makes it the
+        // period's current details, and each is still queued once.
+        let earliest = record.earlier_details[0].clone();
+        let body = paykit_lib::bodies::PaymentProof {
+            attempt_id: paykit_lib::AttemptId::from_bytes([9; 16]),
+            billing_period: Some(paykit_lib::periods::PeriodRef {
+                starts_at: 1_772_236_800_000,
+                ends_at: 1_774_915_200_000,
+            }),
+            payment_endpoint_identifier: paykit_lib::PaymentEndpointIdentifier::new(
+                "btc-lightning-bolt11",
+            )
+            .unwrap(),
+            payment_app_id: [0; 16],
+            list_version: None,
+            amount: None,
+            allowance_id: None,
+            label: None,
+            payment_reference: None,
+            proof: object(json!({ "preimage": "00" })),
+        }
+        .to_body(2)
+        .unwrap();
+        let proof = alice.message(
+            &bob,
+            "paykit.payment_proof",
+            vec![[7; 32], earliest.hash()],
+            body,
+        );
+        assert!(activity::place(&mut record, activity::Role::Proof, proof));
+        assert_eq!(
+            record.period_details.as_ref().map(|d| d.hash()),
+            Some(earliest.hash())
+        );
+        let mut sent = own(&record);
+        sent.sort();
+        expected.sort();
+        assert_eq!(sent, expected);
+        assert_eq!(
+            crate::hold::own_details(&record, &bob.id(), &bob.cert.app_id()).len(),
+            2
+        );
+        // A stop the request record or the period's credit shows covers them: none goes.
+        assert!(
+            crate::hold::own_to_send_again(&record, &bob.id(), &bob.cert.app_id(), false)
+                .is_empty()
+        );
+        // A later stop covers every one of them: only the stop goes again.
+        let cancellation = bob.message(
+            &alice,
+            "paykit.payment_request_cancellation",
+            vec![[7; 32]],
+            object(json!({ "reason": null })),
+        );
+        record.cancellation = Some(cancellation.clone());
+        assert_eq!(own(&record), [cancellation.hash()]);
     }
 
     #[test]

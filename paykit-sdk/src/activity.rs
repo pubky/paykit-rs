@@ -7,8 +7,11 @@
 //! message for a role already held is still processed, but not stored: its `msg_id` joins
 //! the bounded list of others the record reflects (Paykit wire 5.3).
 
+use paykit_lib::bodies::period_details_order;
 use paykit_lib::collections::Collection;
-use paykit_lib::records::{bounded_msg_ids, ActivityRecord, ActivitySide, StoredMessage};
+use paykit_lib::records::{
+    bounded_msg_ids, ActivityRecord, ActivitySide, StoredMessage, MAX_PERIOD_DETAILS,
+};
 use paykit_lib::{Body, Label};
 use pubky_switch_client::app::{Collection as SwitchCollection, RecordTarget};
 use serde::{Deserialize, Serialize};
@@ -28,6 +31,9 @@ pub enum Role {
     Proof,
     /// The receipt.
     Receipt,
+    /// Period details, in a period record, which keeps every details of its period (Paykit
+    /// wire 4.9, 5.3).
+    PeriodDetails,
 }
 
 impl Role {
@@ -39,6 +45,7 @@ impl Role {
             Body::PaymentRequestCancellation(_) => Self::Cancellation,
             Body::PaymentProof(_) => Self::Proof,
             Body::PaymentReceipt(_) => Self::Receipt,
+            Body::PaymentPeriodDetails(_) => Self::PeriodDetails,
             _ => return None,
         })
     }
@@ -183,15 +190,90 @@ pub(crate) fn place(record: &mut ActivityRecord, role: Role, message: StoredMess
         Role::Cancellation => &mut record.cancellation,
         Role::Proof => &mut record.proof,
         Role::Receipt => &mut record.receipt,
+        Role::PeriodDetails => {
+            if !place_details(record, message) {
+                others.push(msg_id);
+            }
+            record.msg_ids = bounded_msg_ids(&stored_ids(record), &others);
+            record.status = Some(status_text(record).to_owned());
+            return true;
+        }
     };
     if slot.is_none() {
         *slot = Some(message);
+        // The details a period's proof names are the period's current ones from then on,
+        // whichever the record held as latest: the payer may pay by any valid details
+        // (Paykit spec 8.2, Paykit wire 5.3).
+        if role == Role::Proof {
+            order_details(record);
+        }
     } else {
         others.push(msg_id);
     }
     record.msg_ids = bounded_msg_ids(&stored_ids(record), &others);
     record.status = Some(status_text(record).to_owned());
     true
+}
+
+/// Store period details `message` in the period record `record` (Paykit wire 4.9, 5.3):
+/// each details stays, none replacing another, at most [`MAX_PERIOD_DETAILS`] for the
+/// period. `period_details` holds the latest, by `created_at` then `msg_id`, and
+/// `earlier_details` the others in that order; once the record holds a proof that names
+/// details, those stay in `period_details`. Returns `false` when it stores nothing, the
+/// record holding 8 already; the caller reflects the `msg_id` then. Details as late as held
+/// ones, the same `created_at` and `msg_id`, never reach here: [`place`] takes a message
+/// whose `msg_id` the record reflects as placed already, so other details as late, an
+/// equivocation, leave the held ones as they are (Paykit wire 4.9).
+fn place_details(record: &mut ActivityRecord, message: StoredMessage) -> bool {
+    if record.details().len() >= MAX_PERIOD_DETAILS {
+        return false;
+    }
+    // A period record names its request and period, from the details' own signed fields.
+    if record.request_hash.is_none() {
+        record.request_hash = message.message().refs.first().copied();
+    }
+    if record.billing_period.is_none() {
+        record.billing_period = message.body().billing_period().copied();
+    }
+    record.earlier_details.push(message);
+    order_details(record);
+    true
+}
+
+/// Order the period details `record` holds (Paykit wire 5.3): the ones its proof names in
+/// `period_details`, or else the latest, by `created_at` then `msg_id`, and the others in
+/// `earlier_details` in that order.
+fn order_details(record: &mut ActivityRecord) {
+    let named = record
+        .proof
+        .as_ref()
+        .and_then(|proof| proof.message().refs.get(1).copied());
+    let mut all: Vec<StoredMessage> = record
+        .period_details
+        .take()
+        .into_iter()
+        .chain(std::mem::take(&mut record.earlier_details))
+        .collect();
+    if all.is_empty() {
+        return;
+    }
+    all.sort_by(|a, b| period_details_order(a.message(), b.message()));
+    let current = named
+        .and_then(|hash| all.iter().position(|d| d.hash() == hash))
+        .unwrap_or(all.len() - 1);
+    record.period_details = Some(all.remove(current));
+    record.earlier_details = all;
+}
+
+/// Whether the proof `stored` names period details `record` doesn't hold: placed now, the
+/// record wouldn't bind (Paykit wire 5.3), so it waits for them as a reply before its record.
+pub(crate) fn names_details_not_held(record: &ActivityRecord, stored: &StoredMessage) -> bool {
+    matches!(stored.body(), Body::PaymentProof(_))
+        && stored
+            .message()
+            .refs
+            .get(1)
+            .is_some_and(|named| record.details().iter().all(|d| d.hash() != *named))
 }
 
 /// The informational `status` a writer sets (Paykit wire 5.3): written by the last writer,

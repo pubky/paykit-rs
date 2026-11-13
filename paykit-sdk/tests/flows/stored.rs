@@ -1800,3 +1800,422 @@ async fn test_stored_receipt_over_a_record_that_never_reads_given_up_with_a_noti
 async fn test_stored_receipt_over_a_record_that_doesnt_open_kept_until_it_reads() {
     receipt_over_unread_record(Unread::Sealed, true).await;
 }
+
+/// The body of bob's receipt for `attempt_id`.
+fn receipt_body(attempt_id: paykit_lib::AttemptId) -> serde_json::Map<String, serde_json::Value> {
+    paykit_lib::bodies::PaymentReceipt {
+        attempt_id,
+        billing_period: None,
+        metadata: None,
+        payment_reference: None,
+    }
+    .to_body(2)
+    .unwrap()
+}
+
+/// The marks of dropped replies `app` holds, as (sender, earliest time, due).
+async fn reply_marks(app: &Paykit) -> Vec<([u8; 32], u64, bool)> {
+    app.app()
+        .protocol_scan(b"pd/")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, value)| {
+            let value: serde_json::Value = serde_json::from_slice(&value).unwrap();
+            let mark = &value["d"];
+            let sender =
+                pubky_switch_core::enc::unb64_array::<32>(mark["sender"].as_str().unwrap())
+                    .unwrap();
+            (
+                sender,
+                mark["earliest_ms"].as_u64().unwrap(),
+                mark["due"].as_bool().unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// Alice's wallet, her attempt on bob's request open, holds the payer record of the
+/// request with a value her phone wrote that doesn't read. Bob's receipt for the attempt
+/// comes, accepted at `at`, and is kept over the record; a second later `others` more of
+/// his receipts for the same record, naming attempts of no claim, are kept the same way.
+struct KeptOverUnread {
+    w: World,
+    wallet: Paykit,
+    phone: Paykit,
+    request: paykit_sdk::RequestRef,
+    attempt_id: paykit_lib::AttemptId,
+    /// The record's value before the phone's write, which reads.
+    good: Vec<u8>,
+    /// Bob's receipt for the attempt, as he signed it.
+    receipt: pubky_switch_core::message::MessagePlaintext,
+    at: u64,
+}
+
+async fn receipts_kept_over_unread(others: usize) -> KeptOverUnread {
+    receipts_kept_over_unread_by(others, AppScopes::new().pay()).await
+}
+
+/// [`receipts_kept_over_unread`], the wallet holding `scopes`.
+async fn receipts_kept_over_unread_by(others: usize, scopes: AppScopes) -> KeptOverUnread {
+    let w = World::new();
+    let store = Arc::new(crate::outcome_record::NoSeenMarks::default());
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            scopes.build().unwrap(),
+            PaykitConfig::default(),
+            Arc::clone(&store) as Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let attempt_id = pending(&w, &mut wallet, &request).await;
+    phone.receive(None).await.unwrap();
+    let target = crate::outcome_record::payer_record(&request);
+    let key = phone.app().record_key(&target).unwrap();
+    let good = phone
+        .app()
+        .shared_record(&key)
+        .await
+        .unwrap()
+        .unwrap()
+        .content
+        .value()
+        .unwrap()
+        .to_vec();
+    store.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    crate::outcome_record::phone_writes(&mut phone, &request, Some(crate::outcome_record::INVALID))
+        .await;
+    wallet.receive(None).await.unwrap();
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    assert_eq!(held.content.value(), Some(crate::outcome_record::INVALID));
+    let at = w.clock.now_ms();
+    let receipt = w.sign_as(
+        &w.bob,
+        "shop",
+        &w.alice,
+        "paykit.payment_receipt",
+        vec![[7; 32], request.request_hash],
+        receipt_body(attempt_id),
+    );
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &receipt);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(kept(&wallet, "pr/").await.len(), 1);
+    w.clock.advance_ms(1_000);
+    for i in 0..others {
+        let other = paykit_lib::AttemptId::from_bytes([u8::try_from(i).unwrap(); 16]);
+        assert_ne!(other, attempt_id);
+        w.inject(
+            &w.bob,
+            "shop",
+            &w.alice,
+            &[wallet.app_id()],
+            "paykit.payment_receipt",
+            vec![[7; 32], request.request_hash],
+            receipt_body(other),
+        );
+    }
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(outcome_of(&mut wallet, attempt_id).await, Outcome::Open);
+    KeptOverUnread {
+        w,
+        wallet,
+        phone,
+        request,
+        attempt_id,
+        good,
+        receipt,
+        at,
+    }
+}
+
+impl KeptOverUnread {
+    /// The phone writes the record's value back, so it reads; the wallet's next receive
+    /// takes it. Returns how many re-sends that receive asked for.
+    async fn record_reads(&mut self) -> u64 {
+        self.phone.receive(None).await.unwrap();
+        crate::outcome_record::phone_writes(&mut self.phone, &self.request, Some(&self.good)).await;
+        self.wallet.receive(None).await.unwrap().resends
+    }
+
+    /// Bob's inbox answers the wallet's request by re-sending his receipt, as his outbox
+    /// would: the same message, accepted again now. Returns whether the wallet took it as a
+    /// new message.
+    async fn receipt_sent_again(&mut self) -> bool {
+        let w = &self.w;
+        w.deliver(
+            &w.bob,
+            "shop",
+            &w.alice,
+            &[self.wallet.app_id()],
+            &self.receipt,
+        );
+        let msg_id = pubky_switch_core::message::Message::parse(
+            self.receipt.json(),
+            paykit_lib::kinds::OPAQUE_MEMBERS,
+        )
+        .unwrap()
+        .msg_id;
+        let events = self.wallet.receive(None).await.unwrap().report.events;
+        events.iter().any(
+            |event| matches!(event, AppEvent::MessageReceived { msg_id: id, .. } if *id == msg_id),
+        )
+    }
+}
+
+#[tokio::test]
+async fn test_stored_receipt_dropped_over_an_unread_record_asked_for_once_it_reads_and_taken() {
+    // 65 of bob's receipts kept over alice's payer record that doesn't read: the earliest,
+    // the one for her open attempt, is dropped for the bound and counts in bob's mark,
+    // which waits. Once the record reads, the wallet asks bob, once, to re-send from the
+    // mark's time; the receipt he re-sends is taken as never processed and settles the
+    // attempt, as its first read would have (Paykit spec 8.1, "Replies before their
+    // record").
+    let mut k = receipts_kept_over_unread(paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER).await;
+    let bob = k.w.bob_id();
+    assert_eq!(
+        kept(&k.wallet, "pr/").await.len(),
+        paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER
+    );
+    assert_eq!(reply_marks(&k.wallet).await, vec![(bob, k.at, false)]);
+    assert!(asked(&k.wallet, &bob).await.is_empty());
+    assert_eq!(k.record_reads().await, 1);
+    assert_eq!(asked(&k.wallet, &bob).await, vec![(Some(k.at), None)]);
+    // The kept receipts, naming attempts of no claim, are placed with no effect.
+    assert!(kept(&k.wallet, "pr/").await.is_empty());
+    assert_eq!(outcome_of(&mut k.wallet, k.attempt_id).await, Outcome::Open);
+    // Asked once: a later read within the day asks nothing more.
+    assert_eq!(k.wallet.receive(None).await.unwrap().resends, 0);
+    assert_eq!(asked(&k.wallet, &bob).await.len(), 1);
+    assert!(k.receipt_sent_again().await);
+    assert!(kept(&k.wallet, "pr/").await.is_empty());
+    assert_eq!(outcome_of(&mut k.wallet, k.attempt_id).await, Outcome::Done);
+}
+
+#[tokio::test]
+async fn test_stored_receipts_kept_over_an_unread_record_up_to_the_bound_drop_nothing() {
+    // 64 receipts kept: none dropped, no mark, nothing asked; the record reads, and the
+    // kept receipt for the attempt settles it.
+    let mut k = receipts_kept_over_unread(paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER - 1).await;
+    let bob = k.w.bob_id();
+    assert_eq!(
+        kept(&k.wallet, "pr/").await.len(),
+        paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER
+    );
+    assert!(reply_marks(&k.wallet).await.is_empty());
+    assert_eq!(k.record_reads().await, 0);
+    assert!(asked(&k.wallet, &bob).await.is_empty());
+    assert!(kept(&k.wallet, "pr/").await.is_empty());
+    assert_eq!(outcome_of(&mut k.wallet, k.attempt_id).await, Outcome::Done);
+}
+
+#[tokio::test]
+async fn test_stored_receipt_dropped_over_a_record_that_stays_unread_asks_nothing() {
+    // While no record of bob's reads, his mark waits: nothing is asked, also days later.
+    let mut k = receipts_kept_over_unread(paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER).await;
+    let bob = k.w.bob_id();
+    for _ in 0..3 {
+        assert_eq!(k.wallet.receive(None).await.unwrap().resends, 0);
+        k.w.clock.advance_ms(DAY_MS);
+    }
+    assert_eq!(reply_marks(&k.wallet).await, vec![(bob, k.at, false)]);
+    assert!(asked(&k.wallet, &bob).await.is_empty());
+    assert_eq!(outcome_of(&mut k.wallet, k.attempt_id).await, Outcome::Open);
+}
+
+#[tokio::test]
+async fn test_stored_receipt_dropped_payee_blocked_asked_only_once_unblocked() {
+    // Bob blocked: his mark becomes due once the record reads, and asks nothing while he is
+    // blocked (Paykit spec 8.1, "Blocked counterparties"); once unblocked, it asks him.
+    let mut k = receipts_kept_over_unread_by(
+        paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER,
+        AppScopes::new().pay().manage_contacts(),
+    )
+    .await;
+    let bob = k.w.bob_id();
+    k.wallet.block(&bob).await.unwrap();
+    assert_eq!(k.record_reads().await, 0);
+    assert_eq!(reply_marks(&k.wallet).await, vec![(bob, k.at, true)]);
+    assert_eq!(k.wallet.receive(None).await.unwrap().resends, 0);
+    assert!(asked(&k.wallet, &bob).await.is_empty());
+    k.wallet.unblock(&bob).await.unwrap();
+    assert_eq!(k.wallet.receive(None).await.unwrap().resends, 1);
+    assert_eq!(asked(&k.wallet, &bob).await, vec![(Some(k.at), None)]);
+}
+
+/// `app` holds a mark of `sender`'s dropped replies, accepted at the time returned, not
+/// due yet: as the bounds on kept replies leave one.
+async fn seed_reply_mark(w: &World, app: &mut Paykit, sender: &[u8; 32]) -> u64 {
+    let at = w.clock.now_ms();
+    let value = serde_json::json!({
+        "v": 1,
+        "d": {
+            "sender": pubky_switch_core::enc::b64(sender),
+            "earliest_ms": at,
+            "latest_ms": at,
+            "due": false,
+            "asked_at_ms": null,
+            "queued": null,
+        }
+    });
+    app.app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: format!("pd/{}", pubky_switch_core::enc::b64(sender)).into_bytes(),
+            value: serde_json::to_vec(&value).unwrap(),
+        }])
+        .await
+        .unwrap();
+    at
+}
+
+/// Over three receives a day apart, `app` asks `sender` nothing, and `sender`'s mark,
+/// accepted at `at`, stays not due.
+async fn asks_nothing_for_days(w: &World, app: &mut Paykit, sender: &[u8; 32], at: u64) {
+    for _ in 0..3 {
+        assert_eq!(app.receive(None).await.unwrap().resends, 0);
+        w.clock.advance_ms(DAY_MS);
+    }
+    assert_eq!(reply_marks(app).await, vec![(*sender, at, false)]);
+    assert!(asked(app, sender).await.is_empty());
+}
+
+/// Alice pays bob from `wallet`, without a request, to his list's reusable endpoint.
+async fn paid_without_a_request(w: &World, wallet: &mut Paykit) {
+    let payment = paykit_sdk::UnrequestedPayment::new(w.bob_id(), crate::common::btc("0.0015"))
+        .with_options(
+            PayOptions::default().with_endpoint(crate::common::endpoint("btc-lightning-bolt12")),
+        );
+    let outcome = wallet.pay_without_request(payment).await.unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_stored_receipt_dropped_mark_waits_over_a_payment_without_a_request() {
+    // The payer record of a payment to bob without a request names him, but isn't the
+    // record of a request: his mark waits, and nothing is asked. Once the record of his
+    // request is held, the wallet asks him (Paykit spec 8.1, "Replies before their record").
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    let bob = w.bob_id();
+    let at = seed_reply_mark(&w, &mut wallet, &bob).await;
+    paid_without_a_request(&w, &mut wallet).await;
+    asks_nothing_for_days(&w, &mut wallet, &bob, at).await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
+    assert_eq!(asked(&wallet, &bob).await, vec![(Some(at), None)]);
+}
+
+#[tokio::test]
+async fn test_stored_receipt_dropped_mark_waits_over_a_billing_period_record() {
+    // The wallet holds a record of a Billing Period of bob's, as another own app writes it.
+    // It names him, but isn't the record of a request: his mark waits, and nothing is asked.
+    // Once the record of his request is held, the wallet asks him.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let bob = w.bob_id();
+    let at = seed_reply_mark(&w, &mut wallet, &bob).await;
+    let request_hash = [5; 32];
+    let period = paykit_lib::periods::PeriodRef {
+        starts_at: 1_769_817_600_000,
+        ends_at: 1_772_236_800_000,
+    };
+    let receipt = paykit_lib::bodies::PaymentReceipt {
+        attempt_id: paykit_lib::AttemptId::from_bytes([3; 16]),
+        billing_period: Some(period),
+        metadata: None,
+        payment_reference: None,
+    }
+    .to_body(2)
+    .unwrap();
+    let plaintext = w.sign_as(
+        &w.bob,
+        "shop",
+        &w.alice,
+        "paykit.payment_receipt",
+        vec![[7; 32], request_hash],
+        receipt,
+    );
+    let keys = w.bob.identity().app_keys("shop");
+    let cert = w.bob.switch().app(&keys.app_id_bytes()).cert.unwrap();
+    let stored = paykit_lib::records::StoredMessage::new(
+        bob,
+        cert.signed(),
+        plaintext,
+        Some(w.clock.now_ms()),
+        &w.alice_id(),
+    )
+    .unwrap();
+    let mut record =
+        paykit_lib::records::ActivityRecord::new(paykit_lib::records::ActivitySide::Payer, bob);
+    record.request_hash = Some(request_hash);
+    record.billing_period = Some(period);
+    record.receipt = Some(stored);
+    assert!(matches!(
+        record.binding(),
+        Ok(paykit_lib::records::RecordBinding::Period { .. })
+    ));
+    let collection = paykit_lib::collections::Collection::PayerActivity;
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(collection.name(), collection.policy(None)),
+        &paykit_lib::derive::natural_key::period_record(
+            &bob,
+            &request_hash,
+            period.starts_at / 1000,
+        ),
+    );
+    wallet
+        .app_mut()
+        .put_record(&target, &record.to_json().unwrap(), Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        wallet
+            .app()
+            .records_of(collection.name())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    asks_nothing_for_days(&w, &mut wallet, &bob, at).await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
+    assert_eq!(asked(&wallet, &bob).await, vec![(Some(at), None)]);
+}
+
+#[tokio::test]
+async fn test_stored_reply_dropped_mark_waits_at_the_payee_over_a_payment_without_a_request() {
+    // At bob's shop, the payee record of alice's payment without a request names her, but
+    // isn't the record of a request: her mark waits, and nothing is asked. Once the shop
+    // holds the record of a request to her, it asks her.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    let alice = w.alice_id();
+    let at = seed_reply_mark(&w, &mut shop, &alice).await;
+    paid_without_a_request(&w, &mut wallet).await;
+    shop.receive(None).await.unwrap();
+    let sales = shop.payee_activity().await.unwrap();
+    assert_eq!(sales.len(), 1, "{sales:?}");
+    assert_eq!((sales[0].payer, sales[0].request_hash), (alice, None));
+    asks_nothing_for_days(&w, &mut shop, &alice, at).await;
+    request_from(&mut shop, alice, draft("1", w.clock.now_ms())).await;
+    assert_eq!(shop.receive(None).await.unwrap().resends, 1);
+    assert_eq!(asked(&shop, &alice).await, vec![(Some(at), None)]);
+}

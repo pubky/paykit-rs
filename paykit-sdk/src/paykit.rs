@@ -8,8 +8,8 @@
 //! The flows live in their own modules, each an `impl Paykit` block: receiving
 //! (`receive.rs`), requests and their answers (`requests.rs`), paying (`pay.rs`), destination
 //! checks (`destination.rs`), re-sends (`resend.rs`) and reconciliation (`reconcile.rs`).
-//! Recurring requests, Allowances and publishing Private Payment Lists add their own modules
-//! the same way.
+//! Recurring requests' Billing Periods have theirs (`periods.rs`); Allowances and publishing
+//! Private Payment Lists add their own the same way.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -472,6 +472,7 @@ impl Paykit {
         .await?;
         let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
         paykit.bound_restored_cursor_time().await?;
+        paykit.stamp_restore_time().await?;
         Ok(paykit)
     }
 
@@ -735,11 +736,16 @@ impl Paykit {
             Box::pin(self.place_kept_cancellations()).await?;
         }
         // The senders of messages dropped before they were taken: of replies dropped for the
-        // bounds once the app holds the record of one of their requests, of entries dropped
-        // unverified at once, then again at most once a day while the mark lives.
+        // bounds once the app holds the record of a request, of either side, naming them, of
+        // entries dropped unverified at once, then again at most once a day while the mark
+        // lives.
         let marked = Box::pin(self.ask_on_marks()).await?;
-        // The payers' replies kept for requests whose record wasn't held yet.
-        Box::pin(self.place_kept_replies()).await?;
+        // The replies and period details kept for requests whose record wasn't held yet,
+        // unless the payer's side waits (`Paykit::payer_waits`), as above; each record they
+        // go into that is absent while its side isn't listed waits on its own.
+        if !Box::pin(self.payer_waits(keys)).await? {
+            Box::pin(self.place_kept_replies()).await?;
+        }
         // Lists held over a `payment_lists` record that didn't read, once it reads.
         Box::pin(self.place_held_lists()).await?;
         // The counterparties' Allowance ends kept as stops go into their records, with their
@@ -834,6 +840,7 @@ mod tests {
         payment: UnrequestedPayment,
         role: crate::AllowanceRole,
         terms: paykit_lib::allowances::AllowanceTerms,
+        details: paykit_lib::bodies::PeriodDetails,
     ) {
         let key = [0; 32];
         let request = RequestRef {
@@ -898,6 +905,11 @@ mod tests {
         assert_send(&wallet.pay_under_allowance(&request, &key));
         assert_send(&wallet.confirm_allowance_again(&key, confirmed));
         assert_send(&wallet.mark_manual_only(&request));
+        assert_send(&wallet.accept_subscription(&request));
+        assert_send(
+            &wallet.accept_subscription_with(&request, crate::requests::AcceptOptions::default()),
+        );
+        assert_send(&wallet.send_period_details(&key, details));
     }
 
     #[test]
