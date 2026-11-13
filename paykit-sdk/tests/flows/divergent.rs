@@ -2765,6 +2765,54 @@ mod durable_event {
     }
 
     #[tokio::test]
+    async fn test_divergent_event_after_a_confirmation_pauses_again_over_the_same_write() {
+        // The user confirmed the record's divergent write. A new divergence report comes
+        // while the view still shows that same write divergent: a report always asks again,
+        // the record is paused, and a payment by hand waits for the user's new confirmation.
+        let w = World::new();
+        let base = store();
+        let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+        let mut shop = w.shop().await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        let record = wallet.request(&request).await.unwrap().record;
+        w.alice
+            .switch()
+            .make_divergent(UPLOADER, record, [1; 32])
+            .unwrap();
+        wallet.receive(None).await.unwrap();
+        confirm(&mut wallet, &record).await.unwrap();
+        let version = wallet
+            .app()
+            .shared_record(&record)
+            .await
+            .unwrap()
+            .unwrap()
+            .version;
+        // The client's flag goes, so the next divergent view of the same write is a change.
+        set_divergent(&base, &wallet, &record, false);
+        w.alice
+            .switch()
+            .make_divergent(UPLOADER, record, [2; 32])
+            .unwrap();
+        wallet.receive(None).await.unwrap();
+        let held = wallet.app().shared_record(&record).await.unwrap().unwrap();
+        assert!(held.divergent);
+        assert_eq!(held.version, version);
+        let refused = wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(refused_records(&refused), vec![(record, true, true)]);
+        confirm(&mut wallet, &record).await.unwrap();
+        let outcome = wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    }
+
+    #[tokio::test]
     async fn test_divergent_event_after_a_confirmation_withholds_the_repeat_again() {
         // As above, with a payment in flight: its repeat is withheld again until the user's
         // new confirmation.

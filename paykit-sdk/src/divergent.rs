@@ -415,13 +415,12 @@ pub(crate) fn after_view(mark: Option<&DivergentMark>, view: &View) -> Option<Di
 ///   nothing ([`DivergentMark::has_taken`]).
 /// - With no mark, the record is paused, at the write held.
 /// - A paused mark stays as it is, the report noted in it.
-/// - A confirmed mark is of the write it was given over, and confirms nothing for a later
-///   divergence (Paykit spec 6): the record is paused again, at the write held, with no
-///   confirmation, a credit's included, whatever the view's flag shows now. Paused, it is
-///   ended only by the user's confirmation of the write the app then shows. The one report
-///   a confirmed mark keeps is one of the write it confirmed while the view still shows that
-///   write divergent: a second upload beside the same write can't be told from the first,
-///   and one confirmation covers both.
+/// - A confirmed mark is of the write it was given over, and confirms nothing for the
+///   divergence a new report tells of (Paykit spec 6): the record is paused again, at the
+///   write held, with no confirmation, a credit's included, whatever the view shows now, the
+///   write the user confirmed still shown divergent included. Paused, it is ended only by the
+///   user's confirmation of the write the app then shows. A report always asks again; only
+///   a view of the confirmed write asks nothing ([`after_view`]).
 pub(crate) fn after_event(
     mark: Option<&DivergentMark>,
     view: &View,
@@ -431,9 +430,6 @@ pub(crate) fn after_event(
         Some(mark) if mark.has_taken(event) => None,
         None => Some(DivergentMark::paused(view).taking(event)),
         Some(mark) if mark.is_paused() => Some(mark.clone().taking(event)),
-        Some(mark) if view.divergent && mark.confirmed == Some(view.version) => {
-            Some(mark.clone().taking(event))
-        }
         Some(_) => Some(DivergentMark::paused(view).taking(event)),
     }
 }
@@ -1865,12 +1861,15 @@ mod tests {
         assert!(after_event(None, &view(false, 4), &event(1))
             .unwrap()
             .is_paused());
-        // A report of the write the user confirmed, while the view shows it divergent, asks
-        // nothing again: one confirmation covers it.
-        let kept = after_event(Some(&confirmed(3)), &view(true, 3), &event(1)).unwrap();
-        assert!(!kept.is_paused());
+        // A new report pauses a confirmed record again, also while the view still shows the
+        // write the user confirmed divergent; a view of it asks nothing.
+        assert!(after_view(Some(&confirmed(3)), &view(true, 3)).is_none());
+        let again = after_event(Some(&confirmed(3)), &view(true, 3), &event(1)).unwrap();
+        assert!(again.is_paused() && again.credit_waits());
         // The same report again changes nothing.
-        assert!(after_event(Some(&kept), &view(true, 3), &event(1)).is_none());
+        let confirmed_again =
+            after_confirmation(Some(&again), Some(&view(true, 3)), false).unwrap();
+        assert!(after_event(Some(&confirmed_again), &view(true, 3), &event(1)).is_none());
     }
 
     #[test]
