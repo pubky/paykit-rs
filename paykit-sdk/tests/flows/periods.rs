@@ -4430,21 +4430,41 @@ async fn details_dropped_for_the_bounds(record_while: RecordWhile, more: usize, 
 
 #[tokio::test]
 async fn test_periods_details_dropped_for_the_bounds_before_their_record_asked_again() {
-    details_dropped_for_the_bounds(RecordWhile::Gone, 64, false).await;
+    // The driver's future goes on the heap: it drives four apps through a restore.
+    Box::pin(details_dropped_for_the_bounds(RecordWhile::Gone, 64, false)).await;
 }
 
 #[tokio::test]
 async fn test_periods_details_dropped_for_the_bounds_over_an_unreadable_record_asked_again() {
-    details_dropped_for_the_bounds(RecordWhile::Unreadable, 64, false).await;
+    Box::pin(details_dropped_for_the_bounds(
+        RecordWhile::Unreadable,
+        64,
+        false,
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn test_periods_details_within_the_bounds_before_their_record_none_dropped() {
-    details_dropped_for_the_bounds(RecordWhile::Gone, 63, false).await;
-    details_dropped_for_the_bounds(RecordWhile::Unreadable, 63, false).await;
+    Box::pin(details_dropped_for_the_bounds(RecordWhile::Gone, 63, false)).await;
+}
+
+#[tokio::test]
+async fn test_periods_details_within_the_bounds_over_an_unreadable_record_none_dropped() {
+    Box::pin(details_dropped_for_the_bounds(
+        RecordWhile::Unreadable,
+        63,
+        false,
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn test_periods_details_dropped_for_the_bounds_of_a_blocked_payee_asked_once_unblocked() {
-    details_dropped_for_the_bounds(RecordWhile::Unreadable, 64, true).await;
+    Box::pin(details_dropped_for_the_bounds(
+        RecordWhile::Unreadable,
+        64,
+        true,
+    ))
+    .await;
 }
