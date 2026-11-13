@@ -1386,6 +1386,20 @@ mod tests {
             &key::list_ask(&[4; 32], None),
             asked(None)
         ));
+        // The `missed` item's consent mark, set only `true`.
+        assert!(reads::<bool>(key::MISSED_CONSENTS, serde_json::json!(true)));
+        assert!(!reads::<bool>(
+            key::MISSED_CONSENTS,
+            serde_json::json!(false)
+        ));
+        // An executor notice's target, of the notice its key names.
+        let target = |msg_id: &str| serde_json::json!({ "msg_id": msg_id, "app_id": "AAAAAAAAAAAAAAAAAAAAAA" });
+        assert!(reads::<NoticeTarget>(&key::notice_target(id), target(id)));
+        assert!(!reads::<NoticeTarget>(
+            &key::notice_target(id),
+            target(other)
+        ));
+        assert!(!reads::<NoticeTarget>(&key::side(id), target(id)));
         // A key the SDK doesn't write reads nothing, nor does a certificate that isn't one.
         assert!(!reads::<u64>("zz/1", serde_json::json!(1)));
         assert!(!reads::<SignedDoc>(

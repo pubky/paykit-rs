@@ -1501,6 +1501,106 @@ mod receive_tests {
         assert!(!restores::<KeptMessage>(&bob, at.as_bytes(), &value));
     }
 
+    /// Alice's acceptance of bob's Allowance proposal, kept at bob's shop before his record,
+    /// and the record key of his Allowance record it names.
+    fn kept_allowance_answer(alice: &Party, bob: &Party) -> (StoredMessage, Vec<u8>, [u8; 32]) {
+        let id = "d0efffb7-191b-4709-b6c7-e343af5500b4";
+        let answer = alice.message(
+            bob,
+            "paykit.allowance_acceptance",
+            vec![[4; 32]],
+            object(json!({ "allowance_id": id })),
+        );
+        let Body::AllowanceAcceptance(body) = answer.body() else {
+            panic!("an acceptance");
+        };
+        let record = fake_key(&allowance_target(&alice.id(), &body.allowance_id));
+        let value = state::encode(&KeptMessage::of(&answer)).unwrap();
+        (answer, value, record)
+    }
+
+    #[test]
+    fn test_protocol_restore_takes_a_kept_allowance_answer_and_refuses_one_elsewhere() {
+        let alice = Party::new("alice", "wallet", &["pay", "allowance", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request", "allowance"]);
+        let (answer, value, record) = kept_allowance_answer(&alice, &bob);
+        let msg_id = answer.message().msg_id.clone();
+        let at = key::kept_reply(&alice.id(), &record, &msg_id);
+        assert!(restores::<KeptMessage>(&bob, at.as_bytes(), &value));
+        for other in [
+            key::kept_reply(&alice.id(), &[9; 32], &msg_id),
+            key::kept_reply(&alice.id(), &record, "123e4567-e89b-42d3-a456-426614174000"),
+            key::kept_reply(&[8; 32], &record, &msg_id),
+        ] {
+            assert!(
+                !restores::<KeptMessage>(&bob, other.as_bytes(), &value),
+                "{other}"
+            );
+        }
+        // Kept only as its inbox accepted it, with its time.
+        assert!(!restores::<KeptMessage>(
+            &bob,
+            at.as_bytes(),
+            &without_acceptance(&value)
+        ));
+    }
+
+    #[test]
+    fn test_protocol_restore_refuses_a_kept_end_without_its_acceptance_time() {
+        let (alice, bob, _, end) = allowance_end();
+        let Body::AllowanceEnd(reply) = end.body() else {
+            panic!("an end");
+        };
+        let key = key::allowance_end(&fake_key(&allowance_target(&bob.id(), &reply.allowance_id)));
+        let value = state::encode(&KeptMessage::of(&end)).unwrap();
+        assert!(!restores::<KeptMessage>(
+            &alice,
+            key.as_bytes(),
+            &without_acceptance(&value)
+        ));
+    }
+
+    #[test]
+    fn test_protocol_restore_takes_a_consent_entry_only_at_its_allowances_record() {
+        // The entry names its Allowance; under the key of another record it would consent
+        // to an Allowance its user never confirmed.
+        let (alice, bob, proposal, _) = allowance_end();
+        let Body::AllowanceProposal(body) = proposal.body() else {
+            panic!("a proposal");
+        };
+        let record = fake_key(&allowance_target(&bob.id(), &body.allowance_id));
+        let entry = crate::allowances::ConsentEntry::new(
+            bob.id(),
+            &body.allowance_id,
+            crate::allowances::Consent::Held {
+                confirm_again: false,
+            },
+        );
+        let value = state::encode(&entry).unwrap();
+        assert!(restores::<ConsentEntry>(
+            &alice,
+            key::consent(&record).as_bytes(),
+            &value
+        ));
+        assert!(!restores::<ConsentEntry>(
+            &alice,
+            key::consent(&[9; 32]).as_bytes(),
+            &value
+        ));
+        let other = crate::allowances::ConsentEntry::new(
+            alice.id(),
+            &body.allowance_id,
+            crate::allowances::Consent::Held {
+                confirm_again: false,
+            },
+        );
+        assert!(!restores::<ConsentEntry>(
+            &alice,
+            key::consent(&record).as_bytes(),
+            &state::encode(&other).unwrap()
+        ));
+    }
+
     /// `value`, a kept message's encoded bytes, with its acceptance time removed.
     fn without_acceptance(value: &[u8]) -> Vec<u8> {
         let mut json: serde_json::Value = serde_json::from_slice(value).unwrap();
