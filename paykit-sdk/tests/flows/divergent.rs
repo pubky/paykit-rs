@@ -237,7 +237,7 @@ fn requiring(app: [u8; 16], now: u64) -> paykit_sdk::RequestDraft {
 #[tokio::test]
 async fn test_divergent_request_requiring_a_removed_app_refused_for_its_destination() {
     // The request record is divergent, and the request requires the shop, which Bob's
-    // signer has since removed: a removed app is never listed again (Switch spec 4), so no
+    // signer has since removed: a removed app is never listed again (Switch spec 4.3), so no
     // confirmation could let it be paid, and the payment is refused for that, naming no
     // record and asking no app for a list (Paykit spec 8.1).
     let w = World::new();

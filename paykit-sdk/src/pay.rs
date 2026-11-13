@@ -1217,7 +1217,7 @@ impl Paykit {
     /// `identity.json` read fresh, as for a request's endpoint: a request carrying
     /// endpoints, as the destination check refuses it, when the app that sent it, whose
     /// endpoints they are, isn't current; a request requiring an app, when the payee has
-    /// removed that app, which is never listed again (Switch spec 4). An app not listed yet
+    /// removed that app, which is never listed again (Switch spec 4.3). An app not listed yet
     /// isn't removed. A request whose destination any current app may give is not judged,
     /// and no copy is read for it. A read that fails is the refusal: no app is taken as
     /// current nor as removed without it.
