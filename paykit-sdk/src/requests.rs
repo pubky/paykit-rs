@@ -567,10 +567,15 @@ impl Paykit {
     /// Send a request to `to` (Paykit spec 8.1 step 1, 8.2; Paykit wire 4.5), under this
     /// app's selling label: one-time, or recurring with a recurrence. The payer must admit
     /// this identity, for example after an invite (Paykit spec 1). The request is signed, and
-    /// its record written in the batch that queues it, then it is sent.
+    /// its record written in the batch that queues it, then it is sent. Nothing is signed,
+    /// written or queued while sends to `to` are held: at an app holding `contacts`, while
+    /// the copy of the deny list holds it, or while that copy isn't known, which a read of
+    /// the lists is tried for first (Paykit spec 8.1, "Blocked counterparties"). An app
+    /// without `contacts` reads no lists, and holds nothing.
     ///
     /// # Errors
     ///
+    /// [`Refusal::NotNow`] while sends to `to` are held, with nothing recorded or queued;
     /// [`Refusal::ScopeMissing`] without `request` or a label; [`Refusal::Label`];
     /// [`PaykitError::Lib`] with `Validation` for a draft that breaks Paykit wire 4.5, such
     /// as a payment deadline of the other kind of request, or both kinds; the
@@ -594,6 +599,9 @@ impl Paykit {
     ) -> Result<SentRequest> {
         self.refresh_own()?;
         self.require_payee()?;
+        // Nothing new starts with a counterparty whose sends are held (Paykit spec 8.1,
+        // "Blocked counterparties"), refused before anything is signed, written or queued.
+        self.refuse_while_sends_held(&to).await?;
         let label = self.selling_label()?;
         // A one-time request's deadline is a time, a recurring one's a delay after each
         // period's start (Paykit wire 4.4); the writer refuses the one that doesn't match.
@@ -1652,11 +1660,16 @@ impl Paykit {
     /// its claim having no open or paid attempt, then sent. Returns the rejection's `msg_id`.
     /// A recurring request is rejected before its acceptance, conditioned on its proposal
     /// not having expired, as its acceptance is ([`Paykit::accept_subscription`]), so an
-    /// acceptance and a rejection can't both go out (Paykit spec 8.2).
+    /// acceptance and a rejection can't both go out (Paykit spec 8.2). Nothing is recorded,
+    /// signed or queued while sends to the payee are held: while the copy of the deny list
+    /// holds it, or while that copy isn't known, which a read of the lists is tried for first
+    /// (Paykit spec 8.1, "Blocked counterparties").
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotFound`]; [`Refusal::Rejected`], [`Refusal::Cancelled`],
+    /// [`Refusal::NotNow`] while sends to the payee are held, before anything else is
+    /// judged, with the request record unchanged and nothing queued; [`Refusal::NotFound`];
+    /// [`Refusal::Rejected`], [`Refusal::Cancelled`],
     /// [`Refusal::AlreadyPaid`] or [`Refusal::PaymentInProgress`]; [`Refusal::Subscribed`]
     /// for a recurring request already accepted; [`Refusal::DeadlinePassed`] for a recurring
     /// request whose proposal expired, decided once the record the service holds shows it
@@ -1686,12 +1699,15 @@ impl Paykit {
     }
 
     /// The payer cancels a one-time request (Paykit spec 8.1, Paykit wire 4.8), recorded and
-    /// sent as a rejection is. Returns the cancellation's `msg_id`.
+    /// sent as a rejection is, and held as a rejection is: nothing is recorded, signed or
+    /// queued while sends to the payee are held. Returns the cancellation's `msg_id`.
     ///
     /// # Errors
     ///
-    /// As [`Paykit::reject_request`]; [`Refusal::Recurring`] for a recurring request, whose
-    /// cancellation is conditioned on its Billing Periods' claims (Paykit spec 8.2).
+    /// As [`Paykit::reject_request`]: [`Refusal::NotNow`] while sends to the payee are held,
+    /// with the request record unchanged and nothing queued; [`Refusal::Recurring`] for a
+    /// recurring request, whose cancellation is conditioned on its Billing Periods' claims
+    /// (Paykit spec 8.2).
     pub async fn cancel_request(
         &mut self,
         request: &RequestRef,
@@ -1763,6 +1779,20 @@ impl Paykit {
         options: AcceptOptions,
     ) -> Result<SentMessage> {
         self.require_pay()?;
+        // A rejection or a payer's cancellation goes to no counterparty whose sends are held
+        // (Paykit spec 8.1, "Blocked counterparties"), refused before the record is touched
+        // or anything is signed or queued: the request stays as it is, and the user answers
+        // it once the payee is unblocked or the lists are read. An acceptance takes paying's
+        // gate instead (Paykit spec 8.1, 8.2): the deny list as judged for a payment the user
+        // starts, read first when the copy is older than 10 minutes or not known, a read
+        // that fails being the call's error, so it never goes on a copy not known; to a
+        // blocked payee it goes only on the user's confirmation, below.
+        let blocked = if answer == Answer::Accept {
+            self.denied_for_user(&request.payee).await?
+        } else {
+            self.refuse_while_sends_held(&request.payee).await?;
+            false
+        };
         let (target, record) = self.payer_request(request).await?;
         let (_, body) = request_of(&record).ok_or(Refusal::NotFound)?;
         let recurring = body.is_recurring();
@@ -1782,7 +1812,6 @@ impl Paykit {
                 }
                 end_hold = Some(record_key);
             }
-            let blocked = self.denied_for_user(&request.payee).await?;
             let shown = BlockedPayment {
                 payee: request.payee,
                 request: Some(*request),

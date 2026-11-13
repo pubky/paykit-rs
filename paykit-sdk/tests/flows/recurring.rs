@@ -19,7 +19,7 @@ async fn monthly_to(w: &World, wallet: &mut Paykit, expires_at: u64) -> RequestR
 
 /// Bob's shop sends alice's apps `targets` a monthly request with `reference`, entered at
 /// her switch directly, its proposal open until `expires_at`.
-fn monthly(w: &World, targets: &[[u8; 16]], expires_at: u64, reference: &str) {
+pub(crate) fn monthly(w: &World, targets: &[[u8; 16]], expires_at: u64, reference: &str) {
     let body = json!({
         "amount": { "asset": "btc", "value": "1" },
         "payment_reference": reference,

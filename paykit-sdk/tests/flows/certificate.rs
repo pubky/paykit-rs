@@ -2124,6 +2124,9 @@ async fn narrowed_on_the_payer_side_then_back(narrowed: RequestedScopes) {
     let mut shop = w.shop().await;
     let first = wallet.app().cert().clone();
     let mixed = renew(&w, me, &narrowed, 1_000);
+    // The narrowed certificate's keys are stored, so the listing it owes isn't left waiting,
+    // which would hold the feed and the renewal back behind it.
+    store_bundle(&w, me, &mixed);
     wallet.receive(None).await.unwrap();
     list(&w, me, &first, &mixed);
     // The shop reads alice's directory while it still lists the wallet under `pay`, so its
@@ -2341,10 +2344,9 @@ async fn acceptances_received(shop: &mut Paykit) -> usize {
 async fn test_certificate_restore_unlisted_with_payee_keys_awaited_resumes_nothing() {
     // The backup holds a payment in flight, which the wallet then finishes; the wallet is
     // renewed to read `request` too. The restored app's first read takes that renewal from
-    // its record, then can't read its feed: its copy counts as unlisted since the restore,
-    // and the payee's keys wait. The
-    // resume treats the payer's side as waiting too: it journals what the method says and
-    // sends nothing, no acceptance again among it.
+    // its record, then reads no feed: its copy counts as unlisted since the restore, and the
+    // listing waits for the payee's keys. The resume treats the payer's side as waiting too:
+    // it journals what the method says and sends nothing, no acceptance again among it.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let me = wallet.app_id();
@@ -2388,13 +2390,16 @@ async fn test_certificate_restore_unlisted_with_payee_keys_awaited_resumes_nothi
     )
     .await
     .unwrap();
-    w.alice
-        .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
-            path: "/feed".into(),
-            after: 0,
-        });
-    assert!(restored.receive(None).await.is_err());
+    let before = w.router.log().len();
+    let summary = restored.receive(None).await.unwrap();
+    assert!(summary.scope_keys_awaited, "{summary:?}");
+    assert!(
+        !w.router.log()[before..]
+            .iter()
+            .any(|line| line.contains("/feed")),
+        "{:?}",
+        w.router.log()
+    );
     assert_eq!(restored.app().cert().hash(), wider.hash());
     let before = w.router.log().len();
     let resumed = restored.resume_payments().await.unwrap();
