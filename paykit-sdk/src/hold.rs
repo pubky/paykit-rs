@@ -670,13 +670,14 @@ impl Paykit {
     /// sent; one whose record is held but can't be read now stays, since that record may
     /// still hold it. The pass waits while a record of the copy is sealed under a scope key
     /// the app doesn't hold yet ([`Paykit::copy_awaits_key`]), so what such a record stores
-    /// is sent once it opens. For the restore's re-send, a record held under a Paykit policy
-    /// whose value doesn't open for good, read or bind shows none of its messages: the
-    /// re-send stays owed and judges every record again at each receive, until each such
-    /// record reads, its messages then going under the same rules, or 30 days have passed
-    /// since the restore ([`OwnResendOwed::restored_at_ms`]), after which none of them could
-    /// still go, so one found unreadable later than that is not waited for; a delete holds no message, and a record under another policy nothing of
-    /// Paykit's. Messages to a counterparty whose sends are held wait, the restore's mark or
+    /// is sent once it opens. For the restore's re-send, a record held under a Paykit policy,
+    /// an activity or an Allowance record, whose value doesn't open for good, read or bind
+    /// shows none of its messages: the re-send stays owed and judges every record again at
+    /// each receive, until each such record reads, its messages then going under the same
+    /// rules, or 30 days have passed since the restore ([`OwnResendOwed::restored_at_ms`]),
+    /// after which none of them could still go, so one found unreadable later than that is
+    /// not waited for; a delete holds no message, and a record under another policy nothing
+    /// of Paykit's. Messages to a counterparty whose sends are held wait, the restore's mark or
     /// the held answer naming it, for a later receive: nothing reaches it meanwhile. Period
     /// details go again only while no later stop covers them: none once their period is
     /// credited or their request is rejected or cancelled; while their request record isn't
@@ -817,7 +818,16 @@ impl Paykit {
         // bound to its key (Paykit spec 7.2, 8.3; `allowances::own_allowance_to_send_again`).
         if let Some(restore) = owed.as_ref() {
             for record_held in Box::pin(self.app.records_of(Collection::Allowances.name())).await? {
+                // As for an activity record: one under another policy holds nothing of
+                // Paykit's and a delete holds no message, while one that doesn't open, read or
+                // bind keeps the re-send owed, judged again at the next receive.
+                if record_held.policy != Collection::Allowances.fixed_policy()
+                    || record_held.content == RecordContent::Deleted
+                {
+                    continue;
+                }
                 let Some(record) = Box::pin(self.held_allowance(&record_held.key)).await? else {
+                    unread = true;
                     continue;
                 };
                 let counterparty = record.counterparty;

@@ -4227,3 +4227,57 @@ async fn test_allowances_answer_dropped_mark_not_due_from_a_payment_without_a_re
     .unwrap();
     assert_eq!(held.response.unwrap().message().msg_id, accepted);
 }
+
+#[tokio::test]
+async fn test_allowances_restore_own_acceptance_over_a_record_left_unreadable_sent_once_it_reads() {
+    // After the backup the phone writes the Allowance record as a value no reader reads. The
+    // restored wallet's acceptance, which no outbox holds, isn't sent while the record
+    // doesn't read, and the restore's re-send stays owed; once the phone writes the record
+    // back, the acceptance goes, once (Paykit spec 7.2, "What a restore loses"; 8.3).
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(wallet(&w)).await;
+    let mut phone = Box::pin(alice_app(
+        &w,
+        "phone",
+        AppScopes::new().pay().allowance().build().unwrap(),
+    ))
+    .await;
+    let kind = "paykit.allowance_acceptance";
+    let (mine, theirs, backup) = Box::pin(backed_up_with_its_answer_unqueued(
+        &w,
+        &mut wallet,
+        &mut shop,
+        kind,
+    ))
+    .await;
+    let id = wallet.allowance(&mine).await.unwrap().allowance_id;
+    drop(wallet);
+    let target = allowances_target(&w.bob_id(), &id);
+    phone.receive(None).await.unwrap();
+    let held = phone.app_mut().read_record(&target).await.unwrap().unwrap();
+    let good = held.content.value().unwrap().to_vec();
+    let unreadable = serde_json::to_vec(&json!({ "v": 99 })).unwrap();
+    Box::pin(crate::periods::writes_value(
+        &mut phone,
+        &target,
+        &unreadable,
+    ))
+    .await;
+    let mut wallet = Box::pin(restored_unreceived(&w, &backup)).await;
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(Box::pin(taken(&mut shop, kind)).await, 0);
+    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_some());
+    Box::pin(crate::periods::writes_value(&mut phone, &target, &good)).await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert_eq!(Box::pin(taken(&mut shop, kind)).await, 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(Box::pin(taken(&mut shop, kind)).await, 0);
+    assert_eq!(
+        shop.allowance(&theirs).await.unwrap().status,
+        AllowanceStatus::Accepted
+    );
+}
