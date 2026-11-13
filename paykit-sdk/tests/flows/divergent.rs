@@ -2235,6 +2235,40 @@ async fn test_divergent_paused_list_unjudged_while_the_payees_identity_is_unread
 }
 
 #[tokio::test]
+async fn test_divergent_paused_list_of_a_current_app_pauses_whatever_its_certificate() {
+    // Bob's shop's list is paused as divergent, and Bob's signer then lists the shop with
+    // another certificate, renewing none: the certificate the held list was signed under
+    // counts for nothing now. The shop is still current, and the upload may hold a newer
+    // list signed under the certificate it is listed with, so the list still pauses the
+    // payment, naming its record, and the shop isn't asked for a newer one (Paykit spec 6,
+    // 8.4).
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    wallet.receive(None).await.unwrap();
+    let record = list_record(&w, &wallet, &shop);
+    set_divergent(&base, &wallet, &record, true);
+    let shop_id = shop.app_id();
+    w.bob
+        .next_doc(|body| {
+            for app in body.apps.iter_mut().filter(|a| a.app_id == shop_id) {
+                app.cert = [9; 32];
+            }
+            body.renewed.retain(|r| r.app_id != shop_id);
+        })
+        .unwrap();
+    w.clock.advance_ms(11 * 60_000);
+    let payment = UnrequestedPayment::new(w.bob_id(), btc("1"))
+        .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")));
+    let refused = wallet.pay_without_request(payment).await.unwrap_err();
+    assert_eq!(refused_records(&refused), vec![(record, true, true)]);
+    assert!(w.rail.all_executions().is_empty());
+    assert!(list_asks(&w, &wallet).await.is_empty());
+}
+
+#[tokio::test]
 async fn test_divergent_acceptance_dropped_for_the_bound_taken_again_from_a_resend() {
     // Eighteen acceptances come over the divergent record: the earliest and the 16 latest are
     // kept, and the second is dropped as one never processed. Once the user confirms and the
