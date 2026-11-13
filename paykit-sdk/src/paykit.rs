@@ -796,7 +796,9 @@ impl Paykit {
         let answered = Box::pin(self.answer_kept_resends()).await?;
         // A restore's asks that waited for a record's key are queued at the receive that
         // opens it, once the records are listed (`hold.rs`), and so are, once, this app's own
-        // messages the records store to be sent that no outbox holds.
+        // messages the records store to be sent that no outbox holds, and at every receive the
+        // rejections and payer's cancellations recorded while sends to their payee were held,
+        // once they aren't.
         if Box::pin(self.unlisted()).await?.is_none()
             && Box::pin(self.scope_keys_awaited()).await?.is_none()
         {
