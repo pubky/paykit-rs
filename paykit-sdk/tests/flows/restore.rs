@@ -1392,6 +1392,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
             "app_id": null,
             "held_version": null,
             "asked_at_ms": 1,
+            "msg_id": "123e4567-e89b-42d3-a456-426614174000",
         })
     };
     // A mark of entries dropped while they waited for a scope key, of the sender its key

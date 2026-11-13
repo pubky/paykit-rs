@@ -1669,20 +1669,25 @@ mod receive_tests {
     #[test]
     fn test_protocol_restore_refuses_a_list_ask_with_a_msg_id_never_given_out() {
         let payee = [3; 32];
-        let ask = |msg_id: Option<&str>| {
+        let ask = |msg_id: &str| {
             let asked = ListAsk {
                 payee,
                 app_id: None,
                 held_version: Some(5),
                 asked_at_ms: 1_000,
-                msg_id: msg_id.map(str::to_owned),
+                msg_id: msg_id.to_owned(),
             };
             (key::list_ask(&payee, None), state::encode(&asked).unwrap())
         };
-        assert!(restore_state(&[ask(Some("123e4567-e89b-42d3-a456-426614174000"))]).is_ok());
-        assert!(restore_state(&[ask(None)]).is_ok());
-        assert!(restore_state(&[ask(Some("not-a-msg-id"))]).is_err());
-        let (_, value) = ask(None);
+        let good = "123e4567-e89b-42d3-a456-426614174000";
+        assert!(restore_state(&[ask(good)]).is_ok());
+        assert!(restore_state(&[ask("not-a-msg-id")]).is_err());
+        // One without its `msg_id` is no form a run writes.
+        let (at, value) = ask(good);
+        let mut without: serde_json::Value = serde_json::from_slice(&value).unwrap();
+        without["d"].as_object_mut().unwrap().remove("msg_id");
+        assert!(restore_state(&[(at, serde_json::to_vec(&without).unwrap())]).is_err());
+        let (_, value) = ask(good);
         assert!(restore_state(&[(key::list_ask(&[4; 32], None), value)]).is_err());
     }
 }

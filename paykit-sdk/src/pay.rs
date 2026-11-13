@@ -637,9 +637,8 @@ pub(crate) struct ListAsk {
     pub(crate) app_id: Option<[u8; 16]>,
     pub(crate) held_version: Option<u64>,
     pub(crate) asked_at_ms: u64,
-    /// Absent from a mark kept before it was recorded: that request counts as sent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) msg_id: Option<String>,
+    /// The request's `msg_id`, to tell whether it reached the payee's inbox.
+    pub(crate) msg_id: String,
 }
 
 impl ListAsk {
@@ -650,9 +649,7 @@ impl ListAsk {
         if self.payee != *payee || self.app_id.as_ref() != app_id {
             return Err(PaykitError::corrupt());
         }
-        self.msg_id
-            .as_deref()
-            .map_or(Ok(()), crate::publish::check_msg_id)
+        crate::publish::check_msg_id(&self.msg_id)
     }
 
     /// Whether it was asked in the 24 hours before `now`: a mark ahead of the clock
@@ -1584,7 +1581,7 @@ impl Paykit {
             app_id,
             held_version,
             asked_at_ms: self.now(),
-            msg_id: Some(msg_id.clone()),
+            msg_id: msg_id.clone(),
         };
         self.local_put(&key::list_ask(&payee, app_id.as_ref()), &asked)
             .await?;
@@ -1603,11 +1600,8 @@ impl Paykit {
     ///
     /// A store failure.
     async fn ask_not_sent(&self, asked: &ListAsk) -> Result<bool> {
-        let Some(msg_id) = &asked.msg_id else {
-            return Ok(false);
-        };
         Ok(matches!(
-            self.app.delivery(msg_id).await?,
+            self.app.delivery(&asked.msg_id).await?,
             None | Some(Delivery::Failed { .. })
         ))
     }

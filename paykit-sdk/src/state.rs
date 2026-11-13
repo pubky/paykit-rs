@@ -1634,13 +1634,17 @@ mod tests {
             held(&pubky_switch_core::enc::b64(&[4; 32]), id)
         ));
         assert!(!reads::<HeldAnswer>(&key::side(id), held(&sender, id)));
-        // A list ask of the payee and app its key names.
+        // A list ask of the payee and app its key names, with its request's `msg_id`.
         let asked = |app: Option<[u8; 16]>| {
             serde_json::json!({
                 "payee": sender, "app_id": app, "held_version": null, "asked_at_ms": 1,
+                "msg_id": id,
             })
         };
         assert!(reads::<ListAsk>(&key::list_ask(&pubky, None), asked(None)));
+        let mut without = asked(None);
+        without.as_object_mut().unwrap().remove("msg_id");
+        assert!(!reads::<ListAsk>(&key::list_ask(&pubky, None), without));
         assert!(!reads::<ListAsk>(
             &key::list_ask(&pubky, None),
             asked(Some([2; 16]))
