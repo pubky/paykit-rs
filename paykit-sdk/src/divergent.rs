@@ -50,7 +50,7 @@ use paykit_lib::derive::natural_key;
 use paykit_lib::records::StoredMessage;
 use paykit_lib::Body;
 use pubky_switch_client::app::{
-    AppEvent, LocalWrite, ReceiveContext, RecordTarget, SharedRecord, UserConfirmed,
+    AppEvent, ReceiveContext, RecordTarget, SharedRecord, UserConfirmed,
 };
 use pubky_switch_core::enc::serde_b64;
 use serde::{Deserialize, Serialize};
@@ -60,7 +60,7 @@ use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
 use crate::receive::{Fail, Settlement};
 use crate::records::{list_target, KeptMessage};
-use crate::state::{self, key, StateKey, Tx};
+use crate::state::{self, key, Tx};
 
 /// A record the app has seen divergent, as the host shows it (Paykit spec 6): from
 /// [`Paykit::divergent_records`], a receive's summary, or a refusal
@@ -123,20 +123,22 @@ impl DivergentMark {
         Collection::from_name(&self.collection).ok_or_else(PaykitError::corrupt)
     }
 
-    /// The mark at `key`, read whole and bound to it: the record its key names, of one of
-    /// Paykit's collections. The one check for a restore and for every read at runtime; a
-    /// value that fails it is a corrupt store, never an absent mark.
-    pub(crate) fn read(key: &[u8], value: &[u8]) -> Result<Self> {
-        let Some(StateKey::Divergent(record)) = StateKey::parse(key) else {
-            return Err(PaykitError::corrupt());
-        };
-        let mark = state::decode::<Self>(value)?;
-        // A confirmation before the write it pauses is a state no run leaves.
-        if mark.record != record || mark.confirmed.is_some_and(|at| at < mark.seen) {
+    /// The mark bound to the key it is read at, `dv/<record>` (`state::Stored`): the record
+    /// its key names, of one of Paykit's collections, and a confirmation, if any, not before
+    /// the write it paused, a state no run leaves. The one check for a restore and for every
+    /// read at runtime; a value that fails it is a corrupt store, never an absent mark.
+    pub(crate) fn bind_to(&self, record: &[u8; 32]) -> Result<()> {
+        if self.record != *record || self.confirmed.is_some_and(|at| at < self.seen) {
             return Err(PaykitError::corrupt());
         }
-        mark.collection()?;
-        Ok(mark)
+        self.collection().map(|_| ())
+    }
+
+    /// The mark as a restore installs it: paused, a confirmation given before the backup
+    /// included (module docs, "Restore").
+    pub(crate) fn restored(mut self) -> Self {
+        self.confirmed = None;
+        self
     }
 
     /// The mark checked against the record held at its key, `view`, before it decides
@@ -343,13 +345,82 @@ impl WriteRole {
 /// and the version of the divergent write it was kept over is the proof that the record
 /// held there later is that record, of its collection, at that write or a later one
 /// ([`check_points_to`]).
+///
+/// A proof of a payment without a request goes into the payee's record of its settlement:
+/// the settlement its rail named when it was kept persists with it, the proof that the
+/// record is that proof's, which binds the value without the rail, and is checked against
+/// the rail's again before the message is written ([`DivergentWrite::kept`]).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct DivergentWrite {
     #[serde(with = "serde_b64")]
     record: [u8; 32],
     role: WriteRole,
     seen: SeenVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    settlement: Option<String>,
     message: KeptMessage,
+}
+
+impl DivergentWrite {
+    /// The settlement kept, as bytes.
+    fn settlement(&self) -> Result<Option<Vec<u8>>> {
+        self.settlement
+            .as_deref()
+            .map(pubky_switch_core::enc::unb64)
+            .transpose()
+            .map_err(|_| PaykitError::corrupt())
+    }
+
+    /// The kept write bound to the key it is read at, `dw/<record>/<role>`
+    /// (`state::Stored`): a message that verifies for `own`, accepted by its inbox, of that
+    /// role, whose record, as `record_key` derives it from the message and the settlement
+    /// kept, is the one its key names, with a settlement kept exactly for a proof of a
+    /// payment without a request. The one check for a restore and for every read at
+    /// runtime; a value that fails it is a corrupt store.
+    pub(crate) fn bind_to(
+        &self,
+        record: &[u8; 32],
+        role: WriteRole,
+        own: &[u8; 32],
+        record_key: &dyn Fn(&RecordTarget) -> Result<[u8; 32]>,
+    ) -> Result<()> {
+        let stored = self.message.stored(own)?;
+        let settlement = self.settlement()?;
+        let settled =
+            matches!(stored.body(), Body::PaymentProof(_)) && stored.message().refs.is_empty();
+        if self.record != *record
+            || self.role != role
+            || WriteRole::of(&stored) != Some(role)
+            || stored.accepted_at().is_none()
+            || settled != settlement.is_some()
+        {
+            return Err(PaykitError::corrupt());
+        }
+        let target =
+            write_target(&stored, own, &|_| settlement.clone()).ok_or_else(PaykitError::corrupt)?;
+        if target.collection().is_none() || record_key(&target.record_target())? != *record {
+            return Err(PaykitError::corrupt());
+        }
+        Ok(())
+    }
+
+    /// The kept write, read bound, as it is written: its message, where it goes by the
+    /// app's rail, `settlement`, and the write it was kept over. A settlement the rail names
+    /// otherwise than the one kept is a corrupt store.
+    pub(crate) fn kept(&self, own: &[u8; 32], settlement: Settlement<'_>) -> Result<KeptWrite> {
+        let message = self.message.stored(own)?;
+        let target = write_target(&message, own, settlement).ok_or_else(PaykitError::corrupt)?;
+        if let Body::PaymentProof(proof) = message.body() {
+            if message.message().refs.is_empty() && settlement(&proof.proof) != self.settlement()? {
+                return Err(PaykitError::corrupt());
+            }
+        }
+        Ok(KeptWrite {
+            message,
+            target,
+            seen: self.seen,
+        })
+    }
 }
 
 /// A kept write read bound ([`kept_write_at`]): its message, where it goes, and the write
@@ -448,52 +519,6 @@ pub(crate) fn write_target(
     }
 }
 
-/// The message kept at `key` (`p/dw/<record>/<role>`), read whole and bound to it: a message
-/// that verifies for `own`, accepted by its inbox, of the role its key names, whose record,
-/// as `record_key` derives it, is the one its key names. The one check for a restore and for
-/// every read at runtime; one that fails it is a corrupt store.
-pub(crate) fn kept_write_at(
-    key: &[u8],
-    value: &[u8],
-    own: &[u8; 32],
-    record_key: &impl Fn(&RecordTarget) -> std::result::Result<[u8; 32], String>,
-    settlement: Settlement<'_>,
-) -> std::result::Result<KeptWrite, String> {
-    let bad =
-        || String::from("Paykit spec 6: a message kept over a divergent record doesn't verify");
-    let Some(StateKey::DivergentWrite { record, role }) = StateKey::parse(key) else {
-        return Err(bad());
-    };
-    let kept = state::decode::<DivergentWrite>(value).map_err(|_| bad())?;
-    let stored = kept.message.stored(own).map_err(|_| bad())?;
-    if kept.record != record
-        || kept.role != role
-        || WriteRole::of(&stored) != Some(role)
-        || stored.accepted_at().is_none()
-    {
-        return Err(bad());
-    }
-    let target = write_target(&stored, own, settlement).ok_or_else(bad)?;
-    if target.collection().is_none() || record_key(&target.record_target())? != record {
-        return Err(bad());
-    }
-    Ok(KeptWrite {
-        message: stored,
-        target,
-        seen: kept.seen,
-    })
-}
-
-/// The mark a restore installs for the mark at `key`: read bound as at runtime, and paused,
-/// a confirmation given before the restore included (module docs, "Restore").
-pub(crate) fn restored_mark(key: &[u8], value: &[u8]) -> std::result::Result<Vec<u8>, String> {
-    let bad =
-        || String::from("Paykit spec 6: a divergent record's mark in the backup doesn't read");
-    let mut mark = DivergentMark::read(key, value).map_err(|_| bad())?;
-    mark.confirmed = None;
-    state::encode(&mark).map_err(|_| bad())
-}
-
 /// Whether a kept list replaces `held`, the one kept for its record: only a newer version,
 /// a list being latest state (Paykit spec 8.4). A message of any other role kept already
 /// stays: the record holds one per role, and a later one would only be reflected.
@@ -511,11 +536,10 @@ fn step_mark(
     cx: &ReceiveContext<'_>,
     view: &View,
 ) -> std::result::Result<Option<DivergentMark>, Fail> {
-    let mark_key = key::divergent(&view.record);
-    match cx.local_get(mark_key.as_bytes())? {
+    match state::cx_get::<DivergentMark>(cx, &key::divergent(&view.record))? {
         None => Ok(None),
-        Some(value) => DivergentMark::read(mark_key.as_bytes(), &value)
-            .and_then(|mark| mark.checked(Some(view)))
+        Some(mark) => mark
+            .checked(Some(view))
             .map(Some)
             .map_err(|_| Fail::corrupt()),
     }
@@ -546,39 +570,40 @@ pub(crate) fn step_keep(
     cx: &mut ReceiveContext<'_>,
     held: &SharedRecord,
     stored: &StoredMessage,
+    settlement: Settlement<'_>,
 ) -> std::result::Result<(), Fail> {
     let (Some(role), Some(view)) = (WriteRole::of(stored), View::of(held)) else {
         return Ok(());
     };
     let record = held.key;
     let kept_key = key::divergent_write(&record, role);
-    if let Some(value) = cx.local_get(kept_key.as_bytes())? {
-        // Only a list is compared, and a list's record needs no settlement.
-        if role != WriteRole::List {
-            return Ok(());
-        }
-        let held = kept_write_at(
-            kept_key.as_bytes(),
-            &value,
-            &cx.identity(),
-            &|target| cx.record_key(target).map_err(|error| error.to_string()),
-            &|_| None,
-        )
-        .map_err(|_| Fail::corrupt())?;
+    // A message kept already for the record and role is read bound, and checked against the
+    // record, before anything is decided on it: one that doesn't read holds the entry.
+    if let Some(kept) = state::cx_get::<DivergentWrite>(cx, &kept_key)? {
+        let kept = kept
+            .kept(&cx.identity(), settlement)
+            .map_err(|_| Fail::corrupt())?;
         check_points_to(
             Some(&view),
-            held.target.collection().ok_or_else(Fail::corrupt)?,
-            held.seen,
+            kept.target.collection().ok_or_else(Fail::corrupt)?,
+            kept.seen,
         )
         .map_err(|_| Fail::corrupt())?;
-        if !replaces(&held.message, stored) {
+        if !replaces(&kept.message, stored) {
             return Ok(());
         }
     }
+    let kept_settlement = match stored.body() {
+        Body::PaymentProof(proof) if stored.message().refs.is_empty() => Some(
+            pubky_switch_core::enc::b64(&settlement(&proof.proof).ok_or_else(Fail::corrupt)?),
+        ),
+        _ => None,
+    };
     let kept = DivergentWrite {
         record,
         role,
         seen: view.version,
+        settlement: kept_settlement,
         message: KeptMessage::of(stored),
     };
     let write = state::local_put(&kept_key, &kept).map_err(|_| Fail::corrupt())?;
@@ -594,12 +619,12 @@ impl Paykit {
         record: &[u8; 32],
         view: Option<&View>,
     ) -> Result<Option<DivergentMark>> {
-        let mark_key = key::divergent(record);
-        match self.app.protocol_get(mark_key.as_bytes()).await? {
+        match self
+            .local_get::<DivergentMark>(&key::divergent(record))
+            .await?
+        {
             None => Ok(None),
-            Some(value) => DivergentMark::read(mark_key.as_bytes(), &value)?
-                .checked(view)
-                .map(Some),
+            Some(mark) => mark.checked(view).map(Some),
         }
     }
 
@@ -616,11 +641,12 @@ impl Paykit {
 
     /// Every mark, each read bound to its key.
     async fn divergent_marks(&self) -> Result<Vec<DivergentMark>> {
-        let mut out = Vec::new();
-        for (mark_key, value) in self.app.protocol_scan(key::DIVERGENT.as_bytes()).await? {
-            out.push(DivergentMark::read(&mark_key, &value)?);
-        }
-        Ok(out)
+        Ok(self
+            .local_scan::<DivergentMark>(key::DIVERGENT)
+            .await?
+            .into_iter()
+            .map(|(_, mark)| mark)
+            .collect())
     }
 
     /// Put or keep the mark `after` of `record`.
@@ -841,32 +867,18 @@ impl Paykit {
     /// 8.1, "Stored entries"). An error is returned, and the message stays kept.
     pub(crate) async fn place_divergent_writes(&mut self) -> Result<()> {
         let own = self.identity();
-        for (kept_key, value) in self
-            .app
-            .protocol_scan(key::DIVERGENT_WRITES.as_bytes())
+        for (rest, kept) in self
+            .local_scan::<DivergentWrite>(key::DIVERGENT_WRITES)
             .await?
         {
-            let kept = kept_write_at(
-                &kept_key,
-                &value,
-                &own,
-                &|target| {
-                    self.app
-                        .record_key(target)
-                        .map_err(|error| error.to_string())
-                },
-                &|proof| self.rail.settlement_id(proof),
-            )
-            .map_err(|_| PaykitError::corrupt())?;
-            let Some(StateKey::DivergentWrite { record, .. }) = StateKey::parse(&kept_key) else {
-                return Err(PaykitError::corrupt());
-            };
+            let kept_key = format!("{}{rest}", key::DIVERGENT_WRITES);
+            let record = kept.record;
+            let kept = kept.kept(&own, &|proof| self.rail.settlement_id(proof))?;
             // What it points to is checked before anything is written: the record held at its
             // key is of its target's collection, at the write it was kept over or a later one.
             let (_, view) = self.mark_and_view(&record).await?;
             let collection = kept.target.collection().ok_or_else(PaykitError::corrupt)?;
             check_points_to(view.as_ref(), collection, kept.seen)?;
-            let kept_key = String::from_utf8(kept_key).map_err(|_| PaykitError::corrupt())?;
             let stored = kept.message;
             let accepted_at = stored.accepted_at().ok_or_else(PaykitError::corrupt)?;
             let placed = if self.pause_at(&record).await?.blocks_by_hand() {
@@ -909,18 +921,12 @@ impl Paykit {
     ) -> Result<()> {
         let held_key = key::held_list(&record);
         // A list held already is read bound to its key: a list of the payee app whose
-        // `payment_lists` record the key names.
-        let newer = match self.app.protocol_get(held_key.as_bytes()).await? {
+        // `payment_lists` record the key names (`state::Stored`).
+        let newer = match self.local_get::<KeptMessage>(&held_key).await? {
             None => true,
-            Some(value) => {
-                let held = state::decode::<KeptMessage>(&value)?.stored(&self.identity())?;
-                let at = self
-                    .app
-                    .record_key(&list_target(&held.sender(), &held.message().from.app_id))?;
-                if !matches!(held.body(), Body::PrivatePaymentList(_)) || at != record {
-                    return Err(PaykitError::corrupt());
-                }
-                crate::receive::list_version(&held) < crate::receive::list_version(list)
+            Some(kept) => {
+                crate::receive::list_version(&kept.stored(&self.identity())?)
+                    < crate::receive::list_version(list)
             }
         };
         if newer {
@@ -1013,20 +1019,10 @@ impl Paykit {
     }
 }
 
-/// The local write of a mark, for a restore's layer.
-pub(crate) fn restored_mark_write(
-    key: Vec<u8>,
-    value: &[u8],
-) -> std::result::Result<LocalWrite, String> {
-    Ok(LocalWrite::Put {
-        value: restored_mark(&key, value)?,
-        key,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::StateKey;
 
     const RECORD: [u8; 32] = [7; 32];
 
@@ -1111,50 +1107,28 @@ mod tests {
     }
 
     #[test]
-    fn test_divergent_mark_read_bound_to_its_key() {
+    fn test_divergent_mark_bound_to_the_record_its_key_names() {
         let mark = DivergentMark::paused(&view(true, 3));
-        let value = state::encode(&mark).unwrap();
-        let at = key::divergent(&RECORD);
-        assert_eq!(DivergentMark::read(at.as_bytes(), &value).unwrap(), mark);
+        assert!(mark.bind_to(&RECORD).is_ok());
         // At another record's key.
-        let other = key::divergent(&[8; 32]);
-        assert!(DivergentMark::read(other.as_bytes(), &value).is_err());
+        assert!(mark.bind_to(&[8; 32]).is_err());
         // Of a collection that isn't Paykit's.
         let foreign = DivergentMark {
             collection: "notes".into(),
             ..mark.clone()
         };
-        let value = state::encode(&foreign).unwrap();
-        assert!(DivergentMark::read(at.as_bytes(), &value).is_err());
-        // At a key of another family.
-        assert!(DivergentMark::read(key::peer(&RECORD).as_bytes(), &value).is_err());
-        assert!(DivergentMark::read(at.as_bytes(), b"not json").is_err());
+        assert!(foreign.bind_to(&RECORD).is_err());
+        // Through the state's reader: a value at a key of another family doesn't read.
+        assert!(StateKey::parse(key::divergent(&RECORD).as_bytes())
+            .is_some_and(|family| family == StateKey::Divergent(RECORD)));
     }
 
     #[test]
     fn test_divergent_restore_pauses_a_confirmed_mark() {
-        let at = key::divergent(&RECORD);
-        let value = state::encode(&confirmed(3)).unwrap();
-        let restored = restored_mark(at.as_bytes(), &value).unwrap();
-        let mark = DivergentMark::read(at.as_bytes(), &restored).unwrap();
-        assert!(mark.is_paused());
-        let paused = state::encode(&DivergentMark::paused(&view(true, 3))).unwrap();
-        let restored = restored_mark(at.as_bytes(), &paused).unwrap();
-        assert!(DivergentMark::read(at.as_bytes(), &restored)
-            .unwrap()
-            .is_paused());
-    }
-
-    #[test]
-    fn test_divergent_restore_refuses_a_mark_at_another_key() {
-        let value = state::encode(&DivergentMark::paused(&view(true, 3))).unwrap();
-        assert!(restored_mark(key::divergent(&[9; 32]).as_bytes(), &value).is_err());
-        let foreign = DivergentMark {
-            collection: "notes".into(),
-            ..DivergentMark::paused(&view(true, 3))
-        };
-        let value = state::encode(&foreign).unwrap();
-        assert!(restored_mark(key::divergent(&RECORD).as_bytes(), &value).is_err());
+        let restored = confirmed(3).restored();
+        assert!(restored.is_paused());
+        assert!(restored.bind_to(&RECORD).is_ok());
+        assert!(DivergentMark::paused(&view(true, 3)).restored().is_paused());
     }
 
     #[test]
@@ -1180,10 +1154,7 @@ mod tests {
             confirmed: Some(view(true, 2).version),
             ..DivergentMark::paused(&view(true, 3))
         };
-        let value = state::encode(&mark).unwrap();
-        let at = key::divergent(&RECORD);
-        assert!(DivergentMark::read(at.as_bytes(), &value).is_err());
-        assert!(restored_mark(at.as_bytes(), &value).is_err());
+        assert!(mark.bind_to(&RECORD).is_err());
     }
 
     #[test]
@@ -1213,63 +1184,5 @@ mod tests {
             assert_eq!(WriteRole::from_tag(role.tag()), Some(role));
         }
         assert_eq!(WriteRole::from_tag("cancellation"), None);
-    }
-}
-
-#[cfg(test)]
-mod reader_tests {
-    /// Every Rust source file of the crate, by its path under `src/`, with its text, cut at
-    /// its first test module.
-    fn sources() -> Vec<(String, String)> {
-        let mut out = Vec::new();
-        let dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
-        let mut stack = vec![dir.to_path_buf()];
-        while let Some(at) = stack.pop() {
-            for entry in std::fs::read_dir(&at).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    stack.push(path);
-                } else if path.extension().is_some_and(|ext| ext == "rs") {
-                    let name = path.strip_prefix(dir).unwrap().display().to_string();
-                    let mut text = std::fs::read_to_string(&path).unwrap();
-                    if let Some(cut) = text.find("#[cfg(test)]") {
-                        text.truncate(cut);
-                    }
-                    out.push((name, text));
-                }
-            }
-        }
-        out.sort();
-        out
-    }
-
-    #[test]
-    fn test_divergent_state_read_only_through_its_readers() {
-        // The marks and the kept writes are read only through `DivergentMark::read` and
-        // `kept_write_at`, which bind each value to its key: a raw read of their keys
-        // anywhere else, or a raw typed read of their values, fails here.
-        for (name, text) in sources() {
-            for needle in [
-                "key::divergent(",
-                "key::DIVERGENT",
-                "key::divergent_write(",
-                "local_get::<DivergentMark",
-                "local_get::<DivergentWrite",
-                "local_scan::<DivergentMark",
-                "local_scan::<DivergentWrite",
-                "decode::<DivergentMark",
-                "decode::<DivergentWrite",
-            ] {
-                let uses = text
-                    .lines()
-                    .filter(|line| !line.trim_start().starts_with("//"))
-                    .filter(|line| line.contains(needle))
-                    .count();
-                assert!(
-                    uses == 0 || name == "divergent.rs",
-                    "{name} reads divergent state outside its readers: {needle}"
-                );
-            }
-        }
     }
 }

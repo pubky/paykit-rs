@@ -658,9 +658,9 @@ pub(crate) struct ListAsk {
 }
 
 /// The local write that journals `entry` in a batch. The entry is checked first
-/// ([`JournalEntry::check`]), the check a resume and a restore read it back with, so no path
-/// persists a state recovery would refuse: one that fails is a bug, refused as a corrupt
-/// store, with nothing written.
+/// ([`JournalEntry::check`]), the shape every read back checks before binding it to its key
+/// (`state::Stored`), so no path persists a state recovery would refuse: one that fails is a
+/// bug, refused as a corrupt store, with nothing written.
 pub(crate) fn journal_write(entry: &JournalEntry) -> Result<LocalWrite> {
     entry.check()?;
     state::local_put(&key::journal(&entry.attempt()?), entry)
@@ -1056,43 +1056,40 @@ impl Paykit {
         })
     }
 
-    /// The journal, every entry checked as read back ([`JournalEntry::check`]).
+    /// The journal, every entry read back bound to its key (`state::Stored`).
     pub(crate) async fn journal(&self) -> Result<Vec<JournalEntry>> {
-        let mut out = Vec::new();
-        for (rest, entry) in self.local_scan::<JournalEntry>(key::JOURNAL).await? {
-            self.check_entry(&entry)?;
-            if rest != entry.attempt_id {
-                return Err(PaykitError::corrupt());
-            }
-            out.push(entry);
-        }
-        Ok(out)
+        Ok(self
+            .local_scan::<JournalEntry>(key::JOURNAL)
+            .await?
+            .into_iter()
+            .map(|(_, entry)| entry)
+            .collect())
     }
 
-    /// The journal entry of `attempt`, read back checked and bound to its obligation and its
-    /// key, as [`Paykit::journal`] reads each.
+    /// The journal entry of `attempt`, read back checked and bound to its key: of that
+    /// attempt, its claim key the one its payee and request blind to, its record the one its
+    /// request or attempt names (`state::Stored`).
     ///
     /// # Errors
     ///
     /// A store failure, or an entry that doesn't read or isn't the attempt its key names.
     pub(crate) async fn journal_entry(&self, attempt: &AttemptId) -> Result<Option<JournalEntry>> {
-        let Some(entry) = self
-            .local_get::<JournalEntry>(&key::journal(attempt))
-            .await?
-        else {
-            return Ok(None);
-        };
-        self.check_entry(&entry)?;
-        if entry.attempt()? != *attempt {
-            return Err(PaykitError::corrupt());
-        }
-        Ok(Some(entry))
+        self.local_get::<JournalEntry>(&key::journal(attempt)).await
     }
 
-    /// A journal entry read back, checked and bound to its obligation through this app's
-    /// naming key ([`JournalEntry::check_bound`]).
-    pub(crate) fn check_entry(&self, entry: &JournalEntry) -> Result<()> {
-        entry.check_bound(|payee, request_hash| self.obligation(payee, request_hash, 0))
+    /// [`Paykit::journal_entry`], bound to `obligation` as well, the claim the caller looks
+    /// the attempt up for ([`JournalEntry::on_claim`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::journal_entry`]; a corrupt store for an entry of the attempt on another
+    /// claim.
+    pub(crate) async fn journal_entry_on(
+        &self,
+        attempt: &AttemptId,
+        obligation: &[u8; 32],
+    ) -> Result<Option<JournalEntry>> {
+        JournalEntry::on_claim(self.journal_entry(attempt).await?, obligation)
     }
 
     /// Journal `entry`, checked first as [`journal_write`] does: only a state a resume and a
@@ -1566,13 +1563,12 @@ impl Paykit {
         let now = self.now();
         for (app_id, held_version) in asks {
             let mark = key::list_ask(payee, app_id.as_ref());
+            // Read bound to its key: a mark naming another payee or app than its key is a
+            // corrupt store (`state::Stored`).
             if let Some(asked) = self.local_get::<ListAsk>(&mark).await? {
                 // A mark ahead of the clock (restored, or the clock set back) is due, as a
                 // lists read is: it never holds the next request back for longer than a day.
-                // One that names another payee or app than its key is no mark of this ask.
-                if asked.payee == *payee
-                    && asked.app_id == app_id
-                    && asked.held_version == held_version
+                if asked.held_version == held_version
                     && asked.asked_at_ms <= now
                     && now - asked.asked_at_ms < DAY_MS
                 {
@@ -2412,11 +2408,12 @@ impl Paykit {
         let target = ActivityTarget::payer(entry.natural_key.clone());
         for _ in 0..OUTCOME_TRIES {
             // A batch kept from before may have been applied since: it finished the entry.
+            // Read bound to its key and to the entry's claim: a value of another attempt or
+            // claim at its key is a corrupt store, never this payment finished.
             if let Some(kept) = self
-                .local_get::<JournalEntry>(&key::journal(&attempt_id))
+                .journal_entry_on(&attempt_id, &entry.obligation)
                 .await?
             {
-                self.check_entry(&kept)?;
                 if matches!(kept.stage, Stage::Finished | Stage::AcceptanceOwed) {
                     *entry = kept;
                     return Ok(Written::Done);

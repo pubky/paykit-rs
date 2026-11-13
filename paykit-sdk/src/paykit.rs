@@ -736,9 +736,9 @@ impl Paykit {
             self.place_kept_cancellations().await?;
         }
         // The senders of messages dropped before they were taken: of replies dropped for the
-        // bounds once the record of one of their requests came, of entries dropped
+        // bounds once the app holds the record of one of their requests, of entries dropped
         // unverified at once, then again at most once a day while the mark lives.
-        let marked = self.ask_on_marks(&report.events).await?;
+        let marked = self.ask_on_marks().await?;
         // The payers' replies kept for requests whose record wasn't held yet.
         self.place_kept_replies().await?;
         // The messages kept over divergent records whose user has confirmed them, a list to

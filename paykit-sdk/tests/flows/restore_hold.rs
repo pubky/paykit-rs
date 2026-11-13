@@ -402,6 +402,30 @@ async fn test_restore_hold_confirming_a_request_not_held_refused_as_not_found() 
     assert_eq!(refused.refusal(), Some(&Refusal::NotFound));
 }
 
+#[tokio::test]
+async fn test_restore_hold_confirming_a_request_missing_from_a_copy_not_listed_refused_as_not_now()
+{
+    // After a `missed` item whose listing fails, bob's request is missing from the copy,
+    // which may lack records: the confirmation is refused as not now, not as no request.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    wallet.receive(None).await.unwrap();
+    missed(&w);
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    fail_paykit_listing(&w);
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.records_unlisted.is_some(), "{got:?}");
+    let refused = wallet
+        .confirm_possibly_cancelled(&request, UserConfirmed::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{refused:?}"
+    );
+}
+
 /// Whether `wallet` keeps the mark of records not listed since a `missed` item.
 async fn missed_unlisted(wallet: &Paykit) -> bool {
     wallet

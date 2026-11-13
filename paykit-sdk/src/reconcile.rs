@@ -481,11 +481,9 @@ impl Paykit {
         // The journal entry of an own attempt is finished with the resolution, in its batch:
         // the user decided, so it neither blocks another payment as one in progress nor is
         // resumed, and never dispatched again (Paykit spec 7.2, "No second execution").
-        let journal_key = key::journal(&attempt);
-        let mut entry = self.local_get::<JournalEntry>(&journal_key).await?;
-        if let Some(entry) = &entry {
-            self.check_entry(entry)?;
-        }
+        // Read bound to its key and to `obligation`: an entry of another attempt, or of this
+        // attempt on another claim, is a corrupt store, and nothing is written.
+        let mut entry = self.journal_entry_on(&attempt, obligation).await?;
         // An own payment the method reported made is never `failed` or `unknown`: either
         // would free the claim for a second payment, and its proof would never go (Paykit
         // spec 7.2, "Failed means definitively not paid"). It is resolved `done`, or by
