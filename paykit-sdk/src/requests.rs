@@ -1740,15 +1740,20 @@ impl Paykit {
     ///
     /// It takes paying's guards (Paykit spec 7.2, 8.1): a request held after a restore is
     /// accepted only once the user has seen the payee may have cancelled it, and a blocked
-    /// payee's only once the user confirms it ([`Paykit::accept_subscription_with`]).
+    /// payee's only once the user confirms it ([`Paykit::accept_subscription_with`]). The
+    /// deny list is judged as for a payment the user starts: as read at most 10 minutes
+    /// before, else read first, and a read that fails is the call's error, so nothing is
+    /// recorded or sent on a copy of the lists not known, a confirmation in hand included.
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotFound`]; [`Refusal::Usage`] for a one-time request, which is accepted
-    /// by paying it; [`Refusal::Subscribed`] when it is accepted already, here or by another
-    /// own app, also when the record changed meanwhile to show that acceptance;
-    /// [`Refusal::HeldAfterRestore`]; [`Refusal::Blocked`]; otherwise as
-    /// [`Paykit::reject_request`]. A failure that leaves the acceptance's batch kept (the
+    /// [`Refusal::SwitchUnavailable`], or the client's error, when the deny list has to be
+    /// read and can't be; [`Refusal::NotFound`]; [`Refusal::Usage`] for a one-time request,
+    /// which is accepted by paying it; [`Refusal::Subscribed`] when it is accepted already,
+    /// here or by another own app, also when the record changed meanwhile to show that
+    /// acceptance; [`Refusal::HeldAfterRestore`]; [`Refusal::Blocked`]; otherwise as
+    /// [`Paykit::reject_request`], whose refusal while sends to the payee are held an
+    /// acceptance doesn't take. A failure that leaves the acceptance's batch kept (the
     /// network, `429`, `503`) is no error: it is reported sent, [`MessageDelivery::Kept`], so
     /// the host doesn't accept again.
     pub async fn accept_subscription(&mut self, request: &RequestRef) -> Result<SentMessage> {
