@@ -440,7 +440,8 @@ fn consent_removed(
 
 /// What an app holds at an Allowance's record, in the receive step.
 enum Held {
-    /// No record, or a delete, and the copy is listed: it holds none.
+    /// No record, or a delete, and the copy is listed: it holds none. A proposal over a
+    /// delete is conflicted all the same.
     None,
     /// A record that binds.
     Record(Box<AllowanceRecord>),
@@ -472,11 +473,13 @@ pub(crate) fn receive_effect(
     // The request path's own read (`receive::held_or_unlisted_at`, which
     // `receive::held_or_unlisted` is): the entry waits for the record's scope key, and an
     // absent or deleted record is held while the copy may lack records, since a later write
-    // may have opened it again (Paykit spec 8.1, "Records not listed yet"). Past that, a
-    // delete is a record not held, as for a request: a proposal opens the record again under
-    // the spam rule, an answer is kept before its record.
+    // may have opened it again (Paykit spec 8.1, "Records not listed yet"). Past that, an
+    // answer over a delete is kept before its record, as over no record; a proposal over a
+    // delete is taken as conflicted (Paykit spec 8.3, "Ending"): one `allowance_id` has one
+    // proposal, and the app can't tell what the deleted record held.
     let value = receive::held_or_unlisted_at(cx, &target, RecordSide::Allowances)?;
     let content = cx.record(&target)?.map(|held| held.content);
+    let deleted = content == Some(RecordContent::Deleted);
     let present = receive::holds_record(content.as_ref());
     let held = match value {
         Some(value) => bind_at(&value, &own, &sender, &allowance_id)
@@ -486,6 +489,9 @@ pub(crate) fn receive_effect(
     };
     match stored.body() {
         Body::AllowanceProposal(_) => match held {
+            // Kept as the stop, and nothing written at the key: a record can't hold
+            // `conflicted` without its proposal.
+            Held::None if deleted => keep_conflict(cx, &target, stored, scopes),
             Held::None => {
                 if receive::admits_new_state(cx, &sender, scopes)? {
                     // Terms that aren't valid were dropped at check 10 (Paykit wire 4.15).
@@ -1708,10 +1714,27 @@ impl Paykit {
             .await?
             .map(|held| held.content)
         {
-            // A record absent or deleted is opened only by a message that may open it, a
-            // proposal, as the request path's later write does (`Paykit::place_note`).
-            None | Some(RecordContent::Deleted) => match stored.body() {
+            // A record absent is opened only by a message that may open it, a proposal, as
+            // the request path's later write does (`Paykit::place_note`).
+            None => match stored.body() {
                 Body::AllowanceProposal(_) => opened(counterparty, stored),
+                _ => None,
+            },
+            // A proposal over a delete is conflicted, kept as the stop with nothing written
+            // at the key, as at its first read (Paykit spec 8.3, "Ending"); an answer waits
+            // for a record.
+            Some(RecordContent::Deleted) => match stored.body() {
+                Body::AllowanceProposal(_) => {
+                    let mut locals = locals;
+                    if !self.conflict_kept(&record).await? {
+                        locals.push(state::local_put(
+                            &key::conflict(&record),
+                            &KeptMessage::of(&stored),
+                        )?);
+                    }
+                    self.app.protocol_commit(&locals).await?;
+                    return Ok(Placed::Done);
+                }
                 _ => None,
             },
             Some(content) if crate::hold::awaits_key(&content) => return Ok(Placed::Not),
