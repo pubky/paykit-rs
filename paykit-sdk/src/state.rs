@@ -43,7 +43,7 @@
 //! | `rsd/<pubky>/<day>` | how many messages were re-sent to a requester that day | |
 //! | `nl` | set by a restore: the shared records aren't listed since, so the client's copy is empty and a record's absence means nothing yet; cleared once they are listed; never restored | |
 //! | `lc` | the certificate the shared records were last listed under, signed: a certificate held now other than it means the copy may lack records until Paykit lists them, since one held between may have read less (`hold.rs`); written only by a Paykit listing, in its commit; absent from a join or a restore until that listing, which leaves the records unlisted; never restored | |
-//! | `ro` | set by a restore: this app's own messages its activity records store to be sent are queued again once the records are listed (`hold.rs`, `Paykit::queue_own_again`); after a pass, the counterparties whose sends were held then, whose messages wait; never restored | |
+//! | `ro` | set by a restore: this app's own messages its activity records store to be sent are queued again once the records are listed (`hold.rs`, `Paykit::queue_own_again`); after a pass, the counterparties whose messages wait: those whose sends were held then, and those whose period details wait for their request record to show whether a later stop covers them; and, once a pass found an activity record it couldn't read, the time from which such records are judged again at each receive, for 30 days; never restored | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
@@ -729,7 +729,7 @@ impl Stored for MissedHold {
 impl sealed::Sealed for OwnResendOwed {}
 
 /// The restore's re-send owed: the counterparties still waiting, if a pass ran, ascending,
-/// each once, which name no key.
+/// each once, and the time a pass first found a record it couldn't read, which name no key.
 impl Stored for OwnResendOwed {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
@@ -1459,6 +1459,15 @@ mod tests {
             key::PAYER_PASS_OWED,
             owed(serde_json::Value::Null)
         ));
+        // With the time a pass first found a record it couldn't read; a mark written
+        // before that field reads as none found.
+        let unread = serde_json::json!({ "waiting": [one], "unread_since_ms": 7 });
+        assert!(reads::<OwnResendOwed>(key::OWN_RESEND_OWED, unread.clone()));
+        let read: OwnResendOwed = serde_json::from_value(unread).unwrap();
+        assert_eq!(read.unread_since_ms, Some(7));
+        let older: OwnResendOwed =
+            serde_json::from_value(serde_json::json!({ "waiting": [one] })).unwrap();
+        assert_eq!(older.unread_since_ms, None);
         // A restore's hold at its key only.
         let hold = serde_json::json!({ "resend_from_ms": 1, "asks_queued": false, "asked": [] });
         assert!(reads::<RestoreHold>(key::RESTORE_HOLD, hold.clone()));

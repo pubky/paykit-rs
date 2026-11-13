@@ -645,9 +645,14 @@ impl Paykit {
     /// nothing is told the host, and it is never asked for again; one the client refuses as
     /// not this app's own is not sent either. The pass waits while a record of the copy is
     /// sealed under a scope key the app doesn't hold yet ([`Paykit::copy_awaits_key`]), so
-    /// what such a record stores is sent once it opens; a record that doesn't bind to its key
-    /// shows nothing to send. Messages to a counterparty whose sends are held wait, the mark naming
-    /// it, for a later receive. Period details go only while no later stop covers them: none
+    /// what such a record stores is sent once it opens. A record held under a Paykit policy
+    /// whose value doesn't open for good, read or bind shows none of its messages: the pass
+    /// stays owed and judges every record again at each receive, until each such record
+    /// reads, its messages then going under the same rules, or 30 days have passed since
+    /// the restore ([`OwnResendOwed::unread_since_ms`]), after which none of them could still
+    /// go; a delete holds no message, and a record under another policy nothing of Paykit's.
+    /// Messages to a counterparty whose sends are held wait, the mark naming it, for a later
+    /// receive. Period details go only while no later stop covers them: none
     /// once their period is credited or their request is rejected or cancelled; while their
     /// request record isn't held, or doesn't read or bind, they wait the same way, neither
     /// sent nor dropped, and are judged again at each later receive, until the record shows
@@ -666,6 +671,12 @@ impl Paykit {
         let own = self.identity();
         let app_id = self.app.cert().app_id();
         let mut waiting = std::collections::BTreeSet::new();
+        // A record the pass can't read names no counterparty: while one may still hold a
+        // message that could go, every record is judged again, whoever its counterparty.
+        let unread_open = owed
+            .unread_since_ms
+            .is_some_and(|since| !self.past_restore_window(since));
+        let mut unread = false;
         for (collection, side) in [
             (
                 Collection::PayerActivity,
@@ -677,27 +688,38 @@ impl Paykit {
             ),
         ] {
             for held in self.app.records_of(collection.name()).await? {
-                let Some(value) = held.content.value() else {
+                // A record under a policy that isn't Paykit's holds nothing of Paykit's, and a
+                // delete holds no message: neither is a record the pass can't read.
+                let Some(policy_label) = collection.policy_label(&held.policy) else {
                     continue;
                 };
-                // A record that doesn't bind shows nothing to send.
-                let label = collection.policy_label(&held.policy).flatten();
-                let Some(record) = crate::records::bind_activity(
-                    value,
-                    &own,
-                    side,
-                    label.as_ref(),
-                    &held.key,
-                    |t| self.app.record_key(t).ok(),
-                    &|p| self.rail.settlement_id(p),
-                ) else {
+                if held.content == RecordContent::Deleted {
+                    continue;
+                }
+                let label = policy_label;
+                let record = held.content.value().and_then(|value| {
+                    crate::records::bind_activity(
+                        value,
+                        &own,
+                        side,
+                        label.as_ref(),
+                        &held.key,
+                        |t| self.app.record_key(t).ok(),
+                        &|p| self.rail.settlement_id(p),
+                    )
+                });
+                // A record that doesn't open, read or bind shows nothing to send now: it is
+                // judged again at each receive (`unread_since_ms`).
+                let Some(record) = record else {
+                    unread = true;
                     continue;
                 };
                 let counterparty = record.counterparty;
-                if owed
-                    .waiting
-                    .as_ref()
-                    .is_some_and(|waiting| waiting.binary_search(&counterparty).is_err())
+                if !unread_open
+                    && owed
+                        .waiting
+                        .as_ref()
+                        .is_some_and(|waiting| waiting.binary_search(&counterparty).is_err())
                 {
                     continue;
                 }
@@ -741,14 +763,36 @@ impl Paykit {
                 }
             }
         }
-        if waiting.is_empty() {
+        // The first pass to find a record it can't read sets the time the 30 days run from,
+        // and later passes keep it.
+        let unread_since_ms = owed
+            .unread_since_ms
+            .or_else(|| unread.then(|| self.window_now()));
+        let unread_waits =
+            unread && unread_since_ms.is_some_and(|since| !self.past_restore_window(since));
+        if waiting.is_empty() && !unread_waits {
             self.local_delete(key::OWN_RESEND_OWED).await
         } else {
             let owed = OwnResendOwed {
                 waiting: Some(waiting.into_iter().collect()),
+                unread_since_ms,
             };
             self.local_put(key::OWN_RESEND_OWED, &owed).await
         }
+    }
+
+    /// The time the client judges a message's replay window by: the later of the device
+    /// clock and the highest service time verified (`App::queue_stored`). No counterparty
+    /// sets either.
+    fn window_now(&self) -> u64 {
+        self.now().max(self.service_time().unwrap_or(0))
+    }
+
+    /// Whether 30 days have passed, on [`Paykit::window_now`], since `since_ms`, a time at or
+    /// after the restore: every message an activity record stores to be sent again was
+    /// signed before the backup, so none could still go by then.
+    fn past_restore_window(&self, since_ms: u64) -> bool {
+        self.window_now() > since_ms.saturating_add(pubky_switch_client::app::SENT_RETENTION_MS)
     }
 
     /// Whether a later stop covers the period details the payee period record `record`,
@@ -789,7 +833,7 @@ impl Paykit {
             .created_at_ms
             .saturating_sub(CLOCK_TOLERANCE_MS)
             .saturating_add(pubky_switch_client::app::SENT_RETENTION_MS);
-        self.now().max(self.service_time().unwrap_or(0)) > until
+        self.window_now() > until
     }
 
     /// Queue, once after a restore, a `resend_request` to every counterparty with an open
@@ -857,6 +901,14 @@ pub(crate) struct OwnResendOwed {
     /// of the deny list isn't known, and those with period details whose request record
     /// couldn't show yet whether a later stop covers them ([`DetailsStop::Unknown`]).
     pub(crate) waiting: Option<Vec<[u8; 32]>>,
+    /// Set by the first pass that found an activity record it couldn't read (a value that
+    /// doesn't open for good, read or bind), to [`Paykit::window_now`] then, at or after the
+    /// restore, and kept: such a record names no counterparty, so while one is found, and
+    /// until 30 days after this time, every record is judged again at each receive, and the
+    /// re-send stays owed. `None`, as in a mark written before this field, until a pass
+    /// finds one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) unread_since_ms: Option<u64>,
 }
 
 /// Whether a later stop covers the period details a payee period record keeps, for the
