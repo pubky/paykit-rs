@@ -4,7 +4,8 @@
 use paykit_lib::allowances::{AllowanceTerms, Ledger};
 use paykit_lib::records::AllowanceRecord;
 use paykit_sdk::{
-    AllowanceRole, AppScopes, PayOptions, PayOutcome, Paykit, PaykitError, Refusal, RequestRef,
+    AllowanceRole, AllowanceStatus, AppScopes, PayOptions, PayOutcome, Paykit, PaykitError,
+    Refusal, RequestRef,
 };
 use pubky_switch_client::app::UserConfirmed;
 use pubky_switch_client::clock::Clock;
@@ -1721,4 +1722,105 @@ async fn test_executor_restored_over_a_ledger_it_did_not_accept_pays_nothing() {
     let after = wallet.pay_under_allowance(&refused, &record).await;
     assert!(after.as_ref().is_err_and(not_automatic), "{after:?}");
     assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_executor_handoff_notice_not_delivered_goes_at_the_next_flush() {
+    // The new executor's grant is applied with its handoff notice queued in the batch; the
+    // try to deliver the notice then fails at the switch. A send that fails is no error: the
+    // grant goes on, and the notice, still queued, goes at the next flush and takes the
+    // Allowance off the previous executor's consent list.
+    let w = World::new();
+    let (mut shop, mut old, record) = set_up(&w, terms_with(json!({}))).await;
+    let first = request(&w, &mut shop, &mut old, "0.5").await;
+    old.pay_under_allowance(&first, &record).await.unwrap();
+    let mut new = executor_wallet(&w, "wallet2").await;
+    new.receive(None).await.unwrap();
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "inbox".into(),
+            after: 0,
+        });
+    new.grant_executor(&record, UserConfirmed::new())
+        .await
+        .unwrap();
+    let (allowance, _) = held(&new, &record).await;
+    assert_eq!(allowance.grants.len(), 2);
+    old.receive(None).await.unwrap();
+    assert!(old.allowance(&record).await.unwrap().consented);
+    new.app_mut().flush_outbox().await.unwrap();
+    old.receive(None).await.unwrap();
+    assert!(!old.allowance(&record).await.unwrap().consented);
+}
+
+/// Another own app blocks bob, or the wallet's read of the lists fails (`blocked`), and the
+/// wallet, the executor, then ends the Allowance it allows. A user's end is never held: it
+/// is recorded and sent at once, and once bob is unblocked, or the lists read again, the
+/// executor pays nothing under the Allowance (Paykit spec 8.1, "Blocked counterparties";
+/// 8.3, "Ending").
+async fn ended_while_sends_held(blocked: bool) {
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let mut contacts = w
+        .join(
+            &w.alice,
+            "contacts",
+            AppScopes::new()
+                .contacts()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+        )
+        .await;
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    if blocked {
+        contacts.block(&w.bob_id()).await.unwrap();
+    } else {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/allow".into(),
+                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                current: Value::Null,
+            });
+    }
+    wallet.receive(None).await.unwrap();
+    let expected = if blocked { Some(true) } else { None };
+    assert_eq!(wallet.allowance(&record).await.unwrap().blocked, expected);
+    wallet.end_allowance(&record).await.unwrap();
+    assert_eq!(
+        wallet.allowance(&record).await.unwrap().status,
+        AllowanceStatus::Ended
+    );
+    shop.receive(None).await.unwrap();
+    let theirs = shop.allowances().await.unwrap()[0].record;
+    assert_eq!(
+        shop.allowance(&theirs).await.unwrap().status,
+        AllowanceStatus::Ended
+    );
+    if blocked {
+        contacts.unblock(&w.bob_id()).await.unwrap();
+    }
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    let refused = wallet
+        .pay_under_allowance(&request, &record)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::AllowanceEnded)),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_executor_end_to_a_blocked_counterparty_sent_and_pays_nothing_after() {
+    ended_while_sends_held(true).await;
+}
+
+#[tokio::test]
+async fn test_executor_end_while_the_deny_copy_is_unknown_sent_and_pays_nothing_after() {
+    ended_while_sends_held(false).await;
 }

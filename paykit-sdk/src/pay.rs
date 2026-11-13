@@ -1840,13 +1840,18 @@ impl Paykit {
         let submitted = self.app.submit_batch(batch).await;
         // A batch carrying the ledger's first write that the switch refused, or the client
         // refused before sending, applied nothing: the first grant's empty ledger is owed
-        // again, as after its own write's refusal.
+        // again, as after its own write's refusal. One the client keeps unanswered names its
+        // batch in the mark, so the mark is reconciled with the client's word on that batch
+        // (the client's `App::kept_batch`), as for the empty ledger's own write. An answer the client found invalid may have been applied:
+        // the mark stays sent, and a missing ledger is then never taken as empty.
         if let (Some(record), Err(error)) = (first_ledger_write, &submitted) {
             let refused = error.kept_batch().is_none()
                 && !matches!(error, AppError::InvalidData(_))
                 && (error.code().is_some() || matches!(error, AppError::Refused(_)));
             if refused {
                 self.empty_ledger_owed_again(&record).await?;
+            } else if let Some(batch) = error.kept_batch() {
+                self.empty_ledger_sent(&record, Some(batch)).await?;
             }
         }
         let submitted = match submitted {

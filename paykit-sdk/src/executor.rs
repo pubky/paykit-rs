@@ -146,8 +146,9 @@ pub(crate) fn check_kept_ledger(record: &[u8; 32], kept: &KeptLedger) -> Result<
 }
 
 /// Whether `shared`'s current write is by an app the own `identity.json` lists as removed,
-/// written at or after its `distrust_from`, or with no service time that dates it (Switch spec 12.2 step 3): a write the executor never builds or pays on, whether
-/// the client flagged it, marked it doubtful, or took it before it learned of the removal.
+/// written at or after its `distrust_from`, or with no service time that dates it (Switch
+/// spec 12.2 step 3): a write the executor never builds or pays on, whether the client
+/// flagged it, marked it doubtful, or took it before it learned of the removal.
 fn written_by_removed_app(
     identity: &pubky_switch_core::records::IdentityDoc,
     shared: &SharedRecord,
@@ -158,7 +159,9 @@ fn written_by_removed_app(
         .iter()
         .find(|removed| removed.app_id == shared.writer)
         // Both times are on the service's clock, the write's dated by a proof or a verified
-        // stub: no tolerance between them. A write at `distrust_from` counts as after it.
+        // stub: no tolerance between them. A write exactly at `distrust_from` is refused too:
+        // one millisecond stricter than the spec's "after its distrust_from" and the client's
+        // own check, so a write the service can't order against the removal pays nothing.
         .is_some_and(|removed| {
             shared
                 .written_at_ms
@@ -428,7 +431,9 @@ impl Paykit {
     }
 
     /// Set the first grant's empty ledger back to owed, after a batch carrying the ledger's
-    /// first write applied nothing. A mark of a ledger the executor didn't accept stays.
+    /// first write applied nothing. A mark of a ledger the executor didn't accept stays as it
+    /// is: a ledger is at the key, so no empty ledger is ever owed over it (Paykit spec 8.3, "A
+    /// grant implies a ledger").
     pub(crate) async fn empty_ledger_owed_again(&mut self, record: &[u8; 32]) -> Result<()> {
         let Some(mark) = self
             .local_get::<EmptyLedgerMark>(&key::empty_ledger(record))
@@ -987,6 +992,25 @@ impl Paykit {
         self.keep_ledger(record, &ledger_key).await
     }
 
+    /// One try to deliver `msg_id`, queued, now. A try the network or the switch fails leaves
+    /// it queued for the next flush, and is no error; a store failure or an alarm is the
+    /// call's error, so nothing goes on past it (as `Paykit::send_own_blocks_again` does).
+    pub(crate) async fn deliver_now(&mut self, msg_id: &str) -> Result<()> {
+        match self.app.flush_message(msg_id).await {
+            Ok(_) => Ok(()),
+            Err(error)
+                if matches!(
+                    error.unkept(),
+                    pubky_switch_client::app::AppError::Store(_)
+                        | pubky_switch_client::app::AppError::Alarm(_)
+                ) =>
+            {
+                Err(error.into())
+            }
+            Err(_) => Ok(()),
+        }
+    }
+
     /// Pay the request `request` automatically under the Allowance at `allowance` (Paykit
     /// spec 8.3, "Paying under an Allowance"), as its executor: no user confirmation is asked
     /// for, and none overrides a check. The host calls it for a request it wants paid
@@ -1234,7 +1258,7 @@ impl Paykit {
         }
         for msg_id in sent {
             // A notice not delivered now goes with the next flush.
-            let _ = self.app.flush_message(&msg_id).await;
+            self.deliver_now(&msg_id).await?;
         }
         if next.grants.len() == 1 {
             self.write_empty_ledger(record, &next).await?;
