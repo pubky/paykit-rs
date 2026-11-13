@@ -651,8 +651,8 @@ impl Paykit {
     /// nothing is told the host, and it is never asked for again; one the client refuses as
     /// not this app's own is not sent either. The pass waits while a record of the copy is
     /// sealed under a scope key the app doesn't hold yet ([`Paykit::copy_awaits_key`]), so
-    /// what such a record stores is sent once it opens; a record that doesn't read shows
-    /// nothing to send. Messages to a counterparty whose sends are held wait, the mark naming
+    /// what such a record stores is sent once it opens; a record that doesn't bind to its key
+    /// shows nothing to send. Messages to a counterparty whose sends are held wait, the mark naming
     /// it, for a later receive.
     pub(crate) async fn queue_own_again(&mut self) -> Result<()> {
         let Some(owed) = self
@@ -681,8 +681,17 @@ impl Paykit {
                 let Some(value) = held.content.value() else {
                     continue;
                 };
-                // A record that doesn't read shows nothing to send.
-                let Ok(record) = ActivityRecord::read(value, &own, side) else {
+                // A record that doesn't bind shows nothing to send.
+                let label = collection.policy_label(&held.policy).flatten();
+                let Some(record) = crate::records::bind_activity(
+                    value,
+                    &own,
+                    side,
+                    label.as_ref(),
+                    &held.key,
+                    |t| self.app.record_key(t).ok(),
+                    &|p| self.rail.settlement_id(p),
+                ) else {
                     continue;
                 };
                 let counterparty = record.counterparty;
