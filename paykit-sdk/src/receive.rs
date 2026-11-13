@@ -641,9 +641,20 @@ fn keep_until_placed(
 /// loop drops back to it. It is reached only once the copy of the payer's records lacks none:
 /// a cancellation of a request absent or deleted from a copy that may lack records is held
 /// before ([`hold_while_unlisted`]), so every stop is judged from a listed copy.
+///
+/// A stop dropped for the bounds is dropped as one never processed, as a reply is
+/// ([`make_room_for_reply`]): the client marked the cancellation processed when it was
+/// kept, so the step forgets its pair ([`ReceiveContext::forget_processed`]) in the commit
+/// that drops it, and a re-sent copy is taken, and kept again, as a new message. Kept
+/// processed, a re-send would be declined as a duplicate, and the request it cancels could
+/// be paid once it came. The stop counts in its sender's mark of dropped replies, due at
+/// once ([`mark_dropped`]), so the sender is asked to send it again, at most once a day
+/// and not while sends to it are held (`marks.rs`). When the client won't forget the pair
+/// now, the stop stays kept and the bounds are over by one for this step.
 fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<(), Fail> {
     let mut kept = Vec::new();
     let mut names = Vec::new();
+    let mut msg_ids = Vec::new();
     for (name, stop) in state::cx_scan::<KeptMessage>(cx, key::KEPT_CANCELLATIONS)? {
         let Some(crate::state::StateKey::KeptCancellation(record)) =
             crate::state::StateKey::parse(name.as_bytes())
@@ -663,15 +674,35 @@ fn make_room_for_stop(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result<
         }
         kept.push((from, at));
         names.push(name.into_bytes());
+        msg_ids.push(cancellation.message().msg_id.clone());
     }
+    let mut dropped: std::collections::BTreeMap<[u8; 32], (u64, u64)> =
+        std::collections::BTreeMap::new();
     while let Some(index) = kept_reply_evicted(&kept, sender) {
+        let (from, at) = kept[index];
+        match cx.forget_processed(from, &msg_ids[index]) {
+            Ok(_) => {}
+            // The client won't forget the pair now: dropped without forgetting it, the stop
+            // could never be taken again, so it stays kept.
+            Err(AppError::Refused(ClientRefusal::NotNow(_))) => break,
+            // Past the step's bound on local writes: the context marks the step, and the
+            // client stores the entry as too large, applying none of it (`keep_local`).
+            Err(AppError::Refused(ClientRefusal::Usage(_))) => {}
+            Err(error) => return Err(error.into()),
+        }
         kept.swap_remove(index);
+        msg_ids.swap_remove(index);
         keep_local(
             cx,
             LocalWrite::Delete {
                 key: names.swap_remove(index),
             },
         );
+        let times = dropped.entry(from).or_insert((at, at));
+        *times = (times.0.min(at), times.1.max(at));
+    }
+    for (from, times) in dropped {
+        mark_dropped(cx, from, times, true)?;
     }
     Ok(())
 }
@@ -926,8 +957,9 @@ fn payer_reply(
 }
 
 /// Keep `stored`, a payer's reply or a payee's period details naming the request whose
-/// record at `target` the app doesn't hold yet (`pr/<sender>/<record key>/<msg_id>`), within
-/// the bounds on kept replies ([`make_room_for_reply`]); one kept already is read with a
+/// record at `target` the app doesn't hold yet, or a receipt for the payer record at
+/// `target`, which the app can't read now (`pr/<sender>/<record key>/<msg_id>`), within the
+/// bounds on kept replies ([`make_room_for_reply`]); one kept already is read with a
 /// restore's check and left as it is. Admission is the caller's.
 fn keep_reply(
     cx: &mut ReceiveContext<'_>,
@@ -951,6 +983,12 @@ fn keep_reply(
 /// the claim is gone, the notice "marked failed, was paid" for a payment made after
 /// `failed` was written (Paykit spec 7.2). A stored entry's receipt written later
 /// (`Paykit::place_receipt`) decides the same.
+///
+/// A payer record held whose value doesn't open for good, or doesn't read, decides nothing
+/// about the receipt, and a receipt taken with no effect could leave the attempt open or
+/// unknown: the receipt is kept instead ([`receipt_over_unread_record`]), and written later,
+/// with its first read's effects, once the record reads (Paykit spec 8.1, "Stored
+/// entries").
 fn receipt_effect(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
@@ -959,10 +997,17 @@ fn receipt_effect(
     let sender = stored.sender();
     let own = cx.identity();
     let target = receipt_target(stored, &own, &attempt_id);
-    let Some(value) = held_or_unlisted(cx, &target, RecordSide::Payer)? else {
-        return Ok(());
-    };
-    let Some(record) = activity::read(Some(&value), &own, target.side.side()) else {
+    let content = cx.record(&target.record_target())?.map(|held| held.content);
+    let value = held_or_unlisted(cx, &target, RecordSide::Payer)?;
+    let record = value
+        .as_deref()
+        .and_then(|value| activity::read(Some(value), &own, target.side.side()));
+    let Some(record) = record else {
+        // No record, or one deleted: the record says the receipt has nowhere to go. Held,
+        // though, it may read later.
+        if holds_record(content.as_ref()) {
+            return receipt_over_unread_record(cx, &target, stored);
+        }
         return Ok(());
     };
     let Some(found) = receipt_on_record(&record, stored) else {
@@ -1031,6 +1076,40 @@ fn receipt_effect(
         keep_local(cx, local(&key::journal(&attempt_id), &entry)?);
     }
     Ok(())
+}
+
+/// A receipt whose payer record at `target` the app holds but can't read now: a value that
+/// doesn't open for good ([`Unopened::DoesNotOpen`]), or one that doesn't read as an activity
+/// record. A value waiting for its scope key waits for it before this ([`wait_for_key`]).
+/// The receipt is kept as a reply before its record is (`pr/`, [`keep_reply`]), within the
+/// bounds on kept replies: one dropped for the bounds has its pair forgotten and counts in
+/// its sender's mark, which asks for it again. The app writes it once the record reads, with
+/// the effects of its first read on the claim and in the journal
+/// ([`Paykit::place_kept_replies`], `Paykit::place_receipt`); one not written within
+/// [`KEPT_MESSAGE_MS`] of its acceptance is given up, the host told
+/// ([`NoticeKind::MessageGivenUp`]). Nothing holds the feed.
+///
+/// Only the counterparty a record would name keeps a receipt so. A request's receipt names
+/// the payer record of its sender's request, whose key derives from that sender (Paykit
+/// wire 5.3), so no other sender reaches that record, and a receipt over a held record is
+/// no new state. A receipt of a payment without a request names the record of the attempt
+/// alone, whose counterparty can't be read while its value can't: that one is new state,
+/// which the spam rule gates (Paykit wire 4.1). A sender blocked or flagged only counts,
+/// and while the copy of the lists isn't known the entry waits on the feed. So no blocked
+/// third party keeps anything through a record that doesn't read, and a kept receipt whose
+/// sender the record, once read, doesn't name does nothing.
+fn receipt_over_unread_record(
+    cx: &mut ReceiveContext<'_>,
+    target: &ActivityTarget,
+    stored: &StoredMessage,
+) -> Result<(), Fail> {
+    if stored.message().refs.get(1).is_none() {
+        let scopes = cx.cert().scopes().to_vec();
+        if !admits_new_state(cx, &stored.sender(), &scopes)? {
+            return Ok(());
+        }
+    }
+    keep_reply(cx, target, stored)
 }
 
 /// What the switch answered for a receipt's claim (Switch wire 7.4.8).
@@ -1463,6 +1542,22 @@ fn make_room_for_reply(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result
             key: names.swap_remove(index),
         },
     );
+    mark_dropped(cx, from, (at, at), false)
+}
+
+/// Count messages from `from` dropped for the bounds, accepted between `times` (the
+/// earliest and the latest), in the sender's mark of dropped replies (`pd/<sender>`,
+/// `marks.rs`), in the step: the sender is asked to send them again, from the mark's
+/// earliest time. A mark is due at once when `due`, as for a stop dropped for the bounds,
+/// whose request may come at any time; otherwise, as for a reply, once the app holds the
+/// record of one of the sender's requests.
+fn mark_dropped(
+    cx: &mut ReceiveContext<'_>,
+    from: [u8; 32],
+    times: (u64, u64),
+    due: bool,
+) -> Result<(), Fail> {
+    let (earliest, latest) = times;
     let family = MarkFamily::Replies;
     let mark_key = family.key(&from);
     let held = state::cx_get::<crate::marks::DropMark>(cx, &mark_key)?;
@@ -1472,7 +1567,7 @@ fn make_room_for_reply(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result
             others.push((mark.sender, mark.latest_ms));
         }
     }
-    let counted = count_dropped(held, &others, from, at, false);
+    let counted = count_dropped(held, &others, from, earliest, due);
     if let Some(gone) = counted.evicted {
         keep_local(
             cx,
@@ -1481,7 +1576,9 @@ fn make_room_for_reply(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result
             },
         );
     }
-    if let Some(mark) = counted.put {
+    if let Some(mut mark) = counted.put {
+        mark.latest_ms = mark.latest_ms.max(latest);
+        mark.due |= due;
         keep_local(cx, local(&mark_key, &mark)?);
     }
     Ok(())
@@ -1627,21 +1724,23 @@ impl Paykit {
     /// Place the messages kept before their records (Paykit spec 8.1): the payer's replies
     /// kept for requests this app held no record of, and the payee's period details kept
     /// for requests whose payer record it didn't hold, each once the request record is
-    /// held, as a later write of its own with the kept copy dropped in its batch (Switch spec
-    /// 8.2). A period's details or proof go into the period record, once checked against the
+    /// held, and the receipts kept for payer records that didn't read, each once the record
+    /// reads, with the effects of its first read ([`receipt_over_unread_record`]), as a
+    /// later write of its own with the kept copy dropped in its batch (Switch spec 8.2). A
+    /// period's details or proof go into the period record, once checked against the
     /// request ([`Paykit::period_destination`]); one that fails is dropped, as are details
     /// the payer doesn't store ([`crate::periods::stores_details`]). A placement that fails
     /// now is tried again at the next receive. Once [`KEPT_MESSAGE_MS`] have passed since a
     /// message's acceptance, on the highest service time verified:
-    /// - with its request record absent or deleted, it is dropped, and stays processed: the
+    /// - with its record absent or deleted, it is dropped, and stays processed: the
     ///   sender re-sends nothing first accepted that long ago (Paykit spec 9), so nothing
     ///   asks for it again, unlike a reply dropped for the bounds on kept replies, whose pair
     ///   is forgotten (`make_room_for_reply`). Never while the copy of its side may lack
     ///   records ([`Paykit::side_unlisted`]): the absence decides nothing then;
-    /// - with its request record, or the period record it goes into, held but not open,
-    ///   sealed under a scope key the app doesn't hold or a value that doesn't read, with a
-    ///   sender that isn't the record's counterparty, or with a proof naming period details
-    ///   the period record doesn't hold, it is given up, and the host told
+    /// - with its record, or the period record it goes into, held but not open, sealed
+    ///   under a scope key the app doesn't hold or a value that doesn't read, with a sender
+    ///   that isn't the record's counterparty, or with a proof naming period details the
+    ///   period record doesn't hold, it is given up, and the host told
     ///   ([`crate::NoticeKind::MessageGivenUp`]) in the commit that drops it, as a stored
     ///   entry's message (`stored.rs`).
     ///
@@ -1668,7 +1767,13 @@ impl Paykit {
             ) else {
                 return Err(crate::error::PaykitError::corrupt());
             };
-            let target = kept_request_target(&own, &reply, &request);
+            // A receipt kept for the payer's record it names, which didn't read
+            // ([`receipt_over_unread_record`]); a reply for this app's payee record, and
+            // details for the payer's record of their request ([`kept_request_target`]).
+            let target = match reply.body() {
+                Body::PaymentReceipt(receipt) => receipt_target(&reply, &own, &receipt.attempt_id),
+                _ => kept_request_target(&own, &reply, &request),
+            };
             let content = self
                 .app
                 .shared_record(&self.activity_key(&target)?)
@@ -1695,6 +1800,12 @@ impl Paykit {
             // isn't written: kept no longer than any other.
             let placed = match record {
                 Some(record) if record.counterparty != reply.sender() => Placed::Not,
+                // A receipt goes into the payer's record it names, which now reads.
+                Some(_) if matches!(reply.body(), Body::PaymentReceipt(_)) => {
+                    let mut tx = Tx::default();
+                    tx.delete(&kept_key);
+                    Box::pin(self.place_note(&target, role, false, reply.clone(), tx)).await?
+                }
                 Some(record) => {
                     // The decision goes on the heap, as `receive`'s steps do: it nests deep.
                     match Box::pin(self.period_destination(&target, &record, &reply, &request))

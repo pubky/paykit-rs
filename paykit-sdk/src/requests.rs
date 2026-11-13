@@ -1677,15 +1677,20 @@ impl Paykit {
     /// its claim having no open or paid attempt, then sent. Returns the rejection's `msg_id`.
     /// A recurring request is rejected before its acceptance, conditioned on its proposal
     /// not having expired, as its acceptance is ([`Paykit::accept_subscription`]), so an
-    /// acceptance and a rejection can't both go out (Paykit spec 8.2). Nothing is recorded,
-    /// signed or queued while sends to the payee are held: while the copy of the deny list
-    /// holds it, or while that copy isn't known, which a read of the lists is tried for first
-    /// (Paykit spec 8.1, "Blocked counterparties").
+    /// acceptance and a rejection can't both go out (Paykit spec 8.2).
+    ///
+    /// While sends to the payee are held (Paykit spec 8.1, "Blocked counterparties"): while
+    /// the copy of the deny list holds it, or while that copy isn't known, which a read of the
+    /// lists is tried for first, the rejection is recorded all the same, on the same
+    /// conditions, so no own app pays or accepts the request, and only its message is held:
+    /// nothing is queued, nothing goes to the payee, and the message is sent at the first
+    /// receive after sends to the payee aren't held. One held past its replay window, 30 days
+    /// from this call, is never sent, and a [`crate::NoticeKind::MessageGivenUp`] notice
+    /// tells the host; the record still holds it.
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotNow`] while sends to the payee are held, before anything else is
-    /// judged, with the request record unchanged and nothing queued; [`Refusal::NotFound`];
+    /// [`Refusal::NotFound`];
     /// [`Refusal::Rejected`], [`Refusal::Cancelled`],
     /// [`Refusal::AlreadyPaid`] or [`Refusal::PaymentInProgress`]; [`Refusal::Subscribed`]
     /// for a recurring request already accepted; [`Refusal::DeadlinePassed`] for a recurring
@@ -1705,26 +1710,26 @@ impl Paykit {
         self.refresh_own()?;
         self.records_known().await?;
         // The answer's future goes on the heap, as `receive`'s does: it nests deep.
-        let sent = Box::pin(self.answer_request(
+        let (msg_id, _) = Box::pin(self.answer_request(
             request,
             Answer::Reject,
             reason,
             AcceptOptions::default(),
         ))
         .await?;
-        Ok(sent.msg_id)
+        Ok(msg_id)
     }
 
     /// The payer cancels a one-time request (Paykit spec 8.1, Paykit wire 4.8), recorded and
-    /// sent as a rejection is, and held as a rejection is: nothing is recorded, signed or
-    /// queued while sends to the payee are held. Returns the cancellation's `msg_id`.
+    /// sent as a rejection is, and held as a rejection is: while sends to the payee are held
+    /// it is recorded, and its message goes once they aren't. Returns the cancellation's
+    /// `msg_id`.
     ///
     /// # Errors
     ///
-    /// As [`Paykit::reject_request`]: [`Refusal::NotNow`] while sends to the payee are held,
-    /// with the request record unchanged and nothing queued; [`Refusal::Recurring`] for a
-    /// recurring request, whose cancellation is conditioned on its Billing Periods' claims
-    /// (Paykit spec 8.2).
+    /// As [`Paykit::reject_request`]; [`Refusal::Recurring`] for a recurring request, whose
+    /// cancellation is conditioned on its Billing Periods' claims (Paykit spec 8.2), with
+    /// nothing recorded, whether or not sends to the payee are held.
     pub async fn cancel_request(
         &mut self,
         request: &RequestRef,
@@ -1733,14 +1738,14 @@ impl Paykit {
         self.refresh_own()?;
         self.records_known().await?;
         // The answer's future goes on the heap, as `receive`'s does: it nests deep.
-        let sent = Box::pin(self.answer_request(
+        let (msg_id, _) = Box::pin(self.answer_request(
             request,
             Answer::Cancel,
             reason,
             AcceptOptions::default(),
         ))
         .await?;
-        Ok(sent.msg_id)
+        Ok(msg_id)
     }
 
     /// The user accepts the subscription `request`, a recurring request (Paykit spec 8.2,
@@ -1766,8 +1771,8 @@ impl Paykit {
     /// which is accepted by paying it; [`Refusal::Subscribed`] when it is accepted already,
     /// here or by another own app, also when the record changed meanwhile to show that
     /// acceptance; [`Refusal::HeldAfterRestore`]; [`Refusal::Blocked`]; otherwise as
-    /// [`Paykit::reject_request`], whose refusal while sends to the payee are held an
-    /// acceptance doesn't take. A failure that leaves the acceptance's batch kept (the
+    /// [`Paykit::reject_request`]. An acceptance is never recorded and held as a rejection
+    /// is while sends to the payee are held: it takes paying's gate above. A failure that leaves the acceptance's batch kept (the
     /// network, `429`, `503`) is no error: it is reported sent, [`MessageDelivery::Kept`], so
     /// the host doesn't accept again.
     pub async fn accept_subscription(&mut self, request: &RequestRef) -> Result<SentMessage> {
@@ -1790,7 +1795,11 @@ impl Paykit {
         self.refresh_own()?;
         self.records_known().await?;
         // The answer's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(self.answer_request(request, Answer::Accept, None, options)).await
+        let (msg_id, delivery) =
+            Box::pin(self.answer_request(request, Answer::Accept, None, options)).await?;
+        // An acceptance is never held: it is recorded and queued, or refused.
+        let delivery = delivery.ok_or_else(PaykitError::corrupt)?;
+        Ok(SentMessage { msg_id, delivery })
     }
 
     async fn answer_request(
@@ -1799,21 +1808,23 @@ impl Paykit {
         answer: Answer,
         reason: Option<String>,
         options: AcceptOptions,
-    ) -> Result<SentMessage> {
+    ) -> Result<(String, Option<MessageDelivery>)> {
         self.require_pay()?;
-        // A rejection or a payer's cancellation goes to no counterparty whose sends are held
-        // (Paykit spec 8.1, "Blocked counterparties"), refused before the record is touched
-        // or anything is signed or queued: the request stays as it is, and the user answers
-        // it once the payee is unblocked or the lists are read. An acceptance takes paying's
-        // gate instead (Paykit spec 8.1, 8.2): the deny list as judged for a payment the user
-        // starts, read first when the copy is older than 10 minutes or not known, a read
-        // that fails being the call's error, so it never goes on a copy not known; to a
-        // blocked payee it goes only on the user's confirmation, below.
-        let blocked = if answer == Answer::Accept {
-            self.denied_for_user(&request.payee).await?
+        // An answer goes to no counterparty whose sends are held (Paykit spec 8.1, "Blocked
+        // counterparties"). A rejection or a payer's cancellation is still a stop: it is
+        // recorded as when they aren't, and only its message waits ([`Paykit::record_held`]);
+        // a copy of the deny list not known is read first. An acceptance takes paying's gate
+        // instead (Paykit spec 8.1, 8.2): the deny list as judged for a payment the user
+        // starts, read first when the copy is older than 10 minutes or not known, a read that
+        // fails being the call's error, so it never goes on a copy not known; to a blocked
+        // payee it goes only on the user's confirmation, below. It is never held.
+        let (blocked, held) = if answer == Answer::Accept {
+            (self.denied_for_user(&request.payee).await?, false)
         } else {
-            self.refuse_while_sends_held(&request.payee).await?;
-            false
+            if !self.deny_copy_known().await? {
+                self.refresh_lists_when_due().await?;
+            }
+            (false, self.sends_held(&request.payee).await?)
         };
         let (target, record) = self.payer_request(request).await?;
         let (_, body) = request_of(&record).ok_or(Refusal::NotFound)?;
@@ -1904,19 +1915,27 @@ impl Paykit {
         } else {
             vec![self.app.claim_condition(&obligation).await?]
         };
-        match self
-            .send_with_record(signed, &target, role, conditions, tx.into_writes())
+        let written = if held {
+            self.record_held(
+                signed,
+                &target,
+                role,
+                conditions,
+                tx.into_writes(),
+                request.request_hash,
+            )
             .await
-        {
+        } else {
+            self.send_with_record(signed, &target, role, conditions, tx.into_writes())
+                .await
+        };
+        match written {
             Ok(_) => {}
             // An acceptance kept to go at the next write or read is sent, as far as the
             // caller goes, so the host doesn't accept again.
             Err(error) if answer == Answer::Accept && error.kept_batch().is_some() => {
                 let batch_id = error.kept_batch().ok_or_else(PaykitError::corrupt)?;
-                return Ok(SentMessage {
-                    msg_id,
-                    delivery: MessageDelivery::Kept { batch_id },
-                });
+                return Ok((msg_id, Some(MessageDelivery::Kept { batch_id })));
             }
             Err(error) => {
                 if let PaykitError::Client(client) = &error {
@@ -1945,15 +1964,16 @@ impl Paykit {
                 return Err(conflict(error));
             }
         }
+        // A held answer is recorded and not queued: nothing is delivered now.
+        if held {
+            return Ok((msg_id, None));
+        }
         // An acceptance recorded and queued is sent whatever a try to deliver it now gives;
         // a rejection's or cancellation's failed try is the call's error, as before.
         if answer != Answer::Accept {
             self.app.flush_message(&msg_id).await?;
         }
-        Ok(SentMessage {
-            delivery: self.delivered(&msg_id).await?,
-            msg_id,
-        })
+        Ok((msg_id.clone(), Some(self.delivered(&msg_id).await?)))
     }
 }
 

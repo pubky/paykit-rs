@@ -420,6 +420,15 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            // A held answer is restored: the record the backup's device wrote holds it, and the
+            // restored app queues it from there, or tells the host it was given up, once sends
+            // to its payee aren't held (`Paykit::queue_own_again`).
+            StateKey::HeldAnswer { .. } => {
+                state::restored::<crate::hold::HeldAnswer>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
             StateKey::KeptCancellation(_) => {
                 state::restored::<KeptMessage>(&key, &value, &binder).map_err(|_| {
                     String::from(
