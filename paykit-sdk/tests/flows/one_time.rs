@@ -1687,7 +1687,14 @@ async fn test_one_time_rejection_while_the_records_are_not_listed_refused_as_not
         code: pubky_switch_core::http::ErrorCode::Unavailable,
         current: serde_json::Value::Null,
     };
-    w.alice.switch().fail_next(unlisted());
+    // The client lists right after the item, the wallet's two collections, before Paykit's
+    // own listing at the end of the receive, which fails.
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "records?collection".into(),
+            after: 2,
+        });
     assert!(wallet
         .receive(None)
         .await
@@ -2081,12 +2088,13 @@ async fn test_one_time_cancellation_of_a_request_missing_from_a_copy_not_listed_
     w.alice.switch().push_missed(1, now - 1_000, now);
     let hash = [7; 32];
     let cancellation = cancel_to(&w, &[wallet.app_id()], hash);
+    // The client lists right after the item, the wallet's two collections, before Paykit's
+    // own listing at the end of the receive, which fails.
     w.alice
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
-            current: serde_json::Value::Null,
+            after: 2,
         });
     let got = wallet.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");

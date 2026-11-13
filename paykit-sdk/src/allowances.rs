@@ -551,10 +551,26 @@ fn stored_entry(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
 ) -> std::result::Result<(), Fail> {
-    if receive::key_wait_over(cx, stored.accepted_at()) {
-        let notice = crate::stored::given_up_write(stored, cx.highest_service_time())
-            .map_err(|_| Fail::corrupt())?;
-        receive::keep_local(cx, notice);
+    // Past its window on the highest service time verified (Paykit spec 8.1); one with no
+    // acceptance time has no window to wait out.
+    let over = stored.accepted_at().is_none_or(|at| {
+        cx.highest_service_time()
+            .is_some_and(|t| at.saturating_add(receive::KEPT_MESSAGE_MS) <= t)
+    });
+    if over {
+        let sender = stored.sender();
+        let msg_id = &stored.message().msg_id;
+        let notice = crate::notices::KeptNotice::given_up(
+            sender,
+            msg_id,
+            None,
+            cx.highest_service_time().unwrap_or(0),
+            crate::notices::GivenUpFrom::Origin(crate::notices::GivenUpOrigin::ReceiveStep),
+        );
+        receive::keep_local(
+            cx,
+            receive::local(&key::message_notice(&sender, msg_id), &notice)?,
+        );
         return Ok(());
     }
     Err(Fail::Store(
@@ -973,6 +989,15 @@ impl Paykit {
         role: AllowanceRole,
         terms: AllowanceTerms,
     ) -> Result<SentAllowance> {
+        Box::pin(self.propose_allowance_inner(to, role, terms)).await
+    }
+
+    async fn propose_allowance_inner(
+        &mut self,
+        to: [u8; 32],
+        role: AllowanceRole,
+        terms: AllowanceTerms,
+    ) -> Result<SentAllowance> {
         self.refresh_own()?;
         self.require_allowance()?;
         self.refuse_while_sends_held(&to).await?;
@@ -1055,8 +1080,7 @@ impl Paykit {
     /// changed; [`Refusal::Usage`] for a proposal this identity sent or one answered already;
     /// as [`Paykit::propose_allowance`].
     pub async fn accept_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
-        self.answer_allowance(record, Kind::AllowanceAcceptance)
-            .await
+        Box::pin(self.answer_allowance(record, Kind::AllowanceAcceptance)).await
     }
 
     /// Reject the Allowance proposed to this identity at `record` (Paykit spec 8.3, Paykit
@@ -1067,8 +1091,7 @@ impl Paykit {
     ///
     /// As [`Paykit::accept_allowance`].
     pub async fn reject_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
-        self.answer_allowance(record, Kind::AllowanceRejection)
-            .await
+        Box::pin(self.answer_allowance(record, Kind::AllowanceRejection)).await
     }
 
     /// End the Allowance at `record` (Paykit spec 8.3 "Ending", Paykit wire 4.16): an
@@ -1090,7 +1113,7 @@ impl Paykit {
     /// this identity not yet answered, which is rejected instead; as
     /// [`Paykit::propose_allowance`].
     pub async fn end_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
-        self.answer_allowance(record, Kind::AllowanceEnd).await
+        Box::pin(self.answer_allowance(record, Kind::AllowanceEnd)).await
     }
 
     /// Record and send this identity's acceptance, rejection or end of the Allowance at
@@ -1285,6 +1308,10 @@ impl Paykit {
     /// or another certificate, or while one of them waits for its scope key; a store
     /// failure, also one reading a single record: the list is never partial.
     pub async fn allowances(&self) -> Result<Vec<AllowanceView>> {
+        Box::pin(self.allowances_inner()).await
+    }
+
+    async fn allowances_inner(&self) -> Result<Vec<AllowanceView>> {
         self.refuse_while_unlisted().await?;
         let mut out = Vec::new();
         for held in self.app.records_of(Collection::Allowances.name()).await? {
@@ -1308,6 +1335,10 @@ impl Paykit {
     ///
     /// [`Refusal::NotFound`]; as [`Paykit::allowances`].
     pub async fn allowance(&self, record: &[u8; 32]) -> Result<AllowanceView> {
+        Box::pin(self.allowance_inner(record)).await
+    }
+
+    async fn allowance_inner(&self, record: &[u8; 32]) -> Result<AllowanceView> {
         self.refuse_while_unlisted().await?;
         self.refuse_while_awaiting_key(record).await?;
         if let Some(held) = self.held_allowance(record).await? {
@@ -1423,28 +1454,6 @@ impl Paykit {
             return Ok(None);
         }
         Ok(Some(self.denied_as_last_read(pubky).await?))
-    }
-
-    /// [`Refusal::NotNow`] while sends to `counterparty` are held ([`Paykit::sends_held`]):
-    /// the copy of the deny list holds it, an own block included, or the copy isn't known,
-    /// which a read of the lists is tried for first (Paykit spec 8.1, "Blocked
-    /// counterparties"). Asked before anything is signed, written or queued, so a refused
-    /// proposal, answer or end changes nothing. Refusing an end moves no money: no
-    /// automatic payment goes to a counterparty whose sends are held, and the user ends the
-    /// Allowance once it is unblocked.
-    async fn refuse_while_sends_held(&mut self, counterparty: &[u8; 32]) -> Result<()> {
-        if !self.deny_copy_known().await? {
-            self.refresh_lists_when_due().await?;
-        }
-        if self.sends_held(counterparty).await? {
-            return Err(Refusal::NotNow(
-                "Paykit spec 8.1: sends to the counterparty are held while the deny list holds \
-                 it or its copy isn't known"
-                    .into(),
-            )
-            .into());
-        }
-        Ok(())
     }
 
     /// [`Refusal::NotNow`] while the record at `record` waits for its scope key: the app

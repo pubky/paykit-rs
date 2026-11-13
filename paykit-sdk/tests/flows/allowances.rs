@@ -1909,12 +1909,26 @@ async fn test_allowances_kept_answer_over_a_record_that_doesnt_read_given_up_wit
 /// the records counts as not listed until a listing of Paykit's own.
 fn missed_and_listing_fails(w: &World) {
     missed(w);
-    w.alice
+    fail_paykit_listing(&w.alice, WALLET_COLLECTIONS);
+}
+
+/// How many collections the client lists for an app of alice's holding `pay` and
+/// `allowance`: the payer's side, `payment_lists` and `allowances`.
+const WALLET_COLLECTIONS: usize = 3;
+
+/// How many collections the client lists for bob's shop, holding `request` and `allowance`:
+/// the payee's side and `allowances`.
+const SHOP_COLLECTIONS: usize = 2;
+
+/// Fail Paykit's own listing at the end of the next receive of `party`'s app after a
+/// `missed` item: the client's listing after the item, of the app's `collections`, goes
+/// through first. A listing that fails inside the client's read fails the read.
+fn fail_paykit_listing(party: &pubky_switch_client::testing::TestSigner, collections: usize) {
+    party
         .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
-            current: Value::Null,
+            after: collections,
         });
 }
 
@@ -1965,13 +1979,7 @@ async fn test_allowances_kept_answer_past_30_days_kept_while_unlisted() {
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     let now = w.clock.now_ms();
     w.bob.switch().push_missed(1, now - 1_000, now);
-    w.bob
-        .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Error {
-            path: "records?collection".into(),
-            code: pubky_switch_core::http::ErrorCode::Unavailable,
-            current: Value::Null,
-        });
+    fail_paykit_listing(&w.bob, SHOP_COLLECTIONS);
     let got = shop.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
     assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 1);

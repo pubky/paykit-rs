@@ -43,13 +43,15 @@
 //! | `rsd/<pubky>/<day>` | how many messages were re-sent to a requester that day | |
 //! | `nl` | set by a restore: the shared records aren't listed since, so the client's copy is empty and a record's absence means nothing yet; cleared once they are listed; never restored | |
 //! | `lc` | the certificate the shared records were last listed under, signed: a certificate held now other than it means the copy may lack records until Paykit lists them, since one held between may have read less (`hold.rs`); written only by a Paykit listing, in its commit; absent from a join or a restore until that listing, which leaves the records unlisted; never restored | |
+//! | `ro` | set by a restore: this app's own messages its activity records store to be sent are queued again once the records are listed (`hold.rs`, `Paykit::queue_own_again`); after a pass, the counterparties whose sends were held then, whose messages wait; never restored | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
-//! | `bk/<pubky>` | this app's block (`true`) or unblock (`false`) of `pubky` whose `deny.put` or `deny.delete` the client keeps unanswered: either counts at once (Paykit spec 8.1); cleared once a read of the list shows it; restored, and written again once after the restore, since the kept batch stays with the device that kept it | |
+//! | `bk/<pubky>` | this app's block or unblock of `pubky` not yet shown by the list (`OwnBlockMark`): a block from before the switch is asked, an unblock only with the batch the client keeps; a block counts until a read of the list shows it, and is written again at a receive while the client neither keeps nor applied its batch, a restored one too, since the kept batch stays with the device that kept it; an unblock counts for payments and held sends only while the client still keeps its batch, never for the spam rule, and isn't restored (Paykit spec 8.1) | |
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
+//! | `kw/<sender>` | a mark of a sender's entries the client dropped while they waited for a scope key, as `pd/` holds, with the data epochs they waited for; it asks only while the app holds every key of those epochs (`marks.rs`) | |
 //! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply to a request the app holds no record of yet, kept until it does (`receive.rs`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing, since a dropped entry's time is already in its sender's mark | |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, with the entry's ID and message hash, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
@@ -75,9 +77,10 @@ use crate::allowances::{allowance_target, ConsentEntry, NoticeTarget};
 use crate::app_records::SeenRecords;
 use crate::error::{PaykitError, Result};
 use crate::hold::MissedHold;
+use crate::hold::OwnResendOwed;
 use crate::hold::RestoreHold;
 use crate::journal::JournalEntry;
-use crate::marks::DropMark;
+use crate::marks::{DropMark, KeyWaitMark};
 use crate::notices::KeptNotice;
 use crate::pay::ListAsk;
 use crate::paykit::Paykit;
@@ -379,9 +382,89 @@ impl Stored for u64 {
     }
 }
 
+/// This app's block or unblock of the identity its key names (`bk/<pubky>`), not yet shown
+/// by a read of the lists (Paykit spec 8.1, "a block or unblock the app wrote counts at
+/// once", for payment decisions). The spam rule counts only its block.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum OwnBlockMark {
+    /// A block or unblock with the client's kept batch it rides on: `None` only for a
+    /// block, not yet answered, or answered with no batch kept.
+    Sent {
+        /// A block (`true`) or an unblock.
+        blocked: bool,
+        /// The batch the client keeps it in.
+        batch: Option<[u8; 16]>,
+    },
+    /// A mark as written before marks named their batch: a block (`true`) or an unblock.
+    Bare(bool),
+}
+
+impl OwnBlockMark {
+    /// A block (`true`) or an unblock.
+    pub(crate) fn blocked(&self) -> bool {
+        match self {
+            Self::Sent { blocked, .. } | Self::Bare(blocked) => *blocked,
+        }
+    }
+
+    /// The batch the client keeps it in, if it named one.
+    pub(crate) fn batch(&self) -> Option<[u8; 16]> {
+        match self {
+            Self::Sent { batch, .. } => *batch,
+            Self::Bare(_) => None,
+        }
+    }
+
+    /// The batch an unblock rides on, the one the client must still keep for it to count.
+    pub(crate) fn unblock_batch(&self) -> Option<[u8; 16]> {
+        match self {
+            Self::Sent {
+                blocked: false,
+                batch,
+            } => *batch,
+            _ => None,
+        }
+    }
+
+    /// What the mark counts as now for payments and held sends, given whether the client
+    /// still keeps the batch of an unblock (`batch_kept`), as the client answers it:
+    /// `Some(true)` for a block, which always counts, failing closed; `Some(false)` for an
+    /// unblock whose batch the client keeps; `None` for an unblock that counts no more: its
+    /// batch dropped or ended, or one named no batch, as a mark of the earlier form, so the
+    /// list decides. The spam rule asks only [`OwnBlockMark::blocked`]: an unblock never
+    /// overrides the client's copy of the lists there.
+    pub(crate) fn counts(&self, batch_kept: bool) -> Option<bool> {
+        if self.blocked() {
+            return Some(true);
+        }
+        (self.unblock_batch().is_some() && batch_kept).then_some(false)
+    }
+}
+
+impl sealed::Sealed for OwnBlockMark {}
+
+/// Every form a run writes; an unblock with no batch is no such form: an unblock is marked
+/// only with the batch the client keeps it in.
+impl Stored for OwnBlockMark {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match (family, self) {
+            (
+                StateKey::OwnBlock(_),
+                Self::Sent {
+                    blocked: false,
+                    batch: None,
+                },
+            ) => corrupt(),
+            (StateKey::OwnBlock(_), _) => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for bool {}
 
-/// A mark, which every writer sets `true`, or an own block kept unanswered.
+/// A mark, which every writer sets `true`.
 impl Stored for bool {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
@@ -395,9 +478,6 @@ impl Stored for bool {
             {
                 Ok(())
             }
-            // This app's block (`true`) or unblock (`false`) kept unanswered, of the identity
-            // its key names.
-            StateKey::OwnBlock(_) => Ok(()),
             _ => corrupt(),
         }
     }
@@ -696,6 +776,26 @@ impl Stored for MissedHold {
     }
 }
 
+impl sealed::Sealed for OwnResendOwed {}
+
+/// The restore's re-send owed: the counterparties still waiting, if a pass ran, ascending,
+/// each once, which name no key.
+impl Stored for OwnResendOwed {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::OwnResendOwed
+                if self
+                    .waiting
+                    .as_ref()
+                    .is_none_or(|waiting| waiting.windows(2).all(|pair| pair[0] < pair[1])) =>
+            {
+                Ok(())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for Vec<[u8; 32]> {}
 
 /// The copy of the deny list: identities, which name no key.
@@ -718,6 +818,30 @@ impl Stored for DropMark {
         match family {
             StateKey::DroppedReplies { sender } | StateKey::DroppedUnverified { sender }
                 if self.sender == *sender && self.earliest_ms <= self.latest_ms =>
+            {
+                Ok(())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for KeyWaitMark {}
+
+/// A mark of a sender's entries dropped while they waited for a scope key: of the sender its
+/// key names, its times not crossed, never due by its flag (it is due while the app holds
+/// its keys), and naming at least one data epoch, ascending, each once (`marks.rs`). Its
+/// request is checked as a [`DropMark`]'s is.
+impl Stored for KeyWaitMark {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        let mark = &self.mark;
+        match family {
+            StateKey::KeyWaits { sender }
+                if mark.sender == *sender
+                    && mark.earliest_ms <= mark.latest_ms
+                    && !mark.due
+                    && !self.epochs.is_empty()
+                    && self.epochs.windows(2).all(|pair| pair[0] < pair[1]) =>
             {
                 Ok(())
             }
@@ -786,12 +910,14 @@ pub(crate) mod key {
     pub(crate) const MISSED_UNLISTED: &str = "ml";
     pub(crate) const MISSED_CONSENTS: &str = "mc";
     pub(crate) const PAYER_PASS_OWED: &str = "pp";
+    pub(crate) const OWN_RESEND_OWED: &str = "ro";
     pub(crate) const LISTED_CERT: &str = "lc";
     pub(crate) const NOTICES: &str = "nt/";
     pub(crate) const STORED_NOTES: &str = "se/";
     pub(crate) const KEPT_REPLIES: &str = "pr/";
     pub(crate) const DROPPED_REPLIES: &str = "pd/";
     pub(crate) const DROPPED_UNVERIFIED: &str = "ud/";
+    pub(crate) const KEY_WAITS: &str = "kw/";
     pub(crate) const ALLOWANCE_ENDS: &str = "ae/";
     pub(crate) const CONFLICTS: &str = "cf/";
     pub(crate) const CONSENTS: &str = "ac/";
@@ -826,6 +952,11 @@ pub(crate) mod key {
     /// The mark of entries from `sender` dropped unverified.
     pub(crate) fn dropped_unverified(sender: &[u8; 32]) -> String {
         format!("{DROPPED_UNVERIFIED}{}", b64(sender))
+    }
+
+    /// The mark of `sender`'s entries dropped while they waited for a scope key.
+    pub(crate) fn key_waits(sender: &[u8; 32]) -> String {
+        format!("{KEY_WAITS}{}", b64(sender))
     }
     pub(crate) const DENIED: &str = "dl";
     pub(crate) const OWN_BLOCKS: &str = "bk/";
@@ -902,7 +1033,12 @@ pub(crate) mod key {
         format!("{HELD_LISTS}{}", b64(record_key))
     }
 
-    /// This app's block (`true`) or unblock of `pubky` kept unanswered.
+    /// This app's block or unblock of `pubky` not yet shown by a read of the lists
+    /// ([`OwnBlockMark`]). A block is marked before the switch is asked, so a crash before
+    /// the call leaves it counted; its mark goes once the switch took it, or once a read of
+    /// the lists shows it, and until then a block whose batch the client neither keeps nor
+    /// applied is written again at each receive. An unblock counts for payments and held
+    /// sends only while the client keeps its batch, and never for the spam rule.
     pub(crate) fn own_block(pubky: &[u8; 32]) -> String {
         format!("{OWN_BLOCKS}{}", b64(pubky))
     }
@@ -970,6 +1106,8 @@ pub(crate) enum StateKey {
     MissedConsents,
     /// `pp`: no reconcile ran the payer pass since a restore.
     PayerPassOwed,
+    /// `ro`: the restore's re-send of this app's own messages is owed.
+    OwnResendOwed,
     /// `lc`: the certificate the shared records were last listed under.
     ListedCert,
     /// `hc/<record key>`: the user's confirmation of a held request.
@@ -1003,6 +1141,8 @@ pub(crate) enum StateKey {
     DroppedReplies { sender: [u8; 32] },
     /// `ud/<sender>`: the mark of a sender's entries dropped unverified.
     DroppedUnverified { sender: [u8; 32] },
+    /// `kw/<sender>`: the mark of a sender's entries dropped while they waited for a key.
+    KeyWaits { sender: [u8; 32] },
     /// `pr/<sender>/<record key>/<msg_id>`: a payer's reply kept for its record.
     KeptReply {
         sender: [u8; 32],
@@ -1062,6 +1202,7 @@ impl StateKey {
             "ml" => Self::MissedUnlisted,
             "mc" => Self::MissedConsents,
             "pp" => Self::PayerPassOwed,
+            "ro" => Self::OwnResendOwed,
             "lc" => Self::ListedCert,
             "lr" => Self::ListsRead,
             "dl" => Self::Denied,
@@ -1142,6 +1283,9 @@ impl StateKey {
                         sender: b64_32(rest)?,
                     },
                     "ud" => Self::DroppedUnverified {
+                        sender: b64_32(rest)?,
+                    },
+                    "kw" => Self::KeyWaits {
                         sender: b64_32(rest)?,
                     },
                     "pr" => {
@@ -1292,6 +1436,31 @@ mod tests {
     }
 
     #[test]
+    fn test_state_own_block_mark_of_the_earlier_form_counts_only_as_a_block() {
+        // A mark written before marks named their batch: a block counts, failing closed; an
+        // unblock can't be tied to a batch the client keeps, so it counts no more.
+        let read = |value: serde_json::Value| -> OwnBlockMark {
+            let bytes = serde_json::to_vec(&serde_json::json!({ "v": 1, "d": value })).unwrap();
+            bound::<OwnBlockMark>(
+                key::own_block(&[1; 32]).as_bytes(),
+                &bytes,
+                &Binder::unblinded([1; 32]),
+            )
+            .unwrap()
+        };
+        assert_eq!(read(serde_json::json!(true)).counts(false), Some(true));
+        assert_eq!(read(serde_json::json!(true)).counts(true), Some(true));
+        assert_eq!(read(serde_json::json!(false)).counts(true), None);
+        // One with its batch: an unblock counts only while the client keeps the batch.
+        let unblock = read(serde_json::json!({ "blocked": false, "batch": vec![7u8; 16] }));
+        assert_eq!(unblock.unblock_batch(), Some([7; 16]));
+        assert_eq!(unblock.counts(true), Some(false));
+        assert_eq!(unblock.counts(false), None);
+        let block = read(serde_json::json!({ "blocked": true, "batch": null }));
+        assert_eq!(block.counts(false), Some(true));
+    }
+
+    #[test]
     fn test_state_restore_hold_written_without_its_asked_reads() {
         // A restore's hold as a run before the `asked` member wrote it, mid-hold when the
         // store is upgraded: a valid run's form, so it reads, having asked none.
@@ -1317,10 +1486,45 @@ mod tests {
         assert!(!reads::<DropMark>(&at, mark(2, 5, 6)));
         assert!(!reads::<DropMark>(&at, mark(1, 7, 6)));
         assert!(!reads::<DropMark>(&key::peer(&[1; 32]), mark(1, 5, 6)));
-        // An own block or unblock kept, of any value, and the deny list's copy.
-        assert!(reads::<bool>(
+        // A mark of key waits: its own type at its own family, naming its epochs ascending,
+        // each once, never due by its flag.
+        let waits = |sender: u8, earliest: u64, latest: u64, due: bool, epochs: &[u64]| {
+            let mut value = mark(sender, earliest, latest);
+            value["due"] = serde_json::json!(due);
+            value["epochs"] = serde_json::json!(epochs);
+            value
+        };
+        let kw = key::key_waits(&[1; 32]);
+        assert!(reads::<KeyWaitMark>(&kw, waits(1, 5, 6, false, &[2, 4])));
+        assert!(!reads::<KeyWaitMark>(&kw, waits(2, 5, 6, false, &[2])));
+        assert!(!reads::<KeyWaitMark>(&kw, waits(1, 7, 6, false, &[2])));
+        assert!(!reads::<KeyWaitMark>(&kw, waits(1, 5, 6, true, &[2])));
+        assert!(!reads::<KeyWaitMark>(&kw, waits(1, 5, 6, false, &[])));
+        assert!(!reads::<KeyWaitMark>(&kw, waits(1, 5, 6, false, &[4, 2])));
+        assert!(!reads::<KeyWaitMark>(&kw, waits(1, 5, 6, false, &[2, 2])));
+        assert!(!reads::<KeyWaitMark>(&at, waits(1, 5, 6, false, &[2])));
+        assert!(!reads::<DropMark>(&kw, mark(1, 5, 6)));
+        // An own block or unblock, in either form, and the deny list's copy.
+        for mark in [
+            serde_json::json!(false),
+            serde_json::json!(true),
+            serde_json::json!({ "blocked": false, "batch": vec![7u8; 16] }),
+            serde_json::json!({ "blocked": true, "batch": null }),
+        ] {
+            assert!(reads::<OwnBlockMark>(&key::own_block(&[1; 32]), mark));
+        }
+        assert!(!reads::<bool>(
             &key::own_block(&[1; 32]),
             serde_json::json!(false)
+        ));
+        // An unblock is marked only with its batch: one without is no run's.
+        assert!(!reads::<OwnBlockMark>(
+            &key::own_block(&[1; 32]),
+            serde_json::json!({ "blocked": false, "batch": null })
+        ));
+        assert!(reads::<OwnBlockMark>(
+            &key::own_block(&[1; 32]),
+            serde_json::json!({ "blocked": true, "batch": vec![7u8; 16] })
         ));
         assert!(reads::<Vec<[u8; 32]>>(key::DENIED, serde_json::json!([])));
         assert!(!reads::<Vec<[u8; 32]>>(
@@ -1357,6 +1561,26 @@ mod tests {
             serde_json::json!(false)
         ));
         assert!(!reads::<bool>(&key::peer(&pubky), serde_json::json!(true)));
+        // The restore's re-send owed at its key only, its waiting counterparties ascending.
+        let owed = |waiting: serde_json::Value| serde_json::json!({ "waiting": waiting });
+        assert!(reads::<OwnResendOwed>(
+            key::OWN_RESEND_OWED,
+            owed(serde_json::Value::Null)
+        ));
+        let one = vec![1u8; 32];
+        let two = vec![2u8; 32];
+        assert!(reads::<OwnResendOwed>(
+            key::OWN_RESEND_OWED,
+            owed(serde_json::json!([one, two]))
+        ));
+        assert!(!reads::<OwnResendOwed>(
+            key::OWN_RESEND_OWED,
+            owed(serde_json::json!([two, one]))
+        ));
+        assert!(!reads::<OwnResendOwed>(
+            key::PAYER_PASS_OWED,
+            owed(serde_json::Value::Null)
+        ));
         // A restore's hold at its key only.
         let hold = serde_json::json!({ "resend_from_ms": 1, "asks_queued": false, "asked": [] });
         assert!(reads::<RestoreHold>(key::RESTORE_HOLD, hold.clone()));
@@ -1482,6 +1706,7 @@ mod tests {
             (key::MISSED_UNLISTED.into(), StateKey::MissedUnlisted),
             (key::MISSED_CONSENTS.into(), StateKey::MissedConsents),
             (key::PAYER_PASS_OWED.into(), StateKey::PayerPassOwed),
+            (key::OWN_RESEND_OWED.into(), StateKey::OwnResendOwed),
             (key::LISTED_CERT.into(), StateKey::ListedCert),
             (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),
             (key::LISTS_READ.into(), StateKey::ListsRead),
@@ -1545,6 +1770,7 @@ mod tests {
                 key::dropped_unverified(&pubky),
                 StateKey::DroppedUnverified { sender: pubky },
             ),
+            (key::key_waits(&pubky), StateKey::KeyWaits { sender: pubky }),
             (
                 key::stored_note(&pubky, id),
                 StateKey::StoredNote {
