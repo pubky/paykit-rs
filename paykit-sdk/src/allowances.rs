@@ -1999,6 +1999,35 @@ fn written(result: Result<()>) -> Result<Placed> {
 /// which no path makes (Paykit spec 8.3, "Recorded first"). Every message of this app's in
 /// an Allowance record is written in the batch that queues it, so one signed by this app
 /// there is one to be sent: the re-send after a restore can rely on that.
+/// The messages of the Allowance record `record` this app signed, `app_id` of identity `own`,
+/// that it queues again after a restore (Paykit spec 7.2, "What a restore loses"; 8.3): each
+/// one the record stores to be sent, since every message this app stores in an Allowance
+/// record it also queues ([`stores_unqueued`]), while the counterparty hasn't answered it and
+/// no later stop covers it. The proposal goes while the record holds no response and no end;
+/// an acceptance or a rejection while it holds no end; an end, a stop, always. Nothing goes
+/// for a conflicted Allowance (Paykit spec 8.3, "Conflicted"); the caller leaves out one
+/// whose conflict or counterparty's end this app keeps as a stop not in the record yet.
+pub(crate) fn own_allowance_to_send_again<'a>(
+    record: &'a AllowanceRecord,
+    own: &[u8; 32],
+    app_id: &[u8; 16],
+) -> Vec<&'a StoredMessage> {
+    if record.conflicted.is_some() {
+        return Vec::new();
+    }
+    let ended = record.end.is_some();
+    let candidates = [
+        (Some(&record.proposal), record.response.is_none() && !ended),
+        (record.response.as_ref(), !ended),
+        (record.end.as_ref(), true),
+    ];
+    candidates
+        .into_iter()
+        .filter_map(|(stored, send)| stored.filter(|_| send))
+        .filter(|stored| stored.sender() == *own && stored.cert().app_id() == *app_id)
+        .collect()
+}
+
 fn stores_unqueued(
     before: Option<&AllowanceRecord>,
     next: &AllowanceRecord,

@@ -1401,6 +1401,19 @@ origin when capacity permits. An over-capacity move marks the resolved topology
 stale and stops supervision; it does not retain old streams and use healthy
 audits as polling coverage for the moved peer.
 
+A Linked Peer whose Pubky homeserver cannot be resolved, because the lookup
+fails or finds no homeserver record, reserves no stream and is reported
+`Stale`. It is retried on each topology refresh, and its failed lookup does not
+stop intake for other peers, at startup or while the supervisor runs. When it
+later resolves, it is placed like any other topology change, so an
+over-capacity result marks the resolved topology stale and stops supervision.
+A topology refresh keeps the stored handshake admission of every peer that is
+still supervised but that the refresh did not place, such as a peer whose
+homeserver lookup failed or a handshake that became pending while the refresh
+was resolving, so reserved capacity stays reserved. A peer that already has a
+stream keeps its last resolved homeserver while a later lookup fails, because a
+missing record can be a temporary DHT miss.
+
 Durable intake is bounded to 64 packets per Linked Peer and 1,024 packets per
 identity, with equivalent exact ciphertext-byte bounds. A full peer is removed
 from its shared homeserver subscription while siblings continue. Its cursor is
@@ -1412,9 +1425,9 @@ slot. Healthy streams audit at a validated 1-second to 1-hour cadence, with a
 60-second default plus bounded jitter. This repairs missing or parser-skipped
 events without turning an unavailable SSE endpoint into an always-on polling
 fallback. HTTP 404, 405, and 501 subscription failures are reported as
-`Unsupported`; other stream/fetch failures are `Stale` and retry. Neither state
-proves remote absence. Buffered work remains drainable during transport
-failure.
+`Unsupported`; other stream/fetch failures and homeserver resolution failures
+are `Stale` and retry. Neither state proves remote absence. Buffered work
+remains drainable during transport failure.
 
 `PrivateIntakeSupervisor::health` reports per-peer transport state and last
 successful absent-slot audit. `subscribe_work` is a coalesced local hint, not a
@@ -1591,6 +1604,15 @@ List state.
 Payment Request resolution restricted to a `required_app_id` loads only that
 app's public endpoints. Failure to load it returns `Unavailable`, regardless
 of other apps' endpoints.
+
+`resolve_public_payment_request` reads the received Payment Request, so it
+fails with `Policy` while the counterparty is blocked, before App Registry
+access. It rechecks the block after each public storage provider call, before
+each App Registry or Payment List read, after payment adapter selection, and
+after each payment target is built. A block that lands during any of those
+calls therefore returns `Policy`, even when that call failed. Requests inside a
+single App's Payment List read are not interrupted.
+`resolve_public_contact_payment` reads no Payment Request and is unaffected.
 
 ### Resolve Private Payment
 

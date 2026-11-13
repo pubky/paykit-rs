@@ -3277,3 +3277,196 @@ async fn test_allowances_answer_dropped_for_the_bound_taken_again_from_a_resend_
     .unwrap();
     assert_eq!(held.response.unwrap().message().msg_id, accepted);
 }
+
+/// Bob's shop proposes an Allowance to alice, and `wallet` answers it with `kind`, an
+/// acceptance or, after it accepted, an end: the answer's batch is applied with its answer
+/// lost, so the message is in the wallet's record and in no outbox, and the wallet is backed
+/// up then. Returns the record keys on alice's side and on bob's, and the backup.
+async fn backed_up_with_its_answer_unqueued(
+    w: &World,
+    wallet: &mut Paykit,
+    shop: &mut Paykit,
+    kind: &str,
+) -> ([u8; 32], [u8; 32], paykit_sdk::PaykitBackup) {
+    let (theirs, mine) = proposed(w, shop, wallet).await;
+    if kind == "paykit.allowance_end" {
+        wallet.accept_allowance(&mine).await.unwrap();
+        shop.receive(None).await.unwrap();
+    }
+    // The switch applies the batch and its answer is lost; the client's try to send the
+    // batch again within the call doesn't reach the switch, so the batch stays kept.
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    let answered = answer(wallet, kind, &mine).await;
+    assert_eq!(taken(shop, kind).await, 0, "{answered:?}");
+    (mine, theirs, wallet.backup().await.unwrap())
+}
+
+/// Restore `backup` onto a new store as an app of alice's, without a receive.
+async fn restored_unreceived(w: &World, backup: &paykit_sdk::PaykitBackup) -> Paykit {
+    Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap()
+}
+
+/// The restored wallet queues its answer of `kind`, which no outbox holds, again from its
+/// record, once (Paykit spec 7.2, "What a restore loses"; 8.3): bob gets it.
+async fn answer_queued_again(kind: &str, status: AllowanceStatus) {
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    let (_, theirs, backup) =
+        backed_up_with_its_answer_unqueued(&w, &mut wallet, &mut shop, kind).await;
+    drop(wallet);
+    let mut wallet = restored_unreceived(&w, &backup).await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert_eq!(taken(&mut shop, kind).await, 1);
+    assert_eq!(shop.allowance(&theirs).await.unwrap().status, status);
+    // Once: a later receive queues nothing more.
+    let before = w.bob.switch().entries_from(&w.alice_id());
+    wallet.receive(None).await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+}
+
+#[tokio::test]
+async fn test_allowances_restore_own_acceptance_kept_unanswered_queued_again_from_its_record() {
+    answer_queued_again("paykit.allowance_acceptance", AllowanceStatus::Accepted).await;
+}
+
+#[tokio::test]
+async fn test_allowances_restore_own_end_kept_unanswered_queued_again_from_its_record() {
+    answer_queued_again("paykit.allowance_end", AllowanceStatus::Ended).await;
+}
+
+/// The restored keeper's acceptance, which no outbox holds, waits while sends to bob are
+/// held, `how`, the owed mark naming him; it goes, once, when they aren't (Paykit spec 7.2,
+/// "What a restore loses"; 8.1, Blocked counterparties).
+async fn acceptance_queued_again_once_sends_go(how: SendsHeld) {
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = keeper(&w).await;
+    let kind = "paykit.allowance_acceptance";
+    let (_, theirs, backup) =
+        backed_up_with_its_answer_unqueued(&w, &mut wallet, &mut shop, kind).await;
+    drop(wallet);
+    let mut wallet = restored_unreceived(&w, &backup).await;
+    match how {
+        SendsHeld::Blocked => wallet.block(&w.bob_id()).await.unwrap(),
+        SendsHeld::Unknown => fail_list_read(&w),
+    }
+    wallet.receive(None).await.unwrap();
+    if let SendsHeld::Blocked = how {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(taken(&mut shop, kind).await, 0, "{how:?}");
+    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_some());
+    release_sends(&w, &mut wallet, how).await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert_eq!(taken(&mut shop, kind).await, 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(taken(&mut shop, kind).await, 0);
+    assert_eq!(
+        shop.allowance(&theirs).await.unwrap().status,
+        AllowanceStatus::Accepted
+    );
+}
+
+#[tokio::test]
+async fn test_allowances_restore_own_acceptance_to_a_blocked_counterparty_waits_until_unblocked() {
+    acceptance_queued_again_once_sends_go(SendsHeld::Blocked).await;
+}
+
+#[tokio::test]
+async fn test_allowances_restore_own_acceptance_waits_while_the_deny_list_is_unknown() {
+    acceptance_queued_again_once_sends_go(SendsHeld::Unknown).await;
+}
+
+#[tokio::test]
+async fn test_allowances_restore_own_acceptance_in_a_record_sealed_under_a_key_not_held_waits_for_it(
+) {
+    // After the backup the phone writes the Allowance record again at a data epoch whose key
+    // the restored wallet doesn't hold, though it holds a later one: the wallet's acceptance,
+    // which no outbox holds, waits for that key, and goes once it comes, once (Paykit spec
+    // 7.2, "What a restore loses").
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    let mut phone = alice_app(
+        &w,
+        "phone",
+        AppScopes::new().pay().allowance().build().unwrap(),
+    )
+    .await;
+    let wallet_app = wallet.app_id();
+    let cert = wallet.app().cert().clone();
+    let (mine, theirs, backup) = backed_up_with_its_answer_unqueued(
+        &w,
+        &mut wallet,
+        &mut shop,
+        "paykit.allowance_acceptance",
+    )
+    .await;
+    let id = wallet.allowance(&mine).await.unwrap().allowance_id;
+    drop(wallet);
+    phone.receive(None).await.unwrap();
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    crate::unrequested::store_bundle(&w, phone.app_id(), &phone.app().cert().clone());
+    phone.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let held = value(&phone, &mine).await;
+    assert!(!held["response"].is_null(), "{held}");
+    write_record(
+        &mut phone,
+        &allowances_target(&w.bob_id(), &id),
+        Some(&serde_json::to_vec(&held).unwrap()),
+    )
+    .await;
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    crate::unrequested::store_bundle_from(&w, wallet_app, &cert, newest);
+    let mut wallet = restored_unreceived(&w, &backup).await;
+    let kind = "paykit.allowance_acceptance";
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    let sealed = wallet.app().shared_record(&mine).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            sealed.content,
+            pubky_switch_client::app::RecordContent::Unreadable(
+                pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+            )
+        ),
+        "{:?}",
+        sealed.content
+    );
+    assert_eq!(taken(&mut shop, kind).await, 0);
+    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_some());
+    crate::unrequested::store_bundle(&w, wallet_app, &cert);
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert_eq!(taken(&mut shop, kind).await, 1);
+    assert_eq!(
+        shop.allowance(&theirs).await.unwrap().status,
+        AllowanceStatus::Accepted
+    );
+}

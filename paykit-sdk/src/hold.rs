@@ -644,7 +644,8 @@ impl Paykit {
     }
 
     /// Queue again, once after a restore, the messages this app signed that its activity
-    /// records store to be sent ([`own_to_send_again`]), with the signed plaintext each
+    /// records store to be sent ([`own_to_send_again`]), and its `allowances` records
+    /// ([`crate::allowances::own_allowance_to_send_again`]), with the signed plaintext each
     /// record stores (Switch spec 11, "Queued again by its signer"): a batch the backup kept
     /// unanswered queued its message only with an answer the restored app never gets, so
     /// no outbox holds it. Called once the copy of the records is listed and no scope key
@@ -714,18 +715,39 @@ impl Paykit {
                     continue;
                 }
                 for stored in messages {
-                    match self.app.queue_stored(stored.plaintext()).await {
-                        Ok(msg_id) => {
-                            let _ = self.app.flush_message(&msg_id).await;
-                        }
-                        // Refused for good, or not this app's own: nothing is queued and
-                        // nothing is told; the pass doesn't ask again.
-                        Err(AppError::Refused(
-                            ClientRefusal::WontDeliver(_) | ClientRefusal::Usage(_),
-                        )) => {}
-                        Err(error) => return Err(error.into()),
-                    }
+                    self.queue_stored_again(stored).await?;
                 }
+            }
+        }
+        // The same for the messages an `allowances` record stores, from the record bound to
+        // its key (Paykit spec 7.2, 8.3; `allowances::own_allowance_to_send_again`).
+        for held in self.app.records_of(Collection::Allowances.name()).await? {
+            let Some(record) = self.held_allowance(&held.key).await? else {
+                continue;
+            };
+            let counterparty = record.counterparty;
+            if owed
+                .waiting
+                .as_ref()
+                .is_some_and(|waiting| waiting.binary_search(&counterparty).is_err())
+            {
+                continue;
+            }
+            // Nothing is sent for a conflicted Allowance, nor under a counterparty's end kept
+            // as the stop, which the record doesn't show yet.
+            if self.conflict_kept(&held.key).await? || self.allowance_stopped(&held.key).await? {
+                continue;
+            }
+            let messages = crate::allowances::own_allowance_to_send_again(&record, &own, &app_id);
+            if messages.is_empty() {
+                continue;
+            }
+            if self.sends_held(&counterparty).await? {
+                waiting.insert(counterparty);
+                continue;
+            }
+            for stored in messages {
+                self.queue_stored_again(stored).await?;
             }
         }
         if waiting.is_empty() {
@@ -735,6 +757,28 @@ impl Paykit {
                 waiting: Some(waiting.into_iter().collect()),
             };
             self.local_put(key::OWN_RESEND_OWED, &owed).await
+        }
+    }
+
+    /// Queue `stored`, a message this app signed that a record stores, again with its signed
+    /// plaintext, and try to deliver it now ([`Paykit::queue_own_again`]). One the client
+    /// refuses for good, or as not this app's own, is neither queued nor told, and isn't
+    /// asked for again; a store failure is the call's error.
+    async fn queue_stored_again(
+        &mut self,
+        stored: &paykit_lib::records::StoredMessage,
+    ) -> Result<()> {
+        match self.app.queue_stored(stored.plaintext()).await {
+            Ok(msg_id) => {
+                let _ = self.app.flush_message(&msg_id).await;
+                Ok(())
+            }
+            // Refused for good, or not this app's own: nothing is queued and nothing is
+            // told; the pass doesn't ask again.
+            Err(AppError::Refused(ClientRefusal::WontDeliver(_) | ClientRefusal::Usage(_))) => {
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
         }
     }
 
