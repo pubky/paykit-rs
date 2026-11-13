@@ -1373,18 +1373,28 @@ impl Paykit {
         if let Some(chosen) = self.choose(payee, gathered, amount, options)? {
             return Ok(chosen);
         }
-        if !paused_lists.is_empty() {
-            Box::pin(self.refuse_while_paused(&paused_lists)).await?;
-        }
         // Lists in use that offer only endpoints the method doesn't pay, and no app's list to
         // ask again: a newer list needn't differ, so the payee isn't asked. A single-use
         // endpoint used up that the method pays is one a newer list may offer again.
-        if offered && !expired && !self.pays_any(&used, amount)? {
-            return Err(unsupported("the payee's Private Payment List endpoints"));
-        }
+        let unsupported_only = offered && !expired && !self.pays_any(&used, amount)?;
         // A list still in use with no endpoint the payment may use isn't missing, expired or
         // used up: a newer one needn't differ, so the payee isn't asked.
-        if live && !offered {
+        let unusable = live && !offered;
+        // A paused list is neither missing, expired nor used up (Paykit spec 8.4): the payment
+        // waits for the user's confirmation of it, naming its record, and no app whose list
+        // is paused is asked for a newer one, since the upload may hold one. An app whose
+        // list isn't paused, and merely expired or is used up, is asked as without a paused
+        // list.
+        if !paused_lists.is_empty() {
+            if !held.is_empty() && !unsupported_only && !unusable {
+                self.ask_for_lists(payee, app, &held).await?;
+            }
+            Box::pin(self.refuse_while_paused(&paused_lists)).await?;
+        }
+        if unsupported_only {
+            return Err(unsupported("the payee's Private Payment List endpoints"));
+        }
+        if unusable {
             return Err(Refusal::NoDestination(
                 "Paykit spec 8.4: the payee's Private Payment List has no endpoint this payment \
                  may use"

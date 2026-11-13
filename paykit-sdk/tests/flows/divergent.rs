@@ -1895,3 +1895,82 @@ async fn test_divergent_credit_flag_set_by_the_host_credits_nothing() {
     confirm_refused(&mut shop, &refused).await;
     assert!(shop.confirm_payment(&paid).await.unwrap().is_some());
 }
+
+/// The publishing apps `wallet` asked bob for a list of, one per list request it sent.
+async fn list_asks(w: &World, wallet: &Paykit) -> Vec<Option<[u8; 16]>> {
+    let sent = wallet
+        .app()
+        .sent_to(&w.bob_id(), 0, u64::MAX)
+        .await
+        .unwrap();
+    sent.iter()
+        .filter(|sent| sent.kind == "paykit.private_payment_list_request")
+        .map(|sent| {
+            let message = pubky_switch_core::message::Message::parse(
+                sent.plaintext.json(),
+                paykit_lib::kinds::OPAQUE_MEMBERS,
+            )
+            .unwrap();
+            match paykit_lib::Body::parse(&message).unwrap() {
+                paykit_lib::Body::PrivatePaymentListRequest(asked) => asked.app_id,
+                other => panic!("a list request: {other:?}"),
+            }
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn test_divergent_paused_list_asks_the_app_whose_list_expired() {
+    // Bob's shop's list is paused as divergent; his till's list has merely expired. The
+    // payment waits for the user's confirmation of the shop's list, the till is asked for its
+    // current list, and the shop isn't (Paykit spec 8.4).
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join_with(
+            &w.bob,
+            "till",
+            AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    till.app_mut().invite(&w.alice_id()).await.unwrap();
+    let mut endpoints = std::collections::BTreeMap::new();
+    endpoints.insert(
+        endpoint("btc-lightning-bolt12"),
+        paykit_lib::bodies::ListEndpoint {
+            payload: paykit_lib::PaymentEndpointPayload::new("lno1till").unwrap(),
+            single_use: false,
+        },
+    );
+    let body = paykit_lib::bodies::PrivatePaymentList {
+        version: 1,
+        payment_endpoints: endpoints,
+        expires_at: w.clock.now_ms() + HOUR_MS,
+    }
+    .to_body()
+    .unwrap();
+    w.inject(
+        &w.bob,
+        "till",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.private_payment_list",
+        Vec::new(),
+        body,
+    );
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(2 * HOUR_MS);
+    let record = list_record(&w, &wallet, &shop);
+    set_divergent(&base, &wallet, &record, true);
+    let payment = UnrequestedPayment::new(w.bob_id(), btc("1"))
+        .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")));
+    let refused = wallet.pay_without_request(payment).await.unwrap_err();
+    assert_eq!(refused_records(&refused), vec![(record, true, true)]);
+    assert!(w.rail.all_executions().is_empty());
+    assert_eq!(list_asks(&w, &wallet).await, vec![Some(till.app_id())]);
+}
