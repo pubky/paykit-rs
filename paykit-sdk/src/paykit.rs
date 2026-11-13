@@ -747,6 +747,7 @@ impl Paykit {
         // conflicted (Paykit spec 8.3). After a `missed` item, every Allowance on it is to be confirmed
         // again, as after a restore. An executor notice's target goes once its notice has.
         Box::pin(self.place_allowance_stops()).await?;
+        Box::pin(self.send_owed_ends()).await?;
         Box::pin(self.confirm_consents_again()).await?;
         Box::pin(self.sweep_consents()).await?;
         Box::pin(self.sweep_notice_targets()).await?;
