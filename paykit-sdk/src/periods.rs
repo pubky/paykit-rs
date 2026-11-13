@@ -349,6 +349,27 @@ impl Paykit {
         self.held_activity(&request).await
     }
 
+    /// Whether the app holds, though it may not open or bind it, the payee's request record
+    /// a period record `bound` at `target` belongs to: any content but a delete.
+    pub(crate) async fn request_record_held(
+        &self,
+        target: &ActivityTarget,
+        bound: &ActivityRecord,
+    ) -> Result<bool> {
+        let Ok(RecordBinding::Period { request_hash, .. }) = bound.binding() else {
+            return Ok(false);
+        };
+        let request = ActivityTarget::payee(
+            natural_key::request_record(&self.identity(), &request_hash),
+            target.label().as_ref(),
+        );
+        Ok(self
+            .app
+            .shared_record(&self.activity_key(&request)?)
+            .await?
+            .is_some_and(|held| held.content != RecordContent::Deleted))
+    }
+
     /// The payee sends the payer period details for one Billing Period of the recurring
     /// request whose `payee_activity` record is `record` (Paykit spec 8.2, Paykit wire 4.9):
     /// the period's destination, its conversion rates, or both, valid until

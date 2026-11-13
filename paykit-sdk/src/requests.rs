@@ -800,7 +800,9 @@ impl Paykit {
     /// # Errors
     ///
     /// [`Refusal::CertificateRefused`] while the app's certificate fails Paykit's checks;
-    /// [`Refusal::NotFound`] for a record without a proof; [`Refusal::MaybeCredited`] while
+    /// [`Refusal::NotFound`] for a record without a proof; [`Refusal::NotNow`] for a Billing
+    /// Period's record whose request record the app holds but can't open or bind yet;
+    /// [`Refusal::MaybeCredited`] while
     /// whether another record credits the settlement can't be told; the rail's errors.
     pub async fn verify_payment(&mut self, record: &[u8; 32]) -> Result<Option<u64>> {
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
@@ -861,6 +863,16 @@ impl Paykit {
                     _ => None,
                 };
                 (request.amount.clone(), from_details.or(from_request))
+            }
+            // A period record whose request record the app holds but can't open or bind yet,
+            // sealed under a scope key it doesn't hold or a value that doesn't read: not now,
+            // as `payer_request` answers for a request record held but not open; the credit
+            // is tried again once it opens.
+            None if self.request_record_held(&target, &bound).await? => {
+                return Err(Refusal::NotNow(
+                    "Paykit wire 5.3: the period's request record is held but not open".into(),
+                )
+                .into());
             }
             None if bound.request_hash.is_none() && bound.billing_period.is_none() => {
                 (proof.amount.clone().ok_or(Refusal::NotFound)?, None)

@@ -3294,3 +3294,54 @@ async fn test_periods_send_details_after_another_app_cancelled_unseen_refused() 
     assert!(!received(&summary, "paykit.payment_period_details"));
     assert!(wallet.request(&request).await.unwrap().periods.is_empty());
 }
+
+#[tokio::test]
+async fn test_periods_credit_not_now_while_the_request_record_is_sealed_then_given() {
+    // The shop holds January's proof in its period record. Bob's till writes the shop's
+    // request record again at a data epoch the shop holds no key of yet: the credit is
+    // refused for now, not as a record not found, and given once the key comes.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let body = period_proof(&w, shop.app_id(), january()).await;
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        body,
+    );
+    shop.receive(None).await.unwrap();
+    let period = shop.payee_activity().await.unwrap()[0].periods[0].record;
+    till.receive(None).await.unwrap();
+    w.bob.next_doc(|body| body.data_epoch += 1).unwrap();
+    store_bob_bundle(&w, till.app_id(), &till.app().cert().clone());
+    till.receive(None).await.unwrap();
+    let collection = Collection::PayeeActivity;
+    let request_record = RecordTarget::new(
+        SwitchCollection::new(collection.name(), collection.policy(None)),
+        &natural_key::request_record(&request.payee, &request.request_hash),
+    );
+    rewrites(&mut till, &request_record).await;
+    shop.receive(None).await.unwrap();
+    let refused = shop.confirm_payment(&period).await.unwrap_err();
+    assert!(
+        matches!(refusal(&refused), Refusal::NotNow(_)),
+        "{refused:?}"
+    );
+    let refused = shop.verify_payment(&period).await.unwrap_err();
+    assert!(
+        matches!(refusal(&refused), Refusal::NotNow(_)),
+        "{refused:?}"
+    );
+    store_bob_bundle(&w, shop.app_id(), &shop.app().cert().clone());
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(shop.confirm_payment(&period).await.unwrap().is_some());
+}
