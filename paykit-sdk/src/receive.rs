@@ -996,8 +996,10 @@ fn receipt_effect(
 /// wire 5.3), so no other sender reaches that record, and a receipt over a held record is
 /// no new state. A receipt of a payment without a request names the record of the attempt
 /// alone, whose counterparty can't be read while its value can't: that one is new state,
-/// which the spam rule gates (Paykit wire 4.1). A sender blocked or flagged only counts,
-/// and while the copy of the lists isn't known the entry waits on the feed. So no blocked
+/// which the spam rule gates (Paykit wire 4.1). One from a sender the user blocked is
+/// dropped as never processed, to ask for again once it is unblocked (`marks.rs`); one from
+/// a sender only flagged counts; and while the copy of the lists isn't known the entry
+/// waits on the feed. So no blocked
 /// third party keeps anything through a record that doesn't read, and a kept receipt whose
 /// sender the record, once read, doesn't name does nothing.
 fn receipt_over_unread_record(
@@ -1007,7 +1009,7 @@ fn receipt_over_unread_record(
 ) -> Result<(), Fail> {
     if stored.message().refs.get(1).is_none() {
         let scopes = cx.cert().scopes().to_vec();
-        if !admits_new_state(cx, &stored.sender(), &scopes)? {
+        if !admits_new_state(cx, &stored.sender(), &scopes, stored)? {
             return Ok(());
         }
     }
