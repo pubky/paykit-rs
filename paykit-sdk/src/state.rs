@@ -44,6 +44,7 @@
 //! | `nl` | set by a restore: the shared records aren't listed since, so the client's copy is empty and a record's absence means nothing yet; cleared once they are listed; never restored | |
 //! | `lc` | the certificate the shared records were last listed under, signed: a certificate held now other than it means the copy may lack records until Paykit lists them, since one held between may have read less (`hold.rs`); written only by a Paykit listing, in its commit; absent from a join or a restore until that listing, which leaves the records unlisted; never restored | |
 //! | `ro` | set by a restore: this app's own messages its activity records store to be sent are queued again once the records are listed (`hold.rs`, `Paykit::queue_own_again`); after a pass, the counterparties whose sends were held then, whose messages wait; never restored | |
+//! | `ha/<payee>/<msg_id>` | a rejection or payer's cancellation recorded while sends to its payee were held, its message stored in the request record and not queued, written with the record's batch: queued from the record once sends to the payee aren't held, or given up with a notice past its window (`hold.rs`, `Paykit::queue_own_again`) | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
@@ -70,6 +71,7 @@ use serde::{Deserialize, Serialize};
 use crate::activity::{ActivityTarget, KeptSide};
 use crate::app_records::SeenRecords;
 use crate::error::{PaykitError, Result};
+use crate::hold::HeldAnswer;
 use crate::hold::MissedHold;
 use crate::hold::OwnResendOwed;
 use crate::hold::RestoreHold;
@@ -747,6 +749,22 @@ impl Stored for OwnResendOwed {
     }
 }
 
+impl sealed::Sealed for HeldAnswer {}
+
+/// A held answer: of the payee and message its key names.
+impl Stored for HeldAnswer {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::HeldAnswer { payee, msg_id }
+                if self.payee == *payee && self.msg_id == *msg_id =>
+            {
+                Ok(())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for Vec<[u8; 32]> {}
 
 /// The copy of the deny list: identities, which name no key.
@@ -830,6 +848,7 @@ pub(crate) mod key {
     pub(crate) const MISSED_UNLISTED: &str = "ml";
     pub(crate) const PAYER_PASS_OWED: &str = "pp";
     pub(crate) const OWN_RESEND_OWED: &str = "ro";
+    pub(crate) const HELD_ANSWERS: &str = "ha/";
     pub(crate) const LISTED_CERT: &str = "lc";
     pub(crate) const NOTICES: &str = "nt/";
     pub(crate) const STORED_NOTES: &str = "se/";
@@ -909,6 +928,12 @@ pub(crate) mod key {
 
     pub(crate) fn journal(attempt_id: &AttemptId) -> String {
         format!("{JOURNAL}{}", attempt_id.to_text())
+    }
+
+    /// A rejection or payer's cancellation `msg_id` to `payee`, recorded while sends to it
+    /// were held and not queued yet.
+    pub(crate) fn held_answer(payee: &[u8; 32], msg_id: &str) -> String {
+        format!("{HELD_ANSWERS}{}/{msg_id}", b64(payee))
     }
 
     pub(crate) fn side(msg_id: &str) -> String {
@@ -1002,6 +1027,8 @@ pub(crate) enum StateKey {
     OwnResendOwed,
     /// `lc`: the certificate the shared records were last listed under.
     ListedCert,
+    /// `ha/<payee>/<msg_id>`: an answer recorded while sends to its payee were held.
+    HeldAnswer { payee: [u8; 32], msg_id: String },
     /// `hc/<record key>`: the user's confirmation of a held request.
     HoldConfirmed([u8; 32]),
     /// `lr`: when the lists were last read.
@@ -1122,6 +1149,13 @@ impl StateKey {
                     "hc" => Self::HoldConfirmed(b64_32(rest)?),
                     "lh" => Self::HeldList(b64_32(rest)?),
                     "side" => Self::Side(msg_id(rest)?),
+                    "ha" => {
+                        let (payee, id) = rest.split_once('/')?;
+                        Self::HeldAnswer {
+                            payee: b64_32(payee)?,
+                            msg_id: msg_id(id)?,
+                        }
+                    }
                     "ar" => {
                         let (payee, app) = rest.split_once('/')?;
                         Self::SeenRecords {
@@ -1474,6 +1508,21 @@ mod tests {
         let side = |msg_id: &str| serde_json::json!({ "msg_id": msg_id, "side": "payer" });
         assert!(reads::<KeptSide>(&key::side(id), side(id)));
         assert!(!reads::<KeptSide>(&key::side(id), side(other)));
+        // A held answer of the payee and message its key names.
+        let held = |payee: &str, msg_id: &str| serde_json::json!({ "payee": payee, "msg_id": msg_id, "request_hash": sender });
+        assert!(reads::<HeldAnswer>(
+            &key::held_answer(&pubky, id),
+            held(&sender, id)
+        ));
+        assert!(!reads::<HeldAnswer>(
+            &key::held_answer(&pubky, id),
+            held(&sender, other)
+        ));
+        assert!(!reads::<HeldAnswer>(
+            &key::held_answer(&pubky, id),
+            held(&pubky_switch_core::enc::b64(&[4; 32]), id)
+        ));
+        assert!(!reads::<HeldAnswer>(&key::side(id), held(&sender, id)));
         // A list ask of the payee and app its key names.
         let asked = |app: Option<[u8; 16]>| {
             serde_json::json!({
@@ -1582,6 +1631,13 @@ mod tests {
             ),
             (key::held_list(&pubky), StateKey::HeldList(pubky)),
             (key::side(id), StateKey::Side(id.into())),
+            (
+                key::held_answer(&pubky, id),
+                StateKey::HeldAnswer {
+                    payee: pubky,
+                    msg_id: id.into(),
+                },
+            ),
             (
                 key::seen_records(&pubky, &app),
                 StateKey::SeenRecords {

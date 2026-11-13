@@ -634,33 +634,52 @@ impl Paykit {
         Ok(false)
     }
 
-    /// Queue again, once after a restore, the messages this app signed that its activity
-    /// records store to be sent ([`own_to_send_again`]), with the signed plaintext each
-    /// record stores (Switch spec 11, "Queued again by its signer"): a batch the backup kept
-    /// unanswered queued its message only with an answer the restored app never gets, so
-    /// no outbox holds it. Called once the copy of the records is listed and no scope key
-    /// is awaited. A message the outbox holds, or that was sent, is queued once; one the
-    /// client refuses ([`pubky_switch_client::app::WontDeliver`]: past its replay window of
-    /// 30 days from its `created_at`, given up already, too large) is not sent again,
-    /// nothing is told the host, and it is never asked for again; one the client refuses as
-    /// not this app's own is not sent either. The pass waits while a record of the copy is
-    /// sealed under a scope key the app doesn't hold yet ([`Paykit::copy_awaits_key`]), so
-    /// what such a record stores is sent once it opens; a record that doesn't bind to its key
-    /// shows nothing to send. Messages to a counterparty whose sends are held wait, the mark naming
-    /// it, for a later receive.
+    /// Queue the messages this app signed that its activity records store to be sent and no
+    /// outbox holds, with the signed plaintext each record stores (Switch spec 11, "Queued
+    /// again by its signer"), at every receive while any is owed:
+    ///
+    /// - once after a restore, every such message ([`own_to_send_again`]): a batch the backup
+    ///   kept unanswered queued its message only with an answer the restored app never
+    ///   gets, so no outbox holds it;
+    /// - each rejection or payer's cancellation recorded while sends to its payee were held
+    ///   ([`HeldAnswer`]), which was never queued.
+    ///
+    /// Called once the copy of the records is listed and no scope key is awaited. A message
+    /// the outbox holds, or that was sent, is queued once; one the client refuses
+    /// ([`pubky_switch_client::app::WontDeliver`]: past its replay window of 30 days from its
+    /// `created_at`, given up already, too large) is not sent again and never asked for
+    /// again; one the client refuses as not this app's own is not sent either. A held
+    /// answer refused that way never reached its payee: the host is told, with a
+    /// [`crate::NoticeKind::MessageGivenUp`] notice, and the record still holds it, so no own
+    /// app pays or accepts the request. A restore's re-send of any other message tells
+    /// nothing. A held answer no record shows to send any more (a later stop, such as the
+    /// payee's cancellation or receipt, covers it, or the record is gone) goes with nothing
+    /// sent. The pass waits while a record of the copy is sealed under a scope key the app
+    /// doesn't hold yet ([`Paykit::copy_awaits_key`]), so what such a record stores is sent
+    /// once it opens; a record that doesn't bind to its key shows nothing to send. Messages
+    /// to a counterparty whose sends are held wait, the restore's mark or the held answer
+    /// naming it, for a later receive: nothing reaches it meanwhile.
     pub(crate) async fn queue_own_again(&mut self) -> Result<()> {
-        let Some(owed) = self
+        let owed = self
             .local_get::<OwnResendOwed>(key::OWN_RESEND_OWED)
+            .await?;
+        let held: std::collections::BTreeMap<String, HeldAnswer> = self
+            .local_scan::<HeldAnswer>(key::HELD_ANSWERS)
             .await?
-        else {
+            .into_iter()
+            .map(|(_, answer)| (answer.msg_id.clone(), answer))
+            .collect();
+        if owed.is_none() && held.is_empty() {
             return Ok(());
-        };
+        }
         if self.copy_awaits_key().await? {
             return Ok(());
         }
         let own = self.identity();
         let app_id = self.app.cert().app_id();
         let mut waiting = std::collections::BTreeSet::new();
+        let mut still_held = std::collections::BTreeSet::new();
+        let mut given_up = Vec::new();
         for (collection, side) in [
             (
                 Collection::PayerActivity,
@@ -671,37 +690,46 @@ impl Paykit {
                 paykit_lib::records::ActivitySide::Payee,
             ),
         ] {
-            for held in self.app.records_of(collection.name()).await? {
-                let Some(value) = held.content.value() else {
+            for record_held in self.app.records_of(collection.name()).await? {
+                let Some(value) = record_held.content.value() else {
                     continue;
                 };
                 // A record that doesn't bind shows nothing to send.
-                let label = collection.policy_label(&held.policy).flatten();
+                let label = collection.policy_label(&record_held.policy).flatten();
                 let Some(record) = crate::records::bind_activity(
                     value,
                     &own,
                     side,
                     label.as_ref(),
-                    &held.key,
+                    &record_held.key,
                     |t| self.app.record_key(t).ok(),
                     &|p| self.rail.settlement_id(p),
                 ) else {
                     continue;
                 };
                 let counterparty = record.counterparty;
-                if owed
-                    .waiting
-                    .as_ref()
-                    .is_some_and(|waiting| waiting.binary_search(&counterparty).is_err())
-                {
-                    continue;
-                }
-                let messages = own_to_send_again(&record, &own, &app_id);
+                let restore_owes = owed.as_ref().is_some_and(|owed| {
+                    owed.waiting
+                        .as_ref()
+                        .is_none_or(|waiting| waiting.binary_search(&counterparty).is_ok())
+                });
+                let messages: Vec<_> = own_to_send_again(&record, &own, &app_id)
+                    .into_iter()
+                    .filter(|stored| restore_owes || held.contains_key(&stored.message().msg_id))
+                    .collect();
                 if messages.is_empty() {
                     continue;
                 }
                 if self.sends_held(&counterparty).await? {
-                    waiting.insert(counterparty);
+                    if restore_owes {
+                        waiting.insert(counterparty);
+                    }
+                    still_held.extend(
+                        messages
+                            .iter()
+                            .map(|stored| stored.message().msg_id.clone())
+                            .filter(|msg_id| held.contains_key(msg_id)),
+                    );
                     continue;
                 }
                 for stored in messages {
@@ -709,24 +737,59 @@ impl Paykit {
                         Ok(msg_id) => {
                             let _ = self.app.flush_message(&msg_id).await;
                         }
-                        // Refused for good, or not this app's own: nothing is queued and
-                        // nothing is told; the pass doesn't ask again.
-                        Err(AppError::Refused(
-                            ClientRefusal::WontDeliver(_) | ClientRefusal::Usage(_),
-                        )) => {}
+                        // Refused for good: nothing is queued; the pass doesn't ask again. A
+                        // held answer never went, so the host is told.
+                        Err(AppError::Refused(ClientRefusal::WontDeliver(_))) => {
+                            if let Some(answer) = held.get(&stored.message().msg_id) {
+                                given_up.push(answer.clone());
+                            }
+                        }
+                        // Not this app's own: nothing is queued and nothing is told.
+                        Err(AppError::Refused(ClientRefusal::Usage(_))) => {}
                         Err(error) => return Err(error.into()),
                     }
                 }
             }
         }
-        if waiting.is_empty() {
-            self.local_delete(key::OWN_RESEND_OWED).await
-        } else {
-            let owed = OwnResendOwed {
-                waiting: Some(waiting.into_iter().collect()),
-            };
-            self.local_put(key::OWN_RESEND_OWED, &owed).await
+        let mut tx = Tx::default();
+        let at = self.service_time().unwrap_or(0);
+        for answer in given_up {
+            let notice = key::message_notice(&answer.payee, &answer.msg_id);
+            if self.kept_notice(&notice).await?.is_none() {
+                tx.put(
+                    &notice,
+                    &crate::notices::KeptNotice::given_up(
+                        answer.payee,
+                        &answer.msg_id,
+                        Some(answer.request_hash),
+                        at,
+                        crate::notices::GivenUpFrom::Origin(
+                            crate::notices::GivenUpOrigin::HeldAnswer,
+                        ),
+                    ),
+                )?;
+            }
         }
+        // Each held answer is queued, given up with its notice, or shown to send by no record
+        // any more, unless its payee's sends are still held.
+        for answer in held.values() {
+            if !still_held.contains(&answer.msg_id) {
+                tx.delete(&key::held_answer(&answer.payee, &answer.msg_id));
+            }
+        }
+        if owed.is_some() {
+            if waiting.is_empty() {
+                tx.delete(key::OWN_RESEND_OWED);
+            } else {
+                tx.put(
+                    key::OWN_RESEND_OWED,
+                    &OwnResendOwed {
+                        waiting: Some(waiting.into_iter().collect()),
+                    },
+                )?;
+            }
+        }
+        self.local_commit(tx).await
     }
 
     /// Queue, once after a restore, a `resend_request` to every counterparty with an open
@@ -792,6 +855,25 @@ pub(crate) struct OwnResendOwed {
     /// counterparties whose sends were held then, a blocked one or every one while the copy
     /// of the deny list isn't known, ascending, each once: only their messages are owed.
     pub(crate) waiting: Option<Vec<[u8; 32]>>,
+}
+
+/// A rejection or payer's cancellation this app recorded in its request record while sends
+/// to the payee were held (`p/ha/<payee>/<msg_id>`), written in the batch that writes the
+/// record, which queues nothing (Paykit spec 8.1, "Blocked counterparties"): the record holds
+/// the signed message, so no own app pays or accepts the request, and
+/// [`Paykit::queue_own_again`] queues it from there once sends to the payee aren't held. Kept
+/// through a restart and carried in backups; after a restore the record is the source, as
+/// for the restore's re-send.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct HeldAnswer {
+    /// The payee it goes to.
+    #[serde(with = "pubky_switch_core::enc::serde_b64")]
+    pub(crate) payee: [u8; 32],
+    /// Its `msg_id`.
+    pub(crate) msg_id: String,
+    /// The request it answers.
+    #[serde(with = "pubky_switch_core::enc::serde_b64")]
+    pub(crate) request_hash: [u8; 32],
 }
 
 /// The messages of `record` this app signed, `app_id` of identity `own`, that it queues again

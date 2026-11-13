@@ -1209,11 +1209,12 @@ async fn test_blocked_block_counted_but_never_kept_written_at_the_next_receive()
 }
 
 /// A store that counts the client's writes that queue a message (`out/`) or keep a batch
-/// (`opq/`).
+/// (`opq/`), and those that queue a message alone.
 #[derive(Default)]
 struct CountsQueued {
     inner: pubky_switch_client::store::MemoryStore,
     queued: std::sync::atomic::AtomicUsize,
+    outbox: std::sync::atomic::AtomicUsize,
 }
 
 impl pubky_switch_client::store::StateStore for CountsQueued {
@@ -1249,9 +1250,16 @@ impl pubky_switch_client::store::StateStore for CountsQueued {
                     if key.starts_with(b"out/") || key.starts_with(b"opq/"))
             })
             .count();
+        let outbox = batch
+            .writes
+            .iter()
+            .filter(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"out/")))
+            .count();
         self.inner.commit(batch)?;
         self.queued
             .fetch_add(queues, std::sync::atomic::Ordering::SeqCst);
+        self.outbox
+            .fetch_add(outbox, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 }
@@ -1294,26 +1302,68 @@ impl Answer {
             Self::Reject | Self::RejectRecurring => RequestStatus::Rejected,
         }
     }
+
+    /// The refusal a second answer, or a payment, of the request gets once it is answered.
+    fn refusal(self) -> Refusal {
+        match self {
+            Self::Cancel => Refusal::Cancelled,
+            Self::Reject | Self::RejectRecurring => Refusal::Rejected,
+        }
+    }
+
+    /// The request record's member that holds the answer.
+    fn member(self) -> &'static str {
+        match self {
+            Self::Cancel => "cancellation",
+            Self::Reject | Self::RejectRecurring => "response",
+        }
+    }
 }
 
-/// Bob's request is held by alice's wallet, and its sends to bob are then `held`: the
-/// wallet's `answer` is refused, the request record unchanged, nothing queued and nothing
-/// reaching bob (Paykit spec 8.1, "Blocked counterparties"). Once bob is unblocked, or the
-/// lists read again, the same answer is recorded and delivered.
-async fn answer_held(held: Held, answer: Answer) {
+/// What happens to alice's wallet between its held answer and the end of the hold.
+#[derive(Clone, Copy, Debug)]
+enum Between {
+    /// Nothing.
+    Nothing,
+    /// The wallet is loaded again from its store.
+    Restart,
+    /// The wallet is restored from a backup taken after the answer, onto a new store.
+    Restore,
+}
+
+/// The wallet's receive and flush while its sends to bob are still `held`: a read of the
+/// lists fails first while the copy isn't known.
+async fn receive_held(w: &World, wallet: &mut Paykit, held: Held) {
+    if let Held::Unknown = held {
+        fail_list_read(w);
+    }
+    wallet.receive(None).await.unwrap();
+    wallet.flush().await.unwrap();
+}
+
+/// Bob's request is held by alice's wallet, and its sends to bob are then `held`. The
+/// wallet's `answer` is recorded at once, on the request record (Paykit spec 8.1, "Blocked
+/// counterparties"): the wallet and alice's phone show it, the phone refuses to pay the
+/// request, and a second answer is refused. Nothing is queued, the outbox never holds the
+/// answer and nothing reaches bob, by any receive or flush, while the sends stay held, also
+/// after `between`. Once bob is
+/// unblocked, or the lists read again, the next receive delivers the answer, once.
+async fn answer_held(held: Held, answer: Answer, between: Between) {
     let w = World::new();
     let counts = std::sync::Arc::new(CountsQueued::default());
+    let base = std::sync::Arc::clone(&counts)
+        as std::sync::Arc<dyn pubky_switch_client::store::StateStore>;
     let mut wallet = w
         .join_with(
             &w.alice,
             "wallet",
             AppScopes::new().pay().manage_contacts().build().unwrap(),
             PaykitConfig::default(),
-            std::sync::Arc::clone(&counts)
-                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+            std::sync::Arc::clone(&base),
         )
         .await;
     wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut phone = w.wallet("phone").await;
     let mut shop = w.shop().await;
     let request = if let Answer::RejectRecurring = answer {
         // Entered at alice's switch directly: bob's admits her answer by an invite.
@@ -1345,39 +1395,119 @@ async fn answer_held(held: Held, answer: Answer) {
         .unwrap()
         .unwrap()
         .version;
-    let queued = counts.queued.load(std::sync::atomic::Ordering::SeqCst);
+    let queued = counts.outbox.load(std::sync::atomic::Ordering::SeqCst);
     let entries = w.bob.switch().entries_from(&w.alice_id());
 
-    let refused = answer.give(&mut wallet, &request).await.unwrap_err();
-    assert!(
-        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
-        "{held:?} {answer:?}: {refused:?}"
-    );
+    let msg_id = answer.give(&mut wallet, &request).await.unwrap();
     wallet.flush().await.unwrap();
-    let after = wallet.app().shared_record(&record).await.unwrap().unwrap();
-    assert_eq!(after.version, version, "{held:?} {answer:?}");
-    let value: serde_json::Value = serde_json::from_slice(after.content.value().unwrap()).unwrap();
-    assert!(value["response"].is_null(), "{held:?} {answer:?}: {value}");
-    assert!(
-        value["cancellation"].is_null(),
-        "{held:?} {answer:?}: {value}"
-    );
     assert_eq!(
-        counts.queued.load(std::sync::atomic::Ordering::SeqCst),
+        counts.outbox.load(std::sync::atomic::Ordering::SeqCst),
         queued,
         "{held:?} {answer:?}"
     );
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
-
-    if let Held::Blocked = held {
-        wallet.unblock(&w.bob_id()).await.unwrap();
-    }
-    answer.give(&mut wallet, &request).await.unwrap();
+    assert!(wallet.app().delivery(&msg_id).await.unwrap().is_none());
+    let after = wallet.app().shared_record(&record).await.unwrap().unwrap();
+    assert!(after.version > version, "{held:?} {answer:?}");
+    let value: serde_json::Value = serde_json::from_slice(after.content.value().unwrap()).unwrap();
+    assert!(
+        !value[answer.member()].is_null(),
+        "{held:?} {answer:?}: {value}"
+    );
     assert_eq!(
         wallet.request(&request).await.unwrap().status,
         answer.status()
     );
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries + 1);
+    // The second answer tries a read of the lists too, while the copy isn't known.
+    if let Held::Unknown = held {
+        fail_list_read(&w);
+    }
+    let again = answer.give(&mut wallet, &request).await.unwrap_err();
+    assert_eq!(
+        again.refusal(),
+        Some(&answer.refusal()),
+        "{held:?} {answer:?}"
+    );
+    phone.receive(None).await.unwrap();
+    assert_eq!(
+        phone.request(&request).await.unwrap().status,
+        answer.status(),
+        "{held:?} {answer:?}"
+    );
+    if let Answer::Reject | Answer::Cancel = answer {
+        let refused = phone
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            refused.refusal(),
+            Some(&answer.refusal()),
+            "{held:?} {answer:?}"
+        );
+    }
+    for _ in 0..2 {
+        receive_held(&w, &mut wallet, held).await;
+    }
+    assert_eq!(
+        counts.outbox.load(std::sync::atomic::Ordering::SeqCst),
+        queued,
+        "{held:?} {answer:?}"
+    );
+    assert!(wallet.app().delivery(&msg_id).await.unwrap().is_none());
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+
+    let mut wallet = match between {
+        Between::Nothing => wallet,
+        Between::Restart => {
+            let app_id = wallet.app_id();
+            drop(wallet);
+            w.load_on_clock(&w.alice, base, app_id, std::sync::Arc::clone(&w.clock))
+                .await
+        }
+        Between::Restore => {
+            let backup = wallet.backup().await.unwrap();
+            drop(wallet);
+            Paykit::restore(
+                w.env(&w.alice, store()),
+                PaykitConfig::default(),
+                &backup,
+                std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+                w.timer(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    for _ in 0..2 {
+        receive_held(&w, &mut wallet, held).await;
+    }
+    assert!(wallet.app().delivery(&msg_id).await.unwrap().is_none());
+    assert_eq!(
+        w.bob.switch().entries_from(&w.alice_id()),
+        entries,
+        "{held:?} {answer:?} {between:?}"
+    );
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        answer.status()
+    );
+
+    if let Held::Blocked = held {
+        wallet.unblock(&w.bob_id()).await.unwrap();
+    }
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        w.bob.switch().entries_from(&w.alice_id()),
+        entries + 1,
+        "{held:?} {answer:?} {between:?}"
+    );
+    wallet.receive(None).await.unwrap();
+    wallet.flush().await.unwrap();
+    assert_eq!(
+        w.bob.switch().entries_from(&w.alice_id()),
+        entries + 1,
+        "{held:?} {answer:?} {between:?}"
+    );
+    assert!(wallet.notices().await.unwrap().is_empty());
     if let Answer::Reject | Answer::Cancel = answer {
         shop.receive(None).await.unwrap();
         let expected = match answer {
@@ -1389,34 +1519,55 @@ async fn answer_held(held: Held, answer: Answer) {
 }
 
 #[tokio::test]
-async fn test_blocked_rejection_to_a_blocked_payee_refused_with_nothing_sent() {
-    answer_held(Held::Blocked, Answer::Reject).await;
+async fn test_blocked_rejection_to_a_blocked_payee_recorded_and_sent_once_unblocked() {
+    answer_held(Held::Blocked, Answer::Reject, Between::Nothing).await;
 }
 
 #[tokio::test]
-async fn test_blocked_rejection_while_the_deny_list_is_unknown_refused_with_nothing_sent() {
-    answer_held(Held::Unknown, Answer::Reject).await;
+async fn test_blocked_rejection_while_the_deny_list_is_unknown_recorded_and_sent_once_it_reads() {
+    answer_held(Held::Unknown, Answer::Reject, Between::Nothing).await;
 }
 
 #[tokio::test]
-async fn test_blocked_cancellation_to_a_blocked_payee_refused_with_nothing_sent() {
-    answer_held(Held::Blocked, Answer::Cancel).await;
+async fn test_blocked_cancellation_to_a_blocked_payee_recorded_and_sent_once_unblocked() {
+    answer_held(Held::Blocked, Answer::Cancel, Between::Nothing).await;
 }
 
 #[tokio::test]
-async fn test_blocked_cancellation_while_the_deny_list_is_unknown_refused_with_nothing_sent() {
-    answer_held(Held::Unknown, Answer::Cancel).await;
-}
-
-#[tokio::test]
-async fn test_blocked_recurring_rejection_to_a_blocked_payee_refused_with_nothing_sent() {
-    answer_held(Held::Blocked, Answer::RejectRecurring).await;
-}
-
-#[tokio::test]
-async fn test_blocked_recurring_rejection_while_the_deny_list_is_unknown_refused_with_nothing_sent()
+async fn test_blocked_cancellation_while_the_deny_list_is_unknown_recorded_and_sent_once_it_reads()
 {
-    answer_held(Held::Unknown, Answer::RejectRecurring).await;
+    answer_held(Held::Unknown, Answer::Cancel, Between::Nothing).await;
+}
+
+#[tokio::test]
+async fn test_blocked_recurring_rejection_to_a_blocked_payee_recorded_and_sent_once_unblocked() {
+    answer_held(Held::Blocked, Answer::RejectRecurring, Between::Nothing).await;
+}
+
+#[tokio::test]
+async fn test_blocked_recurring_rejection_while_the_deny_list_is_unknown_recorded_and_sent_once_it_reads(
+) {
+    answer_held(Held::Unknown, Answer::RejectRecurring, Between::Nothing).await;
+}
+
+#[tokio::test]
+async fn test_blocked_held_rejection_sent_once_after_a_restart() {
+    answer_held(Held::Blocked, Answer::Reject, Between::Restart).await;
+}
+
+#[tokio::test]
+async fn test_blocked_held_cancellation_sent_once_after_a_restart_while_the_deny_list_is_unknown() {
+    answer_held(Held::Unknown, Answer::Cancel, Between::Restart).await;
+}
+
+#[tokio::test]
+async fn test_blocked_held_rejection_sent_once_after_a_restore() {
+    answer_held(Held::Blocked, Answer::Reject, Between::Restore).await;
+}
+
+#[tokio::test]
+async fn test_blocked_held_cancellation_sent_once_after_a_restore_while_the_deny_list_is_unknown() {
+    answer_held(Held::Unknown, Answer::Cancel, Between::Restore).await;
 }
 
 /// Bob's request received at alice's wallet, and his list, then bob blocked: the user's
