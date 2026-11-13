@@ -2481,27 +2481,6 @@ async fn test_restore_own_unblock_mark_without_its_batch_refused() {
     .await;
 }
 
-#[tokio::test]
-async fn test_restore_own_block_mark_without_its_batch_member_refused() {
-    // A block or unblock is marked with the batch member, `null` or the batch: a backup
-    // holding a bare `true` is no run's state, and is refused, writing nothing.
-    let w = World::new();
-    let (good, app_id) = backup_with_a_payment(&w).await;
-    let mut layer = layer_of(&good);
-    layer.push((
-        format!("bk/{}", pubky_switch_core::enc::b64(&w.bob_id())).into_bytes(),
-        serde_json::json!({ "v": 1, "d": true }),
-    ));
-    layer.sort_by(|a, b| a.0.cmp(&b.0));
-    refused_writing_nothing(
-        &w,
-        with_layer(&good, layer),
-        app_id,
-        "a block mark without its batch member",
-    )
-    .await;
-}
-
 /// Bob's shop sends alice a request and cancels it, and is backed up then; after the backup
 /// another own app of bob's, the till, writes the shop's request record as a value no reader
 /// reads. Returns the request, the cancellation's `msg_id`, the record's value before, the

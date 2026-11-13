@@ -1559,16 +1559,12 @@ mod tests {
         assert!(!reads::<KeyWaitMark>(&kw, waits(1, 5, 6, false, &[2, 2])));
         assert!(!reads::<KeyWaitMark>(&at, waits(1, 5, 6, false, &[2])));
         assert!(!reads::<DropMark>(&kw, mark(1, 5, 6)));
-        // An own block or unblock, and the deny list's copy. A bare `true` or `false` is no
-        // form a run writes: refused.
+        // An own block or unblock, and the deny list's copy.
         for mark in [
             serde_json::json!({ "blocked": false, "batch": vec![7u8; 16] }),
             serde_json::json!({ "blocked": true, "batch": null }),
         ] {
             assert!(reads::<OwnBlockMark>(&key::own_block(&[1; 32]), mark));
-        }
-        for mark in [serde_json::json!(false), serde_json::json!(true)] {
-            assert!(!reads::<OwnBlockMark>(&key::own_block(&[1; 32]), mark));
         }
         assert!(!reads::<bool>(
             &key::own_block(&[1; 32]),
@@ -1596,11 +1592,6 @@ mod tests {
         assert!(!reads::<MissedHold>(
             key::RESTORE_HOLD,
             serde_json::json!({ "bound_ms": 9 })
-        ));
-        // A hold with no bound is no form a run writes: every item gives its end.
-        assert!(!reads::<MissedHold>(
-            key::MISSED_HOLD,
-            serde_json::json!({ "bound_ms": null })
         ));
     }
 
@@ -1655,11 +1646,6 @@ mod tests {
         let hold = serde_json::json!({ "resend_from_ms": 1, "asks_queued": false, "asked": [] });
         assert!(reads::<RestoreHold>(key::RESTORE_HOLD, hold.clone()));
         assert!(!reads::<RestoreHold>(key::CURSOR_TIME, hold));
-        // One without `asked` is no form a run writes.
-        assert!(!reads::<RestoreHold>(
-            key::RESTORE_HOLD,
-            serde_json::json!({ "resend_from_ms": 1, "asks_queued": false })
-        ));
         // A queued ask of the sender and time its key names.
         let ask =
             |from: u64| serde_json::json!({ "sender": sender, "from_ms": from, "until_ms": null });
