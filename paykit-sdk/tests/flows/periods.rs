@@ -2853,7 +2853,7 @@ async fn details_twice(
 
 /// `backup` restored onto a new store as an app of bob's, without a receive: no outbox holds
 /// what it sent before.
-async fn bob_restored(w: &World, backup: &paykit_sdk::PaykitBackup) -> Paykit {
+pub(crate) async fn bob_restored(w: &World, backup: &paykit_sdk::PaykitBackup) -> Paykit {
     Paykit::restore(
         w.env(&w.bob, store()),
         PaykitConfig::default(),
@@ -2866,7 +2866,7 @@ async fn bob_restored(w: &World, backup: &paykit_sdk::PaykitBackup) -> Paykit {
 }
 
 /// Whether the client of `app` holds `msg_id` queued or sent.
-async fn queued(app: &Paykit, msg_id: &str) -> bool {
+pub(crate) async fn queued(app: &Paykit, msg_id: &str) -> bool {
     app.message_delivery(msg_id).await.unwrap().is_some()
 }
 
@@ -3015,7 +3015,7 @@ async fn test_periods_restore_own_details_past_their_replay_window_not_sent_agai
 }
 
 /// Bob's payee request record of `request`.
-fn payee_request_at(request: &RequestRef) -> RecordTarget {
+pub(crate) fn payee_request_at(request: &RequestRef) -> RecordTarget {
     let collection = Collection::PayeeActivity;
     RecordTarget::new(
         SwitchCollection::new(collection.name(), collection.policy(None)),
@@ -3024,7 +3024,7 @@ fn payee_request_at(request: &RequestRef) -> RecordTarget {
 }
 
 /// `app` writes `bytes` as the value of the record at `target`.
-async fn writes_value(app: &mut Paykit, target: &RecordTarget, bytes: &[u8]) {
+pub(crate) async fn writes_value(app: &mut Paykit, target: &RecordTarget, bytes: &[u8]) {
     let op = app
         .app_mut()
         .record_op(target, Some(bytes), Vec::new())
@@ -3171,6 +3171,145 @@ async fn test_periods_restore_own_details_waiting_on_their_request_record_end_pa
     }
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
     assert!(shop.notices().await.unwrap().is_empty());
+}
+
+/// `stored`, a stored message of alice's wallet in a record's value, signed again by the
+/// wallet as a message of `kind` with an empty body, naming the same `refs`, under a new
+/// `msg_id`: a genuine message of that app, as another own app might have recorded it.
+fn alice_signs_again(w: &World, stored: &serde_json::Value, kind: &str) -> serde_json::Value {
+    use pubky_switch_core::enc::{b64, unb64};
+    use pubky_switch_core::message::{Message, Sender};
+    let json = unb64(stored["plaintext"]["json"].as_str().unwrap()).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    let refs = json["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| <[u8; 32]>::try_from(unb64(r.as_str().unwrap()).unwrap().as_slice()).unwrap())
+        .collect();
+    let keys = w.alice.identity().app_keys("wallet");
+    let message = Message {
+        kind: kind.to_owned(),
+        msg_id: "0d6f5b9e-3c1a-4e8b-9f2d-7a4c1e5b8d30".into(),
+        created_at_ms: w.clock.now_ms(),
+        from: Sender {
+            identity: w.alice_id(),
+            app_id: keys.app_id_bytes(),
+        },
+        to: w.bob_id(),
+        refs,
+        body: serde_json::Map::new(),
+    };
+    let signed = message.sign(&keys).unwrap();
+    let mut again = stored.clone();
+    again["plaintext"] = json!({
+        "sender_app": b64(&signed.sender_app_id()),
+        "signature": b64(&signed.signature()),
+        "json": b64(signed.json()),
+    });
+    again
+}
+
+/// The shop's subscription, with January's details sent twice, then, after its backup, its
+/// request record rewritten by the till with `edit`. Returns the restored shop, received
+/// once, and the details' `msg_id`s.
+async fn restored_over_an_answer(
+    w: &World,
+    edit: impl Fn(&mut serde_json::Value),
+) -> (Paykit, [String; 2]) {
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _, sent) = details_twice(w, &mut shop, &mut wallet, 1_000).await;
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    till.receive(None).await.unwrap();
+    let target = payee_request_at(&request);
+    let held = till.app_mut().read_record(&target).await.unwrap().unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    edit(&mut value);
+    writes_value(&mut till, &target, &serde_json::to_vec(&value).unwrap()).await;
+    let mut shop = bob_restored(w, &backup).await;
+    shop.receive(None).await.unwrap();
+    (shop, sent)
+}
+
+#[tokio::test]
+async fn test_periods_restore_after_the_payer_rejected_queues_no_details() {
+    // The request record holds alice's rejection in place of her acceptance, as another own
+    // app recorded it: a later stop that covers the details, so the restored shop queues
+    // neither, and the re-send is owed no more (Paykit spec 7.2, "What a restore loses").
+    let w = World::new();
+    let (shop, sent) = restored_over_an_answer(&w, |value| {
+        value["response"] =
+            alice_signs_again(&w, &value["response"], "paykit.payment_request_rejection");
+    })
+    .await;
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    for msg_id in &sent {
+        assert!(!queued(&shop, msg_id).await, "{msg_id}");
+    }
+}
+
+#[tokio::test]
+async fn test_periods_restore_after_the_payers_cancellation_queues_no_details() {
+    // The request record holds alice's cancellation of the subscription: a later stop that
+    // covers the details, so the restored shop queues neither (Paykit spec 7.2, "What a
+    // restore loses").
+    let w = World::new();
+    let (shop, sent) = restored_over_an_answer(&w, |value| {
+        value["cancellation"] = alice_signs_again(
+            &w,
+            &value["response"],
+            "paykit.payment_request_cancellation",
+        );
+    })
+    .await;
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    for msg_id in &sent {
+        assert!(!queued(&shop, msg_id).await, "{msg_id}");
+    }
+}
+
+#[tokio::test]
+async fn test_periods_restore_details_waiting_leave_another_own_message_queued_once() {
+    // The shop's details wait for their request record, which the till left as a value no
+    // reader reads, while its one-time request to alice, unanswered, is found at every
+    // receive: it is queued once in all, across three receives.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, _, sent) = details_twice(&w, &mut shop, &mut wallet, 1_000).await;
+    let mut unexpiring = draft("1", w.clock.now_ms());
+    unexpiring.proposal_expires_at_ms = None;
+    let one_time = shop.send_request(w.alice_id(), unexpiring).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    till.receive(None).await.unwrap();
+    writes_value(
+        &mut till,
+        &payee_request_at(&request),
+        &serde_json::to_vec(&json!({ "v": 99 })).unwrap(),
+    )
+    .await;
+    let mut shop = bob_restored(&w, &backup).await;
+    let before = w.alice.switch().entries_from(&w.bob_id());
+    for _ in 0..3 {
+        shop.receive(None).await.unwrap();
+    }
+    assert!(queued(&shop, &one_time.msg_id).await);
+    for msg_id in &sent {
+        assert!(!queued(&shop, msg_id).await, "{msg_id}");
+    }
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 1);
 }
 
 #[tokio::test]
