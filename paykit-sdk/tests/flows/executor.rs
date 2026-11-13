@@ -1940,7 +1940,20 @@ async fn crossing_end_recorded_while_held(blocked: bool) {
     );
     assert_eq!(wapp.app().protocol_scan(b"eo/").await.unwrap().len(), 1);
     assert_eq!(ends_taken(&mut s).await, 0);
-    x.receive(None).await.unwrap();
+    // X is sent the executor notice: it takes exactly one at its next receive.
+    let notices = x
+        .receive(None)
+        .await
+        .unwrap()
+        .report
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(e, pubky_switch_client::app::AppEvent::MessageReceived { kind, .. }
+                if kind == "paykit.executor_notice")
+        })
+        .count();
+    assert_eq!(notices, 1);
     assert!(!x.allowance(&record).await.unwrap().consented);
     // (b)
     if blocked {
