@@ -19,8 +19,9 @@
 //!   recurring requests' subscriptions and Billing Periods
 //!   ([`Paykit::accept_subscription`], [`Paykit::send_period_details`]),
 //!   paying ([`Paykit::pay_request`], [`Paykit::pay_without_request`],
-//!   [`Paykit::resume_payments`]), receiving ([`Paykit::receive`]) and reconciliation
-//!   ([`Paykit::reconcile`]).
+//!   [`Paykit::resume_payments`]), receiving ([`Paykit::receive`]), reconciliation
+//!   ([`Paykit::reconcile`]) and Allowances ([`Paykit::propose_allowance`],
+//!   [`Paykit::accept_allowance`], [`Paykit::end_allowance`], [`Paykit::allowances`]).
 //! - [`Rail`]: the payment method's interface; `rail::FakeRail` for tests (feature
 //!   `test-support`).
 //! - [`Timer`]: the host's timer, which bounds the wait for a payee's switch.
@@ -30,8 +31,8 @@
 //! - Divergent records after a provider loss: paused until the user confirms
 //!   ([`Paykit::divergent_records`], [`Paykit::confirm_divergent`], [`DivergentRecord`]).
 //!
-//! Paying recurring requests' periods, Allowances with executors and ledgers, and publishing
-//! Private Payment Lists build on the same parts, in their own modules.
+//! Paying recurring requests' periods, the Allowance executor with its grant and ledger, and
+//! publishing Private Payment Lists build on the same parts, in their own modules.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -41,6 +42,7 @@
 )]
 
 mod activity;
+mod allowances;
 pub mod app_records;
 mod approval;
 mod destination;
@@ -68,6 +70,7 @@ mod testkit;
 mod timer;
 
 pub use activity::Role;
+pub use allowances::{AllowanceRole, AllowanceStatus, AllowanceView, SentAllowance};
 pub use approval::{AppScopes, RequestedScopes};
 pub use destination::IDENTITY_GRACE_MS;
 pub use divergent::DivergentRecord;

@@ -791,6 +791,15 @@ impl Paykit {
         }
         // Lists held over a `payment_lists` record that didn't read, once it reads.
         Box::pin(self.place_held_lists()).await?;
+        // The counterparties' Allowance ends kept as stops go into their records, with their
+        // executor notices, and the consent list drops every Allowance seen ended, rejected or
+        // conflicted (Paykit spec 8.3). After a `missed` item, every Allowance on it is to be confirmed
+        // again, as after a restore. An executor notice's target goes once its notice has.
+        Box::pin(self.place_allowance_stops()).await?;
+        Box::pin(self.send_owed_ends()).await?;
+        Box::pin(self.confirm_consents_again()).await?;
+        Box::pin(self.sweep_consents()).await?;
+        Box::pin(self.sweep_notice_targets()).await?;
         let applied = report
             .events
             .iter()
@@ -878,6 +887,8 @@ mod tests {
         draft: RequestDraft,
         payment: UnrequestedPayment,
         shown: crate::DivergentRecord,
+        role: crate::AllowanceRole,
+        terms: paykit_lib::allowances::AllowanceTerms,
         details: paykit_lib::bodies::PeriodDetails,
     ) {
         let key = [0; 32];
@@ -935,6 +946,12 @@ mod tests {
         assert_send(&wallet.receipts(ReceiptsOf::All));
         assert_send(&wallet.divergent_records());
         assert_send(&wallet.confirm_divergent(&shown, confirmed));
+        assert_send(&wallet.propose_allowance(key, role, terms));
+        assert_send(&wallet.accept_allowance(&key));
+        assert_send(&wallet.reject_allowance(&key));
+        assert_send(&wallet.end_allowance(&key));
+        assert_send(&wallet.allowances());
+        assert_send(&wallet.allowance(&key));
         assert_send(&wallet.accept_subscription(&request));
         assert_send(
             &wallet.accept_subscription_with(&request, crate::requests::AcceptOptions::default()),

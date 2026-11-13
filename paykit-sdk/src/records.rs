@@ -462,16 +462,22 @@ mod own_message_tests {
         };
         assert_eq!(
             count("self.own_copy("),
-            named(&[("pay.rs", 1), ("records.rs", 2), ("requests.rs", 1)]),
+            named(&[
+                ("allowances.rs", 3),
+                ("pay.rs", 1),
+                ("records.rs", 2),
+                ("requests.rs", 1),
+            ]),
             "an own message's stored copy is made somewhere new: queue it in the same batch"
         );
         // Every stored message is built in one of these: a received message kept
         // (`KeptMessage::stored`) or stored by the client (`note_stored`), an own message's
         // copy (`own_copy`), an acceptance journaled (`acceptance_message`), and the unit
-        // tests' parties. A copy built anywhere else could store an own message unqueued.
+        // tests' parties and copies (`as_read`). A copy built anywhere else could store an own message unqueued.
         assert_eq!(
             count("StoredMessage::new("),
             named(&[
+                ("allowances.rs", 1),
                 ("journal.rs", 1),
                 ("records.rs", 2),
                 ("stored.rs", 1),
@@ -480,6 +486,7 @@ mod own_message_tests {
             "a stored message is built somewhere new"
         );
         assert!(body(text("records.rs"), "own_copy").contains("StoredMessage::new("));
+        assert!(body(text("allowances.rs"), "as_read").contains("StoredMessage::new("));
         assert!(body(text("journal.rs"), "acceptance_message").contains("StoredMessage::new("));
         assert!(body(text("stored.rs"), "note_stored").contains("StoredMessage::new("));
         // Each place that makes an own copy queues it with the record write.
@@ -497,6 +504,31 @@ mod own_message_tests {
         let request = body(text("requests.rs"), "send_request_inner");
         assert!(request.contains("self.own_copy(&signed)"));
         assert!(request.contains(".queue(signed)"));
+        // An Allowance's proposal, answer or end, and an end crossing a withdrawal, queue
+        // the message in the batch that writes the record (`allowances.rs`, whose own test
+        // checks every record write goes through these).
+        let allowances = text("allowances.rs");
+        let propose = body(allowances, "propose_allowance_inner");
+        assert!(propose.contains("self.own_copy(&signed)"));
+        assert!(propose.contains(".queue(signed)"));
+        let answer = body(allowances, "answer_allowance");
+        assert!(answer.contains("self.own_copy(&signed)"));
+        assert!(answer.contains("let mut queue = vec![signed];"));
+        assert!(answer.contains(".submit_with_record(&target, &next, queue, locals, None)"));
+        let crossing = body(allowances, "record_end");
+        assert!(crossing.contains("self.own_copy(&own_end)"));
+        assert!(crossing.contains("queue.push(own_end);"));
+        assert!(
+            crossing.contains(".submit_with_record(target, &next, queue, locals, owed.as_ref())")
+        );
+        // While sends are held the crossing end is recorded unqueued, with its owed mark
+        // (`eo/`) written in the same batch by `submit_with_record`, and sent from the record
+        // later (`send_owed_ends`).
+        assert!(crossing.contains("owed = Some(OwedEnd {"));
+        let submit = body(allowances, "submit_with_record");
+        assert!(
+            submit.contains("locals.push(state::local_put(&key::owed_end(&owed.record), owed)?);")
+        );
         // The journal's own check reads it; only the outcome places it.
         assert_eq!(
             count(".acceptance_message("),

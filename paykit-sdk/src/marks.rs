@@ -491,7 +491,10 @@ impl Paykit {
     /// the payee's side that is the record of a request to the sender, which a payee app's
     /// kept replies wait for; on the payer's, of the sender's request, which a payer app's
     /// kept receipts and period details wait for. A record of a Billing Period or of a
-    /// payment without a request makes no mark due, nor does one that doesn't read. The
+    /// payment without a request makes no mark due, nor does one that doesn't read. An
+    /// Allowance record whose counterparty the mark names, which reads and binds, makes it due
+    /// too (Paykit spec 8.1, "the record of a request, or an Allowance record"): an Allowance
+    /// answer kept before its record is dropped for the same bounds (`allowances.rs`). The
     /// records are read only while a mark waits, and a failed read fails the pass.
     async fn note_requests_held(&mut self) -> Result<()> {
         use paykit_lib::collections::Collection;
@@ -527,6 +530,22 @@ impl Paykit {
                     continue;
                 }
                 if let Some((key, mut mark)) = waiting.remove(&read.counterparty) {
+                    mark.due = true;
+                    tx.put(&key, &mark)?;
+                }
+            }
+        }
+        if !waiting.is_empty() {
+            let allowances = self
+                .app
+                .records_of(paykit_lib::collections::Collection::Allowances.name())
+                .await?;
+            for held in allowances {
+                // A record that doesn't read or bind shows no counterparty.
+                let Some(record) = Box::pin(self.held_allowance(&held.key)).await? else {
+                    continue;
+                };
+                if let Some((key, mut mark)) = waiting.remove(&record.counterparty) {
                     mark.due = true;
                     tx.put(&key, &mark)?;
                 }

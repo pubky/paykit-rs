@@ -139,6 +139,9 @@ pub(crate) enum GivenUpOrigin {
     /// A message kept to write over a divergent record (`dw/`) was given up, its record's
     /// user not having confirmed it in time.
     Divergent,
+    /// The receive step gave up an Allowance proposal or answer over a record value that
+    /// doesn't read, past its window (`allowances.rs`): it was processed.
+    ReceiveStep,
     /// This app's own rejection or payer's cancellation, recorded while sends to the payee
     /// were held (`ha/`), passed its replay window unsent, or was lost with a write of its
     /// request record that holds neither it nor any stop.

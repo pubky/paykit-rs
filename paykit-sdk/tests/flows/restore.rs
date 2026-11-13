@@ -347,7 +347,7 @@ async fn backup_with_a_payment(w: &World) -> (serde_json::Value, [u8; 16]) {
 }
 
 /// Paykit's layer of a backup: its local state, each value as Paykit keeps it.
-fn layer_of(backup: &serde_json::Value) -> Vec<(Vec<u8>, serde_json::Value)> {
+pub(crate) fn layer_of(backup: &serde_json::Value) -> Vec<(Vec<u8>, serde_json::Value)> {
     let data = backup["protocol"]["data"].as_str().unwrap();
     let bytes = pubky_switch_core::enc::unb64(data).unwrap();
     pubky_switch_client::app::decode_local_state(&bytes)
@@ -358,7 +358,7 @@ fn layer_of(backup: &serde_json::Value) -> Vec<(Vec<u8>, serde_json::Value)> {
 }
 
 /// `backup` with Paykit's layer replaced by `state`.
-fn with_layer(
+pub(crate) fn with_layer(
     backup: &serde_json::Value,
     state: Vec<(Vec<u8>, serde_json::Value)>,
 ) -> serde_json::Value {
