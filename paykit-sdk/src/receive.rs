@@ -1503,9 +1503,9 @@ pub(crate) fn kept_reply_evicted(kept: &[CountedReply], sender: &[u8; 32]) -> Op
 /// Make room for a new reply from `sender` among the kept replies, in the step: the one the
 /// bounds drop ([`kept_reply_evicted`]) goes, and counts in its sender's mark
 /// (`pd/<sender>`, `marks.rs`) with its acceptance time, so the sender is asked to send it
-/// again once a record of either side naming it as counterparty reads. It is dropped as one
-/// never processed (Paykit spec 8.1, "Replies before their record"): the client marked it
-/// processed when it was kept, so the step forgets its pair
+/// again once a request's record of either side naming it as counterparty reads. It is
+/// dropped as one never processed (Paykit spec 8.1, "Replies before their record"): the
+/// client marked it processed when it was kept, so the step forgets its pair
 /// ([`ReceiveContext::forget_processed`]), in the commit that drops it and writes the mark,
 /// and a re-sent copy is taken as a new message. This is the one pair a Paykit App forgets
 /// (Switch spec 11); a reply a later copy brings again is never applied twice, since a
@@ -1550,8 +1550,9 @@ fn make_room_for_reply(cx: &mut ReceiveContext<'_>, sender: &[u8; 32]) -> Result
 /// `marks.rs`), in the step: the sender is asked to send them again, from the mark's
 /// earliest time. A mark is due at once when `due`, as for a stop dropped for the bounds,
 /// whose request may come at any time; otherwise, as for a reply, once the app holds a
-/// record of either side that reads and names the sender as its counterparty: a payee's
-/// record for a payer's reply, a payer's record for a receipt (`Paykit::ask_on_marks`).
+/// request's record of either side that reads and names the sender as its counterparty: a
+/// payee's record for a payer's reply, a payer's record for a receipt or period details
+/// (`Paykit::ask_on_marks`).
 fn mark_dropped(
     cx: &mut ReceiveContext<'_>,
     from: [u8; 32],
