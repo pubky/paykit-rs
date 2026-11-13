@@ -644,3 +644,43 @@ async fn test_divergent_receipt_settles_its_claim_only_once_confirmed() {
     assert_eq!(status(claim), ClaimStatus::Settled);
     assert!(wallet.request(&request).await.unwrap().receipt.is_some());
 }
+
+#[tokio::test]
+async fn test_divergent_kept_value_that_doesnt_read_holds_the_new_message() {
+    // A value at the kept proof's key that doesn't read: the receive step holds the proof
+    // rather than drop it on the key's presence, and once the value is mended and the user
+    // confirms, the proof is written.
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = shop_on(&w, Arc::clone(&base)).await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let record = sale(&shop, &request).await.record;
+    set_divergent(&base, &shop, &record, true);
+    let ns = pubky_switch_client::store::client_namespace(&shop.app_id());
+    let kept = format!("p/dw/{}/proof", pubky_switch_core::enc::b64(&record));
+    let mut batch = WriteBatch::new();
+    batch
+        .put(&ns, kept.clone().into_bytes(), b"not a kept write".to_vec())
+        .unwrap();
+    base.commit(batch).unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    // The state doesn't read: the receive fails rather than act on it.
+    assert!(shop.receive(None).await.is_err());
+    let mut batch = WriteBatch::new();
+    batch.delete(&ns, kept.into_bytes()).unwrap();
+    base.commit(batch).unwrap();
+    shop.confirm_divergent(&record, UserConfirmed::new())
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        sale(&shop, &request).await.status,
+        PayeeStatus::ProofReceived
+    );
+}
