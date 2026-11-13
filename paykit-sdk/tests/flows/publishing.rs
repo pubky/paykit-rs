@@ -872,11 +872,19 @@ async fn test_publishing_withdrawn_counterparty_sent_an_empty_list_and_nothing_a
 struct FailingCommits {
     inner: MemoryStore,
     prefix: std::sync::Mutex<Option<&'static [u8]>>,
+    /// Commits under the prefix that still go before the next fails.
+    skip: std::sync::atomic::AtomicUsize,
 }
 
 impl FailingCommits {
     fn fail(&self, prefix: Option<&'static [u8]>) {
         *self.prefix.lock().unwrap() = prefix;
+    }
+
+    /// Fail commits under `prefix` after `skip` of them have gone.
+    fn fail_after(&self, prefix: &'static [u8], skip: usize) {
+        self.skip.store(skip, std::sync::atomic::Ordering::SeqCst);
+        self.fail(Some(prefix));
     }
 }
 
@@ -907,7 +915,13 @@ impl StateStore for FailingCommits {
                 .iter()
                 .any(|write| matches!(write, Write::Put { key, .. } if key.starts_with(prefix)));
             if hit {
-                return Err(pubky_switch_client::error::StoreError::Unavailable);
+                let skip = self.skip.load(std::sync::atomic::Ordering::SeqCst);
+                if skip > 0 {
+                    self.skip
+                        .store(skip - 1, std::sync::atomic::Ordering::SeqCst);
+                } else {
+                    return Err(pubky_switch_client::error::StoreError::Unavailable);
+                }
             }
         }
         self.inner.commit(batch)
@@ -2238,5 +2252,124 @@ async fn test_publishing_host_withdrawal_ends_the_restores() {
     let set = shop.set_list_endpoints(list("lno1changed")).await.unwrap();
     assert!(set.sent.is_empty(), "{set:?}");
     lists_taken(&mut wallet).await;
+    assert!(no_usable_list(&w, &mut wallet).await);
+}
+
+/// Bob's shop restored from `backup` on `base`, armed to fail under `prefix` after `skip`
+/// commits there: the restore fails after its commit, and the shop is loaded from `base`.
+async fn restored_then_loaded(
+    w: &World,
+    backup: &paykit_sdk::PaykitBackup,
+    prefix: &'static [u8],
+    skip: usize,
+) -> Paykit {
+    let base = Arc::new(FailingCommits::default());
+    base.fail_after(prefix, skip);
+    let restored = Paykit::restore(
+        w.env(&w.bob, Arc::clone(&base) as Arc<dyn StateStore>),
+        PaykitConfig::default(),
+        backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await;
+    assert!(
+        restored.is_err(),
+        "the restore's withdrawal fails after its commit"
+    );
+    drop(restored);
+    base.fail(None);
+    let app_id = w.bob.identity().app_keys("shop").app_id_bytes();
+    w.load_with(
+        &w.bob,
+        base as Arc<dyn StateStore>,
+        app_id,
+        Arc::clone(&w.clock),
+        PaykitConfig::default(),
+    )
+    .await
+}
+
+/// A restore whose withdrawal of the carried list fails after its commit: the load makes
+/// it before the host can flush, so the payer takes both versions and holds none.
+#[tokio::test]
+async fn test_publishing_restored_outbox_list_withdrawn_by_the_load_after_a_failed_restore() {
+    let w = World::new();
+    let mut wallet = w
+        .join(&w.alice, "wallet", AppScopes::new().pay().build().unwrap())
+        .await;
+    let mut shop = w.shop().await;
+    w.publish_to_alice(&mut shop).await;
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    // The restore's own commit goes; the withdrawal's first write fails.
+    let mut shop = restored_then_loaded(&w, &backup, b"p/lp/", 1).await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    shop.flush().await.unwrap();
+    lists_taken(&mut wallet).await;
+    assert!(no_usable_list(&w, &mut wallet).await);
+}
+
+/// A restore withdrawal recorded but not queued goes again at once, by the load here, not
+/// an hour later.
+#[tokio::test]
+async fn test_publishing_restored_withdrawal_not_queued_sent_again_at_once() {
+    let w = World::new();
+    let mut wallet = w
+        .join(&w.alice, "wallet", AppScopes::new().pay().build().unwrap())
+        .await;
+    let mut shop = w.shop().await;
+    w.publish_to_alice(&mut shop).await;
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    // The restore's commit, carrying the outbox, goes; the withdrawal's queueing fails.
+    let mut shop = restored_then_loaded(&w, &backup, b"out/", 1).await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    shop.flush().await.unwrap();
+    lists_taken(&mut wallet).await;
+    assert!(no_usable_list(&w, &mut wallet).await);
+}
+
+/// Two versions the restored outbox carries for a counterparty blocked since the backup:
+/// the restore withdraws once, above both, though she is blocked, and no receive withdraws
+/// again.
+#[tokio::test]
+async fn test_publishing_restored_outbox_versions_withdrawn_once_above_each() {
+    let w = World::new();
+    // Alice's wallet doesn't admit bob yet: what he sends her stays queued.
+    let mut wallet = w
+        .join(&w.alice, "wallet", AppScopes::new().pay().build().unwrap())
+        .await;
+    let mut shop = w
+        .join(
+            &w.bob,
+            "shop",
+            AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+        )
+        .await;
+    w.publish_to_alice(&mut shop).await;
+    w.clock.advance_ms(1);
+    let second = shop.set_list_endpoints(list("lno1second")).await.unwrap();
+    assert_eq!(second.sent.len(), 1, "{second:?}");
+    let backup = shop.backup().await.unwrap();
+    shop.block(&w.alice_id()).await.unwrap();
+    drop(shop);
+    let mut shop = restored_shop(&w, &backup).await;
+    let published = shop.published_lists().await.unwrap();
+    assert_eq!(published.len(), 1, "{published:?}");
+    assert!(!published[0].active);
+    assert!(published[0].version > second.sent[0].version);
+    for _ in 0..2 {
+        let got = shop.receive(None).await.unwrap();
+        assert!(got.lists.sent.is_empty(), "{:?}", got.lists);
+    }
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    shop.flush().await.unwrap();
+    // The two carried versions and one withdrawal.
+    assert_eq!(lists_taken(&mut wallet).await, 3);
     assert!(no_usable_list(&w, &mut wallet).await);
 }

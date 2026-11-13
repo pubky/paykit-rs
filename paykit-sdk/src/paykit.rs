@@ -441,6 +441,10 @@ impl Paykit {
         // written under a certificate Paykit refuses.
         if paykit.certificate_refused().is_none() {
             paykit.bound_restored_cursor_time().await?;
+            // A restore that failed after its commit may have left its withdrawals of the
+            // lists its restored outbox carries undone: they go before the host can flush
+            // (`Paykit::withdraw_restored_lists`).
+            Box::pin(paykit.withdraw_restored_lists()).await?;
         }
         // A load keeps nothing as listed under: a certificate the client took since the last
         // listing, a narrower one included, leaves the records unlisted until the next one
@@ -471,7 +475,10 @@ impl Paykit {
     /// anything is written but a store failure: `InvalidData` for a backup whose certificate
     /// Paykit refuses (Paykit wire 3.1), one without Paykit's layer or one another protocol
     /// made, or a journal with a malformed entry or two open entries for one obligation; a
-    /// store failure.
+    /// store failure. After the commit, a store failure or an alarm from the withdrawals of
+    /// the lists the restored outbox carries: the restored state is in the store then, and
+    /// [`Paykit::load`] makes those withdrawals before it hands the app back, so the host
+    /// loads the app before it flushes.
     pub async fn restore(
         env: AppEnv,
         config: PaykitConfig,

@@ -31,7 +31,8 @@
 //!   spec 8.1, 9).
 //! - **A message given up undelivered** (`MessageUndelivered`, not a re-send): the client
 //!   deleted it from its outbox, never accepted. When an activity record of this app holds
-//!   it, by role or by `msg_id`, the host is told ([`crate::NoticeKind::MessageUndelivered`]),
+//!   it in one of its roles, signed by this identity and app, the host is told
+//!   ([`crate::NoticeKind::MessageUndelivered`]),
 //!   naming the record's counterparty and request (`nt/<counterparty>/<msg_id>`). A message
 //!   no record holds, such as a `resend_request`, a `private_payment_list_request`, a list
 //!   (`publish.rs` reads that event itself), a re-send, or a message whose record write

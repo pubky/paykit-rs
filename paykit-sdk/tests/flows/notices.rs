@@ -974,6 +974,63 @@ async fn test_notices_request_left_out_of_a_backup_told_undelivered() {
 }
 
 #[tokio::test]
+async fn test_notices_undelivered_message_held_by_no_record_of_its_own_tells_nothing() {
+    // The wallet's own `resend_request` to bob, which no record holds, is given up
+    // undelivered. Bob's cancellation in the wallet's request record carries that same
+    // `msg_id`: it is bob's message, not the wallet's, so no notice names that record.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    // Bob blocks alice: his switch never admits what she sends.
+    let mut manager = w
+        .join(
+            &w.bob,
+            "manager",
+            AppScopes::new().manage_contacts().build().unwrap(),
+        )
+        .await;
+    manager.app_mut().deny(&w.alice_id()).await.unwrap();
+    let asked = wallet
+        .request_resend(
+            w.bob_id(),
+            ResendSelection::default().with_accepted_from_ms(1),
+        )
+        .await
+        .unwrap();
+    // Bob's cancellation of the request, signed under that `msg_id`.
+    let keys = w.bob.identity().app_keys("shop");
+    let mut cancellation = pubky_switch_core::message::Message::new(
+        "paykit.payment_request_cancellation",
+        pubky_switch_core::message::Sender::of_app(w.bob.identity().public(), &keys),
+        w.alice.identity().public(),
+        w.clock.now_ms(),
+        vec![request.request_hash],
+        serde_json::json!({ "reason": null })
+            .as_object()
+            .cloned()
+            .unwrap(),
+    )
+    .unwrap();
+    cancellation.msg_id = asked.clone();
+    let plaintext = cancellation.sign(&keys).unwrap();
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &plaintext);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        paykit_sdk::RequestStatus::Cancelled
+    );
+    w.clock
+        .advance_ms(pubky_switch_client::app::UNDELIVERABLE_MAX_MS);
+    wallet.flush().await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.notices().await.unwrap().is_empty());
+    let events = wallet.app_mut().unacknowledged_events().await.unwrap();
+    assert!(undelivered(&events, &asked), "{events:?}");
+}
+
+#[tokio::test]
 async fn test_notices_resend_request_undelivered_tells_nothing_and_stays_for_the_host() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;

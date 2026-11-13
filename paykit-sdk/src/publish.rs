@@ -784,8 +784,8 @@ impl Paykit {
     /// backup came from may have sent it a list since. The host re-applies every withdrawal
     /// the user made since the backup this way, then sets its list. Its version is above
     /// anything an app of this identity sent before the restore: while the lists wait, a
-    /// version is above the later of the device clock and the highest service time verified,
-    /// plus twice the clock tolerance. The host's withdrawal also ends the restore's own
+    /// version is strictly above the later of the device clock and the highest service time
+    /// verified, plus twice the clock tolerance. The host's withdrawal also ends the restore's own
     /// (a list the restored outbox carried, withdrawn behind it): the counterparty doesn't
     /// get the lists again when the host sets its list.
     ///
@@ -834,6 +834,38 @@ impl Paykit {
             return Ok(());
         }
         for mut recipient in self.recipients().await? {
+            // A withdrawal this pass recorded whose message the client never took (its
+            // queueing failed) goes again now, not on the withdrawal's hourly cadence: the
+            // carried list may go with the host's next flush.
+            if recipient.paused_by_restore && !recipient.active {
+                let unqueued = match recipient.current() {
+                    Some(newest)
+                        if newest.endpoints.is_empty()
+                            && newest.accepted_at_ms.is_none()
+                            && newest.fate != Fate::Refused =>
+                    {
+                        match self.app.delivery(&newest.msg_id).await {
+                            Ok(None) => true,
+                            Ok(Some(_)) => false,
+                            Err(error @ (AppError::Store(_) | AppError::Alarm(_))) => {
+                                return Err(error.into())
+                            }
+                            Err(_) => true,
+                        }
+                    }
+                    _ => false,
+                };
+                if unqueued {
+                    match Box::pin(self.publish_to(&[recipient.counterparty], true, None)).await {
+                        Ok(_) => {}
+                        Err(
+                            error @ PaykitError::Client(AppError::Store(_) | AppError::Alarm(_)),
+                        ) => return Err(error),
+                        Err(_) => {}
+                    }
+                }
+                continue;
+            }
             let Some(newest) = recipient
                 .current()
                 .filter(|newest| recipient.active && newest.restored)
@@ -1171,8 +1203,8 @@ impl Paykit {
         let now = self.now();
         let last = self.local_get(key::LAST_VERSION).await?;
         check_last_version(last, recipient.current().map(|o| o.version))?;
-        // While the lists wait for the host after a restore, a version is also above the
-        // later of the device clock and the highest service time verified, plus twice the
+        // While the lists wait for the host after a restore, a version is also strictly above
+        // the later of the device clock and the highest service time verified, plus twice the
         // clock tolerance: an app of this identity on the device the backup came from
         // published before the restore, by a clock within the tolerance of the service's, so
         // every version it sent is below that (Switch spec 10.1). The backup's last version
@@ -1180,6 +1212,7 @@ impl Paykit {
         let floor = if self.lists_await_host().await? {
             now.max(self.service_time().unwrap_or(0))
                 .saturating_add(2 * pubky_switch_core::records::CLOCK_TOLERANCE_MS)
+                .saturating_add(1)
         } else {
             now
         };
