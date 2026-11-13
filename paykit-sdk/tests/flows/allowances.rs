@@ -3811,3 +3811,146 @@ async fn test_allowances_proposal_over_a_deleted_record_from_a_blocked_sender_ke
     assert!(wallet.app().protocol_scan(b"cf/").await.unwrap().is_empty());
     assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 1);
 }
+
+/// Alice's `wallet`, a payer app, sends a proposal to bob as allower alone, without writing
+/// its record, as another of alice's apps would before this one holds the record; bob's shop
+/// accepts it, and the wallet keeps the acceptance before its record. Bob's 64 later
+/// acceptances of proposals alice never sent drop it for the bound, its pair forgotten, and
+/// it counts in bob's mark. Then the wallet's record of the Allowance is written, as the
+/// other app's batch would write it. Returns the record key on alice's side and the
+/// acceptance's `msg_id`.
+async fn wallet_answer_dropped_then_recorded(
+    w: &World,
+    wallet: &mut Paykit,
+    shop: &mut Paykit,
+) -> ([u8; 32], String) {
+    let id = paykit_lib::AllowanceId::generate().unwrap();
+    let body = json!({
+        "allowance_id": id.as_str(),
+        "proposer_role": "allower",
+        "terms": terms().to_json().unwrap(),
+    });
+    let signed = wallet
+        .app()
+        .sign_message(pubky_switch_client::app::OutgoingMessage::new(
+            w.bob_id(),
+            "paykit.allowance_proposal",
+            body.as_object().cloned().unwrap(),
+        ))
+        .unwrap();
+    wallet.app_mut().queue_signed(signed.clone()).await.unwrap();
+    wallet.app_mut().flush_outbox().await.unwrap();
+    shop.receive(None).await.unwrap();
+    let theirs = shop.allowances().await.unwrap()[0].record;
+    let accepted = shop.accept_allowance(&theirs).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    w.clock.advance_ms(1);
+    let bound = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    for i in 0..bound {
+        w.inject(
+            &w.bob,
+            "shop",
+            &w.alice,
+            &[wallet.app_id()],
+            "paykit.allowance_acceptance",
+            vec![[u8::try_from(i).unwrap(); 32]],
+            json!({ "allowance_id": paykit_lib::AllowanceId::generate().unwrap().as_str() })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        );
+    }
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.app().protocol_scan(b"pr/").await.unwrap().len(),
+        bound
+    );
+    assert_eq!(wallet.app().protocol_scan(b"pd/").await.unwrap().len(), 1);
+    let proposal = paykit_lib::records::StoredMessage::new(
+        w.alice_id(),
+        wallet.app().cert().signed(),
+        signed.plaintext().clone(),
+        None,
+        &w.bob_id(),
+    )
+    .unwrap();
+    let record = AllowanceRecord {
+        counterparty: w.bob_id(),
+        allowance_id: id.clone(),
+        proposal,
+        response: None,
+        end: None,
+        conflicted: None,
+        grant: None,
+        grants: Vec::new(),
+        msg_ids: Vec::new(),
+        unknown: Default::default(),
+    };
+    let target = allowances_target(&w.bob_id(), &id);
+    let op = wallet
+        .app_mut()
+        .record_op(&target, Some(&record.to_json().unwrap()), Vec::new())
+        .await
+        .unwrap();
+    wallet
+        .app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    let mine = wallet.app().record_key(&target).unwrap();
+    (mine, accepted)
+}
+
+#[tokio::test]
+async fn test_allowances_answer_dropped_at_a_payer_app_proposer_asked_again_once_and_placed() {
+    // The other side of the dropped-answer test: alice's wallet, holding `pay` and not
+    // `request`, proposed as allower. Once it holds the Allowance record, bob's mark is due
+    // from that record alone and asks him once; the same acceptance comes again, is taken as
+    // never processed, and is placed (Paykit spec 8.1, "Replies before their record").
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    let (mine, accepted) = wallet_answer_dropped_then_recorded(&w, &mut wallet, &mut shop).await;
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Proposed
+    );
+    shop.receive(None).await.unwrap();
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
+    let held = AllowanceRecord::read(
+        &serde_json::to_vec(&value(&wallet, &mine).await).unwrap(),
+        &w.alice_id(),
+    )
+    .unwrap();
+    assert_eq!(held.response.unwrap().message().msg_id, accepted);
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Accepted
+    );
+}
+
+#[tokio::test]
+async fn test_allowances_answer_dropped_at_a_payer_app_asked_again_only_once_unblocked() {
+    // As above at the keeper, which reads the lists: bob is blocked when the record arrives,
+    // so the due mark asks him nothing; once he is unblocked it asks him, once (Paykit spec
+    // 8.1, "Blocked counterparties": no re-send request goes to a blocked counterparty).
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = keeper(&w).await;
+    let (mine, accepted) = wallet_answer_dropped_then_recorded(&w, &mut wallet, &mut shop).await;
+    wallet.block(&w.bob_id()).await.unwrap();
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
+    shop.receive(None).await.unwrap();
+    assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
+    let held = AllowanceRecord::read(
+        &serde_json::to_vec(&value(&wallet, &mine).await).unwrap(),
+        &w.alice_id(),
+    )
+    .unwrap();
+    assert_eq!(held.response.unwrap().message().msg_id, accepted);
+}
