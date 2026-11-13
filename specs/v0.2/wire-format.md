@@ -985,7 +985,7 @@ One record per identity, its block floor (spec 8.1, Blocked counterparties):
 
 **Binding** (Switch spec 8.2): the reader recomputes the record key with its own naming key (Switch wire 1.5) and acts on the record only if it is the key derived from its own identity.
 
-**Seen floor** (Switch spec 8.2): a reader that holds a `block_floor` record ignores, and shows with its writer, a later write of a lower `floor`, so the floor it applies is the highest it has seen. A delete, or a value that doesn't read, keeps the floor seen; with none seen, the reader can't read the floor, and every one-time request counts as dated before it (spec 8.1).
+**Seen floor** (Switch spec 8.2): a reader that holds a `block_floor` record ignores, and shows with its writer, a later write of a lower `floor`, so the floor it applies is the highest it has seen. A delete, or a value that doesn't read, keeps the floor seen; with none seen, the reader can't read the floor, and every one-time request counts as dated before it (spec 8.1). Before each automatic dispatch of a one-time request, and each resume's repeat, the app reads the record again from its switch and applies the higher of the floor that read shows and the one it holds; a read that fails, or a value that doesn't read with none seen, withholds the dispatch (spec 8.1, 8.3).
 
 **Raising:** a writer builds on the version it holds and writes the higher of the floor held and the time it raises to, in the batch of the ask that needs the raise; after `409 conflict` it reads the record again and builds anew.
 
