@@ -55,7 +55,9 @@
 //! taken, or given up, within [`crate::KEPT_MESSAGE_MS`] of its acceptance, also one held
 //! or parked (Switch spec 8.2). So the floor goes once the highest service time verified
 //! passes it by twice [`crate::KEPT_MESSAGE_MS`] plus the clock tolerance. A backup carries
-//! it; a restore bounds it as it bounds the marks.
+//! it; a restore bounds it as it bounds the marks. A restore also raises it, at its first
+//! read of the lists, to that read's time: the backup carries no mark of a sender blocked
+//! and unblocked again since, nor a floor raised since.
 //!
 //! **Two times.** A mark holds the earliest acceptance time among the messages it covers,
 //! which a re-send asks from, and the latest, which the mark expires by. Each message
@@ -738,9 +740,18 @@ impl Paykit {
                 self.local_commit(tx).await?;
             }
             // A window some counterparty couldn't be marked for yet stays, for the next read.
+            // A restore's window also raises the block floor to the time it is applied, in
+            // the commit that drops it: a sender blocked and unblocked again after the
+            // backup is in no mark and no longer in the list, so a one-time request of any
+            // sender dated in that stretch that comes back opens paid only by hand.
             if applied {
-                self.local_delete(&key::blocked_widening(window.from_ms))
-                    .await?;
+                let mut tx = crate::state::Tx::default();
+                if window.until_ms == BlockedWindow::TO_NOW {
+                    let floor = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
+                    fold_into_floor(&mut tx, floor, until)?;
+                }
+                tx.delete(&key::blocked_widening(window.from_ms));
+                self.local_commit(tx).await?;
             }
         }
         Ok(())

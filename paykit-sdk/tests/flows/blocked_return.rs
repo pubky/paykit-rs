@@ -997,3 +997,48 @@ async fn test_blocked_return_recurring_request_dated_in_a_window_opens_with_no_m
     assert!(!views[0].manual_only);
     assert!(!held_for_the_user(&wallet).await);
 }
+
+#[tokio::test]
+async fn test_blocked_return_request_dropped_between_backup_and_restore_paid_only_by_hand() {
+    // After the backup, bob's request is dropped for a block and bob is unblocked again; the
+    // device is then lost. The backup holds no mark of his, and the lists don't show him at
+    // the restore. The restore's re-send to the counterparty of an open request asks him,
+    // and the request that comes back opens paid only by hand: the restore raised the block
+    // floor to its first read.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.requests().await.unwrap().len(), 1);
+    let backup = wallet.backup().await.unwrap();
+    w.clock.advance_ms(60 * MINUTE_MS);
+    request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.requests().await.unwrap().len(), 1);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    drop(wallet);
+    let mut wallet = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    w.clock.advance_ms(MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    // No mark of bob's: the lists don't hold him.
+    assert_eq!(block_marks(&wallet).await, 0);
+    shop.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let views = wallet.requests().await.unwrap();
+    assert_eq!(views.len(), 2, "{views:?}");
+    let held: Vec<bool> = views.iter().map(|view| view.manual_only).collect();
+    assert_eq!(held.iter().filter(|held| **held).count(), 1, "{views:?}");
+}
