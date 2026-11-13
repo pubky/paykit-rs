@@ -1764,12 +1764,8 @@ async fn over_unread(w: &World) -> OverUnread {
         .unwrap()
         .to_vec();
     seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
-    crate::outcome_record::phone_writes(
-        &mut phone,
-        &request,
-        Some(crate::outcome_record::INVALID),
-    )
-    .await;
+    crate::outcome_record::phone_writes(&mut phone, &request, Some(crate::outcome_record::INVALID))
+        .await;
     wallet.receive(None).await.unwrap();
     let held = wallet.app().shared_record(&record).await.unwrap().unwrap();
     assert_eq!(held.content.value(), Some(crate::outcome_record::INVALID));
@@ -1789,8 +1785,7 @@ impl OverUnread {
     /// The phone writes the payer record again with the value that reads.
     async fn phone_writes_back(&mut self) {
         self.phone.receive(None).await.unwrap();
-        crate::outcome_record::phone_writes(&mut self.phone, &self.request, Some(&self.good))
-            .await;
+        crate::outcome_record::phone_writes(&mut self.phone, &self.request, Some(&self.good)).await;
     }
 
     /// The attempt's outcome on its claim, read from the switch.
