@@ -82,6 +82,13 @@ pub const LIST_LIFETIME_MS: u64 = 30 * DAY_MS;
 /// to its list requests (Paykit spec 8.4): once an hour.
 const RESEND_INTERVAL_MS: u64 = 60 * 60 * 1000;
 
+/// The most versions a counterparty's list requests are remembered by, owed an answer
+/// ([`Recipient::asking`]) or answered ([`Recipient::named`]), so its requests can't grow
+/// the state without bound. A request past it is still answered: a version it named that
+/// isn't remembered only gets a newer version again, not the newest sent again, within the
+/// daily bound on answers.
+const MAX_NAMED: usize = 16;
+
 /// One endpoint of the app's Private Payment List ([`Paykit::set_list_endpoints`]).
 ///
 /// A reusable payload is sensitive, as every payload is: `Debug` shows only the kind.
@@ -259,8 +266,8 @@ pub(crate) struct Recipient {
     /// A newer version is owed, set by the receive step.
     pub(crate) owed: bool,
     /// A list request asked for a newer version: it goes within the 24-hour bound
-    /// ([`crate::PaykitConfig::list_answers_per_day`]), and past it the request gets no
-    /// answer.
+    /// ([`crate::PaykitConfig::list_answers_per_day`]), and past it the request stays owed
+    /// until the bound frees.
     pub(crate) requested: bool,
     /// The versions those requests named, marked answered once the newer version goes.
     pub(crate) asking: BTreeSet<u64>,
@@ -315,6 +322,8 @@ impl Recipient {
             || self.versions.is_empty()
             || !ascending
             || (!self.asking.is_empty() && !self.requested)
+            || self.asking.len() > MAX_NAMED
+            || self.named.len() > MAX_NAMED
         {
             return Err(PaykitError::corrupt());
         }
@@ -374,30 +383,34 @@ pub(crate) struct Releases {
     pub(crate) payloads: BTreeMap<String, String>,
 }
 
-/// What `value`, kept at a key of the publishing state's `family` in a backup, holds, read
-/// as its family's and bound to what its key names, by the checks every later read makes:
-/// the last version published, or the newest version sent a counterparty, for
+/// What `value`, kept at `key` of the publishing state in a backup, holds, read through
+/// [`state::restored`], so bound to what its key names by the checks every runtime read
+/// makes: the last version published, or the newest version sent a counterparty, for
 /// [`check_last_version`] over the whole layer. It is the app's own data, so the check
 /// guards against corruption only.
-pub(crate) fn check_restored(family: &StateKey, value: &[u8]) -> Result<Restored> {
-    match family {
-        StateKey::List => state::decode::<KeptList>(value)?
-            .check()
-            .map(|()| Restored::Other),
-        StateKey::LastVersion => state::decode::<u64>(value).map(Restored::LastVersion),
-        StateKey::ListRecipient(counterparty) => {
-            let recipient = state::decode::<Recipient>(value)?;
-            recipient.check(counterparty)?;
+pub(crate) fn check_restored(
+    key: &[u8],
+    value: &[u8],
+    binder: &state::Binder<'_>,
+) -> Result<Restored> {
+    match StateKey::parse(key).ok_or_else(PaykitError::corrupt)? {
+        StateKey::List => {
+            state::restored::<KeptList>(key, value, binder)?;
+            Ok(Restored::Other)
+        }
+        StateKey::LastVersion => {
+            state::restored::<u64>(key, value, binder).map(Restored::LastVersion)
+        }
+        StateKey::ListRecipient(_) => {
+            let recipient = state::restored::<Recipient>(key, value, binder)?;
             Ok(Restored::Newest(
                 recipient.current().map_or(0, |o| o.version),
             ))
         }
-        StateKey::Releases {
-            counterparty,
-            version,
-        } => state::decode::<Releases>(value)?
-            .check(counterparty, *version)
-            .map(|()| Restored::Other),
+        StateKey::Releases { .. } => {
+            state::restored::<Releases>(key, value, binder)?;
+            Ok(Restored::Other)
+        }
         _ => Err(PaykitError::corrupt()),
     }
 }
@@ -442,12 +455,7 @@ fn read_recipient(
     cx: &ReceiveContext<'_>,
     sender: &[u8; 32],
 ) -> std::result::Result<Option<Recipient>, Fail> {
-    let Some(bytes) = cx.local_get(key::list_recipient(sender).as_bytes())? else {
-        return Ok(None);
-    };
-    let recipient = state::decode::<Recipient>(&bytes).map_err(|_| Fail::corrupt())?;
-    recipient.check(sender).map_err(|_| Fail::corrupt())?;
-    Ok(Some(recipient))
+    state::cx_get::<Recipient>(cx, &key::list_recipient(sender))
 }
 
 fn keep_recipient(
@@ -542,7 +550,9 @@ pub(crate) fn note_list_request(
         recipient.resend = true;
     } else {
         recipient.requested = true;
-        recipient.asking.insert(held);
+        if recipient.asking.len() < MAX_NAMED {
+            recipient.asking.insert(held);
+        }
     }
     keep_recipient(cx, &recipient)
 }
@@ -626,8 +636,8 @@ impl Paykit {
                 active.push(recipient.counterparty);
             }
         }
-        let paused = self.paused().await?;
-        self.publish_to(&active, false, &paused, None).await
+        self.know_deny_copy().await?;
+        self.publish_to(&active, false, None).await
     }
 
     /// Send each of `counterparties` a newer version of the app's list (Paykit spec 8.4), for
@@ -639,8 +649,9 @@ impl Paykit {
     ///
     /// [`Refusal::CertificateRefused`]; [`Refusal::ScopeMissing`] without `request` or a
     /// label; [`Refusal::Usage`] before any list is set, or for the app's own identity;
-    /// [`Refusal::CounterpartyBlocked`] when the deny list holds one of them, or can't be read,
-    /// with nothing sent to any; a store failure.
+    /// [`Refusal::CounterpartyBlocked`] when the deny list holds one of them, or
+    /// [`Refusal::NotNow`] while its copy isn't known and can't be read, with nothing sent to
+    /// any; a store failure.
     pub async fn publish_list_to(&mut self, counterparties: &[[u8; 32]]) -> Result<ListsPublished> {
         self.refresh_own()?;
         self.require_payee()?;
@@ -652,8 +663,8 @@ impl Paykit {
                 Refusal::Usage("Paykit spec 8.4: a list goes to another identity".into()).into(),
             );
         }
-        let paused = self.refuse_paused(counterparties).await?;
-        self.publish_to(counterparties, false, &paused, None).await
+        self.refuse_held(counterparties).await?;
+        self.publish_to(counterparties, false, None).await
     }
 
     /// Stop sending `counterparty` the app's lists, as when it is no longer a contact: it is
@@ -673,8 +684,8 @@ impl Paykit {
         if self.recipient(counterparty).await?.is_none() {
             return Err(Refusal::NotFound.into());
         }
-        let paused = self.refuse_paused(&[*counterparty]).await?;
-        self.publish_to(&[*counterparty], true, &paused, None).await
+        self.refuse_held(&[*counterparty]).await?;
+        self.publish_to(&[*counterparty], true, None).await
     }
 
     /// Every counterparty this app sends its lists to, or did, with the newest version sent.
@@ -828,49 +839,63 @@ impl Paykit {
             })
     }
 
-    /// Whom the app sends no list now (Paykit spec 8.1, "Blocked counterparties"; v0.1
-    /// "Block A Peer"): at an app holding `contacts`, the deny list as a payment the user
-    /// starts reads it ([`Paykit::deny_list`]), and everyone when that read fails, so nothing
-    /// is sent on a list not read. An app without `contacts` can't read the lists, and pauses
-    /// no one.
+    /// Read the deny list again when its copy is [`crate::LISTS_REFRESH_MS`] old or
+    /// isn't known ([`Paykit::refresh_lists_when_due`]): a read that fails leaves the copy
+    /// unknown. Every list send is then gated on [`Paykit::sends_held`], which holds a send
+    /// while the copy holds the counterparty or isn't known (Paykit spec 8.1, "Blocked
+    /// counterparties"; v0.1 "Block A Peer"), so no list goes on a copy too old to judge by.
     ///
     /// # Errors
     ///
     /// A store failure or an alarm.
-    async fn paused(&mut self) -> Result<Paused> {
-        if !crate::receive::reads_lists(self.app.cert().scopes()) {
-            return Ok(Paused::NoOne);
-        }
-        match self.deny_list().await? {
-            Ok(denied) => Ok(Paused::Denied(denied)),
-            Err(error @ (AppError::Alarm(_) | AppError::Store(_))) => Err(error.into()),
-            Err(_) => Ok(Paused::Everyone),
-        }
+    async fn know_deny_copy(&mut self) -> Result<()> {
+        self.refresh_lists_when_due().await
     }
 
-    /// Refuse a call that sends `counterparties` a list while one of them is paused
-    /// ([`Paykit::paused`]), with nothing sent.
-    async fn refuse_paused(&mut self, counterparties: &[[u8; 32]]) -> Result<Paused> {
-        let paused = self.paused().await?;
-        if counterparties.iter().any(|c| paused.holds(c)) {
-            return Err(Refusal::CounterpartyBlocked.into());
+    /// Why no list may go to `counterparty` now: [`Refusal::CounterpartyBlocked`] while the
+    /// copy of the deny list holds it, [`Refusal::NotNow`] while the copy isn't known, or
+    /// `None` when a list may go ([`Paykit::sends_held`]).
+    ///
+    /// # Errors
+    ///
+    /// A store failure.
+    async fn list_held(&self, counterparty: &[u8; 32]) -> Result<Option<Refusal>> {
+        if !self.sends_held(counterparty).await? {
+            return Ok(None);
         }
-        Ok(paused)
+        Ok(Some(if self.deny_copy_known().await? {
+            Refusal::CounterpartyBlocked
+        } else {
+            Refusal::NotNow(
+                "Paykit spec 8.1: no list goes while the copy of the deny list isn't known".into(),
+            )
+        }))
+    }
+
+    /// Refuse a call that sends `counterparties` a list while sends to one of them are held
+    /// ([`Paykit::list_held`]), with nothing sent to any.
+    async fn refuse_held(&mut self, counterparties: &[[u8; 32]]) -> Result<()> {
+        self.know_deny_copy().await?;
+        for counterparty in counterparties {
+            if let Some(refusal) = self.list_held(counterparty).await? {
+                return Err(refusal.into());
+            }
+        }
+        Ok(())
     }
 
     /// Send each of `counterparties` a newer version, empty when `withdraw`, each on its own.
-    /// One `paused` holds is sent nothing: a newer version is owed it, which goes once the
-    /// pause ends. `undelivered` is as for [`Paykit::settled`].
+    /// One whose sends are held ([`Paykit::list_held`]) is sent nothing: a newer version is
+    /// owed it, which goes once a read of the deny list shows it not blocked. `undelivered` is as for [`Paykit::settled`].
     async fn publish_to(
         &mut self,
         counterparties: &[[u8; 32]],
         withdraw: bool,
-        paused: &Paused,
         undelivered: Option<&[String]>,
     ) -> Result<ListsPublished> {
         let mut out = ListsPublished::default();
         for counterparty in counterparties {
-            if paused.holds(counterparty) {
+            if self.list_held(counterparty).await?.is_some() {
                 let rkey = key::list_recipient(counterparty);
                 if let Some(mut recipient) = self.recipient(counterparty).await? {
                     if !recipient.owed {
@@ -1124,7 +1149,7 @@ impl Paykit {
     /// back. Otherwise each counterparty's versions are settled, and a newer version is sent
     /// where one is owed, a list request asks for one within the 24-hour bound, or a renewal
     /// is due; else the newest is sent again where a request named an older one. Nothing is
-    /// sent to a paused counterparty ([`Paykit::paused`]). The releases kept are asked of
+    /// sent to a counterparty whose sends are held ([`Paykit::list_held`]). The releases kept are asked of
     /// the payment method last. `duties` are the duty events the receive listed after its
     /// read, which tell the messages the client gave up ([`undelivered`]).
     pub(crate) async fn tend_lists(
@@ -1169,31 +1194,33 @@ impl Paykit {
             self.run_releases().await?;
             return Ok(ListsPublished::default());
         }
-        // A paused counterparty keeps what it waits for, uncounted, until it is unblocked.
-        let paused = self.paused().await?;
+        // A counterparty whose sends are held keeps what it waits for, uncounted, until a
+        // read shows it not blocked.
+        self.know_deny_copy().await?;
         let mut blocked = Vec::new();
         let mut owed = Vec::new();
         let mut resend = Vec::new();
         let mut tx = Tx::default();
         for mut recipient in waiting {
-            if paused.holds(&recipient.counterparty) {
+            if let Some(refusal) = self.list_held(&recipient.counterparty).await? {
                 blocked.push(ListNotSent {
                     counterparty: recipient.counterparty,
-                    reason: Refusal::CounterpartyBlocked.to_string(),
+                    reason: refusal.to_string(),
                 });
                 continue;
             }
             let rkey = key::list_recipient(&recipient.counterparty);
             if recipient.requested {
                 // Every newer version a list request asks for goes within the bound of any 24
-                // hours, and past it the request gets no answer: the versions it named stay
-                // unanswered, for a later request.
-                recipient.requested = false;
-                let asking = std::mem::take(&mut recipient.asking);
+                // hours. Past it the request is held, not dropped: it stays owed, with the
+                // versions it named, and is answered at a later receive once the bound
+                // frees.
                 recipient
                     .answers
                     .retain(|at| *at <= now && now - *at < DAY_MS);
                 if (recipient.answers.len() as u64) < self.config.list_answers_per_day {
+                    recipient.requested = false;
+                    let asking = std::mem::take(&mut recipient.asking);
                     recipient.answers.push(now);
                     recipient.owed = true;
                     for version in asking {
@@ -1202,6 +1229,8 @@ impl Paykit {
                             None => recipient.named.push((version, now)),
                         }
                     }
+                    let over = recipient.named.len().saturating_sub(MAX_NAMED);
+                    recipient.named.drain(..over);
                 }
                 tx.put(&rkey, &recipient)?;
             }
@@ -1222,9 +1251,7 @@ impl Paykit {
             }
         }
         self.local_commit(tx).await?;
-        let mut out = self
-            .publish_to(&owed, false, &Paused::NoOne, Some(&undelivered))
-            .await?;
+        let mut out = self.publish_to(&owed, false, Some(&undelivered)).await?;
         out.not_sent.extend(blocked);
         for (counterparty, current) in resend {
             if self.app.resend(&current.msg_id).await.is_err() {
@@ -1277,26 +1304,6 @@ impl Paykit {
 /// `(version, accepted_at)` in `accepted`: the payer then ignores it (Paykit wire 4.13).
 fn overtaken(accepted: &[(u64, u64)], version: u64, at: u64) -> bool {
     accepted.iter().any(|(v, t)| *v > version && *t < at)
-}
-
-/// Whom no list goes to now ([`Paykit::paused`]).
-enum Paused {
-    /// No one: the app can't read the lists.
-    NoOne,
-    /// The counterparties the deny list holds.
-    Denied(Vec<[u8; 32]>),
-    /// Everyone: the lists couldn't be read.
-    Everyone,
-}
-
-impl Paused {
-    fn holds(&self, counterparty: &[u8; 32]) -> bool {
-        match self {
-            Self::NoOne => false,
-            Self::Denied(denied) => denied.contains(counterparty),
-            Self::Everyone => true,
-        }
-    }
 }
 
 /// The fate `version` had in `before`; `Pending` for one it didn't hold.
@@ -1379,9 +1386,14 @@ mod tests {
         }
     }
 
+    /// [`check_restored`] of `value` at `key`.
+    fn check_at(key: &str, value: &[u8]) -> Result<Restored> {
+        check_restored(key.as_bytes(), value, &state::Binder::unblinded([9; 32]))
+    }
+
     fn restores(recipient: &Recipient) -> bool {
         let value = state::encode(recipient).unwrap();
-        check_restored(&StateKey::ListRecipient([3; 32]), &value).is_ok()
+        check_at(&key::list_recipient(&[3; 32]), &value).is_ok()
     }
 
     fn releases() -> Releases {
@@ -1395,40 +1407,37 @@ mod tests {
     }
 
     fn releases_restore(releases: &Releases) -> bool {
-        let at = StateKey::Releases {
-            counterparty: [3; 32],
-            version: 7,
-        };
-        check_restored(&at, &state::encode(releases).unwrap()).is_ok()
+        check_at(
+            &key::releases(&[3; 32], 7),
+            &state::encode(releases).unwrap(),
+        )
+        .is_ok()
     }
 
     #[test]
     fn test_publish_restore_binds_each_value_to_its_key() {
         let value = state::encode(&recipient()).unwrap();
         assert_eq!(
-            check_restored(&StateKey::ListRecipient([3; 32]), &value).unwrap(),
+            check_at(&key::list_recipient(&[3; 32]), &value).unwrap(),
             Restored::Newest(1_000)
         );
-        assert!(check_restored(&StateKey::ListRecipient([4; 32]), &value).is_err());
+        assert!(check_at(&key::list_recipient(&[4; 32]), &value).is_err());
         let value = state::encode(&releases()).unwrap();
-        let at = |counterparty, version| StateKey::Releases {
-            counterparty,
-            version,
-        };
-        assert!(check_restored(&at([3; 32], 7), &value).is_ok());
-        assert!(check_restored(&at([3; 32], 8), &value).is_err());
-        assert!(check_restored(&at([4; 32], 7), &value).is_err());
+        let at = |counterparty: [u8; 32], version| key::releases(&counterparty, version);
+        assert!(check_at(&at([3; 32], 7), &value).is_ok());
+        assert!(check_at(&at([3; 32], 8), &value).is_err());
+        assert!(check_at(&at([4; 32], 7), &value).is_err());
         let mut list = KeptList::default();
         list.endpoints
             .insert("btc-bitcoin-p2wpkh".into(), Some("bc1q".into()));
-        assert!(check_restored(&StateKey::List, &state::encode(&list).unwrap()).is_ok());
+        assert!(check_at(key::LIST, &state::encode(&list).unwrap()).is_ok());
         list.endpoints.insert("not an identifier".into(), None);
-        assert!(check_restored(&StateKey::List, &state::encode(&list).unwrap()).is_err());
+        assert!(check_at(key::LIST, &state::encode(&list).unwrap()).is_err());
         assert_eq!(
-            check_restored(&StateKey::LastVersion, &state::encode(&5u64).unwrap()).unwrap(),
+            check_at(key::LAST_VERSION, &state::encode(&5u64).unwrap()).unwrap(),
             Restored::LastVersion(5)
         );
-        assert!(check_restored(&StateKey::LastVersion, &state::encode(&"5").unwrap()).is_err());
+        assert!(check_at(key::LAST_VERSION, &state::encode(&"5").unwrap()).is_err());
     }
 
     #[test]

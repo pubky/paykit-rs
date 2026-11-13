@@ -1,16 +1,23 @@
 //! Marks of a sender's messages dropped before they were taken, and the re-sends they ask
 //! for (Paykit spec 8.1, "Replies before their record" and "Stored entries"; Paykit spec 9).
 //!
-//! Two families, each with one mark per sender identity, the identity its certificate
+//! Three families, each with one mark per sender identity, the identity its certificate
 //! names:
 //!
 //! - **Replies dropped for the bounds on kept replies** (`pd/<sender>`, `receive.rs`). Once
 //!   the app holds the record of a request whose counterparty holds such a mark, it asks
 //!   that sender to re-send what its inbox accepted from the mark's earliest time
-//!   (`resend_request` with `accepted_from`).
+//!   (`resend_request` with `accepted_from`). The client marked such a reply processed when
+//!   it was kept, so the step that drops it forgets its pair, and a re-sent copy is taken
+//!   as a new message.
 //! - **Entries dropped unverified** (`ud/<sender>`, `stored.rs`). The app asks that sender
 //!   at once to re-send what its inbox accepted from the mark's earliest time to its latest
 //!   (`accepted_from` and `accepted_until`).
+//! - **Entries dropped while they waited for a scope key** (`kw/<sender>`, `stored.rs`): the
+//!   client drops such an entry past its bounds unprocessed (Switch spec 8.2). The mark also
+//!   holds the data epochs the messages waited for, and asks that sender, as for entries
+//!   dropped unverified, only while the app holds every key of those epochs its certificate
+//!   is given: a copy sent before would wait for the same key.
 //!
 //! **Two times.** A mark holds the earliest acceptance time among the messages it covers,
 //! which a re-send asks from, and the latest, which the mark expires by. Each message
@@ -33,7 +40,8 @@
 //! restore neither loses nor resets them; a restore takes each mark bound to its key's
 //! sender.
 
-use pubky_switch_client::app::{AppEvent, Delivery};
+use pubky_switch_client::app::Delivery;
+use pubky_switch_client::app::Protocol as _;
 use pubky_switch_core::enc::serde_b64;
 use pubky_switch_core::records::DAY_MS;
 use serde::{Deserialize, Serialize};
@@ -41,10 +49,11 @@ use serde::{Deserialize, Serialize};
 use crate::error::{PaykitError, Result};
 use crate::paykit::Paykit;
 use crate::resend::ResendSelection;
-use crate::state::{key, StateKey};
+use crate::state::key;
 
-/// How many marks of each family the app keeps: past it, the mark whose latest time is
-/// earliest goes, a tie going to the lower sender identity.
+/// How many marks of each family the app keeps (module docs: replies dropped for the bounds,
+/// entries dropped unverified, entries dropped while they waited for a scope key): past it,
+/// the mark whose latest time is earliest goes, a tie going to the lower sender identity.
 pub const MAX_DROPPED_MARKS: usize = 128;
 
 /// A mark of a sender's dropped messages (module docs).
@@ -58,12 +67,24 @@ pub(crate) struct DropMark {
     /// The latest: what the mark expires by.
     pub(crate) latest_ms: u64,
     /// Whether asking is due: for replies, once the app holds the record of one of the
-    /// sender's requests; for entries dropped unverified, from the start.
+    /// sender's requests; for entries dropped unverified, from the start. A mark of key
+    /// waits keeps it `false`: it is due while the app holds the keys it waits for
+    /// ([`KeyWaitMark`]).
     pub(crate) due: bool,
     /// When the outbox last delivered a request for this mark, on the device clock.
     pub(crate) asked_at_ms: Option<u64>,
-    /// The `msg_id` of a request queued for this mark and not yet seen delivered.
-    pub(crate) queued: Option<String>,
+    /// A request queued for this mark and not yet seen delivered.
+    pub(crate) queued: Option<QueuedRequest>,
+}
+
+/// A `resend_request` a mark queued (`DropMark::queued`): its `msg_id`, which the outbox
+/// answers its delivery by, and its hash, the proof that the message the outbox delivered
+/// under that `msg_id` is this request ([`Paykit::delivered_request`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct QueuedRequest {
+    pub(crate) msg_id: String,
+    #[serde(with = "serde_b64")]
+    pub(crate) hash: [u8; 32],
 }
 
 impl DropMark {
@@ -72,15 +93,68 @@ impl DropMark {
     pub(crate) fn expired(&self, service: Option<u64>) -> bool {
         service.is_some_and(|t| self.latest_ms.saturating_add(crate::KEPT_MESSAGE_MS) <= t)
     }
+
+    /// Bring both times down to `bound` where they are above it, as a restore bounds them
+    /// (`Paykit::bound_restored_cursor_time`). Whether anything changed.
+    pub(crate) fn clamp(&mut self, bound: u64) -> bool {
+        if self.latest_ms <= bound {
+            return false;
+        }
+        self.latest_ms = bound;
+        self.earliest_ms = self.earliest_ms.min(bound);
+        true
+    }
 }
 
-/// The two families of marks.
+/// A mark of a sender's entries the client dropped while they waited for a scope key
+/// (`kw/<sender>`, module docs): a [`DropMark`] with the data epochs the messages waited
+/// for, ascending, each once.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct KeyWaitMark {
+    #[serde(flatten)]
+    pub(crate) mark: DropMark,
+    /// The data epochs the messages it covers waited for.
+    pub(crate) epochs: Vec<u64>,
+}
+
+impl KeyWaitMark {
+    /// The mark with `epoch` among those it waits for.
+    fn with_epoch(mark: DropMark, epochs: Vec<u64>, epoch: u64) -> Self {
+        let mut epochs = epochs;
+        if let Err(at) = epochs.binary_search(&epoch) {
+            epochs.insert(at, epoch);
+        }
+        Self { mark, epochs }
+    }
+}
+
+/// A mark's value as kept: a [`DropMark`], or one carrying more ([`KeyWaitMark`]).
+pub(crate) trait MarkValue: crate::state::Stored + Serialize {
+    /// The mark's times, cadence and request.
+    fn drop_mark(&mut self) -> &mut DropMark;
+}
+
+impl MarkValue for DropMark {
+    fn drop_mark(&mut self) -> &mut DropMark {
+        self
+    }
+}
+
+impl MarkValue for KeyWaitMark {
+    fn drop_mark(&mut self) -> &mut DropMark {
+        &mut self.mark
+    }
+}
+
+/// The three families of marks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MarkFamily {
     /// Replies dropped for the bounds on kept replies.
     Replies,
     /// Entries dropped unverified.
     Unverified,
+    /// Entries dropped while they waited for a scope key.
+    KeyWaits,
 }
 
 impl MarkFamily {
@@ -89,6 +163,7 @@ impl MarkFamily {
         match self {
             Self::Replies => key::DROPPED_REPLIES,
             Self::Unverified => key::DROPPED_UNVERIFIED,
+            Self::KeyWaits => key::KEY_WAITS,
         }
     }
 
@@ -97,15 +172,7 @@ impl MarkFamily {
         match self {
             Self::Replies => key::dropped_replies(sender),
             Self::Unverified => key::dropped_unverified(sender),
-        }
-    }
-
-    /// The sender a key of this family names; `None` for another key.
-    pub(crate) fn sender_of(self, key: &str) -> Option<[u8; 32]> {
-        match (self, StateKey::parse(key.as_bytes())?) {
-            (Self::Replies, StateKey::DroppedReplies { sender })
-            | (Self::Unverified, StateKey::DroppedUnverified { sender }) => Some(sender),
-            _ => None,
+            Self::KeyWaits => key::key_waits(sender),
         }
     }
 
@@ -114,18 +181,9 @@ impl MarkFamily {
         let selection = ResendSelection::default().with_accepted_from_ms(mark.earliest_ms);
         match self {
             Self::Replies => selection,
-            Self::Unverified => selection.with_accepted_until_ms(mark.latest_ms),
+            Self::Unverified | Self::KeyWaits => selection.with_accepted_until_ms(mark.latest_ms),
         }
     }
-}
-
-/// Read a mark at `key` of `family`, bound to the sender its key names.
-pub(crate) fn read_mark(family: MarkFamily, key: &str, value: &[u8]) -> Result<DropMark> {
-    let mark = crate::state::decode::<DropMark>(value)?;
-    if family.sender_of(key) != Some(mark.sender) || mark.earliest_ms > mark.latest_ms {
-        return Err(PaykitError::corrupt());
-    }
-    Ok(mark)
 }
 
 /// What counting a message from `sender` accepted at `at` does to a family's marks.
@@ -206,14 +264,7 @@ impl Paykit {
         at: u64,
     ) -> Result<()> {
         let family = MarkFamily::Unverified;
-        let held = match self
-            .app
-            .protocol_get(family.key(&sender).as_bytes())
-            .await?
-        {
-            Some(value) => Some(read_mark(family, &family.key(&sender), &value)?),
-            None => None,
-        };
+        let held = self.local_get::<DropMark>(&family.key(&sender)).await?;
         let others = match held {
             Some(_) => Vec::new(),
             None => self.marks_of(family).await?,
@@ -228,111 +279,232 @@ impl Paykit {
         Ok(())
     }
 
+    /// Count a message from `sender` accepted at `at`, dropped while it waited for a scope key
+    /// of `epoch`, in `tx`: its mark of key waits (`kw/<sender>`), with the epoch, due only
+    /// while the app holds the keys it waits for ([`Paykit::ask_on_marks`]).
+    pub(crate) async fn count_key_wait(
+        &self,
+        tx: &mut crate::state::Tx,
+        sender: [u8; 32],
+        at: u64,
+        epoch: u64,
+    ) -> Result<()> {
+        let family = MarkFamily::KeyWaits;
+        let held = self.local_get::<KeyWaitMark>(&family.key(&sender)).await?;
+        let others = match held {
+            Some(_) => Vec::new(),
+            None => self.marks_of(family).await?,
+        };
+        let (held, epochs) = match held {
+            Some(held) => (Some(held.mark), held.epochs),
+            None => (None, Vec::new()),
+        };
+        let counted = count_dropped(held, &others, sender, at, false);
+        if let Some(gone) = counted.evicted {
+            tx.delete(&family.key(&gone));
+        }
+        if let Some(mark) = counted.put {
+            tx.put(
+                &family.key(&sender),
+                &KeyWaitMark::with_epoch(mark, epochs, epoch),
+            )?;
+        }
+        Ok(())
+    }
+
     /// Every mark of `family`, as (sender, latest time).
     async fn marks_of(&self, family: MarkFamily) -> Result<Vec<([u8; 32], u64)>> {
         let mut out = Vec::new();
-        for (key, value) in self.app.protocol_scan(family.prefix().as_bytes()).await? {
-            let key = String::from_utf8(key).map_err(|_| PaykitError::corrupt())?;
-            let mark = read_mark(family, &key, &value)?;
-            out.push((mark.sender, mark.latest_ms));
+        match family {
+            MarkFamily::KeyWaits => {
+                for (_, held) in self.local_scan::<KeyWaitMark>(family.prefix()).await? {
+                    out.push((held.mark.sender, held.mark.latest_ms));
+                }
+            }
+            MarkFamily::Replies | MarkFamily::Unverified => {
+                for (_, mark) in self.local_scan::<DropMark>(family.prefix()).await? {
+                    out.push((mark.sender, mark.latest_ms));
+                }
+            }
         }
         Ok(out)
     }
 
-    /// Ask on the marks, at a receive (module docs): a reply mark becomes due once this read
-    /// took the record of one of its sender's requests (`events`); a mark past its expiry
-    /// goes; each due mark asks its sender when its cadence allows. Returns how many requests
-    /// were queued.
-    pub(crate) async fn ask_on_marks(&mut self, events: &[AppEvent]) -> Result<u64> {
-        self.note_requests_held(events).await?;
-        let service = self.service_time();
+    /// Whether the app holds every scope key of `epoch` its certificate is given, of the
+    /// scopes the protocol keys.
+    fn holds_epoch_keys(&self, epoch: u64) -> bool {
+        self.app
+            .cert()
+            .scopes()
+            .iter()
+            .filter(|scope| self.protocol.has_keys(scope))
+            .all(|scope| self.app.scope_key(epoch, scope).is_some())
+    }
+
+    /// Ask on the marks, at a receive (module docs): a reply mark becomes due once the app
+    /// holds the record of one of its sender's requests; a mark past its expiry goes; each
+    /// due mark asks its sender when its cadence allows. Returns how many requests were
+    /// queued.
+    pub(crate) async fn ask_on_marks(&mut self) -> Result<u64> {
+        self.note_requests_held().await?;
         let mut asked = 0u64;
         for family in [MarkFamily::Replies, MarkFamily::Unverified] {
-            for (key, value) in self.app.protocol_scan(family.prefix().as_bytes()).await? {
-                let key = String::from_utf8(key).map_err(|_| PaykitError::corrupt())?;
-                let mark = read_mark(family, &key, &value)?;
-                if mark.expired(service) {
-                    self.local_delete(&key).await?;
-                } else if mark.due {
-                    asked = asked.saturating_add(self.ask_on_mark(family, &key, mark).await?);
-                }
+            for (rest, mark) in self.local_scan::<DropMark>(family.prefix()).await? {
+                let due = mark.due;
+                asked = asked.saturating_add(self.on_mark(family, &rest, mark, due).await?);
             }
+        }
+        // A mark of key waits asks only while the app holds every key its messages waited
+        // for: a copy sent before would wait for the same key.
+        let family = MarkFamily::KeyWaits;
+        for (rest, held) in self.local_scan::<KeyWaitMark>(family.prefix()).await? {
+            let due = held
+                .epochs
+                .iter()
+                .all(|epoch| self.holds_epoch_keys(*epoch));
+            asked = asked.saturating_add(self.on_mark(family, &rest, held, due).await?);
         }
         Ok(asked)
     }
 
-    /// Ask the sender of `mark`, at `key`, when its cadence allows (module docs). Returns
+    /// Act on `mark`, of `family` at the key whose rest after the prefix is `rest`: it goes
+    /// past its expiry; otherwise, when `due`, it asks its sender (module docs). Returns how
+    /// many requests were queued: 1 or 0.
+    async fn on_mark<M: MarkValue>(
+        &mut self,
+        family: MarkFamily,
+        rest: &str,
+        mut mark: M,
+        due: bool,
+    ) -> Result<u64> {
+        let key = format!("{}{rest}", family.prefix());
+        if mark.drop_mark().expired(self.service_time()) {
+            self.local_delete(&key).await?;
+            return Ok(0);
+        }
+        let sender = mark.drop_mark().sender;
+        // A sender blocked is asked nothing while it is, nor while the copy of the deny list
+        // isn't known (Paykit spec 8.1); its mark stays, and asks once it is unblocked, on
+        // its cadence, until it expires.
+        if !due || self.sends_held(&sender).await? {
+            return Ok(0);
+        }
+        self.ask_on_mark(family, &key, mark).await
+    }
+
+    /// Ask the sender of `held`, at `key`, when its cadence allows (module docs). Returns
     /// how many requests were queued: 1 or 0.
-    async fn ask_on_mark(
+    async fn ask_on_mark<M: MarkValue>(
         &mut self,
         family: MarkFamily,
         key: &str,
-        mut mark: DropMark,
+        mut held: M,
     ) -> Result<u64> {
-        if let Some(msg_id) = mark.queued.clone() {
+        let sender = held.drop_mark().sender;
+        if let Some(queued) = held.drop_mark().queued.clone() {
+            let msg_id = &queued.msg_id;
             if matches!(
-                self.app.delivery(&msg_id).await?,
+                self.app.delivery(msg_id).await?,
                 Some(Delivery::Queued { .. })
             ) {
                 // Queued, it is tried again now; one that fails stays queued for the next
                 // receive.
-                let _ = self.app.flush_message(&msg_id).await;
+                let _ = self.app.flush_message(msg_id).await;
             }
-            match self.app.delivery(&msg_id).await? {
+            match self.app.delivery(msg_id).await? {
                 Some(Delivery::Queued { .. }) => return Ok(0),
-                Some(Delivery::Accepted { .. }) => mark.asked_at_ms = Some(self.now()),
+                // Delivered counts only once the message delivered is shown to be this
+                // request: a `msg_id` naming another message is a corrupt store, never a
+                // request delivered.
+                Some(Delivery::Accepted { .. }) => {
+                    self.delivered_request(&sender, &queued).await?;
+                    held.drop_mark().asked_at_ms = Some(self.now());
+                }
                 // Refused for good, or no longer kept: not sent, so asked anew below.
                 _ => {}
             }
-            mark.queued = None;
-            self.local_put(key, &mark).await?;
+            held.drop_mark().queued = None;
+            self.local_put(key, &held).await?;
         }
         let now = self.now();
         // A time ahead of the clock (restored, or the clock set back) is due: it never holds
         // the next request back for longer than a day.
-        if mark
+        if held
+            .drop_mark()
             .asked_at_ms
             .is_some_and(|at| at <= now && now - at < DAY_MS)
         {
             return Ok(0);
         }
-        let signed = self.resend_request_message(mark.sender, family.selection(&mark))?;
+        let selection = family.selection(held.drop_mark());
+        let signed = self.resend_request_message(sender, selection)?;
         let msg_id = signed.msg_id().to_owned();
         // Kept before it is queued: a crash between the two finds the request not kept by
         // the outbox, and asks anew.
-        mark.queued = Some(msg_id.clone());
-        self.local_put(key, &mark).await?;
+        held.drop_mark().queued = Some(QueuedRequest {
+            msg_id: msg_id.clone(),
+            hash: signed.hash(),
+        });
+        self.local_put(key, &held).await?;
         self.app.queue_signed(signed).await?;
         let _ = self.app.flush_message(&msg_id).await;
         if matches!(
             self.app.delivery(&msg_id).await?,
             Some(Delivery::Accepted { .. })
         ) {
+            let mark = held.drop_mark();
             mark.queued = None;
             mark.asked_at_ms = Some(self.now());
-            self.local_put(key, &mark).await?;
+            self.local_put(key, &held).await?;
         }
         Ok(1)
     }
 
-    /// Make due the reply mark of each sender the record of one of whose requests this read
-    /// took (`events`).
-    async fn note_requests_held(&mut self, events: &[AppEvent]) -> Result<()> {
+    /// Check that the message the outbox delivered to `sender` under `queued`'s `msg_id` is
+    /// that `resend_request`: one to `sender`, of that kind and hash.
+    ///
+    /// # Errors
+    ///
+    /// A corrupt store when none is: the mark points to another message.
+    async fn delivered_request(&self, sender: &[u8; 32], queued: &QueuedRequest) -> Result<()> {
+        let sent = self.app.sent_to(sender, 0, u64::MAX).await?;
+        if sent.iter().any(|message| {
+            message.msg_id == queued.msg_id
+                && message.kind == paykit_lib::kinds::Kind::ResendRequest.as_str()
+                && message.plaintext.hash() == queued.hash
+        }) {
+            Ok(())
+        } else {
+            Err(PaykitError::corrupt())
+        }
+    }
+
+    /// Make due the reply mark of each sender whose request's record the app holds: any
+    /// record of the payee's side whose counterparty the mark names, one held before the
+    /// reply was dropped included. The records are read only while a mark waits.
+    async fn note_requests_held(&mut self) -> Result<()> {
         let own = self.identity();
         let family = MarkFamily::Replies;
-        for event in events {
-            let AppEvent::RecordChanged { key: record } = event else {
+        let mut waiting = std::collections::BTreeMap::new();
+        for (rest, mark) in self.local_scan::<DropMark>(family.prefix()).await? {
+            let key = format!("{}{rest}", family.prefix());
+            if !mark.due {
+                waiting.insert(mark.sender, (key, mark));
+            }
+        }
+        if waiting.is_empty() {
+            return Ok(());
+        }
+        let mut tx = crate::state::Tx::default();
+        let records = self
+            .app
+            .records_of(paykit_lib::collections::Collection::PayeeActivity.name())
+            .await?;
+        for held in records {
+            let Some(value) = held.content.value() else {
                 continue;
             };
-            let Some(held) = self.app.shared_record(record).await? else {
-                continue;
-            };
-            let (Some(_), Some(value)) = (
-                paykit_lib::collections::Collection::PayeeActivity.policy_label(&held.policy),
-                held.content.value(),
-            ) else {
-                continue;
-            };
+            // A record that doesn't read shows no counterparty: it makes no mark due.
             let Ok(read) = paykit_lib::records::ActivityRecord::read(
                 value,
                 &own,
@@ -340,17 +512,12 @@ impl Paykit {
             ) else {
                 continue;
             };
-            let mark_key = family.key(&read.counterparty);
-            let Some(bytes) = self.app.protocol_get(mark_key.as_bytes()).await? else {
-                continue;
-            };
-            let mut mark = read_mark(family, &mark_key, &bytes)?;
-            if !mark.due {
+            if let Some((key, mut mark)) = waiting.remove(&read.counterparty) {
                 mark.due = true;
-                self.local_put(&mark_key, &mark).await?;
+                tx.put(&key, &mark)?;
             }
         }
-        Ok(())
+        self.local_commit(tx).await
     }
 }
 
@@ -448,17 +615,5 @@ mod tests {
                 evicted: None
             }
         );
-    }
-
-    #[test]
-    fn test_marks_read_refuses_another_sender_or_crossed_times() {
-        let key = MarkFamily::Replies.key(&[1; 32]);
-        let good = crate::state::encode(&mark(1, 5, 6)).unwrap();
-        assert!(read_mark(MarkFamily::Replies, &key, &good).is_ok());
-        assert!(read_mark(MarkFamily::Unverified, &key, &good).is_err());
-        let other = crate::state::encode(&mark(2, 5, 6)).unwrap();
-        assert!(read_mark(MarkFamily::Replies, &key, &other).is_err());
-        let crossed = crate::state::encode(&mark(1, 7, 6)).unwrap();
-        assert!(read_mark(MarkFamily::Replies, &key, &crossed).is_err());
     }
 }

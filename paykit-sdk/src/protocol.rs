@@ -25,23 +25,19 @@
 
 use std::sync::{Arc, PoisonError, RwLock};
 
-use paykit_lib::bodies::{check_body, Body, ResendRequest};
+use paykit_lib::bodies::check_body;
 use paykit_lib::collections::Collection;
-use paykit_lib::derive::{natural_key, request_obligation_blinded};
 use paykit_lib::kinds::{targets_app, Kind, Role as KindRole, Side, OPAQUE_MEMBERS};
 use paykit_lib::records::{ActivitySide, PaymentListRecord, StoredMessage};
-use paykit_lib::scopes::{
-    acts_as_payee, check_certificate, verify_certificate, PaykitScope, ScopeName,
-};
+use paykit_lib::scopes::{acts_as_payee, check_certificate, PaykitScope, ScopeName};
 use paykit_lib::{Label, PaykitKindRules};
 use pubky_switch_client::app::{
     decode_local_state, Collection as SwitchCollection, Effect, LocalView, LocalWrite, LossActions,
     MissedEntries, OpaqueRule, Outcome, Protocol, ProtocolLayer, ProviderLoss, ReceiveContext,
-    ReceivedMessage, RecordTarget, ResendNeeded, RestoreContext, StoreFailure, WriteBase,
+    ReceivedMessage, ResendNeeded, RestoreContext, StoreFailure, WriteBase,
 };
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
-use pubky_switch_core::ident::record_key_from_blinded;
 use pubky_switch_core::message::Message;
 use pubky_switch_core::receive::KindRules;
 use pubky_switch_core::records::{AppCert, AppRecord};
@@ -49,15 +45,15 @@ use pubky_switch_core::scopes as switch_scopes;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::activity::{self, ActivityTarget, KeptSide, SideTag};
+use crate::activity::{self, KeptSide, SideTag};
 use crate::hold::RestoreHold;
 use crate::journal::JournalEntry;
-use crate::marks::{read_mark, MarkFamily};
+use crate::marks::{DropMark, KeyWaitMark};
 use crate::notices::KeptNotice;
 use crate::pay::ListAsk;
 use crate::rail::Rail;
 use crate::receive::{self, Fail, QueuedAnswer};
-use crate::records::{list_target, KeptMessage};
+use crate::records::KeptMessage;
 use crate::state::{self, key, StateKey};
 
 /// The kinds this SDK handles (Paykit wire 4.3): the one-time request flow, payments without
@@ -84,6 +80,16 @@ pub(crate) struct QueuedAsk {
     pub(crate) until_ms: Option<u64>,
 }
 
+/// A `missed` item's mark (`p/mi/<from>`): the time its re-sends ask from, and the
+/// counterparties asked already for it, kept while a record whose counterparty it may still
+/// have to ask is sealed under a scope key the app doesn't hold yet (`resend.rs`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct MissedItemMark {
+    pub(crate) from_ms: u64,
+    /// In increasing order, each once.
+    pub(crate) asked: Vec<[u8; 32]>,
+}
+
 /// The own app, as the protocol's callbacks need it.
 #[derive(Clone)]
 struct Own {
@@ -102,9 +108,6 @@ pub struct PaykitProtocol {
     /// The app's rail, which names a proof's settlement (Paykit wire 1.5); without one, the
     /// methods `paykit-lib` knows.
     rail: Option<Arc<dyn Rail>>,
-    /// The entries this read held because their record's value waits for its scope key:
-    /// each `seq` with the data epoch it waits for, taken by [`crate::Paykit::receive`].
-    key_waits: std::sync::Mutex<std::collections::BTreeMap<u64, u64>>,
 }
 
 impl std::fmt::Debug for PaykitProtocol {
@@ -125,7 +128,6 @@ impl PaykitProtocol {
         Self {
             own: RwLock::new(None),
             rail: None,
-            key_waits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         }
     }
 
@@ -151,17 +153,6 @@ impl PaykitProtocol {
     pub fn set_own(&self, identity: [u8; 32], cert: AppCert) {
         let mut own = self.own.write().unwrap_or_else(PoisonError::into_inner);
         *own = Some(Own { identity, cert });
-    }
-
-    /// The entries held for a key since the last call, each `seq` with the data epoch it
-    /// waits for ([`receive::Fail::AwaitsKey`]).
-    pub(crate) fn take_key_waits(&self) -> std::collections::BTreeMap<u64, u64> {
-        std::mem::take(
-            &mut *self
-                .key_waits
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-        )
     }
 
     fn own(&self) -> Option<Own> {
@@ -204,42 +195,6 @@ impl PaykitProtocol {
         let label = body_label(message);
         let side = self.reply_side(kind, label.as_ref(), kept);
         targets_app(kind, side, label.as_ref(), recipient.cert().scopes())
-    }
-}
-
-/// Whether `new` reads a record of `collections` that `old` doesn't (Switch spec 8.3, Paykit
-/// spec 6): a collection `old` lists none of, or, in a family with a policy per sub-scope,
-/// a sub-scope's records `old` reads neither by that sub-scope nor by the family's own read
-/// scope, which reads every member, such as `request:<label>` after `request` alone.
-pub(crate) fn reads_more(collections: &[SwitchCollection], old: &AppCert, new: &AppCert) -> bool {
-    collections.iter().any(|collection| {
-        if !collection.readable_by(new) {
-            return false;
-        }
-        if !collection.readable_by(old) {
-            return true;
-        }
-        let name = collection.policy.read_scope.as_str();
-        if old.holds_scope(name) {
-            return false;
-        }
-        new.holds_scope(name)
-            || new.scopes().iter().any(|scope| {
-                switch_scopes::split(scope).is_some_and(|(held, sub)| sub.is_some() && held == name)
-                    && !old.scopes().contains(scope)
-            })
-    })
-}
-
-/// A record of Paykit's local state, read through a [`LocalView`]: `Err` when the store
-/// can't be read or the record doesn't read, which the caller never takes as an absent one.
-fn view_get<T: serde::de::DeserializeOwned>(
-    view: &LocalView<'_>,
-    key: &str,
-) -> std::result::Result<Option<T>, ()> {
-    match view.local_get(key.as_bytes()).map_err(|_| ())? {
-        None => Ok(None),
-        Some(bytes) => state::decode(&bytes).map(Some).map_err(|_| ()),
     }
 }
 
@@ -313,8 +268,9 @@ pub const BACKUP_NAME: &str = "paykit";
 /// The writes that install Paykit's backup layer (Switch spec 12.4): every key of its local
 /// state, as the default layer holds it, with the payment journal checked whole first and
 /// its entries marked restored (Paykit spec 7.2). The journal's checks are
-/// [`JournalEntry::check_bound`]'s, with `request_obligation` blinding under the backup's
-/// naming key, each entry at its own attempt's key, and at most one open entry
+/// [`JournalEntry::check_restored`]'s, as every runtime read checks an entry, its claim
+/// keys blinded under the backup's naming key, each entry at its own attempt's key, and at
+/// most one open entry
 /// for one obligation, since a payment in progress blocks any other. `Err` names the rule,
 /// without content: nothing is written. Pure: it is called at backup time too.
 ///
@@ -340,27 +296,18 @@ pub(crate) fn restore_paykit_layer(
     own_cert: &AppCert,
     blind: impl Fn(&[u8]) -> [u8; 32],
 ) -> Result<Vec<LocalWrite>, String> {
-    let request_obligation = |payee: &[u8; 32], request_hash: &[u8; 32]| {
-        request_obligation_blinded(&blind(payee), &blind(request_hash), 0)
-    };
-    let record_key = |target: &RecordTarget| -> Result<[u8; 32], String> {
-        let policy = target
-            .collection
-            .policy
-            .hash()
-            .map_err(|_| String::from("a Paykit collection's policy doesn't hash"))?;
-        Ok(record_key_from_blinded(
-            &target.collection.name,
-            &blind(&target.natural_key),
-            &policy,
-        ))
-    };
+    // Every value is bound to its key by the function every runtime read binds it with
+    // (`state::Stored`), with the backup's naming key.
+    let blinding = |input: &[u8]| blind(input);
+    let binder = state::Binder::new(own, own_cert, &blinding);
     let Some(layer) = layer else {
         return Err("a Paykit App's backup carries Paykit's layer, with its journal".into());
     };
     let state = decode_local_state(&layer.data)
         .ok_or_else(|| String::from("Paykit's layer doesn't read as local state"))?;
     let mut open = std::collections::BTreeSet::new();
+    let mut journaled = std::collections::BTreeSet::new();
+    let mut acknowledged = Vec::new();
     let mut writes = Vec::with_capacity(state.len());
     let mut cursor_time_ms = 0;
     // The last list version published, and the newest one sent any counterparty: a valid
@@ -390,116 +337,137 @@ pub(crate) fn restore_paykit_layer(
             // again changes nothing: a dropped entry's time is already in its sender's mark,
             // which asks on its own cadence (`marks.rs`).
             StateKey::RestoreHold
+            | StateKey::MissedHold
             | StateKey::HoldConfirmed(_)
             | StateKey::RecordsUnlisted
+            | StateKey::MissedUnlisted
             | StateKey::PayerPassOwed
+            | StateKey::OwnResendOwed
             | StateKey::ListedCert
             | StateKey::StoredNote { .. }
             | StateKey::Taken(_) => continue,
+            // The time of the last read of the lists isn't restored: the copy of the deny
+            // list the backup holds may be stale by any time, so the list is read again before
+            // any payment (Paykit spec 8.1).
+            StateKey::ListsRead => continue,
+            // This app's blocks not yet shown by the list are: the client's kept batches
+            // belong to the device that kept them, so the restored app keeps counting each
+            // and writes it again (`Paykit::send_own_blocks_again`). Its unblocks aren't: an unblock counts
+            // only while the client keeps its batch, and the restored app keeps none, so the
+            // list decides.
+            StateKey::OwnBlock(_) => {
+                let mark = state::restored::<state::OwnBlockMark>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                if mark.blocked() {
+                    writes.push(LocalWrite::Put { key, value });
+                }
+                continue;
+            }
             StateKey::Journal(attempt) => attempt,
             StateKey::CursorTime => {
-                cursor_time_ms = state::decode::<u64>(&value).map_err(|_| unread())?;
+                cursor_time_ms =
+                    state::restored::<u64>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::Ask { sender, from_ms } => {
-                let ask = state::decode::<QueuedAsk>(&value).map_err(|_| unread())?;
-                if ask.sender != sender || ask.from_ms != from_ms {
-                    return Err(unread());
-                }
+            StateKey::Missed { .. }
+            | StateKey::Peer(_)
+            | StateKey::Spam(_)
+            | StateKey::Resent { .. }
+            | StateKey::ResentDay { .. } => {
+                state::restored::<u64>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::Answer { seq, msg_id } => {
-                check_queued_answer(&value, seq, &msg_id)?;
+            StateKey::Ask { .. } => {
+                state::restored::<QueuedAsk>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::Missed { from_ms } => {
-                // The re-sends are asked from the value, so it must be the time its key names.
-                if state::decode::<u64>(&value).map_err(|_| unread())? != from_ms {
-                    return Err(unread());
-                }
+            StateKey::Answer { .. } => {
+                state::restored::<QueuedAnswer>(&key, &value, &binder).map_err(|_| {
+                    String::from(
+                        "Paykit spec 9: a queued resend_request in the backup doesn't verify",
+                    )
+                })?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::MissedItem { .. } => {
+                state::restored::<MissedItemMark>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
             StateKey::DroppedReplies { .. } | StateKey::DroppedUnverified { .. } => {
                 // A mark is restored whole, its times and when it was last asked, so a restore
                 // neither loses nor resets it (Paykit spec 8.1), bound to its key's sender.
-                let family = match family {
-                    StateKey::DroppedReplies { .. } => MarkFamily::Replies,
-                    _ => MarkFamily::Unverified,
-                };
-                let key_text = std::str::from_utf8(&key).map_err(|_| unread())?;
-                read_mark(family, key_text, &value).map_err(|_| unread())?;
+                state::restored::<DropMark>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::Peer(_)
-            | StateKey::Spam(_)
-            | StateKey::Resent { .. }
-            | StateKey::ResentDay { .. }
-            | StateKey::ListsRead => {
-                state::decode::<u64>(&value).map_err(|_| unread())?;
+            StateKey::KeyWaits { .. } => {
+                // So is a mark of key waits, with the epochs it waits for.
+                state::restored::<KeyWaitMark>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
             StateKey::Denied => {
-                state::decode::<Vec<[u8; 32]>>(&value).map_err(|_| unread())?;
+                state::restored::<Vec<[u8; 32]>>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::Side(msg_id) => {
-                let kept = state::decode::<KeptSide>(&value).map_err(|_| unread())?;
-                if kept.msg_id != msg_id {
-                    return Err(unread());
-                }
+            StateKey::Side(_) => {
+                state::restored::<KeptSide>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
             StateKey::KeptCancellation(_) => {
-                check_kept_cancellation(&key, &value, &own, &record_key)?;
+                state::restored::<KeptMessage>(&key, &value, &binder).map_err(|_| {
+                    String::from(
+                        "Paykit spec 8.1: a kept cancellation in the backup doesn't verify",
+                    )
+                })?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
             StateKey::HeldList(_) => {
-                check_held_list(&key, &value, &own, &record_key)?;
+                state::restored::<KeptMessage>(&key, &value, &binder).map_err(|_| {
+                    String::from("Paykit wire 5.4: a held list in the backup doesn't verify")
+                })?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::ListAsk { payee, app_id } => {
-                state::decode::<ListAsk>(&value)
-                    .and_then(|asked| asked.check(&payee, app_id.as_ref()))
-                    .map_err(|_| unread())?;
+            StateKey::ListAsk { .. } => {
+                state::restored::<ListAsk>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::SeenRecords { payee, app_id } => {
-                check_seen_records(&value, &payee, &app_id)?;
+            StateKey::SeenRecords { .. } => {
+                // They are the payee's, not the app's own: one that doesn't verify would fail
+                // every later public-endpoint read of that payee.
+                state::restored::<crate::app_records::SeenRecords>(&key, &value, &binder)
+                    .map_err(|_| {
+                        String::from(
+                            "Switch spec 4.2: a payee's seen app records in the backup don't verify",
+                        )
+                    })?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::MessageNotice { sender, msg_id } => {
-                state::decode::<KeptNotice>(&value)
-                    .and_then(|notice| notice.check_message(&sender, &msg_id))
-                    .map_err(|_| unread())?;
+            StateKey::KeptReply { .. } => {
+                state::restored::<KeptMessage>(&key, &value, &binder).map_err(|_| {
+                    String::from(
+                        "Switch spec 8.2: a kept payer's reply in the backup doesn't verify",
+                    )
+                })?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::KeptReply {
-                sender,
-                record,
-                msg_id,
-            } => {
-                check_kept_reply(&value, &own, (sender, record), &msg_id, &record_key)?;
-                writes.push(LocalWrite::Put { key, value });
-                continue;
-            }
-            published @ (StateKey::List
+            StateKey::List
             | StateKey::LastVersion
             | StateKey::ListRecipient(_)
-            | StateKey::Releases { .. }) => {
-                match crate::publish::check_restored(&published, &value).map_err(|_| unread())? {
+            | StateKey::Releases { .. } => {
+                match crate::publish::check_restored(&key, &value, &binder).map_err(|_| unread())? {
                     crate::publish::Restored::LastVersion(last) => last_version = Some(last),
                     crate::publish::Restored::Newest(newest) => {
                         newest_sent = newest_sent.max(Some(newest));
@@ -509,35 +477,44 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::Notice { attempt, kind } => {
-                state::decode::<KeptNotice>(&value)
-                    .and_then(|notice| notice.check(&attempt, kind))
-                    .map_err(|_| unread())?;
+            StateKey::MessageNotice { .. } | StateKey::Notice { .. } => {
+                let notice =
+                    state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
+                // An acknowledged notice of an attempt is kept only while the journal holds
+                // the attempt (`Paykit::acknowledge_notice`): one without its entry is a
+                // state no run leaves.
+                if let (true, StateKey::Notice { attempt, .. }) = (notice.acknowledged, family) {
+                    acknowledged.push(attempt);
+                }
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
         };
         let bad = || String::from("Paykit spec 7.2: a journal entry in the backup doesn't read");
-        let mut entry = state::decode::<JournalEntry>(&value).map_err(|_| bad())?;
-        // Each request payment's claim key is the one its payee and request blind to under
-        // the backup's naming key, which the restore context gives (Paykit spec 7.1, Paykit
-        // wire 1.5), and every message it keeps verifies for this app: checked here, before
-        // anything is written.
-        entry
-            .check_restored(&own, own_cert, request_obligation)
-            .map_err(|_| bad())?;
-        if entry.attempt().map_err(|_| bad())? != attempt {
-            return Err(bad());
-        }
+        // Bound to its key as every runtime read binds it (`state::Stored`): of the attempt
+        // its key names, each request payment's claim key the one its payee and request
+        // blind to under the backup's naming key, which the restore context gives (Paykit
+        // spec 7.1, Paykit wire 1.5), its record the one its request or attempt names, and
+        // every message it keeps verified for this app
+        // ([`JournalEntry::check_restored`]): checked here, before anything is written.
+        let mut entry =
+            state::restored::<JournalEntry>(&key, &value, &binder).map_err(|_| bad())?;
         if entry.open() && !open.insert(entry.obligation) {
             return Err("Paykit spec 7.2: two open journal entries for one obligation".into());
         }
+        journaled.insert(attempt);
         entry.restored = true;
         let value = state::encode(&entry).map_err(|_| bad())?;
         writes.push(LocalWrite::Put { key, value });
     }
     crate::publish::check_last_version(last_version, newest_sent)
         .map_err(|_| String::from("Paykit's local state in the backup doesn't read"))?;
+    if acknowledged
+        .iter()
+        .any(|attempt| !journaled.contains(attempt))
+    {
+        return Err("Paykit's local state in the backup doesn't read".into());
+    }
     // Every open request is held after a restore, set in the restore's own commit (Paykit
     // spec 7.2, "What a restore loses"; `hold.rs`).
     let hold = state::local_put(key::RESTORE_HOLD, &RestoreHold::of(cursor_time_ms))
@@ -548,128 +525,21 @@ pub(crate) fn restore_paykit_layer(
     let unlisted = state::local_put(key::RECORDS_UNLISTED, &true)
         .map_err(|_| String::from("the restore's records mark can't be written"))?;
     writes.push(unlisted);
-    // The restore's listing covers what the restored certificate reads; a wider one the
-    // client takes later is listed by Paykit (`Paykit::unlisted`).
-    let listed = state::local_put(key::LISTED_CERT, own_cert.signed())
-        .map_err(|_| String::from("the restore's listed certificate can't be written"))?;
-    writes.push(listed);
+    // No certificate is kept as listed under, a backup's included: only a listing Paykit
+    // makes keeps one (`Paykit::list_records`), so the restored copy counts as unlisted
+    // until then, whichever certificate the client lists under.
     // No new attempt until a reconcile has run the payer pass, under `pay`: the backup
     // doesn't hold the attempts made after it (`Paykit::payer_pass_owed`).
     let owed = state::local_put(key::PAYER_PASS_OWED, &true)
         .map_err(|_| String::from("the restore's payer pass mark can't be written"))?;
     writes.push(owed);
+    // The messages this app signed that a batch the backup kept unanswered queued are in no
+    // outbox: they are queued again from the records once they are listed
+    // (`Paykit::queue_own_again`).
+    let resend = state::local_put(key::OWN_RESEND_OWED, &crate::hold::OwnResendOwed::default())
+        .map_err(|_| String::from("the restore's re-send mark can't be written"))?;
+    writes.push(resend);
     Ok(writes)
-}
-
-/// A payee app's records a reader has seen (`ar/<payee>/<app>`, Switch spec 4.2): each one
-/// the payee's, as it signed it, of the app the key names. They are the payee's, not the
-/// app's own: one that doesn't verify would fail every later public-endpoint read of that
-/// payee.
-fn check_seen_records(value: &[u8], payee: &[u8; 32], app_id: &[u8; 16]) -> Result<(), String> {
-    let bad =
-        || String::from("Switch spec 4.2: a payee's seen app records in the backup don't verify");
-    let seen = state::decode::<crate::app_records::SeenRecords>(value).map_err(|_| bad())?;
-    if !seen.verifies(payee, app_id) {
-        return Err(bad());
-    }
-    Ok(())
-}
-
-/// A `resend_request` received and queued to answer (`ans/<seq>/<msg_id>`, Paykit spec 9):
-/// read at the `seq` and `msg_id` its key names, its body a `resend_request`'s, and its
-/// certificate the requester's.
-fn check_queued_answer(value: &[u8], seq: u64, msg_id: &str) -> Result<(), String> {
-    let bad =
-        || String::from("Paykit spec 9: a queued resend_request in the backup doesn't verify");
-    let queued = state::decode::<QueuedAnswer>(value).map_err(|_| bad())?;
-    if queued.seq != seq || queued.msg_id != msg_id {
-        return Err(bad());
-    }
-    ResendRequest::from_body(&queued.body).map_err(|_| bad())?;
-    verify_certificate(&queued.cert, &queued.requester).map_err(|_| bad())?;
-    Ok(())
-}
-
-/// A payee's cancellation kept to place (`kc/<record key>`, Paykit spec 8.1): it verifies
-/// for `own`, is a `paykit.payment_request_cancellation`, and is kept under the record key
-/// of the request it cancels.
-fn check_kept_cancellation(
-    key: &[u8],
-    value: &[u8],
-    own: &[u8; 32],
-    record_key: &impl Fn(&RecordTarget) -> Result<[u8; 32], String>,
-) -> Result<(), String> {
-    let bad = || String::from("Paykit spec 8.1: a kept cancellation in the backup doesn't verify");
-    let kept = state::decode::<KeptMessage>(value).map_err(|_| bad())?;
-    let cancellation = kept.stored(own).map_err(|_| bad())?;
-    if !matches!(cancellation.body(), Body::PaymentRequestCancellation(_)) {
-        return Err(bad());
-    }
-    let request = cancellation.message().refs.first().ok_or_else(bad)?;
-    let target =
-        ActivityTarget::payer(natural_key::request_record(&cancellation.sender(), request));
-    if key != key::kept_cancellation(&record_key(&target.record_target())?).as_bytes() {
-        return Err(bad());
-    }
-    Ok(())
-}
-
-/// A payer's reply kept for a request record the app didn't hold yet (`pr/<sender>/<record
-/// key>/<msg_id>`, Switch spec 8.2): it verifies for `own`, is an acceptance, rejection,
-/// cancellation or proof from the sender and with the `msg_id` its key names, and is kept
-/// under the record key of the payee's record of the request it names, under its label.
-fn check_kept_reply(
-    value: &[u8],
-    own: &[u8; 32],
-    (sender, record): ([u8; 32], [u8; 32]),
-    msg_id: &str,
-    record_key: &impl Fn(&RecordTarget) -> Result<[u8; 32], String>,
-) -> Result<(), String> {
-    let bad = || String::from("Switch spec 8.2: a kept payer's reply in the backup doesn't verify");
-    let kept = state::decode::<KeptMessage>(value).map_err(|_| bad())?;
-    let reply = kept.stored(own).map_err(|_| bad())?;
-    let replies = matches!(
-        reply.body(),
-        Body::PaymentRequestAcceptance(_)
-            | Body::PaymentRequestRejection(_)
-            | Body::PaymentRequestCancellation(_)
-            | Body::PaymentProof(_)
-    );
-    let request = reply.message().refs.first().ok_or_else(bad)?;
-    let target = ActivityTarget::payee(
-        natural_key::request_record(own, request),
-        reply.body().label(),
-    );
-    if !replies
-        || reply.sender() != sender
-        || reply.message().msg_id != msg_id
-        || record_key(&target.record_target())? != record
-    {
-        return Err(bad());
-    }
-    Ok(())
-}
-
-/// A list held over a record that didn't read (`lh/<record key>`, Paykit wire 5.4): it
-/// verifies for `own`, is a `paykit.private_payment_list`, and is kept under the record
-/// key of its payee app's `payment_lists` record.
-fn check_held_list(
-    key: &[u8],
-    value: &[u8],
-    own: &[u8; 32],
-    record_key: &impl Fn(&RecordTarget) -> Result<[u8; 32], String>,
-) -> Result<(), String> {
-    let bad = || String::from("Paykit wire 5.4: a held list in the backup doesn't verify");
-    let kept = state::decode::<KeptMessage>(value).map_err(|_| bad())?;
-    let list = kept.stored(own).map_err(|_| bad())?;
-    if !matches!(list.body(), Body::PrivatePaymentList(_)) {
-        return Err(bad());
-    }
-    let target = list_target(&list.sender(), &list.message().from.app_id);
-    if key != key::held_list(&record_key(&target)?).as_bytes() {
-        return Err(bad());
-    }
-    Ok(())
 }
 
 impl Protocol for PaykitProtocol {
@@ -777,12 +647,11 @@ impl Protocol for PaykitProtocol {
         view: &LocalView<'_>,
     ) -> bool {
         // A kept side that can't be read sends to no one rather than guess (Paykit spec 3.4):
-        // the message isn't sealed to this recipient.
-        // So does one that names another message than its key.
-        match view_get::<KeptSide>(view, &key::side(&message.msg_id)) {
-            Ok(Some(kept)) if kept.msg_id != message.msg_id => false,
-            Ok(kept) => self.narrows(message, recipient, KeptSide::of(kept, &message.msg_id)),
-            Err(()) => false,
+        // the message isn't sealed to this recipient. So does one that names another message
+        // than its key, which doesn't bind (`state::Stored`).
+        match state::view_get::<KeptSide>(view, &key::side(&message.msg_id)) {
+            Ok(kept) => self.narrows(message, recipient, kept.map(|kept| kept.side)),
+            Err(_) => false,
         }
     }
 
@@ -799,22 +668,34 @@ impl Protocol for PaykitProtocol {
         // A released entry whose effect the app wrote since, by a write of its own, is
         // declined: its effect isn't applied twice (Switch spec 8.2; `stored.rs`).
         if message.released {
-            let note = key::stored_note(&message.sender, &message.message.msg_id);
-            match cx.local_get(note.as_bytes()) {
-                Ok(Some(bytes)) => match state::decode::<crate::stored::StoredNote>(&bytes) {
-                    Ok(note) if crate::stored::declines(Some(&note)) => {
-                        return Outcome::Drop {
-                            reason: "Switch spec 8.2: a released entry whose effect the app \
-                                     wrote since"
-                                .into(),
-                        }
+            let note_key = key::stored_note(&message.sender, &message.message.msg_id);
+            match state::cx_get::<crate::stored::StoredNote>(cx, &note_key) {
+                Ok(note) if crate::stored::declines(note.as_ref()) => {
+                    return Outcome::Drop {
+                        reason: "Switch spec 8.2: a released entry whose effect the app wrote \
+                                 since"
+                            .into(),
                     }
-                    Ok(_) => {}
-                    Err(_) => return Outcome::Retry(StoreFailure::of_entry(StoreError::Corrupt)),
-                },
-                Ok(None) => {}
-                Err(error) => return Outcome::Retry(store_failure(error)),
+                }
+                Ok(_) => {}
+                Err(Fail::Store(failure)) => return Outcome::Retry(failure),
+                Err(_) => return Outcome::Retry(StoreFailure::of_entry(StoreError::Corrupt)),
             }
+        }
+        // A message given up stays processed (Paykit spec 8.1): a copy the sender sends again,
+        // or the parked entry the host releases, has no effect while its notice is kept. One
+        // the client dropped while it waited for a key was never processed: a copy sent again
+        // is a new message.
+        let notice = key::message_notice(&message.sender, &message.message.msg_id);
+        match state::cx_get::<KeptNotice>(cx, &notice) {
+            Ok(Some(notice)) if notice.keeps_processed() => {
+                return Outcome::Drop {
+                    reason: "Paykit spec 8.1: a message given up stays processed".into(),
+                }
+            }
+            Ok(_) => {}
+            Err(Fail::Store(failure)) => return Outcome::Retry(failure),
+            Err(_) => return Outcome::Retry(StoreFailure::of_entry(StoreError::Corrupt)),
         }
         let stored = match stored_copy(message) {
             Ok(stored) => stored,
@@ -827,26 +708,11 @@ impl Protocol for PaykitProtocol {
             Err(Fail::Need(needs)) => Outcome::Need(needs),
             Err(Fail::Drop(reason)) => Outcome::Drop { reason },
             Err(Fail::Store(failure)) => Outcome::Retry(failure),
-            // A record value waits for its scope key: the entry waits for it, held as for a
-            // store unavailable for now, until 30 days after its acceptance; then it is given
-            // up, processed with the host's notice as its only write (Paykit spec 8.1). The
-            // notice can't go with `Outcome::Drop`, which keeps none of the step's writes.
-            Err(Fail::AwaitsKey { .. }) if receive::key_wait_over(cx, stored.accepted_at()) => {
-                match crate::stored::given_up_write(&stored, cx.highest_service_time()) {
-                    Ok(notice) => Outcome::Apply(Effect {
-                        ops: Vec::new(),
-                        local: vec![notice],
-                    }),
-                    Err(_) => Outcome::Retry(StoreFailure::of_entry(StoreError::Corrupt)),
-                }
-            }
-            Err(Fail::AwaitsKey { data_epoch }) => {
-                self.key_waits
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(message.seq, data_epoch);
-                Outcome::Retry(StoreFailure::unavailable(StoreError::Unavailable))
-            }
+            // A record value waits for its scope key: the client stores the entry and passes
+            // it at once, and runs the step again once the key comes (Switch spec 8.2). One
+            // it drops past its bounds first was never processed: the SDK tells the host and
+            // marks its sender to ask again once the key is held (`stored.rs`, `marks.rs`).
+            Err(Fail::AwaitsKey { data_epoch }) => Outcome::AwaitKey { data_epoch },
         }
     }
 
@@ -863,13 +729,37 @@ impl Protocol for PaykitProtocol {
         )?])
     }
 
-    /// Entries missed while lagging: ask the counterparties of unfinished activity to send
-    /// again from the item's time (Paykit spec 9).
+    /// Entries missed while lagging: ask the counterparties of open requests and unfinished
+    /// activity to send again (Paykit spec 9; `resend.rs`), and hold the open requests
+    /// (Paykit spec 7.2; `hold.rs`): a payee's cancellation may be among
+    /// the entries the service deleted. Every request the app holds is held, and one first
+    /// seen later only when created before the item's last acceptance time plus the clock
+    /// tolerance, the time the item carries (`MissedEntries::accepted_until_ms`). The
+    /// confirmations of an earlier hold go in the same commit, so none releases the new
+    /// one. The copy of the shared records counts as not listed from the item on (`ml`,
+    /// Paykit spec 8.1, "Records not listed yet"), until Paykit's own listing at the end of
+    /// the receive (`Paykit::list_records`): the client lists them right after the item,
+    /// inside its read, but Paykit judges the copy listed only from a listing of its own,
+    /// so what the app decides between the item and that listing decides nothing from an
+    /// absence. A mark of its own, not `nl`, which the same read's end would clear.
     fn missed(&self, missed: &MissedEntries) -> Result<Vec<LocalWrite>, StoreFailure> {
-        Ok(vec![local_write(
-            &key::missed(missed.accepted_from_ms),
-            &missed.accepted_from_ms,
-        )?])
+        Ok(vec![
+            local_write(
+                &key::missed_item(missed.accepted_from_ms),
+                &MissedItemMark {
+                    from_ms: missed.accepted_from_ms,
+                    asked: Vec::new(),
+                },
+            )?,
+            local_write(
+                key::MISSED_HOLD,
+                &crate::hold::MissedHold::of_item(missed.accepted_until_ms),
+            )?,
+            local_write(key::MISSED_UNLISTED, &true)?,
+            LocalWrite::DeletePrefix {
+                prefix: key::HOLD_CONFIRMED.as_bytes().to_vec(),
+            },
+        ])
     }
 
     /// A provider loss, without the protocol's state at hand: only the re-sends are queued.
@@ -893,16 +783,18 @@ impl Protocol for PaykitProtocol {
     ) -> Result<LossActions, StoreFailure> {
         // A store that fails, or a peer key that doesn't read, is the step's failure, never
         // an empty list of counterparties: the recovery asks again.
-        let peers = view
-            .local_scan(key::PEERS.as_bytes())
-            .map_err(store_failure)?;
+        let peers = state::view_scan::<u64>(view, key::PEERS).map_err(|error| match error {
+            crate::PaykitError::Client(error)
+                if error != pubky_switch_client::app::AppError::Store(StoreError::Corrupt) =>
+            {
+                store_failure(error)
+            }
+            _ => StoreFailure::of_entry(StoreError::Corrupt),
+        })?;
         let mut conversations = Vec::with_capacity(peers.len());
-        for (k, _) in peers {
-            let peer = k
-                .get(key::PEERS.len()..)
-                .and_then(|rest| std::str::from_utf8(rest).ok())
-                .and_then(|rest| unb64_array::<32>(rest).ok())
-                .ok_or_else(|| StoreFailure::of_entry(StoreError::Corrupt))?;
+        for (rest, _) in peers {
+            let peer = unb64_array::<32>(&rest)
+                .map_err(|_| StoreFailure::of_entry(StoreError::Corrupt))?;
             conversations.push(peer);
         }
         let mut actions = self.provider_lost(loss)?;
@@ -1053,26 +945,6 @@ mod tests {
         PaykitProtocol::new()
     }
 
-    fn cert(scopes: &[&str]) -> AppCert {
-        crate::testkit::Party::new("alice", "wallet", scopes).cert
-    }
-
-    #[test]
-    fn test_protocol_reads_more_with_a_collection_or_a_label_added() {
-        let collections = protocol().collections();
-        let reads_more =
-            |old: &[&str], new: &[&str]| reads_more(&collections, &cert(old), &cert(new));
-        assert!(reads_more(&["pay"], &["pay", "request"]));
-        assert!(reads_more(
-            &["request:shop"],
-            &["request:shop", "request:cafe"]
-        ));
-        assert!(reads_more(&["request:shop"], &["request"]));
-        assert!(!reads_more(&["pay", "request"], &["pay"]));
-        assert!(!reads_more(&["request"], &["request:shop"]));
-        assert!(!reads_more(&["pay"], &["pay", "contacts"]));
-    }
-
     #[test]
     fn test_protocol_keys_paykit_scopes_and_labels_only() {
         let p = protocol();
@@ -1122,11 +994,15 @@ mod tests {
 
 #[cfg(test)]
 mod receive_tests {
+    use paykit_lib::derive::natural_key;
     use paykit_lib::records::ActivityRecord;
+    use pubky_switch_client::app::RecordTarget;
+    use pubky_switch_core::ident::record_key_from_blinded;
     use pubky_switch_core::records::Standing;
     use serde_json::json;
 
     use super::*;
+    use crate::activity::ActivityTarget;
     use crate::testkit::{object, Party, NOW};
 
     fn received(stored: &StoredMessage) -> ReceivedMessage {
@@ -1364,54 +1240,73 @@ mod receive_tests {
             .is_some());
     }
 
-    /// A stand-in for the record key a restore derives: the natural key, padded.
-    fn fake_key(target: &RecordTarget) -> Result<[u8; 32], String> {
-        Ok(pubky_switch_core::enc::hash(&target.natural_key))
+    /// A stand-in for the naming key's blinding a restore is given.
+    fn fake_blind(input: &[u8]) -> [u8; 32] {
+        pubky_switch_core::enc::hash(input)
+    }
+
+    /// The record key of `target` under [`fake_blind`], as the client derives it.
+    fn fake_key(target: &RecordTarget) -> [u8; 32] {
+        let policy = target.collection.policy.hash().unwrap();
+        record_key_from_blinded(
+            &target.collection.name,
+            &fake_blind(&target.natural_key),
+            &policy,
+        )
+    }
+
+    /// Whether `value` at `key` restores at `party`'s app, bound to its key as a runtime read
+    /// binds it ([`state::restored`]).
+    fn restores<T: state::Stored>(party: &Party, key: &[u8], value: &[u8]) -> bool {
+        let blind = |input: &[u8]| fake_blind(input);
+        state::restored::<T>(
+            key,
+            value,
+            &state::Binder::new(party.id(), &party.cert, &blind),
+        )
+        .is_ok()
+    }
+
+    /// Alice's acceptance of bob's request `[4; 32]`, kept at bob's shop, and the record key
+    /// of bob's payee record it names.
+    fn kept_reply(alice: &Party, bob: &Party) -> (StoredMessage, Vec<u8>, [u8; 32]) {
+        let reply = alice.message(
+            bob,
+            "paykit.payment_request_acceptance",
+            vec![[4; 32]],
+            object(json!({})),
+        );
+        let value = state::encode(&KeptMessage::of(&reply)).unwrap();
+        let target = ActivityTarget::payee(natural_key::request_record(&bob.id(), &[4; 32]), None);
+        (reply, value, fake_key(&target.record_target()))
     }
 
     #[test]
     fn test_protocol_restore_takes_a_kept_reply_at_its_record() {
         let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
         let bob = Party::new("bob", "shop", &["request"]);
-        let reply = alice.message(
-            &bob,
-            "paykit.payment_request_acceptance",
-            vec![[4; 32]],
-            object(json!({})),
-        );
-        let value = state::encode(&KeptMessage::of(&reply)).unwrap();
-        let target = ActivityTarget::payee(natural_key::request_record(&bob.id(), &[4; 32]), None);
-        let record = fake_key(&target.record_target()).unwrap();
-        let msg_id = reply.message().msg_id.clone();
-        assert!(
-            check_kept_reply(&value, &bob.id(), (alice.id(), record), &msg_id, &fake_key).is_ok()
-        );
+        let (reply, value, record) = kept_reply(&alice, &bob);
+        let at = key::kept_reply(&alice.id(), &record, &reply.message().msg_id);
+        assert!(restores::<KeptMessage>(&bob, at.as_bytes(), &value));
     }
 
     #[test]
     fn test_protocol_restore_refuses_a_kept_reply_at_another_key() {
         let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
         let bob = Party::new("bob", "shop", &["request"]);
-        let reply = alice.message(
-            &bob,
-            "paykit.payment_request_acceptance",
-            vec![[4; 32]],
-            object(json!({})),
-        );
-        let value = state::encode(&KeptMessage::of(&reply)).unwrap();
-        let target = ActivityTarget::payee(natural_key::request_record(&bob.id(), &[4; 32]), None);
-        let record = fake_key(&target.record_target()).unwrap();
+        let (reply, value, record) = kept_reply(&alice, &bob);
         let msg_id = reply.message().msg_id.clone();
-        assert!(
-            check_kept_reply(&value, &bob.id(), (alice.id(), [9; 32]), &msg_id, &fake_key).is_err()
-        );
         let other = "123e4567-e89b-42d3-a456-426614174000";
-        assert!(
-            check_kept_reply(&value, &bob.id(), (alice.id(), record), other, &fake_key).is_err()
-        );
-        assert!(
-            check_kept_reply(&value, &bob.id(), ([8; 32], record), &msg_id, &fake_key).is_err()
-        );
+        for at in [
+            key::kept_reply(&alice.id(), &[9; 32], &msg_id),
+            key::kept_reply(&alice.id(), &record, other),
+            key::kept_reply(&[8; 32], &record, &msg_id),
+        ] {
+            assert!(
+                !restores::<KeptMessage>(&bob, at.as_bytes(), &value),
+                "{at}"
+            );
+        }
         // A kind that isn't a payer's reply, naming the same request.
         let carol = Party::new("carol", "shop", &["request"]);
         let receipt = carol.message(
@@ -1421,10 +1316,200 @@ mod receive_tests {
             object(json!({ "attempt_id": "DgCVYQKL1eyDacZvG6YhZg" })),
         );
         let value = state::encode(&KeptMessage::of(&receipt)).unwrap();
-        let msg_id = receipt.message().msg_id.clone();
-        assert!(
-            check_kept_reply(&value, &bob.id(), (carol.id(), record), &msg_id, &fake_key).is_err()
+        let at = key::kept_reply(&carol.id(), &record, &receipt.message().msg_id);
+        assert!(!restores::<KeptMessage>(&bob, at.as_bytes(), &value));
+    }
+
+    /// `value`, a kept message's encoded bytes, with its acceptance time removed.
+    fn without_acceptance(value: &[u8]) -> Vec<u8> {
+        let mut json: serde_json::Value = serde_json::from_slice(value).unwrap();
+        json["d"]["accepted_at"] = serde_json::Value::Null;
+        serde_json::to_vec(&json).unwrap()
+    }
+
+    #[test]
+    fn test_protocol_restore_refuses_a_kept_reply_without_its_acceptance_time() {
+        // A reply is kept only as its inbox accepted it: one without the time can't come
+        // from a valid run.
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let (reply, value, record) = kept_reply(&alice, &bob);
+        let at = key::kept_reply(&alice.id(), &record, &reply.message().msg_id);
+        assert!(!restores::<KeptMessage>(
+            &bob,
+            at.as_bytes(),
+            &without_acceptance(&value)
+        ));
+    }
+
+    /// Bob's cancellation of his request `[4; 32]` to alice, kept, and the stop key of the
+    /// payer's record it names.
+    fn kept_cancellation(alice: &Party, bob: &Party) -> (Vec<u8>, Vec<u8>) {
+        let cancellation = bob.message(
+            alice,
+            "paykit.payment_request_cancellation",
+            vec![[4; 32]],
+            object(json!({})),
         );
+        let value = state::encode(&KeptMessage::of(&cancellation)).unwrap();
+        let target = ActivityTarget::payer(natural_key::request_record(&bob.id(), &[4; 32]));
+        let record = fake_key(&target.record_target());
+        (key::kept_cancellation(&record).into_bytes(), value)
+    }
+
+    #[test]
+    fn test_protocol_restore_takes_a_kept_cancellation_at_its_record() {
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let (key, value) = kept_cancellation(&alice, &bob);
+        assert!(restores::<KeptMessage>(&alice, &key, &value));
+    }
+
+    #[test]
+    fn test_protocol_restore_refuses_a_kept_cancellation_at_another_key_or_without_its_time() {
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let (key, value) = kept_cancellation(&alice, &bob);
+        let other = key::kept_cancellation(&[9; 32]).into_bytes();
+        assert!(!restores::<KeptMessage>(&alice, &other, &value));
+        assert!(!restores::<KeptMessage>(
+            &alice,
+            &key,
+            &without_acceptance(&value)
+        ));
+    }
+
+    #[test]
+    fn test_protocol_missed_marks_bound_to_their_time_and_asks() {
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let time = state::encode(&5u64).unwrap();
+        assert!(restores::<u64>(&alice, key::missed(5).as_bytes(), &time));
+        assert!(!restores::<u64>(&alice, key::missed(6).as_bytes(), &time));
+        let mark =
+            |asked: Vec<[u8; 32]>| state::encode(&MissedItemMark { from_ms: 5, asked }).unwrap();
+        let item = |from: u64| key::missed_item(from).into_bytes();
+        assert!(restores::<MissedItemMark>(
+            &alice,
+            &item(5),
+            &mark(vec![[1; 32], [2; 32]])
+        ));
+        assert!(!restores::<MissedItemMark>(
+            &alice,
+            &item(6),
+            &mark(Vec::new())
+        ));
+        assert!(!restores::<MissedItemMark>(
+            &alice,
+            &item(5),
+            &mark(vec![[2; 32], [1; 32]])
+        ));
+        assert!(!restores::<MissedItemMark>(
+            &alice,
+            &item(5),
+            &mark(vec![[1; 32], [1; 32]])
+        ));
+        assert!(!restores::<MissedItemMark>(&alice, &item(5), &time));
+    }
+
+    #[test]
+    fn test_protocol_stored_note_bound_to_its_key() {
+        // A note read back names the sender and `msg_id` its key does, and so does the
+        // message it keeps: one under another key is a corrupt store.
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let request = bob.message(&alice, "paykit.payment_request", vec![], request_body());
+        let msg_id = request.message().msg_id.clone();
+        let note = crate::stored::StoredNote {
+            stored_id: 1,
+            hash: request.hash(),
+            sender: bob.id(),
+            msg_id: msg_id.clone(),
+            message: KeptMessage::of(&request),
+            placed: false,
+        };
+        let value = state::encode(&note).unwrap();
+        let at = key::stored_note(&bob.id(), &msg_id);
+        assert!(restores::<crate::stored::StoredNote>(
+            &alice,
+            at.as_bytes(),
+            &value
+        ));
+        assert!(crate::stored::writes_request(&note, &alice.id(), &request.hash()).unwrap());
+        let other = key::stored_note(&bob.id(), "123e4567-e89b-42d3-a456-426614174000");
+        let by_other = key::stored_note(&[8; 32], &msg_id);
+        for at in [other, by_other] {
+            assert!(!restores::<crate::stored::StoredNote>(
+                &alice,
+                at.as_bytes(),
+                &value
+            ));
+        }
+        // At its message's key, a note that names another `msg_id` or sender itself.
+        for note in [
+            crate::stored::StoredNote {
+                msg_id: "123e4567-e89b-42d3-a456-426614174000".into(),
+                ..note.clone()
+            },
+            crate::stored::StoredNote {
+                sender: [8; 32],
+                ..note.clone()
+            },
+        ] {
+            let value = state::encode(&note).unwrap();
+            assert!(!restores::<crate::stored::StoredNote>(
+                &alice,
+                at.as_bytes(),
+                &value
+            ));
+        }
+    }
+
+    #[test]
+    fn test_protocol_own_receipt_sent_again_after_a_restore() {
+        // A restore queues again a payee's own receipt and cancellation from its record: this
+        // app stores its own receipt only in the batch that queues it, so the record holds
+        // one it sent (Paykit spec 7.2); never a message another app signed.
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let till = Party::new("bob", "till", &["request"]);
+        let mut record = ActivityRecord::new(paykit_lib::records::ActivitySide::Payee, alice.id());
+        let receipt = |by: &Party| {
+            by.message(
+                &alice,
+                "paykit.payment_receipt",
+                vec![[4; 32], [5; 32]],
+                object(json!({ "attempt_id": "DgCVYQKL1eyDacZvG6YhZg" })),
+            )
+        };
+        record.receipt = Some(receipt(&bob));
+        let own = |record: &ActivityRecord| {
+            crate::hold::own_to_send_again(record, &bob.id(), &bob.cert.app_id())
+                .into_iter()
+                .map(|stored| stored.message().kind.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(own(&record), ["paykit.payment_receipt"]);
+        record.cancellation = Some(bob.message(
+            &alice,
+            "paykit.payment_request_cancellation",
+            vec![[4; 32]],
+            object(json!({ "reason": null })),
+        ));
+        assert_eq!(
+            own(&record),
+            [
+                "paykit.payment_request_cancellation",
+                "paykit.payment_receipt"
+            ]
+        );
+        record.cancellation = Some(till.message(
+            &alice,
+            "paykit.payment_request_cancellation",
+            vec![[4; 32]],
+            object(json!({ "reason": null })),
+        ));
+        record.receipt = Some(receipt(&till));
+        assert!(own(&record).is_empty());
     }
 
     #[test]

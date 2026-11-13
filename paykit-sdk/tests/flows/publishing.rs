@@ -660,7 +660,7 @@ async fn test_publishing_list_request_naming_an_expired_version_answered() {
 }
 
 #[tokio::test]
-async fn test_publishing_expired_version_named_past_the_bound_left_for_a_later_request() {
+async fn test_publishing_expired_version_named_past_the_bound_held_until_it_frees() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w
@@ -680,7 +680,7 @@ async fn test_publishing_expired_version_named_past_the_bound_left_for_a_later_r
     w.clock.advance_ms(14 * DAY_MS + 1);
     ask_for_the_list(&w, &shop, None, shop.app_id());
     assert_eq!(shop.receive(None).await.unwrap().lists.sent.len(), 1);
-    // Past the bound, the expired version named gets nothing.
+    // Past the bound, the expired version named gets nothing yet: the request is held.
     ask_for_the_list(&w, &shop, Some(first.version), shop.app_id());
     let got = shop.receive(None).await.unwrap();
     assert!(
@@ -688,16 +688,15 @@ async fn test_publishing_expired_version_named_past_the_bound_left_for_a_later_r
         "{:?}",
         got.lists
     );
-    // Another request answered later doesn't answer it.
+    // Once the bound frees, the held request is answered with a newer version.
     w.clock.advance_ms(DAY_MS);
-    ask_for_the_list(&w, &shop, None, shop.app_id());
-    assert_eq!(shop.receive(None).await.unwrap().lists.sent.len(), 1);
-    // Named again once the bound allows, it gets a newer version, not the newest again.
-    w.clock.advance_ms(DAY_MS);
-    ask_for_the_list(&w, &shop, Some(first.version), shop.app_id());
     let got = shop.receive(None).await.unwrap();
     assert_eq!(got.lists.sent.len(), 1, "{:?}", got.lists);
-    assert!(got.lists.resent.is_empty(), "{:?}", got.lists);
+    // Named again, it was answered: the newest goes again, nothing issued.
+    ask_for_the_list(&w, &shop, Some(first.version), shop.app_id());
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.lists.sent.is_empty(), "{:?}", got.lists);
+    assert_eq!(got.lists.resent.len(), 1, "{:?}", got.lists);
 }
 
 #[tokio::test]
@@ -1024,6 +1023,15 @@ async fn shop_reading_lists(w: &World, wallet: &mut Paykit) -> Paykit {
 }
 
 /// Whether `published` names alice as not sent for being blocked.
+/// Whether the only list not sent is alice's, held while the copy of the deny list isn't
+/// known.
+fn held_for_alice(w: &World, published: &paykit_sdk::ListsPublished) -> bool {
+    published.sent.is_empty()
+        && published.not_sent.len() == 1
+        && published.not_sent[0].counterparty == w.alice_id()
+        && published.not_sent[0].reason.contains("isn't known")
+}
+
 fn blocked_for_alice(w: &World, published: &paykit_sdk::ListsPublished) -> bool {
     published.sent.is_empty()
         && published.not_sent.len() == 1
@@ -1118,16 +1126,17 @@ async fn test_publishing_with_the_deny_list_unread_sends_nothing() {
     // The copy of the lists is too old to judge by, and reading them again fails.
     w.clock.advance_ms(LISTS_REFRESH_MS);
     fail_list_reads(&w, 1);
+    // The copy is unknown after the failed read: the send is held, nothing sent.
     let refused = shop.publish_list_to(&[w.alice_id()]).await.unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::CounterpartyBlocked)),
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
         "{refused:?}"
     );
     // Its renewal due, the receive's own read of the lists and the one before sending fail.
     w.clock.advance_ms(LIST_LIFETIME_MS / 2);
     fail_list_reads(&w, 2);
     let got = shop.receive(None).await.unwrap();
-    assert!(blocked_for_alice(&w, &got.lists), "{:?}", got.lists);
+    assert!(held_for_alice(&w, &got.lists), "{:?}", got.lists);
     assert_eq!(lists_taken(&mut wallet).await, 0);
     // Read again, the renewal goes.
     let got = shop.receive(None).await.unwrap();

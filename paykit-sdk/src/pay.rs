@@ -57,7 +57,7 @@ use crate::rail::{
 };
 use crate::records::{list_target, KeptMessage};
 use crate::requests::{cancelled, rejected, request_of, unreadable_request, Fresh, RequestRef};
-use crate::state::{self, key, StateKey};
+use crate::state::{self, key};
 
 /// How long after the latest time it has seen a payment without a request's attempt pins its
 /// deadline: 10 minutes (Paykit spec 8.4).
@@ -106,9 +106,9 @@ pub struct PayOptions {
     /// anyway ([`Refusal::IdentityUnconfirmed`]; Switch spec 4.3, Paykit spec 7.2).
     pub unconfirmed_identity_confirmed: Option<UserConfirmed>,
     /// The user has seen that the payee may have cancelled this request since the backup the
-    /// app was restored from, and pays it anyway ([`Refusal::HeldAfterRestore`]; Paykit spec
-    /// 7.2, "What a restore loses"). It ends the request's hold; it never overrides a
-    /// cancellation the app holds.
+    /// app was restored from, or a `missed` item, and pays it anyway
+    /// ([`Refusal::HeldAfterRestore`]; Paykit spec 7.2, "What a restore loses"). It ends the
+    /// request's hold; it never overrides a cancellation the app holds.
     pub possibly_cancelled_confirmed: Option<UserConfirmed>,
     /// The payment of a request from a blocked payee the user was shown and chose to make,
     /// as a [`Refusal::Blocked`] gave it (Paykit spec 8.1): only that same payment is made.
@@ -185,7 +185,8 @@ impl PayOptions {
 /// A payment to a payee the identity's deny list holds, as a [`Refusal::Blocked`] shows it
 /// to the user (Paykit spec 8.1, "Blocked counterparties"): the payee, the request paid, if
 /// any, and the amount. A payment the user then makes anyway carries it back
-/// ([`PayOptions::with_blocked_confirmed`]): the SDK reads the deny list again and pays only
+/// ([`PayOptions::with_blocked_confirmed`]): the SDK judges the payment again, by the deny
+/// list as read in the last 10 minutes or read first, as at the first try, and pays only
 /// when what it would show now is this, field for field.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -663,9 +664,9 @@ impl ListAsk {
 }
 
 /// The local write that journals `entry` in a batch. The entry is checked first
-/// ([`JournalEntry::check`]), the check a resume and a restore read it back with, so no path
-/// persists a state recovery would refuse: one that fails is a bug, refused as a corrupt
-/// store, with nothing written.
+/// ([`JournalEntry::check`]), the shape every read back checks before binding it to its key
+/// (`state::Stored`), so no path persists a state recovery would refuse: one that fails is a
+/// bug, refused as a corrupt store, with nothing written.
 pub(crate) fn journal_write(entry: &JournalEntry) -> Result<LocalWrite> {
     entry.check()?;
     state::local_put(&key::journal(&entry.attempt()?), entry)
@@ -976,7 +977,8 @@ impl Paykit {
     }
 
     /// The payments in the journal, each with the payee's receipt of it, if the payer's
-    /// record holds one.
+    /// record holds one. A `Finished` or `Abandoned` payment leaves the journal once past its
+    /// claim's window ([`Paykit::resume_payments`], "Journal pruning").
     ///
     /// # Errors
     ///
@@ -987,9 +989,10 @@ impl Paykit {
             let mut view = entry.view()?;
             let target = ActivityTarget::payer(entry.natural_key.clone());
             if let Some(record) = self.held_activity(&target).await? {
-                view.receipt =
-                    crate::receipts::received_receipt(self.activity_key(&target)?, &record)
-                        .filter(|receipt| receipt.attempt_id == view.attempt_id);
+                view.receipt = self
+                    .received_receipt_of(self.activity_key(&target)?, &record)
+                    .await?
+                    .filter(|receipt| receipt.attempt_id == view.attempt_id);
             }
             out.push(view);
         }
@@ -1016,6 +1019,11 @@ impl Paykit {
     /// the record's value is sealed under a key the app doesn't hold yet, which opens once
     /// it comes and is never replaced meanwhile; the client's errors.
     pub async fn repair_activity_record(&mut self, attempt_id: &AttemptId) -> Result<PayOutcome> {
+        // The call's future goes on the heap, as `receive`'s does: it nests deep.
+        Box::pin(self.repair_activity_record_inner(attempt_id)).await
+    }
+
+    async fn repair_activity_record_inner(&mut self, attempt_id: &AttemptId) -> Result<PayOutcome> {
         self.refresh_own()?;
         // A repair writes over a value the app can't read, on the user's word: it waits for
         // the records to be listed, a wider certificate's keys included.
@@ -1045,23 +1053,40 @@ impl Paykit {
         })
     }
 
-    /// The journal, every entry checked as read back ([`JournalEntry::check`]).
+    /// The journal, every entry read back bound to its key (`state::Stored`).
     pub(crate) async fn journal(&self) -> Result<Vec<JournalEntry>> {
-        let mut out = Vec::new();
-        for (rest, entry) in self.local_scan::<JournalEntry>(key::JOURNAL).await? {
-            self.check_entry(&entry)?;
-            if rest != entry.attempt_id {
-                return Err(PaykitError::corrupt());
-            }
-            out.push(entry);
-        }
-        Ok(out)
+        Ok(self
+            .local_scan::<JournalEntry>(key::JOURNAL)
+            .await?
+            .into_iter()
+            .map(|(_, entry)| entry)
+            .collect())
     }
 
-    /// A journal entry read back, checked and bound to its obligation through this app's
-    /// naming key ([`JournalEntry::check_bound`]).
-    pub(crate) fn check_entry(&self, entry: &JournalEntry) -> Result<()> {
-        entry.check_bound(|payee, request_hash| self.obligation(payee, request_hash, 0))
+    /// The journal entry of `attempt`, read back checked and bound to its key: of that
+    /// attempt, its claim key the one its payee and request blind to, its record the one its
+    /// request or attempt names (`state::Stored`).
+    ///
+    /// # Errors
+    ///
+    /// A store failure, or an entry that doesn't read or isn't the attempt its key names.
+    pub(crate) async fn journal_entry(&self, attempt: &AttemptId) -> Result<Option<JournalEntry>> {
+        self.local_get::<JournalEntry>(&key::journal(attempt)).await
+    }
+
+    /// [`Paykit::journal_entry`], bound to `obligation` as well, the claim the caller looks
+    /// the attempt up for ([`JournalEntry::on_claim`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::journal_entry`]; a corrupt store for an entry of the attempt on another
+    /// claim.
+    pub(crate) async fn journal_entry_on(
+        &self,
+        attempt: &AttemptId,
+        obligation: &[u8; 32],
+    ) -> Result<Option<JournalEntry>> {
+        JournalEntry::on_claim(self.journal_entry(attempt).await?, obligation)
     }
 
     /// Journal `entry`, checked first as [`journal_write`] does: only a state a resume and a
@@ -1516,8 +1541,9 @@ impl Paykit {
         let now = self.now();
         for (app_id, held_version) in asks {
             let mark = key::list_ask(payee, app_id.as_ref());
+            // Read bound to its key: a mark naming another payee or app than its key is a
+            // corrupt store (`state::Stored`).
             if let Some(asked) = self.local_get::<ListAsk>(&mark).await? {
-                asked.check(payee, app_id.as_ref())?;
                 if asked.held_version == held_version
                     && asked.within_a_day(now)
                     && !self.ask_not_sent(&asked).await?
@@ -1532,13 +1558,19 @@ impl Paykit {
 
     /// Ask `payee`'s app `app_id`, or none, for its list, naming `held_version`, and keep the
     /// mark of it. The request is queued before its mark is kept: a crash between the two
-    /// asks again, rather than never.
+    /// asks again, rather than never. While sends to `payee` are held
+    /// ([`Paykit::sends_held`]: the deny list holds it, or its copy isn't known) nothing is
+    /// queued and no mark is kept, so the next payment or receive asks again once they
+    /// aren't (Paykit spec 8.1, "Blocked counterparties").
     async fn send_list_ask(
         &mut self,
         payee: [u8; 32],
         app_id: Option<[u8; 16]>,
         held_version: Option<u64>,
     ) -> Result<()> {
+        if self.sends_held(&payee).await? {
+            return Ok(());
+        }
         let body = PrivatePaymentListRequest {
             held_version,
             app_id,
@@ -1595,10 +1627,7 @@ impl Paykit {
         let now = self.now();
         for (rest, asked) in self.local_scan::<ListAsk>(key::LIST_ASKS).await? {
             let mark = format!("{}{rest}", key::LIST_ASKS);
-            let Some(StateKey::ListAsk { payee, app_id }) = StateKey::parse(mark.as_bytes()) else {
-                return Err(PaykitError::corrupt());
-            };
-            asked.check(&payee, app_id.as_ref())?;
+            // Read bound to its key (`state::Stored`).
             if !asked.within_a_day(now) || !self.ask_not_sent(&asked).await? {
                 continue;
             }
@@ -2422,11 +2451,12 @@ impl Paykit {
         let target = ActivityTarget::payer(entry.natural_key.clone());
         for _ in 0..OUTCOME_TRIES {
             // A batch kept from before may have been applied since: it finished the entry.
+            // Read bound to its key and to the entry's claim: a value of another attempt or
+            // claim at its key is a corrupt store, never this payment finished.
             if let Some(kept) = self
-                .local_get::<JournalEntry>(&key::journal(&attempt_id))
+                .journal_entry_on(&attempt_id, &entry.obligation)
                 .await?
             {
-                self.check_entry(&kept)?;
                 if matches!(kept.stage, Stage::Finished | Stage::AcceptanceOwed) {
                     *entry = kept;
                     return Ok(Written::Done);
@@ -2588,8 +2618,8 @@ impl Paykit {
         if let Some(proof) = proof {
             changed |= activity::place(&mut record, Role::Proof, self.own_copy(proof)?);
         }
-        // A payment made after `failed` was written on its claim: the record shows it, for
-        // every own app that gets the receipt (Paykit spec 7.2).
+        // A payment made after `failed` was written on its claim: the record's informational
+        // `status` shows it for display; no reader decides by it (Paykit wire 5.3).
         let after_failed = Some(crate::receive::PAID_AFTER_FAILED);
         if paid && entry.failed_on_claim && record.status.as_deref() != after_failed {
             record.status = after_failed.map(str::to_owned);
@@ -2722,6 +2752,21 @@ impl Paykit {
     /// carried out again unless the method is idempotent on the attempt ID; a restored entry
     /// is resolved only from a history that survives a restore. A repeat on an idempotent
     /// method passes every check a first dispatch does.
+    ///
+    /// **Journal pruning** (Paykit spec 7.1, 7.2; Switch spec 6.3). After every payment's own
+    /// work, a resume drops the `Finished` and `Abandoned` entries past their claim's window:
+    /// one with a deadline from that deadline plus 30 days ([`RECONCILIATION_MS`]), the time
+    /// the switch keeps the claim's tombstone, and one without from 400 days after it was
+    /// journaled ([`MAX_CLAIM_AGE_MS`]). A bound passes only once it lies before the earlier
+    /// of the highest service time verified and the device clock plus 24 hours, so no
+    /// far-future signed time passes one early, and without a verified service time nothing
+    /// is dropped. What a later reconcile, a restore's included, needs is never dropped: an
+    /// entry still open or [`Stage::AcceptanceOwed`], one whose dispatch the payment method
+    /// reported failed while its history may still show it paid, and one paid after `failed`
+    /// was written, waiting for its receipt. A dropped payment leaves [`Paykit::payments`],
+    /// and its acknowledged notices go with it; the payer's activity record, not the
+    /// journal, shows it and stops a second one (Paykit spec 6, 7.2, "The record shows it
+    /// paid").
     ///
     /// # Errors
     ///
@@ -2923,7 +2968,7 @@ impl Paykit {
                 for kind in [NoticeKind::PaidAfterFailed, NoticeKind::HeldWithoutPay] {
                     let notice = key::notice(&attempt, kind);
                     if self
-                        .local_get::<crate::notices::KeptNotice>(&notice)
+                        .kept_notice(&notice)
                         .await?
                         .is_some_and(|kept| kept.acknowledged)
                     {
@@ -3073,8 +3118,10 @@ impl Paykit {
     /// be paid (Paykit spec 8.1): this app keeps a stop for it, or the request record the
     /// switch holds, read again, shows it cancelled or rejected, or isn't there (a `404`
     /// included, whatever copy this app keeps) or doesn't read as the request, a newer write
-    /// this app refused included, so nothing shows it still open. A payment without a request has
-    /// nothing a payee cancels.
+    /// this app refused included, so nothing shows it still open; or the request is held
+    /// after a restore or a `missed` item until the user confirms it (Paykit spec 7.2,
+    /// [`Paykit::confirm_possibly_cancelled`]). A payment without a request has nothing a
+    /// payee cancels.
     async fn repeat_withheld(&mut self, entry: &JournalEntry) -> Result<bool> {
         if entry.request_hash()?.is_none() {
             return Ok(false);
@@ -3084,7 +3131,11 @@ impl Paykit {
             return Ok(true);
         }
         Ok(match self.fresh_request(&target).await? {
-            Fresh::Held(fresh) => cancelled(&fresh) || rejected(&fresh),
+            Fresh::Held(fresh) => {
+                cancelled(&fresh)
+                    || rejected(&fresh)
+                    || self.held(&self.activity_key(&target)?, &fresh).await?
+            }
             Fresh::Missing | Fresh::Unreadable => true,
         })
     }

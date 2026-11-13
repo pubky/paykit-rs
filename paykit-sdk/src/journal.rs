@@ -424,6 +424,16 @@ impl JournalEntry {
         Ok(())
     }
 
+    /// `entry`, read at its attempt's key, bound to `obligation`, the claim its caller looks
+    /// the attempt up for: an entry of the attempt on another claim would decide this claim
+    /// from another payment's state. A corrupt store, never an absent entry.
+    pub(crate) fn on_claim(entry: Option<Self>, obligation: &[u8; 32]) -> Result<Option<Self>> {
+        match entry {
+            Some(entry) if entry.obligation != *obligation => Err(PaykitError::corrupt()),
+            entry => Ok(entry),
+        }
+    }
+
     /// [`JournalEntry::check`], and the entry's claim key bound to what it pays: for a
     /// payment of a request, the obligation `request_obligation` derives from the payee and
     /// the request, a one-time request's, Billing Period 0 (Paykit spec 7.1, Paykit wire
