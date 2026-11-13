@@ -49,7 +49,24 @@ pub(crate) struct KeptMessage {
     #[serde(with = "serde_b64_vec")]
     plaintext: Vec<u8>,
     accepted_at: Option<u64>,
+    /// Where the receive step took it among the kept messages of its family, for an
+    /// Allowance's end (`ae/`) and an Allowance answer kept before its record (`pr/`): the
+    /// inbox's order within one millisecond ([`KeptMessage::order`]), which decides which end
+    /// stops the Allowance and which answer is its record's response; the binding refuses an
+    /// end or an answer without it (`state::Stored`). The other families have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    intake: Option<u64>,
 }
+
+/// The order the inbox accepted a kept message in (Paykit spec 8.1): by acceptance time,
+/// then, within one millisecond, by where the receive step took it (`intake`), never by its
+/// `msg_id`, which its sender chooses. The step takes the feed's entries in the order of
+/// their `seq`, the position the inbox gives each entry as it accepts it, whoever sent it
+/// (Switch spec 8.3), within one read and across reads: the order it keeps them in is the
+/// inbox's. Where one list holds families with and without an intake, as the stops' bounds
+/// count a payee's kept cancellations (`kc/`) with Allowance ends, a message without one
+/// orders before every message of its millisecond that has one.
+pub(crate) type KeptOrder = (u64, Option<u64>);
 
 impl std::fmt::Debug for KeptMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -65,7 +82,28 @@ impl KeptMessage {
             cert: stored.cert().signed().clone(),
             plaintext: stored.plaintext().encode(),
             accepted_at: stored.accepted_at(),
+            intake: None,
         }
+    }
+
+    /// Keep `stored`, taken `intake`th among the kept messages of its family
+    /// ([`next_intake`]).
+    pub(crate) fn taken(stored: &StoredMessage, intake: u64) -> Self {
+        Self {
+            intake: Some(intake),
+            ..Self::of(stored)
+        }
+    }
+
+    /// Where the receive step took it among the kept messages of its family, for the
+    /// families that keep one ([`KeptOrder`]).
+    pub(crate) fn intake(&self) -> Option<u64> {
+        self.intake
+    }
+
+    /// The order its inbox accepted it in ([`KeptOrder`]).
+    pub(crate) fn order(&self) -> KeptOrder {
+        (self.accepted_at.unwrap_or(0), self.intake)
     }
 
     /// Whether the kept plaintext reads, without the recipient a full check needs.
@@ -100,6 +138,15 @@ impl KeptMessage {
         )
         .map_err(|_| PaykitError::corrupt())
     }
+}
+
+/// The intake the receive step gives the next message it keeps in a family, `kept` the
+/// messages kept in it already: one after the latest.
+pub(crate) fn next_intake<'a>(kept: impl IntoIterator<Item = &'a KeptMessage>) -> u64 {
+    kept.into_iter()
+        .filter_map(|kept| kept.intake)
+        .max()
+        .map_or(0, |latest| latest.saturating_add(1))
 }
 
 impl Paykit {

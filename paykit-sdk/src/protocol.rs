@@ -1404,7 +1404,7 @@ mod receive_tests {
         };
         let target = allowance_target(&bob.id(), &reply.allowance_id);
         let key = key::allowance_end(&fake_key(&target), &end.message().msg_id);
-        let value = state::encode(&KeptMessage::of(&end)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&end, 0)).unwrap();
         assert!(restores::<KeptMessage>(&alice, key.as_bytes(), &value));
         // Under another `msg_id` of the same record: refused.
         let other = key::allowance_end(&fake_key(&target), "0d6f5b9e-3c1a-4e8b-9f2d-7a4c1e5b8d30");
@@ -1414,7 +1414,7 @@ mod receive_tests {
     #[test]
     fn test_protocol_restore_refuses_a_kept_end_at_another_key_or_of_another_kind() {
         let (alice, bob, proposal, end) = allowance_end();
-        let value = state::encode(&KeptMessage::of(&end)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&end, 0)).unwrap();
         let other = key::allowance_end(&[9; 32], &end.message().msg_id);
         assert!(!restores::<KeptMessage>(&alice, other.as_bytes(), &value));
         // The proposal under the end's key isn't an end.
@@ -1527,7 +1527,7 @@ mod receive_tests {
             panic!("an acceptance");
         };
         let record = fake_key(&allowance_target(&alice.id(), &body.allowance_id));
-        let value = state::encode(&KeptMessage::of(&answer)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&answer, 0)).unwrap();
         (answer, value, record)
     }
 
@@ -1558,6 +1558,27 @@ mod receive_tests {
     }
 
     #[test]
+    fn test_protocol_restore_refuses_kept_allowance_messages_it_cannot_order() {
+        // Which of an Allowance's kept ends stops it, and which of its kept answers is the
+        // record's response, is decided by the order their inbox accepted them in: an end or
+        // an answer without its intake can't be ordered, so a restore refuses it.
+        let (alice, bob, _, end) = allowance_end();
+        let Body::AllowanceEnd(reply) = end.body() else {
+            panic!("an end");
+        };
+        let target = allowance_target(&bob.id(), &reply.allowance_id);
+        let key = key::allowance_end(&fake_key(&target), &end.message().msg_id);
+        let unordered = state::encode(&KeptMessage::of(&end)).unwrap();
+        assert!(!restores::<KeptMessage>(&alice, key.as_bytes(), &unordered));
+        let alice = Party::new("alice", "wallet", &["pay", "allowance", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request", "allowance"]);
+        let (answer, _, record) = kept_allowance_answer(&alice, &bob);
+        let at = key::kept_reply(&alice.id(), &record, &answer.message().msg_id);
+        let unordered = state::encode(&KeptMessage::of(&answer)).unwrap();
+        assert!(!restores::<KeptMessage>(&bob, at.as_bytes(), &unordered));
+    }
+
+    #[test]
     fn test_protocol_restore_refuses_a_kept_end_without_its_acceptance_time() {
         let (alice, bob, _, end) = allowance_end();
         let Body::AllowanceEnd(reply) = end.body() else {
@@ -1567,7 +1588,7 @@ mod receive_tests {
             &fake_key(&allowance_target(&bob.id(), &reply.allowance_id)),
             &end.message().msg_id,
         );
-        let value = state::encode(&KeptMessage::of(&end)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&end, 0)).unwrap();
         assert!(!restores::<KeptMessage>(
             &alice,
             key.as_bytes(),

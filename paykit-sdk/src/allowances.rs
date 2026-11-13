@@ -561,7 +561,15 @@ pub(crate) fn receive_effect(
                     let kept = key::kept_reply(&sender, &record, &stored.message().msg_id);
                     if state::cx_get::<KeptMessage>(cx, &kept)?.is_none() {
                         receive::make_room_for_reply(cx, &sender)?;
-                        receive::keep_local(cx, receive::local(&kept, &KeptMessage::of(stored))?);
+                        let intake = crate::records::next_intake(
+                            state::cx_scan::<KeptMessage>(cx, key::KEPT_REPLIES)?
+                                .iter()
+                                .map(|(_, kept)| kept),
+                        );
+                        receive::keep_local(
+                            cx,
+                            receive::local(&kept, &KeptMessage::taken(stored, intake))?,
+                        );
                     }
                 }
                 Ok(())
@@ -798,7 +806,15 @@ fn keep_end(
         {
             receive::make_room_for_stop(cx, &sender)?;
         }
-        receive::keep_local(cx, receive::local(&stop, &KeptMessage::of(stored))?);
+        let intake = crate::records::next_intake(
+            state::cx_scan::<KeptMessage>(cx, key::ALLOWANCE_ENDS)?
+                .iter()
+                .map(|(_, kept)| kept),
+        );
+        receive::keep_local(
+            cx,
+            receive::local(&stop, &KeptMessage::taken(stored, intake))?,
+        );
     }
     if checked && scopes.iter().any(|s| s == "allowance_execute") {
         drop_consent(cx, &record_key, (sender, allowance_id), ConsentEnd::Ended)?;
@@ -1742,22 +1758,17 @@ impl Paykit {
             return Ok(());
         }
         let own = self.identity();
-        // Read bound to its key (`state::Stored`). The ends of one Allowance go earliest
-        // accepted first: once one ends it, the later ones are reflected or dropped.
+        // Read bound to its key (`state::Stored`). The ends of one Allowance go in the order
+        // their inbox accepted them (`records::KeptOrder`): once one ends it, the later ones
+        // are reflected or dropped.
         let mut ends = Vec::new();
         for (rest, kept) in Box::pin(self.local_scan::<KeptMessage>(key::ALLOWANCE_ENDS)).await? {
             let end = kept.stored(&own)?;
             let record = rest.split_once('/').map(|(record, _)| record.to_owned());
-            ends.push((
-                record,
-                end.accepted_at(),
-                end.message().msg_id.clone(),
-                rest,
-                end,
-            ));
+            ends.push((record, kept.order(), rest, end));
         }
-        ends.sort_by(|a, b| (&a.0, a.1, &a.2).cmp(&(&b.0, b.1, &b.2)));
-        for (_, _, _, rest, end) in ends {
+        ends.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+        for (_, _, rest, end) in ends {
             let stop = format!("{}{rest}", key::ALLOWANCE_ENDS);
             let Some(allowance_id) = named_allowance(end.body()).cloned() else {
                 return Err(PaykitError::corrupt());

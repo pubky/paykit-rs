@@ -702,9 +702,8 @@ pub(crate) fn make_room_for_stop(
     cx: &mut ReceiveContext<'_>,
     sender: &[u8; 32],
 ) -> Result<(), Fail> {
-    let mut kept = Vec::new();
-    let mut names = Vec::new();
-    let mut msg_ids = Vec::new();
+    // Each stop counted, with the order its inbox accepted it in (`records::KeptOrder`).
+    let mut counted = Vec::new();
     if !side_may_lack(cx, RecordSide::Payer)? {
         for (name, stop) in state::cx_scan::<KeptMessage>(cx, key::KEPT_CANCELLATIONS)? {
             let Some(crate::state::StateKey::KeptCancellation(record)) =
@@ -723,9 +722,12 @@ pub(crate) fn make_room_for_stop(
                     continue;
                 }
             }
-            kept.push((from, at));
-            names.push(name.into_bytes());
-            msg_ids.push(cancellation.message().msg_id.clone());
+            counted.push((
+                (at, stop.order().1),
+                from,
+                name.into_bytes(),
+                cancellation.message().msg_id.clone(),
+            ));
         }
     }
     if !side_may_lack(cx, RecordSide::Allowances)? {
@@ -740,23 +742,40 @@ pub(crate) fn make_room_for_stop(
                 return Err(Fail::corrupt());
             };
             let (end, at) = kept_with_time(cx, &stop)?;
-            ends.entry(record).or_default().push((at, name, end));
+            ends.entry(record)
+                .or_default()
+                .push(((at, stop.order().1), name, end));
         }
         for (record, mut group) in ends {
-            group.sort_by(|a, b| (a.0, &a.2.message().msg_id).cmp(&(b.0, &b.2.message().msg_id)));
+            group.sort_by_key(|(order, _, _)| *order);
             let content = cx.record_at(&record)?.map(|held| held.content);
-            for (index, (at, name, end)) in group.into_iter().enumerate() {
+            for (index, (order, name, end)) in group.into_iter().enumerate() {
                 if index == 0
                     && (!crate::allowances::end_bounded(cx, content.as_ref(), &end)?
                         || crate::allowances::keeps_stored_message(cx, &record)?)
                 {
                     continue;
                 }
-                kept.push((end.sender(), at));
-                names.push(name.into_bytes());
-                msg_ids.push(end.message().msg_id.clone());
+                counted.push((
+                    order,
+                    end.sender(),
+                    name.into_bytes(),
+                    end.message().msg_id.clone(),
+                ));
             }
         }
+    }
+    // Earliest accepted first, so a sender's earliest goes first: within one millisecond
+    // the one its inbox took first, never the one whose `msg_id` sorts first. The removals
+    // keep that order.
+    counted.sort_by_key(|(order, ..)| *order);
+    let mut kept = Vec::new();
+    let mut names = Vec::new();
+    let mut msg_ids = Vec::new();
+    for ((at, _), from, name, msg_id) in counted {
+        kept.push((from, at));
+        names.push(name);
+        msg_ids.push(msg_id);
     }
     let mut dropped: std::collections::BTreeMap<[u8; 32], (u64, u64)> =
         std::collections::BTreeMap::new();
@@ -772,12 +791,12 @@ pub(crate) fn make_room_for_stop(
             Err(AppError::Refused(ClientRefusal::Usage(_))) => {}
             Err(error) => return Err(error.into()),
         }
-        kept.swap_remove(index);
-        msg_ids.swap_remove(index);
+        kept.remove(index);
+        msg_ids.remove(index);
         keep_local(
             cx,
             LocalWrite::Delete {
-                key: names.swap_remove(index),
+                key: names.remove(index),
             },
         );
         let times = dropped.entry(from).or_insert((at, at));
@@ -1598,11 +1617,18 @@ pub(crate) fn make_room_for_reply(
     cx: &mut ReceiveContext<'_>,
     sender: &[u8; 32],
 ) -> Result<(), Fail> {
+    // Earliest accepted first (`records::KeptOrder`), so a sender's earliest goes first:
+    // within one millisecond the one its inbox took first, never by `msg_id`.
+    let mut counted = Vec::new();
+    for (name, kept) in state::cx_scan::<KeptMessage>(cx, key::KEPT_REPLIES)? {
+        let (reply, at) = kept_with_time(cx, &kept)?;
+        counted.push(((at, kept.order().1), reply, name));
+    }
+    counted.sort_by_key(|(order, ..)| *order);
     let mut kept = Vec::new();
     let mut names = Vec::new();
     let mut msg_ids = Vec::new();
-    for (name, reply) in state::cx_scan::<KeptMessage>(cx, key::KEPT_REPLIES)? {
-        let (reply, at) = kept_with_time(cx, &reply)?;
+    for ((at, _), reply, name) in counted {
         kept.push((reply.sender(), at));
         names.push(name.into_bytes());
         msg_ids.push(reply.message().msg_id.clone());
@@ -1848,14 +1874,30 @@ impl Paykit {
     pub(crate) async fn place_kept_replies(&mut self) -> crate::error::Result<()> {
         use crate::stored::{PeriodPlace, Placed};
         let own = self.identity();
-        for (rest, kept) in self.local_scan::<KeptMessage>(key::KEPT_REPLIES).await? {
+        let held = self.local_scan::<KeptMessage>(key::KEPT_REPLIES).await?;
+        // The Allowances' answers kept before their record (`allowances.rs`), each sender's
+        // for one record in the order their inbox accepted them (`records::KeptOrder`): the
+        // first placed is the record's response, and a different later one conflicts with
+        // it. Read bound to its key, as a restore reads it.
+        let mut answers = Vec::new();
+        for (rest, kept) in &held {
+            let reply = kept.stored(&own)?;
+            if crate::allowances::is_allowance_response(reply.body()) {
+                let record = rest.rsplit_once('/').map(|(record, _)| record.to_owned());
+                answers.push((record, kept.order(), rest.clone(), reply));
+            }
+        }
+        answers.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+        for (_, _, rest, reply) in answers {
+            let kept_key = format!("{}{rest}", key::KEPT_REPLIES);
+            Box::pin(self.place_kept_allowance_response(&kept_key, reply)).await?;
+        }
+        for (rest, kept) in held {
             // Read bound to its key, as a restore reads it: a message that fails it is a
             // corrupt store, so the receive fails rather than drop, give up or place it.
             let reply = kept.stored(&own)?;
             let kept_key = format!("{}{rest}", key::KEPT_REPLIES);
-            // An Allowance's answer kept before its record (`allowances.rs`).
             if crate::allowances::is_allowance_response(reply.body()) {
-                Box::pin(self.place_kept_allowance_response(&kept_key, reply)).await?;
                 continue;
             }
             let (Some(request), Some(role), Some(accepted_at)) = (

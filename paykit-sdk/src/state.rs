@@ -53,10 +53,10 @@
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `kw/<sender>` | a mark of a sender's entries the client dropped while they waited for a scope key, as `pd/` holds, with the data epochs they waited for; it asks only while the app holds every key of those epochs (`marks.rs`) | |
-//! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply, or a payee's period details, for a request the app holds no record of yet, kept until it does, or a receipt for a payer record the app holds but can't read, kept until it reads (`receive.rs`), or a counterparty's Allowance answer before the app holds its Allowance record (`allowances.rs`) | |
+//! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply, or a payee's period details, for a request the app holds no record of yet, kept until it does, or a receipt for a payer record the app holds but can't read, kept until it reads (`receive.rs`), or a counterparty's Allowance answer before the app holds its Allowance record, with the intake that orders it (`allowances.rs`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing, since a dropped entry's time is already in its sender's mark | |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, with the entry's ID and message hash, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
-//! | `ae/<record key>/<msg_id>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection; every distinct end is kept, each under its `msg_id`, until the record shows which one names what it holds (`allowances.rs`, Paykit spec 8.3) | |
+//! | `ae/<record key>/<msg_id>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection; every distinct end is kept, each under its `msg_id` and with the intake that orders it, until the record shows which one names what it holds (`allowances.rs`, Paykit spec 8.3) | |
 //! | `ac/<record key>` | the consent list: an Allowance this app may pay under, or removed from it for good (`allowances.rs`, Paykit spec 8.3); a restore marks every entry to confirm again | |
 //! | `cf/<record key>` | a second, different proposal or response of an Allowance, kept as the stop until the Allowance record holds `conflicted` (`allowances.rs`, Paykit spec 8.3) | |
 //! | `mc` | set by a `missed` item: every entry of the consent list is to be confirmed again, as after a restore; nothing is consented while it is set, and the next receive marks each entry so and clears it (`allowances.rs`); never restored | |
@@ -606,12 +606,12 @@ impl sealed::Sealed for KeptMessage {}
 ///   payee app's `payment_lists` record, from its sender and App ID (Paykit wire 5.4).
 /// - At `pr/<sender>/<record key>/<msg_id>` too, an Allowance's acceptance or rejection its
 ///   inbox accepted before this app held the proposal's record, from that sender and of that
-///   `msg_id`, kept under the record key of the Allowance record it names (Paykit spec 8.1,
-///   8.3).
+///   `msg_id`, kept under the record key of the Allowance record it names, with its intake
+///   (Paykit spec 8.1, 8.3).
 /// - At `ae/<record key>/<msg_id>`, a counterparty's `paykit.allowance_end` its inbox
-///   accepted, of that `msg_id`, kept as the stop under the record key of the Allowance
-///   record of its sender and the Allowance it names (Paykit spec 8.3, "Ends reach the
-///   executor").
+///   accepted, of that `msg_id`, with its intake, kept as the stop under the record key of
+///   the Allowance record of its sender and the Allowance it names (Paykit spec 8.3, "Ends
+///   reach the executor").
 /// - At `cf/<record key>`, a second, different proposal, acceptance or rejection its inbox
 ///   accepted, with its acceptance time, kept as the stop under the record key of the
 ///   Allowance record of its sender and the Allowance it names (Paykit spec 8.3,
@@ -716,6 +716,20 @@ impl Stored for KeptMessage {
             _ => return corrupt(),
         };
         if binder.record_key(&target)? != *record_key {
+            return corrupt();
+        }
+        // Which of an Allowance's kept ends stops it, and which of its kept answers is the
+        // record's response, goes by the order their inbox accepted them in
+        // (`records::KeptOrder`): one without its intake can't be ordered.
+        let ordered = matches!(
+            (family, message.body()),
+            (StateKey::AllowanceEnd { .. }, _)
+                | (
+                    StateKey::KeptReply { .. },
+                    Body::AllowanceAcceptance(_) | Body::AllowanceRejection(_)
+                )
+        );
+        if ordered && self.intake().is_none() {
             return corrupt();
         }
         Ok(())

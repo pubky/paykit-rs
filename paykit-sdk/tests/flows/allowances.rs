@@ -4947,3 +4947,135 @@ async fn test_allowances_restored_end_acceptance_time_ahead_is_clamped() {
         "{value}"
     );
 }
+
+/// Two message IDs whose lexical order is the reverse of the order they are sent in.
+const SENT_FIRST: &str = "f0e1d2c3-b4a5-4697-8879-6a5b4c3d2e1f";
+const SENT_SECOND: &str = "0d6f5b9e-3c1a-4e8b-9f2d-7a4c1e5b8d30";
+
+#[tokio::test]
+async fn test_allowances_ends_of_one_millisecond_recorded_in_acceptance_order() {
+    // Over the record the phone can't read, bob's two ends naming the proposal and the
+    // acceptance come in one millisecond, the one whose `msg_id` sorts last first. Once the
+    // record reads, the one the inbox accepted first ends the Allowance, not the one whose
+    // `msg_id` sorts first (Paykit spec 8.1, 8.3).
+    let w = World::new();
+    let (_shop, mut phone, mut tool, _, mine, target, good) =
+        Box::pin(accepted_then_unreadable(&w)).await;
+    let record = AllowanceRecord::read(&good, &w.alice_id()).unwrap();
+    let refs = vec![
+        record.proposal.hash(),
+        record.response.as_ref().unwrap().hash(),
+    ];
+    let body = json!({ "allowance_id": record.allowance_id.as_str() });
+    w.clock.advance_ms(1);
+    for id in [SENT_FIRST, SENT_SECOND] {
+        inject_with_id(
+            &w,
+            &w.bob,
+            "shop",
+            &[phone.app_id()],
+            "paykit.allowance_end",
+            refs.clone(),
+            body.clone(),
+            id,
+        );
+    }
+    phone.receive(None).await.unwrap();
+    assert_eq!(Box::pin(ends_kept_at(&phone, &mine)).await, 2);
+    Box::pin(crate::periods::writes_value(&mut tool, &target, &good)).await;
+    phone.receive(None).await.unwrap();
+    assert_eq!(
+        phone.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Ended
+    );
+    assert_eq!(
+        Box::pin(recorded_end(&w, &phone, &mine)).await,
+        Some(SENT_FIRST.to_owned())
+    );
+}
+
+#[tokio::test]
+async fn test_allowances_answers_of_one_millisecond_placed_in_acceptance_order() {
+    // Alice's wallet sent a proposal its record doesn't hold yet; bob's acceptance and his
+    // rejection of it come in one millisecond, the one whose `msg_id` sorts last first, and
+    // are kept before the record. Once the record is held, the one the inbox accepted first
+    // is the record's response and the other conflicts with it (Paykit spec 8.1, 8.3).
+    let w = World::new();
+    let _shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(wallet(&w)).await;
+    let id = paykit_lib::AllowanceId::generate().unwrap();
+    let body = json!({
+        "allowance_id": id.as_str(),
+        "proposer_role": "allower",
+        "terms": terms().to_json().unwrap(),
+    });
+    let signed = wallet
+        .app()
+        .sign_message(pubky_switch_client::app::OutgoingMessage::new(
+            w.bob_id(),
+            "paykit.allowance_proposal",
+            body.as_object().cloned().unwrap(),
+        ))
+        .unwrap();
+    let proposal = paykit_lib::records::StoredMessage::new(
+        w.alice_id(),
+        wallet.app().cert().signed(),
+        signed.plaintext().clone(),
+        None,
+        &w.bob_id(),
+    )
+    .unwrap();
+    let answer = json!({ "allowance_id": id.as_str() });
+    w.clock.advance_ms(1);
+    for (kind, msg_id) in [
+        ("paykit.allowance_rejection", SENT_FIRST),
+        ("paykit.allowance_acceptance", SENT_SECOND),
+    ] {
+        inject_with_id(
+            &w,
+            &w.bob,
+            "shop",
+            &[wallet.app_id()],
+            kind,
+            vec![proposal.hash()],
+            answer.clone(),
+            msg_id,
+        );
+    }
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"pr/").await.unwrap().len(), 2);
+    let record = AllowanceRecord {
+        counterparty: w.bob_id(),
+        allowance_id: id.clone(),
+        proposal,
+        response: None,
+        end: None,
+        conflicted: None,
+        grant: None,
+        grants: Vec::new(),
+        msg_ids: Vec::new(),
+        unknown: Default::default(),
+    };
+    let target = allowances_target(&w.bob_id(), &id);
+    Box::pin(crate::periods::writes_value(
+        &mut wallet,
+        &target,
+        &record.to_json().unwrap(),
+    ))
+    .await;
+    let mine = wallet.app().record_key(&target).unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let held = AllowanceRecord::read(
+        &serde_json::to_vec(&Box::pin(value(&wallet, &mine)).await).unwrap(),
+        &w.alice_id(),
+    )
+    .unwrap();
+    let id_of =
+        |m: Option<&paykit_lib::records::StoredMessage>| m.map(|m| m.message().msg_id.clone());
+    assert_eq!(id_of(held.response.as_ref()), Some(SENT_FIRST.to_owned()));
+    assert_eq!(
+        id_of(held.conflicted.as_ref()),
+        Some(SENT_SECOND.to_owned())
+    );
+}

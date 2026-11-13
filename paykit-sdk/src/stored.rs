@@ -614,8 +614,15 @@ impl Paykit {
                 }
                 let stop = key::allowance_end(&record, &stored.message().msg_id);
                 let kept = self.local_get::<KeptMessage>(&stop).await?.is_some();
+                // Taken now, after every end kept before it (`records::KeptOrder`).
+                let intake = crate::records::next_intake(
+                    self.local_scan::<KeptMessage>(key::ALLOWANCE_ENDS)
+                        .await?
+                        .iter()
+                        .map(|(_, kept)| kept),
+                );
                 Some(Place::Stop(
-                    (!kept).then(|| (stop, KeptMessage::of(stored))),
+                    (!kept).then(|| (stop, KeptMessage::taken(stored, intake))),
                 ))
             }
             _ => None,
