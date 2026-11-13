@@ -25,7 +25,7 @@ use crate::common::{btc, draft, endpoint, request_from, store, World, HOUR_MS};
 
 /// Set (`on`) or clear the client's flag that the latest view of `record` shows it divergent,
 /// in the namespace of `app` on `store`.
-fn set_divergent(store: &Arc<dyn StateStore>, app: &Paykit, record: &[u8; 32], on: bool) {
+pub fn set_divergent(store: &Arc<dyn StateStore>, app: &Paykit, record: &[u8; 32], on: bool) {
     let ns = pubky_switch_client::store::client_namespace(&app.app_id());
     let key = format!("rcdiv/{}", pubky_switch_core::enc::b64(record));
     let mut batch = WriteBatch::new();
@@ -165,8 +165,10 @@ async fn test_divergent_pause_kept_after_a_newer_write_clears_the_view() {
         .await
         .unwrap();
     // Confirmed with the view clear, the mark goes at the next receive.
+    assert_eq!(wallet.app().protocol_scan(b"dv/").await.unwrap().len(), 1);
     wallet.receive(None).await.unwrap();
     assert!(wallet.divergent_records().await.unwrap().is_empty());
+    assert!(wallet.app().protocol_scan(b"dv/").await.unwrap().is_empty());
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
@@ -600,4 +602,45 @@ async fn test_divergent_restore_pauses_again_a_record_confirmed_before_the_backu
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].record, record);
     assert!(listed[0].paused);
+}
+
+#[tokio::test]
+async fn test_divergent_receipt_settles_its_claim_only_once_confirmed() {
+    // A payment the method reported failed completed after all: its claim shows the attempt
+    // `failed`, and only the payee's receipt settles it. The receipt comes while the payer's
+    // record is divergent: it is kept whole, its settlement with it, until the user confirms.
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Fail);
+    let PayOutcome::Failed { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("failed");
+    };
+    w.rail.complete_after_failure(&attempt_id);
+    wallet.resume_payments().await.unwrap();
+    let record = wallet.request(&request).await.unwrap().record;
+    set_divergent(&base, &wallet, &record, true);
+    shop.receive(None).await.unwrap();
+    let sold = sale(&shop, &request).await.record;
+    assert!(shop.confirm_payment(&sold).await.unwrap().is_some());
+    wallet.receive(None).await.unwrap();
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    let status = |view: Option<pubky_switch_client::app::ClaimRead>| view.unwrap().view.status;
+    let claim = wallet.app_mut().read_claim(&obligation).await.unwrap();
+    assert_ne!(status(claim), ClaimStatus::Settled);
+    wallet
+        .confirm_divergent(&record, UserConfirmed::new())
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let claim = wallet.app_mut().read_claim(&obligation).await.unwrap();
+    assert_eq!(status(claim), ClaimStatus::Settled);
+    assert!(wallet.request(&request).await.unwrap().receipt.is_some());
 }

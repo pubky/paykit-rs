@@ -958,3 +958,37 @@ async fn test_replies_kept_past_30_days_over_quota_given_up_with_the_notice() {
         .iter()
         .all(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp));
 }
+
+#[tokio::test]
+async fn test_replies_kept_wait_over_a_divergent_record_until_confirmed() {
+    // The shop's record of the request comes, divergent after a provider loss: the replies
+    // kept for it aren't written over it until the user confirms it (Paykit spec 6).
+    let w = World::new();
+    let base = crate::common::store();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+            PaykitConfig::default(),
+            Arc::clone(&base),
+        )
+        .await;
+    let request = paid_before_recorded(&w, &mut wallet, &mut shop).await;
+    record_request(&w, &mut shop, &request).await;
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    crate::divergent::set_divergent(&base, &shop, &record, true);
+    shop.receive(None).await.unwrap();
+    let sales = shop.payee_activity().await.unwrap();
+    assert_eq!(sales[0].status, PayeeStatus::Requested);
+    assert!(sales[0].divergent);
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 2);
+    shop.confirm_divergent(&record, pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let sales = shop.payee_activity().await.unwrap();
+    assert_eq!(sales[0].status, PayeeStatus::ProofReceived);
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+}
