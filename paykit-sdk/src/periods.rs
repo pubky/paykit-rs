@@ -361,12 +361,18 @@ impl Paykit {
     /// a period that takes details, the periods the payer stores them for
     /// (Paykit spec 8.2): one not shown paid that is the next to start, or one started
     /// whose payment deadline hasn't passed, or, for a request without one, one of the 16
-    /// latest to have started, on the highest service time verified.
+    /// latest to have started, on the highest service time verified. Nothing is signed,
+    /// written or queued while sends to the payer are held: at an app holding `contacts`,
+    /// while the copy of the deny list holds the payer, or while that copy isn't known, which
+    /// a read of the lists is tried for first (Paykit spec 8.1, "Blocked counterparties"), as
+    /// a new request is held. An app without `contacts` reads no lists, and holds nothing.
     ///
     /// # Errors
     ///
     /// [`Refusal::ScopeMissing`] without `request` or a label; [`Refusal::NotFound`] for a
-    /// record this app doesn't hold, or a period record; [`Refusal::Usage`] for a one-time
+    /// record this app doesn't hold, or a period record; [`Refusal::NotNow`] while sends to
+    /// the payer are held, before anything else is judged, with nothing written or queued;
+    /// [`Refusal::Usage`] for a one-time
     /// request, or a period that holds 8 details already; [`Refusal::NotSubscribed`] before
     /// the payer's acceptance; [`Refusal::Rejected`] or [`Refusal::Cancelled`];
     /// [`Refusal::AlreadyPaid`] for a period whose record shows it paid;
@@ -389,6 +395,11 @@ impl Paykit {
         self.refresh_own()?;
         self.records_known().await?;
         self.require_payee()?;
+        // Period details go to no payer whose sends are held (Paykit spec 8.1, "Blocked
+        // counterparties"), refused before anything is signed, written or queued: they are
+        // sent once the payer is unblocked or the lists are read.
+        let (_, held) = self.payee_record(record).await?;
+        self.refuse_while_sends_held(&held.counterparty).await?;
         let mut tries = 0;
         let msg_id = loop {
             // Judged on what the switch holds now: the request record read again shows a

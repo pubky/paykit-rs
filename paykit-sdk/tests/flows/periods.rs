@@ -67,6 +67,11 @@ fn details(period: PeriodRef, invoice: &str, expires_at: u64) -> PeriodDetails {
     }
 }
 
+/// Details for January, paid to an invoice, valid until `expires_at`.
+pub(crate) fn january_details(expires_at: u64) -> PeriodDetails {
+    details(january(), "lnbc1january", expires_at)
+}
+
 /// Bob's shop sends alice's `wallet` a monthly request. Returns the request.
 async fn requested(w: &World, shop: &mut Paykit, wallet: &mut Paykit) -> RequestRef {
     let sent = shop

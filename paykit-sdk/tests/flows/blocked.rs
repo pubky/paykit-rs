@@ -10,7 +10,7 @@ use pubky_switch_client::clock::Clock;
 use pubky_switch_client::testing::Fault;
 use pubky_switch_core::http::ErrorCode;
 
-use crate::common::{btc, day_window, draft, endpoint, request_from, store, World};
+use crate::common::{btc, day_window, draft, endpoint, request_from, store, World, HOUR_MS};
 
 /// Alice's wallet holding `pay` and `manage_contacts`, with bob's request received, then
 /// bob blocked. Returns the wallet and the request.
@@ -1769,6 +1769,126 @@ async fn test_blocked_recurring_request_to_a_blocked_payer_refused_with_nothing_
 #[tokio::test]
 async fn test_blocked_recurring_request_while_the_deny_list_is_unknown_refused_with_nothing_sent() {
     request_held(Held::Unknown, true).await;
+}
+
+/// Bob's till holds `contacts` and a subscription alice accepted, and its sends to alice
+/// are then `held`: its period details are refused, nothing recorded, queued or reaching her
+/// (Paykit spec 8.1, "Blocked counterparties"). Once alice is unblocked, or the lists read,
+/// the same details go, and her wallet stores them.
+async fn details_held(held: Held) {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let counts = std::sync::Arc::new(CountsQueued::default());
+    let mut till = contacts_till(
+        &w,
+        std::sync::Arc::clone(&counts)
+            as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    )
+    .await;
+    let request = request_from(
+        &mut till,
+        w.alice_id(),
+        crate::periods::monthly(w.clock.now_ms(), None),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    wallet.accept_subscription(&request).await.unwrap();
+    till.receive(None).await.unwrap();
+    let sale = till.payee_activity().await.unwrap()[0].record;
+    match held {
+        Held::Blocked => till.block(&w.alice_id()).await.unwrap(),
+        Held::Unknown => {
+            // The receive's due read fails, and so does the read the send tries first.
+            w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+            fail_bobs_list_read(&w);
+            till.receive(None).await.unwrap();
+            fail_bobs_list_read(&w);
+        }
+    }
+    let queued = counts.queued.load(std::sync::atomic::Ordering::SeqCst);
+    let entries = w.alice.switch().entries_from(&w.bob_id());
+    let details = || crate::periods::january_details(w.clock.now_ms() + 24 * HOUR_MS);
+
+    let refused = till
+        .send_period_details(&sale, details())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{held:?}: {refused:?}"
+    );
+    till.flush().await.unwrap();
+    assert_eq!(
+        counts.queued.load(std::sync::atomic::Ordering::SeqCst),
+        queued,
+        "{held:?}"
+    );
+    assert!(
+        till.payee_activity().await.unwrap()[0].periods.is_empty(),
+        "{held:?}"
+    );
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), entries);
+
+    if let Held::Blocked = held {
+        till.unblock(&w.alice_id()).await.unwrap();
+    }
+    let sent = till.send_period_details(&sale, details()).await.unwrap();
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), entries + 1);
+    wallet.receive(None).await.unwrap();
+    let view = wallet.request(&request).await.unwrap();
+    assert!(
+        view.periods
+            .iter()
+            .any(|p| p.details.iter().any(|d| d.msg_id == sent.msg_id)),
+        "{view:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_blocked_period_details_to_a_blocked_payer_refused_with_nothing_sent() {
+    details_held(Held::Blocked).await;
+}
+
+#[tokio::test]
+async fn test_blocked_period_details_while_the_deny_list_is_unknown_refused_with_nothing_sent() {
+    details_held(Held::Unknown).await;
+}
+
+#[tokio::test]
+async fn test_blocked_period_details_from_an_app_without_contacts_sent_while_the_lists_dont_read() {
+    // Bob's shop holds no `contacts`, so it reads no lists and holds nothing: its period
+    // details go while a read of the lists would fail.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::periods::monthly(w.clock.now_ms(), None),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    wallet.accept_subscription(&request).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let sale = shop.payee_activity().await.unwrap()[0].record;
+    fail_bobs_list_read(&w);
+    let entries = w.alice.switch().entries_from(&w.bob_id());
+    let sent = shop
+        .send_period_details(
+            &sale,
+            crate::periods::january_details(w.clock.now_ms() + 24 * HOUR_MS),
+        )
+        .await
+        .unwrap();
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), entries + 1);
+    wallet.receive(None).await.unwrap();
+    let view = wallet.request(&request).await.unwrap();
+    assert!(
+        view.periods
+            .iter()
+            .any(|p| p.details.iter().any(|d| d.msg_id == sent.msg_id)),
+        "{view:?}"
+    );
 }
 
 #[tokio::test]
