@@ -37,14 +37,16 @@
 
 use paykit_lib::bodies::ResendRequest;
 use paykit_lib::derive::{natural_key, request_obligation_blinded};
-use paykit_lib::records::{PaymentListRecord, StoredMessage, UnrequestedDestination};
+use paykit_lib::records::{
+    ActivityRecord, PaymentListRecord, StoredMessage, UnrequestedDestination,
+};
 use paykit_lib::{AttemptId, Body};
 use pubky_switch_client::app::{
     AppError, ClaimFetch, ClaimOp, LocalWrite, Need, ObligationDeadline, ReceiveContext,
     RecordContent, RecordTarget, Refusal as ClientRefusal, StoreFailure, Unopened,
 };
 use pubky_switch_client::error::StoreError;
-use pubky_switch_core::claims::{Basis, ClaimStatus, Outcome, RECONCILIATION_MS};
+use pubky_switch_core::claims::{Basis, ClaimStatus, ClaimView, Outcome, RECONCILIATION_MS};
 use pubky_switch_core::enc::serde_b64;
 use pubky_switch_core::records::AppCert;
 use pubky_switch_core::scopes::Permission;
@@ -55,7 +57,7 @@ use serde_json::{Map, Value};
 use crate::activity::{self, ActivityTarget, Role};
 use crate::hold::RecordSide;
 use crate::journal::JournalEntry;
-use crate::marks::{count_dropped, read_mark, MarkFamily};
+use crate::marks::{count_dropped, MarkFamily};
 use crate::notices::{KeptNotice, NoticeKind};
 use crate::paykit::Paykit;
 use crate::protocol::writes_payee_label;
@@ -131,7 +133,8 @@ impl std::fmt::Debug for QueuedAnswer {
 }
 
 /// The writes `stored`, a message that passed check 10, causes, added to `cx` (module docs).
-/// The settlement ID of a proof's `proof` object, by the app's rail ([`crate::Rail::settlement_id`]).
+/// The settlement ID of a proof's `proof` object, by the app's rail
+/// ([`crate::Rail::settlement_id`]).
 pub(crate) type Settlement<'a> = &'a paykit_lib::derive::SettlementIdReader<'a>;
 
 pub(crate) fn effect(
@@ -187,17 +190,41 @@ pub(crate) fn effect(
             if pay && held_request(cx, &payer_target)? {
                 return keep_cancellation(cx, &payer_target, stored, true);
             }
-            if payee && payer_reply(cx, stored, &scopes, settlement)? {
-                // A payer's cancellation of a request this app sent.
-            } else if pay {
-                // One for a request the app holds no record of is new state, which the spam
-                // rule gates. While the copy of the payer's records may lack records, the
-                // absence decides nothing: the entry is held.
-                if cx.record(&payer_target.record_target())?.is_none() {
-                    hold_while_unlisted(cx, RecordSide::Payer)?;
+            // A payer's cancellation of a request this app holds goes into its record. One
+            // naming a request held on neither side is new state, which the spam rule gates
+            // once: at an app holding `pay`, it is kept as the stop, which no payment passes;
+            // at one taking payments, as a payer's reply until the record comes (Paykit spec
+            // 8.1, "Replies before their record"). An app holding both keeps both, each
+            // counted only in its own bounds: the message may be a payee's cancellation of a
+            // request to this identity, or a payer's of one another own app sent.
+            let label = stored.body().label().cloned();
+            let payee_target = ActivityTarget::payee(
+                natural_key::request_record(&cx.identity(), &request),
+                label.as_ref(),
+            );
+            let payee_held = payee && cx.record(&payee_target.record_target())?.is_some();
+            if !pay || payee_held {
+                if payee {
+                    payer_reply(cx, stored, &scopes, settlement)?;
                 }
-                if admits_new_state(cx, &sender, &scopes)? {
-                    keep_cancellation(cx, &payer_target, stored, false)?;
+                return Ok(());
+            }
+            // While the copy of a side may lack records, the absence decides nothing: the
+            // entry is held.
+            let content = cx
+                .record(&payer_target.record_target())?
+                .map(|held| held.content);
+            if !holds_record(content.as_ref()) {
+                hold_while_unlisted(cx, RecordSide::Payer)?;
+            }
+            let reply = payee && writes_payee_label(&scopes, label.as_ref());
+            if reply {
+                hold_while_unlisted(cx, RecordSide::Payee)?;
+            }
+            if admits_new_state(cx, &sender, &scopes)? {
+                keep_cancellation(cx, &payer_target, stored, false)?;
+                if reply {
+                    keep_reply(cx, &payee_target, stored)?;
                 }
             }
         }
@@ -207,7 +234,7 @@ pub(crate) fn effect(
         Body::PrivatePaymentList(_) if pay => {
             let target = list_target(&sender, &stored.message().from.app_id);
             let record = cx.record(&target)?;
-            if record.is_none() {
+            if !holds_record(record.as_ref().map(|held| &held.content)) {
                 hold_while_unlisted(cx, RecordSide::Payer)?;
             }
             let held = record.is_some_and(|held| held.content.value().is_some());
@@ -279,10 +306,7 @@ fn note_cursor_time(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Resu
     let Some(at) = stored.accepted_at() else {
         return Ok(());
     };
-    let held = match cx.local_get(key::CURSOR_TIME.as_bytes())? {
-        Some(bytes) => state::decode::<u64>(&bytes).map_err(|_| Fail::corrupt())?,
-        None => 0,
-    };
+    let held = state::cx_get::<u64>(cx, key::CURSOR_TIME)?.unwrap_or(0);
     if at > held {
         keep_local(cx, local(key::CURSOR_TIME, &at)?);
     }
@@ -309,7 +333,7 @@ pub(crate) fn admits_new_state(
         return Ok(true);
     }
     let unknown = || Fail::Store(StoreFailure::unavailable(StoreError::Unavailable));
-    if cx.local_get(key::LISTS_READ.as_bytes())?.is_none() {
+    if state::cx_get::<u64>(cx, key::LISTS_READ)?.is_none() {
         return Err(unknown());
     }
     let standing = cx.sender_disposition(sender)?;
@@ -320,10 +344,7 @@ pub(crate) fn admits_new_state(
         return Ok(true);
     }
     let kept = key::spam(sender);
-    let count = match cx.local_get(kept.as_bytes())? {
-        Some(bytes) => state::decode::<u64>(&bytes).map_err(|_| Fail::corrupt())?,
-        None => 0,
-    };
+    let count = state::cx_get::<u64>(cx, &kept)?.unwrap_or(0);
     keep_local(cx, local(&kept, &count.saturating_add(1))?);
     Ok(false)
 }
@@ -340,11 +361,17 @@ pub(crate) fn note_peer(
     pubky: &[u8; 32],
     stored: &StoredMessage,
 ) -> Result<(), Fail> {
-    keep_local(
-        cx,
-        local(&key::peer(pubky), &stored.accepted_at().unwrap_or(0))?,
-    );
+    let (peer, at) = peer_note(pubky, stored);
+    keep_local(cx, local(&peer, &at)?);
     Ok(())
+}
+
+/// The note of `pubky` as a counterparty with Paykit activity (`peer/`), for re-sends after
+/// a `missed` item or a provider loss (Paykit spec 9, Switch spec 12.6): its key, and the
+/// acceptance time of `stored`, the message that shows it. A request or a Private Payment
+/// List notes its sender, at its first read and at a stored entry's later write alike.
+pub(crate) fn peer_note(pubky: &[u8; 32], stored: &StoredMessage) -> (String, u64) {
+    (key::peer(pubky), stored.accepted_at().unwrap_or(0))
 }
 
 /// The value of the record the app holds at `target`, if it holds a readable one.
@@ -409,8 +436,9 @@ pub(crate) fn holds_record(content: Option<&RecordContent>) -> bool {
 
 /// The value held at `target`, which is of `side`: `None` for none, or one that isn't
 /// open or is deleted. The entry is held instead while the value waits for its scope key
-/// ([`wait_for_key`]), and while the record is absent and the app's copy of `side` may
-/// lack records ([`hold_while_unlisted`]): the absence decides nothing then.
+/// ([`wait_for_key`]), and while the record is absent or deleted and the app's copy of
+/// `side` may lack records ([`hold_while_unlisted`]): the copy decides nothing then, a
+/// delete it holds included, which a later write at the switch may have replaced.
 fn held_or_unlisted(
     cx: &ReceiveContext<'_>,
     target: &ActivityTarget,
@@ -428,7 +456,7 @@ pub(crate) fn held_or_unlisted_at(
 ) -> Result<Option<Vec<u8>>, Fail> {
     wait_for_record_key(cx, target)?;
     let record = cx.record(target)?;
-    if record.is_none() {
+    if !holds_record(record.as_ref().map(|held| &held.content)) {
         hold_while_unlisted(cx, side)?;
     }
     Ok(record.and_then(|held| held.content.value().map(<[u8]>::to_vec)))
@@ -438,11 +466,11 @@ pub(crate) fn held_or_unlisted_at(
 /// 8.1, "Records not listed yet"): after a restore, a `missed` item, or under another
 /// certificate than the one they were listed under, until Paykit has listed them. The rule
 /// is [`crate::hold::side_unlisted`], read per entry from the context's certificate and
-/// Paykit's state (`nl`, `ml`, `lc`), so an entry after a certificate or a `missed` item the
-/// same read took is held too. The entry is held as for a store unavailable for now (Paykit
-/// spec 17, question 27), and read again at a later read.
+/// Paykit's state (`nl`, `ml`, `lc`), so an entry after a certificate or a `missed` item
+/// the same read took is held too. The entry is held as for a store unavailable for now
+/// (Paykit spec 17, question 27), and read again at a later read.
 pub(crate) fn hold_while_unlisted(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<(), Fail> {
-    if side_unlisted_in(cx, side)? {
+    if side_may_lack(cx, side)? {
         return Err(Fail::Store(StoreFailure::unavailable(
             StoreError::Unavailable,
         )));
@@ -450,15 +478,13 @@ pub(crate) fn hold_while_unlisted(cx: &ReceiveContext<'_>, side: RecordSide) -> 
     Ok(())
 }
 
-/// Whether the app's copy of `side`'s records may lack records, read in the receive step
-/// ([`crate::hold::side_unlisted`]).
-pub(crate) fn side_unlisted_in(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<bool, Fail> {
-    let marked = cx.local_get(key::RECORDS_UNLISTED.as_bytes())?.is_some()
-        || cx.local_get(key::MISSED_UNLISTED.as_bytes())?.is_some();
-    let listed = match cx.local_get(key::LISTED_CERT.as_bytes())? {
+/// Whether the app's copy of `side`'s records may lack records ([`hold_while_unlisted`]).
+fn side_may_lack(cx: &ReceiveContext<'_>, side: RecordSide) -> Result<bool, Fail> {
+    let marked = state::cx_get::<bool>(cx, key::RECORDS_UNLISTED)?.is_some()
+        || state::cx_get::<bool>(cx, key::MISSED_UNLISTED)?.is_some();
+    let listed = match state::cx_get::<SignedDoc>(cx, key::LISTED_CERT)? {
         None => None,
-        Some(bytes) => {
-            let signed: SignedDoc = state::decode(&bytes).map_err(|_| Fail::corrupt())?;
+        Some(signed) => {
             Some(AppCert::verify(&signed, &cx.identity()).map_err(|_| Fail::corrupt())?)
         }
     };
@@ -523,7 +549,7 @@ fn keep_cancellation(
     held: bool,
 ) -> Result<(), Fail> {
     let kept = key::kept_cancellation(&cx.record_key(&target.record_target())?);
-    if cx.local_get(kept.as_bytes())?.is_some() {
+    if state::cx_get::<KeptMessage>(cx, &kept)?.is_some() {
         return Ok(());
     }
     if !held {
@@ -533,58 +559,76 @@ fn keep_cancellation(
     Ok(())
 }
 
-/// Make room for a new stop from `sender` among the stops kept for records not held
-/// ([`holds_record`]), in the step: the one the bounds drop ([`kept_reply_evicted`]) goes.
-/// The payees' cancellations of requests not held (`kc/`) and the counterparties' ends of
-/// Allowances not held (`ae/`, `allowances.rs`) are counted together, under one sender's
-/// bound and the bound in all. An Allowance's stop whose Allowance has a stored message
-/// kept to write ([`crate::allowances::keeps_stored_message`]) is neither counted nor
-/// dropped: the message could open the record, and the stop must then be there.
+/// Make room for a new stop from `sender` among the stops kept for records not held, in the
+/// step: those the bounds drop ([`kept_reply_evicted`]) go, until there is room. The payees'
+/// cancellations of requests not held (`kc/`) and the counterparties' ends of Allowances not
+/// held (`ae/`, `allowances.rs`) are counted together, under one sender's bound and the
+/// bound in all (Paykit spec 8.3, "Ends reach the executor"). Left out of the bounds,
+/// neither counted nor dropped, are:
+/// - a request's stop for a request the copy holds ([`holds_record`]), and one for a request
+///   the app keeps a stored message of to write ([`crate::stored::writes_request`]), the
+///   request's own entry among them. These last are bounded by the entries the client stores
+///   (Switch spec 8.2), one stop per request record; counted here, they would make the stops
+///   of other requests go first;
+/// - an Allowance's stop over a record held that doesn't read, or that reads and holds what
+///   the end names ([`crate::allowances::end_bounded`]), and one whose Allowance has a stored
+///   message kept to write ([`crate::allowances::keeps_stored_message`]): the message could
+///   open the record, and the stop must then be there.
+///
+/// One that is left out no longer counts again from then on, which can put its sender past
+/// the bound: the loop drops back to it. A new stop is reached here only once its own side's
+/// copy lacks no record: an entry over a record absent or deleted from a copy that may lack
+/// records is held before ([`hold_while_unlisted`]). The other side's copy may still lack
+/// records, as after a narrowing of one side: none of that side's stops is counted or
+/// dropped then, since they would be judged from a copy that decides nothing.
 pub(crate) fn make_room_for_stop(
     cx: &mut ReceiveContext<'_>,
     sender: &[u8; 32],
 ) -> Result<(), Fail> {
     let mut kept = Vec::new();
     let mut names = Vec::new();
-    let own = cx.identity();
-    for (prefix, side) in [
-        (key::KEPT_CANCELLATIONS, RecordSide::Payer),
-        (key::ALLOWANCE_ENDS, RecordSide::Allowances),
-    ] {
-        // While the copy of a side may lack records, its stops are judged from no copy:
-        // none of them is counted or dropped.
-        if side_unlisted_in(cx, side)? {
-            continue;
-        }
-        for (bytes, value) in cx.local_scan(prefix.as_bytes())? {
-            let stop = state::decode::<KeptMessage>(&value).map_err(|_| Fail::corrupt())?;
-            let (record, allowance) = match crate::state::StateKey::parse(&bytes) {
-                Some(crate::state::StateKey::KeptCancellation(record)) => (record, false),
-                Some(crate::state::StateKey::AllowanceEnd(record)) => {
-                    crate::allowances::kept_stop_at(&bytes, &stop, &own, |t| cx.record_key(t))?
-                        .ok_or_else(Fail::corrupt)?;
-                    (record, true)
-                }
-                _ => return Err(Fail::corrupt()),
+    if !side_may_lack(cx, RecordSide::Payer)? {
+        for (name, stop) in state::cx_scan::<KeptMessage>(cx, key::KEPT_CANCELLATIONS)? {
+            let Some(crate::state::StateKey::KeptCancellation(record)) =
+                crate::state::StateKey::parse(name.as_bytes())
+            else {
+                return Err(Fail::corrupt());
             };
+            let (cancellation, at) = kept_with_time(cx, &stop)?;
             let content = cx.record_at(&record)?.map(|held| held.content);
-            // A request's stop counts while its record isn't held. An Allowance's counts
-            // unless its record is held without a value that reads, which may yet open, or a
-            // stored message of the Allowance waits to be written.
-            let counted = if allowance {
-                !matches!(content, Some(RecordContent::Unreadable(_)))
-                    && !crate::allowances::keeps_stored_message(cx, &record)?
-            } else {
-                !holds_record(content.as_ref())
-            };
-            if !counted {
+            if holds_record(content.as_ref()) {
                 continue;
             }
-            kept.push((stop.sender(), stop.accepted_at().unwrap_or(0)));
-            names.push(bytes);
+            let from = cancellation.sender();
+            if let Some(request) = cancellation.message().refs.first() {
+                if keeps_stored_of(cx, &from, request)? {
+                    continue;
+                }
+            }
+            kept.push((from, at));
+            names.push(name.into_bytes());
         }
     }
-    if let Some(index) = kept_reply_evicted(&kept, sender) {
+    if !side_may_lack(cx, RecordSide::Allowances)? {
+        for (name, stop) in state::cx_scan::<KeptMessage>(cx, key::ALLOWANCE_ENDS)? {
+            let Some(crate::state::StateKey::AllowanceEnd(record)) =
+                crate::state::StateKey::parse(name.as_bytes())
+            else {
+                return Err(Fail::corrupt());
+            };
+            let (end, at) = kept_with_time(cx, &stop)?;
+            let content = cx.record_at(&record)?.map(|held| held.content);
+            if !crate::allowances::end_bounded(cx, content.as_ref(), &end)?
+                || crate::allowances::keeps_stored_message(cx, &record)?
+            {
+                continue;
+            }
+            kept.push((end.sender(), at));
+            names.push(name.into_bytes());
+        }
+    }
+    while let Some(index) = kept_reply_evicted(&kept, sender) {
+        kept.swap_remove(index);
         keep_local(
             cx,
             LocalWrite::Delete {
@@ -593,6 +637,34 @@ pub(crate) fn make_room_for_stop(
         );
     }
     Ok(())
+}
+
+/// The message `kept`, read bound to its key (`state::Stored`), with its acceptance time,
+/// which every stop and kept reply carries.
+fn kept_with_time(
+    cx: &ReceiveContext<'_>,
+    kept: &KeptMessage,
+) -> Result<(StoredMessage, u64), Fail> {
+    let message = kept.stored(&cx.identity()).map_err(|_| Fail::corrupt())?;
+    let at = message.accepted_at().ok_or_else(Fail::corrupt)?;
+    Ok((message, at))
+}
+
+/// Whether the app keeps a stored message from `sender` of `request` still to write
+/// ([`crate::stored::writes_request`]).
+fn keeps_stored_of(
+    cx: &ReceiveContext<'_>,
+    sender: &[u8; 32],
+    request: &[u8; 32],
+) -> Result<bool, Fail> {
+    let own = cx.identity();
+    for (_, note) in state::cx_scan::<crate::stored::StoredNote>(cx, &key::stored_notes_of(sender))?
+    {
+        if crate::stored::writes_request(&note, &own, request).map_err(|_| Fail::corrupt())? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// A payer's acceptance, rejection, cancellation or proof, at the payee (Paykit spec 3.4,
@@ -629,12 +701,7 @@ fn payer_reply(
             // nothing: the entry is held instead ([`held_or_unlisted`]).
             if held_or_unlisted(cx, &target, RecordSide::Payee)?.is_none() {
                 if admits_new_state(cx, &sender, scopes)? {
-                    let record = cx.record_key(&target.record_target())?;
-                    let kept = key::kept_reply(&sender, &record, &stored.message().msg_id);
-                    if cx.local_get(kept.as_bytes())?.is_none() {
-                        make_room_for_reply(cx, &sender)?;
-                        keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
-                    }
+                    keep_reply(cx, &target, stored)?;
                 }
                 return Ok(false);
             }
@@ -666,11 +733,32 @@ fn payer_reply(
     }
 }
 
+/// Keep `stored`, a payer's reply to the request whose payee record is at `target`, which
+/// the app doesn't hold yet (`pr/<sender>/<record key>/<msg_id>`), within the bounds on kept
+/// replies ([`make_room_for_reply`]); one kept already is read with a restore's check and
+/// left as it is. Admission is the caller's.
+fn keep_reply(
+    cx: &mut ReceiveContext<'_>,
+    target: &ActivityTarget,
+    stored: &StoredMessage,
+) -> Result<(), Fail> {
+    let sender = stored.sender();
+    let record = cx.record_key(&target.record_target())?;
+    let kept = key::kept_reply(&sender, &record, &stored.message().msg_id);
+    // One kept already is read bound to its key, and stays as it is.
+    if state::cx_get::<KeptMessage>(cx, &kept)?.is_none() {
+        make_room_for_reply(cx, &sender)?;
+        keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
+    }
+    Ok(())
+}
+
 /// A receipt (Paykit spec 7.3, 8.4): stored in the payer's record and, in the same batch,
-/// the attempt it names settled by evidence when it is open, unknown or failed and the
-/// claim isn't SETTLED (Switch spec 10.2 row 3). Once the claim is gone, a receipt for a
-/// payment made after `failed` was written raises the notice "marked failed, was paid"
-/// instead (Paykit spec 7.2).
+/// what [`receipt_settles`] decides: the attempt it names settled by evidence when it is
+/// open, unknown or failed and the claim isn't SETTLED (Switch spec 10.2 row 3), or, once
+/// the claim is gone, the notice "marked failed, was paid" for a payment made after
+/// `failed` was written (Paykit spec 7.2). A stored entry's receipt written later
+/// (`Paykit::place_receipt`) decides the same.
 fn receipt_effect(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
@@ -678,118 +766,289 @@ fn receipt_effect(
 ) -> Result<(), Fail> {
     let sender = stored.sender();
     let own = cx.identity();
-    let target = match stored.message().refs.get(1) {
-        Some(request) => ActivityTarget::payer(natural_key::request_record(&sender, request)),
-        None => ActivityTarget::payer(natural_key::payer_payment_record(&own, &attempt_id)),
-    };
-    // The payer matches a receipt through its record, whose counterparty must be the
-    // receipt's sender (Paykit spec 8.4).
+    let target = receipt_target(stored, &own, &attempt_id);
     let Some(value) = held_or_unlisted(cx, &target, RecordSide::Payer)? else {
         return Ok(());
     };
     let Some(record) = activity::read(Some(&value), &own, target.side.side()) else {
         return Ok(());
     };
-    if record.counterparty != sender {
+    let Some(found) = receipt_on_record(&record, stored) else {
         return Ok(());
-    }
-    // A receipt names the proof it confirms first (Paykit wire 4.11), and the record holds a
-    // receipt only beside that proof (Paykit wire 5.3): the payer's proof goes into the
-    // record in the batch that sends it, so a receipt for a record without it, or naming
-    // another proof, isn't stored. Stored, it would leave the payer unable to record its own
-    // proof. It still settles the attempt it names.
-    let names_held_proof = record
-        .proof
-        .as_ref()
-        .is_some_and(|proof| stored.message().refs.first() == Some(&proof.hash()));
-    // The record shows the payment made after `failed` was written on its claim, and no
-    // receipt yet (placing one sets the status `receipted`): what every app that gets the
-    // receipt tells the user once the claim is gone (Paykit spec 7.2, 8.3).
-    let first_after_failed =
-        names_held_proof && record.status.as_deref() == Some(PAID_AFTER_FAILED);
-    if names_held_proof {
+    };
+    if found.names_held_proof {
         place(cx, &target, sender, Role::Receipt, stored)?;
     }
     // The journal entry of the attempt, if this app made it: it holds a payment without a
     // request's deadline, and whether `failed` stands on the claim of a payment made. One
     // that doesn't read parks the receipt rather than settling the claim with no deadline,
-    // or consuming it (Switch spec 8.2): the store is corrupt.
-    let journaled = match cx.local_get(key::journal(&attempt_id).as_bytes())? {
-        Some(bytes) => Some(
-            state::decode::<JournalEntry>(&bytes)
-                .and_then(|entry| entry.check().map(|()| entry))
-                .map_err(|_| Fail::corrupt())?,
-        ),
-        None => None,
-    };
+    // or consuming it (Switch spec 8.2): the store is corrupt. It is read as
+    // `Paykit::journal_entry_on` reads it: bound to its key, and to the claim the receipt
+    // settles, so an entry of the attempt on another claim parks the receipt too.
+    let claim = receipt_claim(stored, &attempt_id, |request| {
+        obligation(cx, &sender, request, 0)
+    });
+    let journaled = JournalEntry::on_claim(
+        state::cx_get::<JournalEntry>(cx, &key::journal(&attempt_id))?,
+        &claim,
+    )
+    .map_err(|_| Fail::corrupt())?;
     // A receipt reaches only an app holding `pay`, which carries `claims.write`, and an entry
     // that comes under a certificate without it is held unprocessed: this returns only for a
     // certificate Paykit's checks would refuse.
     if !cx.cert().has_permission(Permission::ClaimsWrite) {
         return Ok(());
     }
-    let (obligation, deadline) = match stored.message().refs.get(1) {
-        Some(request) => {
-            let deadline = crate::requests::request_of(&record)
-                .and_then(|(_, body)| body.attempt_deadline(None).ok())
-                .map_or(ObligationDeadline::NotKnown, crate::pay::own_deadline);
-            (obligation(cx, &sender, request, 0), deadline)
-        }
-        None => {
-            // The deadline of a payment without a request is the one its journal kept.
-            let deadline = journaled
-                .as_ref()
-                .map_or(ObligationDeadline::NotKnown, |e| {
-                    crate::pay::own_deadline(e.deadline)
-                });
-            (
-                paykit_lib::derive::payment_obligation(&attempt_id),
-                deadline,
-            )
-        }
-    };
+    let obligation = claim;
+    let deadline = receipt_deadline(stored, &record, journaled.as_ref());
     // A claim the app keeps no view of is read from the switch first, so the receipt
     // settles it in the cursor's batch (Switch spec 10.2 row 3).
-    let view = match cx.claim_view(&obligation)? {
-        Some(view) => Some(view),
-        None => match cx.switch_claim(&obligation) {
-            None => return Err(Fail::Need(vec![Need::Claim(obligation)])),
-            Some(ClaimFetch::Read(read)) => Some(read.view.clone()),
-            Some(ClaimFetch::Absent) => None,
-            // Refused, such as without `claims.read`: nothing to settle here.
-            Some(_) => return Ok(()),
-        },
+    let read = cx.switch_claim(&obligation).map(|fetch| match fetch {
+        ClaimFetch::Read(read) => SwitchClaim::Read(Some(read.view.clone())),
+        ClaimFetch::Absent => SwitchClaim::Read(None),
+        // Refused, such as without `claims.read`.
+        _ => SwitchClaim::Refused,
+    });
+    let view = match failure_view(cx.claim_view(&obligation)?, read) {
+        FailureView::View(view) => view,
+        FailureView::Refused => return Ok(()),
+        FailureView::ReadSwitch => return Err(Fail::Need(vec![Need::Claim(obligation)])),
     };
-    // The claim is gone, or may be: the switch holds none, or its pinned deadline is 30 days
-    // or more before the highest service time verified, when the switch may delete it
-    // (Switch spec 6.3). The receipt can't be recorded on it. For a payment made after
-    // `failed` was written on it, the user is told it was paid (Paykit spec 7.2, "What a
-    // payment method declares"); the receipt is in the record already.
-    let gone = view.as_ref().is_none_or(|view| {
+    let settles = receipt_settles(&ReceiptClaim {
+        stored,
+        attempt_id,
+        obligation,
+        deadline,
+        view: view.as_ref(),
+        service_time: cx.highest_service_time(),
+        journaled,
+        first_receipt: found.first_receipt,
+    })?;
+    if let Some((op, deadline)) = settles.claim {
+        cx.claim(op, Vec::new(), deadline)?;
+    }
+    if let Some(late) = settles.notice {
+        let notice = key::notice(&attempt_id, NoticeKind::PaidAfterFailed);
+        // A notice kept already is read whole and bound to its key, as `Paykit::kept_notice`
+        // reads it.
+        if state::cx_get::<KeptNotice>(cx, &notice)?.is_none() {
+            keep_local(cx, local(&notice, &late)?);
+        }
+    }
+    if let Some(entry) = settles.received {
+        keep_local(cx, local(&key::journal(&attempt_id), &entry)?);
+    }
+    Ok(())
+}
+
+/// What the switch answered for a receipt's claim (Switch wire 7.4.8).
+pub(crate) enum SwitchClaim {
+    /// The claim as read, `None` when the switch holds none.
+    Read(Option<ClaimView>),
+    /// The read refused for good, such as without `claims.read`.
+    Refused,
+}
+
+/// The claim view a receipt decides on ([`failure_view`]).
+#[derive(Debug)]
+pub(crate) enum FailureView {
+    /// The view, `None` when the switch holds no claim and the app keeps none.
+    View(Option<ClaimView>),
+    /// The switch refused its read: the receipt settles nothing, and is still recorded.
+    Refused,
+    /// The app keeps no view: the switch's answer is needed first.
+    ReadSwitch,
+}
+
+/// The claim view a receipt's claim effect decides on ([`receipt_settles`]), the one rule
+/// for its first read (`receipt_effect`) and a stored entry's later write
+/// (`Paykit::place_receipt`): the view the app keeps, `kept`, which holds the failure after
+/// the service deletes the claim, or, only when it keeps none, the switch's answer, `read`,
+/// which the caller fetches once this asks for it.
+pub(crate) fn failure_view(kept: Option<ClaimView>, read: Option<SwitchClaim>) -> FailureView {
+    match (kept, read) {
+        (Some(view), _) => FailureView::View(Some(view)),
+        (None, Some(SwitchClaim::Read(view))) => FailureView::View(view),
+        (None, Some(SwitchClaim::Refused)) => FailureView::Refused,
+        (None, None) => FailureView::ReadSwitch,
+    }
+}
+
+/// The payer's record a receipt goes into: its request's, or for a payment without a
+/// request the record of the attempt it names (Paykit wire 4.11, 5.3). This SDK makes no
+/// payment of a Billing Period: the request record holds no proof of one, so a receipt
+/// naming a period is neither stored nor settles its claim here.
+pub(crate) fn receipt_target(
+    stored: &StoredMessage,
+    own: &[u8; 32],
+    attempt_id: &AttemptId,
+) -> ActivityTarget {
+    match stored.message().refs.get(1) {
+        Some(request) => {
+            ActivityTarget::payer(natural_key::request_record(&stored.sender(), request))
+        }
+        None => ActivityTarget::payer(natural_key::payer_payment_record(own, attempt_id)),
+    }
+}
+
+/// What a receipt finds in the payer's record it names ([`receipt_on_record`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReceiptOnRecord {
+    /// The record holds the proof the receipt names, so the receipt goes beside it.
+    pub(crate) names_held_proof: bool,
+    /// The record holds the proof the receipt names and no receipt yet: this receipt is the
+    /// first of that payment.
+    pub(crate) first_receipt: bool,
+}
+
+/// What a receipt `stored` finds in `record`, the payer's record it names: `None` when the
+/// record's counterparty isn't the receipt's sender, through whom the payer matches it
+/// (Paykit spec 8.4), so the receipt does nothing.
+///
+/// A receipt names the proof it confirms first (Paykit wire 4.11), and the record holds a
+/// receipt only beside that proof (Paykit wire 5.3): the payer's proof goes into the record
+/// in the batch that sends it, so a receipt for a record without it, or naming another
+/// proof, isn't stored. Stored, it would leave the payer unable to record its own proof. It
+/// still settles the attempt it names. Only stored messages decide here: the record's
+/// `status` is informational, rewritten by every writer, so it is never read (Paykit wire
+/// 5.3).
+pub(crate) fn receipt_on_record(
+    record: &ActivityRecord,
+    stored: &StoredMessage,
+) -> Option<ReceiptOnRecord> {
+    if record.counterparty != stored.sender() {
+        return None;
+    }
+    let names_held_proof = record
+        .proof
+        .as_ref()
+        .is_some_and(|proof| stored.message().refs.first() == Some(&proof.hash()));
+    Some(ReceiptOnRecord {
+        names_held_proof,
+        first_receipt: names_held_proof && record.receipt.is_none(),
+    })
+}
+
+/// The claim a receipt settles: its request's obligation, blinded by `request_obligation`;
+/// or, for a payment without a request, the attempt's own obligation.
+pub(crate) fn receipt_claim(
+    stored: &StoredMessage,
+    attempt_id: &AttemptId,
+    request_obligation: impl FnOnce(&[u8; 32]) -> [u8; 32],
+) -> [u8; 32] {
+    match stored.message().refs.get(1) {
+        Some(request) => request_obligation(request),
+        None => paykit_lib::derive::payment_obligation(attempt_id),
+    }
+}
+
+/// The deadline of a receipt's claim: its request's attempt deadline; or, for a payment
+/// without a request, the deadline its journal entry kept, `journaled` read bound to the
+/// claim ([`JournalEntry::on_claim`]).
+pub(crate) fn receipt_deadline(
+    stored: &StoredMessage,
+    record: &ActivityRecord,
+    journaled: Option<&JournalEntry>,
+) -> ObligationDeadline {
+    match stored.message().refs.get(1) {
+        Some(_) => crate::requests::request_of(record)
+            .and_then(|(_, body)| body.attempt_deadline(None).ok())
+            .map_or(ObligationDeadline::NotKnown, crate::pay::own_deadline),
+        None => journaled.map_or(ObligationDeadline::NotKnown, |entry| {
+            crate::pay::own_deadline(entry.deadline)
+        }),
+    }
+}
+
+/// What [`receipt_settles`] decides from.
+pub(crate) struct ReceiptClaim<'a> {
+    pub(crate) stored: &'a StoredMessage,
+    pub(crate) attempt_id: AttemptId,
+    pub(crate) obligation: [u8; 32],
+    pub(crate) deadline: ObligationDeadline,
+    /// The claim as read now, `None` when the switch holds none.
+    pub(crate) view: Option<&'a ClaimView>,
+    /// The highest service time verified.
+    pub(crate) service_time: Option<u64>,
+    /// The attempt's journal entry, if this app holds it.
+    pub(crate) journaled: Option<JournalEntry>,
+    /// The receipt is the first of the payment its record holds the proof of.
+    pub(crate) first_receipt: bool,
+}
+
+/// What a receipt does beside its placing ([`receipt_settles`]), each part in the batch that
+/// places it.
+#[derive(Debug, Default)]
+pub(crate) struct ReceiptSettles {
+    /// The attempt settled by evidence, and the obligation's deadline.
+    pub(crate) claim: Option<(ClaimOp, ObligationDeadline)>,
+    /// The notice "marked failed, was paid", kept unless one is held at its key already.
+    pub(crate) notice: Option<KeptNotice>,
+    /// The attempt's journal entry, kept as no longer waiting for a receipt.
+    pub(crate) received: Option<JournalEntry>,
+}
+
+/// What a receipt does on its claim and in the journal, the same at its first read and at
+/// a stored entry's later write (Paykit spec 7.2, 7.3, 8.1; Switch spec 10.2 row 3).
+///
+/// The claim is gone, or may be, when the switch holds none, or its pinned deadline is 30
+/// days or more before the highest service time verified, when the switch may delete it
+/// (Switch spec 6.3): the receipt can't be recorded on it. For a payment made after
+/// `failed` was written on it, the user is told it was paid (Paykit spec 7.2, "What a
+/// payment method declares"), and the entry no longer waits. An app that gets the receipt
+/// and holds the failure tells the user: it holds the failure when it has it from a stable
+/// source, the attempt's owner from its own journal (`failed_on_claim`), or any own app,
+/// the owner included, from a view of the claim, kept or read, that shows the attempt
+/// `failed`, for the first receipt of the proof the record holds. An owner restored from a
+/// backup that predates the failure has no journal entry for it, and uses such a view. The record's `status` is informational and never
+/// decides it (Paykit wire 5.3). An own app that never saw the failure, such as one that
+/// joined after the service deleted the claim, can't tell and raises nothing. Either way
+/// the receipt goes into the record, by the caller. A claim SETTLED holds the
+/// payment, and one with the attempt open, unknown or failed is settled by this receipt's
+/// evidence: either way an entry waiting for its receipt no longer waits.
+///
+/// # Errors
+///
+/// The client's refusal of the claim operation as built.
+pub(crate) fn receipt_settles(claim: &ReceiptClaim<'_>) -> Result<ReceiptSettles, AppError> {
+    let waiting = claim
+        .journaled
+        .clone()
+        .filter(|entry| entry.failed_on_claim)
+        .map(|mut entry| {
+            entry.failed_on_claim = false;
+            entry
+        });
+    let gone = claim.view.is_none_or(|view| {
         view.deadline.is_some_and(|deadline| {
-            cx.highest_service_time()
+            claim
+                .service_time
                 .is_some_and(|t| deadline.saturating_add(RECONCILIATION_MS) <= t)
         })
     });
-    if gone {
-        let waiting = journaled.filter(|entry| entry.failed_on_claim);
-        if waiting.is_some() || first_after_failed {
-            let late = KeptNotice::late(attempt_id, sender, stored.message().refs.get(1), 0);
-            late_receipt(cx, late, waiting)?;
+    let mut out = ReceiptSettles::default();
+    let Some(view) = claim.view.filter(|_| !gone) else {
+        let failed_on_view = claim
+            .view
+            .and_then(|view| view.attempt(&claim.attempt_id.to_bytes()))
+            .is_some_and(|attempt| attempt.outcome == Outcome::Failed);
+        if waiting.is_some() || (claim.first_receipt && failed_on_view) {
+            out.notice = Some(KeptNotice::late(
+                claim.attempt_id,
+                claim.stored.sender(),
+                claim.stored.message().refs.get(1),
+                claim.service_time.unwrap_or(0),
+            ));
         }
-        return Ok(());
-    }
-    let Some(view) = view else {
-        return Ok(());
+        out.received = waiting;
+        return Ok(out);
     };
-    // A claim SETTLED, or settled by this receipt, holds the payment: an entry waiting for
-    // its receipt no longer waits, in the same batch.
-    let waiting = journaled.filter(|entry| entry.failed_on_claim);
     if view.status == ClaimStatus::Settled {
-        return waiting.map_or(Ok(()), |entry| received_in_time(cx, entry));
+        out.received = waiting;
+        return Ok(out);
     }
     let open = view.attempts.iter().any(|a| {
-        a.attempt_id == attempt_id.to_bytes()
+        a.attempt_id == claim.attempt_id.to_bytes()
             && matches!(
                 a.outcome,
                 Outcome::Open | Outcome::Unknown | Outcome::Failed
@@ -797,52 +1056,22 @@ fn receipt_effect(
     });
     if open {
         let op = ClaimOp::done(
-            obligation,
+            claim.obligation,
             view.step,
-            attempt_id.to_bytes(),
+            claim.attempt_id.to_bytes(),
             Basis::Evidence,
-            Some(stored.hash()),
+            Some(claim.stored.hash()),
         )?;
-        cx.claim(op, Vec::new(), deadline)?;
-        if let Some(entry) = waiting {
-            received_in_time(cx, entry)?;
-        }
+        out.claim = Some((op, claim.deadline));
+        out.received = waiting;
     }
-    Ok(())
-}
-
-/// The notice "marked failed, was paid", `late`, raised with the cursor move once (Paykit
-/// spec 7.2), and the payment's journal entry, if this app holds it `waiting`, kept as no
-/// longer waiting for a receipt.
-fn late_receipt(
-    cx: &mut ReceiveContext<'_>,
-    mut late: KeptNotice,
-    waiting: Option<JournalEntry>,
-) -> Result<(), Fail> {
-    let attempt =
-        AttemptId::parse(late.attempt_id.as_deref().unwrap_or("")).map_err(|_| Fail::corrupt())?;
-    let notice = key::notice(&attempt, NoticeKind::PaidAfterFailed);
-    if cx.local_get(notice.as_bytes())?.is_none() {
-        late.raised_at_ms = cx.highest_service_time().unwrap_or(0);
-        keep_local(cx, local(&notice, &late)?);
-    }
-    match waiting {
-        Some(entry) => received_in_time(cx, entry),
-        None => Ok(()),
-    }
+    Ok(out)
 }
 
 /// The `status` of a payer's record whose payment was made after `failed` was written on its
-/// claim, which stays `failed` until a receipt settles it (Paykit wire 5.3: informational).
+/// claim, which stays `failed` until a receipt settles it (Paykit wire 5.3: informational,
+/// written for display and never read for a decision).
 pub(crate) const PAID_AFTER_FAILED: &str = "failed";
-
-/// The payment `entry` journals no longer waits for a receipt, kept with the cursor move.
-fn received_in_time(cx: &mut ReceiveContext<'_>, mut entry: JournalEntry) -> Result<(), Fail> {
-    let attempt = entry.attempt().map_err(|_| Fail::corrupt())?;
-    entry.failed_on_claim = false;
-    keep_local(cx, local(&key::journal(&attempt), &entry)?);
-    Ok(())
-}
 
 /// The obligation ID of a request or Billing Period, blinded through the receive context
 /// (Paykit wire 1.5).
@@ -951,10 +1180,8 @@ fn hold_list(
     stored: &StoredMessage,
 ) -> Result<(), Fail> {
     let kept = key::held_list(&cx.record_key(target)?);
-    if let Some(bytes) = cx.local_get(kept.as_bytes())? {
-        let held = state::decode::<KeptMessage>(&bytes)
-            .and_then(|k| k.stored(&cx.identity()))
-            .map_err(|_| Fail::corrupt())?;
+    if let Some(held) = state::cx_get::<KeptMessage>(cx, &kept)? {
+        let held = held.stored(&cx.identity()).map_err(|_| Fail::corrupt())?;
         if list_version(&held) >= list_version(stored) {
             return Ok(());
         }
@@ -1005,24 +1232,20 @@ pub(crate) fn kept_reply_evicted(kept: &[CountedReply], sender: &[u8; 32]) -> Op
 }
 
 /// Make room for a new reply from `sender` among the kept replies, in the step: the one the
-/// bounds drop ([`kept_reply_evicted`]) goes, dropped without being processed, and counts in
-/// its sender's mark (`pd/<sender>`, `marks.rs`) with its acceptance time, so the sender is
-/// asked to send it again once the record of one of its requests is held.
+/// bounds drop ([`kept_reply_evicted`]) goes, and counts in its sender's mark
+/// (`pd/<sender>`, `marks.rs`) with its acceptance time, so the sender is asked to send it
+/// again once the record of one of its requests is held. The client marked it processed
+/// when it was kept, so at this pin a re-sent copy arrives as a duplicate and isn't taken.
 pub(crate) fn make_room_for_reply(
     cx: &mut ReceiveContext<'_>,
     sender: &[u8; 32],
 ) -> Result<(), Fail> {
     let mut kept = Vec::new();
     let mut names = Vec::new();
-    for (bytes, value) in cx.local_scan(key::KEPT_REPLIES.as_bytes())? {
-        let Some(crate::state::StateKey::KeptReply { sender, .. }) =
-            crate::state::StateKey::parse(&bytes)
-        else {
-            return Err(Fail::corrupt());
-        };
-        let reply = state::decode::<KeptMessage>(&value).map_err(|_| Fail::corrupt())?;
-        kept.push((sender, reply.accepted_at().unwrap_or(0)));
-        names.push(bytes);
+    for (name, reply) in state::cx_scan::<KeptMessage>(cx, key::KEPT_REPLIES)? {
+        let (reply, at) = kept_with_time(cx, &reply)?;
+        kept.push((reply.sender(), at));
+        names.push(name.into_bytes());
     }
     let Some(index) = kept_reply_evicted(&kept, sender) else {
         return Ok(());
@@ -1036,15 +1259,10 @@ pub(crate) fn make_room_for_reply(
     );
     let family = MarkFamily::Replies;
     let mark_key = family.key(&from);
-    let held = match cx.local_get(mark_key.as_bytes())? {
-        Some(value) => Some(read_mark(family, &mark_key, &value).map_err(|_| Fail::corrupt())?),
-        None => None,
-    };
+    let held = state::cx_get::<crate::marks::DropMark>(cx, &mark_key)?;
     let mut others = Vec::new();
     if held.is_none() {
-        for (bytes, value) in cx.local_scan(family.prefix().as_bytes())? {
-            let name = String::from_utf8(bytes).map_err(|_| Fail::corrupt())?;
-            let mark = read_mark(family, &name, &value).map_err(|_| Fail::corrupt())?;
+        for (_, mark) in state::cx_scan::<crate::marks::DropMark>(cx, family.prefix())? {
             others.push((mark.sender, mark.latest_ms));
         }
     }
@@ -1064,7 +1282,11 @@ pub(crate) fn make_room_for_reply(
 }
 
 /// How long a message kept to be written into its record later is tried: 30 days from its
-/// acceptance, the time its sender keeps it to send again (Paykit spec 9).
+/// acceptance, the time its sender keeps it to send again (Paykit spec 9). While its record
+/// decides nothing yet, it waits without this limit and is never given up: the record's
+/// value is sealed at a key the app doesn't hold yet (`Unopened::KeyNotHeld`), the app
+/// lacks the current data epoch's key of the record's scope, or the record is absent while
+/// the copy of its side may lack records (Paykit spec 8.1, "Records not listed yet").
 pub const KEPT_MESSAGE_MS: u64 = 30 * pubky_switch_core::records::DAY_MS;
 
 /// How long an app holding `contacts` goes between its reads of the lists, the flagged
@@ -1129,8 +1351,9 @@ impl Paykit {
     /// Place the lists held because their record didn't read or was deleted, once another
     /// own app has written it again so it reads (Paykit wire 5.4): the record's update,
     /// built on the version held with its marks kept, and the notice's delete, in one batch.
-    /// A record that still doesn't read, or is still deleted, keeps its list held; a list no
-    /// newer than the record's is dropped. A placement that fails now is tried again at the
+    /// A record that still doesn't read, or is still deleted, keeps its list held, as does
+    /// one absent while the payer's side isn't listed yet; a list no newer than the
+    /// record's is dropped. A placement that fails now is tried again at the
     /// next receive, with no bound in time: one held list per payee app, replaced by a
     /// newer one, and one write of it per receive.
     pub(crate) async fn place_held_lists(&mut self) -> crate::error::Result<()> {
@@ -1165,6 +1388,10 @@ impl Paykit {
             .await?
             .map(|r| r.content)
         {
+            // Absent while the copy of the payer's side may lack records, as after a join
+            // or a restore before the first listing: the absence decides nothing yet, so the
+            // list stays held (Paykit spec 8.1, "Records not listed yet").
+            None if self.side_unlisted(RecordSide::Payer).await? => return Ok(()),
             None => None,
             Some(RecordContent::Value(value)) => match PaymentListRecord::read(&value, &own) {
                 Ok(held) => Some(held),
@@ -1193,55 +1420,83 @@ impl Paykit {
 
     /// Place the payer's replies kept for requests this app held no record of, each once
     /// the record is held, as a later write of its own with the kept copy dropped in its
-    /// batch (Switch spec 8.2, Paykit spec 8.1). One whose record doesn't come within
-    /// [`KEPT_MESSAGE_MS`] of its acceptance, on the highest service time verified, is
-    /// dropped: the payer keeps what it sent that long, and may send it again (Paykit spec
-    /// 9). A placement that fails now is tried again at the next receive.
+    /// batch (Switch spec 8.2, Paykit spec 8.1). A placement that fails now is tried again
+    /// at the next receive. Once [`KEPT_MESSAGE_MS`] have passed since a reply's acceptance,
+    /// on the highest service time verified:
+    /// - with its record absent or deleted, it is dropped: the payer keeps what it sent that
+    ///   long, and may send it again (Paykit spec 9). Never while the copy of the payee's
+    ///   records may lack records ([`Paykit::side_unlisted`]): the absence decides nothing
+    ///   then;
+    /// - with its record held but not open, sealed under a scope key the app doesn't hold
+    ///   or a value that doesn't read, or with a sender that isn't the record's
+    ///   counterparty, it is given up, and the host told
+    ///   ([`crate::NoticeKind::MessageGivenUp`]) in the commit that drops it, as a stored
+    ///   entry's message (`stored.rs`).
+    ///
+    /// A reply over a held record goes through the stored entries' later write
+    /// ([`Paykit::place_note`]) and its one rule ([`crate::stored::later_write`]): a write the
+    /// switch refuses, for good or over a quota, past the window gives the reply up with the
+    /// notice; a write that can't be built or sent now, for a store failure or a switch that
+    /// doesn't answer, is an error, returned, and the reply stays kept. Every kept reply is
+    /// read with a restore's check, and one that fails it fails the call as a corrupt store.
     pub(crate) async fn place_kept_replies(&mut self) -> crate::error::Result<()> {
         let own = self.identity();
         for (rest, kept) in self.local_scan::<KeptMessage>(key::KEPT_REPLIES).await? {
-            let kept_key = format!("{}{rest}", key::KEPT_REPLIES);
+            // Read bound to its key, as a restore reads it: a reply that fails it is a
+            // corrupt store, so the receive fails rather than drop, give up or place it.
             let reply = kept.stored(&own)?;
+            let kept_key = format!("{}{rest}", key::KEPT_REPLIES);
             // An Allowance's answer kept before its record (`allowances.rs`).
             if crate::allowances::is_allowance_response(reply.body()) {
                 self.place_kept_allowance_response(&kept_key, reply).await?;
                 continue;
             }
-            let (Some(request), Some(role)) = (
+            let (Some(request), Some(role), Some(accepted_at)) = (
                 reply.message().refs.first(),
                 crate::activity::Role::of(reply.body()),
+                reply.accepted_at(),
             ) else {
-                self.local_delete(&kept_key).await?;
-                continue;
+                return Err(crate::error::PaykitError::corrupt());
             };
             let target = ActivityTarget::payee(
                 natural_key::request_record(&own, request),
                 reply.body().label(),
             );
-            if self.held_activity(&target).await?.is_none() {
-                let stale = reply.accepted_at().is_none_or(|at| {
-                    self.service_time()
-                        .is_some_and(|t| at.saturating_add(KEPT_MESSAGE_MS) <= t)
-                });
-                if stale {
+            let content = self
+                .app
+                .shared_record(&self.activity_key(&target)?)
+                .await?
+                .map(|held| held.content);
+            // No record yet: the reply waits for it within its window, and past it is dropped
+            // with no notice, its sender keeping it no longer either, but never while the
+            // copy may lack records.
+            if matches!(content, None | Some(RecordContent::Deleted)) {
+                if crate::stored::past_window(accepted_at, self.service_time())
+                    && !self.side_unlisted(RecordSide::Payee).await?
+                {
                     self.local_delete(&kept_key).await?;
                 }
                 continue;
             }
-            let mut tx = Tx::default();
-            tx.delete(&kept_key);
-            let sender = reply.sender();
-            match self
-                .placed_write(&target, sender, role, reply, Vec::new())
-                .await?
-            {
-                Some(entry) => {
-                    let batch = pubky_switch_client::app::OpBatch::new()
-                        .entry(entry)
-                        .locals(tx.into_writes());
-                    let _ = self.app.submit_batch(batch).await;
+            let record = match content {
+                Some(RecordContent::Value(_)) => self.held_activity(&target).await?,
+                _ => None,
+            };
+            // A reply the record can't take, its sender not the record's counterparty, isn't
+            // written: kept no longer than any other.
+            let placed = match record {
+                Some(record) if record.counterparty != reply.sender() => crate::stored::Placed::Not,
+                _ => {
+                    let mut tx = Tx::default();
+                    tx.delete(&kept_key);
+                    self.place_note(&target, role, false, reply.clone(), tx)
+                        .await?
                 }
-                None => self.local_commit(tx).await?,
+            };
+            if crate::stored::later_write(placed, accepted_at, self.service_time())
+                == crate::stored::LaterWrite::GiveUp
+            {
+                self.give_up(&kept_key, &reply).await?;
             }
         }
         Ok(())
@@ -1284,9 +1539,8 @@ impl Paykit {
         }
         match self.app.allow_list().await {
             Ok(lists) => {
-                let mut tx = Tx::default();
-                tx.put(key::LISTS_READ, &now)?
-                    .put(key::DENIED, &lists.deny)?;
+                let (deny, mut tx) = self.judged_deny(lists.deny).await?;
+                tx.put(key::LISTS_READ, &now)?.put(key::DENIED, &deny)?;
                 self.local_commit(tx).await
             }
             Err(error @ (AppError::Alarm(_) | AppError::Store(_))) => Err(error.into()),
@@ -1312,11 +1566,36 @@ impl Paykit {
                 crate::error::PaykitError::from(error)
             }
         })?;
-        let mut tx = Tx::default();
+        let (deny, mut tx) = self.judged_deny(lists.deny).await?;
         tx.put(key::LISTS_READ, &self.now())?
-            .put(key::DENIED, &lists.deny)?;
+            .put(key::DENIED, &deny)?;
         self.local_commit(tx).await?;
-        Ok(lists.deny.contains(pubky))
+        Ok(deny.contains(pubky))
+    }
+
+    /// The deny list as this app judges payments by, from `deny` as read from the switch:
+    /// with this app's own blocks and unblocks whose batch the client keeps unanswered
+    /// (`bk/`), which count at once (Paykit spec 8.1, "a block or unblock the app wrote
+    /// counts at once"): a kept `deny.put` adds its counterparty, a kept `deny.delete` takes
+    /// it out. The marks the list shows landed go, in the returned commit.
+    async fn judged_deny(
+        &self,
+        mut deny: Vec<[u8; 32]>,
+    ) -> crate::error::Result<(Vec<[u8; 32]>, Tx)> {
+        let mut tx = Tx::default();
+        for (rest, blocked) in self.local_scan::<bool>(key::OWN_BLOCKS).await? {
+            let pubky = pubky_switch_core::enc::unb64_array::<32>(&rest)
+                .map_err(|_| crate::error::PaykitError::corrupt())?;
+            let listed = deny.contains(&pubky);
+            if listed == blocked {
+                tx.delete(&key::own_block(&pubky));
+            } else if blocked {
+                deny.push(pubky);
+            } else {
+                deny.retain(|other| *other != pubky);
+            }
+        }
+        Ok((deny, tx))
     }
 
     /// Whether the identity's deny list holds `pubky`, for a payment the user starts (Paykit
@@ -1341,33 +1620,66 @@ impl Paykit {
 
     /// Block `pubky`: the identity's deny list takes it (`deny.put`, the client's
     /// [`pubky_switch_client::app::App::deny`]), and the copy of the list this app judges
-    /// payments by holds it at once, whatever its age (Paykit spec 8.1). A block made
-    /// through the client directly is seen at the next read of the lists.
+    /// payments by holds it at once, whatever its age (Paykit spec 8.1). A `deny.put` the
+    /// client keeps unanswered ([`AppError::Kept`]) counts at once all the same: the copy
+    /// holds it, and so does every fresh read of the list before an automatic payment until
+    /// the list shows it (`bk/`). A block made through the client directly is seen at the
+    /// next read of the lists.
     ///
     /// # Errors
     ///
-    /// The client's errors, such as without `manage_contacts`; nothing is written then.
+    /// The client's errors but a kept batch, such as without `manage_contacts`; nothing is
+    /// written then.
     pub async fn block(&mut self, pubky: &[u8; 32]) -> crate::error::Result<()> {
         self.refresh_own()?;
-        self.app.deny(pubky).await?;
-        self.copy_denied(pubky, true).await
+        self.list_own(pubky, true).await
     }
 
     /// Unblock `pubky`, as [`Paykit::block`] blocks: the deny list drops it, and the copy at
-    /// once. Unblocking ends the pause (Paykit spec 8.1). An unblock made through the client
-    /// directly is seen at the next read of the lists.
+    /// once. Unblocking ends the pause (Paykit spec 8.1). A `deny.delete` the client keeps
+    /// unanswered counts at once all the same, as a kept block does: the copy drops `pubky`,
+    /// and so does every fresh read of the list before an automatic payment until the list
+    /// shows it dropped (`bk/`). An unblock made through the client directly is seen at the
+    /// next read of the lists.
     ///
     /// # Errors
     ///
     /// As [`Paykit::block`].
     pub async fn unblock(&mut self, pubky: &[u8; 32]) -> crate::error::Result<()> {
         self.refresh_own()?;
-        self.app.undeny(pubky).await?;
-        self.copy_denied(pubky, false).await
+        self.list_own(pubky, false).await
     }
 
-    /// The copy of the deny list with `pubky` held or not.
-    async fn copy_denied(&mut self, pubky: &[u8; 32], held: bool) -> crate::error::Result<()> {
+    /// Write `pubky` to the deny list (`blocked`) or drop it, and the copy with it; a batch
+    /// the client keeps unanswered is marked (`bk/`) as [`Paykit::block`] says. The mark and
+    /// the copy go in one commit, so no crash leaves the one without the other.
+    async fn list_own(&mut self, pubky: &[u8; 32], blocked: bool) -> crate::error::Result<()> {
+        let sent = if blocked {
+            self.app.deny(pubky).await
+        } else {
+            self.app.undeny(pubky).await
+        };
+        let mut tx = Tx::default();
+        match sent {
+            Ok(()) => {
+                tx.delete(&key::own_block(pubky));
+            }
+            Err(error) if error.kept_batch().is_some() => {
+                tx.put(&key::own_block(pubky), &blocked)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        self.copy_denied(&mut tx, pubky, blocked).await?;
+        self.local_commit(tx).await
+    }
+
+    /// The copy of the deny list with `pubky` held or not, put in `tx`.
+    async fn copy_denied(
+        &self,
+        tx: &mut Tx,
+        pubky: &[u8; 32],
+        held: bool,
+    ) -> crate::error::Result<()> {
         let mut denied = self
             .local_get::<Vec<[u8; 32]>>(key::DENIED)
             .await?
@@ -1376,11 +1688,35 @@ impl Paykit {
         if held {
             denied.push(*pubky);
         }
-        self.local_put(key::DENIED, &denied).await
+        tx.put(key::DENIED, &denied)?;
+        Ok(())
+    }
+
+    /// Whether every send to `pubky` is held back now (Paykit spec 8.1, "Blocked
+    /// counterparties"): no list, renewal, answer or re-send request goes to it while the
+    /// copy of the deny list holds it, nor while the copy isn't known, at an app holding
+    /// `contacts`: no read of the lists succeeded since the last that failed, or since a
+    /// restore (`lr` absent). An unknown copy decides nothing, so what is owed to that
+    /// counterparty is kept, never dropped, and goes once a read shows it not blocked.
+    pub(crate) async fn sends_held(&self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
+        Ok(!self.deny_copy_known().await? || self.denied_as_last_read(pubky).await?)
+    }
+
+    /// Whether the copy of the deny list is known ([`Paykit::sends_held`]): always at an app
+    /// that doesn't read the lists, which blocks no one.
+    pub(crate) async fn deny_copy_known(&self) -> crate::error::Result<bool> {
+        if !reads_lists(self.app.cert().scopes()) {
+            return Ok(true);
+        }
+        Ok(self.local_get::<u64>(key::LISTS_READ).await?.is_some())
     }
 
     /// Whether the copy of the deny list kept from the last read holds `pubky`, at an app
-    /// holding `contacts`, for the views, which read nothing from the switch.
+    /// holding `contacts`, for the views, which read nothing from the switch, and for the
+    /// re-sends, which send a blocked counterparty nothing ([`Paykit::sends_held`]). The copy
+    /// holds this app's own blocks and unblocks at once, kept unanswered included
+    /// ([`Paykit::block`]), and a receive reads it again first once it is
+    /// [`LISTS_REFRESH_MS`] old.
     pub(crate) async fn denied_as_last_read(&self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
         if !reads_lists(self.app.cert().scopes()) {
             return Ok(false);
@@ -1461,18 +1797,27 @@ impl Paykit {
     }
 
     /// Answer the `resend_request`s the receive step kept, oldest first, each once (Paykit
-    /// spec 9). Returns how many were answered.
+    /// spec 9). One from a requester the copy of the deny list holds is dropped unanswered,
+    /// as v0.1 ran no send for a blocked peer (Paykit spec 8.1); while the copy isn't known
+    /// ([`Paykit::deny_copy_known`]), none is answered or dropped: they wait for a read of
+    /// the lists. Returns how many were answered.
     pub(crate) async fn answer_kept_resends(&mut self) -> crate::error::Result<u64> {
         let mut answered = 0u64;
+        if !self.deny_copy_known().await? {
+            return Ok(answered);
+        }
+        // Each read bound to its key, as a restore reads it: one that fails it is a corrupt
+        // store, never an answer dropped.
         for (rest, queued) in self.local_scan::<QueuedAnswer>(key::ANSWERS).await? {
-            if let Ok(request) = ResendRequest::from_body(&queued.body) {
+            let answer_key = format!("{}{rest}", key::ANSWERS);
+            // A requester blocked since the request was kept is sent nothing (Paykit spec 8.1).
+            let blocked = self.denied_as_last_read(&queued.requester).await?;
+            if let (false, Ok(request)) = (blocked, ResendRequest::from_body(&queued.body)) {
                 self.answer_resend(&queued.requester, &queued.cert, &request)
                     .await?;
                 answered = answered.saturating_add(1);
             }
-            let mut tx = Tx::default();
-            tx.delete(&format!("{}{rest}", key::ANSWERS));
-            self.local_commit(tx).await?;
+            self.local_delete(&answer_key).await?;
         }
         Ok(answered)
     }

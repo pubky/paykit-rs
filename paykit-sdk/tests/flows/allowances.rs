@@ -423,13 +423,23 @@ async fn grant(w: &World, exec: &mut Paykit, record: &[u8; 32]) {
 }
 
 /// The consent list's entry of `record`, held and confirmed, as the executor's grant
-/// writes it.
+/// writes it: of the Allowance the record holds.
 async fn consent(app: &mut Paykit, record: &[u8; 32]) {
+    let held = app.app().shared_record(record).await.unwrap().unwrap();
+    let value = AllowanceRecord::read(held.content.value().unwrap(), &app.identity()).unwrap();
     let key = format!("ac/{}", pubky_switch_core::enc::b64(record));
+    let entry = json!({
+        "v": 1,
+        "d": {
+            "counterparty": pubky_switch_core::enc::b64(&value.counterparty),
+            "allowance_id": value.allowance_id.as_str(),
+            "consent": { "held": { "confirm_again": false } },
+        },
+    });
     app.app_mut()
         .protocol_commit(&[LocalWrite::Put {
             key: key.into_bytes(),
-            value: br#"{"v":1,"d":{"held":{"confirm_again":false}}}"#.to_vec(),
+            value: serde_json::to_vec(&entry).unwrap(),
         }])
         .await
         .unwrap();
@@ -442,7 +452,7 @@ async fn consent_entry(app: &Paykit, record: &[u8; 32]) -> Option<Value> {
         .protocol_get(key.as_bytes())
         .await
         .unwrap()
-        .map(|v| serde_json::from_slice::<Value>(&v).unwrap()["d"].clone())
+        .map(|v| serde_json::from_slice::<Value>(&v).unwrap()["d"]["consent"].clone())
 }
 
 /// Bob's Allowance accepted by alice's wallet, with her `exec` app as its executor, and
@@ -2136,4 +2146,156 @@ async fn test_allowances_stop_over_a_readable_record_makes_room_when_kept() {
         .await
         .unwrap()
         .is_some());
+}
+
+#[tokio::test]
+async fn test_allowances_stop_over_a_record_holding_what_it_names_never_dropped_for_the_bound() {
+    // Bob withdraws the Allowance the wallet holds, then ends 64 it holds no record of, in
+    // one read. The withdrawal's stop is over a record that reads and holds the proposal it
+    // names: it is the stop of a held Allowance, outside the bounds of the stops for records
+    // not held, so the 64 later ones push none of it out, and the later write records it
+    // (Paykit spec 8.3, "Ends reach the executor").
+    let w = World::new();
+    let mut shop = shop(&w).await;
+    let mut wallet = wallet(&w).await;
+    let (_, mine) = proposed(&w, &mut shop, &mut wallet).await;
+    let record = AllowanceRecord::read(
+        &serde_json::to_vec(&value(&wallet, &mine).await).unwrap(),
+        &w.alice_id(),
+    )
+    .unwrap();
+    w.clock.advance_ms(1);
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.allowance_end",
+        vec![record.proposal.hash()],
+        json!({ "allowance_id": record.allowance_id.as_str() })
+            .as_object()
+            .cloned()
+            .unwrap(),
+    );
+    let bound = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
+    for i in 0..bound {
+        w.clock.advance_ms(1);
+        end_unknown(&w, &wallet, i);
+    }
+    wallet.receive(None).await.unwrap();
+    assert!(!value(&wallet, &mine).await["end"].is_null());
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Ended
+    );
+    assert_eq!(stops(&wallet).await, bound);
+    assert!(keeps_end(&w, &wallet, 0).await);
+}
+
+#[tokio::test]
+async fn test_allowances_kept_answer_refused_past_30_days_given_up_with_a_notice() {
+    // The acceptance is kept before the phone holds a record that reads. Past 30 days from
+    // its acceptance the record reads, and the switch refuses for good the write placing the
+    // answer: that refusal is the record's, so the answer is given up, the host told, as a
+    // payer's kept reply is (Paykit spec 8.1).
+    let w = World::new();
+    let (mut phone, record, written) = answer_after_a_value_that_doesnt_read(&w, false).await;
+    phone.receive(None).await.unwrap();
+    assert_eq!(phone.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "allowances",
+            paykit_lib::Collection::Allowances.fixed_policy(),
+        ),
+        &paykit_lib::derive::natural_key::allowance(
+            &w.bob_id(),
+            &AllowanceRecord::read(&written, &w.alice_id())
+                .unwrap()
+                .allowance_id,
+        ),
+    );
+    let op = phone
+        .app_mut()
+        .record_op(&target, Some(&written), Vec::new())
+        .await
+        .unwrap();
+    phone
+        .app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+    // The app's own renewals first, so the refusal meets the write placing the answer.
+    phone.app_mut().rotate().await.unwrap();
+    phone.app_mut().flush_cursor().await.unwrap();
+    refuse_writes(&w, 1);
+    phone.receive(None).await.unwrap();
+    assert!(phone.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    let notices = phone.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+    assert_eq!(raw(&phone, &record).await, written);
+}
+
+#[tokio::test]
+async fn test_allowances_consent_under_another_records_key_is_corrupt() {
+    // A consent entry read back under the key of another Allowance's record than the one it
+    // names is a corrupt store: it would let the executor pay under an Allowance its user
+    // never consented to (Paykit spec 8.3).
+    let w = World::new();
+    let (_shop, _wallet, mut exec, _phone, _, mine) = executed(&w).await;
+    let key = format!("ac/{}", pubky_switch_core::enc::b64(&mine));
+    let value = exec
+        .app()
+        .protocol_get(key.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    let other = format!("ac/{}", pubky_switch_core::enc::b64(&[3; 32]));
+    exec.app_mut()
+        .protocol_commit(&[LocalWrite::Put {
+            key: other.into_bytes(),
+            value,
+        }])
+        .await
+        .unwrap();
+    let error = exec.receive(None).await.unwrap_err();
+    assert!(error.to_string().contains("corrupt"), "{error:?}");
+}
+
+#[tokio::test]
+async fn test_allowances_notice_target_goes_once_its_notice_is_accepted() {
+    // The wallet's end queues the executor's notice with its target (`en/`); once the
+    // client reports the notice accepted, the next receive drops the target, so the targets
+    // don't grow with every notice sent.
+    let w = World::new();
+    let (_shop, mut wallet, _exec, _phone, _, mine) = executed(&w).await;
+    wallet.end_allowance(&mine).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"en/").await.unwrap().len(), 1);
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_scan(b"en/").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_allowances_notice_target_naming_another_notice_is_corrupt() {
+    // A notice target read back under another notice's `msg_id` than the one it names is a
+    // corrupt store, returned by the receive, never a silent "send to no one".
+    let w = World::new();
+    let (_shop, mut wallet, _exec, _phone, _, mine) = executed(&w).await;
+    wallet.end_allowance(&mine).await.unwrap();
+    let (key, value) = wallet.app().protocol_scan(b"en/").await.unwrap().remove(0);
+    wallet
+        .app_mut()
+        .protocol_commit(&[
+            LocalWrite::Delete { key },
+            LocalWrite::Put {
+                key: b"en/123e4567-e89b-42d3-a456-426614174000".to_vec(),
+                value,
+            },
+        ])
+        .await
+        .unwrap();
+    let error = wallet.receive(None).await.unwrap_err();
+    assert!(error.to_string().contains("corrupt"), "{error:?}");
 }

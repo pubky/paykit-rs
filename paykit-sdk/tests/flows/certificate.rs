@@ -2941,13 +2941,14 @@ async fn test_certificate_restore_taking_a_labelled_one_without_keys_keeps_the_m
 }
 
 #[tokio::test]
-async fn test_certificate_late_receipt_for_a_record_not_listed_yet_is_held_then_raised_once() {
+async fn test_certificate_late_receipt_for_a_record_not_listed_yet_is_held_then_taken_once() {
     // The wallet is narrowed to `contacts` while the phone pays bob's request: the method
     // reports a failure, `failed` is written, and its history then shows the payment made.
     // Past the claim's window the wallet is renewed to `pay` with no bundle, so its copy lacks
     // the payer record, and bob's receipt comes. The record's absence decides nothing: the
     // receipt is held, raising nothing. Once the keys come and the records are listed, it is
-    // taken once, and the wallet tells its user once.
+    // taken once. The wallet neither made the payment nor saw its claim, which the switch
+    // no longer holds: it can't tell the payment was marked failed, and raises nothing.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let me = wallet.app_id();
@@ -3015,10 +3016,8 @@ async fn test_certificate_late_receipt_for_a_record_not_listed_yet_is_held_then_
         receipts += usize::from(received(&summary, "paykit.payment_receipt"));
     }
     assert_eq!(receipts, 1);
-    let notices = wallet.notices().await.unwrap();
-    assert_eq!(notices.len(), 1, "{notices:?}");
-    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::PaidAfterFailed);
-    assert_eq!(notices[0].attempt_id, Some(attempt_id));
+    assert!(wallet.notices().await.unwrap().is_empty());
+    let _ = attempt_id;
     let value = crate::outcome_record::record_value(&mut wallet, &request)
         .await
         .unwrap();

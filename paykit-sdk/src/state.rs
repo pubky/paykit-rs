@@ -13,7 +13,9 @@
 //!
 //! Reads go through the client too: [`pubky_switch_client::app::App::protocol_get`],
 //! [`pubky_switch_client::app::App::protocol_scan`], the receive context's and, in the
-//! protocol's other callbacks, a [`pubky_switch_client::app::LocalView`].
+//! protocol's other callbacks, a [`pubky_switch_client::app::LocalView`]. Only this module
+//! makes them, and it binds every value it reads to its key before any caller sees it
+//! ([`Stored`]), at a restore as at runtime.
 //! Every value is `{"v":1,"d":<record>}`; a reader refuses another `v` as corrupt.
 //!
 //! The whole of it is Paykit's layer in the app's backups ([`crate::PaykitBackup`]), which a
@@ -22,9 +24,10 @@
 //!
 //! | Key (after `p/`) | Holds | Sensitive |
 //! |---|---|---|
-//! | `ask/<sender>/<from>` | a re-send to ask of a sender | |
+//! | `ask/<sender>/<from>` | a re-send to ask of a sender, kept while sends to it are held back (`resend.rs`) | |
 //! | `ans/<seq>/<msg_id>` | a `resend_request` received and still to be answered | |
-//! | `missed/<from>` | entries missed while lagging, or before a provider loss | |
+//! | `missed/<from>` | entries missed before a provider loss: every counterparty with Paykit activity is asked to re-send | |
+//! | `mi/<from>` | entries missed while lagging, a `missed` item's: the counterparties of open requests and unfinished payments are asked to re-send; kept, with those asked already, while a record whose counterparty it may ask is sealed | |
 //! | `j/<attempt_id>` | the payment journal: one payment, from before its `attempt` | yes |
 //! | `side/<msg_id>` | the side a cancellation is sent from, kept with the batch that queues it | |
 //! | `ar/<payee>/<app_id>` | a payee app's records that took part in its comparison, for its public endpoints | |
@@ -34,7 +37,7 @@
 //! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads | |
 //! | `kc/<record key>` | a payee's cancellation of a one-time request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
-//! | `lr` | when the app last read the lists, on the device clock; absent before the first read and after a due read failed, when new activity waits (Paykit wire 4.1) | |
+//! | `lr` | when the app last read the lists, on the device clock; absent before the first read and after a due read failed, when new activity waits (Paykit wire 4.1); never restored, so a restored app reads the deny list again before any payment | |
 //! | `spam/<pubky>` | how many messages from a blocked or flagged sender only were counted (Paykit wire 4.1) | |
 //! | `rs/<pubky>/<msg_id>` | when a message was last re-sent to a requester | |
 //! | `rsd/<pubky>/<day>` | how many messages were re-sent to a requester that day | |
@@ -43,25 +46,45 @@
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
-//! | `dl` | the deny list as the app last read it, for the views (Paykit spec 8.1) | |
+//! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
+//! | `bk/<pubky>` | this app's block (`true`) or unblock (`false`) of `pubky` whose `deny.put` or `deny.delete` the client keeps unanswered: either counts at once (Paykit spec 8.1); cleared once a read of the list shows it; never restored | |
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply to a request the app holds no record of yet, kept until it does (`receive.rs`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing, since a dropped entry's time is already in its sender's mark | |
-//! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
+//! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, with the entry's ID and message hash, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
 //! | `ae/<record key>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection (`allowances.rs`, Paykit spec 8.3) | |
 //! | `ac/<record key>` | the consent list: an Allowance this app may pay under, or removed from it for good (`allowances.rs`, Paykit spec 8.3); a restore marks every entry to confirm again | |
 //! | `cf/<record key>` | a second, different proposal or response of an Allowance, kept as the stop until the Allowance record holds `conflicted` (`allowances.rs`, Paykit spec 8.3) | |
 //! | `mc` | set by a `missed` item: every entry of the consent list is to be confirmed again, as after a restore; nothing is consented while it is set, and the next receive marks each entry so and clears it (`allowances.rs`); never restored | |
 //! | `en/<msg_id>` | the executor app an `executor_notice` is wrapped to, kept with the batch that queues it | |
 
-use paykit_lib::AttemptId;
-use pubky_switch_client::app::LocalWrite;
+use paykit_lib::bodies::ResendRequest;
+use paykit_lib::derive::{natural_key, request_obligation_blinded};
+use paykit_lib::scopes::verify_certificate;
+use paykit_lib::{AttemptId, Body};
+use pubky_switch_client::app::{LocalView, LocalWrite, ReceiveContext, RecordTarget};
+use pubky_switch_core::ident::record_key_from_blinded;
+use pubky_switch_core::records::AppCert;
+use pubky_switch_core::sig::SignedDoc;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::activity::{ActivityTarget, KeptSide};
+use crate::allowances::{allowance_target, ConsentEntry, NoticeTarget};
+use crate::app_records::SeenRecords;
 use crate::error::{PaykitError, Result};
+use crate::hold::MissedHold;
+use crate::hold::RestoreHold;
+use crate::journal::JournalEntry;
+use crate::marks::DropMark;
+use crate::notices::KeptNotice;
+use crate::pay::ListAsk;
 use crate::paykit::Paykit;
+use crate::protocol::{MissedItemMark, QueuedAsk};
+use crate::receive::{Fail, QueuedAnswer};
+use crate::records::{list_target, KeptMessage};
+use crate::stored::StoredNote;
 
 /// The schema version of Paykit's local records.
 pub(crate) const LOCAL_VERSION: u32 = 1;
@@ -87,8 +110,9 @@ pub(crate) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     .map_err(|_| PaykitError::corrupt())
 }
 
-/// Read a local record's bytes.
-pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+/// Read a local record's bytes. Private: every read binds the value to its key, through
+/// [`bound`].
+fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     let read: In<T> = serde_json::from_slice(bytes).map_err(|_| PaykitError::corrupt())?;
     if read.v != LOCAL_VERSION {
         return Err(PaykitError::corrupt());
@@ -137,25 +161,37 @@ impl Tx {
 }
 
 impl Paykit {
-    /// The record at protocol key `key`.
-    pub(crate) async fn local_get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
+    /// What binds a value read here to its key: this app's identity, and its naming key's
+    /// blinding through the client.
+    fn binding<R>(&self, read: impl FnOnce(&Binder<'_>) -> R) -> R {
+        let blind = |input: &[u8]| self.app.blind(input);
+        read(&Binder::new(self.identity(), self.app.cert(), &blind))
+    }
+
+    /// The value at protocol key `key`, read whole and bound to it ([`Stored::bind`]): `Err`
+    /// for a store failure, and a corrupt store for a value that doesn't read, isn't its
+    /// family's, or names another key than `key`. Never `None` for one that doesn't bind.
+    pub(crate) async fn local_get<T: Stored>(&self, key: &str) -> Result<Option<T>> {
         match self.app.protocol_get(key.as_bytes()).await? {
             None => Ok(None),
-            Some(bytes) => decode(&bytes).map(Some),
+            Some(bytes) => self
+                .binding(|binder| bound(key.as_bytes(), &bytes, binder))
+                .map(Some),
         }
     }
 
-    /// Every record under protocol prefix `prefix`, with the key's rest after the prefix.
-    pub(crate) async fn local_scan<T: DeserializeOwned>(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<(String, T)>> {
-        let mut out = Vec::new();
-        for (key, value) in self.app.protocol_scan(prefix.as_bytes()).await? {
-            let rest = rest_of(&key, prefix.as_bytes()).ok_or_else(PaykitError::corrupt)?;
-            out.push((rest, decode(&value)?));
-        }
-        Ok(out)
+    /// Every value under protocol prefix `prefix`, with the key's rest after the prefix, each
+    /// read whole and bound to its own key as [`Paykit::local_get`] reads one.
+    pub(crate) async fn local_scan<T: Stored>(&self, prefix: &str) -> Result<Vec<(String, T)>> {
+        let held = self.app.protocol_scan(prefix.as_bytes()).await?;
+        self.binding(|binder| {
+            let mut out = Vec::with_capacity(held.len());
+            for (key, value) in &held {
+                let rest = rest_of(key, prefix.as_bytes()).ok_or_else(PaykitError::corrupt)?;
+                out.push((rest, bound(key, value, binder)?));
+            }
+            Ok(out)
+        })
     }
 
     /// Commit `tx` on its own, in one store commit.
@@ -181,6 +217,546 @@ impl Paykit {
     }
 }
 
+/// What binding a value read back to its key takes: this app's identity, its certificate,
+/// which verifies the messages a value keeps that this app signed, and its naming key's
+/// blinding, which derives the record keys and claim keys a value names. A [`LocalView`]
+/// has neither certificate nor blinding: a value whose binding needs them doesn't read
+/// there.
+pub(crate) struct Binder<'a> {
+    own: [u8; 32],
+    cert: Option<&'a AppCert>,
+    blind: Option<Blind<'a>>,
+}
+
+/// The naming key's blinding (Switch spec 13.3).
+type Blind<'a> = &'a dyn Fn(&[u8]) -> [u8; 32];
+
+impl<'a> Binder<'a> {
+    /// The binding of the app `own`, under `cert`, blinding with `blind`.
+    pub(crate) fn new(own: [u8; 32], cert: &'a AppCert, blind: Blind<'a>) -> Self {
+        Self {
+            own,
+            cert: Some(cert),
+            blind: Some(blind),
+        }
+    }
+
+    /// The binding of a reader without the certificate or the naming key, a [`LocalView`].
+    fn unblinded(own: [u8; 32]) -> Self {
+        Self {
+            own,
+            cert: None,
+            blind: None,
+        }
+    }
+
+    fn blind(&self) -> Result<Blind<'a>> {
+        self.blind.ok_or_else(PaykitError::corrupt)
+    }
+
+    /// The record key of `target`, as the client derives it (Switch spec 13.3).
+    fn record_key(&self, target: &RecordTarget) -> Result<[u8; 32]> {
+        let policy = target
+            .collection
+            .policy
+            .hash()
+            .map_err(|_| PaykitError::corrupt())?;
+        Ok(record_key_from_blinded(
+            &target.collection.name,
+            &self.blind()?(&target.natural_key),
+            &policy,
+        ))
+    }
+}
+
+mod sealed {
+    /// Only `state.rs` implements [`super::Stored`], beside the reader.
+    pub trait Sealed {}
+}
+
+/// A value of Paykit's local state, as its families hold it, and its binding to the key it
+/// is read at. Every read goes through [`Paykit::local_get`], [`Paykit::local_scan`],
+/// [`cx_get`], [`view_get`], [`view_scan`] or, at a restore, [`restored`], each of which
+/// binds what it decodes; the type is sealed, and [`decode`] private, so no value of
+/// Paykit's state is read anywhere without its binding.
+pub(crate) trait Stored: sealed::Sealed + DeserializeOwned {
+    /// Bind the value read at `key`, of family `family`, to it: a corrupt store for a value
+    /// of another family, or one naming anything other than what its key names.
+    fn bind(&self, key: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()>;
+}
+
+/// The value `bytes` read at `key`, bound to it ([`Stored::bind`]).
+fn bound<T: Stored>(key: &[u8], bytes: &[u8], binder: &Binder<'_>) -> Result<T> {
+    let text = std::str::from_utf8(key).map_err(|_| PaykitError::corrupt())?;
+    let family = StateKey::parse(key).ok_or_else(PaykitError::corrupt)?;
+    let value = decode::<T>(bytes)?;
+    value.bind(text, &family, binder)?;
+    Ok(value)
+}
+
+/// The value at `key`, read through the receive context and bound to it as
+/// [`Paykit::local_get`] binds it. A value that doesn't bind is a corrupt store, which parks
+/// the entry (Switch spec 8.2).
+pub(crate) fn cx_get<T: Stored>(
+    cx: &ReceiveContext<'_>,
+    key: &str,
+) -> std::result::Result<Option<T>, Fail> {
+    let Some(bytes) = cx.local_get(key.as_bytes())? else {
+        return Ok(None);
+    };
+    let blind = |input: &[u8]| cx.blind(input);
+    bound(
+        key.as_bytes(),
+        &bytes,
+        &Binder::new(cx.identity(), cx.cert(), &blind),
+    )
+    .map(Some)
+    .map_err(|_| Fail::corrupt())
+}
+
+/// Every value under `prefix`, read through the receive context, with its full key, each
+/// bound to its own key as [`cx_get`] binds one.
+pub(crate) fn cx_scan<T: Stored>(
+    cx: &ReceiveContext<'_>,
+    prefix: &str,
+) -> std::result::Result<Vec<(String, T)>, Fail> {
+    let blind = |input: &[u8]| cx.blind(input);
+    let binder = Binder::new(cx.identity(), cx.cert(), &blind);
+    let mut out = Vec::new();
+    for (key, bytes) in cx.local_scan(prefix.as_bytes())? {
+        let value = bound(&key, &bytes, &binder).map_err(|_| Fail::corrupt())?;
+        let key = String::from_utf8(key).map_err(|_| Fail::corrupt())?;
+        out.push((key, value));
+    }
+    Ok(out)
+}
+
+/// The value at `key`, read through a [`LocalView`] and bound to it.
+pub(crate) fn view_get<T: Stored>(view: &LocalView<'_>, key: &str) -> Result<Option<T>> {
+    let Some(bytes) = view.local_get(key.as_bytes())? else {
+        return Ok(None);
+    };
+    bound(key.as_bytes(), &bytes, &Binder::unblinded(view.identity())).map(Some)
+}
+
+/// Every value under `prefix`, read through a [`LocalView`], with the key's rest after the
+/// prefix, each bound to its own key.
+pub(crate) fn view_scan<T: Stored>(view: &LocalView<'_>, prefix: &str) -> Result<Vec<(String, T)>> {
+    let binder = Binder::unblinded(view.identity());
+    let mut out = Vec::new();
+    for (key, value) in view.local_scan(prefix.as_bytes())? {
+        let rest = rest_of(&key, prefix.as_bytes()).ok_or_else(PaykitError::corrupt)?;
+        out.push((rest, bound(&key, &value, &binder)?));
+    }
+    Ok(out)
+}
+
+/// A value of a backup's Paykit layer at `key`, bound to it as every runtime read binds it.
+pub(crate) fn restored<T: Stored>(key: &[u8], value: &[u8], binder: &Binder<'_>) -> Result<T> {
+    bound(key, value, binder)
+}
+
+fn corrupt() -> Result<()> {
+    Err(PaykitError::corrupt())
+}
+
+impl sealed::Sealed for u64 {}
+
+/// A time or a count. Only a `missed` item's names anything: its time, which the key names.
+impl Stored for u64 {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            // The re-sends are asked from the value, so it is the time its key names.
+            StateKey::Missed { from_ms } if self == from_ms => Ok(()),
+            StateKey::CursorTime
+            | StateKey::Peer(_)
+            | StateKey::Spam(_)
+            | StateKey::Resent { .. }
+            | StateKey::ResentDay { .. }
+            | StateKey::ListsRead => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for bool {}
+
+/// A mark, which every writer sets `true`, or an own block kept unanswered.
+impl Stored for bool {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::RecordsUnlisted
+            | StateKey::MissedUnlisted
+            | StateKey::MissedConsents
+            | StateKey::PayerPassOwed
+            | StateKey::HoldConfirmed(_)
+            | StateKey::Taken(_)
+                if *self =>
+            {
+                Ok(())
+            }
+            // This app's block (`true`) or unblock (`false`) kept unanswered, of the identity
+            // its key names.
+            StateKey::OwnBlock(_) => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for RestoreHold {}
+
+/// A restore's hold, which names nothing.
+impl Stored for RestoreHold {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::RestoreHold => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for SignedDoc {}
+
+/// The certificate the records were last listed under: this identity's.
+impl Stored for SignedDoc {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::ListedCert => AppCert::verify(self, &binder.own)
+                .map(|_| ())
+                .map_err(|_| PaykitError::corrupt()),
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for QueuedAsk {}
+
+/// A re-send to ask: of the sender, from the time, its key names.
+impl Stored for QueuedAsk {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::Ask { sender, from_ms }
+                if self.sender == *sender && self.from_ms == *from_ms =>
+            {
+                Ok(())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for QueuedAnswer {}
+
+/// A `resend_request` received and queued to answer (Paykit spec 9): at the `seq` and
+/// `msg_id` its key names, its body a `resend_request`'s, and its certificate the
+/// requester's.
+impl Stored for QueuedAnswer {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::Answer { seq, msg_id } if self.seq == *seq && self.msg_id == *msg_id => {
+                ResendRequest::from_body(&self.body).map_err(|_| PaykitError::corrupt())?;
+                verify_certificate(&self.cert, &self.requester)
+                    .map(|_| ())
+                    .map_err(|_| PaykitError::corrupt())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for KeptSide {}
+
+/// The side a message was sent from: of the message its key names.
+impl Stored for KeptSide {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::Side(msg_id) if self.msg_id == *msg_id => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for SeenRecords {}
+
+/// A payee app's records seen (Switch spec 4.2): each the payee's, as it signed it, of the
+/// app its key names.
+impl Stored for SeenRecords {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::SeenRecords { payee, app_id } if self.verifies(payee, app_id) => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for ListAsk {}
+
+/// A list request asked: of the payee, and the app or none, its key names.
+impl Stored for ListAsk {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::ListAsk { payee, app_id }
+                if self.payee == *payee && self.app_id == *app_id =>
+            {
+                Ok(())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for KeptMessage {}
+
+/// A message kept: verified for this app, and of the record its key names.
+///
+/// - At `kc/<record key>`, a `paykit.payment_request_cancellation` its inbox accepted, kept
+///   under the record key of the payer's record of the request it cancels, from its sender
+///   and the first of its `refs` (Paykit spec 8.1).
+/// - At `pr/<sender>/<record key>/<msg_id>`, a payer's acceptance, rejection, cancellation
+///   or proof its inbox accepted, from that sender and of that `msg_id`, kept under the
+///   record key of this app's payee record of the request it names first, under its label
+///   (Switch spec 8.2, Paykit spec 8.1).
+/// - At `lh/<record key>`, a `paykit.private_payment_list`, kept under the record key of its
+///   payee app's `payment_lists` record, from its sender and App ID (Paykit wire 5.4).
+/// - At `pr/<sender>/<record key>/<msg_id>` too, an Allowance's acceptance or rejection its
+///   inbox accepted before this app held the proposal's record, from that sender and of that
+///   `msg_id`, kept under the record key of the Allowance record it names (Paykit spec 8.1,
+///   8.3).
+/// - At `ae/<record key>`, a counterparty's `paykit.allowance_end` its inbox accepted, kept
+///   as the stop under the record key of the Allowance record of its sender and the
+///   Allowance it names (Paykit spec 8.3, "Ends reach the executor").
+/// - At `cf/<record key>`, a second, different proposal, acceptance or rejection, kept as
+///   the stop under the record key of the Allowance record of its sender and the Allowance
+///   it names (Paykit spec 8.3, "Conflicted").
+impl Stored for KeptMessage {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let message = self.stored(&binder.own)?;
+        let first = || {
+            message
+                .message()
+                .refs
+                .first()
+                .copied()
+                .ok_or_else(PaykitError::corrupt)
+        };
+        let (target, record_key) = match (family, message.body()) {
+            (StateKey::KeptCancellation(record_key), Body::PaymentRequestCancellation(_))
+                if message.accepted_at().is_some() =>
+            {
+                let target = ActivityTarget::payer(natural_key::request_record(
+                    &message.sender(),
+                    &first()?,
+                ));
+                (target.record_target(), record_key)
+            }
+            (
+                StateKey::KeptReply {
+                    sender,
+                    record,
+                    msg_id,
+                },
+                Body::PaymentRequestAcceptance(_)
+                | Body::PaymentRequestRejection(_)
+                | Body::PaymentRequestCancellation(_)
+                | Body::PaymentProof(_),
+            ) if message.sender() == *sender
+                && message.message().msg_id == *msg_id
+                && message.accepted_at().is_some() =>
+            {
+                let target = ActivityTarget::payee(
+                    natural_key::request_record(&binder.own, &first()?),
+                    message.body().label(),
+                );
+                (target.record_target(), record)
+            }
+            (StateKey::HeldList(record_key), Body::PrivatePaymentList(_)) => (
+                list_target(&message.sender(), &message.message().from.app_id),
+                record_key,
+            ),
+            (
+                StateKey::KeptReply {
+                    sender,
+                    record,
+                    msg_id,
+                },
+                Body::AllowanceAcceptance(answer) | Body::AllowanceRejection(answer),
+            ) if message.sender() == *sender
+                && message.message().msg_id == *msg_id
+                && message.accepted_at().is_some() =>
+            {
+                (allowance_target(sender, &answer.allowance_id), record)
+            }
+            (StateKey::AllowanceEnd(record_key), Body::AllowanceEnd(end))
+                if message.accepted_at().is_some() =>
+            {
+                (
+                    allowance_target(&message.sender(), &end.allowance_id),
+                    record_key,
+                )
+            }
+            (StateKey::Conflict(record_key), Body::AllowanceProposal(proposal)) => (
+                allowance_target(&message.sender(), &proposal.allowance_id),
+                record_key,
+            ),
+            (
+                StateKey::Conflict(record_key),
+                Body::AllowanceAcceptance(answer) | Body::AllowanceRejection(answer),
+            ) => (
+                allowance_target(&message.sender(), &answer.allowance_id),
+                record_key,
+            ),
+            _ => return corrupt(),
+        };
+        if binder.record_key(&target)? != *record_key {
+            return corrupt();
+        }
+        Ok(())
+    }
+}
+
+impl sealed::Sealed for KeptNotice {}
+
+/// A notice: of the attempt and kind, or the sender and `msg_id`, its key names
+/// ([`crate::notices::bind_notice`]).
+impl Stored for KeptNotice {
+    fn bind(&self, key: &str, _: &StateKey, _: &Binder<'_>) -> Result<()> {
+        crate::notices::bind_notice(key, self)
+    }
+}
+
+impl sealed::Sealed for StoredNote {}
+
+/// A stored entry's note: of the sender and `msg_id` its key names, its message verified as
+/// theirs ([`StoredNote::bound`]).
+impl Stored for StoredNote {
+    fn bind(&self, key: &str, _: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        self.bound(key, &binder.own).map(|_| ())
+    }
+}
+
+impl sealed::Sealed for JournalEntry {}
+
+/// A journal entry (Paykit spec 7.2), checked as a restore checks it
+/// ([`JournalEntry::check_restored`]): of the attempt its key names; its claim key the one
+/// its payee and request blind to; the request it keeps that payee's request of that hash,
+/// amount, reference and label; its carrier verified for the payee; its acceptance this
+/// app's, of that request, at the `msg_id` it keeps; and its record the payer's record of
+/// that request, or, for a payment without a request, of this app's attempt the key names.
+/// An entry naming another attempt, claim, record or message would read and write one
+/// payment while its key names another.
+impl Stored for JournalEntry {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::Journal(attempt) = family else {
+            return corrupt();
+        };
+        if self.attempt()? != *attempt {
+            return corrupt();
+        }
+        let blind = binder.blind()?;
+        let cert = binder.cert.ok_or_else(PaykitError::corrupt)?;
+        self.check_restored(&binder.own, cert, |payee, request_hash| {
+            request_obligation_blinded(&blind(payee), &blind(request_hash), 0)
+        })?;
+        if self.request_hash()?.is_none()
+            && self.natural_key != natural_key::payer_payment_record(&binder.own, attempt)
+        {
+            return corrupt();
+        }
+        Ok(())
+    }
+}
+
+impl sealed::Sealed for MissedItemMark {}
+
+/// A `missed` item's mark: of the time its key names, the counterparties it asked each once,
+/// in order, as the asks leave them (`resend.rs`).
+impl Stored for MissedItemMark {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::MissedItem { from_ms }
+                if self.from_ms == *from_ms
+                    && self.asked.windows(2).all(|pair| pair[0] < pair[1]) =>
+            {
+                Ok(())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for MissedHold {}
+
+/// A `missed` item's hold, which names nothing.
+impl Stored for MissedHold {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::MissedHold => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for Vec<[u8; 32]> {}
+
+/// The copy of the deny list: identities, which name no key.
+impl Stored for Vec<[u8; 32]> {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::Denied => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for DropMark {}
+
+/// A mark of a sender's dropped messages: of the sender its key names, its times not crossed
+/// (`marks.rs`). The request it queued is checked against the outbox when it is read
+/// (`Paykit::delivered_request`): its hash is the proof of the pointer.
+impl Stored for DropMark {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::DroppedReplies { sender } | StateKey::DroppedUnverified { sender }
+                if self.sender == *sender && self.earliest_ms <= self.latest_ms =>
+            {
+                Ok(())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for ConsentEntry {}
+
+/// An entry of the consent list: of the Allowance record its key names, which its
+/// counterparty and Allowance ID derive (Paykit spec 8.3). An entry naming another
+/// Allowance would let the executor pay under one its user never consented to.
+impl Stored for ConsentEntry {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::Consent(record) = family else {
+            return corrupt();
+        };
+        let allowance_id = self.allowance_id()?;
+        if binder.record_key(&allowance_target(&self.counterparty, &allowance_id))? != *record {
+            return corrupt();
+        }
+        Ok(())
+    }
+}
+
+impl sealed::Sealed for NoticeTarget {}
+
+/// The executor app an `executor_notice` is wrapped to: of the notice's `msg_id` its key
+/// names, written in the batch that queues that notice (`allowances.rs`).
+impl Stored for NoticeTarget {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::NoticeTarget(msg_id) if self.msg_id == *msg_id => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
 /// A number in a key, zero-padded to 20 digits so keys sort numerically.
 pub(crate) fn num(n: u64) -> String {
     format!("{n:020}")
@@ -196,6 +772,7 @@ pub(crate) mod key {
     pub(crate) const ASKS: &str = "ask/";
     pub(crate) const ANSWERS: &str = "ans/";
     pub(crate) const MISSED: &str = "missed/";
+    pub(crate) const MISSED_ITEMS: &str = "mi/";
     pub(crate) const JOURNAL: &str = "j/";
     pub(crate) const PEERS: &str = "peer/";
     pub(crate) const KEPT_CANCELLATIONS: &str = "kc/";
@@ -218,6 +795,7 @@ pub(crate) mod key {
     pub(crate) const ALLOWANCE_ENDS: &str = "ae/";
     pub(crate) const CONFLICTS: &str = "cf/";
     pub(crate) const CONSENTS: &str = "ac/";
+    pub(crate) const NOTICE_TARGETS: &str = "en/";
 
     /// A counterparty's end of the Allowance whose record is `record_key`, kept as the stop.
     pub(crate) fn allowance_end(record_key: &[u8; 32]) -> String {
@@ -237,7 +815,7 @@ pub(crate) mod key {
 
     /// The executor app the `executor_notice` `msg_id` is wrapped to.
     pub(crate) fn notice_target(msg_id: &str) -> String {
-        format!("en/{msg_id}")
+        format!("{NOTICE_TARGETS}{msg_id}")
     }
 
     /// The mark of replies from `sender` dropped for the bounds.
@@ -250,6 +828,7 @@ pub(crate) mod key {
         format!("{DROPPED_UNVERIFIED}{}", b64(sender))
     }
     pub(crate) const DENIED: &str = "dl";
+    pub(crate) const OWN_BLOCKS: &str = "bk/";
     pub(crate) const TAKEN: &str = "dt/";
 
     /// The mark of the duty event `id`, taken.
@@ -265,6 +844,11 @@ pub(crate) mod key {
     /// The prefix of the replies kept from `sender`.
     pub(crate) fn kept_replies_of(sender: &[u8; 32]) -> String {
         format!("{KEPT_REPLIES}{}/", b64(sender))
+    }
+
+    /// The prefix of the notes of stored entries' messages from `sender`.
+    pub(crate) fn stored_notes_of(sender: &[u8; 32]) -> String {
+        format!("{STORED_NOTES}{}/", b64(sender))
     }
 
     /// The note of a stored entry's message `msg_id` from `sender`.
@@ -294,6 +878,10 @@ pub(crate) mod key {
         format!("{MISSED}{}", num(from))
     }
 
+    pub(crate) fn missed_item(from: u64) -> String {
+        format!("{MISSED_ITEMS}{}", num(from))
+    }
+
     pub(crate) fn journal(attempt_id: &AttemptId) -> String {
         format!("{JOURNAL}{}", attempt_id.to_text())
     }
@@ -312,6 +900,11 @@ pub(crate) mod key {
 
     pub(crate) fn held_list(record_key: &[u8; 32]) -> String {
         format!("{HELD_LISTS}{}", b64(record_key))
+    }
+
+    /// This app's block (`true`) or unblock of `pubky` kept unanswered.
+    pub(crate) fn own_block(pubky: &[u8; 32]) -> String {
+        format!("{OWN_BLOCKS}{}", b64(pubky))
     }
 
     pub(crate) fn kept_cancellation(record_key: &[u8; 32]) -> String {
@@ -355,8 +948,10 @@ pub(crate) enum StateKey {
     Ask { sender: [u8; 32], from_ms: u64 },
     /// `ans/<seq>/<msg_id>`: a `resend_request` received, to answer.
     Answer { seq: u64, msg_id: String },
-    /// `missed/<from>`: a `missed` item's re-sends to ask for.
+    /// `missed/<from>`: the re-sends to ask for after a provider loss.
     Missed { from_ms: u64 },
+    /// `mi/<from>`: a `missed` item's re-sends to ask for.
+    MissedItem { from_ms: u64 },
     /// `peer/<pubky>`: a counterparty with Paykit activity.
     Peer([u8; 32]),
     /// `kc/<record key>`: a payee's cancellation kept to place.
@@ -400,13 +995,15 @@ pub(crate) enum StateKey {
     },
     /// `dl`: the deny list as last read.
     Denied,
+    /// `bk/<pubky>`: this app's block or unblock of `pubky` kept unanswered.
+    OwnBlock([u8; 32]),
     /// `dt/<event ID>`: a duty event taken.
     Taken(String),
     /// `pd/<sender>`: the mark of a sender's replies dropped for the bounds.
     DroppedReplies { sender: [u8; 32] },
     /// `ud/<sender>`: the mark of a sender's entries dropped unverified.
     DroppedUnverified { sender: [u8; 32] },
-    /// `pr/<record key>/<msg_id>`: a payer's reply kept for its record.
+    /// `pr/<sender>/<record key>/<msg_id>`: a payer's reply kept for its record.
     KeptReply {
         sender: [u8; 32],
         record: [u8; 32],
@@ -492,8 +1089,12 @@ impl StateKey {
                     "missed" => Self::Missed {
                         from_ms: number(rest)?,
                     },
+                    "mi" => Self::MissedItem {
+                        from_ms: number(rest)?,
+                    },
                     "peer" => Self::Peer(b64_32(rest)?),
                     "kc" => Self::KeptCancellation(b64_32(rest)?),
+                    "bk" => Self::OwnBlock(b64_32(rest)?),
                     "hc" => Self::HoldConfirmed(b64_32(rest)?),
                     "lh" => Self::HeldList(b64_32(rest)?),
                     "side" => Self::Side(msg_id(rest)?),
@@ -590,6 +1191,209 @@ mod tests {
 
     use super::*;
 
+    /// The source of every module but this one, comments dropped: `(path, code)`.
+    fn sources() -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+            let mut entries: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            entries.sort();
+            for path in entries {
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    let code: String = text
+                        .lines()
+                        .filter(|line| !line.trim_start().starts_with("//"))
+                        .map(|line| format!("{line}\n"))
+                        .collect();
+                    out.push((path.display().to_string(), code));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut out,
+        );
+        out.retain(|(path, _)| !path.ends_with("src/state.rs"));
+        out
+    }
+
+    /// The text of each call of `.name(` in `code`, up to its closing parenthesis.
+    fn calls<'a>(code: &'a str, name: &str) -> Vec<&'a str> {
+        let needle = format!(".{name}(");
+        let mut out = Vec::new();
+        let mut from = 0;
+        while let Some(at) = code[from..].find(&needle) {
+            let start = from + at + needle.len();
+            let mut depth = 1usize;
+            let mut end = start;
+            for (i, c) in code[start..].char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = start + i;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            out.push(&code[start..end]);
+            from = end.max(start);
+        }
+        out
+    }
+
+    #[test]
+    fn test_state_no_raw_read_of_paykit_state_outside_its_reader() {
+        // Paykit's own state is read only here, each value bound to its key (`Stored`): the
+        // client's byte reads of the protocol's state appear in no other module, and the
+        // backup layer's raw pairs only at the restore, which binds each with `restored`.
+        for (path, code) in sources() {
+            for raw in ["protocol_get(", "protocol_scan("] {
+                assert!(!code.contains(raw), "{path}: a raw read `{raw}`");
+            }
+            if !path.ends_with("src/protocol.rs") {
+                assert!(
+                    !code.contains("decode_local_state"),
+                    "{path}: a raw read of a backup's layer"
+                );
+            }
+            for name in ["local_get", "local_scan"] {
+                for args in calls(&code, name) {
+                    assert!(
+                        !args.contains("as_bytes") && !args.contains("b\""),
+                        "{path}: a raw `{name}({args})` of the client's bytes"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_state_raw_read_scan_finds_a_raw_call() {
+        let code = "let v = cx\n    .local_get(key::journal(&a).as_bytes())?;\nview.local_scan(b\"peer/\")";
+        let found = calls(code, "local_get");
+        assert_eq!(found, ["key::journal(&a).as_bytes()"]);
+        assert_eq!(calls(code, "local_scan"), ["b\"peer/\""]);
+        assert!(calls("self.local_get::<u64>(key::CURSOR_TIME)", "local_get").is_empty());
+    }
+
+    /// `value` read at `key` as a `T`, through a reader without the naming key.
+    fn reads<T: Stored>(key: &str, value: serde_json::Value) -> bool {
+        let bytes = serde_json::to_vec(&serde_json::json!({ "v": 1, "d": value })).unwrap();
+        bound::<T>(key.as_bytes(), &bytes, &Binder::unblinded([1; 32])).is_ok()
+    }
+
+    #[test]
+    fn test_state_restore_hold_written_without_its_asked_reads() {
+        // A restore's hold as a run before the `asked` member wrote it, mid-hold when the
+        // store is upgraded: a valid run's form, so it reads, having asked none.
+        let hold = serde_json::json!({ "resend_from_ms": 1, "asks_queued": false });
+        assert!(reads::<RestoreHold>(key::RESTORE_HOLD, hold));
+    }
+
+    #[test]
+    fn test_state_marks_bound_to_their_sender_with_times_not_crossed() {
+        let mark = |sender: u8, earliest: u64, latest: u64| {
+            serde_json::json!({
+                "sender": pubky_switch_core::enc::b64(&[sender; 32]),
+                "earliest_ms": earliest, "latest_ms": latest, "due": false,
+                "asked_at_ms": null, "queued": null,
+            })
+        };
+        let at = key::dropped_replies(&[1; 32]);
+        assert!(reads::<DropMark>(&at, mark(1, 5, 6)));
+        assert!(reads::<DropMark>(
+            &key::dropped_unverified(&[1; 32]),
+            mark(1, 5, 6)
+        ));
+        assert!(!reads::<DropMark>(&at, mark(2, 5, 6)));
+        assert!(!reads::<DropMark>(&at, mark(1, 7, 6)));
+        assert!(!reads::<DropMark>(&key::peer(&[1; 32]), mark(1, 5, 6)));
+        // An own block or unblock kept, of any value, and the deny list's copy.
+        assert!(reads::<bool>(
+            &key::own_block(&[1; 32]),
+            serde_json::json!(false)
+        ));
+        assert!(reads::<Vec<[u8; 32]>>(key::DENIED, serde_json::json!([])));
+        assert!(!reads::<Vec<[u8; 32]>>(
+            key::CURSOR_TIME,
+            serde_json::json!([])
+        ));
+        assert!(reads::<bool>(key::MISSED_UNLISTED, serde_json::json!(true)));
+        assert!(reads::<MissedHold>(
+            key::MISSED_HOLD,
+            serde_json::json!({ "bound_ms": null })
+        ));
+        assert!(!reads::<MissedHold>(
+            key::RESTORE_HOLD,
+            serde_json::json!({ "bound_ms": null })
+        ));
+    }
+
+    #[test]
+    fn test_state_values_bound_to_their_family_and_key() {
+        let pubky = [3u8; 32];
+        let id = "123e4567-e89b-42d3-a456-426614174000";
+        let other = "223e4567-e89b-42d3-a456-426614174000";
+        let sender = pubky_switch_core::enc::b64(&pubky);
+        // Times and counts, at their families only; a `missed` item at its key's time.
+        assert!(reads::<u64>(&key::peer(&pubky), serde_json::json!(4)));
+        assert!(reads::<u64>(key::CURSOR_TIME, serde_json::json!(4)));
+        assert!(reads::<u64>(&key::missed(5), serde_json::json!(5)));
+        assert!(!reads::<u64>(&key::missed(5), serde_json::json!(7)));
+        assert!(!reads::<u64>(key::RECORDS_UNLISTED, serde_json::json!(1)));
+        // Marks, set only `true`, at their families only.
+        assert!(reads::<bool>(key::PAYER_PASS_OWED, serde_json::json!(true)));
+        assert!(!reads::<bool>(
+            key::PAYER_PASS_OWED,
+            serde_json::json!(false)
+        ));
+        assert!(!reads::<bool>(&key::peer(&pubky), serde_json::json!(true)));
+        // A restore's hold at its key only.
+        let hold = serde_json::json!({ "resend_from_ms": 1, "asks_queued": false, "asked": [] });
+        assert!(reads::<RestoreHold>(key::RESTORE_HOLD, hold.clone()));
+        assert!(!reads::<RestoreHold>(key::CURSOR_TIME, hold));
+        // A queued ask of the sender and time its key names.
+        let ask =
+            |from: u64| serde_json::json!({ "sender": sender, "from_ms": from, "until_ms": null });
+        assert!(reads::<QueuedAsk>(&key::ask(&pubky, 5), ask(5)));
+        assert!(!reads::<QueuedAsk>(&key::ask(&pubky, 5), ask(6)));
+        assert!(!reads::<QueuedAsk>(&key::ask(&[4; 32], 5), ask(5)));
+        // A side of the message its key names.
+        let side = |msg_id: &str| serde_json::json!({ "msg_id": msg_id, "side": "payer" });
+        assert!(reads::<KeptSide>(&key::side(id), side(id)));
+        assert!(!reads::<KeptSide>(&key::side(id), side(other)));
+        // A list ask of the payee and app its key names.
+        let asked = |app: Option<[u8; 16]>| {
+            serde_json::json!({
+                "payee": sender, "app_id": app, "held_version": null, "asked_at_ms": 1,
+            })
+        };
+        assert!(reads::<ListAsk>(&key::list_ask(&pubky, None), asked(None)));
+        assert!(!reads::<ListAsk>(
+            &key::list_ask(&pubky, None),
+            asked(Some([2; 16]))
+        ));
+        assert!(!reads::<ListAsk>(
+            &key::list_ask(&[4; 32], None),
+            asked(None)
+        ));
+        // A key the SDK doesn't write reads nothing, nor does a certificate that isn't one.
+        assert!(!reads::<u64>("zz/1", serde_json::json!(1)));
+        assert!(!reads::<SignedDoc>(
+            key::LISTED_CERT,
+            serde_json::json!({ "x": 1 })
+        ));
+    }
+
     #[test]
     fn test_state_records_refuse_another_version() {
         let bytes = encode(&7u64).unwrap();
@@ -651,6 +1455,7 @@ mod tests {
                 },
             ),
             (key::missed(9), StateKey::Missed { from_ms: 9 }),
+            (key::missed_item(9), StateKey::MissedItem { from_ms: 9 }),
             (key::peer(&pubky), StateKey::Peer(pubky)),
             (
                 key::kept_cancellation(&pubky),
@@ -667,6 +1472,7 @@ mod tests {
             (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),
             (key::LISTS_READ.into(), StateKey::ListsRead),
             (key::DENIED.into(), StateKey::Denied),
+            (key::own_block(&pubky), StateKey::OwnBlock(pubky)),
             (
                 format!("{}{}-7", key::TAKEN, "05".repeat(16)),
                 StateKey::Taken(format!("{}-7", "05".repeat(16))),
@@ -772,6 +1578,7 @@ mod tests {
             "ask/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM/7",
             "ans/00000000000000000001/not-a-uuid",
             "missed/1",
+            "mi/1",
             "j/",
             "ctx",
             "side/123E4567-E89B-42D3-A456-426614174000",

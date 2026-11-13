@@ -7,6 +7,13 @@
 //! is built from the signed message, holding its stored copy, and the record write and the
 //! message go in one batch ([`Paykit::send_with_record`]): the message is queued only if
 //! the write is applied, and the write is never made without the message (Switch spec 8.2).
+//!
+//! **An own message in a record is one to send.** No path stores a message this app signed
+//! in a record without queuing it: a request and the replies go with [`Paykit::send_with_record`]
+//! or the request's own batch, a proof in the outcome's batch that queues it, and an
+//! acceptance only once it was queued with its payment (`acceptance_released`). So a message
+//! in a record signed by this app means one to be sent, which the re-send after a restore
+//! reads it as; `test_records_own_message_written_only_where_it_is_queued` guards it.
 
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
@@ -57,21 +64,22 @@ impl KeptMessage {
         }
     }
 
-    /// Its sender, as kept: verified only by [`KeptMessage::stored`].
-    pub(crate) fn sender(&self) -> [u8; 32] {
-        self.sender
-    }
-
-    /// When its inbox accepted it, service time.
-    pub(crate) fn accepted_at(&self) -> Option<u64> {
-        self.accepted_at
-    }
-
     /// Whether the kept plaintext reads, without the recipient a full check needs.
     pub(crate) fn check_shape(&self) -> Result<()> {
         MessagePlaintext::decode(&self.plaintext)
             .map(|_| ())
             .map_err(|_| PaykitError::corrupt())
+    }
+
+    /// Bound the acceptance time kept to `bound`: whether it was later.
+    pub(crate) fn bound_acceptance(&mut self, bound: u64) -> bool {
+        match self.accepted_at {
+            Some(at) if at > bound => {
+                self.accepted_at = Some(bound);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The stored message again, verified for `recipient` as a record's copy is (Paykit wire
@@ -209,7 +217,8 @@ impl Paykit {
     /// Place `signed` in its `role` of the record at `target` and queue it, in one batch with
     /// `conditions` on the record write and the local writes `local` (Switch spec 8.2): the
     /// message goes out only if the record write is applied. Returns the `msg_id`. Nothing is
-    /// sent: the caller flushes.
+    /// sent: the caller flushes. The way an own message goes into a record: never stored
+    /// without being queued, so one in a record is one to be sent (module docs).
     ///
     /// # Errors
     ///
@@ -302,5 +311,154 @@ pub(crate) fn conflict(error: PaykitError) -> PaykitError {
         PaykitError::Conflict("the record changed meanwhile".into())
     } else {
         error
+    }
+}
+
+#[cfg(test)]
+mod own_message_tests {
+    /// Every Rust source file of the crate, by its path under `src/`, with its text.
+    fn sources() -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let name = path
+                        .strip_prefix(concat!(env!("CARGO_MANIFEST_DIR"), "/src"))
+                        .unwrap()
+                        .display()
+                        .to_string();
+                    let mut text = std::fs::read_to_string(&path).unwrap();
+                    // This test's own text names what it counts.
+                    if let Some(at) = text.find("mod own_message_tests") {
+                        text.truncate(at);
+                    }
+                    out.push((name, text));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src")),
+            &mut out,
+        );
+        out.sort();
+        out
+    }
+
+    /// The text of the function `name` in `text`: from its signature to the first line
+    /// closing it at its own indentation.
+    fn body<'a>(text: &'a str, name: &str) -> &'a str {
+        let at = text
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("no fn {name}"));
+        let start = text[..at].rfind('\n').map_or(0, |n| n + 1);
+        let indent = &text[start..at]
+            .chars()
+            .take_while(|c| *c == ' ')
+            .collect::<String>();
+        let close = format!("\n{indent}}}\n");
+        let end = text[at..].find(&close).map_or(text.len(), |n| at + n);
+        &text[at..end]
+    }
+
+    #[test]
+    fn test_records_own_message_written_only_where_it_is_queued() {
+        // The stored copy of a message this app signed is made in three places, each in the
+        // batch that queues it: `send_with_record`, the request's own batch, and the
+        // outcome's batch with its proof; and an acceptance is placed only once released.
+        // A new place that stores an own message must queue it in the same batch, so that
+        // an own message in a record is always one to be sent (module docs).
+        let sources = sources();
+        let text = |name: &str| -> &str {
+            &sources
+                .iter()
+                .find(|(file, _)| file == name)
+                .unwrap_or_else(|| panic!("no {name}"))
+                .1
+        };
+        let count = |needle: &str| -> Vec<(String, usize)> {
+            sources
+                .iter()
+                .map(|(name, text)| {
+                    let n = text
+                        .lines()
+                        .filter(|line| !line.trim_start().starts_with("//"))
+                        .filter(|line| line.contains(needle))
+                        .count();
+                    (name.clone(), n)
+                })
+                .filter(|(_, n)| *n > 0)
+                .collect()
+        };
+        let named = |pairs: &[(&str, usize)]| -> Vec<(String, usize)> {
+            pairs.iter().map(|(n, c)| ((*n).to_owned(), *c)).collect()
+        };
+        assert_eq!(
+            count("self.own_copy("),
+            named(&[
+                ("allowances.rs", 3),
+                ("pay.rs", 1),
+                ("records.rs", 1),
+                ("requests.rs", 1),
+            ]),
+            "an own message's stored copy is made somewhere new: queue it in the same batch"
+        );
+        // Every stored message is built in one of these: a received message kept
+        // (`KeptMessage::stored`) or stored by the client (`note_stored`), an own message's
+        // copy (`own_copy`), an acceptance journaled (`acceptance_message`), and the unit
+        // tests' parties and copies (`as_read`). A copy built anywhere else could store an own message unqueued.
+        assert_eq!(
+            count("StoredMessage::new("),
+            named(&[
+                ("allowances.rs", 1),
+                ("journal.rs", 1),
+                ("records.rs", 2),
+                ("stored.rs", 1),
+                ("testkit.rs", 1),
+            ]),
+            "a stored message is built somewhere new"
+        );
+        assert!(body(text("records.rs"), "own_copy").contains("StoredMessage::new("));
+        assert!(body(text("allowances.rs"), "as_read").contains("StoredMessage::new("));
+        assert!(body(text("journal.rs"), "acceptance_message").contains("StoredMessage::new("));
+        assert!(body(text("stored.rs"), "note_stored").contains("StoredMessage::new("));
+        // Each place that makes an own copy queues it with the record write.
+        let send = body(text("records.rs"), "send_with_record");
+        assert!(send.contains("self.own_copy(&signed)"));
+        assert!(send.contains(".queue(signed.clone())"));
+        assert!(send.contains("self.app.queue_signed(signed)"));
+        let request = body(text("requests.rs"), "send_request_inner");
+        assert!(request.contains("self.own_copy(&signed)"));
+        assert!(request.contains(".queue(signed)"));
+        // An Allowance's proposal, answer or end, and an end crossing a withdrawal, queue
+        // the message in the batch that writes the record (`allowances.rs`, whose own test
+        // checks every record write goes through these).
+        let allowances = text("allowances.rs");
+        let propose = body(allowances, "propose_allowance");
+        assert!(propose.contains("self.own_copy(&signed)"));
+        assert!(propose.contains(".queue(signed)"));
+        let answer = body(allowances, "answer_allowance");
+        assert!(answer.contains("self.own_copy(&signed)"));
+        assert!(answer.contains("let mut queue = vec![signed];"));
+        assert!(answer.contains(".submit_with_record(&target, &next, queue, locals)"));
+        let crossing = body(allowances, "record_end");
+        assert!(crossing.contains("self.own_copy(&own_end)"));
+        assert!(crossing.contains("queue.push(own_end);"));
+        assert!(crossing.contains(".submit_with_record(target, &next, queue, locals)"));
+        // The journal's own check reads it; only the outcome places it.
+        assert_eq!(
+            count(".acceptance_message("),
+            named(&[("journal.rs", 1), ("pay.rs", 1)]),
+            "an acceptance is placed somewhere new"
+        );
+        let pay = text("pay.rs");
+        assert!(body(pay, "outcome_record").contains("self.own_copy(proof)"));
+        let outcome = body(pay, "write_outcome");
+        assert!(outcome.contains(".outcome_record(entry, &target, paid, proof.as_ref()"));
+        assert!(outcome.contains("batch = batch.queue(proof);"));
+        assert!(outcome.contains("self.app.queue_signed(proof)"));
+        assert!(body(pay, "place_acceptance").contains("if !entry.acceptance_released {"));
     }
 }
