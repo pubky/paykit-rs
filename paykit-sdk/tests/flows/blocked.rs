@@ -1586,6 +1586,74 @@ async fn test_blocked_held_rejection_kept_unanswered_resumed_with_nothing_sent()
 }
 
 #[tokio::test]
+async fn test_blocked_held_rejection_kept_while_its_record_doesnt_read() {
+    // The rejection is held while bob is blocked. The phone then writes a value that doesn't
+    // read over the request record. Once bob is unblocked the record can't show whether it
+    // still holds the rejection, so the held answer stays, nothing is sent and nothing is
+    // given up. Once the record reads again the rejection goes, once (Paykit spec 8.1,
+    // "Blocked counterparties").
+    let w = World::new();
+    let store = std::sync::Arc::new(crate::outcome_record::NoSeenMarks::default());
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            std::sync::Arc::clone(&store)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet.block(&w.bob_id()).await.unwrap();
+    let entries = w.bob.switch().entries_from(&w.alice_id());
+    wallet.reject_request(&request, None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let target = crate::outcome_record::payer_record(&request);
+    let key = phone.app().record_key(&target).unwrap();
+    let good = phone
+        .app()
+        .shared_record(&key)
+        .await
+        .unwrap()
+        .unwrap()
+        .content
+        .value()
+        .unwrap()
+        .to_vec();
+    store.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    crate::outcome_record::phone_writes(&mut phone, &request, Some(crate::outcome_record::INVALID))
+        .await;
+    wallet.receive(None).await.unwrap();
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+        wallet.flush().await.unwrap();
+    }
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    assert_eq!(held.content.value(), Some(crate::outcome_record::INVALID));
+    assert_eq!(wallet.app().protocol_scan(b"ha/").await.unwrap().len(), 1);
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    assert!(wallet.notices().await.unwrap().is_empty());
+    phone.receive(None).await.unwrap();
+    crate::outcome_record::phone_writes(&mut phone, &request, Some(&good)).await;
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries + 1);
+    assert!(wallet.app().protocol_scan(b"ha/").await.unwrap().is_empty());
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        paykit_sdk::PayeeStatus::Rejected
+    );
+}
+
+#[tokio::test]
 async fn test_blocked_held_rejection_past_its_window_given_up_with_a_notice() {
     // Bob stays blocked for more than the rejection's replay window of 30 days: once he is
     // unblocked the client refuses to queue it, so it never goes, and a notice tells the

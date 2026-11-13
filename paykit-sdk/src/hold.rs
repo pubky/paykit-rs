@@ -654,7 +654,8 @@ impl Paykit {
     /// app pays or accepts the request. A restore's re-send of any other message tells
     /// nothing. A held answer no record shows to send any more (a later stop, such as the
     /// payee's cancellation or receipt, covers it, or the record is gone) goes with nothing
-    /// sent. The pass waits while a record of the copy is sealed under a scope key the app
+    /// sent; one whose record is held but can't be read now stays, since that record may
+    /// still hold it. The pass waits while a record of the copy is sealed under a scope key the app
     /// doesn't hold yet ([`Paykit::copy_awaits_key`]), so what such a record stores is sent
     /// once it opens; a record that doesn't bind to its key shows nothing to send. Messages
     /// to a counterparty whose sends are held wait, the restore's mark or the held answer
@@ -679,6 +680,7 @@ impl Paykit {
         let app_id = self.app.cert().app_id();
         let mut waiting = std::collections::BTreeSet::new();
         let mut still_held = std::collections::BTreeSet::new();
+        let mut done = std::collections::BTreeSet::new();
         let mut given_up = Vec::new();
         for (collection, side) in [
             (
@@ -733,6 +735,9 @@ impl Paykit {
                     continue;
                 }
                 for stored in messages {
+                    if held.contains_key(&stored.message().msg_id) {
+                        done.insert(stored.message().msg_id.clone());
+                    }
                     match self.app.queue_stored(stored.plaintext()).await {
                         Ok(msg_id) => {
                             let _ = self.app.flush_message(&msg_id).await;
@@ -771,11 +776,16 @@ impl Paykit {
             }
         }
         // Each held answer is queued, given up with its notice, or shown to send by no record
-        // any more, unless its payee's sends are still held.
+        // any more, unless its payee's sends are still held. One whose request record is
+        // held but can't be read now decides nothing yet, and stays.
         for answer in held.values() {
-            if !still_held.contains(&answer.msg_id) {
-                tx.delete(&key::held_answer(&answer.payee, &answer.msg_id));
+            if still_held.contains(&answer.msg_id) {
+                continue;
             }
+            if !done.contains(&answer.msg_id) && self.answer_record_unread(answer).await? {
+                continue;
+            }
+            tx.delete(&key::held_answer(&answer.payee, &answer.msg_id));
         }
         if owed.is_some() {
             if waiting.is_empty() {
@@ -790,6 +800,24 @@ impl Paykit {
             }
         }
         self.local_commit(tx).await
+    }
+
+    /// Whether the request record a held answer was recorded in is held but can't be read
+    /// now: a value that doesn't open, or one that doesn't read or bind. Such a record may
+    /// still hold the answer, so the answer is kept for a later pass. An absent or deleted
+    /// record, or one that binds, decides.
+    async fn answer_record_unread(&self, answer: &HeldAnswer) -> Result<bool> {
+        let target = crate::activity::ActivityTarget::payer(
+            paykit_lib::derive::natural_key::request_record(&answer.payee, &answer.request_hash),
+        );
+        let key = self.activity_key(&target)?;
+        Ok(
+            match self.app.shared_record(&key).await?.map(|held| held.content) {
+                None | Some(RecordContent::Deleted) => false,
+                Some(RecordContent::Value(_)) => self.held_activity(&target).await?.is_none(),
+                Some(RecordContent::Unreadable(_)) => true,
+            },
+        )
     }
 
     /// Queue, once after a restore, a `resend_request` to every counterparty with an open
