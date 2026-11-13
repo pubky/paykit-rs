@@ -10,9 +10,10 @@
 //!   payment without a request), it asks that sender to re-send what its inbox accepted
 //!   from the mark's earliest time (`resend_request` with `accepted_from`). The client
 //!   marked such a reply processed when it was kept, so the step that drops it forgets its
-//!   pair, and a re-sent copy is taken as a new message. A payee's cancellation kept as a stop for a request the app holds no
-//!   record of, dropped for the bounds on those stops, counts in the same mark, which is
-//!   then due at once: the request it cancels may come at any time.
+//!   pair, and a re-sent copy is taken as a new message. A payee's cancellation kept as a
+//!   stop for a request the app holds no record of, dropped for the bounds on those stops,
+//!   counts in the same mark, which is then due at once: the request it cancels may come at
+//!   any time.
 //! - **Entries dropped unverified** (`ud/<sender>`, `stored.rs`). The app asks that sender
 //!   at once to re-send what its inbox accepted from the mark's earliest time to its latest
 //!   (`accepted_from` and `accepted_until`).
