@@ -27,7 +27,7 @@ const DAY_MS: u64 = 24 * HOUR_MS;
 
 /// A monthly request for 1 btc, from now, paid to one invoice of the sending app, its
 /// proposal open a day; it ends at `ends_at`, when set.
-fn monthly(now: u64, ends_at: Option<u64>) -> RequestDraft {
+pub(crate) fn monthly(now: u64, ends_at: Option<u64>) -> RequestDraft {
     let mut endpoints = BTreeMap::new();
     endpoints.insert(
         endpoint("btc-lightning-bolt11"),
