@@ -131,7 +131,9 @@ pub struct DivergentRecord {
     /// ([`Paykit::confirm_payment`]) shows it, and the app keeps that it did, at the write
     /// shown: a confirmation counts for a credit only when given over a record shown with
     /// it, of the write a credit's refusal showed. A plain one, or one whose flag the host
-    /// set itself, leaves the credit refused.
+    /// set itself, leaves the credit refused. The showing the app keeps is the refusal it
+    /// returned to the host: that the user saw it is the host's word, as the
+    /// [`UserConfirmed`] the confirmation takes is.
     pub may_hold_credit: bool,
     /// The user has confirmed it, and the messages kept over it, receipts included, are
     /// written at the next receive ([`Paykit::receive`]): until then nothing is paid,
@@ -1494,10 +1496,11 @@ impl Paykit {
     /// recorded. Given over a record shown for a credit
     /// ([`DivergentRecord::may_hold_credit`]), of the write a credit's refusal showed, it also
     /// lets a credit go (Paykit spec 8.1 step 4); a plain one doesn't, nor one whose flag the
-    /// refusal didn't set. A mark that doesn't point to the record held is
-    /// replaced. Confirming a record no longer held ends its pause and drops the mark.
-    /// Another own app keeps its own pause until its own user confirms. A restore from a
-    /// backup pauses the record again.
+    /// refusal didn't set. The app knows only that it returned that refusal to the host; the
+    /// host shows it to the user and passes `UserConfirmed` once the user has seen it. A mark
+    /// that doesn't point to the record held is replaced. Confirming a record no longer held
+    /// ends its pause and drops the mark. Another own app keeps its own pause until its own
+    /// user confirms. A restore from a backup pauses the record again.
     ///
     /// # Errors
     ///

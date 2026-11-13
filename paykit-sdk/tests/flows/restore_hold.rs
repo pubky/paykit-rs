@@ -641,9 +641,9 @@ async fn test_restore_hold_missed_item_absence_decides_nothing_until_the_listing
 
 #[tokio::test]
 async fn test_restore_hold_missed_item_mark_stays_until_paykit_lists() {
-    // The client lists right after the item, and Paykit's listing at the end of the receive
-    // fails: the mark stays past the client's listing, and calls that only read are refused
-    // until a listing of Paykit's own ends it.
+    // Paykit's listing at the end of the receive fails: the mark stays past the client's own
+    // listing at the next read's start, and calls that only read are refused until a listing
+    // of Paykit's own ends it.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
