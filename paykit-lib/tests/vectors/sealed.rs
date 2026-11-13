@@ -515,7 +515,10 @@ fn bases(keys: &Keys) -> Bases {
             source: DestinationSource::List,
             list_version: Some(l.version),
             single_use: endpoint.single_use,
-            amount: None,
+            amount: p
+                .amount
+                .clone()
+                .expect("a proof of a payment without a request has its amount"),
         }),
         proof: Some(proof.clone()),
         ..activity(ActivitySide::Payer, bob)
@@ -738,7 +741,8 @@ periods name by their start cut to whole seconds (between two starts, before the
 period, for the request signed again ending at its March period after its ends_at, and, for \
 the request signed again anchored at half a second past midnight, the second before its \
 February period, whose own second it accepts); and, last, a period record with manual_only \
-false, which is true or absent. later_writes holds pairs of \
+false, which is true or absent, and the record of the payment without a request whose \
+unrequested has no amount, which is required. later_writes holds pairs of \
 versions of one record, the version a reader holds (held) and a later write (value), both of \
 which bind at record_key, with built_on_held true when the write builds on the held version \
 (wire 5.3 \"Seen roles\", \"Seen Allowance\", \"Seen marks\"). On alice's request record of \
@@ -838,7 +842,7 @@ fn member_cases(keys: &Keys) -> (Vec<ActivityCase>, Vec<ActivityCase>) {
     else {
         panic!("a proof")
     };
-    let with_amount = |amount| ActivityRecord {
+    let with_amount = |amount: paykit_lib::PaymentAmount| ActivityRecord {
         unrequested: b
             .unrequested
             .unrequested
@@ -846,7 +850,7 @@ fn member_cases(keys: &Keys) -> (Vec<ActivityCase>, Vec<ActivityCase>) {
             .map(|u| paykit_lib::records::UnrequestedDestination { amount, ..u }),
         ..b.unrequested.clone()
     };
-    let paid_amount = with_amount(proof.amount.clone());
+    let paid_amount = with_amount(proof.amount.clone().unwrap());
     let mut other_amount = proof.amount.clone().unwrap();
     other_amount.value = paykit_lib::Decimal::parse("0.0016").unwrap();
     let unknown = with_unknown(
@@ -971,7 +975,7 @@ fn member_cases(keys: &Keys) -> (Vec<ActivityCase>, Vec<ActivityCase>) {
         ),
         (
             "unrequested.amount other than the stored proof's",
-            with_amount(Some(other_amount)),
+            with_amount(other_amount),
             key(&b.unrequested),
         ),
     ];
@@ -1064,16 +1068,29 @@ fn period_start_cases(keys: &Keys) -> (Vec<ActivityCase>, Vec<ActivityCase>) {
 }
 
 /// Refused `activity_records` cases no record a writer builds can hold, appended last: alice's
-/// period record with `manual_only` `false`, which is `true` or absent (wire 5.3).
+/// period record with `manual_only` `false`, which is `true` or absent, and the record of a
+/// payment without a request whose `unrequested` has no `amount`, which is required (wire 5.3).
 fn written_member_cases(keys: &Keys) -> Vec<(&'static str, Vec<u8>, [u8; 32])> {
     let b = bases(keys);
     let mut value: Value = serde_json::from_slice(&b.period.to_json().unwrap()).unwrap();
     value["manual_only"] = serde_json::json!(false);
-    vec![(
-        "manual_only false in a payer's period record",
-        serde_json::to_vec(&value).unwrap(),
-        base_key(keys, &b.period),
-    )]
+    let mut unrequested: Value = serde_json::from_slice(&b.unrequested.to_json().unwrap()).unwrap();
+    unrequested["unrequested"]
+        .as_object_mut()
+        .unwrap()
+        .remove("amount");
+    vec![
+        (
+            "manual_only false in a payer's period record",
+            serde_json::to_vec(&value).unwrap(),
+            base_key(keys, &b.period),
+        ),
+        (
+            "unrequested without amount",
+            serde_json::to_vec(&unrequested).unwrap(),
+            base_key(keys, &b.unrequested),
+        ),
+    ]
 }
 
 /// A later-write case of `activity_records`: its name, whether the write builds on the

@@ -2546,7 +2546,7 @@ pub(crate) fn unrequested_of(
         source: destination.source()?,
         list_version: destination.list_version,
         single_use: destination.single_use,
-        amount: Some(amount.clone()),
+        amount: amount.clone(),
     })
 }
 
