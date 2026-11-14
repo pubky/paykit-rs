@@ -28,6 +28,11 @@
 //! - [`AppScopes`]: Paykit's side of approval.
 //! - [`app_records`]: Paykit's member of app records, and reading a payee's public
 //!   endpoints from them ([`Paykit::public_endpoints`]).
+//! - Restoring from a backup ([`Paykit::restore`]): every open request and every Allowance
+//!   the executor consented to is held until the first feed page judges the restore; a
+//!   clean one resumes with no hold, no question to the user and no re-send asked, and any
+//!   other holds them until the user confirms each or its record shows it stopped
+//!   ([`Refusal::HeldAfterRestore`], [`Paykit::confirm_possibly_cancelled`]).
 //! - Divergent records after a provider loss: paused until the user confirms
 //!   ([`Paykit::divergent_records`], [`Paykit::confirm_divergent`], [`DivergentRecord`]).
 //! - Obligations payable before a provider loss: in doubt at the new service until their

@@ -525,6 +525,8 @@ impl Stored for bool {
             | StateKey::PayerPassOwed
             | StateKey::ListsAwaitHost
             | StateKey::HoldConfirmed(_)
+            | StateKey::HoldConfirmedBefore(_)
+            | StateKey::RestoreConsent(_)
             | StateKey::NotPaidBeforeLoss(_)
             | StateKey::FloorOpened(_)
             | StateKey::Taken(_)
@@ -1172,6 +1174,8 @@ pub(crate) mod key {
     /// A `missed` item's hold whose end isn't known yet (`Paykit::bound_missed_hold`).
     pub(crate) const MISSED_END_UNKNOWN: &str = "mu";
     pub(crate) const HOLD_CONFIRMED: &str = "hc/";
+    pub(crate) const HOLD_CONFIRMED_BEFORE: &str = "hb/";
+    pub(crate) const RESTORE_CONSENTS: &str = "rc/";
     pub(crate) const LISTS_READ: &str = "lr";
     pub(crate) const HELD_LISTS: &str = "lh/";
     pub(crate) const RECORDS_UNLISTED: &str = "nl";
@@ -1411,6 +1415,18 @@ pub(crate) mod key {
         format!("{HOLD_CONFIRMED}{}", b64(record_key))
     }
 
+    /// A user's confirmation of the held request at `record_key` that the backup a restore
+    /// came from held (`crate::hold::RestoreHold::earlier`).
+    pub(crate) fn hold_confirmed_before(record_key: &[u8; 32]) -> String {
+        format!("{HOLD_CONFIRMED_BEFORE}{}", b64(record_key))
+    }
+
+    /// The restore's own mark on the consent list's entry for the Allowance record at
+    /// `record_key` (`crate::hold::RestoreHold`).
+    pub(crate) fn restore_consent(record_key: &[u8; 32]) -> String {
+        format!("{RESTORE_CONSENTS}{}", b64(record_key))
+    }
+
     /// The user's statement that `obligation` wasn't paid before the provider loss the app
     /// keeps (`loss.rs`).
     pub(crate) fn not_paid_before_loss(obligation: &[u8; 32]) -> String {
@@ -1510,6 +1526,11 @@ pub(crate) enum StateKey {
     HeldAnswer { payee: [u8; 32], msg_id: String },
     /// `hc/<record key>`: the user's confirmation of a held request.
     HoldConfirmed([u8; 32]),
+    /// `hb/<record key>`: a confirmation of a held request the restored backup held.
+    HoldConfirmedBefore([u8; 32]),
+    /// `rc/<record key>`: a consent the restore marked to be confirmed again, which a clean
+    /// verdict lifts.
+    RestoreConsent([u8; 32]),
     /// `lr`: when the lists were last read.
     ListsRead,
     /// `lh/<record key>`: a list held over a record that didn't read.
@@ -1692,6 +1713,8 @@ impl StateKey {
                     "kc" => Self::KeptCancellation(b64_32(rest)?),
                     "bk" => Self::OwnBlock(b64_32(rest)?),
                     "hc" => Self::HoldConfirmed(b64_32(rest)?),
+                    "hb" => Self::HoldConfirmedBefore(b64_32(rest)?),
+                    "rc" => Self::RestoreConsent(b64_32(rest)?),
                     "pn" => Self::NotPaidBeforeLoss(b64_32(rest)?),
                     "fo" => Self::FloorOpened(b64_32(rest)?),
                     "lh" => Self::HeldList(b64_32(rest)?),
@@ -2125,7 +2148,14 @@ mod tests {
         let read: OwnResendOwed = serde_json::from_value(stamped).unwrap();
         assert_eq!(read.restored_at_ms, Some(7));
         // A restore's hold at its key only.
-        let hold = serde_json::json!({ "resend_from_ms": 1, "asks_queued": false, "asked": [] });
+        let hold = serde_json::json!({
+            "resend_from_ms": 1,
+            "asks_queued": false,
+            "asked": [],
+            "earlier": false,
+            "earlier_asks": false,
+            "verdict": "open",
+        });
         assert!(reads::<RestoreHold>(key::RESTORE_HOLD, hold.clone()));
         assert!(!reads::<RestoreHold>(key::CURSOR_TIME, hold));
         // A queued ask of the sender and time its key names.
@@ -2294,6 +2324,14 @@ mod tests {
             (key::OWN_RESEND_OWED.into(), StateKey::OwnResendOwed),
             (key::LISTED_CERT.into(), StateKey::ListedCert),
             (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),
+            (
+                key::hold_confirmed_before(&pubky),
+                StateKey::HoldConfirmedBefore(pubky),
+            ),
+            (
+                key::restore_consent(&pubky),
+                StateKey::RestoreConsent(pubky),
+            ),
             (key::LISTS_READ.into(), StateKey::ListsRead),
             (key::DENIED.into(), StateKey::Denied),
             (key::own_block(&pubky), StateKey::OwnBlock(pubky)),

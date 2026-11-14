@@ -1284,3 +1284,289 @@ async fn test_restore_hold_request_sent_again_over_its_seen_deleted_record_chang
         pubky_switch_client::app::RecordContent::Deleted
     );
 }
+
+// -------------------------------------------------------------------------------------
+// The held cursor's verdict on the restore (Paykit spec 7.2, "What a restore loses";
+// Switch spec 12.4, "The held cursor").
+
+use pubky_switch_client::app::HeldCursor;
+
+/// `backup` restored on `store`, as a host lets the held cursor judge the restore: the
+/// newest identity.json confirmed and a first feed page read before anything else.
+async fn restored_read_first(
+    w: &World,
+    backup: &PaykitBackup,
+    store: Arc<dyn pubky_switch_client::store::StateStore>,
+) -> Paykit {
+    let mut app = Paykit::restore(
+        w.env(&w.alice, store),
+        PaykitConfig::default(),
+        backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    app.app_mut().refresh_identity().await.unwrap();
+    app.receive(None).await.unwrap();
+    app
+}
+
+/// Reconcile `app` and end reconcile mode.
+async fn reconciled(app: &mut Paykit) {
+    app.reconcile().await.unwrap();
+    app.end_reconcile(UserConfirmed::new()).await.unwrap();
+}
+
+/// The restore's hold as Paykit keeps it (`p/rh`).
+async fn restore_verdict(app: &Paykit) -> serde_json::Value {
+    let raw = app.app().protocol_get(b"rh").await.unwrap().unwrap();
+    serde_json::from_slice::<serde_json::Value>(&raw).unwrap()["d"]["verdict"].clone()
+}
+
+/// Two requests from bob open in alice's wallet, and a backup taken with both, the wallet
+/// dropped. Returns the shop, the requests, the backup, the wallet's App ID and its cursor's
+/// `seq` at the backup.
+async fn backed_up_with_requests(
+    w: &World,
+) -> (Paykit, [RequestRef; 2], PaykitBackup, [u8; 16], u64) {
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let first = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let second = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    let id = wallet.app_id();
+    let position = wallet.app().cursor().seq;
+    drop(wallet);
+    (shop, [first, second], backup, id, position)
+}
+
+#[tokio::test]
+async fn test_restore_clean_resumes_without_a_hold() {
+    // Nothing after the backup's position was passed: the held cursor shows the restore
+    // clean, so the app holds nothing for it, asks nothing of the user, and asks bob to
+    // re-send nothing.
+    let w = World::new();
+    let (mut shop, [first, second], backup, ..) = backed_up_with_requests(&w).await;
+    let mut app = restored_read_first(&w, &backup, store()).await;
+    assert_eq!(app.app().restore_held_cursor(), Some(HeldCursor::Clean));
+    reconciled(&mut app).await;
+    assert_eq!(
+        app.request(&first).await.unwrap().status,
+        RequestStatus::Open
+    );
+    assert_eq!(shop.receive(None).await.unwrap().resends, 0);
+    let paid = app
+        .pay_request_automatically(&first, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(
+        matches!(paid, PayOutcome::Paid { .. } | PayOutcome::Pending { .. }),
+        "{paid:?}"
+    );
+    let paid = app
+        .pay_request(&second, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    app.receive(None).await.unwrap();
+    assert_eq!(shop.receive(None).await.unwrap().resends, 0);
+}
+
+/// The hold after a restore that isn't clean, as before: `request` held, by hand and
+/// automatically, and bob asked to re-send.
+async fn assert_held_as_before(app: &mut Paykit, shop: &mut Paykit, request: &RequestRef) {
+    assert_eq!(
+        app.request(request).await.unwrap().status,
+        RequestStatus::Held
+    );
+    for automatic in [false, true] {
+        let refused = if automatic {
+            app.pay_request_automatically(request, PayOptions::default())
+                .await
+        } else {
+            app.pay_request(request, PayOptions::default()).await
+        }
+        .unwrap_err();
+        assert_eq!(refused.refusal(), Some(&Refusal::HeldAfterRestore));
+    }
+    let answered = shop.receive(None).await.unwrap();
+    assert!(answered.resends >= 1, "no re-send request reached bob");
+}
+
+#[tokio::test]
+async fn test_restore_held_cursor_ahead_holds_as_before() {
+    // Another instance passed entries after the backup's position: the held cursor is
+    // ahead, and the restore holds as one that isn't clean.
+    let w = World::new();
+    let (mut shop, [first, _], backup, id, position) = backed_up_with_requests(&w).await;
+    w.alice.switch().set_held_cursor(&id, position + 4);
+    let mut app = restored_read_first(&w, &backup, store()).await;
+    assert!(matches!(
+        app.app().restore_held_cursor(),
+        Some(HeldCursor::Ahead { .. })
+    ));
+    reconciled(&mut app).await;
+    assert_eq!(restore_verdict(&app).await, "not_clean");
+    assert_held_as_before(&mut app, &mut shop, &first).await;
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_restore_held_cursor_unknown_holds_as_before() {
+    // No page read yet: the verdict isn't known, and the hold is in force. Then the
+    // restored app moves its cursor before its first page: the verdict is unknown, and the
+    // restore holds as one that isn't clean.
+    let w = World::new();
+    let (mut shop, [first, _], backup, ..) = backed_up_with_requests(&w).await;
+    let mut app = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.app().restore_held_cursor(), None);
+    assert_eq!(restore_verdict(&app).await, "open");
+    app.app_mut().flush_cursor().await.unwrap();
+    app.app_mut().refresh_identity().await.unwrap();
+    app.receive(None).await.unwrap();
+    assert_eq!(app.app().restore_held_cursor(), Some(HeldCursor::Unknown));
+    reconciled(&mut app).await;
+    assert_eq!(restore_verdict(&app).await, "not_clean");
+    assert_held_as_before(&mut app, &mut shop, &first).await;
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_restore_clean_verdict_ended_by_a_later_report_holds_again() {
+    // A clean restore resumes; a later page, while the client still keeps the restore's
+    // verdict, reports the cursor ahead of the app's own position, which ends the clean
+    // verdict for an app whose devices don't share its cursor: the hold comes back as
+    // after a restore that isn't clean.
+    let w = World::new();
+    let (mut shop, [first, _], backup, id, _) = backed_up_with_requests(&w).await;
+    let mut app = restored_read_first(&w, &backup, store()).await;
+    assert_eq!(restore_verdict(&app).await, "clean");
+    assert_eq!(
+        app.request(&first).await.unwrap().status,
+        RequestStatus::Open
+    );
+    assert_eq!(shop.receive(None).await.unwrap().resends, 0);
+    let position = app.app().cursor().seq;
+    w.alice.switch().set_held_cursor(&id, position + 3);
+    app.receive(None).await.unwrap();
+    assert!(matches!(
+        app.app().restore_held_cursor(),
+        Some(HeldCursor::Ahead { .. })
+    ));
+    assert_eq!(restore_verdict(&app).await, "not_clean");
+    reconciled(&mut app).await;
+    assert_held_as_before(&mut app, &mut shop, &first).await;
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_restore_clean_lift_lost_to_a_crash_leaves_the_hold() {
+    // The client commits the clean verdict with the page; Paykit's lift is a commit of its
+    // own after it, which fails here, as a crash between the two would leave it: the hold
+    // stays in force, and the next load takes the verdict.
+    let w = World::new();
+    let (_shop, [first, _], backup, id, _) = backed_up_with_requests(&w).await;
+    let base = store();
+    let faulty = Arc::new(pubky_switch_client::store::FaultStore::new(
+        Arc::clone(&base),
+        pubky_switch_client::store::Fault::None,
+    ));
+    let mut app = Paykit::restore(
+        w.env(
+            &w.alice,
+            Arc::clone(&faulty) as Arc<dyn pubky_switch_client::store::StateStore>,
+        ),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    app.app_mut().refresh_identity().await.unwrap();
+    faulty.fail_put_once(b"p/rh");
+    assert!(app.receive(None).await.is_err());
+    assert_eq!(app.app().restore_held_cursor(), Some(HeldCursor::Clean));
+    // The hold is in force: Paykit's verdict is still open.
+    assert_eq!(restore_verdict(&app).await, "open");
+    drop(app);
+    let mut app = Paykit::load(
+        w.env(&w.alice, base),
+        PaykitConfig::default(),
+        id,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(restore_verdict(&app).await, "clean");
+    reconciled(&mut app).await;
+    assert_eq!(
+        app.request(&first).await.unwrap().status,
+        RequestStatus::Open
+    );
+}
+
+#[tokio::test]
+async fn test_restore_clean_keeps_the_hold_its_backup_held() {
+    // A first restore isn't judged clean: it holds both requests, and the user confirms
+    // the second. A backup of that state, restored clean, lifts nothing the backup held:
+    // the first stays held, and the user's confirmation still releases the second.
+    let w = World::new();
+    let (_shop, [first, second], backup, ..) = backed_up_with_requests(&w).await;
+    let mut app = restored(&w, &backup).await;
+    assert_eq!(
+        app.request(&first).await.unwrap().status,
+        RequestStatus::Held
+    );
+    app.confirm_possibly_cancelled(&second, UserConfirmed::new())
+        .await
+        .unwrap();
+    app.receive(None).await.unwrap();
+    let backup = app.backup().await.unwrap();
+    drop(app);
+    let mut app = restored_read_first(&w, &backup, store()).await;
+    assert_eq!(app.app().restore_held_cursor(), Some(HeldCursor::Clean));
+    reconciled(&mut app).await;
+    assert_eq!(restore_verdict(&app).await, "clean");
+    assert_eq!(
+        app.request(&first).await.unwrap().status,
+        RequestStatus::Held
+    );
+    assert_eq!(
+        app.request(&second).await.unwrap().status,
+        RequestStatus::Open
+    );
+}
+
+#[tokio::test]
+async fn test_restore_held_cursor_asks_sent_before_the_first_page_make_it_unknown() {
+    // A host that reconciles before its first read sends the restore's asks, in batches
+    // that carry the restored cursor move: the verdict is unknown, and the asks were owed.
+    let w = World::new();
+    let (mut shop, [first, _], backup, ..) = backed_up_with_requests(&w).await;
+    let mut app = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    app.app_mut().refresh_identity().await.unwrap();
+    reconciled(&mut app).await;
+    app.receive(None).await.unwrap();
+    assert_eq!(app.app().restore_held_cursor(), Some(HeldCursor::Unknown));
+    assert_held_as_before(&mut app, &mut shop, &first).await;
+}

@@ -6693,3 +6693,37 @@ async fn test_allowances_answer_after_a_given_up_earlier_answer_never_takes_the_
         AllowanceStatus::Conflicted
     );
 }
+
+#[tokio::test]
+async fn test_restore_clean_executor_needs_no_reconfirmation() {
+    // A clean restore (Paykit spec 7.2, "What a restore loses"; 8.3, "After a restore"):
+    // the executor's consent list is as the backup held it, with no confirmation asked of
+    // the user. One that isn't clean, the restored app moving its cursor before its first
+    // page, asks it as before.
+    Box::pin(async {
+        let w = World::new();
+        let (_shop, _wallet, mut exec, _phone, _, mine) = Box::pin(executed(&w)).await;
+        let backup = exec.backup().await.unwrap();
+        drop(exec);
+        for clean in [true, false] {
+            let mut restored = Box::pin(restored_unreceived(&w, &backup)).await;
+            if !clean {
+                restored.app_mut().flush_cursor().await.unwrap();
+            }
+            restored.app_mut().refresh_identity().await.unwrap();
+            restored.receive(None).await.unwrap();
+            assert_eq!(
+                restored.app().restore_held_cursor()
+                    == Some(pubky_switch_client::app::HeldCursor::Clean),
+                clean
+            );
+            assert_eq!(
+                Box::pin(consent_entry(&restored, &mine)).await,
+                Some(json!({ "held": { "confirm_again": !clean } }))
+            );
+            assert_eq!(restored.allowance(&mine).await.unwrap().consented, clean);
+            drop(restored);
+        }
+    })
+    .await;
+}

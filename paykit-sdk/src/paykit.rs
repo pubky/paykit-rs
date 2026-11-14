@@ -460,6 +460,9 @@ impl Paykit {
         // written under a certificate Paykit refuses.
         if paykit.certificate_refused().is_none() {
             paykit.bound_restored_cursor_time().await?;
+            // A crash between the client's commit of a restore's verdict and Paykit's taking
+            // it left the hold as it was: it is taken now (`Paykit::take_restore_verdict`).
+            paykit.take_restore_verdict().await?;
             // A restore that failed after its commit may have left its withdrawals of the
             // lists its restored outbox carries undone: they go before the host can flush
             // (`Paykit::withdraw_restored_lists`).
@@ -478,6 +481,32 @@ impl Paykit {
     /// 7.2), each request payment's claim key bound to its request under the backup's naming
     /// key. On an error, neither layer is in the store. The app is in reconcile mode until
     /// [`Paykit::reconcile`] and [`Paykit::end_reconcile`].
+    ///
+    /// The backup can predate a payee's cancellation or a counterparty's Allowance end, so
+    /// the restore holds every open request and every Allowance on the executor's consent
+    /// list until the client's verdict on the restore is known
+    /// (`App::restore_held_cursor`; Paykit spec 7.2, "What a restore loses"; Switch spec
+    /// 12.4, "The held cursor"). The verdict settles at the first feed page read once the
+    /// app has confirmed its newest `identity.json`, and before any cursor move of its own:
+    /// the host calls `app_mut().refresh_identity()` and then [`Paykit::receive`] right
+    /// after the restore, before [`Paykit::reconcile`] or any write, which sends the
+    /// restored cursor move and leaves the verdict unknown.
+    ///
+    /// - **Clean**, the service reporting a cursor at or behind the backup's position: the
+    ///   app resumes. No request reads [`crate::RequestStatus::Held`] for the restore, none
+    ///   is refused [`crate::Refusal::HeldAfterRestore`], every Allowance the backup consented to
+    ///   is consented again ([`crate::AllowanceView::consented`]), the user is asked
+    ///   nothing, and no counterparty is asked to re-send. What the backup held itself, of
+    ///   an earlier restore or a `missed` item, stays held.
+    /// - **Ahead, unknown, or not settled yet**: every open request reads held and is
+    ///   refused [`crate::Refusal::HeldAfterRestore`] until its record shows it stopped or the user
+    ///   confirms it ([`Paykit::confirm_possibly_cancelled`]), every Allowance on the
+    ///   consent list waits for the user's confirmation, and the counterparties of open
+    ///   requests and Allowances are asked to re-send from the backup's position. A report
+    ///   ahead is also a gap the client hands as a `missed` item.
+    /// - **A clean verdict a later page ends**, its cursor reported ahead of the app's own
+    ///   position, for an app whose devices don't share its cursor: the hold comes back as
+    ///   after a restore that isn't clean, the user's earlier confirmations dropped.
     ///
     /// A publishing app whose backup holds a list it published publishes no Private Payment
     /// List after the restore until the host sets its list again
@@ -803,6 +832,10 @@ impl Paykit {
             });
         }
         self.refresh_own()?;
+        // The client's verdict on a restore, settled by this read's first page or ended by a
+        // later report, lifts or brings back the restore's hold before anything acts on it
+        // (`hold.rs`).
+        Box::pin(self.take_restore_verdict()).await?;
         // The client lists the shared records at its read when a listing is owed, a
         // restore's included, before the read itself, while it holds the keys that read
         // them: a read that wasn't stopped got past that listing, so the restore's mark goes

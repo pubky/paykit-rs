@@ -137,8 +137,11 @@ pub struct AllowanceView {
     pub status: AllowanceStatus,
     /// The executor app the record's current grant names, if it holds one that verifies.
     pub executor_app_id: Option<[u8; 16]>,
-    /// Whether this app's consent list holds it, confirmed since any restore: an executor
-    /// pays under an Allowance only then (Paykit spec 8.3).
+    /// Whether this app's consent list holds it, confirmed since any restore that isn't
+    /// clean: an executor pays under an Allowance only then (Paykit spec 8.3). After a
+    /// restore it reads `false` until the first feed page shows the restore clean, which
+    /// gives back the consent the backup held with no question to the user
+    /// ([`Paykit::restore`]).
     pub consented: bool,
     /// Whether the counterparty is on the identity's deny list, as the app last read it
     /// (Paykit spec 8.1, "Blocked counterparties"): nothing new from it is taken, its
@@ -1903,8 +1906,10 @@ impl Paykit {
     /// After a `missed` item, which sets `mc` in the commit that passes it: mark every
     /// Allowance on the consent list to be confirmed by the user again, as a restore marks
     /// it ([`Consent::confirm_again`]), and clear the mark, in one commit. An end may be among
-    /// the entries the service deleted (Paykit spec 7.2, 8.3). Run after each receive; a
-    /// commit that fails leaves the mark, under which nothing is consented, for the next.
+    /// the entries the service deleted (Paykit spec 7.2, 8.3). The restore's own marks
+    /// (`rc/`) go in the same commit, so a clean verdict on the restore gives back none of
+    /// these. Run after each receive; a commit that fails leaves the mark, under which
+    /// nothing is consented, for the next.
     pub(crate) async fn confirm_consents_again(&mut self) -> Result<()> {
         if !Box::pin(self.consents_unconfirmed()).await? {
             return Ok(());
@@ -1915,6 +1920,9 @@ impl Paykit {
             if again != entry.consent {
                 tx.put(&format!("{}{rest}", key::CONSENTS), &entry.with(again))?;
             }
+        }
+        for (rest, _) in Box::pin(self.local_scan::<bool>(key::RESTORE_CONSENTS)).await? {
+            tx.delete(&format!("{}{rest}", key::RESTORE_CONSENTS));
         }
         tx.delete(key::MISSED_CONSENTS);
         Box::pin(self.local_commit(tx)).await

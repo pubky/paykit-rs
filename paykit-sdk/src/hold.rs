@@ -5,8 +5,15 @@
 //! would see the request payable. So every restore from a backup holds every open request,
 //! as the restore itself sets it: [`crate::protocol::PaykitProtocol`]'s restore step adds the
 //! hold to the writes it installs, in the restore's one commit, so no restore can leave it
-//! out; it is no part of what a backup carries, and a confirmation an older backup holds is
-//! dropped by the restore. A `missed` item (Switch spec 8.2) shows the service deleted
+//! out. The hold stays in force until the client's verdict on the restore is known
+//! (`App::restore_held_cursor`; Switch spec 12.4, "The held cursor"): a clean one, the first
+//! feed page read after the restore reporting a cursor at or behind the backup's position,
+//! lifts it with no question to the user and no re-send asked for it, since no entry after
+//! the backup's position was passed; ahead or unknown leaves it as below
+//! ([`Paykit::take_restore_verdict`]). The holds the backup held itself, of an earlier
+//! restore or a `missed` item, cover entries before its position and are carried whatever
+//! the verdict, with the user's confirmations of them (`hb/`), which never release this
+//! restore's own hold. A `missed` item (Switch spec 8.2) shows the service deleted
 //! entries before the app read them, a payee's cancellation possibly among them: the
 //! protocol's `missed` step sets the same hold (`mh`) and drops every confirmation of an
 //! earlier one, in the commit that passes the item. An item whose end isn't known (the
@@ -22,17 +29,19 @@
 //! - a cancellation the record shows, or the app keeps, stops it for good, and no
 //!   confirmation overrides it (Paykit spec 8.1).
 //!
-//! After the restore, at the reconciliation it requires, once the records are read again,
-//! the app asks every counterparty with an open request to re-send what its inbox accepted
-//! from the acceptance time of the last entry the backup's cursor had passed, less the
-//! clock tolerance (Paykit spec 9). A cancellation that comes back is kept
-//! and placed as any other.
+//! After a restore whose hold isn't lifted, at the reconciliation it requires, once the
+//! records are read again, the app asks every counterparty with an open request to re-send
+//! what its inbox accepted from the acceptance time of the last entry the backup's cursor
+//! had passed, less the clock tolerance (Paykit spec 9). A cancellation that comes back is
+//! kept and placed as any other. An ask the app sent before the verdict was known stays
+//! sent: a verdict is clean only when the first page came before any cursor move of the
+//! app, and the batch that sends an ask carries the restored one.
 
 use paykit_lib::collections::Collection;
 use paykit_lib::records::ActivityRecord;
 use pubky_switch_client::app::Protocol as _;
 use pubky_switch_client::app::{
-    AppError, Collection as SwitchCollection, PolicyFamily, RecordContent,
+    AppError, Collection as SwitchCollection, HeldCursor, PolicyFamily, RecordContent,
     Refusal as ClientRefusal, Unopened,
 };
 use pubky_switch_core::http::ErrorCode;
@@ -41,6 +50,7 @@ use pubky_switch_core::scopes::Permission;
 use pubky_switch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
 
+use crate::allowances::{Consent, ConsentEntry};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
 use crate::requests::{cancelled, rejected, RequestStatus};
@@ -57,18 +67,75 @@ pub(crate) struct RestoreHold {
     /// The counterparties asked already while a record of the copy was sealed, in
     /// increasing order ([`Paykit::queue_restore_asks`]).
     pub(crate) asked: Vec<[u8; 32]>,
+    /// Whether the backup held a restore's hold in force itself, of an earlier restore
+    /// that isn't clean, or one of a backup before it: that hold, which covers entries
+    /// before this backup's position, holds every open request as before, whatever this
+    /// restore's verdict, and a confirmation the backup holds (`hb/`) releases it.
+    pub(crate) earlier: bool,
+    /// Whether that earlier restore's re-sends were still to be asked for in the backup:
+    /// they are asked for, from the earlier of the two times, whatever this restore's
+    /// verdict.
+    pub(crate) earlier_asks: bool,
+    /// The client's verdict on this restore, as Paykit took it
+    /// ([`Paykit::take_restore_verdict`]).
+    pub(crate) verdict: RestoreVerdict,
+}
+
+/// The client's verdict on a restore, as Paykit took it (Switch spec 12.4, "The held
+/// cursor"; `App::restore_held_cursor`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RestoreVerdict {
+    /// Not known yet: the hold is in force, as after a restore that isn't clean.
+    Open,
+    /// Clean: the hold is lifted; it holds nothing and asks for nothing.
+    Clean,
+    /// Ahead or unknown, or a clean verdict a later report ended: the hold is in force for
+    /// good.
+    NotClean,
 }
 
 impl RestoreHold {
     /// The hold of a restore whose backup's cursor had passed entries accepted up to
-    /// `cursor_time_ms`.
-    pub(crate) fn of(cursor_time_ms: u64) -> Self {
+    /// `cursor_time_ms`, over `before`, the hold the backup held, if any.
+    pub(crate) fn of(cursor_time_ms: u64, before: Option<&RestoreHold>) -> Self {
+        let own = resend_from(cursor_time_ms);
+        let earlier_asks = before.is_some_and(RestoreHold::asks_owed);
         Self {
-            resend_from_ms: cursor_time_ms.saturating_sub(CLOCK_TOLERANCE_MS),
+            resend_from_ms: match before {
+                Some(before) if earlier_asks => own.min(before.resend_from_ms),
+                _ => own,
+            },
             asks_queued: false,
             asked: Vec::new(),
+            earlier: before.is_some_and(RestoreHold::holds_all),
+            earlier_asks,
+            verdict: RestoreVerdict::Open,
         }
     }
+
+    /// Whether re-sends are still to be asked for: this restore's while its hold is in
+    /// force, or an earlier one's the backup owed.
+    pub(crate) fn asks_owed(&self) -> bool {
+        !self.asks_queued && (self.in_force() || self.earlier_asks)
+    }
+
+    /// Whether this restore's own hold holds: until a clean verdict lifts it.
+    pub(crate) fn in_force(&self) -> bool {
+        self.verdict != RestoreVerdict::Clean
+    }
+
+    /// Whether the hold holds every open request, this restore's own or an earlier one the
+    /// backup held: what a backup of this state carries over ([`RestoreHold::earlier`]).
+    pub(crate) fn holds_all(&self) -> bool {
+        self.in_force() || self.earlier
+    }
+}
+
+/// From when a restore whose backup's cursor had passed entries accepted up to
+/// `cursor_time_ms` asks its counterparties to re-send: that time less the clock tolerance.
+pub(crate) fn resend_from(cursor_time_ms: u64) -> u64 {
+    cursor_time_ms.saturating_sub(CLOCK_TOLERANCE_MS)
 }
 
 /// The hold a `missed` item set (`p/mh`), bounded. An item whose end isn't known sets `p/mu`
@@ -344,7 +411,9 @@ impl Paykit {
     /// Whether the request record at `record_key`, `record`, is held after a restore or a
     /// `missed` item: one of them set the hold, the user hasn't confirmed this request
     /// since, and it is open.
-    /// After a restore every open request is held, one first seen after the restore too: no
+    /// After a restore every open request is held until the client's verdict shows the
+    /// restore clean, which lifts the hold ([`Paykit::take_restore_verdict`]); after any
+    /// other, every open request is held, one first seen after the restore too: no
     /// time the app can see proves a request new, since its creation time is the
     /// counterparty's and a request from before the backup can come again with a later
     /// acceptance time (Paykit spec 7.2, "What a restore loses": nothing releases the hold
@@ -352,16 +421,19 @@ impl Paykit {
     /// when created before the item's last acceptance time plus the clock tolerance
     /// ([`MissedHold::holds`]); while the end of an item isn't known (`mu`), every open
     /// request is held, as after a restore.
+    ///
+    /// A restore carries the holds its backup held: an earlier restore's
+    /// ([`RestoreHold::earlier`]) and a `missed` item's (`mh`, `mu`), with the user's
+    /// confirmations of them (`hb/`). This restore's own hold, while in force, is released
+    /// only by a confirmation given since it (`hc/`); a carried one by either.
     pub(crate) async fn held(
         &self,
         record_key: &[u8; 32],
         record: &ActivityRecord,
     ) -> Result<bool> {
-        let restored = self
-            .local_get::<RestoreHold>(key::RESTORE_HOLD)
-            .await?
-            .is_some();
-        let unbounded = restored
+        let hold = self.local_get::<RestoreHold>(key::RESTORE_HOLD).await?;
+        let own = hold.as_ref().is_some_and(RestoreHold::in_force);
+        let unbounded = hold.as_ref().is_some_and(RestoreHold::holds_all)
             || self
                 .local_get::<bool>(key::MISSED_END_UNKNOWN)
                 .await?
@@ -380,10 +452,18 @@ impl Paykit {
         if record.shows_paid() || cancelled(record) || rejected(record) {
             return Ok(false);
         }
-        Ok(self
+        if self
             .local_get::<bool>(&key::hold_confirmed(record_key))
             .await?
-            .is_none())
+            .is_some()
+        {
+            return Ok(false);
+        }
+        Ok(own
+            || self
+                .local_get::<bool>(&key::hold_confirmed_before(record_key))
+                .await?
+                .is_none())
     }
 
     /// Bound the hold of a `missed` item whose end isn't known (`mu`), at a receive whose
@@ -471,7 +551,7 @@ impl Paykit {
             if cursor > bound {
                 tx.put(key::CURSOR_TIME, &bound)?;
                 if let Some(mut hold) = self.local_get::<RestoreHold>(key::RESTORE_HOLD).await? {
-                    hold.resend_from_ms = RestoreHold::of(bound).resend_from_ms;
+                    hold.resend_from_ms = resend_from(bound);
                     tx.put(key::RESTORE_HOLD, &hold)?;
                 }
             }
@@ -1139,10 +1219,10 @@ impl Paykit {
             .service_time()
             .unwrap_or_else(|| self.now())
             .saturating_add(CLOCK_TOLERANCE_MS);
-        hold.resend_from_ms = hold
-            .resend_from_ms
-            .min(RestoreHold::of(bound).resend_from_ms);
-        if hold.asks_queued {
+        hold.resend_from_ms = hold.resend_from_ms.min(resend_from(bound));
+        // A hold the clean verdict lifted asks for nothing: no entry after the backup's
+        // position was passed, so none of them is lost (Paykit spec 7.2).
+        if !hold.asks_owed() {
             return Ok(());
         }
         let mut counterparties = std::collections::BTreeSet::new();
@@ -1174,6 +1254,80 @@ impl Paykit {
         } else {
             hold.asks_queued = true;
             hold.asked = Vec::new();
+        }
+        tx.put(key::RESTORE_HOLD, &hold)?;
+        self.local_commit(tx).await
+    }
+
+    /// Take the client's verdict on the last restore (`App::restore_held_cursor`; Switch
+    /// spec 12.4, "The held cursor"; Paykit spec 7.2, "What a restore loses").
+    ///
+    /// - **None yet**, before a feed page settled it: the hold stays in force, as after a
+    ///   restore that isn't clean. A verdict the client no longer keeps once the restore is
+    ///   over leaves the hold as it was last taken.
+    /// - **Clean**: the hold is lifted in one commit: no open request is held for the
+    ///   restore, no re-send is asked for it, and the consents the restore marked (`rc/`)
+    ///   are as the backup held them again, but while a `missed` item's mark (`mc`) is still
+    ///   to be applied, which marks them all. What the backup held itself stays held
+    ///   ([`Paykit::held`]).
+    /// - **Ahead or unknown**: the hold stays, for good. Ahead is a gap the client hands as
+    ///   a `missed` item, whose own hold the protocol's step sets in the commit that passes
+    ///   it. A clean verdict a later report ends brings the hold back as after a restore
+    ///   that isn't clean, in one commit: every open request held, the user's earlier
+    ///   confirmations dropped, every Allowance on the consent list to be confirmed again,
+    ///   and the re-sends asked for from the backup's position.
+    ///
+    /// The client commits the verdict before this runs: a crash between the two leaves the
+    /// hold in force, and the next load or receive takes the verdict again.
+    pub(crate) async fn take_restore_verdict(&mut self) -> Result<()> {
+        let Some(mut hold) = self.local_get::<RestoreHold>(key::RESTORE_HOLD).await? else {
+            return Ok(());
+        };
+        let clean = match self.app.restore_held_cursor() {
+            None => return Ok(()),
+            Some(HeldCursor::Clean) => true,
+            Some(_) => false,
+        };
+        let mut tx = Tx::default();
+        let marks = self.local_scan::<bool>(key::RESTORE_CONSENTS).await?;
+        match (hold.verdict, clean) {
+            (RestoreVerdict::Open, true) => {
+                let missed = self
+                    .local_get::<bool>(key::MISSED_CONSENTS)
+                    .await?
+                    .is_some();
+                let marked = Consent::Held {
+                    confirm_again: true,
+                };
+                for (rest, _) in marks {
+                    let consent_key = format!("{}{rest}", key::CONSENTS);
+                    let entry = self.local_get::<ConsentEntry>(&consent_key).await?;
+                    if let Some(entry) = entry.filter(|entry| !missed && entry.consent == marked) {
+                        let confirmed = Consent::Held {
+                            confirm_again: false,
+                        };
+                        tx.put(&consent_key, &entry.with(confirmed))?;
+                    }
+                    tx.delete(&format!("{}{rest}", key::RESTORE_CONSENTS));
+                }
+                hold.verdict = RestoreVerdict::Clean;
+            }
+            (RestoreVerdict::Open, false) => hold.verdict = RestoreVerdict::NotClean,
+            (RestoreVerdict::Clean, false) => {
+                for (rest, entry) in self.local_scan::<ConsentEntry>(key::CONSENTS).await? {
+                    let again = entry.consent.confirm_again();
+                    if again != entry.consent {
+                        tx.put(&format!("{}{rest}", key::CONSENTS), &entry.with(again))?;
+                    }
+                }
+                for prefix in [key::HOLD_CONFIRMED, key::HOLD_CONFIRMED_BEFORE] {
+                    for (rest, _) in self.local_scan::<bool>(prefix).await? {
+                        tx.delete(&format!("{prefix}{rest}"));
+                    }
+                }
+                hold.verdict = RestoreVerdict::NotClean;
+            }
+            (RestoreVerdict::Clean, true) | (RestoreVerdict::NotClean, _) => return Ok(()),
         }
         tx.put(key::RESTORE_HOLD, &hold)?;
         self.local_commit(tx).await

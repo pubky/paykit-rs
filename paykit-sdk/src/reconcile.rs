@@ -166,9 +166,10 @@ impl Paykit {
     async fn reconcile_inner(&mut self) -> Result<ReconcileReport> {
         self.refresh_own()?;
         self.list_records().await?;
-        // After a restore, the counterparties of the open requests the records now show are
-        // asked to re-send from the backup's cursor time, once (`hold.rs`, Paykit spec 7.2);
-        // what isn't sent now goes at the next receive.
+        // After a restore that a feed page hasn't shown clean, the counterparties of the open
+        // requests the records now show are asked to re-send from the backup's cursor time,
+        // once (`hold.rs`, Paykit spec 7.2); what isn't sent now goes at the next receive.
+        self.take_restore_verdict().await?;
         self.queue_restore_asks().await?;
         let _ = self.send_asks().await;
         let payer_pass = self.holds("paykit_pay");
@@ -649,10 +650,11 @@ impl Paykit {
     }
 
     /// Reconciliation finished (Switch spec 12.4 step 2.4): reconcile mode ends, and new
-    /// attempts may be made again. After a restore, the re-send requests to the open
-    /// requests' counterparties are queued first if [`Paykit::reconcile`] didn't queue them
-    /// (Paykit spec 7.2), reading the records for them: a host that ends reconcile mode
-    /// without reconciling still asks once. After a restore, payments still wait for a
+    /// attempts may be made again. After a restore that a feed page hasn't shown clean, the
+    /// re-send requests to the open requests' counterparties are queued first if
+    /// [`Paykit::reconcile`] didn't queue them (Paykit spec 7.2), reading the records for
+    /// them: a host that ends reconcile mode without reconciling still asks once; after a
+    /// clean one nothing is asked ([`Paykit::restore`]). After a restore, payments still wait for a
     /// reconcile under `paykit_pay` that runs the payer pass, if none has yet; the payee's side
     /// works at once.
     ///
@@ -662,10 +664,12 @@ impl Paykit {
     /// asks can't be queued.
     pub async fn end_reconcile(&mut self, confirmed: UserConfirmed) -> Result<()> {
         self.refresh_own()?;
+        // The verdict the client may drop as the restore ends is taken first.
+        self.take_restore_verdict().await?;
         let asks_owed = self
             .local_get::<RestoreHold>(key::RESTORE_HOLD)
             .await?
-            .is_some_and(|hold| !hold.asks_queued);
+            .is_some_and(|hold| hold.asks_owed());
         if asks_owed {
             self.list_records().await?;
             self.queue_restore_asks().await?;
