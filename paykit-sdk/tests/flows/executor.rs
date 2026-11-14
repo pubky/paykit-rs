@@ -1,6 +1,8 @@
 //! The executor (Paykit spec 8.3): the grant, the ledger, and paying a one-time request
 //! automatically under an Allowance.
 
+use std::sync::Arc;
+
 use paykit_lib::allowances::{AllowanceTerms, Ledger};
 use paykit_lib::records::AllowanceRecord;
 use paykit_sdk::{
@@ -9,10 +11,12 @@ use paykit_sdk::{
 };
 use pubky_switch_client::app::UserConfirmed;
 use pubky_switch_client::clock::Clock;
+use pubky_switch_client::store::StateStore;
+use pubky_switch_client::transport::Transport;
 use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
 use serde_json::{json, Value};
 
-use crate::common::{draft, request_from, World};
+use crate::common::{draft, request_from, ReadHook, World};
 
 fn terms_with(extra: Value) -> AllowanceTerms {
     let mut terms = json!({
@@ -2125,4 +2129,507 @@ async fn test_executor_pays_nothing_for_a_request_cancelled_while_its_payee_was_
 async fn test_executor_pays_nothing_for_a_request_cancelled_while_the_deny_copy_was_unknown() {
     held_answer_then_executor(false, true, false).await;
     held_answer_then_executor(false, true, true).await;
+}
+
+/// Alice's executor wallet as [`executor_wallet`], on `store`, its requests going through
+/// `transport`.
+async fn executor_wallet_through(
+    w: &World,
+    store: Arc<dyn StateStore>,
+    transport: Arc<dyn Transport>,
+) -> Paykit {
+    let mut app = w
+        .join_through(
+            &w.alice,
+            "wallet",
+            AppScopes::new()
+                .pay()
+                .allowance()
+                .allowance_execute()
+                .contacts()
+                .build()
+                .unwrap(),
+            paykit_sdk::PaykitConfig::default(),
+            store,
+            transport,
+        )
+        .await;
+    app.app_mut().invite(&w.bob_id()).await.unwrap();
+    app
+}
+
+/// [`set_up`], the wallet on `store`, its requests going through `transport`.
+async fn set_up_through(
+    w: &World,
+    store: Arc<dyn StateStore>,
+    transport: Arc<dyn Transport>,
+) -> (Paykit, Paykit, [u8; 32]) {
+    let mut shop = Box::pin(allowance_shop(w)).await;
+    let mut wallet = Box::pin(executor_wallet_through(w, store, transport)).await;
+    let record = Box::pin(accepted(w, &mut shop, &mut wallet, terms_with(json!({})))).await;
+    wallet
+        .grant_executor(&record, UserConfirmed::new())
+        .await
+        .unwrap();
+    (shop, wallet, record)
+}
+
+/// [`set_up_through`], the wallet on `store`.
+async fn set_up_on(w: &World, store: Arc<dyn StateStore>) -> (Paykit, Paykit, [u8; 32]) {
+    let router = Arc::clone(&w.router) as Arc<dyn Transport>;
+    Box::pin(set_up_through(w, store, router)).await
+}
+
+/// The service's mark of an upload, kept as divergent for a record.
+const UPLOADER: [u8; 16] = [0x5b; 16];
+
+#[tokio::test]
+async fn test_executor_pays_nothing_under_an_allowance_record_seen_divergent_until_confirmed() {
+    // After a provider loss the Allowance record's view shows it divergent: its upload may
+    // hold an end or a rejection the current write lacks. The executor pays nothing under
+    // it, and once a newer write clears the view it still pays nothing until the user
+    // confirms the record (Paykit spec 6, "Divergent records"; 8.3, "Executor").
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(&w, terms_with(json!({})))).await;
+    let mut other = w
+        .join(
+            &w.alice,
+            "other",
+            AppScopes::new().allowance().build().unwrap(),
+        )
+        .await;
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    w.alice
+        .switch()
+        .make_divergent(UPLOADER, record, [1; 32])
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let refused = Box::pin(wallet.pay_under_allowance(&request, &record))
+        .await
+        .unwrap_err();
+    assert!(
+        refused_for(&refused, "divergent or untrusted"),
+        "{refused:?}"
+    );
+    // Another own app writes the record again, unchanged: the view isn't divergent now.
+    other.receive(None).await.unwrap();
+    let (allowance, _) = held(&other, &record).await;
+    other
+        .app_mut()
+        .put_record(
+            &allowances_target(&allowance),
+            &allowance.to_json().unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(
+        !wallet
+            .app()
+            .shared_record(&record)
+            .await
+            .unwrap()
+            .unwrap()
+            .divergent
+    );
+    let refused = Box::pin(wallet.pay_under_allowance(&request, &record))
+        .await
+        .unwrap_err();
+    assert!(refused_for(&refused, "seen divergent"), "{refused:?}");
+    assert!(w.rail.all_executions().is_empty());
+    crate::divergent::confirm(&mut wallet, &record)
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let paid = Box::pin(wallet.pay_under_allowance(&request, &record))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+}
+
+#[tokio::test]
+async fn test_executor_pays_nothing_under_a_ledger_seen_divergent() {
+    // The ledger record's view shows it divergent: its upload may hold entries the current
+    // write lacks, so the room left under the limits isn't known. The executor pays nothing
+    // under the Allowance, and the ledger is shown among the divergent records; nothing is
+    // paid until the user confirms it and a newer write clears the view (Paykit spec 6,
+    // "Divergent records"; 8.3, "Building on a version accepts it").
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(&w, terms_with(json!({})))).await;
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    let ledger = ledger_key(&wallet, &record).await;
+    w.alice
+        .switch()
+        .make_divergent(UPLOADER, ledger, [1; 32])
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let refused = Box::pin(wallet.pay_under_allowance(&request, &record))
+        .await
+        .unwrap_err();
+    assert!(
+        refused_for(&refused, "the ledger is divergent, or was seen so"),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    let shown = wallet.divergent_records().await.unwrap();
+    assert!(
+        shown.iter().any(|shown| shown.record == ledger
+            && shown.collection == paykit_lib::collections::Collection::AllowanceLedgers),
+        "{shown:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_executor_pays_nothing_while_an_answer_is_kept_to_write() {
+    // Alice's wallet proposed as allower, and bob accepted. An answer of bob's to the
+    // proposal kept before the record and not yet written (`pr/`) may be an earlier
+    // different answer, which takes the response or makes the Allowance conflicted once it
+    // is written: while it is kept the executor pays nothing under the Allowance (Paykit
+    // spec 8.1, "Replies before their record"; 8.3, "Conflicted").
+    let w = World::new();
+    let mut shop = Box::pin(allowance_shop(&w)).await;
+    let mut wallet = Box::pin(executor_wallet(&w, "wallet")).await;
+    let sent = wallet
+        .propose_allowance(w.bob_id(), AllowanceRole::Allower, terms_with(json!({})))
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let theirs = shop.allowances().await.unwrap()[0].record;
+    shop.accept_allowance(&theirs).await.unwrap();
+    // The switch refuses the acceptance's write: it is kept to write.
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::TooLarge,
+            current: Value::Null,
+        });
+    wallet.receive(None).await.unwrap();
+    let mut kept = wallet.app().protocol_scan(b"pr/").await.unwrap();
+    assert_eq!(kept.len(), 1);
+    let (key, value) = kept.remove(0);
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert_eq!(
+        wallet.allowance(&sent.record).await.unwrap().status,
+        AllowanceStatus::Accepted
+    );
+    wallet
+        .grant_executor(&sent.record, UserConfirmed::new())
+        .await
+        .unwrap();
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    // The answer is kept to write again, as it was before its write.
+    wallet
+        .app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put { key, value }])
+        .await
+        .unwrap();
+    let refused = Box::pin(wallet.pay_under_allowance(&request, &sent.record))
+        .await
+        .unwrap_err();
+    assert!(
+        refused_for(&refused, "an answer to the Allowance's proposal is kept"),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_executor_pays_nothing_while_its_counterparty_owes_a_resend() {
+    // Bob's replies kept before their records pass the bound on one sender's kept replies:
+    // the earliest is dropped, and bob owes a re-send (`pd/`). An answer to the Allowance's
+    // proposal may be among the dropped replies, so while the re-send is owed the executor
+    // pays nothing under an Allowance of bob's (Paykit spec 8.1, "Replies before their
+    // record"; 8.3, "Conflicted").
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(&w, terms_with(json!({})))).await;
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    for i in 0..=paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER {
+        w.clock.advance_ms(1);
+        w.inject(
+            &w.bob,
+            "shop",
+            &w.alice,
+            &[wallet.app_id()],
+            "paykit.allowance_acceptance",
+            vec![[u8::try_from(i).unwrap(); 32]],
+            json!({ "allowance_id": paykit_lib::AllowanceId::generate().unwrap().as_str() })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        );
+    }
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"pd/").await.unwrap().len(), 1);
+    let refused = Box::pin(wallet.pay_under_allowance(&request, &record))
+        .await
+        .unwrap_err();
+    assert!(refused_for(&refused, "owes a re-send"), "{refused:?}");
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_executor_pays_nothing_when_the_resend_mark_does_not_read() {
+    // The mark of a re-send bob owes holds a value that doesn't read: a corrupt store, never
+    // no mark, so the executor pays nothing (Paykit spec 8.1, "Replies before their record").
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(&w, terms_with(json!({})))).await;
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    let bob = pubky_switch_core::enc::b64(&w.bob_id());
+    wallet
+        .app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: format!("pd/{bob}").into_bytes(),
+            value: serde_json::to_vec(&json!({ "v": 1, "d": { "sender": bob } })).unwrap(),
+        }])
+        .await
+        .unwrap();
+    let failed = Box::pin(wallet.pay_under_allowance(&request, &record))
+        .await
+        .unwrap_err();
+    assert!(crate::common::is_corrupt(&failed), "{failed:?}");
+    assert!(w.rail.all_executions().is_empty());
+}
+
+const MINUTE_MS: u64 = 60_000;
+
+/// A store that notes the commit that journals an attempt's `Paying`, and runs a hook once,
+/// during it: after the checks before the commit and before the payment method's call.
+#[derive(Default)]
+struct PayingStore {
+    inner: pubky_switch_client::store::MemoryStore,
+    paying: std::sync::atomic::AtomicBool,
+    hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl PayingStore {
+    fn on_paying(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.hook.lock().unwrap() = Some(Box::new(hook));
+    }
+
+    /// Whether an attempt's `Paying` was committed.
+    fn paying_seen(&self) -> bool {
+        self.paying.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl StateStore for PayingStore {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        const PAYING: &[u8] = b"\"stage\":\"paying\"";
+        let paying = batch.writes.iter().any(|write| {
+            matches!(write, pubky_switch_client::store::Write::Put { key, value, .. }
+                if key.starts_with(b"p/j/") && value.windows(PAYING.len()).any(|w| w == PAYING))
+        });
+        self.inner.commit(batch)?;
+        if paying {
+            self.paying.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(hook) = self.hook.lock().unwrap().take() {
+                hook();
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Another payer app of alice's, holding `pay` and `manage_contacts`.
+async fn keeper(w: &World) -> Paykit {
+    let mut keeper = w
+        .join(
+            &w.alice,
+            "keeper",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+        )
+        .await;
+    keeper.app_mut().invite(&w.carol_id()).await.unwrap();
+    keeper
+}
+
+/// [`keeper`], which drops carol's request for the block and unblocks her: its next
+/// receive, once the lists are read again, asks her for the request and raises the block
+/// floor past every request made before it.
+async fn keeper_about_to_raise_the_floor(w: &World) -> Paykit {
+    let mut keeper = Box::pin(keeper(w)).await;
+    let mut till = w
+        .join(
+            &w.carol,
+            "till",
+            AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    request_from(&mut till, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    keeper.app_mut().deny(&w.carol_id()).await.unwrap();
+    keeper.receive(None).await.unwrap();
+    keeper.unblock(&w.carol_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    keeper
+}
+
+/// Run `keeper`'s receive on its own thread, which raises the floor, while the caller waits.
+fn raise_the_floor(w: &World, mut keeper: Paykit) {
+    let carol = w.carol_id();
+    let asked = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {
+                keeper.receive(None).await.unwrap();
+                crate::common::asked(&keeper, &carol).await.len()
+            })
+    })
+    .join()
+    .unwrap();
+    assert_eq!(asked, 1);
+}
+
+/// The executor's payment of `request` under `record`, held at its dispatch: nothing
+/// reaches the payment method, the outcome is pending, the ledger holds the attempt's entry
+/// from the batch written before the dispatch, and the attempt is known unsubmitted.
+async fn held_at_the_dispatch(
+    w: &World,
+    wallet: &mut Paykit,
+    request: &RequestRef,
+    record: &[u8; 32],
+) {
+    let outcome = Box::pin(wallet.pay_under_allowance(request, record))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
+    assert!(w.rail.all_executions().is_empty());
+    let PayOutcome::Pending { attempt_id, .. } = outcome else {
+        unreachable!()
+    };
+    assert_eq!(w.rail.pay_calls(&attempt_id), 0);
+    let (_, ledger) = held(wallet, record).await;
+    assert_eq!(ledger.unwrap().entries.len(), 1);
+    let payment = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Attempted);
+}
+
+#[tokio::test]
+async fn test_executor_floor_raised_before_the_paying_commit_holds_the_dispatch() {
+    // Bob's request is dated above the floor the wallet holds. Right after the executor
+    // reads the ledger, another payer app raises the floor past the request. The floor read
+    // from the switch before the attempt's `Paying` commit holds the dispatch: nothing is
+    // journaled `Paying` and nothing is sent (Paykit spec 8.1, "Blocked counterparties";
+    // 8.3, "Executor").
+    let w = Arc::new(World::new());
+    let wallet_store = Arc::new(PayingStore::default());
+    let reads = Arc::new(ReadHook::new(Arc::clone(&w.router)));
+    let (mut shop, mut wallet, record) = Box::pin(set_up_through(
+        &w,
+        Arc::clone(&wallet_store) as Arc<dyn StateStore>,
+        Arc::clone(&reads) as Arc<dyn Transport>,
+    ))
+    .await;
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    let keeper = Box::pin(keeper_about_to_raise_the_floor(&w)).await;
+    let ledger = ledger_key(&wallet, &record).await;
+    let world = Arc::clone(&w);
+    reads.after_read(
+        &format!("/records/{}", pubky_switch_core::enc::b64(&ledger)),
+        move || raise_the_floor(&world, keeper),
+    );
+    Box::pin(held_at_the_dispatch(&w, &mut wallet, &request, &record)).await;
+    assert!(reads.fired());
+    assert!(!wallet_store.paying_seen());
+}
+
+#[tokio::test]
+async fn test_executor_floor_raised_after_the_paying_commit_holds_the_dispatch() {
+    // While the attempt's `Paying` commit runs, another payer app raises the floor past
+    // bob's request. The floor read from the switch again after the commit holds the
+    // dispatch, and the attempt goes back to known unsubmitted (Paykit spec 8.1, "Blocked
+    // counterparties"; 8.3, "Executor").
+    let w = Arc::new(World::new());
+    let wallet_store = Arc::new(PayingStore::default());
+    let (mut shop, mut wallet, record) = Box::pin(set_up_on(
+        &w,
+        Arc::clone(&wallet_store) as Arc<dyn StateStore>,
+    ))
+    .await;
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    let keeper = Box::pin(keeper_about_to_raise_the_floor(&w)).await;
+    let world = Arc::clone(&w);
+    wallet_store.on_paying(move || raise_the_floor(&world, keeper));
+    Box::pin(held_at_the_dispatch(&w, &mut wallet, &request, &record)).await;
+    assert!(wallet_store.paying_seen());
+}
+
+#[tokio::test]
+async fn test_executor_floor_read_failing_at_the_dispatch_holds_it() {
+    // No raise, but the floor's read after the attempt's `Paying` commit fails: it never
+    // counts as a floor that doesn't hold the request, so the dispatch is held (Paykit spec
+    // 8.1, "Blocked counterparties"; 8.3, "Executor").
+    let w = Arc::new(World::new());
+    let wallet_store = Arc::new(PayingStore::default());
+    let (mut shop, mut wallet, record) = Box::pin(set_up_on(
+        &w,
+        Arc::clone(&wallet_store) as Arc<dyn StateStore>,
+    ))
+    .await;
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    let world = Arc::clone(&w);
+    wallet_store.on_paying(move || {
+        // The request record is read again first, then the floor, which fails.
+        world
+            .alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+                path: "/records/".into(),
+                after: 1,
+            });
+    });
+    Box::pin(held_at_the_dispatch(&w, &mut wallet, &request, &record)).await;
+}
+
+#[tokio::test]
+async fn test_executor_payee_blocked_after_the_paying_commit_not_paid() {
+    // While the attempt's `Paying` commit runs, another payer app blocks bob. The deny list
+    // read from the switch again after the commit holds the dispatch: no automatic payment
+    // to a blocked payee (Paykit spec 8.1, "Blocked counterparties"; 8.3, "Executor").
+    let w = Arc::new(World::new());
+    let wallet_store = Arc::new(PayingStore::default());
+    let (mut shop, mut wallet, record) = Box::pin(set_up_on(
+        &w,
+        Arc::clone(&wallet_store) as Arc<dyn StateStore>,
+    ))
+    .await;
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    let mut keeper = Box::pin(keeper(&w)).await;
+    let bob = w.bob_id();
+    wallet_store.on_paying(move || {
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(async { keeper.app_mut().deny(&bob).await.unwrap() })
+        })
+        .join()
+        .unwrap();
+    });
+    Box::pin(held_at_the_dispatch(&w, &mut wallet, &request, &record)).await;
 }
