@@ -48,9 +48,13 @@
 //!   the bounds dropped (`pd/`), an earlier different answer may still take the response or
 //!   make the Allowance conflicted, so the executor pays nothing under it.
 //! - **A repeat finishes a payment already dispatched** (Paykit spec 8.3, "Conflicted",
-//!   "Handoff"): at a resume it is made after an end, a handoff or a conflict too, through
-//!   the method's repeat with the same idempotency key, while what holds while unknown
-//!   still holds it ([`Paykit::repeat_under_allowance_held`]).
+//!   "Handoff"): at a resume it is made after a handoff or a conflict too, through the
+//!   method's repeat with the same idempotency key, while what holds while unknown still
+//!   holds it ([`Paykit::repeat_under_allowance_held`]). The Allowance record is read from
+//!   the switch again for it, before the final payment check and after it, and an end or a
+//!   rejection it shows, or a read that fails, holds the repeat: a crash can leave `Paying`
+//!   journaled for a dispatch the final payment check stopped before any call, so a repeat
+//!   may be the first call ([`Paykit::repeat_allowance_read_now`]).
 //! - **Immediately before the dispatch** (Paykit spec 8.1, 8.3): the deny list, the request
 //!   record, the block floor and the Allowance record are read from the switch again, twice,
 //!   before the attempt's `Paying` commit and after it, and the dispatch holds on a block, a
@@ -1141,17 +1145,22 @@ impl Paykit {
     }
 
     /// What holds the repeat of a payment the executor already dispatched under the
-    /// Allowance at `record`, read as held (Paykit spec 8.3): a repeat finishes that payment,
-    /// so the Allowance ended, handed off or conflicted since doesn't stop it ("Conflicted",
-    /// "Handoff"), and neither does its consent removed for those. What can't be known holds
-    /// it: the record not held or not binding, its view or its ledger's divergent or seen so
-    /// and not confirmed (Paykit spec 6), its current write one the app ignores and the user
-    /// hasn't confirmed or a removed app's after its `distrust_from`, its consent to be
-    /// confirmed again after a restore or a `missed` item, or no consent entry at all.
+    /// Allowance at `record` (Paykit spec 8.3): the record read from the switch now
+    /// ([`Paykit::repeat_allowance_read_now`]: ended, rejected, or not read), then the rest as
+    /// that read leaves it held. A repeat finishes that payment, so the Allowance handed off or
+    /// conflicted since doesn't stop it ("Conflicted", "Handoff"), and neither does its consent
+    /// removed for those. What can't be known holds it: the record not held or not binding,
+    /// its view or its ledger's divergent or seen so and not confirmed (Paykit spec 6), its
+    /// current write one the app ignores and the user hasn't confirmed or a removed app's
+    /// after its `distrust_from`, its consent to be confirmed again after a restore or a
+    /// `missed` item, or no consent entry at all.
     pub(crate) async fn repeat_under_allowance_held(
         &mut self,
         record: &[u8; 32],
     ) -> Result<std::result::Result<(), Refusal>> {
+        if let Err(refusal) = self.repeat_allowance_read_now(record).await? {
+            return Ok(Err(refusal));
+        }
         let refuse = |why: &str| Ok(Err(Refusal::NotAutomatic(why.into())));
         let Some(allowance) = self.held_allowance(record).await? else {
             return refuse("the Allowance record isn't held as one that binds");
@@ -1181,6 +1190,70 @@ impl Paykit {
             return refuse("the consent list holds it to be confirmed again");
         }
         Ok(Ok(()))
+    }
+
+    /// The Allowance at `record` as the switch holds it now, judged for the repeat of a
+    /// payment the executor dispatched under it (Paykit spec 7.2, 8.3). A repeat may be the
+    /// first call: a first dispatch the final payment check stopped after its `Paying` commit
+    /// goes back to `Attempted`, and a crash before that write leaves `Paying`, which a resume
+    /// repeats. So an end or a rejection the record shows, or the counterparty's end this app
+    /// keeps as its stop, holds the repeat, as a read that fails, a record that isn't read
+    /// from the switch now, or one that doesn't bind does: nothing is dispatched, and the
+    /// attempt stays open, reserved in the ledger, its outcome not known. A handoff or a
+    /// conflict doesn't hold it: they cancel no payment already started ("Handoff",
+    /// "Conflicted"). A current write the app ignores leaves the copy it trusts to be judged,
+    /// and [`Paykit::repeat_under_allowance_held`] holds the repeat until the user confirms
+    /// it. Read before the final payment check, and again after its last await
+    /// (`Paykit::automatic_dispatch_held`).
+    ///
+    /// # Errors
+    ///
+    /// A failure of the app's own store.
+    pub(crate) async fn repeat_allowance_read_now(
+        &mut self,
+        record: &[u8; 32],
+    ) -> Result<std::result::Result<(), Refusal>> {
+        let refuse = |why: &str| Ok(Err(Refusal::NotAutomatic(why.into())));
+        let Some(held) = self.held_allowance(record).await? else {
+            return refuse("the Allowance record isn't held as one that binds");
+        };
+        let target = allowance_target(&held.counterparty, &held.allowance_id);
+        match self.app.read_record_fresh(&target).await {
+            Ok(RecordRead::Fresh(_)) => {}
+            Ok(RecordRead::Kept {
+                record: Some(shared),
+                reason: pubky_switch_client::app::KeptReason::Refused,
+            }) if shared.flagged => {}
+            Ok(RecordRead::Kept {
+                reason: pubky_switch_client::app::KeptReason::Unreachable(why),
+                ..
+            }) => {
+                return Ok(Err(Refusal::NotNow(format!(
+                    "the Allowance record can't be read now: {why}"
+                ))))
+            }
+            Ok(_) => return refuse("the Allowance record isn't read from the switch now"),
+            Err(error) => {
+                let error: PaykitError = error.into();
+                if crate::hold::local_failure(&error) {
+                    return Err(error);
+                }
+                return Ok(Err(Refusal::NotNow(format!(
+                    "the Allowance record can't be read now: {error}"
+                ))));
+            }
+        }
+        let Some(allowance) = self.held_allowance(record).await? else {
+            return refuse("the Allowance record isn't held as one that binds");
+        };
+        if allowance.end.is_some() || self.allowance_stopped(record).await? {
+            return Ok(Err(Refusal::AllowanceEnded));
+        }
+        match &allowance.response {
+            Some(response) if matches!(response.body(), Body::AllowanceAcceptance(_)) => Ok(Ok(())),
+            Some(_) => Ok(Err(Refusal::Rejected)),
+            None => refuse("the Allowance isn't accepted"),
+        }
     }
 
     /// The executor's checks on the request and its record (Paykit spec 8.3, "Executor"):
@@ -1424,6 +1497,16 @@ impl Paykit {
         amount: &PaymentAmount,
         destination: &Destination,
     ) -> Result<ExecutorOps> {
+        // Doubtful obligations (Paykit spec 8.3): the claim is read first, before the owed
+        // empty ledger is written or the ledger read is kept, so a read that fails writes
+        // nothing and is the error, never taken as a claim without attempts. The batch's
+        // `attempt` builds on the claim's step read before, so an attempt added since makes
+        // it fail.
+        let attempts: Option<Vec<[u8; 16]>> = self
+            .app
+            .read_claim(&obligation)
+            .await?
+            .map(|read| read.view.attempts.iter().map(|a| a.attempt_id).collect());
         // The first grant's empty ledger, while owed, goes before the first payment.
         self.write_owed_empty_ledger(under).await?;
         let base = self.ledger_base(under).await?;
@@ -1436,20 +1519,19 @@ impl Paykit {
                 under.allowance.allowance_id.clone(),
             )
         });
-        // Doubtful obligations (Paykit spec 8.3): an occurrence whose claim holds an attempt
-        // the ledger names neither in an entry nor in `totals.failed`, one made by hand or
-        // under another Allowance, whatever its outcome, even one that never reached the
-        // payment method, is paid again only by hand. Read before anything is written; a
-        // read that fails is the error, never taken as a claim without attempts. The batch's
-        // `attempt` builds on the claim's step read before, so an attempt added since makes
-        // it fail.
-        if let Some(read) = self.app.read_claim(&obligation).await? {
-            let attempts: Vec<[u8; 16]> = read.view.attempts.iter().map(|a| a.attempt_id).collect();
-            if attempted_elsewhere(&obligation, &attempts, &ledger) {
-                return Err(not_automatic(
-                    "the occurrence was attempted by hand or under another Allowance: it is paid only by hand",
-                ));
-            }
+        // An occurrence whose claim holds an attempt the ledger names neither in an entry nor
+        // in `totals.failed`, one made by hand or under another Allowance, whatever its
+        // outcome, even one that never reached the payment method, is paid again only by
+        // hand. Judged against the ledger built on, so after the owed empty ledger's write
+        // and the ledger read's keep, which are the Allowance's, not the occurrence's:
+        // nothing of the occurrence is written.
+        if attempts
+            .as_deref()
+            .is_some_and(|attempts| attempted_elsewhere(&obligation, attempts, &ledger))
+        {
+            return Err(not_automatic(
+                "the occurrence was attempted by hand or under another Allowance: it is paid only by hand",
+            ));
         }
         let claims = self.ledger_claims(&ledger).await?;
         let at = self
