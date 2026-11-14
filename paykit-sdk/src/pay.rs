@@ -2342,29 +2342,27 @@ impl Paykit {
             }
         }
         // Starting to pay is journaled just before the payment begins (Paykit spec 7.2): from
-        // here on it may be paid. A repeat's entry is `Paying` already, and nothing awaits
-        // between its final check, which read the block floor, and its call.
+        // here on it may be paid. A repeat's entry is `Paying` already.
         if matches!(kind, Dispatch::First { .. }) {
             self.set_stage(&mut entry, Stage::Paying).await?;
-            // The commit was an await, during which another payer app can raise the block
-            // floor or mark the request record `manual_only`: an automatic payment reads the
-            // record and the floor again now, from the switch, and a read that fails holds it
-            // (Paykit spec 8.1, 8.3, `crate::floor`). The entry goes back to `Attempted`, known
-            // unsubmitted, as it does when the fence stops it.
-            if by == Initiator::Automatic
-                && self
-                    .automatic_dispatch_held(&entry, kind)
-                    .await
-                    .unwrap_or(true)
-            {
-                return self.stopped_at_the_fence(entry, FinalCheck::Hold).await;
-            }
-            // That read was an await too: the fence judges every other gate again, and
-            // nothing awaits after it before the call.
-            match self.payment_fence(&entry, &payee, by, confirmed, kind)? {
-                FinalCheck::Pay => {}
-                stopped => return self.stopped_at_the_fence(entry, stopped).await,
-            }
+        }
+        // The commit and the checks were awaits, during which another payer app can block the
+        // payee, raise the block floor or mark the request record `manual_only`: an automatic
+        // payment, a first dispatch or a repeat, reads the deny list, the record and the floor
+        // again now, from the switch, and a read that fails holds it (Paykit spec 8.1, 8.3,
+        // `crate::floor`). A first dispatch goes back to `Attempted`, known unsubmitted, as it
+        // does when the fence stops it; a repeat stays open.
+        if by == Initiator::Automatic && self.automatic_dispatch_held(&entry).await.unwrap_or(true)
+        {
+            return self
+                .stopped_before_the_call(entry, kind, FinalCheck::Hold)
+                .await;
+        }
+        // Those reads were awaits too: the fence judges every other gate again, and nothing
+        // awaits after it before the call.
+        match self.payment_fence(&entry, &payee, by, confirmed, kind)? {
+            FinalCheck::Pay => {}
+            stopped => return self.stopped_before_the_call(entry, kind, stopped).await,
         }
         let outcome = self.rail.pay(payment).await;
         // The call was made and the payment may be running, its outcome not known yet: only
@@ -2401,6 +2399,24 @@ impl Paykit {
             // Any other error, once a payment may have been submitted, is nothing yet: the
             // attempt stays open (Paykit spec 7.2).
             Err(_) => Ok(PayOutcome::Pending { attempt_id }),
+        }
+    }
+
+    /// A dispatch stopped after its final payment check, before the payment method's call:
+    /// a first dispatch as [`Paykit::stopped_at_the_fence`] leaves it; a repeat stays open,
+    /// as the final payment check leaves it: [`PayOutcome::Pending`] for a hold, and
+    /// "may be paid" otherwise, as the dispatch before it may have paid.
+    async fn stopped_before_the_call(
+        &mut self,
+        entry: JournalEntry,
+        kind: Dispatch,
+        stopped: FinalCheck,
+    ) -> Result<PayOutcome> {
+        let attempt_id = entry.attempt()?;
+        match (kind, stopped) {
+            (Dispatch::First { .. }, stopped) => self.stopped_at_the_fence(entry, stopped).await,
+            (Dispatch::Repeat { .. }, FinalCheck::Hold) => Ok(PayOutcome::Pending { attempt_id }),
+            (Dispatch::Repeat { .. }, _) => Ok(PayOutcome::Uncertain { attempt_id }),
         }
     }
 
@@ -3221,8 +3237,8 @@ impl Paykit {
                 Ok(doc) => doc,
                 Err(held) => return Ok(Some(held)),
             };
-            // The retention is judged again by the final payment check, after its await and
-            // just before the call: the checks awaited the network meanwhile.
+            // The retention is judged again by the final payment check and the fence, after
+            // the last await and just before the call: the checks awaited the network meanwhile.
             let repeat = Dispatch::Repeat {
                 idempotency_retention_ms: declaration.idempotency_retention_ms,
                 opened_at_ms,
@@ -3301,16 +3317,17 @@ impl Paykit {
         Ok(false)
     }
 
-    /// The final payment check, the last thing before the payment method's call on every
-    /// path that reaches it, a first dispatch and a repeat at a resume or a recovery (Paykit
-    /// spec 4, 7.2). In order:
+    /// The final payment check, on every path that reaches the payment method's call, a first
+    /// dispatch and a repeat at a resume or a recovery, judged again by the fence just before
+    /// the call (Paykit spec 4, 7.2). In order:
     ///
-    /// 0. for an automatic payment, the deny list, read again: a blocked payee, or a list
-    ///    that can't be read, holds it ([`FinalCheck::Hold`], Paykit spec 8.1); for a first
-    ///    dispatch, the request record, read again: one that holds `manual_only`, or isn't
-    ///    there or can't be read, holds it too (Paykit spec 8.3); and the block floor, read
-    ///    again: a one-time request dated before it, or a floor that can't be read, holds it
-    ///    too (`crate::floor`);
+    /// 0. for an automatic first dispatch, the deny list, read again: a blocked payee, or a
+    ///    list that can't be read, holds it ([`FinalCheck::Hold`], Paykit spec 8.1); the
+    ///    request record, read again: one that holds `manual_only`, or isn't there or can't
+    ///    be read, holds it too (Paykit spec 8.3); and the block floor, read again: a
+    ///    one-time request dated before it, or a floor that can't be read, holds it too
+    ///    (`crate::floor`); an automatic repeat reads them after this check
+    ///    ([`Paykit::automatic_dispatch_held`]);
     /// 1. a switch lookup kept for the payee whose answer has come is taken, so a late
     ///    answer that removes the destination's app is acted on (Switch spec 4.3), and one
     ///    the client refuses, such as an equivocation, stops the payment
@@ -3331,10 +3348,11 @@ impl Paykit {
     ///    resume or a recovery included ([`FinalCheck::Hold`]: nothing is paid, the attempt
     ///    stays open for an app that holds it).
     ///
-    /// Checks 2 to 6 run on the clock after the one await ([`Paykit::final_gates`]). A
-    /// repeat's call follows them with no await; a first dispatch's follows the journal
-    /// write of `Paying`, after which an automatic one reads its request record and the block
-    /// floor again and the fence ([`Paykit::payment_fence`]) runs them all again. Anything but
+    /// Checks 2 to 6 run on the clock after the one await ([`Paykit::final_gates`]). A first
+    /// dispatch's call follows the journal write of `Paying`; after it, and for a repeat
+    /// after this check, an automatic payment reads the deny list, its request record and
+    /// the block floor again, and the fence ([`Paykit::payment_fence`]) runs 1 to 6 again,
+    /// with no await after it before the call. Anything but
     /// [`FinalCheck::Pay`]: nothing is paid; a copy past its age is looked up again by the
     /// next check, at a resume. Returns the payee's copy the checks judged, for the fence.
     pub(crate) async fn final_payment_check(
@@ -3345,20 +3363,17 @@ impl Paykit {
         confirmed: Option<UserConfirmed>,
         kind: Dispatch,
     ) -> Result<(FinalCheck, PeerIdentity)> {
-        // No automatic payment to a blocked payee (Paykit spec 8.1), on any automatic path,
-        // a resume's repeat included: the user's confirmation was for the first dispatch. A
-        // deny list that can't be read holds it too. Judged before the await below, after
-        // which nothing time-bound is: the list changes only by the user's or the switch's
-        // write, which a later check reads again.
-        if by == Initiator::Automatic && self.denied(&entry.payee).await.unwrap_or(true) {
-            return Ok((FinalCheck::Hold, payee));
-        }
-        // Nor of a request paid only by hand, its record's `manual_only` (Paykit spec 8.3),
-        // or a one-time request dated before the block floor, as a read of the floor made now
-        // shows it, a read that fails holding it too (`crate::floor`): the attempt's batch
-        // doesn't condition on the floor, so a raise the copy doesn't hold yet, made before
-        // the attempt's commit or after it, is met here.
-        if by == Initiator::Automatic && self.automatic_dispatch_held(entry, kind).await? {
+        // No automatic payment to a blocked payee (Paykit spec 8.1), nor of a request paid
+        // only by hand, its record's `manual_only` (Paykit spec 8.3), or a one-time request
+        // dated before the block floor (`crate::floor`), each read now, a read that fails
+        // holding it too. A first dispatch judges them before its attempt's `Paying` commit,
+        // so that a held one is known unsubmitted, and again after it ([`Paykit::dispatch`]);
+        // a repeat, whose entry is `Paying` already, judges them once, after every other
+        // await before its call.
+        if by == Initiator::Automatic
+            && matches!(kind, Dispatch::First { .. })
+            && self.automatic_dispatch_held(entry).await?
+        {
             return Ok((FinalCheck::Hold, payee));
         }
         let payee = match self.take_kept_lookup(&entry.payee).await? {
@@ -3370,49 +3385,44 @@ impl Paykit {
         Ok((check, payee))
     }
 
-    /// Whether the request `entry` pays is held from an automatic dispatch `kind`: its record
-    /// holds `manual_only`, the request is paid only by hand (Paykit wire 5.3, spec 8.3), or
-    /// the block floor, read now, holds it ([`Paykit::floor_holds_fresh`]). `false` for a
-    /// payment without a request.
+    /// Whether `entry` is held from an automatic dispatch, a first dispatch or a repeat, as
+    /// the switch holds the identity's state now: the deny list, read again, holds the payee
+    /// or can't be read (Paykit spec 8.1); the request record, read again
+    /// ([`Paykit::fresh_request`]), holds `manual_only`, the request being paid only by hand
+    /// (Paykit wire 5.3, spec 8.3), or isn't there, doesn't read as the request or holds none,
+    /// or can't be read; or the block floor, read again, holds the request
+    /// ([`Paykit::floor_holds_fresh`]). For a payment without a request, the deny list only.
     ///
-    /// A first dispatch reads the record again, from the switch ([`Paykit::fresh_request`]):
-    /// a receive of this app or another own app can mark it `manual_only` from a live block
-    /// mark before any floor is raised, or while an attempt's commit awaits. A record that
-    /// isn't there, doesn't read as the request, or can't be read holds it: nothing shows
-    /// the request may be paid automatically. A repeat judges the copy, which its withheld
-    /// check has just read again ([`Paykit::repeat_withheld`]); a copy that doesn't read is
-    /// that check's.
-    async fn automatic_dispatch_held(
-        &mut self,
-        entry: &JournalEntry,
-        kind: Dispatch,
-    ) -> Result<bool> {
+    /// Another own app can block the payee, or mark the record `manual_only` from a live block
+    /// mark before any floor is raised, while this app awaits anything: a copy this app keeps,
+    /// or a read made before an await, shows nothing of that, so they are read here, one after
+    /// the other, and nothing else awaits after them before the call.
+    async fn automatic_dispatch_held(&mut self, entry: &JournalEntry) -> Result<bool> {
+        if self.denied(&entry.payee).await.unwrap_or(true) {
+            return Ok(true);
+        }
         if entry.request_hash()?.is_none() {
             return Ok(false);
         }
         let target = ActivityTarget::payer(entry.natural_key.clone());
-        let record = match kind {
-            Dispatch::First { .. } => match self.fresh_request(&target).await {
-                Ok(Fresh::Held(record)) => *record,
-                Ok(Fresh::Missing | Fresh::Unreadable) | Err(_) => return Ok(true),
-            },
-            Dispatch::Repeat { .. } => match self.held_activity(&target).await? {
-                Some(record) => record,
-                None => return Ok(false),
-            },
+        let record = match self.fresh_request(&target).await {
+            Ok(Fresh::Held(record)) => *record,
+            Ok(Fresh::Missing | Fresh::Unreadable) | Err(_) => return Ok(true),
         };
         if record.manual_only {
             return Ok(true);
         }
         let Some((stored, _)) = crate::requests::request_of(&record) else {
-            return Ok(matches!(kind, Dispatch::First { .. }));
+            return Ok(true);
         };
         let stored = stored.clone();
         self.floor_holds_fresh(&stored).await
     }
 
-    /// The fence after the journal write of `Paying` (Paykit spec 7.2): that commit is an
-    /// await, during which a lookup's answer can come and a freshness limit pass, so every
+    /// The fence before the payment method's call, after a first dispatch's journal write of
+    /// `Paying` and an automatic payment's reads ([`Paykit::automatic_dispatch_held`]) (Paykit
+    /// spec 7.2): each is an await, during which a lookup's answer can come and a freshness
+    /// limit pass, so every
     /// gate of the final payment check is judged again here, with no await of its own and
     /// none after it before the payment method's call:
     ///
@@ -3423,10 +3433,10 @@ impl Paykit {
     ///
     /// The kept stop and the restore hold aren't judged again: Paykit's own state, which
     /// only this app's own calls change (a receive, a placement, a confirmation), and none
-    /// can run while the payment holds the app. The block floor and the request record are
-    /// the identity's, which another payer app can raise or mark `manual_only` during the
-    /// commit: an automatic first dispatch reads them again, from the switch, between the
-    /// commit and this fence ([`Paykit::dispatch`]).
+    /// can run while the payment holds the app. The deny list, the block floor and the
+    /// request record are the identity's, which another payer app can change meanwhile: an
+    /// automatic payment reads them again, from the switch, just before this fence
+    /// ([`Paykit::dispatch`]).
     fn payment_fence(
         &mut self,
         entry: &JournalEntry,
@@ -3451,9 +3461,8 @@ impl Paykit {
     /// confirmation (rows 5 and 6), while the repeat's payment could still run, so it isn't
     /// made, and the attempt stays "may be paid" as past the idempotency retention.
     ///
-    /// A repeat has no journal write between its final payment check and its call, so no
-    /// fence after it: this check, with the others, is the last before the call, and nothing
-    /// awaits between them.
+    /// The fence judges it again after a repeat's last await ([`Paykit::payment_fence`]): this
+    /// check, with the others, is the last before the call, and nothing awaits between them.
     fn repeat_completes_before_orphaned(
         &self,
         now: u64,

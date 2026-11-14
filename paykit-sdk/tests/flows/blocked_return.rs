@@ -1473,16 +1473,22 @@ async fn phone_paying_carol_on(
 }
 
 /// A store that runs a hook once, during the commit that journals `Paying`: after the final
-/// payment check and before the payment method's call.
+/// payment check and before the payment method's call; and another once, during the next
+/// commit that keeps the deny list as read from the switch.
 #[derive(Default)]
 struct PayingStore {
     inner: pubky_switch_client::store::MemoryStore,
     hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    lists_hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl PayingStore {
     fn on_paying(&self, hook: impl FnOnce() + Send + 'static) {
         *self.hook.lock().unwrap() = Some(Box::new(hook));
+    }
+
+    fn on_deny_list_read(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.lists_hook.lock().unwrap() = Some(Box::new(hook));
     }
 }
 
@@ -1515,9 +1521,17 @@ impl StateStore for PayingStore {
             matches!(write, pubky_switch_client::store::Write::Put { key, value, .. }
                 if key.starts_with(b"p/j/") && value.windows(PAYING.len()).any(|w| w == PAYING))
         });
+        let deny_list = batch.writes.iter().any(|write| {
+            matches!(write, pubky_switch_client::store::Write::Put { key, .. } if key == b"p/dl")
+        });
         self.inner.commit(batch)?;
         if paying {
             if let Some(hook) = self.hook.lock().unwrap().take() {
+                hook();
+            }
+        }
+        if deny_list {
+            if let Some(hook) = self.lists_hook.lock().unwrap().take() {
                 hook();
             }
         }
@@ -1699,6 +1713,73 @@ async fn test_blocked_return_request_marked_manual_only_during_the_paying_commit
     assert_eq!(payment.stage, paykit_sdk::Stage::Attempted);
 }
 
+#[tokio::test]
+async fn test_blocked_return_payee_blocked_during_the_paying_commit_not_paid() {
+    // An automatic first dispatch reads the deny list, which doesn't hold carol, and journals
+    // `Paying`. While that write commits, another payer app blocks her. The deny list read
+    // again after the commit holds the payment: the method isn't called, and the attempt is
+    // known unsubmitted.
+    let w = Arc::new(World::new());
+    let (phone, attempt_id) = automatic_first_dispatch_with(&w, false, |w, mut wallet, _shop| {
+        let carol = w.carol_id();
+        // The wallet runs on its own thread while the phone's commit waits for it.
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(async { wallet.app_mut().deny(&carol).await.unwrap() })
+        })
+        .join()
+        .unwrap();
+    })
+    .await;
+    assert_eq!(w.rail.pay_calls(&attempt_id), 0);
+    let payment = phone.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Attempted);
+}
+
+#[tokio::test]
+async fn test_blocked_return_request_marked_manual_only_after_the_repeat_read_not_repeated() {
+    // The phone pays carol's request by hand, left in flight. At the resume, the repeat reads
+    // her record, open and not `manual_only`; then, while the phone reads the deny list,
+    // another payer app marks the record `manual_only`, raising no floor. The record read
+    // again just before the call holds the repeat: the method isn't called again, and the
+    // attempt stays open for the method's history or a receipt.
+    let w = World::new();
+    let phone_store = Arc::new(PayingStore::default());
+    // On the heap: the setup nests deep.
+    let (mut wallet, mut phone, _shop, carols) = Box::pin(phone_paying_carol_on(
+        &w,
+        Arc::clone(&phone_store) as Arc<dyn StateStore>,
+    ))
+    .await;
+    let attempt_id = paid_in_flight(&w, &mut phone, &carols).await;
+    w.clock.advance_ms(MINUTE_MS);
+    let carol = w.carol_id();
+    phone_store.on_deny_list_read(move || {
+        // The wallet runs on its own thread while the phone's commit waits for it.
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    wallet.receive(None).await.unwrap();
+                    mark_manual_only(&mut wallet, &carol).await;
+                    assert_eq!(shared_floor(&wallet).await, None);
+                })
+        })
+        .join()
+        .unwrap();
+    });
+    Box::pin(phone.resume_payments()).await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    let payment = phone.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Paying);
+    // The mark is sticky: the next resume withholds the repeat too.
+    Box::pin(phone.resume_payments()).await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
 /// `app` writes the payer record of `payee`'s one request it holds with `manual_only`.
 async fn mark_manual_only(app: &mut Paykit, payee: &[u8; 32]) {
     let request = app
@@ -1799,12 +1880,12 @@ async fn test_blocked_return_floor_read_that_fails_at_the_repeat_holds_it() {
     let (_wallet, mut phone, _shop, carols) = phone_paying_carol(&w).await;
     let attempt_id = paid_in_flight(&w, &mut phone, &carols).await;
     w.clock.advance_ms(MINUTE_MS);
-    // The resume reads the request record again first, then the floor, which fails.
+    // The resume reads the request record again, twice, then the floor, which fails.
     w.alice
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Unreachable {
             path: "/records/".into(),
-            after: 1,
+            after: 2,
         });
     phone.resume_payments().await.unwrap();
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
