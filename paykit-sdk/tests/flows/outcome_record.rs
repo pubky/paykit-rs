@@ -73,8 +73,8 @@ impl StateStore for NoSeenMarks {
 }
 
 /// Bob's request, paid by alice's wallet on `store` with the payment left in flight; her
-/// phone, another own app holding `paykit_pay`, holds the request record too. Returns both apps,
-/// the request and the attempt.
+/// phone, another own app holding `paykit_pay`, holds the request record too, as the
+/// attempt's batch marked it `manual_only`. Returns both apps, the request and the attempt.
 async fn in_flight_on(
     w: &World,
     store: Arc<dyn StateStore>,
@@ -93,6 +93,11 @@ async fn in_flight_on(
     else {
         panic!("pending");
     };
+    phone
+        .app_mut()
+        .read_record(&payer_record(&request))
+        .await
+        .unwrap();
     (wallet, phone, request, attempt_id)
 }
 

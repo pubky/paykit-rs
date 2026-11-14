@@ -3077,9 +3077,9 @@ async fn test_executor_kept_ledger_past_the_record_size_refused_at_restore() {
 #[tokio::test]
 async fn test_executor_refuses_an_occurrence_attempted_by_hand() {
     // The user pays bob's request by hand and the payment method refuses the call: the
-    // attempt is written `failed`, and no money moved. The occurrence was attempted not under
-    // the Allowance, so its executor never pays it: it is paid again only by hand (Paykit
-    // spec 8.3, "Doubtful obligations").
+    // attempt is written `failed`, and no money moved. The attempt's batch marked the record
+    // `manual_only`, so its executor never pays it: it is paid again only by hand (Paykit
+    // spec 8.3, "Manual only").
     let w = World::new();
     let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
     let request = request(&w, &mut shop, &mut wallet, "0.5").await;
@@ -3093,10 +3093,7 @@ async fn test_executor_refuses_an_occurrence_attempted_by_hand() {
         .pay_under_allowance(&request, &record)
         .await
         .unwrap_err();
-    assert!(
-        refused_for(&refused, "attempted by hand or under another Allowance"),
-        "{refused:?}"
-    );
+    assert!(refused_for(&refused, "manual-only"), "{refused:?}");
     assert!(w.rail.all_executions().is_empty());
     let (_, ledger) = held(&wallet, &record).await;
     assert!(ledger.unwrap().entries.is_empty());
@@ -3213,98 +3210,324 @@ async fn test_executor_refuses_an_occurrence_attempted_under_another_allowance()
     assert!(ledger.is_none_or(|l| l.entries.is_empty()));
 }
 
-/// Bob's one-time request for 0.5 btc, signed by his shop with a `created_at` `age` before
-/// now and received by the wallet, which verifies a service time now as it does.
-async fn request_aged(w: &World, wallet: &mut Paykit, age: u64) -> RequestRef {
-    let now = w.clock.now_ms();
-    let body = json!({
-        "amount": { "asset": "btc", "value": "0.5" },
-        "payment_reference": "order-1",
-        "proposal_expires_at": null,
-        "payment_endpoints": { "btc-lightning-bolt11": "lnbc1invoice" }
-    });
-    let keys = w.bob.identity().app_keys("shop");
-    let cert = w.bob.switch().app(&keys.app_id_bytes()).cert.unwrap();
-    let message = pubky_switch_core::message::Message::new(
-        "paykit.payment_request",
-        pubky_switch_core::message::Sender::of_app(w.bob.identity().public(), &keys),
-        w.alice.identity().public(),
-        now - age,
-        Vec::new(),
-        body.as_object().cloned().unwrap(),
-    )
-    .unwrap();
-    w.alice
-        .switch()
-        .send_plaintext(
-            w.bob.identity().public(),
-            &cert,
-            &message.sign(&keys).unwrap(),
-            &[wallet.app_id()],
-        )
+/// The payer record of `request` as `app` holds it, as JSON.
+async fn request_record_value(app: &Paykit, request: &RequestRef) -> Value {
+    let target = crate::outcome_record::payer_record(request);
+    let key = app.app().record_key(&target).unwrap();
+    let held = app.app().shared_record(&key).await.unwrap().unwrap();
+    serde_json::from_slice(held.content.value().unwrap()).unwrap()
+}
+
+/// The claim of the occurrence `app`'s one journaled payment is of, read from the switch.
+async fn claim_of(app: &mut Paykit) -> Option<pubky_switch_client::app::ClaimRead> {
+    let obligation = app.payments().await.unwrap()[0].obligation;
+    app.app_mut().read_claim(&obligation).await.unwrap()
+}
+
+/// An Allowance with the wallet as its executor, and alice's phone, another app of hers,
+/// that pays bob's request by hand, the payment method answering `behaviour`: it fails, or
+/// refuses the call, so nothing is submitted. The wallet has read its messages since.
+async fn attempted_by_the_phone(
+    w: &World,
+    behaviour: paykit_sdk::rail::Behaviour,
+) -> (Paykit, Paykit, [u8; 32], RequestRef) {
+    let (mut shop, mut wallet, record) = set_up(w, terms_with(json!({}))).await;
+    let mut phone = Box::pin(executor_wallet(w, "phone")).await;
+    let request = request(w, &mut shop, &mut wallet, "0.5").await;
+    phone.receive(None).await.unwrap();
+    w.rail.next(behaviour);
+    let by_hand = phone
+        .pay_request(&request, PayOptions::default())
+        .await
         .unwrap();
+    assert!(matches!(by_hand, PayOutcome::Failed { .. }), "{by_hand:?}");
     wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.app().highest_service_time(), Some(now));
-    wallet.requests().await.unwrap()[0].request
+    (phone, wallet, record, request)
 }
 
-const YEAR_MS: u64 = 365 * 24 * crate::common::HOUR_MS;
-
-#[tokio::test]
-async fn test_executor_pays_a_one_time_request_just_within_365_days() {
-    let w = World::new();
-    let (_shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
-    let request = Box::pin(request_aged(&w, &mut wallet, YEAR_MS - 1)).await;
-    let paid = wallet.pay_under_allowance(&request, &record).await.unwrap();
-    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
-    assert_eq!(w.rail.all_executions().len(), 1);
-}
-
-#[tokio::test]
-async fn test_executor_refuses_a_one_time_request_365_days_old() {
-    // Past 365 days on the service time, an attempt made by hand may soon no longer show
-    // to the executor's check of the occurrence: paid only by hand (Paykit spec 8.3,
-    // "Executor"), with nothing written.
-    let w = World::new();
-    let (_shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
-    let request = Box::pin(request_aged(&w, &mut wallet, YEAR_MS)).await;
+/// The executor's payment of `request`, refused for the record's `manual_only` mark, with
+/// nothing written and nothing paid.
+async fn refused_as_manual_only(
+    w: &World,
+    wallet: &mut Paykit,
+    request: &RequestRef,
+    record: &[u8; 32],
+) {
     let refused = wallet
-        .pay_under_allowance(&request, &record)
+        .pay_under_allowance(request, record)
         .await
         .unwrap_err();
-    assert!(refused_for(&refused, "365 days old"), "{refused:?}");
+    assert!(refused_for(&refused, "manual-only"), "{refused:?}");
     assert!(w.rail.all_executions().is_empty());
-    let (_, ledger) = held(&wallet, &record).await;
+    let (_, ledger) = held(wallet, record).await;
     assert!(ledger.unwrap().entries.is_empty());
+}
+
+#[tokio::test]
+async fn test_executor_manual_only_after_another_apps_failed_attempt_by_hand() {
+    // Alice's phone pays bob's request by hand and the payment fails. Its attempt's batch
+    // marked the request record `manual_only`: the wallet, the Allowance's executor, doesn't
+    // pay it (Paykit spec 8.3, "Manual only").
+    let w = World::new();
+    let (_phone, mut wallet, record, request) = Box::pin(attempted_by_the_phone(
+        &w,
+        paykit_sdk::rail::Behaviour::Fail,
+    ))
+    .await;
+    assert!(wallet.request(&request).await.unwrap().manual_only);
+    refused_as_manual_only(&w, &mut wallet, &request, &record).await;
+}
+
+#[tokio::test]
+async fn test_executor_manual_only_after_another_apps_attempt_by_hand_never_submitted() {
+    // Alice's phone pays bob's request by hand and the payment method refuses the call:
+    // nothing was submitted. The mark its attempt's batch wrote still holds: the executor
+    // doesn't pay it (Paykit spec 8.3, "Manual only").
+    let w = World::new();
+    let (_phone, mut wallet, record, request) = Box::pin(attempted_by_the_phone(
+        &w,
+        paykit_sdk::rail::Behaviour::Refuse,
+    ))
+    .await;
+    refused_as_manual_only(&w, &mut wallet, &request, &record).await;
+}
+
+#[tokio::test]
+async fn test_executor_manual_only_after_an_attempt_by_hand_through_a_restore() {
+    // The wallet is backed up before alice's phone pays bob's request by hand, and restored
+    // after: the backup holds the record without the mark, the switch with it. The restored
+    // executor still doesn't pay it (Paykit spec 8.3, "Manual only").
+    let w = World::new();
+    let (mut shop, wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let mut wallet = wallet;
+    let mut phone = Box::pin(executor_wallet(&w, "phone")).await;
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    phone.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    w.rail.next(paykit_sdk::rail::Behaviour::Fail);
+    let by_hand = phone
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(by_hand, PayOutcome::Failed { .. }), "{by_hand:?}");
+    let mut wallet = Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    wallet.reconcile().await.unwrap();
+    wallet.end_reconcile(UserConfirmed::new()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet
+        .confirm_allowance_again(&record, UserConfirmed::new())
+        .await
+        .unwrap();
+    wallet
+        .confirm_possibly_cancelled(&request, UserConfirmed::new())
+        .await
+        .unwrap();
+    assert!(wallet.request(&request).await.unwrap().manual_only);
+    refused_as_manual_only(&w, &mut wallet, &request, &record).await;
+}
+
+#[tokio::test]
+async fn test_executor_hand_batch_in_conflict_writes_no_attempt_and_no_mark() {
+    // Alice's phone writes the request record after the wallet read it. The wallet's payment
+    // by hand builds on the version it read: the switch refuses the batch, and neither the
+    // attempt nor the mark is written. Paid by hand again once the wallet has read the
+    // record, the attempt and the mark land together (Paykit spec 8.3, "Manual only").
+    let w = World::new();
+    let (mut shop, mut wallet, _record) = set_up(&w, terms_with(json!({}))).await;
+    let mut phone = Box::pin(executor_wallet(&w, "phone")).await;
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    phone.receive(None).await.unwrap();
+    let value = serde_json::to_vec(&request_record_value(&phone, &request).await).unwrap();
+    crate::outcome_record::phone_writes(&mut phone, &request, Some(&value)).await;
+    let conflict = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(conflict, PaykitError::Conflict(_)), "{conflict:?}");
+    assert!(w.rail.all_executions().is_empty());
+    let claim = claim_of(&mut wallet).await;
+    assert!(claim.is_none_or(|read| read.view.attempts.is_empty()));
+    phone
+        .app_mut()
+        .read_record(&crate::outcome_record::payer_record(&request))
+        .await
+        .unwrap();
+    assert!(request_record_value(&phone, &request)
+        .await
+        .get("manual_only")
+        .is_none());
+    wallet.receive(None).await.unwrap();
     let paid = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert!(wallet.request(&request).await.unwrap().manual_only);
+    let claim = claim_of(&mut wallet).await.unwrap();
+    assert_eq!(claim.view.attempts.len(), 1);
 }
 
 #[tokio::test]
-async fn test_executor_one_time_request_reaching_365_days_before_the_dispatch_held() {
-    // Bob's request is 365 days less 1 ms old when the executor's checks pass. Right after
-    // the executor reads the ledger, the service time moves 1 ms on: the dispatch judges the
-    // age again on the service time verified then and holds (Paykit spec 8.3, "Executor").
-    let w = Arc::new(World::new());
-    let wallet_store = Arc::new(PayingStore::default());
-    let reads = Arc::new(ReadHook::new(Arc::clone(&w.router)));
-    let (_shop, mut wallet, record) = Box::pin(set_up_through(
-        &w,
-        Arc::clone(&wallet_store) as Arc<dyn StateStore>,
-        Arc::clone(&reads) as Arc<dyn Transport>,
-    ))
-    .await;
-    let request = Box::pin(request_aged(&w, &mut wallet, YEAR_MS - 1)).await;
-    let ledger = ledger_key(&wallet, &record).await;
-    let clock = Arc::clone(&w.clock);
-    reads.after_read(
-        &format!("/records/{}", pubky_switch_core::enc::b64(&ledger)),
-        move || clock.advance_ms(1),
+async fn test_executor_automatic_payment_writes_no_mark() {
+    // An executor's payment, and an automatic one made without an Allowance, leave the
+    // request record without `manual_only`.
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let under = request(&w, &mut shop, &mut wallet, "0.5").await;
+    let paid = wallet.pay_under_allowance(&under, &record).await.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert!(!wallet.request(&under).await.unwrap().manual_only);
+    assert!(request_record_value(&wallet, &under)
+        .await
+        .get("manual_only")
+        .is_none());
+    let automatic = request(&w, &mut shop, &mut wallet, "0.5").await;
+    let paid = wallet
+        .pay_request_automatically(&automatic, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert!(!wallet.request(&automatic).await.unwrap().manual_only);
+}
+
+#[tokio::test]
+async fn test_executor_mark_by_hand_keeps_the_records_other_members() {
+    // The executor's attempt at bob's request fails: the record names the Allowance and
+    // shows the outcome. The user then pays it by hand, left in flight. The record the
+    // attempt's batch wrote is the one read, with `manual_only` set and nothing else
+    // changed.
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    w.rail.next(paykit_sdk::rail::Behaviour::Refuse);
+    let failed = wallet.pay_under_allowance(&request, &record).await.unwrap();
+    assert!(matches!(failed, PayOutcome::Failed { .. }), "{failed:?}");
+    let mut before = request_record_value(&wallet, &request).await;
+    assert!(before["allowance_id"].is_string(), "{before}");
+    assert!(before.get("manual_only").is_none(), "{before}");
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let pending = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(pending, PayOutcome::Pending { .. }), "{pending:?}");
+    before["manual_only"] = json!(true);
+    assert_eq!(request_record_value(&wallet, &request).await, before);
+}
+
+/// Alice's wallet pays bob's request by hand on an idempotent method, the call left in
+/// flight after `Paying` is journaled, as a crash would leave it.
+async fn paid_by_hand_in_flight(w: &World) -> (Paykit, RequestRef, paykit_lib::AttemptId) {
+    w.rail.set_declaration(
+        paykit_sdk::rail::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true),
     );
-    Box::pin(held_at_the_dispatch(&w, &mut wallet, &request, &record)).await;
-    assert!(reads.fired());
-    assert!(!wallet_store.paying_seen());
+    let mut shop = allowance_shop(w).await;
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().contacts().build().unwrap(),
+            crate::common::day_window(),
+            crate::common::store(),
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let request = request(w, &mut shop, &mut wallet, "0.5").await;
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("in flight");
+    };
+    (wallet, request, attempt_id)
+}
+
+#[tokio::test]
+async fn test_executor_mark_by_hand_doesnt_withhold_that_payments_repeat() {
+    // The user's payment by hand marked the record `manual_only` in its attempt's batch, and
+    // its call was left in flight. At the resume, the repeat finishes the user's own payment:
+    // the mark doesn't withhold it, and once the method settles it the payment completes
+    // (Paykit spec 7.2; 8.3, "Manual only").
+    let w = World::new();
+    let (mut wallet, request, attempt) = Box::pin(paid_by_hand_in_flight(&w)).await;
+    assert!(wallet.request(&request).await.unwrap().manual_only);
+    let payment = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Paying);
+    assert_eq!(calls_after_resume(&w, &mut wallet, &attempt).await, 2);
+    w.rail.settle(&attempt, true);
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Paid
+    );
+}
+
+#[tokio::test]
+async fn test_executor_repeat_withheld_over_a_mark_written_since() {
+    // The executor's call is left in flight; then the user marks the request `manual_only`.
+    // At the resume, the repeat is of an automatic payment: the mark withholds it, and the
+    // attempt stays open for the method's history or a receipt (Paykit spec 8.3).
+    let w = World::new();
+    let (_shop, mut wallet, _record, attempt, request) =
+        Box::pin(executor_in_flight_on(&w, true)).await;
+    wallet.mark_manual_only(&request).await.unwrap();
+    assert_eq!(calls_after_resume(&w, &mut wallet, &attempt).await, 1);
+    let payment = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Paying);
+}
+
+#[tokio::test]
+async fn test_executor_entry_rebuilt_after_a_restore_kept_as_automatic() {
+    // The user pays bob's request by hand after the backup and the device is lost once the
+    // method has paid it. The restored app's reconcile rebuilds the entry from the claim and
+    // the request record, which don't tell who started the attempt: it is kept as automatic,
+    // so what holds an automatic attempt, the mark the payment's batch wrote included, holds
+    // it. A rebuilt entry is never dispatched again anyway; its outcome is the method's.
+    let w = World::new();
+    let (mut shop, mut wallet, _record) = set_up(&w, terms_with(json!({}))).await;
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    let backup = wallet.backup().await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("in flight");
+    };
+    w.rail.settle(&attempt_id, true);
+    drop(wallet);
+    let mut wallet = Box::pin(Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    let report = Box::pin(wallet.reconcile()).await.unwrap();
+    assert!(
+        matches!(report.resolved.as_slice(), [PayOutcome::Paid { .. }]),
+        "{report:?}"
+    );
+    let journal = wallet.app().protocol_scan(b"j/").await.unwrap();
+    assert_eq!(journal.len(), 1);
+    let kept: Value = serde_json::from_slice(&journal[0].1).unwrap();
+    assert_eq!(kept["d"]["initiator"], "automatic", "{kept}");
+    assert_eq!(kept["d"]["restored"], true, "{kept}");
+    assert!(wallet.request(&request).await.unwrap().manual_only);
+    assert_eq!(w.rail.executions(&attempt_id), 1);
 }

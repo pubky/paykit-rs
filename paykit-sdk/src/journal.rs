@@ -211,6 +211,29 @@ impl KeptAmount {
     }
 }
 
+/// Who started an attempt, as its journal entry keeps it: the user by hand, or the app
+/// automatically, an executor under an Allowance included. Required in every entry, and
+/// never derived from another member.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StartedBy {
+    /// The user started it by hand.
+    User,
+    /// The app started it automatically, or a reconcile rebuilt the entry without knowing
+    /// who started it: what an automatic attempt's checks hold also holds its repeat.
+    Automatic,
+}
+
+impl StartedBy {
+    /// Who starts the attempt `by`.
+    pub(crate) fn of(by: pubky_switch_client::app::Initiator) -> Self {
+        match by {
+            pubky_switch_client::app::Initiator::User => Self::User,
+            _ => Self::Automatic,
+        }
+    }
+}
+
 /// One payment in the journal (`p/j/<attempt_id>`). Sensitive.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct JournalEntry {
@@ -300,6 +323,10 @@ pub(crate) struct JournalEntry {
     /// The Allowance an executor pays the request under, which its proof names (Paykit spec
     /// 8.3 step 4); `None` for a payment the user made.
     pub(crate) allowance_id: Option<String>,
+    /// Who started the attempt: a repeat of one the user started by hand finishes that
+    /// payment, which the request record's `manual_only` mark doesn't withhold (Paykit spec
+    /// 8.3, "Manual only").
+    pub(crate) initiator: StartedBy,
 }
 
 impl std::fmt::Debug for JournalEntry {
@@ -356,13 +383,18 @@ impl JournalEntry {
     /// - at most one carrier, which reads; the attempt's proof, when kept, reads;
     /// - a kept request only in a payment of a request, and it reads; an outcome held for
     ///   its record, and a payment made after `failed` was written, only once paid by the
-    ///   method.
+    ///   method;
+    /// - an attempt under an Allowance is an automatic one; who started the attempt is
+    ///   required and one of the two kept ([`StartedBy`]), which deserializing checks.
     pub(crate) fn check(&self) -> Result<()> {
         let bad = || Err(PaykitError::corrupt());
         let attempt = self.attempt()?;
         let request_hash = self.request_hash()?;
-        // An executor pays a request under an Allowance, never a payment without one.
-        if self.allowance()?.is_some() && request_hash.is_none() {
+        // An executor pays a request under an Allowance, never a payment without one, and
+        // its attempt is an automatic one.
+        if self.allowance()?.is_some()
+            && (request_hash.is_none() || self.initiator != StartedBy::Automatic)
+        {
             return bad();
         }
         self.amount.amount()?;

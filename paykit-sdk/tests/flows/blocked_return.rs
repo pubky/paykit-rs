@@ -2176,10 +2176,11 @@ async fn test_blocked_return_payee_blocked_during_the_paying_commit_not_paid() {
 }
 
 #[tokio::test]
-async fn test_blocked_return_request_marked_manual_only_after_the_repeat_read_not_repeated() {
-    // At the resume, the repeat reads carol's record, open and not `manual_only`; then
-    // another payer app marks it `manual_only`, raising no floor. The record read again just
-    // before the call holds the repeat.
+async fn test_blocked_return_request_marked_manual_only_again_before_a_hand_repeat_repeated() {
+    // The phone's payment by hand marked carol's record `manual_only` in its attempt's
+    // batch. At the resume, while the repeat reads the deny list, another payer app writes
+    // the mark again, raising no floor. The repeat finishes the payment the user started,
+    // which the mark doesn't withhold: it goes (Paykit spec 8.3, "Manual only").
     let w = World::new();
     Box::pin(repeat_while_the_wallet_writes(&w, OwnWrite::ManualOnly)).await;
 }
@@ -2272,9 +2273,10 @@ async fn carol_cancels(w: &World) {
 
 /// The phone pays carol's request by hand, left in flight. At the resume, the repeat reads
 /// her record; then, while the phone reads the deny list, the wallet makes `write` (carol's
-/// cancellation is sent before the resume). The
-/// method isn't called again, and the attempt stays open for the method's history or a
-/// receipt, at this resume and the next.
+/// cancellation is sent before the resume). For a cancellation, the method isn't called
+/// again, and the attempt stays open for the method's history or a receipt, at this resume
+/// and the next; the `manual_only` mark, which the phone's own attempt wrote, doesn't
+/// withhold the repeat of a payment the user started, which goes.
 async fn repeat_while_the_wallet_writes(w: &World, write: OwnWrite) {
     let phone_store = Arc::new(PayingStore::default());
     // On the heap: the setup nests deep.
@@ -2301,6 +2303,10 @@ async fn repeat_while_the_wallet_writes(w: &World, write: OwnWrite) {
         .unwrap();
     });
     Box::pin(phone.resume_payments()).await.unwrap();
+    if matches!(write, OwnWrite::ManualOnly) {
+        assert_eq!(w.rail.pay_calls(&attempt_id), 2);
+        return;
+    }
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
     let payment = phone.payments().await.unwrap().remove(0);
     assert_eq!(payment.stage, paykit_sdk::Stage::Paying);
@@ -2451,7 +2457,9 @@ async fn first_dispatch_with_a_write_after_its_read(w: &Arc<World>, write: Lands
 /// The phone pays carol's request by hand, left in flight. At the resume, once the repeat's
 /// check has read the deny list, the wallet makes `write`: at once for the deny list, which
 /// that read has answered, or right after the phone's next read of the record or the floor.
-/// The method isn't called again, and the attempt stays open, at this resume and the next.
+/// The method isn't called again, and the attempt stays open, at this resume and, but for
+/// the record's `manual_only` mark, which doesn't withhold the repeat of a payment the user
+/// started, the next.
 async fn repeat_with_a_write_after_its_read(w: &Arc<World>, write: LandsAfter) {
     let phone_store = Arc::new(PayingStore::default());
     let reads = Arc::new(ReadHook::new(Arc::clone(&w.router)));
@@ -2486,7 +2494,12 @@ async fn repeat_with_a_write_after_its_read(w: &Arc<World>, write: LandsAfter) {
     let payment = phone.payments().await.unwrap().remove(0);
     assert_eq!(payment.stage, paykit_sdk::Stage::Paying);
     Box::pin(phone.resume_payments()).await.unwrap();
-    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    let again = if matches!(write, LandsAfter::Record) {
+        2
+    } else {
+        1
+    };
+    assert_eq!(w.rail.pay_calls(&attempt_id), again);
 }
 
 #[tokio::test]
@@ -2537,11 +2550,12 @@ async fn test_blocked_return_payee_blocked_after_the_repeat_deny_list_read_not_r
 }
 
 #[tokio::test]
-async fn test_blocked_return_request_marked_manual_only_after_the_repeat_record_read_not_repeated()
-{
-    // At the resume, the repeat's check reads carol's record, open and not `manual_only`;
-    // right after that read, another payer app marks it `manual_only`. The second read of
-    // the record holds the repeat.
+async fn test_blocked_return_request_written_after_the_repeat_record_read_holds_that_repeat() {
+    // At the resume, the repeat's check reads carol's record, which the phone's own attempt
+    // marked `manual_only`; right after that read, another payer app writes the mark again.
+    // The second read of the record shows another write and holds the repeat. The next
+    // resume reads one write twice and repeats: the mark doesn't withhold the repeat of a
+    // payment the user started (Paykit spec 8.3, "Manual only").
     let w = Arc::new(World::new());
     Box::pin(repeat_with_a_write_after_its_read(&w, LandsAfter::Record)).await;
 }
