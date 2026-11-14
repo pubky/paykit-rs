@@ -1528,6 +1528,109 @@ pub fn check_successor_since(
     Ok(())
 }
 
+/// Whether `ledger` lists `attempt` among its entries or in `totals.failed`.
+fn lists(ledger: &Ledger, attempt: &AttemptId) -> bool {
+    ledger.entries.iter().any(|e| e.attempt_id == *attempt)
+        || ledger.failed.iter().any(|f| f.attempt_id == *attempt)
+}
+
+/// Whether `entry` can be one of an Allowance under `terms`: in the terms' asset, at a time
+/// the grammar writes ("A valid ledger", Paykit wire 5.5).
+fn of_the_terms(terms: &AllowanceTerms, entry: &LedgerEntry) -> bool {
+    entry.asset == terms.asset && entry.at <= MAX_TIME_MS
+}
+
+/// The ledger a repair writes (Paykit spec 8.3, "After a confirmation"; Paykit wire 5.5): a
+/// merge that never counts less, from these, in this order:
+///
+/// - `kept`, the last ledger version the executor accepted, as it was, or the empty ledger
+///   when it accepted none;
+/// - what `shown`, the ledger the service shows now, adds to it: each entry and
+///   `totals.failed` item for an attempt `kept` doesn't list, an entry's `outcome` taken
+///   only when it is `done`; a `done` for an entry `kept` lists, and for a `totals.failed`
+///   item it lists, which moves into `spent` and `count` once; and the higher `spent` and
+///   `count`;
+/// - each of `journal`, the attempts the executor's journal holds under the Allowance, and
+///   then of `claims`, the attempts the claims of the counterparty's obligations show, for
+///   an attempt not listed yet, without an outcome.
+///
+/// An entry of another asset than the terms', or at a time the grammar doesn't write, is
+/// left out: no executor makes an attempt in another asset under the Allowance (Paykit spec
+/// 8.3, "Executor"). Usage over the result is no less than over `kept`, and no less than
+/// over what each of the others adds, by every limit, and the result is a successor of
+/// `kept` ([`check_successor`]).
+///
+/// # Errors
+///
+/// [`Error::Invalid`] for a `kept` that isn't valid against the terms, a `shown` of another
+/// Allowance, or a sum that overflows.
+pub fn merge_for_repair(
+    terms: &AllowanceTerms,
+    kept: &Ledger,
+    shown: Option<&Ledger>,
+    journal: &[LedgerEntry],
+    claims: &[LedgerEntry],
+) -> Result<Ledger> {
+    kept.check_valid(terms)?;
+    let mut next = kept.clone();
+    if let Some(shown) = shown {
+        if shown.counterparty != kept.counterparty || shown.allowance_id != kept.allowance_id {
+            return invalid("Paykit wire 5.5: the ledger shown is another Allowance's");
+        }
+        let mut spent = next.spent_scaled().max(shown.spent_scaled());
+        let mut count = next.count.max(shown.count);
+        for entry in shown.entries.iter().filter(|e| of_the_terms(terms, e)) {
+            let done = entry.outcome == Some(EntryOutcome::Done);
+            if let Some(held) = next
+                .entries
+                .iter_mut()
+                .find(|e| e.attempt_id == entry.attempt_id)
+            {
+                if done {
+                    held.outcome = Some(EntryOutcome::Done);
+                }
+                continue;
+            }
+            if let Some(i) = next
+                .failed
+                .iter()
+                .position(|f| f.attempt_id == entry.attempt_id)
+            {
+                // A compacted failed attempt shown paid: into the totals, once.
+                if done {
+                    let item = next.failed.remove(i);
+                    spent = add(spent, item.value.scaled())?;
+                    count = count.checked_add(1).ok_or_else(overflow)?;
+                }
+                continue;
+            }
+            next.entries.push(LedgerEntry {
+                outcome: done.then_some(EntryOutcome::Done),
+                ..entry.clone()
+            });
+        }
+        for item in &shown.failed {
+            if !lists(&next, &item.attempt_id) {
+                next.failed.push(item.clone());
+            }
+        }
+        if spent != next.spent_scaled() {
+            next.spent = Some(Decimal::from_scaled(spent));
+        }
+        next.count = count;
+    }
+    for entry in journal.iter().chain(claims) {
+        if of_the_terms(terms, entry) && !lists(&next, &entry.attempt_id) {
+            next.entries.push(LedgerEntry {
+                outcome: None,
+                ..entry.clone()
+            });
+        }
+    }
+    next.check_valid(terms)?;
+    Ok(next)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2688,5 +2791,166 @@ mod tests {
                 "{at}"
             );
         }
+    }
+
+    const IN_MONTH: &str = "2026-03-05T00:00:00.000Z";
+
+    /// What a repair merges: a kept version, the ledger shown, the journal's attempts and the
+    /// claims', overlapping, with entries of every outcome, compacted totals, and a shown
+    /// entry of another asset.
+    fn repair_inputs() -> (Ledger, Ledger, Vec<LedgerEntry>, Vec<LedgerEntry>) {
+        let mut kept = ledger(vec![
+            entry(1, "0.01", IN_MONTH, Some(EntryOutcome::Done)),
+            entry(2, "0.01", IN_MONTH, None),
+            entry(3, "0.01", IN_MONTH, Some(EntryOutcome::Failed)),
+        ]);
+        kept.failed.push(CompactedFailed {
+            obligation: [4; 32],
+            attempt_id: AttemptId::from_bytes([4; 16]),
+            value: Decimal::parse("0.01").unwrap(),
+        });
+        let mut other_asset = entry(6, "0.01", IN_MONTH, None);
+        other_asset.asset = Asset::parse("usd").unwrap();
+        let mut shown = ledger(vec![
+            entry(2, "0.01", IN_MONTH, Some(EntryOutcome::Done)),
+            entry(
+                4,
+                "0.01",
+                "2025-06-01T00:00:00.000Z",
+                Some(EntryOutcome::Done),
+            ),
+            entry(5, "0.02", IN_MONTH, Some(EntryOutcome::Failed)),
+            other_asset,
+        ]);
+        shown.failed.push(CompactedFailed {
+            obligation: [7; 32],
+            attempt_id: AttemptId::from_bytes([7; 16]),
+            value: Decimal::parse("0.01").unwrap(),
+        });
+        shown.spent = Some(Decimal::parse("0.02").unwrap());
+        shown.count = 2;
+        let journal = vec![
+            entry(2, "0.01", IN_MONTH, None),
+            entry(8, "0.01", IN_MONTH, None),
+        ];
+        let claims = vec![
+            entry(8, "0.01", IN_MONTH, None),
+            entry(9, "0.01", IN_MONTH, None),
+        ];
+        (kept, shown, journal, claims)
+    }
+
+    /// Claims as an executor may read them for the repair's attempts: gone, open, and each
+    /// outcome, the kept `failed` borne out by a `failed` claim or a later `done`.
+    fn repair_claims() -> Vec<HashMap<AttemptId, ClaimState>> {
+        let id = |n: u8| AttemptId::from_bytes([n; 16]);
+        let mut open = HashMap::new();
+        for n in [2, 5, 8, 9] {
+            open.insert(id(n), ClaimState::Open);
+        }
+        open.insert(id(3), ClaimState::Failed { by_owner: true });
+        let mut settled = HashMap::new();
+        for n in [2, 3, 4, 5, 7, 8, 9] {
+            settled.insert(id(n), ClaimState::Done);
+        }
+        let mut failed = HashMap::new();
+        for n in [2, 5, 8] {
+            failed.insert(id(n), ClaimState::Failed { by_owner: false });
+        }
+        failed.insert(id(9), ClaimState::Failed { by_owner: true });
+        failed.insert(id(3), ClaimState::Failed { by_owner: false });
+        vec![HashMap::new(), open, settled, failed]
+    }
+
+    #[test]
+    fn test_merge_for_repair_never_counts_less_than_any_input() {
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let (kept, shown, journal, claims) = repair_inputs();
+        let merged = merge_for_repair(&terms, &kept, Some(&shown), &journal, &claims).unwrap();
+        // The ledger shown as usage reads it: without its entry of another asset.
+        let mut shown_valid = shown.clone();
+        shown_valid.entries.retain(|e| e.asset == terms.asset);
+        let inputs = [
+            kept.clone(),
+            shown_valid,
+            ledger(journal.clone()),
+            ledger(claims.clone()),
+            Ledger::empty(kept.counterparty, kept.allowance_id.clone()),
+        ];
+        for at in [
+            IN_MONTH,
+            "2026-03-20T00:00:00.000Z",
+            "2026-05-01T00:00:00.000Z",
+        ] {
+            for states in repair_claims() {
+                let after = usage(&terms, &merged, &states, t(at)).unwrap();
+                for input in &inputs {
+                    let before = usage(&terms, input, &states, t(at)).unwrap();
+                    assert!(after.lifetime() >= before.lifetime(), "{at}");
+                    for (a, b) in after.periods().iter().zip(before.periods()) {
+                        assert!(a.amount() >= b.amount(), "{at}");
+                        assert!(a.count() >= b.count(), "{at}");
+                    }
+                }
+            }
+            check_successor(&terms, &kept, &merged, t(at)).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_merge_for_repair_takes_what_the_ledger_shown_adds() {
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let (kept, shown, journal, claims) = repair_inputs();
+        let merged = merge_for_repair(&terms, &kept, Some(&shown), &journal, &claims).unwrap();
+        let outcome = |n: u8| {
+            merged
+                .entries
+                .iter()
+                .find(|e| e.attempt_id == AttemptId::from_bytes([n; 16]))
+                .map(|e| e.outcome)
+        };
+        // The kept entries as they were, a `done` shown added; the kept `failed` stays.
+        assert_eq!(outcome(1), Some(Some(EntryOutcome::Done)));
+        assert_eq!(outcome(2), Some(Some(EntryOutcome::Done)));
+        assert_eq!(outcome(3), Some(Some(EntryOutcome::Failed)));
+        // A `failed` shown isn't taken; the entry of another asset is left out.
+        assert_eq!(outcome(5), Some(None));
+        assert_eq!(outcome(6), None);
+        // The journal's and the claims' attempts, once each.
+        assert_eq!(outcome(8), Some(None));
+        assert_eq!(outcome(9), Some(None));
+        assert_eq!(merged.entries.len(), 6);
+        // The compacted failed attempt shown paid moves into the higher totals, once; the
+        // one shown compacted comes along.
+        assert!(merged
+            .failed
+            .iter()
+            .all(|f| f.attempt_id != AttemptId::from_bytes([4; 16])));
+        assert!(merged
+            .failed
+            .iter()
+            .any(|f| f.attempt_id == AttemptId::from_bytes([7; 16])));
+        assert_eq!(merged.spent.as_ref().map(Decimal::as_str), Some("0.03"));
+        assert_eq!(merged.count, 3);
+        // Without a ledger shown: the kept version, the journal's and the claims' attempts.
+        let alone = merge_for_repair(&terms, &kept, None, &journal, &claims).unwrap();
+        assert_eq!(alone.entries.len(), 5);
+        assert_eq!(alone.failed, kept.failed);
+        assert_eq!((alone.spent.clone(), alone.count), (None, 0));
+        // From nothing kept: the empty ledger and what the journal and claims show.
+        let empty = Ledger::empty(kept.counterparty, kept.allowance_id.clone());
+        let fresh = merge_for_repair(&terms, &empty, None, &journal, &claims).unwrap();
+        assert_eq!(fresh.entries.len(), 3);
+    }
+
+    #[test]
+    fn test_merge_for_repair_refuses_another_allowances_ledger() {
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let (kept, mut shown, journal, claims) = repair_inputs();
+        shown.counterparty = [6; 32];
+        assert!(merge_for_repair(&terms, &kept, Some(&shown), &journal, &claims).is_err());
+        let mut invalid_kept = kept.clone();
+        invalid_kept.entries[0].asset = Asset::parse("usd").unwrap();
+        assert!(merge_for_repair(&terms, &invalid_kept, None, &journal, &claims).is_err());
     }
 }
