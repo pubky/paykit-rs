@@ -117,7 +117,7 @@ pub(crate) enum RecordSide {
     Payee,
     /// `allowances` and `allowance_ledgers`: the Allowance records and their ledgers, on
     /// their own side (Paykit spec 8.1, "Records not listed yet"; Paykit spec 8.3). Both are
-    /// read under `allowance`, so a certificate reads both or neither.
+    /// read under `paykit_allowance`, so a certificate reads both or neither.
     Allowances,
     /// Every collection of Paykit's.
     All,

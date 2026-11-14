@@ -201,7 +201,7 @@ async fn test_executor_refuses_a_payment_over_the_lifetime_limit() {
 }
 
 #[tokio::test]
-async fn test_executor_grant_refused_without_allowance_execute() {
+async fn test_executor_grant_refused_without_paykit_allowance_execute() {
     let w = World::new();
     let mut shop = allowance_shop(&w).await;
     let mut wallet = w
