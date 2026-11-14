@@ -275,6 +275,25 @@ fn claim_state(
     })
 }
 
+/// Whether the claim of `obligation` holds an attempt, one of `attempts`, that `ledger` names
+/// neither in an entry nor in a `totals.failed` item for that obligation: one made by hand or
+/// otherwise not under the Allowance the ledger is of, whatever its outcome, so the occurrence
+/// is paid again only by hand (Paykit spec 8.3, "Doubtful obligations").
+fn attempted_elsewhere(obligation: &[u8; 32], attempts: &[[u8; 16]], ledger: &Ledger) -> bool {
+    attempts.iter().any(|attempt| {
+        let attempt = AttemptId::from_bytes(*attempt);
+        let in_entry = ledger
+            .entries
+            .iter()
+            .any(|e| e.attempt_id == attempt && &e.obligation == obligation);
+        let in_failed = ledger
+            .failed
+            .iter()
+            .any(|f| f.attempt_id == attempt && &f.obligation == obligation);
+        !in_entry && !in_failed
+    })
+}
+
 /// "Who wrote it" (Paykit spec 8.3, Paykit wire 5.4): the ledger write `op`, by `writer`,
 /// counts only if it carries `record_version` on the Allowance record `record_key` at a
 /// version no newer than `held`, the version read, and `writer` is the executor the grant
@@ -1072,6 +1091,21 @@ impl Paykit {
                 under.allowance.allowance_id.clone(),
             )
         });
+        // Doubtful obligations (Paykit spec 8.3): an occurrence whose claim holds an attempt
+        // the ledger names neither in an entry nor in `totals.failed`, one made by hand or
+        // under another Allowance, whatever its outcome, even one that never reached the
+        // payment method, is paid again only by hand. Read before anything is written; a
+        // read that fails is the error, never taken as a claim without attempts. The batch's
+        // `attempt` builds on the claim's step read before, so an attempt added since makes
+        // it fail.
+        if let Some(read) = self.app.read_claim(&obligation).await? {
+            let attempts: Vec<[u8; 16]> = read.view.attempts.iter().map(|a| a.attempt_id).collect();
+            if attempted_elsewhere(&obligation, &attempts, &ledger) {
+                return Err(not_automatic(
+                    "the occurrence was attempted by hand or under another Allowance: it is paid only by hand",
+                ));
+            }
+        }
         let mut claims = HashMap::new();
         let open: Vec<([u8; 32], AttemptId)> = ledger
             .entries
@@ -1694,6 +1728,61 @@ mod tests {
             item_hash: [3; 32],
             value: ledger.to_json().unwrap(),
         }
+    }
+
+    fn ledger_with(entries: &[(u8, u8)], failed: &[(u8, u8)]) -> Ledger {
+        let mut ledger = Ledger::empty([2; 32], AllowanceId::parse(ID).unwrap());
+        for (obligation, attempt) in entries {
+            ledger.entries.push(LedgerEntry {
+                obligation: [*obligation; 32],
+                attempt_id: AttemptId::from_bytes([*attempt; 16]),
+                value: paykit_lib::Decimal::parse("0.5").unwrap(),
+                asset: paykit_lib::Asset::parse("btc").unwrap(),
+                at: 1,
+                outcome: None,
+            });
+        }
+        for (obligation, attempt) in failed {
+            ledger.failed.push(paykit_lib::allowances::CompactedFailed {
+                obligation: [*obligation; 32],
+                attempt_id: AttemptId::from_bytes([*attempt; 16]),
+                value: paykit_lib::Decimal::parse("0.5").unwrap(),
+            });
+        }
+        ledger
+    }
+
+    #[test]
+    fn test_executor_attempts_named_in_entries_or_totals_failed_are_the_allowances() {
+        let ledger = ledger_with(&[(1, 7)], &[(1, 8)]);
+        assert!(!attempted_elsewhere(&[1; 32], &[], &ledger));
+        assert!(!attempted_elsewhere(&[1; 32], &[[7; 16]], &ledger));
+        assert!(!attempted_elsewhere(&[1; 32], &[[8; 16]], &ledger));
+        assert!(!attempted_elsewhere(&[1; 32], &[[7; 16], [8; 16]], &ledger));
+    }
+
+    #[test]
+    fn test_executor_attempt_no_entry_or_totals_failed_item_names_is_made_elsewhere() {
+        let ledger = ledger_with(&[(1, 7)], &[(1, 8)]);
+        // Made by hand, or under another Allowance, whose ledger is another.
+        assert!(attempted_elsewhere(&[1; 32], &[[9; 16]], &ledger));
+        assert!(attempted_elsewhere(&[1; 32], &[[7; 16], [9; 16]], &ledger));
+        assert!(attempted_elsewhere(
+            &[1; 32],
+            &[[7; 16]],
+            &ledger_with(&[], &[])
+        ));
+        // An entry or an item for another obligation names no attempt of this one.
+        assert!(attempted_elsewhere(
+            &[1; 32],
+            &[[7; 16]],
+            &ledger_with(&[(3, 7)], &[])
+        ));
+        assert!(attempted_elsewhere(
+            &[1; 32],
+            &[[8; 16]],
+            &ledger_with(&[], &[(3, 8)])
+        ));
     }
 
     #[test]

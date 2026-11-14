@@ -2951,3 +2951,142 @@ async fn test_executor_kept_ledger_past_the_record_size_refused_at_restore() {
     .unwrap();
     assert_eq!(restored.app().protocol_scan(b"lv/").await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn test_executor_refuses_an_occurrence_attempted_by_hand() {
+    // The user pays bob's request by hand and the payment method refuses the call: the
+    // attempt is written `failed`, and no money moved. The occurrence was attempted not under
+    // the Allowance, so its executor never pays it: it is paid again only by hand (Paykit
+    // spec 8.3, "Doubtful obligations").
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    w.rail.next(paykit_sdk::rail::Behaviour::Refuse);
+    let by_hand = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(by_hand, PayOutcome::Failed { .. }), "{by_hand:?}");
+    let refused = wallet
+        .pay_under_allowance(&request, &record)
+        .await
+        .unwrap_err();
+    assert!(
+        refused_for(&refused, "attempted by hand or under another Allowance"),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    let (_, ledger) = held(&wallet, &record).await;
+    assert!(ledger.unwrap().entries.is_empty());
+    // By hand it is still paid.
+    let again = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(again, PayOutcome::Paid { .. }), "{again:?}");
+}
+
+#[tokio::test]
+async fn test_executor_pays_after_its_own_failed_attempt_is_compacted() {
+    // The executor's own attempt fails, and its ledger entry is compacted into
+    // `totals.failed` a minute later. The ledger still names the attempt, so it is the
+    // Allowance's own, and the executor pays the occurrence again (Paykit spec 8.3,
+    // "Doubtful obligations"; Paykit wire 5.5).
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    w.rail.next(paykit_sdk::rail::Behaviour::Refuse);
+    let failed = wallet.pay_under_allowance(&request, &record).await.unwrap();
+    assert!(matches!(failed, PayOutcome::Failed { .. }), "{failed:?}");
+    let (allowance, ledger) = held(&wallet, &record).await;
+    let mut ledger = ledger.unwrap();
+    let entry = ledger.entries.remove(0);
+    assert!(ledger.entries.is_empty());
+    ledger.failed.push(paykit_lib::allowances::CompactedFailed {
+        obligation: entry.obligation,
+        attempt_id: entry.attempt_id,
+        value: entry.value,
+    });
+    w.clock
+        .advance_ms(paykit_lib::allowances::ENTRY_WINDOW_MS + 1_000);
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "allowance_ledgers",
+            paykit_lib::collections::Collection::AllowanceLedgers.fixed_policy(),
+        ),
+        &paykit_lib::derive::natural_key::allowance(
+            &allowance.counterparty,
+            &allowance.allowance_id,
+        ),
+    );
+    let version = wallet
+        .app()
+        .shared_record(&record)
+        .await
+        .unwrap()
+        .unwrap()
+        .version;
+    let op = wallet
+        .app_mut()
+        .record_op(
+            &target,
+            Some(&ledger.to_json().unwrap()),
+            vec![pubky_switch_core::ops::Condition::RecordVersion {
+                key: record,
+                version,
+            }],
+        )
+        .await
+        .unwrap();
+    wallet
+        .app_mut()
+        .submit_batch(pubky_switch_client::app::OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    let paid = wallet.pay_under_allowance(&request, &record).await.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let (_, ledger) = held(&wallet, &record).await;
+    let ledger = ledger.unwrap();
+    assert_eq!(ledger.failed.len(), 1);
+    assert_eq!(ledger.entries.len(), 1);
+}
+
+#[tokio::test]
+async fn test_executor_refuses_an_occurrence_attempted_under_another_allowance() {
+    // Bob allows alice two Allowances, each with its own executor. The first executor's
+    // attempt at bob's request fails. The second executor still holds the request record as
+    // it was before, naming no Allowance; the claim it reads shows the other Allowance's
+    // attempt, which its own ledger doesn't name, so it pays nothing (Paykit spec 8.3,
+    // "Doubtful obligations").
+    let w = World::new();
+    let mut shop = allowance_shop(&w).await;
+    let mut wallet = executor_wallet(&w, "wallet").await;
+    let first = accepted(&w, &mut shop, &mut wallet, terms_with(json!({}))).await;
+    let second = accepted(&w, &mut shop, &mut wallet, terms_with(json!({}))).await;
+    wallet
+        .grant_executor(&first, UserConfirmed::new())
+        .await
+        .unwrap();
+    let mut other = executor_wallet(&w, "wallet2").await;
+    other.receive(None).await.unwrap();
+    other
+        .grant_executor(&second, UserConfirmed::new())
+        .await
+        .unwrap();
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    other.receive(None).await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Refuse);
+    let failed = wallet.pay_under_allowance(&request, &first).await.unwrap();
+    assert!(matches!(failed, PayOutcome::Failed { .. }), "{failed:?}");
+    let refused = other
+        .pay_under_allowance(&request, &second)
+        .await
+        .unwrap_err();
+    assert!(
+        refused_for(&refused, "attempted by hand or under another Allowance"),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    let (_, ledger) = held(&other, &second).await;
+    assert!(ledger.is_none_or(|l| l.entries.is_empty()));
+}
