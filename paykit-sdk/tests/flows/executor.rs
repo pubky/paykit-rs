@@ -2465,17 +2465,24 @@ async fn test_executor_pays_nothing_when_the_resend_mark_does_not_read() {
 const MINUTE_MS: u64 = 60_000;
 
 /// A store that notes the commit that journals an attempt's `Paying`, and runs a hook once,
-/// during it: after the checks before the commit and before the payment method's call.
+/// during it: after the checks before the commit and before the payment method's call. A
+/// second hook runs once during the first commit that journals an attempt `Attempted`: after
+/// the attempt's batch is applied and before the final payment check.
 #[derive(Default)]
 struct PayingStore {
     inner: pubky_switch_client::store::MemoryStore,
     paying: std::sync::atomic::AtomicBool,
     hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    attempted_hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl PayingStore {
     fn on_paying(&self, hook: impl FnOnce() + Send + 'static) {
         *self.hook.lock().unwrap() = Some(Box::new(hook));
+    }
+
+    fn on_attempted(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.attempted_hook.lock().unwrap() = Some(Box::new(hook));
     }
 
     /// Whether an attempt's `Paying` was committed.
@@ -2509,11 +2516,20 @@ impl StateStore for PayingStore {
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
         const PAYING: &[u8] = b"\"stage\":\"paying\"";
-        let paying = batch.writes.iter().any(|write| {
-            matches!(write, pubky_switch_client::store::Write::Put { key, value, .. }
-                if key.starts_with(b"p/j/") && value.windows(PAYING.len()).any(|w| w == PAYING))
-        });
+        const ATTEMPTED: &[u8] = b"\"stage\":\"attempted\"";
+        let journals = |stage: &[u8]| {
+            batch.writes.iter().any(|write| {
+                matches!(write, pubky_switch_client::store::Write::Put { key, value, .. }
+                    if key.starts_with(b"p/j/") && value.windows(stage.len()).any(|w| w == stage))
+            })
+        };
+        let (paying, attempted) = (journals(PAYING), journals(ATTEMPTED));
         self.inner.commit(batch)?;
+        if attempted {
+            if let Some(hook) = self.attempted_hook.lock().unwrap().take() {
+                hook();
+            }
+        }
         if paying {
             self.paying.store(true, std::sync::atomic::Ordering::SeqCst);
             if let Some(hook) = self.hook.lock().unwrap().take() {
@@ -2703,6 +2719,92 @@ async fn test_executor_payee_blocked_after_the_paying_commit_not_paid() {
     Box::pin(held_at_the_dispatch(&w, &mut wallet, &request, &record)).await;
 }
 
+/// Another app of alice's that holds the Allowance at `record` and may end it.
+async fn own_app_holding(w: &World) -> Paykit {
+    let mut other = Box::pin(executor_wallet(w, "other")).await;
+    other.receive(None).await.unwrap();
+    other
+}
+
+/// Run `other`'s end of the Allowance at `record` on its own thread, while the caller waits.
+fn end_from(mut other: Paykit, record: [u8; 32]) {
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async { other.end_allowance(&record).await.unwrap() })
+    })
+    .join()
+    .unwrap();
+}
+
+#[tokio::test]
+async fn test_executor_allowance_ended_after_the_batch_holds_the_dispatch() {
+    // Right after the executor's batch is applied, another own app ends the Allowance. The
+    // copy the executor holds doesn't show the end; the Allowance record read from the
+    // switch at the final payment check, before the attempt's `Paying` commit, does, and
+    // holds the dispatch: nothing is journaled `Paying` and nothing is sent (Paykit spec
+    // 8.3, "Executor").
+    let w = Arc::new(World::new());
+    let wallet_store = Arc::new(PayingStore::default());
+    let (mut shop, mut wallet, record) = Box::pin(set_up_on(
+        &w,
+        Arc::clone(&wallet_store) as Arc<dyn StateStore>,
+    ))
+    .await;
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    let other = Box::pin(own_app_holding(&w)).await;
+    wallet_store.on_attempted(move || end_from(other, record));
+    Box::pin(held_at_the_dispatch(&w, &mut wallet, &request, &record)).await;
+    assert!(!wallet_store.paying_seen());
+}
+
+#[tokio::test]
+async fn test_executor_allowance_ended_after_the_paying_commit_holds_the_dispatch() {
+    // While the attempt's `Paying` commit runs, another own app ends the Allowance. The
+    // Allowance record read from the switch again after the commit holds the dispatch, and
+    // the attempt goes back to known unsubmitted (Paykit spec 8.3, "Executor").
+    let w = Arc::new(World::new());
+    let wallet_store = Arc::new(PayingStore::default());
+    let (mut shop, mut wallet, record) = Box::pin(set_up_on(
+        &w,
+        Arc::clone(&wallet_store) as Arc<dyn StateStore>,
+    ))
+    .await;
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    let other = Box::pin(own_app_holding(&w)).await;
+    wallet_store.on_paying(move || end_from(other, record));
+    Box::pin(held_at_the_dispatch(&w, &mut wallet, &request, &record)).await;
+    assert!(wallet_store.paying_seen());
+}
+
+#[tokio::test]
+async fn test_executor_allowance_read_failing_at_the_dispatch_holds_it() {
+    // No end, but the Allowance record's read after the attempt's `Paying` commit fails: it
+    // never counts as an Allowance still in force, so the dispatch is held (Paykit spec 8.3,
+    // "Executor").
+    let w = Arc::new(World::new());
+    let wallet_store = Arc::new(PayingStore::default());
+    let (mut shop, mut wallet, record) = Box::pin(set_up_on(
+        &w,
+        Arc::clone(&wallet_store) as Arc<dyn StateStore>,
+    ))
+    .await;
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    let world = Arc::clone(&w);
+    wallet_store.on_paying(move || {
+        world
+            .alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+                path: format!("/records/{}", pubky_switch_core::enc::b64(&record)),
+                after: 0,
+            });
+    });
+    Box::pin(held_at_the_dispatch(&w, &mut wallet, &request, &record)).await;
+    assert!(wallet_store.paying_seen());
+}
+
 #[tokio::test]
 async fn test_executor_pays_nothing_while_the_client_stores_an_answer_of_its_counterparty() {
     // An acceptance from bob comes while bob's standing can't be checked: the client stores
@@ -2859,4 +2961,143 @@ async fn test_executor_kept_ledger_past_the_record_size_refused_at_restore() {
     .await
     .unwrap();
     assert_eq!(restored.app().protocol_scan(b"lv/").await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_executor_refuses_an_occurrence_attempted_by_hand() {
+    // The user pays bob's request by hand and the payment method refuses the call: the
+    // attempt is written `failed`, and no money moved. The occurrence was attempted not under
+    // the Allowance, so its executor never pays it: it is paid again only by hand (Paykit
+    // spec 8.3, "Doubtful obligations").
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    w.rail.next(paykit_sdk::rail::Behaviour::Refuse);
+    let by_hand = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(by_hand, PayOutcome::Failed { .. }), "{by_hand:?}");
+    let refused = wallet
+        .pay_under_allowance(&request, &record)
+        .await
+        .unwrap_err();
+    assert!(
+        refused_for(&refused, "attempted by hand or under another Allowance"),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    let (_, ledger) = held(&wallet, &record).await;
+    assert!(ledger.unwrap().entries.is_empty());
+    // By hand it is still paid.
+    let again = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(again, PayOutcome::Paid { .. }), "{again:?}");
+}
+
+#[tokio::test]
+async fn test_executor_pays_after_its_own_failed_attempt_is_compacted() {
+    // The executor's own attempt fails, and its ledger entry is compacted into
+    // `totals.failed` a minute later. The ledger still names the attempt, so it is the
+    // Allowance's own, and the executor pays the occurrence again (Paykit spec 8.3,
+    // "Doubtful obligations"; Paykit wire 5.5).
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    w.rail.next(paykit_sdk::rail::Behaviour::Refuse);
+    let failed = wallet.pay_under_allowance(&request, &record).await.unwrap();
+    assert!(matches!(failed, PayOutcome::Failed { .. }), "{failed:?}");
+    let (allowance, ledger) = held(&wallet, &record).await;
+    let mut ledger = ledger.unwrap();
+    let entry = ledger.entries.remove(0);
+    assert!(ledger.entries.is_empty());
+    ledger.failed.push(paykit_lib::allowances::CompactedFailed {
+        obligation: entry.obligation,
+        attempt_id: entry.attempt_id,
+        value: entry.value,
+    });
+    w.clock
+        .advance_ms(paykit_lib::allowances::ENTRY_WINDOW_MS + 1_000);
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "allowance_ledgers",
+            paykit_lib::collections::Collection::AllowanceLedgers.fixed_policy(),
+        ),
+        &paykit_lib::derive::natural_key::allowance(
+            &allowance.counterparty,
+            &allowance.allowance_id,
+        ),
+    );
+    let version = wallet
+        .app()
+        .shared_record(&record)
+        .await
+        .unwrap()
+        .unwrap()
+        .version;
+    let op = wallet
+        .app_mut()
+        .record_op(
+            &target,
+            Some(&ledger.to_json().unwrap()),
+            vec![pubky_switch_core::ops::Condition::RecordVersion {
+                key: record,
+                version,
+            }],
+        )
+        .await
+        .unwrap();
+    wallet
+        .app_mut()
+        .submit_batch(pubky_switch_client::app::OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    let paid = wallet.pay_under_allowance(&request, &record).await.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let (_, ledger) = held(&wallet, &record).await;
+    let ledger = ledger.unwrap();
+    assert_eq!(ledger.failed.len(), 1);
+    assert_eq!(ledger.entries.len(), 1);
+}
+
+#[tokio::test]
+async fn test_executor_refuses_an_occurrence_attempted_under_another_allowance() {
+    // Bob allows alice two Allowances, each with its own executor. The first executor's
+    // attempt at bob's request fails. The second executor still holds the request record as
+    // it was before, naming no Allowance; the claim it reads shows the other Allowance's
+    // attempt, which its own ledger doesn't name, so it pays nothing (Paykit spec 8.3,
+    // "Doubtful obligations").
+    let w = World::new();
+    let mut shop = allowance_shop(&w).await;
+    let mut wallet = executor_wallet(&w, "wallet").await;
+    let first = accepted(&w, &mut shop, &mut wallet, terms_with(json!({}))).await;
+    let second = accepted(&w, &mut shop, &mut wallet, terms_with(json!({}))).await;
+    wallet
+        .grant_executor(&first, UserConfirmed::new())
+        .await
+        .unwrap();
+    let mut other = executor_wallet(&w, "wallet2").await;
+    other.receive(None).await.unwrap();
+    other
+        .grant_executor(&second, UserConfirmed::new())
+        .await
+        .unwrap();
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    other.receive(None).await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Refuse);
+    let failed = wallet.pay_under_allowance(&request, &first).await.unwrap();
+    assert!(matches!(failed, PayOutcome::Failed { .. }), "{failed:?}");
+    let refused = other
+        .pay_under_allowance(&request, &second)
+        .await
+        .unwrap_err();
+    assert!(
+        refused_for(&refused, "attempted by hand or under another Allowance"),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    let (_, ledger) = held(&other, &second).await;
+    assert!(ledger.is_none_or(|l| l.entries.is_empty()));
 }

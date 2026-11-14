@@ -2568,15 +2568,21 @@ impl Paykit {
             self.set_stage(&mut entry, Stage::Paying).await?;
         }
         // The commit and the checks were awaits, during which another payer app can block the
-        // payee, raise the block floor, or record a cancellation, a rejection or `manual_only`
-        // in the request record ([`Paykit::fresh_record_withholds`]): an automatic
-        // payment, a first dispatch or a repeat, reads the deny list, the record and the floor
-        // again now, from the switch, judges them, and reads them once more, holding unless
-        // the second reads show what the first did; a read that fails holds it too
+        // payee, raise the block floor, record a cancellation, a rejection or `manual_only`
+        // in the request record ([`Paykit::fresh_record_withholds`]), or end the Allowance:
+        // an automatic payment, a first dispatch or a repeat, reads the deny list, the record
+        // and the floor, and a first dispatch the Allowance record, again now, from the
+        // switch, judges them, and reads them once more, holding unless the second reads show
+        // what the first did; a read that fails holds it too
         // ([`Paykit::automatic_dispatch_held`], Paykit spec 8.1, 8.3, `crate::floor`). A first
         // dispatch goes back to `Attempted`, known unsubmitted, as it does when the fence
         // stops it; a repeat stays open.
-        if by == Initiator::Automatic && self.automatic_dispatch_held(&entry).await.unwrap_or(true)
+        let first = matches!(kind, Dispatch::First { .. });
+        if by == Initiator::Automatic
+            && self
+                .automatic_dispatch_held(&entry, first)
+                .await
+                .unwrap_or(true)
         {
             return self
                 .stopped_before_the_call(entry, kind, FinalCheck::Hold)
@@ -3679,12 +3685,13 @@ impl Paykit {
     /// dispatch and a repeat at a resume or a recovery, judged again by the fence just before
     /// the call (Paykit spec 4, 7.2). In order:
     ///
-    /// 0. for an automatic first dispatch, the deny list, the request record and the block
-    ///    floor, each read again and confirmed by a second read
-    ///    ([`Paykit::automatic_dispatch_held`]): a blocked payee, a record that withholds it
-    ///    ([`Paykit::fresh_record_withholds`]: cancelled, rejected, `manual_only`, held after
-    ///    a restore, divergent), isn't there or can't be read, a one-time request dated before
-    ///    the floor, a read that fails, or a second read that shows another write, holds it
+    /// 0. for an automatic first dispatch, the deny list, the request record, the block floor
+    ///    and the Allowance record it is paid under, each read again and confirmed by a second
+    ///    read ([`Paykit::automatic_dispatch_held`]): a blocked payee, a record that withholds
+    ///    it ([`Paykit::fresh_record_withholds`]: cancelled, rejected, `manual_only`, held
+    ///    after a restore, divergent), isn't there or can't be read, a one-time request dated
+    ///    before the floor, an Allowance not in force ([`Paykit::allowance_read_now`]), a read
+    ///    that fails, or a second read that shows another write, holds it
     ///    ([`FinalCheck::Hold`], Paykit spec 8.1, 8.3, `crate::floor`); an automatic repeat
     ///    makes that check after this one;
     /// 1. a switch lookup kept for the payee whose answer has come is taken, so a late
@@ -3726,8 +3733,9 @@ impl Paykit {
     ) -> Result<(FinalCheck, PeerIdentity)> {
         // No automatic payment to a blocked payee (Paykit spec 8.1), nor of a request its
         // record withholds ([`Paykit::fresh_record_withholds`]: cancelled, rejected,
-        // `manual_only`, held after a restore, divergent; Paykit spec 8.1, 8.3), or a one-time
-        // request dated before the block floor (`crate::floor`), each read now and confirmed by
+        // `manual_only`, held after a restore, divergent; Paykit spec 8.1, 8.3), a one-time
+        // request dated before the block floor (`crate::floor`), or one under an Allowance not
+        // in force (Paykit spec 8.3, "Executor"), each read now and confirmed by
         // a second read ([`Paykit::automatic_dispatch_held`]), a read that fails holding it
         // too. A first dispatch judges them before its attempt's `Paying` commit,
         // so that a held one is known unsubmitted, and again after it ([`Paykit::dispatch`]);
@@ -3735,7 +3743,7 @@ impl Paykit {
         // await before its call.
         if by == Initiator::Automatic
             && matches!(kind, Dispatch::First { .. })
-            && self.automatic_dispatch_held(entry).await?
+            && self.automatic_dispatch_held(entry, true).await?
         {
             return Ok((FinalCheck::Hold, payee));
         }
@@ -3753,31 +3761,34 @@ impl Paykit {
     /// and after it only the fence runs ([`Paykit::payment_fence`], with no await) before the
     /// payment method's call ([`Paykit::dispatch`]).
     ///
-    /// It reads these from the switch, one after the other ([`Paykit::shared_collect`]): the
-    /// deny list, the request record ([`Paykit::fresh_request_stamped`]), for a Billing
-    /// Period its period record, and the block floor ([`Paykit::floor_read_now`], for a
-    /// one-time request only), and judges them: the deny list holds the payee (Paykit spec
-    /// 8.1); the record withholds the request ([`Paykit::fresh_record_withholds`]: cancelled,
-    /// rejected, `manual_only`, held after a restore, divergent), or isn't there, doesn't
-    /// read as the request or holds none; the period record holds `manual_only` or doesn't
-    /// read ([`Paykit::period_record_now`]); or the floor holds the request
-    /// ([`Paykit::floor_holds_read`]). Then it reads them again,
-    /// in the same order, and holds unless each shows what its first read did (the deny list
-    /// the same entries, each record the same write, [`WriteStamp`]), or the deny list now
-    /// holds the payee, or the record isn't there, doesn't read or holds no request. Each read
+    /// It reads up to five things from the switch, one after the other
+    /// ([`Paykit::shared_collect`]): the deny list, the request record
+    /// ([`Paykit::fresh_request_stamped`]), for a Billing Period its period record, the block
+    /// floor ([`Paykit::floor_read_now`], for a one-time request only) and, for a `first`
+    /// dispatch under an Allowance, the Allowance record ([`Paykit::allowance_read_now`]), and
+    /// judges them: the deny list holds the payee (Paykit spec 8.1); the record withholds the
+    /// request ([`Paykit::fresh_record_withholds`]: cancelled, rejected, `manual_only`, held
+    /// after a restore, divergent), or isn't there, doesn't read as the request or holds none;
+    /// the period record holds `manual_only` or doesn't read ([`Paykit::period_record_now`]);
+    /// the floor holds the request ([`Paykit::floor_holds_read`]); or the Allowance isn't in
+    /// force (Paykit spec 8.3, "Executor"). Then it reads them again, in the same order, and
+    /// holds unless each shows what its first read did (the deny list the same entries, each
+    /// record the same write, [`WriteStamp`], the Allowance record the same version), or the
+    /// deny list now holds the payee, the record isn't there, doesn't read or holds no
+    /// request, or the Allowance isn't in force. Each read
     /// shows the switch's current state, never a copy this app keeps: the deny list from
     /// `GET /allow`, which the client always fetches, with this app's own block or unblock
     /// that the list doesn't show yet counting at once (Paykit spec 8.1, `judged_deny`): an
     /// unblock whose batch the client still keeps takes the payee out even while
-    /// `GET /allow` lists them; the record and the floor from
+    /// `GET /allow` lists them; the records and the floor from
     /// `read_record_fresh`, a read that shows anything but the switch's current write holding
     /// the dispatch.
     ///
     /// Another own app can block the payee, record a cancellation or a rejection, mark the
-    /// record `manual_only` or raise the floor while this app awaits anything, between these
-    /// reads included. A record's version only grows, whoever writes, a delete included, so an
+    /// record `manual_only`, raise the floor, or end, reject or hand off the Allowance while
+    /// this app awaits anything, the executor's batch and these reads included. A record's version only grows, whoever writes, a delete included, so an
     /// unchanged version is the same write; the deny list carries no version and is compared
-    /// whole. Both reads of the record and of the floor bracket the second read of the deny
+    /// whole. Both reads of the records and of the floor bracket the second read of the deny
     /// list, so each value judged held at that instant. A read that fails, or a record not
     /// there or not readable at either read, holds the dispatch. A write that lands after its
     /// own second read is too late for this call: the payment method's call can't be made
@@ -3786,11 +3797,11 @@ impl Paykit {
     /// (for a recurring request, the copy of the record just taken; for a payment without a
     /// request, the commit of the deny list read and the widenings it applies), and then
     /// only code with no await runs before the call.
-    async fn automatic_dispatch_held(&mut self, entry: &JournalEntry) -> Result<bool> {
-        let Some(judged) = Box::pin(self.shared_collect(entry, true)).await? else {
+    async fn automatic_dispatch_held(&mut self, entry: &JournalEntry, first: bool) -> Result<bool> {
+        let Some(judged) = Box::pin(self.shared_collect(entry, first, true)).await? else {
             return Ok(true);
         };
-        let Some(confirmed) = Box::pin(self.shared_collect(entry, false)).await? else {
+        let Some(confirmed) = Box::pin(self.shared_collect(entry, first, false)).await? else {
             return Ok(true);
         };
         Ok(judged != confirmed)
@@ -3798,16 +3809,18 @@ impl Paykit {
 
     /// One read of the identity's state an automatic dispatch of `entry` is judged by
     /// ([`Paykit::automatic_dispatch_held`]): the deny list, then the request record, then a
-    /// Billing Period's period record, then the block floor for a one-time request, each from
-    /// the switch now. `None` when a read fails, the deny list holds the payee, the record
-    /// isn't there, doesn't read or holds no request, the period record withholds the period
-    /// ([`Paykit::period_record_now`]), or, when `judge`, the record withholds the request or
-    /// the floor holds it.
-    /// Without `judge`, nothing more is read from the switch after the last read; only the
-    /// app's own store is.
+    /// Billing Period's period record, then the block floor for a one-time request, then, for
+    /// a `first` dispatch under an Allowance, the Allowance record
+    /// ([`Paykit::allowance_read_now`]), each from the switch now. `None` when a read fails,
+    /// the deny list holds the payee, the record isn't there, doesn't read or holds no
+    /// request, the period record withholds the period ([`Paykit::period_record_now`]), the
+    /// Allowance record doesn't let the executor pay under it, or, when `judge`, the record
+    /// withholds the request or the floor holds it. Without `judge`, nothing more is read from
+    /// the switch after the last read; only the app's own store is.
     async fn shared_collect(
         &mut self,
         entry: &JournalEntry,
+        first: bool,
         judge: bool,
     ) -> Result<Option<SharedState>> {
         let Ok(deny) = self.deny_list_now().await else {
@@ -3817,51 +3830,85 @@ impl Paykit {
             return Ok(None);
         }
         // The request record, a Billing Period's payment's included.
-        let Some(natural) = entry.request_record()? else {
-            return Ok(Some(SharedState {
-                deny,
-                record: None,
-                period: None,
-                floor: None,
-            }));
+        let (record, period, floor) = match entry.request_record()? {
+            None => (None, None, None),
+            Some(natural) => {
+                let target = ActivityTarget::payer(natural);
+                let (record, stamp) = match self.fresh_request_stamped(&target).await {
+                    Ok((Fresh::Held(record), Some(stamp))) => (*record, stamp),
+                    Ok(_) | Err(_) => return Ok(None),
+                };
+                if judge && self.fresh_record_withholds(entry, &target, &record).await? {
+                    return Ok(None);
+                }
+                // A Billing Period's period record, which another own app may have marked
+                // `manual_only` since the attempt's batch (Paykit spec 8.3, "Manual only").
+                let PeriodRecordNow::Clear(period) = self.period_record_now(entry).await else {
+                    return Ok(None);
+                };
+                let Some((stored, _)) = crate::requests::request_of(&record) else {
+                    return Ok(None);
+                };
+                if crate::floor::floor_applies(stored) {
+                    let stored = stored.clone();
+                    let Some(floor) = self.floor_read_now().await else {
+                        return Ok(None);
+                    };
+                    if judge && self.floor_holds_read(&stored, floor.as_ref()).await? {
+                        return Ok(None);
+                    }
+                    (Some(stamp), period, Some(floor.as_ref().map(WriteStamp::of)))
+                } else {
+                    (Some(stamp), period, None)
+                }
+            }
         };
-        let target = ActivityTarget::payer(natural);
-        let (record, stamp) = match self.fresh_request_stamped(&target).await {
-            Ok((Fresh::Held(record), Some(stamp))) => (*record, stamp),
-            Ok(_) | Err(_) => return Ok(None),
+        // A repeat finishes a payment already dispatched: an end, a handoff or a conflict
+        // since cancels no payment already started (Paykit spec 8.3, "Conflicted",
+        // "Handoff"), so only a first dispatch reads its Allowance here.
+        let allowance = match (first, entry.allowance()?) {
+            (true, Some(allowance_id)) => {
+                match Box::pin(self.allowance_read_now(entry, &allowance_id)).await {
+                    Ok(Some(version)) => Some(version),
+                    Ok(None) | Err(_) => return Ok(None),
+                }
+            }
+            _ => None,
         };
-        if judge && self.fresh_record_withholds(entry, &target, &record).await? {
-            return Ok(None);
-        }
-        // A Billing Period's period record, which another own app may have marked
-        // `manual_only` since the attempt's batch (Paykit spec 8.3, "Manual only").
-        let PeriodRecordNow::Clear(period) = self.period_record_now(entry).await else {
-            return Ok(None);
-        };
-        let Some((stored, _)) = crate::requests::request_of(&record) else {
-            return Ok(None);
-        };
-        if !crate::floor::floor_applies(stored) {
-            return Ok(Some(SharedState {
-                deny,
-                record: Some(stamp),
-                period,
-                floor: None,
-            }));
-        }
-        let stored = stored.clone();
-        let Some(floor) = self.floor_read_now().await else {
-            return Ok(None);
-        };
-        if judge && self.floor_holds_read(&stored, floor.as_ref()).await? {
-            return Ok(None);
-        }
         Ok(Some(SharedState {
             deny,
-            record: Some(stamp),
+            record,
             period,
-            floor: Some(floor.as_ref().map(WriteStamp::of)),
+            floor,
+            allowance,
         }))
+    }
+
+    /// The Allowance record `allowance_id` of `entry`'s payee as the switch holds it now,
+    /// judged whole as an executor's first dispatch under it needs it in force
+    /// ([`Paykit::allowance_gate`], read from the switch): the version every executor batch
+    /// conditions on, or `None` when it doesn't let the executor pay under it, ended,
+    /// rejected, conflicted, handed off to another app, its terms changed so that no grant
+    /// is current, paused after a provider loss, off the consent list, divergent, or with a
+    /// current write the app ignores and its user hasn't confirmed. Another own app can end
+    /// the Allowance, or hand it off, after the executor's batch was applied and before the
+    /// dispatch: the copy the app held then shows neither.
+    ///
+    /// # Errors
+    ///
+    /// A read that fails, or a record that doesn't read: the caller holds the dispatch.
+    async fn allowance_read_now(
+        &mut self,
+        entry: &JournalEntry,
+        allowance_id: &paykit_lib::AllowanceId,
+    ) -> Result<Option<RecordVersion>> {
+        let target = crate::allowances::allowance_target(&entry.payee, allowance_id);
+        let record = self.app.record_key(&target)?;
+        Ok(self
+            .allowance_gate(&record, true)
+            .await?
+            .ok()
+            .map(|under| under.version))
     }
 
     /// The fence before the payment method's call, after a first dispatch's journal write of
@@ -3878,11 +3925,11 @@ impl Paykit {
     ///
     /// The kept stop and the restore hold aren't judged again: Paykit's own state, which
     /// only this app's own calls change (a receive, a placement, a confirmation), and none
-    /// can run while the payment holds the app. The deny list, the block floor and the
-    /// request record are the identity's, which another payer app can change meanwhile: an
-    /// automatic payment reads them again, from the switch, twice, just before this fence,
-    /// and holds unless the second reads show what the first did
-    /// ([`Paykit::automatic_dispatch_held`]).
+    /// can run while the payment holds the app. The deny list, the block floor, the request
+    /// record and the Allowance record are the identity's, which another own app can change
+    /// meanwhile: an automatic payment reads them again, from the switch, twice, just before
+    /// this fence (the Allowance record at a first dispatch), and holds unless the second
+    /// reads show what the first did ([`Paykit::automatic_dispatch_held`]).
     fn payment_fence(
         &mut self,
         entry: &JournalEntry,
@@ -4152,7 +4199,10 @@ impl Paykit {
             // no payment already started (Paykit spec 8.3, "Conflicted", "Handoff"), so it
             // is made then too, while what holds while unknown still holds it
             // ([`Paykit::repeat_under_allowance_held`]). A first dispatch checks the
-            // Allowance in force.
+            // Allowance in force here as held, and again as the switch holds it at the final
+            // payment check, before and after its `Paying` commit
+            // ([`Paykit::allowance_read_now`]): the copy held may predate an end written
+            // after the executor's batch.
             let refused = if repeat {
                 self.repeat_under_allowance_held(&record).await?.err()
             } else {
@@ -4302,14 +4352,16 @@ impl WriteStamp {
 
 /// What one read of the identity's state for an automatic dispatch showed
 /// ([`Paykit::shared_collect`]): the deny list, the request record's write, a Billing
-/// Period's period record's (`None` for no record, or no period), and the floor record's
-/// (`None` inside for no record), each `None` when not read.
+/// Period's period record's (`None` for no record, or no period), the floor record's
+/// (`None` inside for no record), and the Allowance record's version, each `None` when not
+/// read.
 #[derive(Debug, PartialEq, Eq)]
 struct SharedState {
     deny: Vec<[u8; 32]>,
     record: Option<WriteStamp>,
     period: Option<WriteStamp>,
     floor: Option<Option<WriteStamp>>,
+    allowance: Option<RecordVersion>,
 }
 
 /// The period record of an automatic payment's Billing Period, read again from the switch

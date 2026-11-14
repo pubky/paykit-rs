@@ -52,10 +52,12 @@
 //!   the method's repeat with the same idempotency key, while what holds while unknown
 //!   still holds it ([`Paykit::repeat_under_allowance_held`]).
 //! - **Immediately before the dispatch** (Paykit spec 8.1, 8.3): the deny list, the request
-//!   record and the block floor are read from the switch again, twice, before the attempt's
-//!   `Paying` commit and after it, and the dispatch holds on a block, a stop, a raise of the
-//!   floor past the request's date, or a read that fails
-//!   (`Paykit::automatic_dispatch_held`); the batch doesn't condition on the floor's version.
+//!   record, the block floor and the Allowance record are read from the switch again, twice,
+//!   before the attempt's `Paying` commit and after it, and the dispatch holds on a block, a
+//!   stop, a raise of the floor past the request's date, an Allowance no longer in force
+//!   (ended, rejected, conflicted, handed off, its grant voided, paused), or a read that
+//!   fails (`Paykit::automatic_dispatch_held`); the batch doesn't condition on the floor's
+//!   version, and the Allowance record can change after the batch is applied.
 //!
 //! Security: every executor batch is conditioned on the Allowance record version read, so
 //! an end, a rejection or a handoff written since makes it fail; usage is counted from the
@@ -121,6 +123,14 @@ fn not_automatic(why: &str) -> PaykitError {
 /// version, the item hash of its write, the service time it was written at, and its
 /// content, the base the next version is checked against. The Allowance record it names
 /// repeats the key's, so a value read back is bound to its key.
+///
+/// With it go the attempts its content no longer lists that an earlier kept version did,
+/// while this app's journal holds them under the Allowance (`dropped`): compaction drops a
+/// `done` entry into the totals, and a compacted `failed` attempt leaves `totals.failed`
+/// into the totals once its `done` is seen, so the ledger alone no longer shows the
+/// Allowance such an attempt was made under. They stay what bears out the Allowance its
+/// journal entry names ([`Paykit::entry_allowance`]), for a payment whose proof is still
+/// to be written.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct KeptLedger {
     #[serde(with = "serde_b64")]
@@ -136,6 +146,10 @@ pub(crate) struct KeptLedger {
     pub(crate) item_hash: [u8; 32],
     #[serde(with = "serde_b64_vec")]
     pub(crate) value: Vec<u8>,
+    /// The attempts, as text, an earlier kept version listed among its entries or
+    /// `totals.failed` and this one doesn't, of this app's journal entries under the
+    /// Allowance when it was kept.
+    pub(crate) dropped: Vec<String>,
 }
 
 /// The first grant's empty ledger in the executor's own journal (`el/<Allowance record key>`,
@@ -348,13 +362,37 @@ impl KeptLedger {
             version: self.version,
         }
     }
+
+    /// The attempts kept as dropped, read as written: one that doesn't read is a corrupt
+    /// store.
+    fn dropped(&self) -> Result<Vec<AttemptId>> {
+        self.dropped
+            .iter()
+            .map(|text| AttemptId::parse(text).map_err(|_| PaykitError::corrupt()))
+            .collect()
+    }
+}
+
+/// Whether `ledger`, the content of `kept`, or an earlier kept version as `kept` carries it,
+/// lists `attempt` (Paykit wire 5.5): among its entries, in `totals.failed`, or dropped
+/// from them since.
+fn kept_lists(kept: &KeptLedger, ledger: &Ledger, attempt: &AttemptId) -> Result<bool> {
+    Ok(ledger_lists(ledger, attempt) || kept.dropped()?.contains(attempt))
+}
+
+/// Whether `ledger` lists `attempt` among its entries or in `totals.failed` (Paykit wire
+/// 5.5): a compacted failed attempt keeps its `attempt_id` there.
+fn ledger_lists(ledger: &Ledger, attempt: &AttemptId) -> bool {
+    ledger.entries.iter().any(|e| e.attempt_id == *attempt)
+        || ledger.failed.iter().any(|f| f.attempt_id == *attempt)
 }
 
 /// Check a kept ledger version read back from the store or a backup, the same check for
 /// both: it names the Allowance record its key names, its version is one a write gives
 /// (`seq` at least 1), its content is no longer than a shared record holds
 /// (`MAX_LEDGER_VALUE`), which no write or read the executor keeps exceeds, and it reads as
-/// a ledger. Returns the ledger.
+/// a ledger; each attempt kept as dropped reads, once, and isn't one the ledger lists.
+/// Returns the ledger.
 ///
 /// # Errors
 ///
@@ -367,7 +405,14 @@ pub(crate) fn check_kept_ledger(record: &[u8; 32], kept: &KeptLedger) -> Result<
     {
         return Err(PaykitError::corrupt());
     }
-    Ledger::from_json(&kept.value).map_err(|_| PaykitError::corrupt())
+    let ledger = Ledger::from_json(&kept.value).map_err(|_| PaykitError::corrupt())?;
+    let dropped = kept.dropped()?;
+    for (i, attempt) in dropped.iter().enumerate() {
+        if ledger_lists(&ledger, attempt) || dropped[..i].contains(attempt) {
+            return Err(PaykitError::corrupt());
+        }
+    }
+    Ok(ledger)
 }
 
 /// Whether `shared`'s current write is by an app the own `identity.json` lists as removed,
@@ -401,6 +446,18 @@ pub(crate) fn ledger_target(counterparty: &[u8; 32], allowance_id: &AllowanceId)
         crate::activity::switch_collection(Collection::AllowanceLedgers, None),
         &natural_key::allowance(counterparty, allowance_id),
     )
+}
+
+/// The Allowance an attempt rebuilt after a restore was made under, as its ledger shows it
+/// ([`Paykit::attempt_under`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AttemptUnder {
+    /// The Allowance: its ledger lists the attempt.
+    Allowance(AllowanceId),
+    /// None: made by hand.
+    ByHand,
+    /// Not known: its proof can name neither, so the attempt stays doubtful.
+    Unknown,
 }
 
 /// The Allowance an executor pays under, as its checks read it now.
@@ -473,6 +530,25 @@ fn claim_state(
     })
 }
 
+/// Whether the claim of `obligation` holds an attempt, one of `attempts`, that `ledger` names
+/// neither in an entry nor in a `totals.failed` item for that obligation: one made by hand or
+/// otherwise not under the Allowance the ledger is of, whatever its outcome, so the occurrence
+/// is paid again only by hand (Paykit spec 8.3, "Doubtful obligations").
+fn attempted_elsewhere(obligation: &[u8; 32], attempts: &[[u8; 16]], ledger: &Ledger) -> bool {
+    attempts.iter().any(|attempt| {
+        let attempt = AttemptId::from_bytes(*attempt);
+        let in_entry = ledger
+            .entries
+            .iter()
+            .any(|e| e.attempt_id == attempt && &e.obligation == obligation);
+        let in_failed = ledger
+            .failed
+            .iter()
+            .any(|f| f.attempt_id == attempt && &f.obligation == obligation);
+        !in_entry && !in_failed
+    })
+}
+
 /// "Who wrote it" (Paykit spec 8.3, Paykit wire 5.4): the ledger write `op`, by `writer`,
 /// counts only if it carries `record_version` on the Allowance record `record_key` at a
 /// version no newer than `held`, the version read, and `writer` is the executor the grant
@@ -516,9 +592,12 @@ impl Paykit {
     /// The Allowance `entry`, a journal entry, was paid under, with the proof that the
     /// stored pointer names the right one (Paykit spec 8.3): the executor's batch named the
     /// Allowance in the request record in the same batch as the attempt, so the payer record
-    /// held must name it; without a record that reads, the kept ledger version must hold an
-    /// entry for the attempt. An entry naming another Allowance than its proof is a corrupt
-    /// store, checked before money moves and before the outcome's proof or record is built.
+    /// held must name it; without a record that reads, such as one another own app deleted,
+    /// the kept ledger version must list the attempt, among its entries, in `totals.failed`
+    /// once compacted, or as dropped since from a version kept earlier ([`KeptLedger`]), so
+    /// neither compaction nor a compacted attempt's move into the totals loses it. An entry
+    /// naming another Allowance than its proof is a corrupt store, checked before money
+    /// moves and before the outcome's proof or record is built.
     ///
     /// `Ok(Err(..))` for an entry whose Allowance its proof doesn't bear out, so the caller
     /// decides for that one entry: the gate holds it, the outcome returns it as a corrupt
@@ -547,10 +626,10 @@ impl Paykit {
             .app
             .record_key(&allowance_target(&entry.payee, &allowance_id))?;
         let attempt = entry.attempt()?;
-        let in_ledger = self
-            .kept_ledger(&allowance)
-            .await?
-            .is_some_and(|(_, ledger)| ledger.entries.iter().any(|e| e.attempt_id == attempt));
+        let in_ledger = match self.kept_ledger(&allowance).await? {
+            Some((kept, ledger)) => kept_lists(&kept, &ledger, &attempt)?,
+            None => false,
+        };
         if !in_ledger {
             return unproven();
         }
@@ -558,62 +637,68 @@ impl Paykit {
     }
 
     /// The Allowance `named`, of the request record of `payee`, that `attempt` was made
-    /// under: the one its ledger record, as held or else as read from the switch once, holds
-    /// an entry for the attempt in. `None` for a record naming none, or a ledger not held,
-    /// that doesn't read or bind, or holds no such entry: the attempt is then taken as made
-    /// by hand, and its proof names no Allowance. For a journal entry rebuilt after a
-    /// restore.
+    /// under, for a journal entry rebuilt after a restore: its ledger record, as held or else
+    /// as read from the switch once, lists the attempt among its entries or, compacted, in
+    /// `totals.failed`. [`AttemptUnder::ByHand`] for a record naming none, or a ledger that
+    /// reads and binds, was never compacted and doesn't list it: the attempt was made by
+    /// hand, and its proof names no Allowance. [`AttemptUnder::Unknown`] for a ledger that
+    /// can't be read, doesn't read or bind, or was compacted without listing it, since
+    /// compaction drops a `done` entry into the totals: its proof can name neither.
     pub(crate) async fn attempt_under(
         &mut self,
         payee: &[u8; 32],
         named: Option<&AllowanceId>,
         attempt: AttemptId,
-    ) -> Result<Option<AllowanceId>> {
+    ) -> Result<AttemptUnder> {
         let Some(allowance_id) = named else {
-            return Ok(None);
+            return Ok(AttemptUnder::ByHand);
         };
         let target = ledger_target(payee, allowance_id);
         let key = self.app.record_key(&target)?;
-        if self
-            .held_ledger_names(&key, payee, allowance_id, attempt)
-            .await?
-        {
-            return Ok(Some(allowance_id.clone()));
+        if let Some(ledger) = self.held_ledger(&key, payee, allowance_id).await? {
+            if ledger_lists(&ledger, &attempt) {
+                return Ok(AttemptUnder::Allowance(allowance_id.clone()));
+            }
         }
         // The copy a restore holds may predate the attempt's entry: the ledger is read from
-        // the switch once. A read that fails leaves the copy as it was; only a failure of the
-        // app's own store is an error.
+        // the switch once. A read that fails leaves it unknown; only a failure of the app's
+        // own store is an error.
         if let Err(error) = self.app.read_record(&target).await {
             let error: PaykitError = error.into();
             if crate::hold::local_failure(&error) {
                 return Err(error);
             }
-            return Ok(None);
+            return Ok(AttemptUnder::Unknown);
         }
-        Ok(self
-            .held_ledger_names(&key, payee, allowance_id, attempt)
-            .await?
-            .then(|| allowance_id.clone()))
+        Ok(match self.held_ledger(&key, payee, allowance_id).await? {
+            Some(ledger) if ledger_lists(&ledger, &attempt) => {
+                AttemptUnder::Allowance(allowance_id.clone())
+            }
+            Some(ledger)
+                if ledger.spent.is_none() && ledger.count == 0 && ledger.failed.is_empty() =>
+            {
+                AttemptUnder::ByHand
+            }
+            _ => AttemptUnder::Unknown,
+        })
     }
 
-    /// Whether the ledger the app holds at `key`, bound to `payee`'s Allowance
-    /// `allowance_id`, holds an entry for `attempt`.
-    async fn held_ledger_names(
+    /// The ledger the app holds at `key`, when it reads and is bound to `payee`'s Allowance
+    /// `allowance_id`.
+    async fn held_ledger(
         &self,
         key: &[u8; 32],
         payee: &[u8; 32],
         allowance_id: &AllowanceId,
-        attempt: AttemptId,
-    ) -> Result<bool> {
+    ) -> Result<Option<Ledger>> {
         let Some(held) = self.app.shared_record(key).await? else {
-            return Ok(false);
+            return Ok(None);
         };
         Ok(held
             .content
             .value()
             .and_then(|value| Ledger::from_json(value).ok())
-            .filter(|l| l.counterparty == *payee && &l.allowance_id == allowance_id)
-            .is_some_and(|ledger| ledger.entries.iter().any(|e| e.attempt_id == attempt)))
+            .filter(|l| l.counterparty == *payee && &l.allowance_id == allowance_id))
     }
 
     /// The kept ledger version of the Allowance at `record`, read bound to its key as a
@@ -660,6 +745,8 @@ impl Paykit {
         let Some(written_at) = held.written_at_ms.or(self.service_time()) else {
             return Ok(());
         };
+        let ledger = Ledger::from_json(value).map_err(|_| PaykitError::corrupt())?;
+        let dropped = self.dropped_attempts(record, &ledger).await?;
         let kept = KeptLedger {
             record: *record,
             generation: held.version.generation,
@@ -667,6 +754,7 @@ impl Paykit {
             written_at,
             item_hash: op.item_hash().map_err(|_| PaykitError::corrupt())?,
             value: value.to_vec(),
+            dropped: dropped.iter().map(|a| a.to_text()).collect(),
         };
         check_kept_ledger(record, &kept)?;
         let mut tx = Tx::default();
@@ -674,6 +762,40 @@ impl Paykit {
         // A version kept answers the first grant's empty ledger.
         tx.delete(&key::empty_ledger(record));
         self.local_commit(tx).await
+    }
+
+    /// The attempts the version kept now of the Allowance at `record` lists, among its
+    /// entries or `totals.failed` or as dropped from an earlier one, that `next`, the version
+    /// about to be kept, doesn't, of this app's journal entries under that Allowance: what
+    /// still bears out the Allowance those entries name once the ledger has compacted them
+    /// or moved them into the totals ([`KeptLedger`]). An attempt whose journal entry is
+    /// gone, pruned past its reconciliation window, isn't carried further.
+    async fn dropped_attempts(&self, record: &[u8; 32], next: &Ledger) -> Result<Vec<AttemptId>> {
+        let Some((kept, ledger)) = self.kept_ledger(record).await? else {
+            return Ok(Vec::new());
+        };
+        let mut dropped = Vec::new();
+        for entry in self.journal().await? {
+            let Some(allowance_id) = entry.allowance()? else {
+                continue;
+            };
+            if self
+                .app
+                .record_key(&allowance_target(&entry.payee, &allowance_id))?
+                != *record
+            {
+                continue;
+            }
+            let attempt = entry.attempt()?;
+            if kept_lists(&kept, &ledger, &attempt)?
+                && !ledger_lists(next, &attempt)
+                && !dropped.contains(&attempt)
+            {
+                dropped.push(attempt);
+            }
+        }
+        dropped.sort_by_key(|a| a.to_bytes());
+        Ok(dropped)
     }
 
     /// Whether a ledger was at its key at the first grant (`el/`), so the executor takes it
@@ -1318,6 +1440,21 @@ impl Paykit {
                 under.allowance.allowance_id.clone(),
             )
         });
+        // Doubtful obligations (Paykit spec 8.3): an occurrence whose claim holds an attempt
+        // the ledger names neither in an entry nor in `totals.failed`, one made by hand or
+        // under another Allowance, whatever its outcome, even one that never reached the
+        // payment method, is paid again only by hand. Read before anything is written; a
+        // read that fails is the error, never taken as a claim without attempts. The batch's
+        // `attempt` builds on the claim's step read before, so an attempt added since makes
+        // it fail.
+        if let Some(read) = self.app.read_claim(&obligation).await? {
+            let attempts: Vec<[u8; 16]> = read.view.attempts.iter().map(|a| a.attempt_id).collect();
+            if attempted_elsewhere(&obligation, &attempts, &ledger) {
+                return Err(not_automatic(
+                    "the occurrence was attempted by hand or under another Allowance: it is paid only by hand",
+                ));
+            }
+        }
         let claims = self.ledger_claims(&ledger).await?;
         let at = self
             .service_time()
@@ -2471,7 +2608,63 @@ mod tests {
             written_at: 1,
             item_hash: [3; 32],
             value: ledger.to_json().unwrap(),
+            dropped: Vec::new(),
         }
+    }
+
+    fn ledger_with(entries: &[(u8, u8)], failed: &[(u8, u8)]) -> Ledger {
+        let mut ledger = Ledger::empty([2; 32], AllowanceId::parse(ID).unwrap());
+        for (obligation, attempt) in entries {
+            ledger.entries.push(LedgerEntry {
+                obligation: [*obligation; 32],
+                attempt_id: AttemptId::from_bytes([*attempt; 16]),
+                value: paykit_lib::Decimal::parse("0.5").unwrap(),
+                asset: paykit_lib::Asset::parse("btc").unwrap(),
+                at: 1,
+                outcome: None,
+            });
+        }
+        for (obligation, attempt) in failed {
+            ledger.failed.push(paykit_lib::allowances::CompactedFailed {
+                obligation: [*obligation; 32],
+                attempt_id: AttemptId::from_bytes([*attempt; 16]),
+                value: paykit_lib::Decimal::parse("0.5").unwrap(),
+            });
+        }
+        ledger
+    }
+
+    #[test]
+    fn test_executor_attempts_named_in_entries_or_totals_failed_are_the_allowances() {
+        let ledger = ledger_with(&[(1, 7)], &[(1, 8)]);
+        assert!(!attempted_elsewhere(&[1; 32], &[], &ledger));
+        assert!(!attempted_elsewhere(&[1; 32], &[[7; 16]], &ledger));
+        assert!(!attempted_elsewhere(&[1; 32], &[[8; 16]], &ledger));
+        assert!(!attempted_elsewhere(&[1; 32], &[[7; 16], [8; 16]], &ledger));
+    }
+
+    #[test]
+    fn test_executor_attempt_no_entry_or_totals_failed_item_names_is_made_elsewhere() {
+        let ledger = ledger_with(&[(1, 7)], &[(1, 8)]);
+        // Made by hand, or under another Allowance, whose ledger is another.
+        assert!(attempted_elsewhere(&[1; 32], &[[9; 16]], &ledger));
+        assert!(attempted_elsewhere(&[1; 32], &[[7; 16], [9; 16]], &ledger));
+        assert!(attempted_elsewhere(
+            &[1; 32],
+            &[[7; 16]],
+            &ledger_with(&[], &[])
+        ));
+        // An entry or an item for another obligation names no attempt of this one.
+        assert!(attempted_elsewhere(
+            &[1; 32],
+            &[[7; 16]],
+            &ledger_with(&[(3, 7)], &[])
+        ));
+        assert!(attempted_elsewhere(
+            &[1; 32],
+            &[[8; 16]],
+            &ledger_with(&[], &[(3, 8)])
+        ));
     }
 
     #[test]
@@ -2491,6 +2684,32 @@ mod tests {
         let mut not_a_ledger = kept([1; 32]);
         not_a_ledger.value = b"{}".to_vec();
         assert!(check_kept_ledger(&[1; 32], &not_a_ledger).is_err());
+    }
+
+    #[test]
+    fn test_executor_kept_ledger_dropped_attempts_read_once_and_unlisted() {
+        let attempt = AttemptId::from_bytes([4; 16]);
+        let mut dropped = kept([1; 32]);
+        dropped.dropped = vec![attempt.to_text()];
+        assert!(check_kept_ledger(&[1; 32], &dropped).is_ok());
+        let mut unread = kept([1; 32]);
+        unread.dropped = vec!["not-an-attempt".into()];
+        assert!(check_kept_ledger(&[1; 32], &unread).is_err());
+        let mut twice = kept([1; 32]);
+        twice.dropped = vec![attempt.to_text(), attempt.to_text()];
+        assert!(check_kept_ledger(&[1; 32], &twice).is_err());
+        // An attempt the content still lists isn't dropped from it.
+        let mut ledger = Ledger::empty([2; 32], AllowanceId::parse(ID).unwrap());
+        ledger.failed.push(paykit_lib::allowances::CompactedFailed {
+            obligation: [5; 32],
+            attempt_id: attempt,
+            value: paykit_lib::Decimal::parse("1").unwrap(),
+        });
+        let mut listed = kept([1; 32]);
+        listed.value = ledger.to_json().unwrap();
+        assert!(check_kept_ledger(&[1; 32], &listed).is_ok());
+        listed.dropped = vec![attempt.to_text()];
+        assert!(check_kept_ledger(&[1; 32], &listed).is_err());
     }
 
     #[test]
