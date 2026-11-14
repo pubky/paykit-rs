@@ -566,7 +566,7 @@ The latest list of one publishing app (spec 8.4).
 
 | Field | Type | Req | Constraints | Notes |
 |---|---|---|---|---|
-| `version` | int | yes | Unix milliseconds of publishing, higher than every earlier version from this app, even after a restore | |
+| `version` | int | yes | Unix milliseconds of publishing, higher than every earlier version from this app, even after a restore; while the app's lists wait for its host after a restore, above the later of the publishing time and the highest service time it verified by more than twice the clock tolerance (spec 8.4, Withdrawing a list) | |
 | `payment_endpoints` | object | yes | Payment Endpoint Identifier to endpoint | |
 | `expires_at` | time | yes | chosen by the publishing app from its current time, not from `version`; the prototype sets 30 days after publishing | a list without it, or with one that doesn't parse, is dropped (Switch wire 5.1 check 10). Payers use a list only until the earlier of `expires_at` and 30 days after its inbox accepted it (`accepted_at`), on their clock; past that it has expired, and they ask for a newer one (4.14) |
 
