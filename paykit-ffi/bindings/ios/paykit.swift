@@ -20722,9 +20722,8 @@ public struct ReceiptIssuanceView {
     public var createdAt: String
     /**
      * Last change to the issuance or its Receipt Access delivery as RFC3339
-     * text. Until `AccessSent`, each delivery attempt, failure or recovery
-     * requeue moves it; once sent, it is the publication time, then the
-     * peer's Delivery Confirmation time once confirmed.
+     * text: each delivery attempt, failure, recovery requeue, publication or
+     * Delivery Confirmation moves it, and it never moves backwards.
      */
     public var updatedAt: String
     /**
@@ -20782,9 +20781,8 @@ public struct ReceiptIssuanceView {
          */createdAt: String,
         /**
          * Last change to the issuance or its Receipt Access delivery as RFC3339
-         * text. Until `AccessSent`, each delivery attempt, failure or recovery
-         * requeue moves it; once sent, it is the publication time, then the
-         * peer's Delivery Confirmation time once confirmed.
+         * text: each delivery attempt, failure, recovery requeue, publication or
+         * Delivery Confirmation moves it, and it never moves backwards.
          */updatedAt: String,
         /**
          * Time the Encrypted Receipt was stored as RFC3339 text.

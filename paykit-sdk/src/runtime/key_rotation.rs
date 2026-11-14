@@ -224,7 +224,7 @@ pub(super) fn rotate_private_state(
             )
         {
             message.status = OutboundPrivateMessageStatus::RecoveryRequired;
-            message.updated_at = now;
+            message.updated_at = message.updated_at.max(now);
             message.last_error = Some(KEY_ROTATION_RECOVERY_REASON.into());
             message.prepared_send = None;
         }

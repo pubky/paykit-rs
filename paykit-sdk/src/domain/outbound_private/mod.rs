@@ -237,13 +237,15 @@ where
         .await
 }
 
+// Each transition below keeps `updated_at` from moving backwards: issued
+// receipts read it as their Receipt Access delivery time.
 pub(crate) fn mark_outbound_sent(
     mut record: OutboundPrivateMessageRecord,
     now: DateTime<Utc>,
 ) -> OutboundPrivateMessageRecord {
     record.status = OutboundPrivateMessageStatus::Sent;
     record.sent_at.get_or_insert(now);
-    record.updated_at = now;
+    record.updated_at = record.updated_at.max(now);
     record.last_error = None;
     record.prepared_send = None;
     record
@@ -255,7 +257,7 @@ pub(crate) fn mark_outbound_failed(
     now: DateTime<Utc>,
 ) -> OutboundPrivateMessageRecord {
     record.status = OutboundPrivateMessageStatus::Failed;
-    record.updated_at = now;
+    record.updated_at = record.updated_at.max(now);
     record.last_error = Some(error);
     record
 }
@@ -281,7 +283,7 @@ pub(crate) fn mark_outbound_slot_taken(
         );
     }
     record.status = OutboundPrivateMessageStatus::Pending;
-    record.updated_at = now;
+    record.updated_at = record.updated_at.max(now);
     record.last_error = None;
     record
 }
@@ -292,7 +294,7 @@ pub(crate) fn mark_outbound_invalid(
     now: DateTime<Utc>,
 ) -> OutboundPrivateMessageRecord {
     record.status = OutboundPrivateMessageStatus::Invalid;
-    record.updated_at = now;
+    record.updated_at = record.updated_at.max(now);
     record.last_error = Some(error);
     record.prepared_send = None;
     record
@@ -304,7 +306,7 @@ pub(crate) fn mark_outbound_recovery_required(
     now: DateTime<Utc>,
 ) -> OutboundPrivateMessageRecord {
     record.status = OutboundPrivateMessageStatus::RecoveryRequired;
-    record.updated_at = now;
+    record.updated_at = record.updated_at.max(now);
     record.last_error = Some(error);
     record.prepared_send = None;
     record

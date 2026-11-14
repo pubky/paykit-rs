@@ -248,12 +248,9 @@ pub struct ReceiptIssuanceView {
     pub outbound_message_id: Option<u64>,
     /// Creation time.
     pub created_at: DateTime<Utc>,
-    /// Last change to the issuance or its Receipt Access delivery.
-    ///
-    /// Until Receipt Access is published, each delivery attempt, failure or
-    /// recovery requeue moves it. Once `AccessSent`, it is the publication
-    /// time, then the peer's Delivery Confirmation time once confirmed;
-    /// retries of the unconfirmed event in between do not move it.
+    /// Last change to the issuance or its Receipt Access delivery: each
+    /// delivery attempt, failure, recovery requeue, publication or Delivery
+    /// Confirmation moves it, and it never moves backwards.
     pub updated_at: DateTime<Utc>,
     /// Time the Encrypted Receipt was stored.
     pub stored_at: Option<DateTime<Utc>>,
@@ -302,43 +299,36 @@ impl ReceiptIssuanceView {
     /// Build the view with Receipt Access delivery read from the outbound
     /// private message that carries it.
     ///
-    /// `outbound` may hold any outbound messages; only the one matching the
-    /// record's counterparty, `outbound_message_id` and Receipt Access kind
-    /// is used. A missing message leaves the stored status.
-    pub(crate) fn with_access_delivery<'a>(
+    /// `outbound` is the message stored under the record's
+    /// `outbound_message_id`, if any; it is used only when its counterparty
+    /// and Receipt Access kind match. A missing message leaves the stored
+    /// status.
+    pub(crate) fn with_access_delivery(
         record: &ReceiptIssuanceRecord,
-        outbound: impl IntoIterator<Item = &'a OutboundPrivateMessageRecord>,
+        outbound: Option<&OutboundPrivateMessageRecord>,
     ) -> Self {
         let mut view = Self::from(record);
         if record.status != ReceiptIssuanceStatus::AccessQueued {
             return view;
         }
-        let Some(message_id) = record.outbound_message_id else {
-            return view;
-        };
-        let Some(message) = outbound.into_iter().find(|message| {
-            message.outbound_message_id == message_id
+        let Some(message) = outbound.filter(|message| {
+            Some(message.outbound_message_id) == record.outbound_message_id
                 && message.counterparty == record.counterparty
                 && message.kind == PrivateMessageKind::ReceiptAccess.as_str()
         }) else {
             return view;
         };
+        // Every outbound transition keeps `updated_at` from moving backwards,
+        // so it is the delivery time for every status shown here.
+        view.updated_at = view.updated_at.max(message.updated_at);
         // `sent_at` survives a later failed retry of an unconfirmed event, so
-        // it, not `status`, tells whether Receipt Access was published.
-        //
-        // Only a successful send writes `sent_at` on an unconfirmed message.
-        // Completing an already-confirmed message (for example on Encrypted
-        // Link recovery) fills an empty `sent_at` with the completion time
-        // without publishing, so once the peer confirmed delivery its
-        // confirmation time is the delivery evidence, never `sent_at`.
-        if let Some(delivered_at) = message.confirmed_at.or(message.sent_at) {
+        // it, not `status`, tells whether Receipt Access was published. A
+        // Delivery Confirmation proves delivery even when an ambiguous
+        // publication left `sent_at` empty.
+        if message.sent_at.is_some() || message.confirmed_at.is_some() {
             view.status = ReceiptIssuanceStatus::AccessSent;
-            view.updated_at = view.updated_at.max(delivered_at);
             return view;
         }
-        // Until publication, every delivery change (an attempt, a failure, a
-        // recovery requeue) moves `updated_at`, so it never runs backwards.
-        view.updated_at = view.updated_at.max(message.updated_at);
         view.last_error = message.last_error.clone();
         if matches!(
             message.status,

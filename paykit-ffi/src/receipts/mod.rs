@@ -126,9 +126,8 @@ pub struct FfiReceiptIssuanceView {
     /// Creation time as RFC3339 text.
     pub created_at: String,
     /// Last change to the issuance or its Receipt Access delivery as RFC3339
-    /// text. Until `AccessSent`, each delivery attempt, failure or recovery
-    /// requeue moves it; once sent, it is the publication time, then the
-    /// peer's Delivery Confirmation time once confirmed.
+    /// text: each delivery attempt, failure, recovery requeue, publication or
+    /// Delivery Confirmation moves it, and it never moves backwards.
     pub updated_at: String,
     /// Time the Encrypted Receipt was stored as RFC3339 text.
     pub stored_at: Option<String>,

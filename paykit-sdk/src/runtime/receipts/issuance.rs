@@ -231,10 +231,19 @@ where
             .storage
             .transaction(move |tx| {
                 let outbound = tx.outbound_private_messages(&counterparty);
+                let outbound = outbound
+                    .iter()
+                    .map(|message| (message.outbound_message_id, message))
+                    .collect::<HashMap<_, _>>();
                 Ok(tx
                     .receipt_issuance_records(&counterparty)
                     .iter()
-                    .map(|record| ReceiptIssuanceView::with_access_delivery(record, &outbound))
+                    .map(|record| {
+                        let access = record
+                            .outbound_message_id
+                            .and_then(|id| outbound.get(&id).copied());
+                        ReceiptIssuanceView::with_access_delivery(record, access)
+                    })
                     .collect::<Vec<_>>())
             })
             .await?;
@@ -327,9 +336,14 @@ where
         let record = record.clone();
         self.storage
             .transaction(move |tx| {
-                let outbound = tx.outbound_private_messages(&record.counterparty);
+                let access = record.outbound_message_id.and_then(|id| {
+                    tx.outbound_private_messages(&record.counterparty)
+                        .into_iter()
+                        .find(|message| message.outbound_message_id == id)
+                });
                 Ok(ReceiptIssuanceView::with_access_delivery(
-                    &record, &outbound,
+                    &record,
+                    access.as_ref(),
                 ))
             })
             .await

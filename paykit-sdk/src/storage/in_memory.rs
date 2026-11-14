@@ -992,7 +992,7 @@ impl StorageTransaction for StorageStateTransaction {
         message.status = OutboundPrivateMessageStatus::Sending;
         message.attempt_count = message.attempt_count.saturating_add(1);
         message.last_attempt_at = Some(now);
-        message.updated_at = now;
+        message.updated_at = message.updated_at.max(now);
         message.last_error = None;
         Some(message.clone())
     }

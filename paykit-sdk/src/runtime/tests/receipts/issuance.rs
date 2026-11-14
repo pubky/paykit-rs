@@ -771,16 +771,10 @@ async fn test_issued_receipts_report_receipt_access_delivery() {
         assert_eq!(all.len(), 1);
         all.into_iter().next().unwrap()
     };
-    // Each outbound change happens at its own time after queueing.
+    // Each outbound change happens at its own time after queueing; some run
+    // after the wall clock moved backwards.
     let queued_at = FixedClock.now();
     let at = |minutes| queued_at + chrono::Duration::minutes(minutes);
-
-    let view = views().await;
-    assert_eq!(view.status, ReceiptIssuanceStatus::AccessQueued);
-    assert_eq!(view.outbound_message_id, Some(outbound_message_id));
-    assert_eq!(view.updated_at, queued_at);
-    assert!(view.last_error.is_none());
-
     let recover = |now| {
         let storage = storage.clone();
         let counterparty = counterparty.clone();
@@ -797,114 +791,120 @@ async fn test_issued_receipts_report_receipt_access_delivery() {
                 .unwrap();
         }
     };
+    let confirm = |now| {
+        let storage = storage.clone();
+        let counterparty = counterparty.clone();
+        let confirmation = paykit_lib::DeliveryConfirmation::new(
+            paykit_lib::PaykitAppId::new("test-app").unwrap(),
+            paykit_lib::EventId::new(&queued.receipt_access_event_id).unwrap(),
+            crate::domain::private_stream::payload_hash(&queued.access_json),
+        )
+        .unwrap();
+        async move {
+            storage
+                .transaction(move |tx| {
+                    crate::domain::private_stream::apply_delivery_confirmation(
+                        tx,
+                        &counterparty,
+                        &confirmation,
+                        now,
+                    )
+                })
+                .await
+                .unwrap();
+        }
+    };
+    let attempt_failed = |now| -> Box<
+        dyn FnOnce(OutboundPrivateMessageRecord) -> OutboundPrivateMessageRecord + Send,
+    > {
+        Box::new(move |mut message| {
+            message.attempt_count += 1;
+            message.last_attempt_at = Some(now);
+            mark_outbound_failed(message, "timeout".into(), now)
+        })
+    };
+
+    let view = views().await;
+    assert_eq!(view.status, ReceiptIssuanceStatus::AccessQueued);
+    assert_eq!(view.outbound_message_id, Some(outbound_message_id));
+    assert_eq!(view.updated_at, queued_at);
+    assert!(view.last_error.is_none());
 
     // A failed attempt is retried, so the receipt stays queued with the error.
-    set_outbound(Box::new(move |message| {
-        mark_outbound_failed(message, "timeout".into(), at(1))
-    }))
-    .await;
+    set_outbound(attempt_failed(at(10))).await;
     let view = views().await;
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessQueued);
     assert_eq!(view.last_error.as_deref(), Some("timeout"));
-    assert_eq!(view.updated_at, at(1));
+    assert_eq!(view.updated_at, at(10));
 
     set_outbound(Box::new(move |message| {
-        mark_outbound_invalid(message, "bad payload".into(), at(2))
+        mark_outbound_invalid(message, "bad payload".into(), at(5))
     }))
     .await;
     let view = views().await;
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessFailed);
     assert_eq!(view.last_error.as_deref(), Some("bad payload"));
-    assert_eq!(view.updated_at, at(2));
+    assert_eq!(view.updated_at, at(10));
 
     set_outbound(Box::new(move |message| {
-        mark_outbound_recovery_required(message, "link lost".into(), at(3))
+        mark_outbound_recovery_required(message, "link lost".into(), at(11))
     }))
     .await;
     let view = views().await;
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessFailed);
     assert_eq!(view.last_error.as_deref(), Some("link lost"));
-    assert_eq!(view.updated_at, at(3));
+    assert_eq!(view.updated_at, at(11));
 
-    // Encrypted Link recovery queues the access again, at a later time.
-    recover(at(4)).await;
+    // Encrypted Link recovery queues the access again under a rolled-back clock.
+    recover(at(6)).await;
     let view = views().await;
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessQueued);
     assert!(view.last_error.is_none());
-    assert_eq!(view.updated_at, at(4));
+    assert_eq!(view.updated_at, at(11));
 
-    // A Delivery Confirmation after an ambiguous publication, which left
-    // `sent_at` empty, proves delivery at the confirmation time.
-    set_outbound(Box::new(move |mut message| {
-        message.status = OutboundPrivateMessageStatus::Failed;
-        message.confirmed_at = Some(at(5));
-        message
-    }))
-    .await;
+    // An ambiguous failed publication leaves `sent_at` empty; the peer's
+    // confirmation, read under a rolled-back clock, still proves delivery.
+    set_outbound(attempt_failed(at(12))).await;
+    confirm(at(7)).await;
     let view = views().await;
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
-    assert_eq!(view.updated_at, at(5));
+    assert_eq!(view.updated_at, at(12));
 
-    // Recovery completes the confirmed message and fills `sent_at` with its
-    // own time without publishing. Neither an equal nor an earlier recovery
-    // clock may show that time.
-    for recovered_at in [at(5), at(2)] {
-        set_outbound(Box::new(move |mut message| {
-            message.sent_at = None;
-            mark_outbound_recovery_required(message, "rotated".into(), recovered_at)
-        }))
-        .await;
-        recover(recovered_at).await;
-        let view = views().await;
-        assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
-        assert_eq!(view.updated_at, at(5));
-    }
+    // Recovery completes the confirmed message under a rolled-back clock.
+    set_outbound(Box::new(move |message| {
+        mark_outbound_recovery_required(message, "rotated".into(), at(13))
+    }))
+    .await;
+    recover(at(8)).await;
+    let view = views().await;
+    assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
+    assert_eq!(view.updated_at, at(13));
 
-    // A real publication, then failed retries, then the peer's confirmation.
+    // A real publication, a failed retry, then a confirmation read under a
+    // rolled-back clock.
     set_outbound(Box::new(move |mut message| {
         message.confirmed_at = None;
         message.sent_at = None;
         message.attempt_count += 1;
-        message.last_attempt_at = Some(at(8));
-        mark_outbound_sent(message, at(8))
+        message.last_attempt_at = Some(at(20));
+        mark_outbound_sent(message, at(20))
     }))
     .await;
     let view = views().await;
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
-    assert_eq!(view.updated_at, at(8));
+    assert_eq!(view.updated_at, at(20));
     assert!(view.last_error.is_none());
 
-    set_outbound(Box::new(move |message| {
-        mark_outbound_failed(message, "retry".into(), at(9))
-    }))
-    .await;
+    set_outbound(attempt_failed(at(21))).await;
     let view = views().await;
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
-    assert_eq!(view.updated_at, at(8));
+    assert_eq!(view.updated_at, at(21));
     assert!(view.last_error.is_none());
 
-    // The peer's confirmation arrives while the wall clock reads earlier than
-    // the publication; delivery time must not move backwards.
-    storage
-        .transaction({
-            let counterparty = counterparty.clone();
-            let confirmation = paykit_lib::DeliveryConfirmation::new(
-                paykit_lib::PaykitAppId::new("test-app").unwrap(),
-                paykit_lib::EventId::new(&queued.receipt_access_event_id).unwrap(),
-                crate::domain::private_stream::payload_hash(&queued.access_json),
-            )
-            .unwrap();
-            move |tx| {
-                crate::domain::private_stream::apply_delivery_confirmation(
-                    tx,
-                    &counterparty,
-                    &confirmation,
-                    at(7),
-                )
-            }
-        })
-        .await
-        .unwrap();
+    confirm(at(15)).await;
+    let view = views().await;
+    assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
+    assert_eq!(view.updated_at, at(21));
     let confirmed = storage
         .transaction({
             let counterparty = counterparty.clone();
@@ -918,11 +918,7 @@ async fn test_issued_receipts_report_receipt_access_delivery() {
         })
         .await
         .unwrap();
-    assert_eq!(confirmed.confirmed_at, Some(at(8)));
-    assert_eq!(confirmed.updated_at, at(9));
-    let view = views().await;
-    assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
-    assert_eq!(view.updated_at, at(8));
+    assert_eq!(confirmed.confirmed_at, Some(at(21)));
 
     // Repeating issuance returns the same delivery status.
     let repeated = sdk

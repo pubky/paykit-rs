@@ -39,7 +39,7 @@ where
                         {
                             message.status = OutboundPrivateMessageStatus::Superseded;
                             message.last_error = None;
-                            message.updated_at = now;
+                            message.updated_at = message.updated_at.max(now);
                             tx.save_outbound_private_message(message)?;
                         }
                     }
@@ -157,7 +157,7 @@ pub(super) fn retire_app_outbound_private_messages(
             message.status = OutboundPrivateMessageStatus::Invalid;
             message.last_error = Some("Paykit app was removed before delivery".into());
         }
-        message.updated_at = now;
+        message.updated_at = message.updated_at.max(now);
         tx.save_outbound_private_message(message)?;
     }
     debug_assert_eq!(counterparties.len(), leases.len());
