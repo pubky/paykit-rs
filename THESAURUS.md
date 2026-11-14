@@ -48,8 +48,8 @@
 - **Related terms**: App, App ID, App certificate, Paykit scope
 
 ### Paykit scope
-- **Definition**: A scope Paykit defines under the Switch's scope rule: `pay`, `request`, `request:<label>`, `allowance`, `allowance_execute`, `contacts`, `manage_contacts` and `ext:<prefix>` (Paykit spec 3.1). A certificate lists every scope it holds explicitly, required ones included.
-- **NOT**: A switch permission; the Switch knows no scope names.
+- **Definition**: A scope Paykit defines under the Switch's scope rule: `paykit_pay`, `paykit_request`, `paykit_request:<label>`, `paykit_allowance`, `paykit_allowance_execute`, `paykit_contacts`, `paykit_manage_contacts` and `paykit_ext:<prefix>` (Paykit spec 3.1). A certificate lists every scope it holds explicitly, required ones included.
+- **NOT**: A switch permission; the Switch knows no scope names. Nor a scope whose root isn't Paykit's: `pay` and `request` are another protocol's, which Paykit gives no meaning (Paykit spec 3.2).
 - **Related terms**: Scope, Switch permission, Labelled selling scope, Extension scope
 
 ### Permission table
@@ -58,16 +58,16 @@
 - **Related terms**: Paykit scope, Switch permission, App certificate
 
 ### Labelled selling scope
-- **Definition**: A scope `request:<label>`, a sub-scope of `request`, that lets a hosted selling app act as payee for its own sales only. A certificate holds `request` or labels, never both, and at most 8 labels; its keys are label keys, derived from the `request` key (Paykit spec 3.1, 3.5).
+- **Definition**: A scope `paykit_request:<label>`, a sub-scope of `paykit_request`, that lets a hosted selling app act as payee for its own sales only. A certificate holds `paykit_request` or labels, never both, and at most 8 labels; its keys are label keys, derived from the `paykit_request` key (Paykit spec 3.1, 3.5).
 - **NOT**: A display name; labels should be opaque, like `shop1`.
 - **Related terms**: Paykit scope, Sub-scope, Payment Request, Activity record
 
 ### Extension scope
-- **Definition**: A scope `ext:<prefix>` covering every extension kind `<prefix>.<name>`. It has no scope keys; a certificate holds at most 8, and the prefix `paykit` is Paykit's own (Paykit spec 3.1).
+- **Definition**: A scope `paykit_ext:<prefix>`, such as `paykit_ext:paykit-cap`, covering every extension kind `<prefix>.<name>`. It has no scope keys; a certificate holds at most 8, and the prefix always starts with `paykit-` (Paykit spec 3.1).
 - **Related terms**: Extension kind, Paykit scope
 
 ### Extension kind
-- **Definition**: A message kind `<prefix>.<name>` covered by `ext:<prefix>`. Extension kinds carry no Paykit payment semantics: no payment relies on one and no Paykit collection records one (Paykit spec 3.3).
+- **Definition**: A message kind `<prefix>.<name>` covered by `paykit_ext:<prefix>`. Extension kinds carry no Paykit payment semantics: no payment relies on one and no Paykit collection records one (Paykit spec 3.3).
 - **NOT**: A Paykit payment message kind.
 - **Related terms**: Extension scope, Paykit message kind
 
@@ -163,11 +163,11 @@
 - **Related terms**: Payment Proof, Payment without a request
 
 ### Payer
-- **Definition**: The party sending value in a payment flow; its apps hold `pay`.
+- **Definition**: The party sending value in a payment flow; its apps hold `paykit_pay`.
 - **Related terms**: Payee, Counterparty
 
 ### Payee
-- **Definition**: The party receiving value in a payment flow and publishing or sharing Payment Endpoints; its apps hold `request` or a labelled selling scope.
+- **Definition**: The party receiving value in a payment flow and publishing or sharing Payment Endpoints; its apps hold `paykit_request` or a labelled selling scope.
 - **Related terms**: Payer, Payment List
 
 ### Counterparty
@@ -258,7 +258,7 @@
 - **Related terms**: Allowance terms, Executor grant
 
 ### Executor
-- **Definition**: The one app that an Allowance record names, with the app's own signed grant, to pay automatically under that Allowance. It must hold `allowance_execute` (Paykit spec Terms, 8.3).
+- **Definition**: The one app that an Allowance record names, with the app's own signed grant, to pay automatically under that Allowance. It must hold `paykit_allowance_execute` (Paykit spec Terms, 8.3).
 - **Related terms**: Executor grant, Consent list, Allowance
 
 ### Executor grant
