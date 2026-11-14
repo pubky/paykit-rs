@@ -50,7 +50,7 @@ use pubky_switch_core::ops::{Condition, OpKind};
 use crate::activity::{ActivityTarget, Role};
 use crate::destination::Carrier;
 use crate::error::{PaykitError, Refusal, Result};
-use crate::journal::{Destination, JournalEntry, KeptAmount, KeptPeriod, Stage};
+use crate::journal::{Destination, JournalEntry, KeptAmount, KeptPeriod, Stage, StartedBy};
 use crate::pay::{
     unsupported, BlockedPayment, Choice, Chosen, DestinationFrom, PayOptions, PayOutcome,
     PaymentMode, Plan,
@@ -896,6 +896,7 @@ impl Paykit {
             receipted: false,
             allowance_id: None,
             billing_period: Some(KeptPeriod::of(&period)),
+            initiator: StartedBy::of(by),
         };
         self.execute(Plan {
             entry,
@@ -911,6 +912,7 @@ impl Paykit {
             unconfirmed: options.unconfirmed_identity_confirmed,
             end_hold,
             executor: None,
+            mark: None,
         })
         .await
     }

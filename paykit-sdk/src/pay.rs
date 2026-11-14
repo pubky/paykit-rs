@@ -51,7 +51,9 @@ use pubky_switch_core::records::{CLOCK_TOLERANCE_MS, DAY_MS};
 use crate::activity::{self, ActivityTarget, Role};
 use crate::destination::{Carrier, Need};
 use crate::error::{PaykitError, Refusal, Result};
-use crate::journal::{Destination, JournalEntry, KeptAmount, PaymentView, Stage, TransferBound};
+use crate::journal::{
+    Destination, JournalEntry, KeptAmount, PaymentView, Stage, StartedBy, TransferBound,
+};
 use crate::notices::NoticeKind;
 use crate::paykit::Paykit;
 use crate::rail::{
@@ -501,6 +503,9 @@ pub(crate) struct Plan {
     /// An executor's ledger and request record writes, in the attempt's batch (Paykit spec
     /// 8.3 step 3).
     pub(crate) executor: Option<crate::executor::ExecutorOps>,
+    /// The request record marked `manual_only`, written in the attempt's batch of a payment
+    /// the user starts by hand, at the record's next version.
+    pub(crate) mark: Option<ActivityRecord>,
 }
 
 /// A Payment Endpoint a payment may take: its identifier and payload, handed to the payment
@@ -734,7 +739,10 @@ pub(crate) fn journal_write(entry: &JournalEntry) -> Result<LocalWrite> {
 }
 
 impl Paykit {
-    /// Pay a one-time request by hand (Paykit spec 7.2, 8.1 step 3).
+    /// Pay a one-time request by hand (Paykit spec 7.2, 8.1 step 3). The attempt's batch
+    /// marks the request record `manual_only` (Paykit spec 8.3, "Manual only"): from then on
+    /// no executor of any own app pays it, whatever the attempt's outcome. The mark is never
+    /// lifted; a batch refused or in conflict writes neither the attempt nor the mark.
     ///
     /// # Errors
     ///
@@ -768,7 +776,7 @@ impl Paykit {
     /// tests only (feature `test-support`): the checks an automatic first dispatch passes once
     /// its attempt is journaled are tested through this one, without an Allowance. It makes
     /// none of the checks an executor makes before it starts a payment
-    /// ([`Paykit::pay_under_allowance`]).
+    /// ([`Paykit::pay_under_allowance`]) and writes no `manual_only` mark.
     ///
     /// # Errors
     ///
@@ -905,6 +913,18 @@ impl Paykit {
             .request_destination(&request.payee, &stored, &body, &options, accepted, lookup)
             .await?;
         let attempt_id = AttemptId::generate()?;
+        // A one-time request the user pays by hand is marked `manual_only` in the attempt's
+        // batch (Paykit spec 8.3, "Manual only"): no executor pays the occurrence after it,
+        // whatever the attempt's outcome and however long its claim is kept. In the same
+        // batch, at the version of the record the attempt is conditioned on, so no attempt
+        // exists without its mark, and a batch refused or in conflict writes neither. Built
+        // from the record read, every other member kept; a record holding the mark already
+        // is only conditioned on.
+        let mark = (by == Initiator::User && !record.manual_only).then(|| {
+            let mut next = record.clone();
+            next.manual_only = true;
+            next
+        });
         let executor = match &under {
             Some(under) => Some(
                 self.executor_ops(
@@ -956,6 +976,7 @@ impl Paykit {
                 .as_ref()
                 .map(|u| u.allowance.allowance_id.as_str().to_owned()),
             billing_period: None,
+            initiator: StartedBy::of(by),
         };
         self.execute(Plan {
             entry,
@@ -971,6 +992,7 @@ impl Paykit {
             unconfirmed: options.unconfirmed_identity_confirmed,
             end_hold,
             executor,
+            mark,
         })
         .await
     }
@@ -1180,6 +1202,7 @@ impl Paykit {
             receipted: false,
             allowance_id: None,
             billing_period: None,
+            initiator: StartedBy::User,
         };
         self.execute(Plan {
             entry,
@@ -1195,6 +1218,7 @@ impl Paykit {
             unconfirmed: options.unconfirmed_identity_confirmed,
             end_hold: None,
             executor: None,
+            mark: None,
         })
         .await
     }
@@ -2018,6 +2042,7 @@ impl Paykit {
             unconfirmed,
             end_hold,
             executor,
+            mark,
         } = plan;
         let attempt_id = entry.attempt()?;
         // The attempt's `orphan_after` covers the rail's longest time and the pre-dispatch
@@ -2089,6 +2114,16 @@ impl Paykit {
         if let Some(created) = &create {
             // A payment without a request: its activity record (Paykit spec 8.4).
             let value = created.to_json()?;
+            batch = batch.entry(
+                self.app
+                    .record_op(&record.record_target(), Some(&value), Vec::new())
+                    .await?,
+            );
+        }
+        if let Some(marked) = &mark {
+            // A payment by hand: its request record marked `manual_only`, built on the
+            // version the attempt is conditioned on.
+            let value = marked.to_json()?;
             batch = batch.entry(
                 self.app
                     .record_op(&record.record_target(), Some(&value), Vec::new())
@@ -3575,14 +3610,16 @@ impl Paykit {
     /// included, whatever copy this app keeps) or doesn't read as the request, a newer write
     /// this app refused included, so nothing shows it still open; or the request is held
     /// after a restore or a `missed` item until the user confirms it (Paykit spec 7.2,
-    /// [`Paykit::confirm_possibly_cancelled`]); or the record holds `manual_only`, or the
-    /// request is a one-time one dated before the block floor, or the floor can't be read
-    /// (`crate::floor`, whatever the record holds: another app may have opened it before it
-    /// held the floor): the request is paid only by hand, and a repeat is an automatic
-    /// payment (Paykit spec 8.1, 8.3), so the attempt stays open and the user's payment
-    /// method's history or a receipt settles it. For a Billing Period, its period record is
-    /// read again too, and withholds it as [`Paykit::period_record_now`] says. A payment
-    /// without a request has nothing a payee cancels.
+    /// [`Paykit::confirm_possibly_cancelled`]); or, for an attempt started automatically, the
+    /// record holds `manual_only`; or the request is a one-time one dated before the block
+    /// floor, or the floor can't be read (`crate::floor`, whatever the record holds: another
+    /// app may have opened it before it held the floor): the request is paid only by hand,
+    /// and a repeat is an automatic payment (Paykit spec 8.1, 8.3), so the attempt stays open
+    /// and the user's payment method's history or a receipt settles it. A repeat of an
+    /// attempt the user started by hand finishes that payment, whose own batch marked the
+    /// record `manual_only`: the mark doesn't withhold it. For a Billing Period, its period record is read again too, and withholds
+    /// it as [`Paykit::period_record_now`] says. A payment without a request has nothing a
+    /// payee cancels.
     async fn repeat_withheld(&mut self, entry: &JournalEntry) -> Result<bool> {
         // A repeat is an automatic payment: none while its request record or its list's
         // record is divergent, or paused since it was seen so (Paykit spec 6). The view held
@@ -3599,7 +3636,9 @@ impl Paykit {
         }
         let withheld = match self.fresh_request(&target).await? {
             Fresh::Held(fresh) => {
-                self.fresh_record_withholds(entry, &target, &fresh).await?
+                let automatic = started_automatically(entry)?;
+                self.fresh_record_withholds(entry, &target, &fresh, automatic)
+                    .await?
                     || match crate::requests::request_of(&fresh) {
                         Some((stored, _)) => self.floor_holds(stored).await?,
                         None => false,
@@ -3643,19 +3682,21 @@ impl Paykit {
     /// ([`Paykit::fresh_request`]), withholds an automatic payment of it, at a repeat's
     /// withheld check and at the last check before any automatic call
     /// ([`Paykit::automatic_dispatch_held`]): the record shows the request cancelled or
-    /// rejected, or holds `manual_only`; the request is held after a restore or a `missed`
-    /// item until the user confirms it (Paykit spec 7.2); or the record, or the list's
-    /// record, is divergent or paused since it was seen so, the view read after the record
-    /// (Paykit spec 6, 8.1, 8.3).
+    /// rejected, or, for an `automatic` attempt, holds `manual_only`; the request is held
+    /// after a restore or a `missed` item until the user confirms it (Paykit spec 7.2); or
+    /// the record, or the list's record, is divergent or paused since it was seen so, the
+    /// view read after the record (Paykit spec 6, 8.1, 8.3). `automatic` is false for the
+    /// repeat of an attempt the user started by hand ([`started_automatically`]).
     async fn fresh_record_withholds(
         &mut self,
         entry: &JournalEntry,
         target: &ActivityTarget,
         fresh: &ActivityRecord,
+        automatic: bool,
     ) -> Result<bool> {
         Ok(cancelled(fresh)
             || rejected(fresh)
-            || fresh.manual_only
+            || (automatic && fresh.manual_only)
             || self.held(&self.activity_key(target)?, fresh).await?
             || Box::pin(self.divergent_withholds(entry)).await?)
     }
@@ -3824,10 +3865,10 @@ impl Paykit {
     /// record isn't there, doesn't read or holds no request, the period record withholds the
     /// period ([`Paykit::period_record_now`]), the Allowance record doesn't let the executor
     /// pay under it (for a repeat: ended, rejected or not read), or, when `judge`, the record
-    /// withholds the request or the floor holds it, or, at a `first` dispatch, the one-time
-    /// request is past the age an executor pays it at automatically
-    /// (`crate::executor::ONE_TIME_AUTOMATIC_AGE_MS`). Without `judge`, nothing more is read
-    /// from the switch after the last read; only the app's own store is.
+    /// withholds the request or the floor holds it. A first dispatch judged here is an
+    /// automatic one; a repeat is of the attempt its entry's starter made
+    /// ([`started_automatically`]). Without `judge`, nothing more is read from the switch
+    /// after the last read; only the app's own store is.
     async fn shared_collect(
         &mut self,
         entry: &JournalEntry,
@@ -3849,7 +3890,14 @@ impl Paykit {
                     Ok((Fresh::Held(record), Some(stamp))) => (*record, stamp),
                     Ok(_) | Err(_) => return Ok(None),
                 };
-                if judge && self.fresh_record_withholds(entry, &target, &record).await? {
+                // A first dispatch judged here is an automatic one; a repeat is of the
+                // attempt its entry's starter made.
+                let automatic = first || started_automatically(entry)?;
+                if judge
+                    && self
+                        .fresh_record_withholds(entry, &target, &record, automatic)
+                        .await?
+                {
                     return Ok(None);
                 }
                 // A Billing Period's period record, which another own app may have marked
@@ -3866,11 +3914,6 @@ impl Paykit {
                         return Ok(None);
                     };
                     if judge && self.floor_holds_read(&stored, floor.as_ref()).await? {
-                        return Ok(None);
-                    }
-                    // The request's age, judged before the batch, again on the service time
-                    // verified since (`crate::executor::ONE_TIME_AUTOMATIC_AGE_MS`).
-                    if judge && first && self.past_automatic_age(&stored) {
                         return Ok(None);
                     }
                     (
@@ -4317,6 +4360,12 @@ impl Paykit {
         }
         Ok(())
     }
+}
+
+/// Whether `entry`'s attempt was started automatically, as its entry keeps who started it
+/// (`StartedBy`): an executor's, the app's own, or one a reconcile rebuilt without knowing.
+fn started_automatically(entry: &JournalEntry) -> Result<bool> {
+    Ok(entry.initiator == StartedBy::Automatic)
 }
 
 /// Whether `error` says the own switch doesn't answer now: the request or its answer was

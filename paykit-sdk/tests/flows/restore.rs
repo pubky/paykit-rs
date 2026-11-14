@@ -615,6 +615,36 @@ async fn test_restore_corrupt_journal_refused_and_nothing_written() {
 }
 
 #[tokio::test]
+async fn test_restore_journal_entry_without_who_started_it_refused() {
+    // Who started an attempt is required in its journal entry, and is one of the two kept:
+    // an entry without it, or with another value, is refused, nothing written.
+    let w = World::new();
+    let (good, app_id) = backup_with_a_payment(&w).await;
+    let layer = layer_of(&good);
+    let journal = layer
+        .iter()
+        .position(|(k, _)| k.starts_with(b"j/"))
+        .expect("the layer holds the journal");
+    assert_eq!(layer[journal].1["d"]["initiator"], "user");
+    for value in [None, Some(serde_json::json!("policy"))] {
+        let mut state = layer.clone();
+        let entry = state[journal].1["d"].as_object_mut().unwrap();
+        match &value {
+            None => {
+                entry.remove("initiator");
+            }
+            Some(value) => {
+                entry.insert("initiator".into(), value.clone());
+            }
+        }
+        let target = store();
+        let error = refused_restore(&w, with_layer(&good, state), Arc::clone(&target)).await;
+        assert!(is_refused(&error), "{value:?}: {error:?}");
+        nothing_restored(&w, target, app_id).await;
+    }
+}
+
+#[tokio::test]
 async fn test_restore_two_open_entries_for_one_obligation_refused() {
     let w = World::new();
     let (good, app_id) = backup_with_a_payment(&w).await;
