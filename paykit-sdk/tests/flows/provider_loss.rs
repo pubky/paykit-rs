@@ -1,0 +1,392 @@
+//! A provider loss (Paykit spec 7.3, "After a provider loss"; Pubky Switch spec 12.6): the
+//! signer declares alice's generation lost at a new service, the old one stops answering,
+//! and her apps follow the loss there.
+
+use std::sync::Arc;
+
+use paykit_sdk::rail::Behaviour;
+use paykit_sdk::{
+    PayOptions, PayOutcome, Paykit, PaykitBackup, PaykitConfig, PaykitError, PaymentDoubt, Rail,
+    Refusal, RequestRef, RequestStatus,
+};
+use pubky_switch_client::app::UserConfirmed;
+use pubky_switch_client::clock::Clock;
+use pubky_switch_client::testing::{ScriptedSwitch, SWITCH_ORIGIN};
+use pubky_switch_core::claims::ClaimStatus;
+use pubky_switch_core::records::Inbox;
+
+use crate::common::{draft, request_from, store, World, ALICE_ORIGIN};
+
+/// The new service's key secret.
+const NEXT_SECRET: [u8; 32] = [0x4e; 32];
+
+/// Alice's signer declares her current generation lost (Switch spec 12.6 step 1): a new
+/// service recovering the account at the next generation, routed at [`SWITCH_ORIGIN`], the
+/// next `identity.json` naming it with `recovery_from`, delivered there and published; then
+/// the old service is unreachable.
+fn declare_loss(w: &World) {
+    let lost_generation = w
+        .homeserver
+        .identity_doc(&w.alice_id())
+        .unwrap()
+        .generation();
+    let next = ScriptedSwitch::recovering(
+        w.alice.identity().key(),
+        NEXT_SECRET,
+        Arc::clone(&w.clock),
+        lost_generation + 1,
+        lost_generation,
+    )
+    .unwrap();
+    w.router.add_switch(SWITCH_ORIGIN, &next);
+    let doc = w
+        .alice
+        .sign_next(|body| {
+            body.generation = lost_generation + 1;
+            body.inbox = Inbox::new(SWITCH_ORIGIN, next.service_key());
+            body.recovery_from = Some(lost_generation);
+        })
+        .unwrap();
+    next.deliver_identity(&doc).unwrap();
+    w.router.remove(ALICE_ORIGIN);
+}
+
+/// `app` follows the loss: its own `identity.json` from the Homeserver, then reads at the new
+/// service until its steps of the recovery have run, and its reconciliation ends. Returns the
+/// end of the loss's residual window.
+async fn follow_loss(app: &mut Paykit) -> u64 {
+    app.app_mut().refresh_identity().await.unwrap();
+    for _ in 0..4 {
+        app.receive(None).await.unwrap();
+    }
+    let info = app.app().recovery_info().await.unwrap().unwrap();
+    assert!(info.steps_done, "{info:?}");
+    assert!(info.loss.uncertain_until_ms > info.loss.declared_at_ms);
+    app.reconcile().await.unwrap();
+    app.end_reconcile(UserConfirmed::new()).await.unwrap();
+    info.loss.uncertain_until_ms
+}
+
+/// The doubt a payment was refused with, as [`Refusal::MayBePaid`] shows it.
+fn doubt_of(paid: &paykit_sdk::Result<PayOutcome>) -> PaymentDoubt {
+    match paid.as_ref().err().and_then(PaykitError::refusal) {
+        Some(Refusal::MayBePaid {
+            doubt: Some(doubt), ..
+        }) => (**doubt).clone(),
+        _ => panic!("not refused as may be paid: {paid:?}"),
+    }
+}
+
+/// Every payment the method carried out, repeats included.
+fn executions(w: &World) -> u64 {
+    w.rail.all_executions().values().sum()
+}
+
+async fn status(app: &Paykit, request: &RequestRef) -> RequestStatus {
+    app.request(request).await.unwrap().status
+}
+
+#[tokio::test]
+async fn test_provider_loss_request_paid_at_the_old_service_needs_confirmation_before_paying_again()
+{
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    // The phone pays the request at the old service, and its claim there is SETTLED. The
+    // wallet reads nothing after it, and bob's shop receives nothing: no receipt comes.
+    let paid = phone
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let obligation = phone.payments().await.unwrap().remove(0).obligation;
+    let at_old = phone
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(at_old.view.status, ClaimStatus::Settled);
+    assert_eq!(executions(&w), 1);
+    // The phone is gone with its state: nothing it held reaches the new service.
+    drop(phone);
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    follow_loss(&mut wallet).await;
+    // The new service holds no claim for the obligation: nothing settled it there.
+    assert!(wallet
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .is_none_or(|read| read.view.status != ClaimStatus::Settled));
+    // The request was payable before the declaration: paying it by hand needs the user's
+    // confirmation that another app may already have paid it (Switch spec 12.6 step 5).
+    assert_eq!(status(&wallet, &request).await, RequestStatus::MayBePaid);
+    let again = wallet.pay_request(&request, PayOptions::default()).await;
+    let doubt = doubt_of(&again);
+    assert!(doubt.before_loss, "{doubt:?}");
+    assert_eq!(doubt.obligation, obligation);
+    assert_eq!(executions(&w), 1);
+    // The user has seen it and pays anyway.
+    let paid = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_may_be_paid_confirmed(doubt),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(executions(&w), 2);
+}
+
+#[tokio::test]
+async fn test_provider_loss_own_attempt_before_the_loss_stays_in_doubt() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    // This app attempts the request at the old service, and the method reports it failed:
+    // the claim there is FREE again, its attempt `failed`.
+    w.rail.next(Behaviour::Fail);
+    let failed = wallet.pay_request(&request, PayOptions::default()).await;
+    assert!(!matches!(failed, Ok(PayOutcome::Paid { .. })), "{failed:?}");
+    assert_eq!(executions(&w), 0);
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    follow_loss(&mut wallet).await;
+    // Another own app may have paid it at the old service meanwhile: this app's own attempt
+    // there settles nothing about that.
+    let again = wallet.pay_request(&request, PayOptions::default()).await;
+    assert!(doubt_of(&again).before_loss);
+    assert_eq!(executions(&w), 0);
+}
+
+#[tokio::test]
+async fn test_provider_loss_automatic_payment_of_an_obligation_from_before_is_refused() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let dispatched = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let held = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    // A dispatch before the loss whose answer is lost: the method paid it, and the attempt
+    // stays open for a resume to repeat.
+    w.rail.set_idempotent(true);
+    w.rail.next(Behaviour::LoseAnswer);
+    let lost = wallet
+        .pay_request(&dispatched, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(!matches!(lost, PayOutcome::Paid { .. }), "{lost:?}");
+    assert_eq!(executions(&w), 1);
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    follow_loss(&mut wallet).await;
+    // A resume never repeats the dispatch made before the loss.
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        !resumed
+            .iter()
+            .any(|outcome| matches!(outcome, PayOutcome::Paid { .. })),
+        "{resumed:?}"
+    );
+    assert_eq!(executions(&w), 1);
+    // An automatic payment of a request from before the loss is refused, a confirmation of
+    // its doubt passing nothing.
+    let refused = wallet
+        .pay_request_automatically(&held, PayOptions::default())
+        .await;
+    let doubt = doubt_of(&refused);
+    assert!(doubt.before_loss, "{doubt:?}");
+    let refused = wallet
+        .pay_request_automatically(
+            &held,
+            PayOptions::default().with_may_be_paid_confirmed(doubt),
+        )
+        .await;
+    assert!(doubt_of(&refused).before_loss);
+    assert_eq!(executions(&w), 1);
+}
+
+/// Alice's wallet restored from `backup` on a store of its own, the device the backup came
+/// from gone.
+async fn restored(w: &World, backup: &PaykitBackup) -> Paykit {
+    Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &PaykitBackup::from_bytes(&backup.to_bytes().unwrap()).unwrap(),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_provider_loss_doubt_survives_a_restore_from_a_backup_after_the_loss() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    follow_loss(&mut wallet).await;
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut app = restored(&w, &backup).await;
+    app.receive(None).await.unwrap();
+    app.reconcile().await.unwrap();
+    app.end_reconcile(UserConfirmed::new()).await.unwrap();
+    // The restore holds the request until the user has seen the payee may have cancelled
+    // it; the loss's doubt comes after that, carried by the backup.
+    let options = PayOptions::default().with_possibly_cancelled_confirmed(UserConfirmed::new());
+    let again = app.pay_request(&request, options).await;
+    assert!(doubt_of(&again).before_loss, "{again:?}");
+    assert_eq!(executions(&w), 0);
+}
+
+#[tokio::test]
+async fn test_provider_loss_restore_from_a_backup_before_the_loss_learns_it_again() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut laptop = w.wallet("laptop").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    laptop.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    // The laptop follows the loss: the request's record reaches the new service.
+    follow_loss(&mut laptop).await;
+    // Restored from a backup taken before the loss, the app learns of it when it follows it.
+    let mut app = restored(&w, &backup).await;
+    assert!(app.app().protocol_get(b"pl").await.unwrap().is_none());
+    follow_loss(&mut app).await;
+    let kept: serde_json::Value =
+        serde_json::from_slice(&app.app().protocol_get(b"pl").await.unwrap().unwrap()).unwrap();
+    let loss = app.app().recovery_info().await.unwrap().unwrap().loss;
+    assert_eq!(kept["d"]["declared_at_ms"], loss.declared_at_ms);
+    assert_eq!(kept["d"]["uncertain_until_ms"], loss.uncertain_until_ms);
+    app.receive(None).await.unwrap();
+    let options = PayOptions::default().with_possibly_cancelled_confirmed(UserConfirmed::new());
+    let again = app.pay_request(&request, options).await;
+    assert!(doubt_of(&again).before_loss, "{again:?}");
+    assert_eq!(executions(&w), 0);
+}
+
+#[tokio::test]
+async fn test_provider_loss_doubt_outlasts_the_residual_window() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let before = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    let uncertain_until_ms = follow_loss(&mut wallet).await;
+    // Hours past the residual window, the request still payable: the window decides which
+    // obligations are uncertain, not how long the doubt lasts.
+    let now = w.clock.now_ms();
+    w.clock
+        .advance_ms(uncertain_until_ms.saturating_sub(now) + 6 * 3_600_000);
+    let after = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let again = wallet.pay_request(&before, PayOptions::default()).await;
+    assert!(doubt_of(&again).before_loss, "{again:?}");
+    assert_eq!(executions(&w), 0);
+    // A request created after the declaration plus the clock tolerance isn't uncertain.
+    assert_eq!(status(&wallet, &after).await, RequestStatus::Open);
+    let paid = wallet
+        .pay_request(&after, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(executions(&w), 1);
+}
+
+#[tokio::test]
+async fn test_provider_loss_confirm_not_paid_before_loss_clears_that_obligation_only() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let first = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let second = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    follow_loss(&mut wallet).await;
+    let first_doubt = doubt_of(&wallet.pay_request(&first, PayOptions::default()).await);
+    let second_doubt = doubt_of(&wallet.pay_request(&second, PayOptions::default()).await);
+    // A payment the user confirms over the doubt that fails states nothing: the second
+    // request stays in doubt.
+    w.rail.next(Behaviour::Fail);
+    let failed = wallet
+        .pay_request(
+            &second,
+            PayOptions::default().with_may_be_paid_confirmed(second_doubt),
+        )
+        .await;
+    assert!(!matches!(failed, Ok(PayOutcome::Paid { .. })), "{failed:?}");
+    assert!(doubt_of(&wallet.pay_request(&second, PayOptions::default()).await).before_loss);
+    // The user states the first wasn't paid before the loss: it is paid as any other.
+    wallet
+        .confirm_not_paid_before_loss(&first_doubt.obligation, UserConfirmed::new())
+        .await
+        .unwrap();
+    assert_eq!(status(&wallet, &first).await, RequestStatus::Open);
+    assert_eq!(status(&wallet, &second).await, RequestStatus::MayBePaid);
+    let paid = wallet
+        .pay_request(&first, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert!(doubt_of(&wallet.pay_request(&second, PayOptions::default()).await).before_loss);
+    assert_eq!(executions(&w), 1);
+}
+
+#[tokio::test]
+async fn test_provider_loss_settled_claim_at_the_new_service_ends_the_doubt() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut laptop = w.wallet("laptop").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    laptop.receive(None).await.unwrap();
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    follow_loss(&mut wallet).await;
+    follow_loss(&mut laptop).await;
+    assert_eq!(status(&laptop, &request).await, RequestStatus::MayBePaid);
+    // The wallet pays it over the doubt: its claim at the new service is SETTLED.
+    let doubt = doubt_of(&wallet.pay_request(&request, PayOptions::default()).await);
+    let paid = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_may_be_paid_confirmed(doubt),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    // The laptop's doubt ends with it: the request reads paid, never "may be paid".
+    laptop.receive(None).await.unwrap();
+    assert_eq!(status(&laptop, &request).await, RequestStatus::Paid);
+    let again = laptop.pay_request(&request, PayOptions::default()).await;
+    assert!(
+        matches!(
+            again.as_ref().err().and_then(PaykitError::refusal),
+            Some(Refusal::AlreadyPaid)
+        ),
+        "{again:?}"
+    );
+    assert_eq!(executions(&w), 1);
+}

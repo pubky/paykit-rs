@@ -216,10 +216,12 @@ pub(crate) fn refuse_blocked(
 }
 
 /// Why a payment may already have been made, as a [`Refusal::MayBePaid`] shows it to the
-/// user (Paykit spec 7.1, 7.2): the obligation, the claim's step read, the attempts that
-/// make it doubtful by name, and the claim's flags. A payment the user then makes anyway
-/// carries it back ([`PayOptions::with_may_be_paid_confirmed`]): the SDK reads the claim
-/// again and goes on only when the doubt now is this one, field for field.
+/// user (Paykit spec 7.1, 7.2, 7.3): the obligation, the claim's step read, the attempts that
+/// make it doubtful by name, the claim's flags, and whether a provider loss leaves it in
+/// doubt. A payment the user then makes anyway carries it back
+/// ([`PayOptions::with_may_be_paid_confirmed`]): the SDK reads the claim again and goes on
+/// only when the doubt now is this one, field for field. No automatic payment goes over
+/// [`PaymentDoubt::before_loss`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PaymentDoubt {
@@ -242,6 +244,12 @@ pub struct PaymentDoubt {
     pub after_distrust: bool,
     /// The pinned deadline is earlier than the app's own.
     pub early_pin: bool,
+    /// The obligation was payable before a provider loss and its claim at the new service
+    /// isn't SETTLED: another own app, or this one, may have paid it at the old service,
+    /// and nothing of that reaches the new one (Paykit spec 7.3). The host shows the user
+    /// that it may already be paid; the user pays over it, or states that it wasn't paid
+    /// before the loss ([`Paykit::confirm_not_paid_before_loss`]), which ends it.
+    pub before_loss: bool,
 }
 
 impl PaymentDoubt {
@@ -254,6 +262,7 @@ impl PaymentDoubt {
             || self.divergent
             || self.after_distrust
             || self.early_pin
+            || self.before_loss
     }
 }
 
@@ -713,7 +722,13 @@ impl Paykit {
     /// pause, its deadline refusing it at the latest; one carrying endpoints whose app the
     /// payee's `identity.json` no longer lists as current, and one requiring an app that
     /// copy lists as removed, are [`Refusal::Destination`], that copy read fresh, a read
-    /// that fails being the refusal.
+    /// that fails being the refusal. After a provider loss, a request payable before it whose
+    /// claim at the new service isn't SETTLED is [`Refusal::MayBePaid`], its doubt showing
+    /// [`PaymentDoubt::before_loss`], whichever own app may have paid it at the old service,
+    /// this one included: the host shows the user that it may already be paid, and pays it
+    /// with that doubt confirmed ([`PayOptions::with_may_be_paid_confirmed`]) or, once the
+    /// user states it wasn't paid before the loss, after
+    /// [`Paykit::confirm_not_paid_before_loss`] (Paykit spec 7.3).
     pub async fn pay_request(
         &mut self,
         request: &RequestRef,
@@ -813,7 +828,7 @@ impl Paykit {
         let obligation = self.obligation(&request.payee, &request.request_hash, 0);
         let restored = self.restored_attempts(&obligation).await?;
         let step = self
-            .claim_step(&obligation, deadline, restored, &options)
+            .claim_step(&obligation, &stored, deadline, restored, &options, by)
             .await?;
         // No attempt once the deadline is at or before the highest service time verified
         // (Paykit spec 7.1); the service refuses one from its own clock anyway. The claim is
@@ -1192,17 +1207,21 @@ impl Paykit {
         Ok(restored)
     }
 
-    /// The step to attempt at, after the claim's checks (Paykit spec 7.1, 7.2): a SETTLED
-    /// claim is paid; another open attempt is another wallet's; a pinned deadline other
-    /// than this app's may already be paid, with no confirmation passing it. Otherwise the
-    /// doubt, `restored` with the claim's, read now: a doubtful one is refused with it
-    /// ([`PaymentDoubt`]) unless the user confirmed exactly it.
+    /// The step to attempt at, after the claim's checks (Paykit spec 7.1, 7.2, 7.3): a
+    /// SETTLED claim is paid; another open attempt is another wallet's; a pinned deadline
+    /// other than this app's may already be paid, with no confirmation passing it. Otherwise
+    /// the doubt, `restored` with the claim's and a provider loss's for `request`, read now:
+    /// a doubtful one is refused with it ([`PaymentDoubt`]) unless the user confirmed exactly
+    /// it, and one a provider loss leaves in doubt is refused an automatic payment `by`
+    /// whatever was confirmed.
     async fn claim_step(
         &mut self,
         obligation: &[u8; 32],
+        request: &StoredMessage,
         deadline: Option<u64>,
         restored: Vec<AttemptId>,
         options: &PayOptions,
+        by: Initiator,
     ) -> Result<u64> {
         let view = self.app.read_claim(obligation).await?.map(|read| read.view);
         if let Some(view) = &view {
@@ -1231,6 +1250,10 @@ impl Paykit {
                     .map(|a| a.attempt_id),
             );
         }
+        // A SETTLED claim is refused above.
+        let before_loss = self
+            .in_doubt_after_loss(obligation, Some(request), None)
+            .await?;
         let doubt = PaymentDoubt {
             obligation: *obligation,
             step: view.as_ref().map(|v| v.step),
@@ -1242,12 +1265,18 @@ impl Paykit {
             divergent: kept.divergent,
             after_distrust: kept.after_distrust,
             early_pin: kept.early_pin,
+            before_loss,
         };
-        if doubt.doubtful() && options.may_be_paid_confirmed.as_ref() != Some(&doubt) {
-            let reason = if doubt.restored.is_empty() {
-                "Paykit spec 7.1: a doubtful claim"
-            } else {
+        let automatic_over_loss = before_loss && by == Initiator::Automatic;
+        if automatic_over_loss
+            || doubt.doubtful() && options.may_be_paid_confirmed.as_ref() != Some(&doubt)
+        {
+            let reason = if !doubt.restored.is_empty() {
                 "Switch spec 12.4: a restored attempt is unresolved"
+            } else if before_loss {
+                crate::loss::LOSS_DOUBT
+            } else {
+                "Paykit spec 7.1: a doubtful claim"
             };
             return Err(Refusal::MayBePaid {
                 reason: reason.into(),
@@ -2985,7 +3014,8 @@ impl Paykit {
     /// written `failed`; once paying, the method's history decides, and a dispatch is never
     /// carried out again unless the method is idempotent on the attempt ID; a restored entry
     /// is resolved only from a history that survives a restore. A repeat on an idempotent
-    /// method passes every check a first dispatch does.
+    /// method passes every check a first dispatch does. A dispatch made before a provider
+    /// loss is never repeated: its attempt stays "may be paid" (Paykit spec 7.3).
     ///
     /// **Journal pruning** (Paykit spec 7.1, 7.2; Switch spec 6.3). After every payment's own
     /// work, a resume drops the `Finished` and `Abandoned` entries past their claim's window:
@@ -3348,7 +3378,8 @@ impl Paykit {
         Ok(Some(PayOutcome::Uncertain { attempt_id }))
     }
 
-    /// Whether a repeat of `entry`'s dispatch is withheld because its request may no longer
+    /// Whether a repeat of `entry`'s dispatch is withheld: it was made before a provider loss
+    /// ([`Paykit::dispatched_before_loss`], Paykit spec 7.3), or its request may no longer
     /// be paid (Paykit spec 8.1): this app keeps a stop for it, or the request record the
     /// switch holds, read again, shows it cancelled or rejected, or isn't there (a `404`
     /// included, whatever copy this app keeps) or doesn't read as the request, a newer write
@@ -3361,6 +3392,11 @@ impl Paykit {
     /// payment (Paykit spec 8.1, 8.3), so the attempt stays open and the user's payment
     /// method's history or a receipt settles it. A payment without a request has nothing a payee cancels.
     async fn repeat_withheld(&mut self, entry: &JournalEntry) -> Result<bool> {
+        // A dispatch made before a provider loss is never repeated automatically: another own
+        // app may have paid the obligation at the old service (Paykit spec 7.3).
+        if self.dispatched_before_loss(entry).await? {
+            return Ok(true);
+        }
         // A repeat is an automatic payment: none while its request record or its list's
         // record is divergent, or paused since it was seen so (Paykit spec 6). The view held
         // is taken before the record is read again, and the one read after it.

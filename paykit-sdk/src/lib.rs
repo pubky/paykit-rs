@@ -30,6 +30,11 @@
 //!   endpoints from them ([`Paykit::public_endpoints`]).
 //! - Divergent records after a provider loss: paused until the user confirms
 //!   ([`Paykit::divergent_records`], [`Paykit::confirm_divergent`], [`DivergentRecord`]).
+//! - Obligations payable before a provider loss: in doubt at the new service until their
+//!   claim there is SETTLED or the user states they weren't paid before the loss
+//!   ([`PaymentDoubt::before_loss`], [`Paykit::confirm_not_paid_before_loss`]). A payment by
+//!   hand is refused [`Refusal::MayBePaid`] until the user confirms it, and none is made
+//!   automatically.
 //!
 //! - Publishing Private Payment Lists ([`Paykit::set_list_endpoints`],
 //!   [`Paykit::publish_list_to`], [`Paykit::withdraw_list_from`]): versions, renewals, the
@@ -56,6 +61,7 @@ mod error;
 mod floor;
 mod hold;
 mod journal;
+mod loss;
 mod marks;
 mod notices;
 mod pay;

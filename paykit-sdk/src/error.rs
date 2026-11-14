@@ -60,8 +60,13 @@ pub enum Refusal {
     BeingHandledByOtherWallet,
     /// The obligation may already be paid: an `unknown` or orphaned attempt, a next attempt
     /// that would be flagged `possibly_duplicate`, a pinned deadline other than the app's own,
-    /// or an attempt a restore left unresolved. Only a user who has seen "may already be
-    /// paid" pays it (Paykit spec 7.1, 7.2). `doubt`, when there is one, is what the user
+    /// an attempt a restore left unresolved, or an obligation payable before a provider loss
+    /// whose claim at the new service isn't SETTLED ([`crate::PaymentDoubt::before_loss`]:
+    /// another own app, or this one, may have paid it at the old service). Only a user who
+    /// has seen "may already be paid" pays it (Paykit spec 7.1, 7.2, 7.3); for a provider
+    /// loss the host may instead let the user state that it wasn't paid before the loss
+    /// ([`crate::Paykit::confirm_not_paid_before_loss`]), which ends that doubt, and no
+    /// automatic payment goes over it, whatever was confirmed. `doubt`, when there is one, is what the user
     /// is shown and may pay over: paying anyway carries it back
     /// ([`crate::PayOptions::with_may_be_paid_confirmed`]), and only that same doubt is
     /// passed. `None` for a reason no confirmation passes, such as a pinned deadline other

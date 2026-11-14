@@ -276,6 +276,19 @@ fn store_failure(error: pubky_switch_client::app::AppError) -> StoreFailure {
     }
 }
 
+/// The failure of a read through a [`LocalView`]: the store's, or a corrupt entry for a
+/// value that doesn't read.
+pub(crate) fn view_failure(error: crate::PaykitError) -> StoreFailure {
+    match error {
+        crate::PaykitError::Client(error)
+            if error != pubky_switch_client::app::AppError::Store(StoreError::Corrupt) =>
+        {
+            store_failure(error)
+        }
+        _ => StoreFailure::of_entry(StoreError::Corrupt),
+    }
+}
+
 /// The name of Paykit's layer in app backups (Switch spec 12.4).
 pub const BACKUP_NAME: &str = "paykit";
 
@@ -302,8 +315,8 @@ pub const BACKUP_NAME: &str = "paykit";
 /// bound to the payee and app its key names). The rest is the app's own data, read as its
 /// family's and bound to its key (`ask/`, times and counts, `side/`, `en/`, notices `nt/`
 /// and those owed `bl/`, the consent list `ac/`, each entry marked to be confirmed again,
-/// and the list published and what was sent each counterparty, `ll`, `lv`, `lp/` and
-/// `rl/`): a
+/// the list published and what was sent each counterparty, `ll`, `lv`, `lp/` and `rl/`,
+/// and the provider loss kept with the user's statements about it, `pl` and `pn/`): a
 /// backup carries the app's signing keys, so whoever can write one can sign anything the
 /// app can, and a check of what the app signed guards against corruption only.
 pub(crate) fn restore_paykit_layer(
@@ -444,6 +457,20 @@ pub(crate) fn restore_paykit_layer(
             }
             StateKey::Denied => {
                 state::restored::<Vec<[u8; 32]>>(&key, &value, &binder).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            // The provider loss kept, and the user's statements about it: the restored app
+            // keeps what it may already have paid before the loss in doubt (Paykit spec
+            // 7.3; `loss.rs`).
+            StateKey::LossBoundary => {
+                state::restored::<crate::loss::LossBoundary>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::NotPaidBeforeLoss(_) => {
+                state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -946,22 +973,18 @@ impl Protocol for PaykitProtocol {
 
     /// A provider loss (Switch spec 12.6 steps 2 and 4): ask every counterparty with Paykit
     /// activity to send again from the old cursor's time, and add their conversation entries
-    /// back.
+    /// back. The loss is kept in the same commit, its declaration time and the end of its
+    /// residual window, for the doubt it leaves on what was payable before it (Paykit spec
+    /// 7.3; `loss.rs`).
     fn provider_lost_with(
         &self,
         loss: &ProviderLoss,
         view: &LocalView<'_>,
     ) -> Result<LossActions, StoreFailure> {
         // A store that fails, or a peer key that doesn't read, is the step's failure, never
-        // an empty list of counterparties: the recovery asks again.
-        let peers = state::view_scan::<u64>(view, key::PEERS).map_err(|error| match error {
-            crate::PaykitError::Client(error)
-                if error != pubky_switch_client::app::AppError::Store(StoreError::Corrupt) =>
-            {
-                store_failure(error)
-            }
-            _ => StoreFailure::of_entry(StoreError::Corrupt),
-        })?;
+        // an empty list of counterparties: the recovery asks again. So is a kept loss that
+        // doesn't read.
+        let peers = state::view_scan::<u64>(view, key::PEERS).map_err(view_failure)?;
         let mut conversations = Vec::with_capacity(peers.len());
         for (rest, _) in peers {
             let peer = unb64_array::<32>(&rest)
@@ -970,6 +993,7 @@ impl Protocol for PaykitProtocol {
         }
         let mut actions = self.provider_lost(loss)?;
         actions.conversations = conversations;
+        actions.local.extend(crate::loss::loss_writes(loss, view)?);
         Ok(actions)
     }
 

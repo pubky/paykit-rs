@@ -366,7 +366,8 @@ pub enum RequestStatus {
     BeingPaidHere,
     /// "Being handled by your other wallet": another own app's attempt is open.
     BeingHandledByOtherWallet,
-    /// An `unknown` or orphaned attempt: "may be paid" (Paykit spec 7.1).
+    /// An `unknown` or orphaned attempt, or payable before a provider loss and not SETTLED at
+    /// the new service: "may be paid" (Paykit spec 7.1, 7.3).
     MayBePaid,
     /// SETTLED, or the record holds the proof of a payment: "Paid" only then.
     Paid,
@@ -1724,6 +1725,12 @@ impl Paykit {
                     }
                 }
             }
+        }
+        // Payable before a provider loss, and not SETTLED at the new service: another own app
+        // may have paid it at the old one (Paykit spec 7.3).
+        let stored = request_of(record).map(|(stored, _)| stored);
+        if self.in_doubt_after_loss(&obligation, stored, None).await? {
+            return Ok(RequestStatus::MayBePaid);
         }
         // Expired once the deadline is at or before the highest service time verified (Paykit
         // spec 7.1): a one-time request's attempt deadline.

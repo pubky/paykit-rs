@@ -33,6 +33,8 @@
 //! | `ar/<payee>/<app_id>` | a payee app's records that took part in its comparison, for its public endpoints | |
 //! | `ct` | the acceptance time of the last Paykit entry the receive step passed | |
 //! | `rh` | the hold a restore set on the open requests (`hold.rs`); never backed up | |
+//! | `pl` | the provider loss the app followed last, as Paykit keeps it for its doubt: the generation recovered at, the declaration time and the end of the residual window, written only with the loss's re-sends, a newer loss replacing it and an older one leaving it (`loss.rs`, Paykit spec 7.3) | |
+//! | `pn/<obligation>` | the user stated the obligation wasn't paid before the provider loss `pl` holds, which ends its doubt; dropped by the commit that keeps a newer loss (`loss.rs`) | |
 //! | `hc/<record key>` | the user confirmed a held request; never backed up | |
 //! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads | |
 //! | `kc/<record key>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
@@ -95,6 +97,7 @@ use crate::hold::MissedHold;
 use crate::hold::OwnResendOwed;
 use crate::hold::RestoreHold;
 use crate::journal::JournalEntry;
+use crate::loss::LossBoundary;
 use crate::marks::{DropMark, KeyWaitMark};
 use crate::notices::KeptNotice;
 use crate::pay::ListAsk;
@@ -517,6 +520,7 @@ impl Stored for bool {
             | StateKey::PayerPassOwed
             | StateKey::ListsAwaitHost
             | StateKey::HoldConfirmed(_)
+            | StateKey::NotPaidBeforeLoss(_)
             | StateKey::FloorOpened(_)
             | StateKey::Taken(_)
                 if *self =>
@@ -884,6 +888,19 @@ impl Stored for MissedHold {
     }
 }
 
+impl sealed::Sealed for LossBoundary {}
+
+/// The provider loss kept, which names nothing: recovered at a generation after another, its
+/// residual window ending no earlier than its declaration.
+impl Stored for LossBoundary {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::LossBoundary if self.valid() => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for OwnResendOwed {}
 
 /// The restore's re-send owed: the counterparties still waiting, if a pass ran, ascending,
@@ -1145,6 +1162,8 @@ pub(crate) mod key {
     pub(crate) const CURSOR_TIME: &str = "ct";
     pub(crate) const RESTORE_HOLD: &str = "rh";
     pub(crate) const MISSED_HOLD: &str = "mh";
+    pub(crate) const LOSS_BOUNDARY: &str = "pl";
+    pub(crate) const NOT_PAID_BEFORE_LOSS: &str = "pn/";
     pub(crate) const HOLD_CONFIRMED: &str = "hc/";
     pub(crate) const LISTS_READ: &str = "lr";
     pub(crate) const HELD_LISTS: &str = "lh/";
@@ -1385,6 +1404,12 @@ pub(crate) mod key {
         format!("{HOLD_CONFIRMED}{}", b64(record_key))
     }
 
+    /// The user's statement that `obligation` wasn't paid before the provider loss the app
+    /// keeps (`loss.rs`).
+    pub(crate) fn not_paid_before_loss(obligation: &[u8; 32]) -> String {
+        format!("{NOT_PAID_BEFORE_LOSS}{}", b64(obligation))
+    }
+
     pub(crate) fn held_list(record_key: &[u8; 32]) -> String {
         format!("{HELD_LISTS}{}", b64(record_key))
     }
@@ -1454,6 +1479,10 @@ pub(crate) enum StateKey {
     RestoreHold,
     /// `mh`: the hold a `missed` item set.
     MissedHold,
+    /// `pl`: the provider loss the app followed last.
+    LossBoundary,
+    /// `pn/<obligation>`: the user stated the obligation wasn't paid before that loss.
+    NotPaidBeforeLoss([u8; 32]),
     /// `nl`: the shared records aren't listed since a restore.
     RecordsUnlisted,
     /// `ml`: the shared records aren't listed by Paykit since a `missed` item.
@@ -1608,6 +1637,7 @@ impl StateKey {
             "ct" => Self::CursorTime,
             "rh" => Self::RestoreHold,
             "mh" => Self::MissedHold,
+            "pl" => Self::LossBoundary,
             "nl" => Self::RecordsUnlisted,
             "ml" => Self::MissedUnlisted,
             "mc" => Self::MissedConsents,
@@ -1652,6 +1682,7 @@ impl StateKey {
                     "kc" => Self::KeptCancellation(b64_32(rest)?),
                     "bk" => Self::OwnBlock(b64_32(rest)?),
                     "hc" => Self::HoldConfirmed(b64_32(rest)?),
+                    "pn" => Self::NotPaidBeforeLoss(b64_32(rest)?),
                     "fo" => Self::FloorOpened(b64_32(rest)?),
                     "lh" => Self::HeldList(b64_32(rest)?),
                     "side" => Self::Side(msg_id(rest)?),
@@ -2006,6 +2037,26 @@ mod tests {
             key::RESTORE_HOLD,
             serde_json::json!({ "bound_ms": 9 })
         ));
+        let loss = |generation: u64, declared: u64, until: u64| {
+            serde_json::json!({
+                "generation": generation,
+                "declared_at_ms": declared,
+                "uncertain_until_ms": until,
+            })
+        };
+        assert!(reads::<LossBoundary>(key::LOSS_BOUNDARY, loss(2, 5, 9)));
+        assert!(reads::<LossBoundary>(key::LOSS_BOUNDARY, loss(2, 5, 5)));
+        assert!(!reads::<LossBoundary>(key::LOSS_BOUNDARY, loss(2, 9, 5)));
+        assert!(!reads::<LossBoundary>(key::LOSS_BOUNDARY, loss(0, 5, 9)));
+        assert!(!reads::<LossBoundary>(key::MISSED_HOLD, loss(2, 5, 9)));
+        assert!(reads::<bool>(
+            &key::not_paid_before_loss(&[2; 32]),
+            serde_json::json!(true)
+        ));
+        assert!(!reads::<bool>(
+            &key::not_paid_before_loss(&[2; 32]),
+            serde_json::json!(false)
+        ));
     }
 
     #[test]
@@ -2210,6 +2261,11 @@ mod tests {
             (key::CURSOR_TIME.into(), StateKey::CursorTime),
             (key::RESTORE_HOLD.into(), StateKey::RestoreHold),
             (key::MISSED_HOLD.into(), StateKey::MissedHold),
+            (key::LOSS_BOUNDARY.into(), StateKey::LossBoundary),
+            (
+                key::not_paid_before_loss(&pubky),
+                StateKey::NotPaidBeforeLoss(pubky),
+            ),
             (key::RECORDS_UNLISTED.into(), StateKey::RecordsUnlisted),
             (key::MISSED_UNLISTED.into(), StateKey::MissedUnlisted),
             (key::MISSED_CONSENTS.into(), StateKey::MissedConsents),

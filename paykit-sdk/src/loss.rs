@@ -1,0 +1,318 @@
+//! After a provider loss (Paykit spec 7.3; Switch spec 12.6): which obligations stay in
+//! doubt at the new service.
+//!
+//! An obligation is uncertain when its request or Billing Period was payable before the
+//! declaration plus the residual window: another own app may have paid it at the old service,
+//! and nothing of that reaches the new one. The app keeps the loss it followed last
+//! ([`LossBoundary`], `p/pl`): the generation recovered at, the declaration time and the end
+//! of the residual window. The protocol's loss step writes it with the loss's re-sends, in
+//! their one commit ([`loss_writes`]); a newer loss replaces it and drops the user's
+//! statements about the older one, an older one leaves it. A backup carries it, with those
+//! statements; an app restored from a backup taken before it learned of the loss writes it
+//! again when it follows the loss. While the client follows a newer loss than the one kept,
+//! before its loss step has run, the client's view of that loss counts instead, with no
+//! statement of the user's.
+//!
+//! An uncertain obligation stays in doubt, whichever own app attempted it or may have, this
+//! app included, until its claim at the new service shows it SETTLED or the user states that
+//! it wasn't paid before the loss ([`Paykit::confirm_not_paid_before_loss`]):
+//!
+//! - a payment by hand is refused [`crate::Refusal::MayBePaid`], its doubt showing
+//!   [`crate::PaymentDoubt::before_loss`], and goes ahead only once the user has seen it and
+//!   confirmed it ([`crate::PayOptions::with_may_be_paid_confirmed`]); a confirmed payment
+//!   that fails leaves the doubt as it was;
+//! - no automatic payment is made on it, with no confirmation passing it, and a resume never
+//!   repeats a dispatch made before the loss;
+//! - the request's status reads [`crate::RequestStatus::MayBePaid`].
+//!
+//! An obligation the app can't place before or after the loss, such as one whose request it
+//! can't date, is in doubt.
+
+use paykit_lib::records::StoredMessage;
+use pubky_switch_client::app::{LocalView, LocalWrite, ProviderLoss, StoreFailure, UserConfirmed};
+use pubky_switch_core::chain::TransitionProof;
+use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+use serde::{Deserialize, Serialize};
+
+use crate::error::Result;
+use crate::journal::JournalEntry;
+use crate::paykit::Paykit;
+use crate::state::{self, key};
+
+/// The reason of a [`crate::Refusal::MayBePaid`] for an obligation a provider loss leaves
+/// in doubt.
+pub(crate) const LOSS_DOUBT: &str =
+    "Paykit spec 7.3: payable before a provider loss, and not SETTLED at the new service";
+
+/// The provider loss the app followed last (`p/pl`), as Paykit keeps it for the doubt it
+/// leaves (Paykit spec 7.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LossBoundary {
+    /// The generation recovered at: the newer of two losses is the one at the later
+    /// generation.
+    pub(crate) generation: u64,
+    /// When the loss was declared: the recovery record's service time, in Unix
+    /// milliseconds; 0 when the client doesn't know it yet.
+    pub(crate) declared_at_ms: u64,
+    /// Until when an attempt could have been authorized at the old service: the declaration
+    /// plus the residual window and the offset between the services' clocks.
+    pub(crate) uncertain_until_ms: u64,
+}
+
+impl LossBoundary {
+    /// The boundary of `loss`, as the client tells of it.
+    pub(crate) fn of(loss: &ProviderLoss) -> Self {
+        Self {
+            generation: loss.generation,
+            declared_at_ms: loss.declared_at_ms,
+            uncertain_until_ms: loss.uncertain_until_ms,
+        }
+    }
+
+    /// Whether it is one the protocol's loss step writes: recovered at a generation after
+    /// another, its residual window ending no earlier than its declaration.
+    pub(crate) fn valid(&self) -> bool {
+        self.generation > 0 && self.uncertain_until_ms >= self.declared_at_ms
+    }
+
+    /// Whether the obligations of `request` are uncertain after the loss (Paykit spec 7.3),
+    /// or, with `period_starts_at_ms`, those of its Billing Period starting then. A request
+    /// counts as made before the loss when the app held it in local state then, its inbox
+    /// having accepted it before the end of the residual window, or when its signed
+    /// `created_at` is earlier than the declaration plus the clock tolerance. A Billing Period
+    /// starting after the end of the residual window is never uncertain. What the app can't
+    /// place is: a request it holds no copy of, one with no acceptance time, and every
+    /// request while the declaration time isn't known.
+    pub(crate) fn uncertain(
+        &self,
+        request: Option<&StoredMessage>,
+        period_starts_at_ms: Option<u64>,
+    ) -> bool {
+        if period_starts_at_ms.is_some_and(|start| start > self.uncertain_until_ms) {
+            return false;
+        }
+        let Some(request) = request else {
+            return true;
+        };
+        if self.declared_at_ms == 0 {
+            return true;
+        }
+        let held = request
+            .accepted_at()
+            .is_none_or(|at| at < self.uncertain_until_ms);
+        held || request.message().created_at_ms
+            < self.declared_at_ms.saturating_add(CLOCK_TOLERANCE_MS)
+    }
+}
+
+/// The protocol's writes for `loss` (Switch spec 12.6 step 4), with its re-sends in one
+/// commit: the boundary kept, `view` holding the one kept before. A newer loss replaces it
+/// and drops every statement of the user's about the older one; the same loss again
+/// replaces it and keeps them; an older loss writes nothing.
+///
+/// # Errors
+///
+/// A store failure, or a corrupt store for a kept boundary that doesn't read.
+pub(crate) fn loss_writes(
+    loss: &ProviderLoss,
+    view: &LocalView<'_>,
+) -> std::result::Result<Vec<LocalWrite>, StoreFailure> {
+    let boundary = LossBoundary::of(loss);
+    let kept = state::view_get::<LossBoundary>(view, key::LOSS_BOUNDARY)
+        .map_err(crate::protocol::view_failure)?;
+    let put =
+        || state::local_put(key::LOSS_BOUNDARY, &boundary).map_err(crate::protocol::view_failure);
+    Ok(match kept {
+        Some(kept) if kept.generation > boundary.generation => Vec::new(),
+        Some(kept) if kept.generation == boundary.generation => vec![put()?],
+        _ => vec![
+            put()?,
+            LocalWrite::DeletePrefix {
+                prefix: key::NOT_PAID_BEFORE_LOSS.as_bytes().to_vec(),
+            },
+        ],
+    })
+}
+
+/// The loss that decides the doubt: the boundary kept, or the client's view of a newer loss
+/// it follows; and whether the user's statements count, which they do for the kept one only.
+struct Decisive {
+    boundary: LossBoundary,
+    statements_count: bool,
+}
+
+impl Paykit {
+    async fn decisive_loss(&self) -> Result<Option<Decisive>> {
+        let kept = self.local_get::<LossBoundary>(key::LOSS_BOUNDARY).await?;
+        let following = self
+            .app
+            .recovery_info()
+            .await?
+            .map(|info| LossBoundary::of(&info.loss));
+        Ok(match (kept, following) {
+            (Some(kept), Some(following)) if following.generation > kept.generation => {
+                Some(Decisive {
+                    boundary: following,
+                    statements_count: false,
+                })
+            }
+            (Some(kept), _) => Some(Decisive {
+                boundary: kept,
+                statements_count: true,
+            }),
+            (None, Some(following)) => Some(Decisive {
+                boundary: following,
+                statements_count: false,
+            }),
+            (None, None) => None,
+        })
+    }
+
+    /// Whether `obligation`, of `request` or of its Billing Period starting at
+    /// `period_starts_at_ms`, is in doubt after a provider loss (Paykit spec 7.3), its claim
+    /// at the new service not SETTLED, which the caller judges first: the loss makes it
+    /// uncertain ([`LossBoundary::uncertain`]), and the user hasn't stated it wasn't paid
+    /// before the loss. `request` is `None` for one the app holds no copy of, which it can't
+    /// place.
+    pub(crate) async fn in_doubt_after_loss(
+        &self,
+        obligation: &[u8; 32],
+        request: Option<&StoredMessage>,
+        period_starts_at_ms: Option<u64>,
+    ) -> Result<bool> {
+        let Some(loss) = self.decisive_loss().await? else {
+            return Ok(false);
+        };
+        if !loss.boundary.uncertain(request, period_starts_at_ms) {
+            return Ok(false);
+        }
+        if !loss.statements_count {
+            return Ok(true);
+        }
+        Ok(self
+            .local_get::<bool>(&key::not_paid_before_loss(obligation))
+            .await?
+            .is_none())
+    }
+
+    /// Whether `entry`'s dispatch was made before a provider loss the app follows or followed:
+    /// its attempt written at a generation before the one the loss recovered at, or one whose
+    /// proof the entry doesn't hold or that doesn't read. A resume never repeats it
+    /// (Paykit spec 7.3).
+    pub(crate) async fn dispatched_before_loss(&self, entry: &JournalEntry) -> Result<bool> {
+        let Some(loss) = self.decisive_loss().await? else {
+            return Ok(false);
+        };
+        let generation = entry
+            .attempt_proof
+            .as_ref()
+            .and_then(|signed| TransitionProof::peek(signed).ok())
+            .map(|proof| proof.envelope().generation);
+        Ok(generation.is_none_or(|generation| generation < loss.boundary.generation))
+    }
+
+    /// The user states that `obligation` wasn't paid before the provider loss the app
+    /// followed last (Paykit spec 7.3): its doubt after the loss ends, for it alone, so a
+    /// payment of it goes as any other, an automatic one included, the claim's own doubt
+    /// still counting. The host asks only after showing the user that another own app may
+    /// have paid it at the old service: the obligation is the one a
+    /// [`crate::Refusal::MayBePaid`] showed with [`crate::PaymentDoubt::before_loss`]. A
+    /// payment the user makes over that doubt instead
+    /// ([`crate::PayOptions::with_may_be_paid_confirmed`]) states nothing: one that fails
+    /// leaves the obligation in doubt. The statement holds for the loss it was given after;
+    /// a newer loss puts the obligation in doubt again. Without a loss followed, nothing is
+    /// in doubt and nothing is written.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::PaykitError::Lib`] for a certificate Paykit refuses; a store failure.
+    pub async fn confirm_not_paid_before_loss(
+        &mut self,
+        obligation: &[u8; 32],
+        _confirmed: UserConfirmed,
+    ) -> Result<()> {
+        self.refresh_own()?;
+        if self
+            .local_get::<LossBoundary>(key::LOSS_BOUNDARY)
+            .await?
+            .is_none()
+        {
+            return Ok(());
+        }
+        self.local_put(&key::not_paid_before_loss(obligation), &true)
+            .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::testkit::{object, Party, NOW};
+
+    const DECLARED: u64 = NOW + 1_000_000;
+    const UNTIL: u64 = DECLARED + 70_000;
+
+    fn boundary() -> LossBoundary {
+        LossBoundary {
+            generation: 2,
+            declared_at_ms: DECLARED,
+            uncertain_until_ms: UNTIL,
+        }
+    }
+
+    /// A request from bob to alice, signed as created at `created_at_ms` and stored as
+    /// accepted at `accepted_at`.
+    fn request(created_at_ms: u64, accepted_at: Option<u64>) -> StoredMessage {
+        let alice = Party::new("alice", "wallet", &["paykit_pay"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
+        let body = object(json!({
+            "amount": { "asset": "btc", "value": "1" },
+            "payment_reference": "order-1",
+            "proposal_expires_at": null
+        }));
+        bob.message_accepted(
+            &alice,
+            "paykit.payment_request",
+            body,
+            created_at_ms,
+            accepted_at,
+        )
+    }
+
+    #[test]
+    fn test_loss_uncertain_request_held_or_created_before() {
+        let loss = boundary();
+        // Held in local state: accepted before the end of the residual window.
+        assert!(loss.uncertain(Some(&request(UNTIL, Some(UNTIL - 1))), None));
+        // Created before the declaration plus the clock tolerance, accepted later.
+        let created = DECLARED + CLOCK_TOLERANCE_MS - 1;
+        assert!(loss.uncertain(Some(&request(created, Some(UNTIL + 5))), None));
+        // Created and accepted after: not uncertain.
+        let created = DECLARED + CLOCK_TOLERANCE_MS;
+        assert!(!loss.uncertain(Some(&request(created, Some(UNTIL))), None));
+    }
+
+    #[test]
+    fn test_loss_uncertain_what_can_not_be_placed() {
+        let loss = boundary();
+        let after = DECLARED + CLOCK_TOLERANCE_MS + 1;
+        assert!(loss.uncertain(None, None));
+        assert!(loss.uncertain(Some(&request(after, None)), None));
+        let unknown = LossBoundary {
+            declared_at_ms: 0,
+            ..loss
+        };
+        assert!(unknown.uncertain(Some(&request(after, Some(UNTIL + 1))), None));
+    }
+
+    #[test]
+    fn test_loss_uncertain_billing_period_after_the_window() {
+        let loss = boundary();
+        let before = request(DECLARED - 1, Some(DECLARED - 1));
+        assert!(loss.uncertain(Some(&before), Some(UNTIL)));
+        assert!(!loss.uncertain(Some(&before), Some(UNTIL + 1)));
+        assert!(!loss.uncertain(None, Some(UNTIL + 1)));
+    }
+}

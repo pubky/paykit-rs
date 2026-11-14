@@ -23,6 +23,7 @@ mod one_time;
 mod outcome_record;
 mod periods;
 mod protocols;
+mod provider_loss;
 mod pruning;
 mod public;
 mod publishing;
