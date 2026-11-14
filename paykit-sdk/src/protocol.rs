@@ -672,7 +672,8 @@ pub(crate) fn restore_paykit_layer(
             }
             StateKey::MessageNotice { .. }
             | StateKey::Notice { .. }
-            | StateKey::BlockedLost { .. } => {
+            | StateKey::BlockedLost { .. }
+            | StateKey::HandoffNotice { .. } => {
                 let notice =
                     state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
                 // An acknowledged notice of an attempt is kept only while the journal holds

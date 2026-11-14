@@ -2024,6 +2024,7 @@ impl Paykit {
                 for write in ops.entries {
                     batch = batch.entry(write);
                 }
+                batch = batch.locals(ops.locals);
                 if ops.first_ledger_write {
                     first_ledger_write = Some(ops.record_key);
                 }
@@ -2796,7 +2797,7 @@ impl Paykit {
             };
             let applied_ledger = ledger.as_ref().map(|l| (l.record_key, l.ledger.clone()));
             if let Some(ledger) = ledger {
-                batch = batch.entry(ledger.write);
+                batch = batch.entry(ledger.write).locals(ledger.locals);
             }
             let mut finished = entry.clone();
             // An acceptance still owed keeps the entry where a resume visits it: the outcome

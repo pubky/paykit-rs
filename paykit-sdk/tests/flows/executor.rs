@@ -566,6 +566,7 @@ async fn test_executor_refuses_after_a_restore_until_confirmed_again() {
         .await
         .unwrap();
     let request = request_after_restore(&w, &mut shop, &mut wallet, "0.5").await;
+    repaired_after_restore(&mut wallet, &request, &record).await;
     let paid = wallet.pay_under_allowance(&request, &record).await.unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
 }
@@ -982,6 +983,31 @@ async fn test_executor_journal_entry_naming_another_allowance_is_corrupt_at_the_
 
 /// `wallet` backed up and restored, reconciled, read, and its user's confirmations after
 /// the restore given for `record` and `request`.
+/// After a restore, the executor builds on the version its backup held only through the
+/// repair (Paykit spec 8.3, "Last ledger version"): a payment under the Allowance at `record`
+/// is refused for it, and the user confirms the repair shown.
+pub(crate) async fn repaired_after_restore(
+    wallet: &mut Paykit,
+    request: &RequestRef,
+    record: &[u8; 32],
+) {
+    let refused = Box::pin(wallet.pay_under_allowance(request, record))
+        .await
+        .unwrap_err();
+    assert!(
+        refused_for(&refused, "version kept is a backup's"),
+        "{refused:?}"
+    );
+    let repair = Box::pin(wallet.ledger_repair(record)).await.unwrap();
+    assert!(
+        repair.reason.contains("version kept is a backup's"),
+        "{repair:?}"
+    );
+    Box::pin(wallet.confirm_ledger_repair(record, &repair, UserConfirmed::new()))
+        .await
+        .unwrap();
+}
+
 pub(crate) async fn restored_confirmed(w: &World, wallet: Paykit, record: &[u8; 32]) -> Paykit {
     let mut wallet = wallet;
     let backup = wallet.backup().await.unwrap();
@@ -1361,6 +1387,7 @@ async fn test_executor_pays_inside_its_limits_until_ended_through_a_restore() {
         .await
         .unwrap();
     let after = request_after_restore(&w, &mut shop, &mut wallet, "0.3").await;
+    repaired_after_restore(&mut wallet, &after, &record).await;
     let paid = wallet.pay_under_allowance(&after, &record).await.unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     assert_eq!(w.rail.all_executions().len(), 2);
@@ -1536,12 +1563,12 @@ async fn test_executor_no_repeat_while_the_allowance_needs_confirming_again() {
 }
 
 #[tokio::test]
-async fn test_executor_restored_with_an_older_ledger_version_builds_on_the_newer_one() {
+async fn test_executor_restored_with_a_kept_version_pays_only_after_a_confirmed_repair() {
     // The executor pays 0.4 under a lifetime limit of 1, is backed up, then pays 0.4 more.
-    // Restored, it keeps the older ledger version; the ledger shown is built on it and
-    // counts no less, so the executor accepts it and counts both payments: after its user
-    // confirms again, a third of 0.4 has no room under the limit, and 0.1 still does (Paykit
-    // spec 8.3, "Last ledger version", "From one version to the next").
+    // Restored, it holds the older ledger version the backup held: a restore this SDK can't
+    // tell clean, so it builds on no ledger until its user confirms the repair, which counts
+    // both payments: then a third of 0.4 has no room under the limit, and 0.1 still does
+    // (Paykit spec 8.3, "Last ledger version", "After a confirmation").
     let w = World::new();
     let (mut shop, mut wallet, record) =
         set_up(&w, terms_with(json!({ "lifetime_amount_limit": "1" }))).await;
@@ -1573,6 +1600,20 @@ async fn test_executor_restored_with_an_older_ledger_version_builds_on_the_newer
     wallet.receive(None).await.unwrap();
     let third = request_after_restore(&w, &mut shop, &mut wallet, "0.4").await;
     let fourth = request_after_restore(&w, &mut shop, &mut wallet, "0.1").await;
+    let refused = wallet
+        .pay_under_allowance(&fourth, &record)
+        .await
+        .unwrap_err();
+    assert!(
+        refused_for(&refused, "version kept is a backup's"),
+        "{refused:?}"
+    );
+    let repair = Box::pin(wallet.ledger_repair(&record)).await.unwrap();
+    assert_eq!(repair.lifetime.to_string(), "0.8", "{repair:?}");
+    assert_eq!(w.rail.all_executions().len(), 2);
+    Box::pin(wallet.confirm_ledger_repair(&record, &repair, UserConfirmed::new()))
+        .await
+        .unwrap();
     let refused = wallet
         .pay_under_allowance(&third, &record)
         .await

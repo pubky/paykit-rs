@@ -341,6 +341,29 @@ async fn handed_off_to_a_reader(w: &World) -> (Paykit, Paykit, Paykit, [u8; 32])
     (shop, old, new, record)
 }
 
+/// The previous executor's kept version moved, later by 5 when `later`, else earlier by 1,
+/// with another item hash, so its `ledger_handoff` names that version.
+async fn name_another_version(old: &mut Paykit, record: &[u8; 32], later: bool) {
+    let key = kept_key(record);
+    let held_kept = old
+        .app()
+        .protocol_get(key.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut value: Value = serde_json::from_slice(&held_kept).unwrap();
+    let version = value["d"]["version"].as_u64().unwrap();
+    value["d"]["version"] = json!(if later { version + 5 } else { version - 1 });
+    value["d"]["item_hash"] = json!(pubky_switch_core::enc::b64(&[7; 32]));
+    old.app_mut()
+        .protocol_commit(&[LocalWrite::Put {
+            key: key.into_bytes(),
+            value: serde_json::to_vec(&value).unwrap(),
+        }])
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn test_handoff_reader_executor_settles_on_the_write_its_first_write_built_on() {
     // A new executor that kept a version as a reader pays on it before the handoff is
@@ -367,23 +390,7 @@ async fn test_handoff_reader_executor_built_on_an_older_version_than_named_is_a_
     // named write raises the alarm, and nothing more is paid.
     let w = World::new();
     let (mut shop, mut old, mut new, record) = Box::pin(handed_off_to_a_reader(&w)).await;
-    let key = kept_key(&record);
-    let held_kept = old
-        .app()
-        .protocol_get(key.as_bytes())
-        .await
-        .unwrap()
-        .unwrap();
-    let mut value: Value = serde_json::from_slice(&held_kept).unwrap();
-    value["d"]["version"] = json!(value["d"]["version"].as_u64().unwrap() + 5);
-    value["d"]["item_hash"] = json!(pubky_switch_core::enc::b64(&[7; 32]));
-    old.app_mut()
-        .protocol_commit(&[LocalWrite::Put {
-            key: key.into_bytes(),
-            value: serde_json::to_vec(&value).unwrap(),
-        }])
-        .await
-        .unwrap();
+    name_another_version(&mut old, &record, true).await;
     Box::pin(old.resume_payments()).await.unwrap();
     new.receive(None).await.unwrap();
     let third = request(&w, &mut shop, &mut new, "0.2").await;
@@ -392,4 +399,105 @@ async fn test_handoff_reader_executor_built_on_an_older_version_than_named_is_a_
         .unwrap_err();
     assert!(is_rollback(&refused), "{refused:?}");
     assert_eq!(w.rail.all_executions().len(), 2);
+}
+
+#[tokio::test]
+async fn test_handoff_named_before_the_new_executors_base_is_ignored_and_told() {
+    // The previous executor names a version before the one the new executor's first write
+    // built on: the new executor ignores it and goes on with its own, and the host is told,
+    // with the writer, never silently.
+    let w = World::new();
+    let (mut shop, mut old, mut new, record) = Box::pin(handed_off_to_a_reader(&w)).await;
+    name_another_version(&mut old, &record, false).await;
+    Box::pin(old.resume_payments()).await.unwrap();
+    new.receive(None).await.unwrap();
+    let third = request(&w, &mut shop, &mut new, "0.2").await;
+    let paid = Box::pin(new.pay_under_allowance(&third, &record))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert!(new.ledger_alarm().is_none());
+    let notices = new.notices().await.unwrap();
+    let told = notices
+        .iter()
+        .find(|n| n.kind == paykit_sdk::NoticeKind::LedgerHandoffIgnored)
+        .unwrap_or_else(|| panic!("{notices:?}"));
+    assert_eq!(told.allowance, Some(record));
+    assert_eq!(told.writer_app_id, Some(old.app_id()));
+    new.acknowledge_notice(&told.id).await.unwrap();
+    assert!(new.notices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_handoff_first_write_base_goes_with_its_batch_not_the_keep() {
+    // The new executor, holding the version it read, makes its first ledger write since the
+    // handoff, and the answer is lost: the batch applies but no version of it is kept. What
+    // it built on is recorded with the batch itself once it lands, so the previous
+    // executor's last version, which it built on, settles the handoff without an alarm.
+    let w = World::new();
+    let (mut shop, mut old, record) = Box::pin(set_up(&w, terms_with(json!({})))).await;
+    let first = request(&w, &mut shop, &mut old, "0.5").await;
+    Box::pin(old.pay_under_allowance(&first, &record))
+        .await
+        .unwrap();
+    let mut new = Box::pin(executor_wallet(&w, "wallet2")).await;
+    new.receive(None).await.unwrap();
+    Box::pin(new.grant_executor(&record, UserConfirmed::new()))
+        .await
+        .unwrap();
+    let base_key = format!("lb/{}", pubky_switch_core::enc::b64(&record));
+    let kept_before: Value = serde_json::from_slice(
+        &new.app()
+            .protocol_get(kept_key(&record).as_bytes())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let second = request(&w, &mut shop, &mut new, "0.2").await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    let _ = Box::pin(new.pay_under_allowance(&second, &record)).await;
+    assert_eq!(w.rail.all_executions().len(), 1);
+    // The kept batch lands; no version of its write is kept.
+    new.app_mut().flush_outbox().await.unwrap();
+    assert_eq!(
+        new.app()
+            .protocol_get(kept_key(&record).as_bytes())
+            .await
+            .unwrap()
+            .map(|v| serde_json::from_slice::<Value>(&v).unwrap()),
+        Some(kept_before.clone())
+    );
+    let mark: Value = serde_json::from_slice(
+        &new.app()
+            .protocol_get(base_key.as_bytes())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        mark["d"]["handoff"]["first"]["version"], kept_before["d"]["version"],
+        "{mark}"
+    );
+    old.receive(None).await.unwrap();
+    Box::pin(old.resume_payments()).await.unwrap();
+    new.receive(None).await.unwrap();
+    let third = request(&w, &mut shop, &mut new, "0.2").await;
+    let paid = Box::pin(new.pay_under_allowance(&third, &record))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert!(new.ledger_alarm().is_none());
+    assert!(new.notices().await.unwrap().is_empty());
+    assert!(new
+        .app()
+        .protocol_get(base_key.as_bytes())
+        .await
+        .unwrap()
+        .is_none());
 }

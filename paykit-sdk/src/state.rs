@@ -50,7 +50,7 @@
 //! | `ha/<payee>/<msg_id>` | a rejection or payer's cancellation recorded while sends to its payee were held, its message stored in the request record and not queued, written with the record's batch: queued from the record once sends to the payee aren't held, or given up with a notice past its window (`hold.rs`, `Paykit::queue_own_again`) | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `paykit_pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
-//! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
+//! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>`, `nt/<record key>/handoff-<app_id>` | a notice for the host about a payment, a message given up, or a `ledger_handoff` the executor ignores, with its writer, until acknowledged (`notices.rs`) | |
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
 //! | `fg` | the flagged senders as the app last read them, at most `MAX_FLAGGED_COPY`; absent while not known, which holds the asks of block marks (`marks.rs`); never restored | |
 //! | `bf` | the raise of the identity's block floor this app owes: the latest of the latest times of the block marks gone for the bound or their own expiry, and of a restore's first read of the lists; written to the shared `block_floor` record before the block marks ask and with any ask, and deleted in that batch; applied as a floor meanwhile (`crate::floor`) | yes |
@@ -1398,6 +1398,12 @@ pub(crate) mod key {
     }
 
     /// The notice that `sender`'s message `msg_id` was given up.
+    /// The notice that a `ledger_handoff` `writer` wrote into the Allowance record `record`
+    /// is ignored.
+    pub(crate) fn handoff_notice(record: &[u8; 32], writer: &[u8; 16]) -> String {
+        format!("{NOTICES}{}/handoff-{}", b64(record), b64(writer))
+    }
+
     pub(crate) fn message_notice(sender: &[u8; 32], msg_id: &str) -> String {
         format!("{NOTICES}{}/{msg_id}", b64(sender))
     }
@@ -1585,6 +1591,8 @@ pub(crate) enum StateKey {
         counterparty: [u8; 32],
         from_ms: u64,
     },
+    /// `nt/<record key>/handoff-<app_id>`: the notice that a `ledger_handoff` is ignored.
+    HandoffNotice { record: [u8; 32], writer: [u8; 16] },
     /// `kw/<sender>`: the mark of a sender's entries dropped while they waited for a key.
     KeyWaits { sender: [u8; 32] },
     /// `pr/<sender>/<record key>/<msg_id>`: a payer's reply kept for its record.
@@ -1827,6 +1835,14 @@ impl StateKey {
                             return Some(Self::BlockedLost {
                                 counterparty,
                                 from_ms: number(from)?,
+                            });
+                        }
+                        if let (Some(record), Some(writer)) =
+                            (b64_32(attempt), tag.strip_prefix("handoff-"))
+                        {
+                            return Some(Self::HandoffNotice {
+                                record,
+                                writer: b64_16(writer)?,
                             });
                         }
                         if let Some(sender) = b64_32(attempt) {
@@ -2362,6 +2378,13 @@ mod tests {
             (key::BLOCK_FLOOR.into(), StateKey::BlockFloor),
             (key::LEDGER_ALARM.into(), StateKey::LedgerAlarm),
             (key::floor_opened(&pubky), StateKey::FloorOpened(pubky)),
+            (
+                key::handoff_notice(&pubky, &[5; 16]),
+                StateKey::HandoffNotice {
+                    record: pubky,
+                    writer: [5; 16],
+                },
+            ),
             (
                 key::blocked_lost(&pubky, 9),
                 StateKey::BlockedLost {

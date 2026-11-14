@@ -68,6 +68,12 @@ pub enum NoticeKind {
     /// spec 8.1, "Blocked counterparties"). The app never kept them, so the notice holds no
     /// content: a payment among them shows only in the payment method.
     BlockedMessagesLost,
+    /// The previous executor of an Allowance named, in the Allowance record's
+    /// `ledger_handoff`, a ledger version this app, its new executor, ignores: one before
+    /// the version it holds or built on, or another write at that version (Paykit spec 8.3,
+    /// "Handoff"). The host shows the user the Allowance ([`Notice::allowance`]) and the
+    /// writer ([`Notice::writer_app_id`]); the executor goes on building on its own version.
+    LedgerHandoffIgnored,
 }
 
 impl NoticeKind {
@@ -78,6 +84,7 @@ impl NoticeKind {
             Self::HeldWithoutPay => "held_without_pay",
             Self::MessageGivenUp => "given_up",
             Self::BlockedMessagesLost => "blocked_lost",
+            Self::LedgerHandoffIgnored => "handoff_ignored",
         }
     }
 
@@ -88,6 +95,7 @@ impl NoticeKind {
             "held_without_pay" => Some(Self::HeldWithoutPay),
             "given_up" => Some(Self::MessageGivenUp),
             "blocked_lost" => Some(Self::BlockedMessagesLost),
+            "handoff_ignored" => Some(Self::LedgerHandoffIgnored),
             _ => None,
         }
     }
@@ -118,6 +126,10 @@ pub struct Notice {
     pub lost_from_ms: Option<u64>,
     /// For [`NoticeKind::BlockedMessagesLost`]: the latest such time.
     pub lost_until_ms: Option<u64>,
+    /// For [`NoticeKind::LedgerHandoffIgnored`]: the Allowance record's key.
+    pub allowance: Option<[u8; 32]>,
+    /// For [`NoticeKind::LedgerHandoffIgnored`]: the app that wrote the `ledger_handoff`.
+    pub writer_app_id: Option<[u8; 16]>,
 }
 
 /// A notice as kept (`p/nt/<attempt_id>/<kind>`, `p/nt/<sender>/<msg_id>` for a message
@@ -146,6 +158,16 @@ pub(crate) struct KeptNotice {
     /// of acceptance times, earliest and latest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) lost: Option<(u64, u64)>,
+    /// For a `ledger_handoff` the executor ignores: the Allowance record and the writer.
+    pub(crate) handoff: Option<IgnoredHandoff>,
+}
+
+/// A `ledger_handoff` the executor ignores ([`NoticeKind::LedgerHandoffIgnored`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct IgnoredHandoff {
+    #[serde(with = "serde_b64")]
+    pub(crate) record: [u8; 32],
+    pub(crate) writer: [u8; 16],
 }
 
 /// Where a message given up with no entry stored came from: no entry, so no handle.
@@ -206,6 +228,7 @@ impl KeptNotice {
             stored: None,
             origin: None,
             lost: None,
+            handoff: None,
         }
     }
 
@@ -228,6 +251,7 @@ impl KeptNotice {
             stored: None,
             origin: None,
             lost: None,
+            handoff: None,
         }
     }
 
@@ -255,6 +279,7 @@ impl KeptNotice {
             stored,
             origin,
             lost: None,
+            handoff: None,
         }
     }
 
@@ -275,6 +300,7 @@ impl KeptNotice {
             || self.stored.is_some()
             || self.origin.is_some()
             || self.lost.is_some()
+            || self.handoff.is_some()
         {
             return Err(PaykitError::corrupt());
         }
@@ -295,7 +321,53 @@ impl KeptNotice {
             stored: None,
             origin: None,
             lost: Some((from, until.max(from))),
+            handoff: None,
         }
+    }
+
+    /// The notice that the `ledger_handoff` `writer` wrote into the Allowance record `record`,
+    /// with `counterparty`, is ignored, raised at `at`.
+    pub(crate) fn handoff_ignored(
+        record: [u8; 32],
+        counterparty: [u8; 32],
+        writer: [u8; 16],
+        at: u64,
+    ) -> Self {
+        Self {
+            kind: NoticeKind::LedgerHandoffIgnored,
+            attempt_id: None,
+            msg_id: None,
+            counterparty,
+            request_hash: None,
+            raised_at_ms: at,
+            acknowledged: false,
+            stored: None,
+            origin: None,
+            lost: None,
+            handoff: Some(IgnoredHandoff { record, writer }),
+        }
+    }
+
+    /// The notice of an ignored `ledger_handoff` read whole, at the record and writer its key
+    /// names: one that doesn't is a corrupt store. It is deleted at its acknowledgement.
+    pub(crate) fn check_handoff(&self, record: &[u8; 32], writer: &[u8; 16]) -> Result<()> {
+        if self.kind != NoticeKind::LedgerHandoffIgnored
+            || self.attempt_id.is_some()
+            || self.msg_id.is_some()
+            || self.request_hash.is_some()
+            || self.stored.is_some()
+            || self.origin.is_some()
+            || self.lost.is_some()
+            || self.handoff
+                != Some(IgnoredHandoff {
+                    record: *record,
+                    writer: *writer,
+                })
+            || self.acknowledged
+        {
+            return Err(PaykitError::corrupt());
+        }
+        Ok(())
     }
 
     /// The notice of lost messages read whole, at the counterparty and start its key names:
@@ -312,6 +384,7 @@ impl KeptNotice {
             || self.stored.is_some()
             || self.origin.is_some()
             || !window_read
+            || self.handoff.is_some()
             || self.acknowledged
         {
             return Err(PaykitError::corrupt());
@@ -370,6 +443,8 @@ impl KeptNotice {
             raised_at_ms: self.raised_at_ms,
             lost_from_ms: self.lost.map(|(from, _)| from),
             lost_until_ms: self.lost.map(|(_, until)| until),
+            allowance: self.handoff.map(|h| h.record),
+            writer_app_id: self.handoff.map(|h| h.writer),
         })
     }
 }
@@ -384,6 +459,7 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
             counterparty,
             from_ms,
         }) => notice.check_lost(&counterparty, from_ms),
+        Some(StateKey::HandoffNotice { record, writer }) => notice.check_handoff(&record, &writer),
         _ => Err(PaykitError::corrupt()),
     }
 }
@@ -426,6 +502,7 @@ impl Paykit {
                 StateKey::Notice { .. }
                     | StateKey::MessageNotice { .. }
                     | StateKey::BlockedLost { .. }
+                    | StateKey::HandoffNotice { .. }
             )
         ) {
             return Err(Refusal::NotFound.into());
@@ -540,6 +617,7 @@ mod tests {
             stored: None,
             origin: None,
             lost: None,
+            handoff: None,
         }
     }
 

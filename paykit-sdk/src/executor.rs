@@ -343,9 +343,12 @@ enum Settled {
     Waiting,
     /// The named write is the one to build on, or on one built on it or later.
     Take(BuildOn),
-    /// Settled: the kept version stands, the named write being it, or one before it, which
-    /// the executor ignores.
+    /// Settled: the named write is the one the executor holds or built on.
     Kept,
+    /// Settled, the named write ignored: one before the version the executor holds or built
+    /// on, or another write at that version. The host is told, with its writer
+    /// ([`crate::NoticeKind::LedgerHandoffIgnored`]).
+    Ignored([u8; 16]),
     /// The executor built on a version older than the previous executor's last, named at
     /// the generation given: a rollback.
     Rollback(u64),
@@ -430,6 +433,8 @@ pub(crate) struct LedgerWrite {
     pub(crate) record_key: [u8; 32],
     /// The ledger's target.
     pub(crate) ledger: RecordTarget,
+    /// The local writes that go with the batch ([`Paykit::first_write_locals`]).
+    pub(crate) locals: Vec<pubky_switch_client::app::LocalWrite>,
 }
 
 /// The ledger an executor batch writes (Paykit spec 8.3, "Outcomes in the ledger" and
@@ -531,6 +536,11 @@ impl LedgerClaims {
 /// Why a ledger is refused while its version kept is of an earlier generation than the
 /// service now serving (Paykit spec 8.3, "Last ledger version").
 const EARLIER_GENERATION: &str = "the ledger kept is of an earlier generation than the service's";
+
+/// Why an executor restored from a backup pays nothing on the version the backup held
+/// (Paykit spec 8.3, "Last ledger version"): only through the repair.
+const RESTORED_VERSION: &str =
+    "the ledger version kept is a backup's, which may predate later writes: only a repair the user confirms is built on";
 
 /// Why a new executor that holds no ledger version pays nothing yet after a handoff (Paykit
 /// spec 8.3, "Handoff"): until the record holds a `ledger_handoff` that counts, or its user
@@ -1023,6 +1033,8 @@ pub(crate) struct ExecutorOps {
     /// Whether this batch carries the ledger's first write: the first grant's empty ledger
     /// is then marked sent just before the batch goes ([`Paykit::empty_ledger_sent`]).
     pub(crate) first_ledger_write: bool,
+    /// The local writes that go with the batch ([`Paykit::first_write_locals`]).
+    pub(crate) locals: Vec<pubky_switch_client::app::LocalWrite>,
 }
 
 /// The identifiers a payment may use: those the request accepts and, under an Allowance
@@ -1306,25 +1318,15 @@ impl Paykit {
             restored: false,
         };
         check_kept_ledger(record, &kept)?;
-        let before = self.kept_ledger(record).await?.map(|(kept, _)| kept);
         let mut tx = Tx::default();
         tx.put(&key::kept_ledger(record), &kept)?;
         // A version kept answers the first grant's empty ledger.
         tx.delete(&key::empty_ledger(record));
         if let Some(mut mark) = self.ledger_base_mark(record).await? {
             // A version kept past the repair answers it: the write shown passed the check
-            // against the repair's own write. This app's first ledger write since a handoff
-            // keeps what it built on, which the `ledger_handoff` is checked against (Paykit
-            // spec 8.3, "Handoff").
+            // against the repair's own write. What this app's first ledger write since a
+            // handoff built on goes with that write's own batch ([`Paykit::first_write_locals`]).
             mark.repair = None;
-            if let Some(wait) = &mut mark.handoff {
-                if wait.first.is_none() && op.body().app_id == Some(self.app_id()) {
-                    let OpKind::RecordPut(put) = &op.body().kind else {
-                        return Err(PaykitError::corrupt());
-                    };
-                    wait.first = Some(first_write(put.expected_version, before.as_ref()));
-                }
-            }
             if mark.handoff.is_some() {
                 tx.put(&key::ledger_base(record), &mark)?;
             } else {
@@ -1339,6 +1341,60 @@ impl Paykit {
     async fn ledger_base_mark(&self, record: &[u8; 32]) -> Result<Option<LedgerBase>> {
         self.local_get::<LedgerBase>(&key::ledger_base(record))
             .await
+    }
+
+    /// Whether a ledger version a restore installed may be built on (Paykit spec 8.3, "Last
+    /// ledger version"): only after a clean restore. This SDK holds every open request after
+    /// every restore (`RESTORE_HOLD`) and doesn't tell a clean restore apart yet, so every
+    /// restore counts as one that isn't, and the executor builds only on a ledger its user
+    /// confirms by the repair.
+    fn restore_keeps_ledger_version(&self) -> bool {
+        false
+    }
+
+    /// The local write that goes in the batch of `write`, a ledger write of the Allowance at
+    /// `record`, when it is this app's first ledger write since a handoff (Paykit spec 8.3,
+    /// "Handoff"): what it built on, its `expected_version`, with the kept version's item hash
+    /// when it is that version. It is committed with the batch's answer, so it records the
+    /// write that applied, whatever a later keep stores.
+    pub(crate) async fn first_write_locals(
+        &self,
+        record: &[u8; 32],
+        write: &(Vec<Condition>, OpKind),
+    ) -> Result<Vec<pubky_switch_client::app::LocalWrite>> {
+        let Some(mut mark) = self.ledger_base_mark(record).await? else {
+            return Ok(Vec::new());
+        };
+        let Some(wait) = mark.handoff.as_mut().filter(|wait| wait.first.is_none()) else {
+            return Ok(Vec::new());
+        };
+        let OpKind::RecordPut(put) = &write.1 else {
+            return Err(PaykitError::corrupt());
+        };
+        let before = self.kept_ledger(record).await?.map(|(kept, _)| kept);
+        wait.first = Some(first_write(put.expected_version, before.as_ref()));
+        Ok(vec![state::local_put(&key::ledger_base(record), &mark)?])
+    }
+
+    /// Tell the host of a `ledger_handoff` of the Allowance at `record`, with `counterparty`,
+    /// that counts but that the executor ignores, written by `writer`, unless it is told
+    /// already ([`crate::NoticeKind::LedgerHandoffIgnored`]).
+    async fn raise_handoff_notice(
+        &mut self,
+        record: &[u8; 32],
+        counterparty: &[u8; 32],
+        writer: [u8; 16],
+    ) -> Result<()> {
+        let key = key::handoff_notice(record, &writer);
+        if self.kept_notice(&key).await?.is_some() {
+            return Ok(());
+        }
+        let at = self.service_time().unwrap_or(0);
+        self.local_put(
+            &key,
+            &crate::notices::KeptNotice::handoff_ignored(*record, *counterparty, writer, at),
+        )
+        .await
     }
 
     /// Drop the handoff of `mark`, the Allowance at `record`'s, once it has settled: the
@@ -1392,11 +1448,18 @@ impl Paykit {
                         .is_some_and(|item| item != handoff.item_hash);
                 if first.version == 0 || named > first.version() || other_at_same {
                     Settled::Rollback(named.generation)
+                } else if named < first.version() {
+                    Settled::Ignored(handoff.app_id)
                 } else {
                     Settled::Kept
                 }
             }
-            (None, Some(kept)) if named <= kept.version() => Settled::Kept,
+            (None, Some(kept))
+                if named == kept.version() && handoff.item_hash == kept.item_hash =>
+            {
+                Settled::Kept
+            }
+            (None, Some(kept)) if named <= kept.version() => Settled::Ignored(handoff.app_id),
             (None, _) => Settled::Take(BuildOn::Named {
                 version: named,
                 item_hash: handoff.item_hash,
@@ -2016,6 +2079,16 @@ impl Paykit {
                 Settled::Kept => {
                     mark = self.handoff_settled(&under.record_key, mark).await?;
                 }
+                Settled::Ignored(writer) => {
+                    // Never silent: the host shows the user the ignored write and its writer.
+                    self.raise_handoff_notice(
+                        &under.record_key,
+                        &under.allowance.counterparty,
+                        writer,
+                    )
+                    .await?;
+                    mark = self.handoff_settled(&under.record_key, mark).await?;
+                }
                 Settled::Rollback(named_at) => {
                     if named_at != generation {
                         return Ok(unaccepted(EARLIER_GENERATION, ShownContent::Nothing));
@@ -2235,6 +2308,15 @@ impl Paykit {
         // a ledger its user confirms by the repair.
         if extras.is_empty() {
             match &kept {
+                // After a restore that isn't clean, the version the backup held may predate
+                // writes this app made since: it builds only on a ledger its user confirms by
+                // the repair (Paykit spec 8.3, "Last ledger version").
+                Some((kept, _)) if kept.restored && !self.restore_keeps_ledger_version() => {
+                    return Ok(unaccepted(
+                        RESTORED_VERSION,
+                        ShownContent::Ledger(Box::new(ledger)),
+                    ))
+                }
                 Some((kept, held)) => {
                     let item = op.item_hash().map_err(|_| PaykitError::corrupt())?;
                     if item != kept.item_hash {
@@ -2427,7 +2509,11 @@ impl Paykit {
                 end: Some(end),
             },
         ];
-        let mut entries = vec![self.app.record_op(&lt, Some(&value), conditions).await?];
+        let ledger_write = self.app.record_op(&lt, Some(&value), conditions).await?;
+        let locals = self
+            .first_write_locals(&under.record_key, &ledger_write)
+            .await?;
+        let mut entries = vec![ledger_write];
         let mut next = record.clone();
         next.allowance_id = Some(under.allowance.allowance_id.clone());
         next.status = Some("paying".into());
@@ -2442,6 +2528,7 @@ impl Paykit {
             record_key: under.record_key,
             ledger: lt,
             first_ledger_write,
+            locals,
         })
     }
 
@@ -2715,10 +2802,12 @@ impl Paykit {
                 }],
             )
             .await?;
+        let locals = self.first_write_locals(&under.record_key, &write).await?;
         Ok(LedgerWrite {
             write,
             record_key: under.record_key,
             ledger: lt,
+            locals,
         })
     }
 
@@ -3000,7 +3089,7 @@ impl Paykit {
     async fn submit_ledger_write(&mut self, write: LedgerWrite) -> Result<()> {
         match self
             .app
-            .submit_batch(OpBatch::new().entry(write.write))
+            .submit_batch(OpBatch::new().entry(write.write).locals(write.locals))
             .await
         {
             Ok(_) => self.keep_own_ledger(&write.record_key, &write.ledger).await,
