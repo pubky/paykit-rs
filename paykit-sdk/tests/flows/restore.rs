@@ -1180,7 +1180,7 @@ fn another_request_body() -> serde_json::Value {
 }
 
 /// `backup` refused onto an empty store, with no commit and nothing to load.
-async fn refused_writing_nothing(
+pub(crate) async fn refused_writing_nothing(
     w: &World,
     backup: serde_json::Value,
     app_id: [u8; 16],

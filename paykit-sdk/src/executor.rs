@@ -152,13 +152,19 @@ impl KeptLedger {
 
 /// Check a kept ledger version read back from the store or a backup, the same check for
 /// both: it names the Allowance record its key names, its version is one a write gives
-/// (`seq` at least 1), and its content reads as a ledger. Returns the ledger.
+/// (`seq` at least 1), its content is no longer than a shared record value
+/// (`MAX_RECORD_VALUE`), which no write or read the executor keeps exceeds, and it reads as
+/// a ledger. Returns the ledger.
 ///
 /// # Errors
 ///
 /// A corrupt store, never an absence.
 pub(crate) fn check_kept_ledger(record: &[u8; 32], kept: &KeptLedger) -> Result<Ledger> {
-    if &kept.record != record || kept.version == 0 || kept.generation == 0 {
+    if &kept.record != record
+        || kept.version == 0
+        || kept.generation == 0
+        || kept.value.len() > MAX_RECORD_VALUE
+    {
         return Err(PaykitError::corrupt());
     }
     Ledger::from_json(&kept.value).map_err(|_| PaykitError::corrupt())

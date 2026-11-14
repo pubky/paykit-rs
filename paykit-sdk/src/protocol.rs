@@ -365,7 +365,9 @@ pub const BACKUP_NAME: &str = "paykit";
 /// past a bound is refused: the notices of lost messages owed (`bl/`, at most
 /// [`crate::marks::MAX_LOST_OWED`]) and each family of marks (`pd/`, `ud/`, `kw/`, `bd/`, at
 /// most [`crate::marks::MAX_DROPPED_MARKS`] each). No run leaves more, and the runtime
-/// checks the bound only as it adds one, so a restored layer over it would stay over it.
+/// checks the bound only as it adds one, so a restored layer over it would stay over it. A
+/// kept ledger version (`lv/`) longer than a shared record value is refused too: no write or
+/// read the executor keeps is longer (`executor::check_kept_ledger`).
 pub(crate) fn restore_paykit_layer(
     layer: Option<&ProtocolLayer>,
     own: [u8; 32],
@@ -553,7 +555,8 @@ pub(crate) fn restore_paykit_layer(
             }
             StateKey::KeptLedger(_) => {
                 // The same check a runtime read makes: bound to its key's Allowance record,
-                // at a version a write gives, its content a ledger (`state::Stored`).
+                // at a version a write gives, its content a ledger no longer than a shared
+                // record value (`state::Stored`).
                 state::restored::<crate::executor::KeptLedger>(&key, &value, &binder)
                     .map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });

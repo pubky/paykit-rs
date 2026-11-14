@@ -72,7 +72,7 @@
 //! | `cf/<record key>` | a second, different proposal or response of an Allowance, with the feed `seq` its entry was read at, kept as the stop until the Allowance record holds `conflicted` (`allowances.rs`, Paykit spec 8.3) | |
 //! | `mc` | set by a `missed` item: every entry of the consent list is to be confirmed again, as after a restore; nothing is consented while it is set, and the next receive marks each entry so and clears it (`allowances.rs`); never restored | |
 //! | `en/<msg_id>` | the executor app an `executor_notice` is wrapped to, kept with the batch that queues it | |
-//! | `lv/<record key>` | the last ledger version the executor accepted, with its content (`executor.rs`, Paykit spec 8.3) | |
+//! | `lv/<record key>` | the last ledger version the executor accepted, with its content (`executor.rs`, Paykit spec 8.3); its content at most a shared record value's 256 KiB, and a restore refuses a backup holding a longer one | |
 //! | `el/<record key>` | the first grant's empty ledger, not yet sent or sent without a verified answer (`executor.rs`); never restored, so a restored executor takes a missing ledger as usage history lost | |
 //! | `fc/<record key>` | the version of the ignored current write of an Allowance record its user confirmed the executor may pay under (`executor.rs`); never restored | |
 //! | `eo/<record key>` | this app's own crossing end of an Allowance, recorded while sends to its counterparty were held, whose message is sent from the record once they aren't (`allowances.rs`, `Paykit::send_owed_ends`); never restored | |
@@ -1062,9 +1062,10 @@ impl sealed::Sealed for KeptLedger {}
 
 /// The last ledger version the executor accepted: of the Allowance record its key names,
 /// which the value repeats and which the ledger's own counterparty and Allowance ID derive
-/// (Paykit wire 5.5, "Binding"), at a version a write gives, its content a ledger
-/// ([`crate::executor::check_kept_ledger`]). A version of another Allowance's ledger kept
-/// here would be the base the next version is checked against, and could pass a rollback.
+/// (Paykit wire 5.5, "Binding"), at a version a write gives, its content a ledger no
+/// longer than a shared record value ([`crate::executor::check_kept_ledger`]). A version
+/// of another Allowance's ledger kept here would be the base the next version is checked
+/// against, and could pass a rollback.
 impl Stored for KeptLedger {
     fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
         let StateKey::KeptLedger(record) = family else {
