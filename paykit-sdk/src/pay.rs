@@ -2700,8 +2700,6 @@ impl Paykit {
     ///   that saw it would ignore the write (Paykit wire 5.3, "Seen roles"), so the user
     ///   decides ([`Paykit::repair_activity_record`], `overwrite`): the rebuilt record then
     ///   replaces it, built on the version seen.
-    /// - an entry that can't rebuild its record (one journaled before requests were kept)
-    ///   holds too.
     ///
     /// A failure moves no money, and its `failed` is what lets a payment be made again: it
     /// goes with the record's update when the record reads, and alone otherwise.
@@ -2752,10 +2750,7 @@ impl Paykit {
         let (mut record, mut changed) = match read {
             Some(record) => (record, false),
             None if !paid => return Ok(OutcomeRecord::Unchanged),
-            None => match self.rebuilt_record(entry)? {
-                Some(record) => (record, true),
-                None => return Ok(OutcomeRecord::Held),
-            },
+            None => (self.rebuilt_record(entry)?, true),
         };
         changed |= self.place_acceptance(&mut record, entry)?;
         if let Some(proof) = proof {
@@ -2804,15 +2799,15 @@ impl Paykit {
 
     /// The payer's activity record of `entry`'s payment, rebuilt from the journal without
     /// its acceptance and proof, which the outcome places: the request kept with the entry,
-    /// or a payment without a request's own members (Paykit wire 5.3). `None` when the entry
-    /// keeps no request it can be rebuilt from.
-    pub(crate) fn rebuilt_record(&self, entry: &JournalEntry) -> Result<Option<ActivityRecord>> {
+    /// or a payment without a request's own members (Paykit wire 5.3). A payment of a request
+    /// that keeps no request is a corrupt store ([`JournalEntry::check`] refuses it).
+    pub(crate) fn rebuilt_record(&self, entry: &JournalEntry) -> Result<ActivityRecord> {
         let own = self.identity();
         let mut record = activity::empty(ActivitySide::Payer, entry.payee);
         match entry.request_hash()? {
             Some(hash) => {
                 let Some(kept) = &entry.request else {
-                    return Ok(None);
+                    return Err(PaykitError::corrupt());
                 };
                 let request = kept.stored(&own)?;
                 if request.hash() != hash || request.sender() != entry.payee {
@@ -2829,7 +2824,7 @@ impl Paykit {
                 record.status = Some("paying".into());
             }
         }
-        Ok(Some(record))
+        Ok(record)
     }
 
     /// The claim's step and this attempt's outcome, read from the switch; `None` when the
@@ -3655,9 +3650,7 @@ impl Paykit {
                 }
             }
         }
-        let Some(carrier) = entry.kept_carrier(&self.identity())? else {
-            return Ok(FinalCheck::Hold);
-        };
+        let carrier = entry.kept_carrier(&self.identity())?;
         let destination = self
             .destination_valid(
                 &entry.payee,
@@ -3700,9 +3693,7 @@ impl Paykit {
         claim: &ClaimView,
     ) -> Result<std::result::Result<PeerIdentity, PayOutcome>> {
         let attempt_id = entry.attempt()?;
-        let Some(carrier) = entry.kept_carrier(&self.identity())? else {
-            return Ok(Err(PayOutcome::Uncertain { attempt_id }));
-        };
+        let carrier = entry.kept_carrier(&self.identity())?;
         let gate = self
             .pay_gate(entry, &carrier, claim, Initiator::Automatic, None, true)
             .await?;
