@@ -188,7 +188,7 @@ Example (`documents.json` `executor_grant`, whose write built on version (1, 12)
   "app_id": "cw5ahtdkixcafna9zh1y5y5o1w",
   "cert": {
     "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFw...",
-    "sig": "wX8NrG-Xn5tfiN4Nhe9iON15nc3rgBO60ysBJnuvWGmT0WgAUaOXHKRiaMvqT0FArsXOJXWFeiVxni5Jq6ynAw"
+    "sig": "JEGa78qsr_F28gpLUIq1wG1q5zlNcZQ3SpZNstomnJXVaGVFCERjADDUWpaikmdTNBBnpCLsyvYKUS6ukIiWBA"
   },
   "confirmed_generation": 1,
   "sig": "TwAuCSVx5eKgCkbbyAxeqddsr0xSL5QebVA794GsLihQO5VxA0O_qUCAk30KFH2TNuVgcWqpORJMNWNEaaLGDw",
@@ -722,7 +722,7 @@ Between apps of one identity only, through the own inbox, wrapped only to the ex
 
 ```json
 {
-  "allowance_record": "ErVk3byZhtqK-MMclhlnci5g1SeR79osx7Hxw5BlifA",
+  "allowance_record": "kNgxYqkcwbzOglKDpn58fw-UwvdX7mAeDCJKhK1bBUA",
   "reason": "ended"
 }
 ```
@@ -825,7 +825,7 @@ Example (alice's `payer_activity` record of bob's request, certificate and plain
     "sender": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
     "cert": {
       "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFw...",
-      "sig": "DcZij9RBJFkc9zKg4JRc9zdz2sgDvUR0ZAWP2_VBgKqCUIJFKQSy2x2uKApzYCfiFD6DFvKL161n6kj-J_FGBw"
+      "sig": "4bAiKsZ2ITml9GP7Nqxgz3-lJ5WB25fIqYRarBxke89Mye8URlPFAM5qGTqWMxRcPS5lWLy1aDPt6IyRVQsoDA"
     },
     "plaintext": {
       "sender_app": "CQl8r8bZGV9VwrqRrTtDSw",
@@ -921,7 +921,7 @@ Example entry (`documents.json` `executor_grant_history_entry`: the record was c
     "app_id": "cw5ahtdkixcafna9zh1y5y5o1w",
     "cert": {
       "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFw...",
-      "sig": "wX8NrG-Xn5tfiN4Nhe9iON15nc3rgBO60ysBJnuvWGmT0WgAUaOXHKRiaMvqT0FArsXOJXWFeiVxni5Jq6ynAw"
+      "sig": "JEGa78qsr_F28gpLUIq1wG1q5zlNcZQ3SpZNstomnJXVaGVFCERjADDUWpaikmdTNBBnpCLsyvYKUS6ukIiWBA"
     },
     "confirmed_generation": 1,
     "sig": "TwAuCSVx5eKgCkbbyAxeqddsr0xSL5QebVA794GsLihQO5VxA0O_qUCAk30KFH2TNuVgcWqpORJMNWNEaaLGDw",
