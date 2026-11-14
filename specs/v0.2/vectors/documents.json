@@ -600,6 +600,59 @@
     ],
     "description": "Wire 3.1: certificates whose permissions are well formed but aren't exactly the list Paykit's table derives from their scopes (paykit_permissions). Each is the wallet certificate of the Switch set's documents.json with scopes and permissions changed, signed by alice's identity key; the signatures verify. The switch takes them and enforces exactly that list (switch_accepts), while Paykit's verifiers, apps and payers, refuse them. The lists that aren't well formed, which every verifier refuses, are the Switch set's permission_rejections. reason is the prototype's wording at a Paykit verifier."
   },
+  "certificates": {
+    "cases": [
+      {
+        "app": "wallet",
+        "name": "wallet certificate",
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoid2VqZjM3bmdyN3FpemVqM2VvaWpuM2hxNGMiLCJzaWduaW5nX2tleSI6IjM0WkdWbVZaTEVhVzlMVi1mdmRocTVMV3N0UGhsakhHYkpnY1FWU1I5RWsiLCJidW5kbGVfa2V5IjoiaVNGVk9XV2V1TjRFdU5CN2p4MEljT0NoWGRqRmFGRjBQOVlaR2VZTHNtRSIsInNjb3BlcyI6WyJwYXkiLCJjb250YWN0cyIsIm1hbmFnZV9jb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJjbGFpbXMucmVhZCIsImNsYWltcy53cml0ZSIsImxpc3RzLnJlYWQiLCJsaXN0cy5tYW5hZ2UiLCJjb252ZXJzYXRpb24uYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "7HEQItMvYGIKQnhjSAhPr2EiMQ3VmbHjQCgTU39a1u46i7lNbiw2tqPLaMRaN90N8NhW13e4aI_F75-US3_GBw"
+        }
+      },
+      {
+        "app": "phone",
+        "name": "phone certificate",
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoiZzd0ZWlmOWsxdXI3NWpybWlkcWs3ejd1NnciLCJzaWduaW5nX2tleSI6IlVEeVgtTllWbUotZVlfQ1FsRlRNYml2VHVMZ1lwRzhJaHVkSjRwcGtjejQiLCJidW5kbGVfa2V5IjoiS3YxMER0dXlva2FfSDlzTTkteWZwUDNSVU5HM2lSd3ZCSXE1ZWJ3MmRuOCIsInNjb3BlcyI6WyJwYXkiLCJhbGxvd2FuY2UiLCJjb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJjbGFpbXMucmVhZCIsImNsYWltcy53cml0ZSIsImxpc3RzLnJlYWQiLCJjb252ZXJzYXRpb24uYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI3LTAxLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "GiPbHsZ2XcyACMOE_Wixi_noTCCJ10kDYrKukqHf7kwJex9JL-KUdyrM48JZ7CWgPMPvGeiBcSZ_BRIvYSZKAw"
+        }
+      },
+      {
+        "app": "executor",
+        "name": "executor certificate",
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoiY3c1YWh0ZGtpeGNhZm5hOXpoMXk1eTVvMXciLCJzaWduaW5nX2tleSI6IlhuQUp4Mlc1d2N1M3RFV3VDTUN2SW1jM2JSRlN4V1AxLThsblJDc3J6Y1kiLCJidW5kbGVfa2V5IjoiY3dYQzVYdHRWdFpjTDJjZ1diVXVOeFRNY3U0bnJGc0p5ekYxeHMwX2J3byIsInNjb3BlcyI6WyJwYXkiLCJhbGxvd2FuY2UiLCJhbGxvd2FuY2VfZXhlY3V0ZSIsImNvbnRhY3RzIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY2xhaW1zLndyaXRlIiwibGlzdHMucmVhZCIsImNvbnZlcnNhdGlvbi5hZGQiXSwiaXNzdWVkX2F0IjoiMjAyNS0xMi0wMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMTItMDFUMDA6MDA6MDAuMDAwWiJ9",
+          "sig": "wX8NrG-Xn5tfiN4Nhe9iON15nc3rgBO60ysBJnuvWGmT0WgAUaOXHKRiaMvqT0FArsXOJXWFeiVxni5Jq6ynAw"
+        }
+      },
+      {
+        "app": "shop",
+        "name": "shop certificate",
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiYWxsb3dhbmNlIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
+          "sig": "DcZij9RBJFkc9zKg4JRc9zdz2sgDvUR0ZAWP2_VBgKqCUIJFKQSy2x2uKApzYCfiFD6DFvKL161n6kj-J_FGBw"
+        }
+      },
+      {
+        "app": "cap",
+        "name": "cap certificate",
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoicXQ0aHQ4NnJ0ODE1eDZud25vOGhvbWh3a3kiLCJzaWduaW5nX2tleSI6Ii1uNl9oa1FJVVN6dHJGUF8xZVk4YktMa1VkLVFzMmg0a1Zla2tPcG1HdnMiLCJidW5kbGVfa2V5IjoiMjF1eG9zV0ZXX05FdnVxWDltaXhvS3dfNlBibHBjeTNBN0x3VTcyTzBXWSIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiZXh0OnBheWtpdC1jYXAiXSwicGVybWlzc2lvbnMiOlsiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
+          "sig": "Xf9slVh9ZwDMM2SXTyg9ki-wid8-8SnB2m2S0EckABoyO-8usqaSxyHoC2O-DWc3p9pF3dnlixsCT89ExxtCAA"
+        }
+      },
+      {
+        "app": "hosted",
+        "name": "hosted certificate",
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnNtYjE5NDczZTFnaWhlb2l6ZnhqMTRvamEiLCJzaWduaW5nX2tleSI6InZ0Z3MzLWlyMk02eWJPRS1ETjZFUkdPMktSekU4RmRtQnpVLWJXdVFJSnMiLCJidW5kbGVfa2V5IjoiQjJZcTVuR01ENnpBQkU0ZVFsdjU3M1lfSlB3bGlybU53eFVFc0t2T2ZsdyIsInNjb3BlcyI6WyJyZXF1ZXN0OnNob3AxIl0sInBlcm1pc3Npb25zIjpbImNvbnZlcnNhdGlvbi5hZGQiXSwiaXNzdWVkX2F0IjoiMjAyNS0xMi0wMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMTItMDFUMDA6MDA6MDAuMDAwWiJ9",
+          "sig": "3pkCQc86Y5fL-J2wzULp7824B6I0MFto8wWbdo7GXTIfG5Hjj6Pm8s7ULQgVT0GasiH1btQw3lblBlHW23LeAw"
+        }
+      }
+    ],
+    "description": "Wire 3.1, Switch wire 3.1: the certificate of each app of keys.json, as Paykit's verifiers take it, in its carrying form (signed: body and sig). Each holds its app's keys, scopes and permissions as keys.json gives them, issued_at 2025-12-01T00:00:00.000Z and the app's expires_at, signed by its identity's key under pubky-switch/v1/app-cert. The executor's and the phone's are Paykit's own, the accepted certificates of executor_certificates and payer_certificates, holding contacts; the others are the certificates every other case of this set signs again with scopes or permissions changed. app is the app's name in keys.json."
+  },
   "description": "Paykit's signed documents and Paykit's checks of the Switch's certificates and app records (wire 3): the executor grant, alone and as the Allowance record's grant history holds it, with Paykit's own executor certificate, and the Switch set's, which Paykit's verifiers refuse; Paykit's own phone certificate, and certificates holding pay without contacts, which they refuse; certificates that Paykit's verifiers refuse for their scopes or their permissions, certificates that hold another protocol's scopes beside Paykit's or instead of them, and app records as a Paykit reader reads their Paykit member. The certificates are the Switch set's documents.json certificates with scopes or permissions changed, and the app records its shop app record with its Paykit member changed.",
   "executor_certificates": {
     "accepted": [
@@ -695,6 +748,25 @@
       "terms_hash": "PEj43Oz6GuVKcLXW3n5vIbBdSORajscVVsogpqd7Y9M"
     },
     "version": 12
+  },
+  "extension_app": {
+    "app_record": {
+      "app": "cap",
+      "name": "cap app record, accepting the extension kind paykit-cap.offer",
+      "signed": {
+        "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcCIsImlkZW50aXR5IjoiN3A0Zm40NHFvc2hjd2dmbmR6NWdydDdmeXl6MWV5Y3F5ZHV4ZHFlOG81OG9mMWJ5em9kbyIsImFwcF9pZCI6InF0NGh0ODZydDgxNXg2bndubzhob21od2t5Iiwic2lnbmluZ19rZXkiOiItbjZfaGtRSVVTenRyRlBfMWVZOGJLTGtVZC1RczJoNGtWZWtrT3BtR3ZzIiwiY2VydCI6eyJib2R5IjoiZXlKMklqb3hMQ0pyYVc1a0lqb2ljSFZpYTNrdGMzZHBkR05vTG1Gd2NGOWpaWEowSWl3aWFXUmxiblJwZEhraU9pSTNjRFJtYmpRMGNXOXphR04zWjJadVpIbzFaM0owTjJaNWVYb3haWGxqY1hsa2RYaGtjV1U0YnpVNGIyWXhZbmw2YjJSdklpd2lZWEJ3WDJsa0lqb2ljWFEwYUhRNE5uSjBPREUxZURadWQyNXZPR2h2YldoM2Eza2lMQ0p6YVdkdWFXNW5YMnRsZVNJNklpMXVObDlvYTFGSlZWTjZkSEpHVUY4eFpWazRZa3RNYTFWa0xWRnpNbWcwYTFabGEydFBjRzFIZG5NaUxDSmlkVzVrYkdWZmEyVjVJam9pTWpGMWVHOXpWMFpYWDA1RmRuVnhXRGx0YVhodlMzZGZObEJpYkhCamVUTkJOMHgzVlRjeVR6QlhXU0lzSW5OamIzQmxjeUk2V3lKeVpYRjFaWE4wSWl3aVpYaDBPbkJoZVd0cGRDMWpZWEFpWFN3aWNHVnliV2x6YzJsdmJuTWlPbHNpWTI5dWRtVnljMkYwYVc5dUxtRmtaQ0pkTENKcGMzTjFaV1JmWVhRaU9pSXlNREkxTFRFeUxUQXhWREF3T2pBd09qQXdMakF3TUZvaUxDSmxlSEJwY21WelgyRjBJam9pTWpBeU5pMHhNaTB3TVZRd01Eb3dNRG93TUM0d01EQmFJbjAiLCJzaWciOiJYZjlzbFZoOVp3RE1NMlNYVHlnOWtpLXdpZDgtOFNuQjJtMlMwRWNrQUJveU8tOHVzcWFTeHlIb0MyTy1EV2MzcDlwRjNkbmxpeHNDVDg5RXh4dENBQSJ9LCJhY2NlcHRzIjpbInBheWtpdC5wYXltZW50X3JlcXVlc3RfYWNjZXB0YW5jZSIsInBheWtpdC5wYXltZW50X3JlcXVlc3RfcmVqZWN0aW9uIiwicGF5a2l0LnBheW1lbnRfcmVxdWVzdF9jYW5jZWxsYXRpb24iLCJwYXlraXQucGF5bWVudF9wcm9vZiIsInBheWtpdC5wcml2YXRlX3BheW1lbnRfbGlzdF9yZXF1ZXN0IiwicGF5a2l0LnJlc2VuZF9yZXF1ZXN0IiwicGF5a2l0LWNhcC5vZmZlciJdLCJwcm90b2NvbHMiOnsicGF5a2l0Ijp7ImNhcGFiaWxpdGllcyI6eyJlbmRwb2ludF9pZGVudGlmaWVycyI6WyJidGMtbGlnaHRuaW5nLWJvbHQxMSIsImJ0Yy1iaXRjb2luLXAyd3BraCJdfSwicHVibGljX2VuZHBvaW50cyI6e319fSwibGFiZWwiOiJib2IgY2FwIiwidXBkYXRlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOm51bGx9",
+        "sig": "pEzCdWkfKYDZO-nZ_rGwzFN7j8opc9-0TSNli8kgWXH7so2onINnFy4uIdCQCifzfxA1HADRHzhsIgTrtlPZDg"
+      }
+    },
+    "certificate": {
+      "app": "cap",
+      "name": "cap certificate",
+      "signed": {
+        "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoicXQ0aHQ4NnJ0ODE1eDZud25vOGhvbWh3a3kiLCJzaWduaW5nX2tleSI6Ii1uNl9oa1FJVVN6dHJGUF8xZVk4YktMa1VkLVFzMmg0a1Zla2tPcG1HdnMiLCJidW5kbGVfa2V5IjoiMjF1eG9zV0ZXX05FdnVxWDltaXhvS3dfNlBibHBjeTNBN0x3VTcyTzBXWSIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiZXh0OnBheWtpdC1jYXAiXSwicGVybWlzc2lvbnMiOlsiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0",
+        "sig": "Xf9slVh9ZwDMM2SXTyg9ki-wid8-8SnB2m2S0EckABoyO-8usqaSxyHoC2O-DWc3p9pF3dnlixsCT89ExxtCAA"
+      }
+    },
+    "description": "Wire 3.1, 3.2, Switch wire 3.1, 3.2: bob's extension app cap. certificate is its certificate of certificates, holding request beside the extension scope ext:paykit-cap. app_record is its app record, signed by its signing key under pubky-switch/v1/app-record: it carries that certificate, accepts the kinds a payee app takes from payers and the extension kind paykit-cap.offer, and its Paykit member states its endpoint identifiers and no public endpoints; its label is bob cap, its updated_at its certificate's issued_at, and its expires_at null. The switch takes the record, and a Paykit reader reads its member."
   },
   "labelled_scope_rejections": {
     "cases": [

@@ -10,7 +10,7 @@ use crate::common::{arr, b64n, hex, paykit, pubky, st, unhex, Keys, ALICE, ALLOW
 
 #[test]
 fn test_vectors_signatures() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let v = paykit("signatures.json");
     let cases = arr(&v, "signatures");
     assert_eq!(cases.len(), 1);

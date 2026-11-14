@@ -29,7 +29,7 @@ struct Read {
 
 #[test]
 fn test_vectors_messages() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     generate(&keys);
     let file = paykit("messages.json");
     let mut read: HashMap<String, Read> = HashMap::new();

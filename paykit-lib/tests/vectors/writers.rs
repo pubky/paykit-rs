@@ -347,7 +347,7 @@ fn test_writers_records_write_only_what_their_readers_take() {
 /// derivation already rules it out.
 #[test]
 fn test_writers_refuse_every_rejection_case() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let alice = pubky(ALICE);
     let m = paykit("messages.json");
     // conversion_terms: requests and period details a payer drops.

@@ -15,13 +15,13 @@ use pubky_switch_core::sealed::{aad, pad, RecordValue, SealedValue};
 use serde_json::Value;
 
 use crate::common::{
-    arr, b64n, generated, hex, message_json, paykit, pubky, quoted, st, switch, unhex32, Keys,
-    Place, ALICE, ALLOWANCE_ID, BOB,
+    arr, b64n, generated, hex, message_json, paykit, pubky, quoted, st, unhex32, Keys, Place,
+    ALICE, ALLOWANCE_ID, BOB,
 };
 
 #[test]
 fn test_vectors_sealed() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     generate(&keys);
     let v = paykit("sealed.json");
     check_bindings(&keys, &v);
@@ -186,16 +186,6 @@ fn check_bindings(keys: &Keys, v: &Value) {
         list.to_json().unwrap(),
         value(&accepted[0]),
         "the list record writes back"
-    );
-    // The same value as the Switch set's payment_lists case.
-    let switch_case = arr(&switch("sealed.json"), "cases")
-        .iter()
-        .find(|c| st(c, "name") == "payment_lists record")
-        .unwrap()
-        .clone();
-    assert_eq!(
-        st(&switch_case, "plaintext").as_bytes(),
-        value(&accepted[0])
     );
 
     let allowance =
@@ -407,24 +397,27 @@ fn check_labelled(keys: &Keys, l: &Value) {
         );
     }
 
-    // The Switch set's payer request record binds under the fixed policy, whatever the label.
+    // A payer request record binds under the fixed policy, whatever the label.
     let alice = pubky(ALICE);
-    let case = arr(&switch("sealed.json"), "cases")
+    let case = arr(&paykit("sealed.json")["activity_records"], "accepted")
         .iter()
-        .find(|c| st(c, "name") == "payer_activity request record")
+        .find(|c| {
+            st(c, "name")
+                == "a payer's request record with the proof and the receipt of its attempt"
+        })
         .unwrap()
         .clone();
     let anks = keys.identity(&alice).naming_key();
     let payer = ActivityRecord::bind(
-        st(&case, "plaintext").as_bytes(),
+        value(&case),
         &alice,
         ActivitySide::Payer,
         &anks,
-        &b64n::<32>(st(&case, "record_key")),
+        &key(&case),
         None,
     )
     .unwrap();
-    assert_eq!(payer.to_json().unwrap(), st(&case, "plaintext").as_bytes());
+    assert_eq!(payer.to_json().unwrap(), value(&case));
     assert_eq!(
         payer.record_key(&alice, &anks, Some(&shop1)).unwrap(),
         payer.record_key(&alice, &anks, None).unwrap()
@@ -438,7 +431,7 @@ fn stored_message(keys: &Keys, name: &str) -> paykit_lib::records::StoredMessage
 }
 
 /// A stored message from a message case: its `json`, `signature` and `sender_app`, with the
-/// sender app's certificate of the Switch set.
+/// sender app's certificate of this set.
 fn stored_json(keys: &Keys, m: &Value) -> paykit_lib::records::StoredMessage {
     use pubky_switch_core::message::MessagePlaintext;
     let sender = keys.app_by_id(st(m, "sender_app"));
@@ -1322,10 +1315,11 @@ fn allowance_record_value(keys: &Keys) -> Vec<u8> {
 
 /// The binding cases that store a message from alice's executor app, with the stored copy
 /// carrying Paykit's own executor certificate (`documents.json` `executor_certificates`)
-/// instead of the Switch set's, which Paykit's verifiers refuse (Paykit spec 3.1). Every
+/// instead of its base certificate, which Paykit's verifiers refuse (Paykit spec 3.1). Every
 /// other byte of their values is as the file holds it.
 fn executor_certificate_cases(keys: &Keys) -> Vec<(Place<'static>, Value)> {
-    let switch_cert = crate::common::document("executor certificate");
+    let base = crate::common::base_cert(keys, "executor");
+    let base_doc = base.signed();
     let own = crate::common::executor_cert(keys);
     let file = paykit("sealed.json");
     let mut out = Vec::new();
@@ -1333,9 +1327,9 @@ fn executor_certificate_cases(keys: &Keys) -> Vec<(Place<'static>, Value)> {
         for case in file.pointer(list).and_then(Value::as_array).unwrap() {
             let held = st(case, "value");
             let value = held
-                .replace(&switch_cert.body, &own.signed().body)
-                .replace(&switch_cert.sig, &own.signed().sig);
-            assert!(!value.contains(&switch_cert.sig));
+                .replace(&base_doc.body, &own.signed().body)
+                .replace(&base_doc.sig, &own.signed().sig);
+            assert!(!value.contains(&base_doc.sig));
             if value != held || held.contains(&own.signed().sig) {
                 let mut case = case.clone();
                 case["value"] = Value::String(value);
@@ -1415,7 +1409,7 @@ fn refuses_member(record: &ActivityRecord, member: &str) {
 
 #[test]
 fn test_activity_record_refuses_request_hash_outside_a_period_record() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let b = bases(&keys);
     let record = ActivityRecord {
         request_hash: b.period.request_hash,
@@ -1426,7 +1420,7 @@ fn test_activity_record_refuses_request_hash_outside_a_period_record() {
 
 #[test]
 fn test_activity_record_refuses_billing_period_outside_a_period_record() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let b = bases(&keys);
     let record = ActivityRecord {
         billing_period: b.period.billing_period,
@@ -1437,7 +1431,7 @@ fn test_activity_record_refuses_billing_period_outside_a_period_record() {
 
 #[test]
 fn test_activity_record_refuses_attempt_id_outside_an_unrequested_record() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let b = bases(&keys);
     for base in [b.payer_request, b.period] {
         let record = ActivityRecord {
@@ -1450,7 +1444,7 @@ fn test_activity_record_refuses_attempt_id_outside_an_unrequested_record() {
 
 #[test]
 fn test_activity_record_refuses_unrequested_outside_an_unrequested_record() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let b = bases(&keys);
     for base in [b.payer_request, b.period] {
         let record = ActivityRecord {
@@ -1463,7 +1457,7 @@ fn test_activity_record_refuses_unrequested_outside_an_unrequested_record() {
 
 #[test]
 fn test_activity_record_refuses_allowance_id_outside_a_payer_request_record() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let b = bases(&keys);
     let allowance = b.payer_request.allowance_id.clone();
     for base in [b.period, b.unrequested, b.payee_request] {
@@ -1559,7 +1553,7 @@ fn check_msg_ids_bounds(keys: &Keys, v: &Value) {
 
 #[test]
 fn test_activity_record_writes_canonical_msg_ids() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let b = bases(&keys);
     let request_id = b
         .payer_request
@@ -1659,7 +1653,7 @@ fn record_with_request(keys: &Keys, request: Value, json: &str) -> (Vec<u8>, [u8
 #[test]
 fn test_stored_message_refuses_a_label_its_sender_does_not_hold() {
     use paykit_lib::records::StoredMessage;
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let alice = pubky(ALICE);
     for (name, m, cert) in unauthorized_stored(&keys) {
         let error = StoredMessage::read(&stored_value(&m, &cert), &alice)
@@ -1684,7 +1678,7 @@ fn test_stored_message_refuses_a_label_its_sender_does_not_hold() {
 #[test]
 fn test_activity_record_writer_refuses_what_readers_refuse() {
     use paykit_lib::records::DestinationSource;
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let b = bases(&keys);
     let other_request = stored_message(&keys, "payment_request_acceptance");
     let mut no_version = b.unrequested.clone();
@@ -1763,7 +1757,7 @@ fn test_activity_record_writer_refuses_what_readers_refuse() {
 
 #[test]
 fn test_record_writers_refuse_msg_ids_that_are_not_uuids() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let alice = pubky(ALICE);
     let v = paykit("sealed.json");
     let accepted = arr(&v, "binding_accepted");
@@ -2378,7 +2372,7 @@ fn check_allowance_records(keys: &Keys, v: &Value) {
 #[test]
 fn test_activity_record_proof_names_the_list_it_paid() {
     use paykit_lib::records::DestinationSource;
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let b = bases(&keys);
     // The proof paid a list version; a destination that isn't that list doesn't match it.
     let mut public = b.unrequested.clone();
@@ -2416,7 +2410,7 @@ fn with_details(held: &ActivityRecord, d: paykit_lib::records::StoredMessage) ->
 fn test_activity_record_seen_period_details_again_as_late_is_kept() {
     // The same message again, as late with the same hash: nothing changes. A check that
     // took only later details would refuse it.
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let (held, details) = period_held(&keys);
     held.check_later_write(&with_details(&held, details))
         .unwrap();
@@ -2426,7 +2420,7 @@ fn test_activity_record_seen_period_details_again_as_late_is_kept() {
 fn test_activity_record_seen_period_details_as_late_with_another_hash_are_refused() {
     // Another signed message as late (the same created_at and msg_id), other rates: an
     // equivocation, which replaces nothing and is stored beside nothing.
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let (held, details) = period_held(&keys);
     let equivocation = resigned(&keys, "payment_period_details", None, |body| {
         body.insert(
@@ -2451,7 +2445,7 @@ fn test_activity_record_seen_period_details_as_late_with_another_hash_are_refuse
 #[test]
 fn test_activity_record_seen_period_details_kept_beside_later_ones() {
     // Later details replace none: the later write keeps those seen in earlier_details.
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let (held, details) = period_held(&keys);
     let later = later_details(&keys);
     let kept = ActivityRecord {
@@ -2473,7 +2467,7 @@ fn test_activity_record_seen_period_details_kept_beside_later_ones() {
 fn test_activity_record_seen_period_details_the_proof_write_names_earlier_ones() {
     // The payer paid by the earlier details after later ones came: the write that stores its
     // proof sets period_details to the details the proof names, and keeps the later ones.
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let (held, details) = period_held(&keys);
     let later = later_details(&keys);
     let latest = ActivityRecord {
@@ -2504,7 +2498,7 @@ fn test_activity_record_seen_period_details_the_proof_write_names_earlier_ones()
 
 #[test]
 fn test_activity_record_period_details_at_most_eight() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let (held, _) = period_held(&keys);
     let details = |n: u64| {
         resign_with(&keys, "payment_period_details", |m| {
@@ -2546,7 +2540,7 @@ fn test_activity_record_period_details_at_most_eight() {
 fn test_activity_record_seen_marks_are_kept() {
     use paykit_lib::identifiers::AllowanceId;
     use paykit_lib::records::Reassociation;
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let b = bases(&keys);
     let other = AllowanceId::parse("55de1f16-1a9e-4504-bc9c-57efc3a2b38c").unwrap();
     let named = b.payer_request.allowance_id.clone().unwrap();
@@ -2592,7 +2586,7 @@ fn test_activity_record_seen_marks_are_kept() {
 fn test_activity_record_allowance_for_follows_reassociations() {
     use paykit_lib::identifiers::AllowanceId;
     use paykit_lib::records::Reassociation;
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let b = bases(&keys);
     let named = b.payer_request.allowance_id.clone().unwrap();
     let other = AllowanceId::parse("55de1f16-1a9e-4504-bc9c-57efc3a2b38c").unwrap();
@@ -2619,7 +2613,7 @@ fn test_activity_record_allowance_for_follows_reassociations() {
 
 #[test]
 fn test_allowance_record_seen_roles_are_kept() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let (accepted, _) = allowance_cases(&keys);
     let ended = accepted[0].1.clone();
     ended.check_later_write(&ended).unwrap();
@@ -2652,7 +2646,7 @@ fn test_allowance_record_seen_roles_are_kept() {
 
 #[test]
 fn test_allowance_record_conflicted_is_never_dropped() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let (accepted, _) = allowance_cases(&keys);
     let plain = accepted[0].1.clone();
     let conflicted = accepted
@@ -2710,7 +2704,7 @@ fn test_allowance_record_conflicted_is_never_dropped() {
 
 #[test]
 fn test_allowance_record_conflicting_response_is_never_dropped() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let (accepted, _) = allowance_cases(&keys);
     let case = |part: &str| {
         accepted
@@ -2739,7 +2733,7 @@ fn test_allowance_record_conflicting_response_is_never_dropped() {
 
 #[test]
 fn test_allowance_record_conflicted_has_no_current_grant() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let alice = pubky(ALICE);
     let entry = &paykit("documents.json")["executor_grant_history_entry"];
     let mut with_grant: Value = serde_json::from_slice(&allowance_record_value(&keys)).unwrap();
@@ -2781,7 +2775,7 @@ fn test_allowance_record_conflicted_has_no_current_grant() {
 fn test_allowance_record_conflicted_msg_id_is_a_stored_one() {
     // The conflicting proposal is stored, so its msg_id stays however many others follow it
     // (Paykit wire 5.3, 5.4).
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let alice = pubky(ALICE);
     let (accepted, _) = allowance_cases(&keys);
     let conflicted = accepted
@@ -2833,7 +2827,7 @@ fn list_case(keys: &Keys, delta: i64) -> (PaymentListRecord, paykit_lib::records
 
 #[test]
 fn test_payment_list_record_later_write_follows_the_list_version() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let (held, other_same_version) = list_case(&keys, 0);
     // The same list, its used grown: taken.
     let mut grown = held.clone();
@@ -2871,7 +2865,7 @@ fn test_payment_list_record_later_write_follows_the_list_version() {
 
 #[test]
 fn test_payment_list_record_later_write_keeps_used_entries() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let (held, _) = list_case(&keys, 0);
     // At the same version, dropping a used entry is refused.
     let dropped = PaymentListRecord {
@@ -2892,7 +2886,7 @@ fn test_payment_list_record_later_write_keeps_used_entries() {
 
 #[test]
 fn test_record_transitions_hold_records_built_in_code() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let b = bases(&keys);
     // A later write no reader takes: request_hash in a request record.
     let later = ActivityRecord {
@@ -2933,7 +2927,7 @@ fn test_record_transitions_hold_records_built_in_code() {
 #[test]
 fn test_stored_message_from_received_is_its_plaintexts() {
     use paykit_lib::records::StoredMessage;
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let request = stored_message(&keys, "payment_request");
     let other = stored_message(&keys, "payment_request_recurring");
     let built = |s: &StoredMessage, message: &pubky_switch_core::message::Message| {
@@ -2966,7 +2960,7 @@ fn test_stored_message_from_received_is_its_plaintexts() {
 
 #[test]
 fn test_record_transitions_compare_versions_of_one_record() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let alice = pubky(ALICE);
     let b = bases(&keys);
     // An unrequested record holds no message to keep: another attempt's record isn't its
@@ -3024,7 +3018,7 @@ fn test_record_transitions_compare_versions_of_one_record() {
 fn test_activity_record_receipt_is_of_its_proofs_billing_period() {
     // A period record with the February period's proof, and a receipt of that proof's attempt
     // that names another Billing Period: refused for the receipt's period.
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let b = bases(&keys);
     let proof = b.period.proof.clone().unwrap();
     let paykit_lib::bodies::Body::PaymentProof(p) = proof.body() else {
@@ -3087,7 +3081,7 @@ fn written(record: &ActivityRecord) -> Value {
 
 #[test]
 fn test_activity_record_keeps_unknown_members() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let b = bases(&keys);
     let note = serde_json::json!({ "text": "kept", "n": 7 });
     let read = read_with_unknown(
@@ -3127,7 +3121,7 @@ fn test_activity_record_keeps_unknown_members() {
 
 #[test]
 fn test_activity_record_unknown_members_follow_their_object() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let (held, details) = period_held(&keys);
     let read = read_with_unknown(
         &held,
@@ -3192,7 +3186,7 @@ fn test_list_and_allowance_records_keep_unknown_members() {
 fn test_activity_record_reassociation_on_a_version_the_reader_does_not_hold() {
     use paykit_lib::identifiers::AllowanceId;
     use paykit_lib::records::Reassociation;
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let b = bases(&keys);
     let other = AllowanceId::parse("55de1f16-1a9e-4504-bc9c-57efc3a2b38c").unwrap();
     let period = 1_772_236_800;
@@ -3228,7 +3222,7 @@ fn test_activity_record_reassociation_on_a_version_the_reader_does_not_hold() {
 
 #[test]
 fn test_activity_record_seen_rules_hold_for_every_member() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let b = bases(&keys);
     // Period details seen only in earlier_details stay.
     let (held, details) = period_held(&keys);
@@ -3260,7 +3254,7 @@ fn test_activity_record_seen_rules_hold_for_every_member() {
 fn test_activity_record_period_starts_resolve_through_the_recurrence() {
     use paykit_lib::identifiers::AllowanceId;
     use paykit_lib::records::Reassociation;
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let b = bases(&keys);
     let alice = pubky(ALICE);
     let other = AllowanceId::parse("55de1f16-1a9e-4504-bc9c-57efc3a2b38c").unwrap();
@@ -3476,7 +3470,7 @@ fn test_allowance_record_renewed_grant_leaves_the_history_grant_its_own_members(
     use paykit_lib::grant::ExecutorGrant;
     use paykit_lib::records::GrantEntry;
     use pubky_switch_core::ops::RecordVersion;
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let (alice, bob) = (pubky(ALICE), pubky(BOB));
     let s = paykit("sealed.json");
     let entry = paykit("documents.json")["executor_grant_history_entry"].clone();
@@ -3579,7 +3573,7 @@ fn test_activity_record_half_second_anchor_names_periods_by_their_second() {
     use paykit_lib::identifiers::AllowanceId;
     use paykit_lib::records::{reassociation_condition, Reassociation};
     use pubky_switch_core::ops::Condition;
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let b = bases(&keys);
     let (alice, bob) = (pubky(ALICE), pubky(BOB));
     let nk = keys.identity(&alice).naming_key();
@@ -3721,7 +3715,7 @@ fn test_allowance_record_history_grant_made_current_keeps_its_members() {
 #[test]
 fn test_activity_record_attempted_entry_naming_no_period_drops_without_a_claim() {
     use pubky_switch_core::ops::Condition;
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let b = bases(&keys);
     let (alice, bob) = (pubky(ALICE), pubky(BOB));
     let nk = keys.identity(&alice).naming_key();

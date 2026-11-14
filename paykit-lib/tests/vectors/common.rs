@@ -1,13 +1,15 @@
-//! Helpers shared by the vector tests: loading the two sets, the fixed keys and the Switch
-//! set's certificates, and writing the cases paykit-lib generates.
+//! Helpers shared by the vector tests: loading the files, the fixed keys derived from their
+//! seed labels, the certificates and app records built from them, and writing the cases
+//! paykit-lib generates.
 
 #![allow(dead_code)]
 
 use std::path::PathBuf;
 
-use pubky_switch_core::enc::{pubky_key, unb64_array};
+use paykit_lib::kinds::Kind;
+use pubky_switch_core::enc::{hash, pubky_key, unb64_array};
 use pubky_switch_core::keys::{AppKeys, IdentityKey};
-use pubky_switch_core::records::AppCert;
+use pubky_switch_core::records::{AppCert, AppCertBody, AppRecord, AppRecordBody};
 use pubky_switch_core::scopes::Permission;
 use pubky_switch_core::sig::SignedDoc;
 use pubky_switch_core::time::parse_rfc3339;
@@ -25,13 +27,6 @@ pub fn paykit(name: &str) -> Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../specs/v0.2/vectors")
         .join(name);
-    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    serde_json::from_slice(&bytes).unwrap()
-}
-
-/// A file of the Switch's set at the pinned revision.
-pub fn switch(name: &str) -> Value {
-    let path = pubky_switch_core::spec_vectors_dir().join(name);
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     serde_json::from_slice(&bytes).unwrap()
 }
@@ -83,50 +78,148 @@ pub fn b64n<const N: usize>(text: &str) -> [u8; N] {
     unb64_array::<N>(text).unwrap()
 }
 
-/// One app of the Switch set's `keys.json`.
+/// The prefix of every seed label: each secret of the set is
+/// `BLAKE3("paykit/v1/test-vectors/" + seed label)`, an Ed25519 seed as it is and an X25519
+/// secret clamped as RFC 7748 requires (Switch wire 1.3).
+pub const SEED_PREFIX: &str = "paykit/v1/test-vectors/";
+
+/// The 32 secret bytes of a seed label, `BLAKE3(SEED_PREFIX + label)`.
+pub fn seed(label: &str) -> [u8; 32] {
+    hash(format!("{SEED_PREFIX}{label}").as_bytes())
+}
+
+/// The identities of the set, by name: alice, the payer, and bob, the payee.
+pub const IDENTITIES: [&str; 2] = ["alice", "bob"];
+
+/// The seed label of an identity's key.
+pub fn identity_label(name: &str) -> String {
+    format!("{name}/identity")
+}
+
+/// When every app certificate of the set is issued.
+pub const CERT_ISSUED_AT: &str = "2025-12-01T00:00:00.000Z";
+
+/// One app of the set as its seeds and its base certificate define it.
+pub struct AppSeed {
+    /// The app's name.
+    pub name: &'static str,
+    /// The name of the identity it belongs to.
+    pub owner: &'static str,
+    /// The scopes of its base certificate ([`base_cert`]).
+    pub scopes: &'static [&'static str],
+    /// When its certificates expire.
+    pub expires_at: &'static str,
+}
+
+/// The apps of the set: alice's wallet, phone and executor, and bob's shop, his extension
+/// app `cap` and his `hosted` app, which sells under the label `shop1`.
+pub const APPS: [AppSeed; 6] = [
+    AppSeed {
+        name: "wallet",
+        owner: "alice",
+        scopes: &["pay", "contacts", "manage_contacts"],
+        expires_at: "2026-12-01T00:00:00.000Z",
+    },
+    AppSeed {
+        name: "phone",
+        owner: "alice",
+        scopes: &["pay", "allowance"],
+        expires_at: "2027-01-01T00:00:00.000Z",
+    },
+    AppSeed {
+        name: "executor",
+        owner: "alice",
+        scopes: &["pay", "allowance", "allowance_execute"],
+        expires_at: "2026-12-01T00:00:00.000Z",
+    },
+    AppSeed {
+        name: "shop",
+        owner: "bob",
+        scopes: &["request", "allowance"],
+        expires_at: "2026-12-01T00:00:00.000Z",
+    },
+    AppSeed {
+        name: "cap",
+        owner: "bob",
+        scopes: &["request", "ext:paykit-cap"],
+        expires_at: "2026-12-01T00:00:00.000Z",
+    },
+    AppSeed {
+        name: "hosted",
+        owner: "bob",
+        scopes: &["request:shop1"],
+        expires_at: "2026-12-01T00:00:00.000Z",
+    },
+];
+
+/// The extension kind bob's `cap` app accepts, under its scope `ext:paykit-cap`.
+pub const CAP_EXTENSION_KIND: &str = "paykit-cap.offer";
+
+/// The label of bob's labelled selling scope, which his `hosted` app holds.
+pub const SHOP1: &str = "shop1";
+
+/// One app of the set, with its keys derived from its seed labels.
 pub struct App {
     pub name: String,
+    pub owner: String,
     pub identity: [u8; 32],
     pub app_id: String,
     pub keys: AppKeys,
+    /// The scopes of its base certificate ([`base_cert`]).
     pub scopes: Vec<String>,
+    pub expires_at: u64,
 }
 
-/// The fixed keys of the Switch set's `keys.json`.
+impl App {
+    /// The seed label of its signing key.
+    pub fn signing_label(&self) -> String {
+        format!("{}/{}/signing", self.owner, self.name)
+    }
+
+    /// The seed label of its bundle key.
+    pub fn bundle_label(&self) -> String {
+        format!("{}/{}/bundle", self.owner, self.name)
+    }
+}
+
+/// The fixed keys of the set, derived from their seed labels.
 pub struct Keys {
     pub identities: Vec<(String, IdentityKey)>,
     pub apps: Vec<App>,
 }
 
 impl Keys {
-    pub fn load() -> Self {
-        let k = switch("keys.json");
-        let identities = arr(&k, "identities")
+    /// Every key of the set from its seed label ([`seed`]).
+    pub fn from_seeds() -> Self {
+        let identities: Vec<(String, IdentityKey)> = IDENTITIES
             .iter()
-            .map(|i| {
-                let key = IdentityKey::from_secret(unhex32(st(i, "secret_hex")));
-                assert_eq!(key.id(), st(i, "pubky_id"));
-                (st(i, "name").to_owned(), key)
+            .map(|name| {
+                let key = IdentityKey::from_secret(seed(&identity_label(name)));
+                ((*name).to_owned(), key)
             })
             .collect();
-        let apps = arr(&k, "apps")
+        let apps = APPS
             .iter()
             .map(|a| {
-                let keys = AppKeys::from_secrets(
-                    unhex32(st(a, "signing_secret_hex")),
-                    unhex32(st(a, "bundle_secret_hex")),
-                );
-                assert_eq!(keys.app_id(), st(a, "app_id"));
-                App {
-                    name: st(a, "name").to_owned(),
-                    identity: pubky(st(a, "identity")),
-                    app_id: st(a, "app_id").to_owned(),
-                    keys,
-                    scopes: arr(a, "scopes")
-                        .iter()
-                        .map(|s| s.as_str().unwrap().to_owned())
-                        .collect(),
-                }
+                let mut app = App {
+                    name: a.name.to_owned(),
+                    owner: a.owner.to_owned(),
+                    identity: [0; 32],
+                    app_id: String::new(),
+                    keys: AppKeys::from_secrets([0; 32], [0; 32]),
+                    scopes: a.scopes.iter().map(|s| (*s).to_owned()).collect(),
+                    expires_at: time(a.expires_at),
+                };
+                app.keys =
+                    AppKeys::from_secrets(seed(&app.signing_label()), seed(&app.bundle_label()));
+                app.app_id = app.keys.app_id();
+                app.identity = identities
+                    .iter()
+                    .find(|(name, _)| name == a.owner)
+                    .unwrap()
+                    .1
+                    .public();
+                app
             })
             .collect();
         Self { identities, apps }
@@ -141,6 +234,10 @@ impl Keys {
             .1
     }
 
+    pub fn identity_named(&self, name: &str) -> &IdentityKey {
+        &self.identities.iter().find(|(n, _)| n == name).unwrap().1
+    }
+
     pub fn app(&self, name: &str) -> &App {
         self.apps.iter().find(|a| a.name == name).unwrap()
     }
@@ -153,16 +250,120 @@ impl Keys {
     }
 }
 
-/// The scopes of Paykit's own executor certificate (Paykit spec 3.1): the Switch set's, with
-/// `contacts`, which `allowance_execute` requires.
+/// The base certificate of an app: its [`APPS`] scopes with the permissions Paykit's scopes
+/// need, issued at [`CERT_ISSUED_AT`] by its identity key (Switch wire 3.1).
+pub fn base_cert(keys: &Keys, app: &str) -> AppCert {
+    let app = keys.app(app);
+    let body = AppCertBody::new(
+        app.identity,
+        app.keys.signing_public(),
+        app.keys.bundle_public(),
+        app.scopes.clone(),
+        &paykit_lib::scopes::permissions_for(&app.scopes),
+        time(CERT_ISSUED_AT),
+        app.expires_at,
+    );
+    AppCert::issue(keys.identity(&app.identity), body).unwrap()
+}
+
+/// The Paykit kinds a payee app takes from payers: answers to its requests, proofs, and the
+/// requests for its list and for a resend.
+pub const PAYEE_ACCEPTS: [Kind; 6] = [
+    Kind::PaymentRequestAcceptance,
+    Kind::PaymentRequestRejection,
+    Kind::PaymentRequestCancellation,
+    Kind::PaymentProof,
+    Kind::PrivatePaymentListRequest,
+    Kind::ResendRequest,
+];
+
+/// The Allowance kinds the shop takes besides [`PAYEE_ACCEPTS`].
+pub const SHOP_ALLOWANCE_ACCEPTS: [Kind; 4] = [
+    Kind::AllowanceProposal,
+    Kind::AllowanceAcceptance,
+    Kind::AllowanceRejection,
+    Kind::AllowanceEnd,
+];
+
+/// The endpoint identifiers bob's apps state in their Paykit member (Paykit wire 3.2).
+pub const BOB_ENDPOINT_IDENTIFIERS: [&str; 2] = ["btc-lightning-bolt11", "btc-bitcoin-p2wpkh"];
+
+/// The shop's public BOLT12 offer, in its Paykit member.
+pub const SHOP_BOLT12_OFFER: &str = "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr";
+
+/// An app record of bob's, signed by the app's signing key (Switch wire 3.2): it carries the
+/// app's base certificate, accepts `accepts`, and holds a Paykit member stating
+/// [`BOB_ENDPOINT_IDENTIFIERS`] and `public_endpoints`.
+fn bob_app_record(
+    keys: &Keys,
+    app: &str,
+    accepts: Vec<String>,
+    public_endpoints: Value,
+    updated_at: &str,
+    expires_at: Option<&str>,
+) -> AppRecord {
+    let mut body = AppRecordBody::new(&base_cert(keys, app), accepts, time(updated_at));
+    body.protocols.insert(
+        paykit_lib::app_record::PROTOCOL_NAME.to_owned(),
+        serde_json::json!({
+            "capabilities": { "endpoint_identifiers": BOB_ENDPOINT_IDENTIFIERS },
+            "public_endpoints": public_endpoints,
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    body.label = Some(format!("bob {app}"));
+    body.expires_at = expires_at.map(time);
+    AppRecord::sign(&keys.app(app).keys, body).unwrap()
+}
+
+/// The shop's app record: [`PAYEE_ACCEPTS`] and [`SHOP_ALLOWANCE_ACCEPTS`], with its public
+/// BOLT12 offer.
+pub fn shop_app_record(keys: &Keys) -> AppRecord {
+    let accepts = PAYEE_ACCEPTS
+        .iter()
+        .chain(&SHOP_ALLOWANCE_ACCEPTS)
+        .map(|k| k.as_str().to_owned())
+        .collect();
+    bob_app_record(
+        keys,
+        "shop",
+        accepts,
+        serde_json::json!({ "btc-lightning-bolt12": SHOP_BOLT12_OFFER }),
+        "2025-12-31T00:00:00.000Z",
+        Some("2026-01-30T00:00:00.000Z"),
+    )
+}
+
+/// The `cap` app's record: [`PAYEE_ACCEPTS`] and its extension kind [`CAP_EXTENSION_KIND`],
+/// without public endpoints, never expiring.
+pub fn cap_app_record(keys: &Keys) -> AppRecord {
+    let accepts = PAYEE_ACCEPTS
+        .iter()
+        .map(|k| k.as_str().to_owned())
+        .chain([CAP_EXTENSION_KIND.to_owned()])
+        .collect();
+    bob_app_record(
+        keys,
+        "cap",
+        accepts,
+        serde_json::json!({}),
+        CERT_ISSUED_AT,
+        None,
+    )
+}
+
+/// The scopes of Paykit's own executor certificate (Paykit spec 3.1): the base certificate's,
+/// with `contacts`, which `allowance_execute` requires.
 pub const EXECUTOR_SCOPES: [&str; 4] = ["pay", "allowance", "allowance_execute", "contacts"];
 
-/// The scopes of Paykit's own phone certificate (Paykit spec 3.1): the Switch set's, with
-/// `contacts`, which `pay` requires.
+/// The scopes of Paykit's own phone certificate (Paykit spec 3.1): the base certificate's,
+/// with `contacts`, which `pay` requires.
 pub const PHONE_SCOPES: [&str; 3] = ["pay", "allowance", "contacts"];
 
-/// The scopes of the certificates this set signs itself, by app name: the apps whose Switch
-/// set certificate lacks `contacts`, which Paykit requires beside `pay` and
+/// The scopes of the certificates this set holds beside the base ones, by app name: the apps
+/// whose base certificate lacks `contacts`, which Paykit requires beside `pay` and
 /// `allowance_execute` (Paykit spec 3.1).
 pub fn paykit_signed_scopes(app: &str) -> Option<&'static [&'static str]> {
     match app {
@@ -172,37 +373,28 @@ pub fn paykit_signed_scopes(app: &str) -> Option<&'static [&'static str]> {
     }
 }
 
-/// The certificate of an app, by app name: the Switch set's `documents.json` certificate, but
-/// the executor's and the phone's, which this set signs itself ([`paykit_cert`]).
+/// The certificate of an app, by app name: its base certificate ([`base_cert`]), but for the
+/// executor and the phone Paykit's own ([`paykit_cert`]).
 pub fn cert_doc(app: &str) -> SignedDoc {
+    let keys = Keys::from_seeds();
     if paykit_signed_scopes(app).is_some() {
-        return paykit_cert(&Keys::load(), app).signed().clone();
+        return paykit_cert(&keys, app).signed().clone();
     }
-    let name = match app {
-        "cap" => "cap certificate, extension scope ext:paykit-cap",
-        "hosted" => "hosted certificate, labelled selling scope request:shop1",
-        other => return document(&format!("{other} certificate")),
-    };
-    document(name)
+    base_cert(&keys, app).signed().clone()
 }
 
-/// Paykit's own certificate of `app`, the executor or the phone: the Switch set's certificate
-/// with [`paykit_signed_scopes`] and the permissions they need, signed again by alice's
-/// identity key. The Switch set's hold no `contacts`, so Paykit's verifiers refuse them
-/// (Paykit spec 3.1).
+/// Paykit's own certificate of `app`, the executor or the phone: its base certificate with
+/// [`paykit_signed_scopes`] and the permissions they need, signed by alice's identity key.
+/// The base certificates hold no `contacts`, so Paykit's verifiers refuse them (Paykit spec
+/// 3.1).
 pub fn paykit_cert(keys: &Keys, app: &str) -> AppCert {
     let scopes = paykit_signed_scopes(app).unwrap_or_else(|| panic!("{app} isn't Paykit's"));
-    let app = keys.app(app);
-    let switch_cert = document(&format!("{} certificate", app.name));
-    let mut body = AppCert::verify(&switch_cert, &app.identity)
-        .unwrap()
-        .body()
-        .clone();
+    let mut body = base_cert(keys, app).body().clone();
     let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
     body.permissions =
         pubky_switch_core::scopes::permission_names(&paykit_lib::scopes::permissions_for(&scopes));
     body.scopes = scopes;
-    AppCert::issue(keys.identity(&app.identity), body).unwrap()
+    AppCert::issue(keys.identity(&keys.app(app).identity), body).unwrap()
 }
 
 /// Paykit's own executor certificate ([`paykit_cert`]).
@@ -215,23 +407,13 @@ pub fn phone_cert(keys: &Keys) -> AppCert {
     paykit_cert(keys, "phone")
 }
 
-/// The scopes of an app's certificate in this set: the Switch set's `keys.json` scopes, and
-/// [`paykit_signed_scopes`] for the certificates this set signs itself.
+/// The scopes of an app's certificate in this set: its [`APPS`] scopes, and
+/// [`paykit_signed_scopes`] for the executor and the phone.
 pub fn scopes_of(app: &App) -> Vec<String> {
     match paykit_signed_scopes(&app.name) {
         Some(scopes) => scopes.iter().map(|s| (*s).to_owned()).collect(),
         None => app.scopes.clone(),
     }
-}
-
-/// A signed document of the Switch set's `documents.json`, by name.
-pub fn document(name: &str) -> SignedDoc {
-    let d = switch("documents.json");
-    let doc = arr(&d, "documents")
-        .iter()
-        .find(|x| st(x, "name") == name)
-        .unwrap_or_else(|| panic!("no document {name}"));
-    signed(&doc["signed"])
 }
 
 /// A carried signed document.
@@ -272,7 +454,7 @@ pub fn body_text(doc: &SignedDoc) -> String {
     String::from_utf8(doc.body_bytes().unwrap()).unwrap()
 }
 
-/// The Switch set's certificate of `app` with `scopes` and `permissions` changed, signed again
+/// The certificate of `app` with `scopes` and `permissions` changed, signed again
 /// by its identity key: the switch's checks take it (Switch wire 3.1).
 pub fn reissued(keys: &Keys, app: &str, scopes: &[&str], permissions: &[Permission]) -> AppCert {
     let app = keys.app(app);
@@ -308,7 +490,8 @@ pub enum Place<'a> {
 pub const WRITE_VECTORS: &str = "PAYKIT_WRITE_VECTORS";
 
 /// Compare the cases paykit-lib generates for the file `name` with the file, value for value;
-/// with [`WRITE_VECTORS`] set, write them into the file first. Every file is JSON written with
+/// with [`WRITE_VECTORS`] set, write them into the file first, creating it if the set doesn't
+/// hold it. Every file is JSON written with
 /// sorted members, indented by two spaces, and a final newline, so writing one changes no
 /// other byte of it.
 pub fn generated(name: &str, cases: &[(Place<'_>, Value)]) {
@@ -316,7 +499,12 @@ pub fn generated(name: &str, cases: &[(Place<'_>, Value)]) {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../specs/v0.2/vectors")
             .join(name);
-        let mut file = paykit(name);
+        // A file the set doesn't hold yet starts as an empty object.
+        let mut file = if path.exists() {
+            paykit(name)
+        } else {
+            Value::Object(Default::default())
+        };
         for (place, value) in cases {
             match place {
                 Place::Member(pointer) => {

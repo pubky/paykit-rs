@@ -17,17 +17,18 @@ use pubky_switch_core::scopes::{permission_names, Permission};
 use serde_json::{json, Value};
 
 use crate::common::{
-    arr, b64n, body_text, cert, cert_doc, document, executor_cert, generated, paykit, phone_cert,
-    pubky, quoted, reissued, signed, signed_json, st, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
+    arr, b64n, base_cert, body_text, cap_app_record, cert, cert_doc, executor_cert, generated,
+    paykit, phone_cert, pubky, quoted, reissued, shop_app_record, signed, signed_json, st, Keys,
+    Place, ALICE, ALLOWANCE_ID, BOB,
 };
 
 #[test]
 fn test_vectors_documents() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     generate(&keys);
     let d = paykit("documents.json");
-    // Every app certificate of this set, the Switch set's but the executor's and the phone's,
-    // which this set signs itself, is a Paykit App's and passes Paykit's checks: its
+    // Every app certificate of this set, the base certificates but the executor's and the
+    // phone's, which are Paykit's own, is a Paykit App's and passes Paykit's checks: its
     // `permissions` are the list its scopes need.
     for app in &keys.apps {
         let c = cert(app);
@@ -328,7 +329,7 @@ fn app_record_wire_1_4_cases() -> Vec<(&'static str, Value)> {
     ]
 }
 
-/// One `multi_protocol_certificates` case, built from the Switch set's certificate and
+/// One `multi_protocol_certificates` case, built from an app's certificate and
 /// checked as it is built: the switch takes it, and Paykit's verifier gives `accepted`.
 fn cert_case(keys: &Keys, (name, app, scopes, permissions): CertCase, accepted: bool) -> Value {
     certificate_case(&reissued(keys, app, scopes, permissions), name, accepted)
@@ -361,11 +362,11 @@ fn certificate_case(c: &AppCert, name: &str, accepted: bool) -> Value {
     case
 }
 
-/// One refused `app_records` case: the Switch set's shop app record with its Paykit member
+/// One refused `app_records` case: the shop's app record with its Paykit member
 /// replaced, signed again with the shop's signing key.
 fn app_record_case(keys: &Keys, name: &str, member: &Value) -> Value {
     let (shop, bob) = (keys.app("shop"), pubky(BOB));
-    let base = AppRecord::verify(&document("shop app record"), &bob).unwrap();
+    let base = shop_app_record(keys);
     let mut body = base.body().clone();
     body.protocols.clear();
     body.protocols.insert(
@@ -397,19 +398,18 @@ allowance_execute without contacts: the switch takes it (switch_accepts), and Pa
 verifiers refuse it. reason is paykit-lib's wording at a Paykit verifier.";
 
 /// `executor_certificates` (Paykit spec 3.1): Paykit's own executor certificate, which the
-/// grant carries, and the Switch set's, which holds `allowance_execute` without `contacts`.
+/// grant carries, and the base one, which holds `allowance_execute` without `contacts`.
 fn executor_certificates(keys: &Keys) -> Value {
-    let alice = pubky(ALICE);
-    let switch_cert = AppCert::verify(&document("executor certificate"), &alice).unwrap();
+    let base = base_cert(keys, "executor");
     json!({
         "accepted": [certificate_case(&executor_cert(keys), "Paykit's executor certificate, with contacts", true)],
         "description": EXECUTOR_CERTIFICATES_DESCRIPTION,
-        "refused": [certificate_case(&switch_cert, "allowance_execute without contacts", false)],
+        "refused": [certificate_case(&base, "allowance_execute without contacts", false)],
     })
 }
 
 /// `executor_certificates`: each verifies at the switch, signed by alice's identity key;
-/// Paykit's verifiers take Paykit's, the grant's certificate, and refuse the Switch set's for
+/// Paykit's verifiers take Paykit's, the grant's certificate, and refuse the base one for
 /// the scope rule of Paykit spec 3.1.
 fn check_executor_certificates(keys: &Keys, d: &Value) {
     let alice = pubky(ALICE);
@@ -443,10 +443,10 @@ fn check_executor_certificates(keys: &Keys, d: &Value) {
             }
         }
     }
-    // The refused one is the Switch set's executor certificate, as it is.
+    // The refused one is the executor's base certificate, as it is.
     assert_eq!(
-        signed(&arr(e, "refused")[0]["signed"]),
-        document("executor certificate")
+        &signed(&arr(e, "refused")[0]["signed"]),
+        base_cert(keys, "executor").signed()
     );
 }
 
@@ -462,18 +462,17 @@ switch takes each (switch_accepts), and Paykit's verifiers refuse each. reason i
 paykit-lib's wording at a Paykit verifier.";
 
 /// `payer_certificates` (Paykit spec 3.1): Paykit's own phone certificate, which the phone's
-/// stored messages carry, and certificates holding `pay` without `contacts`: the Switch set's
-/// phone certificate, and the wallet's with `pay` alone.
+/// stored messages carry, and certificates holding `pay` without `contacts`: the phone's base
+/// certificate, and the wallet's with `pay` alone.
 fn payer_certificates(keys: &Keys) -> Value {
-    let alice = pubky(ALICE);
-    let switch_phone = AppCert::verify(&document("phone certificate"), &alice).unwrap();
+    let base = base_cert(keys, "phone");
     let pay = ["pay".to_owned()];
     let pay_alone = reissued(keys, "wallet", &["pay"], &permissions_for(&pay));
     json!({
         "accepted": [certificate_case(&phone_cert(keys), "Paykit's phone certificate, with contacts", true)],
         "description": PAYER_CERTIFICATES_DESCRIPTION,
         "refused": [
-            certificate_case(&switch_phone, "pay and allowance without contacts", false),
+            certificate_case(&base, "pay and allowance without contacts", false),
             certificate_case(&pay_alone, "pay alone", false),
         ],
     })
@@ -521,17 +520,77 @@ fn check_payer_certificates(keys: &Keys, d: &Value) {
             }
         }
     }
-    // The first refused is the Switch set's phone certificate, as it is.
+    // The first refused is the phone's base certificate, as it is.
     assert_eq!(
-        signed(&arr(e, "refused")[0]["signed"]),
-        document("phone certificate")
+        &signed(&arr(e, "refused")[0]["signed"]),
+        base_cert(keys, "phone").signed()
     );
+}
+
+const CERTIFICATES_DESCRIPTION: &str = "Wire 3.1, Switch wire 3.1: the certificate of \
+each app of keys.json, as Paykit's verifiers take it, in its carrying form (signed: body and \
+sig). Each holds its app's keys, scopes and permissions as keys.json gives them, issued_at \
+2025-12-01T00:00:00.000Z and the app's expires_at, signed by its identity's key under \
+pubky-switch/v1/app-cert. The executor's and the phone's are Paykit's own, the accepted \
+certificates of executor_certificates and payer_certificates, holding contacts; the others \
+are the certificates every other case of this set signs again with scopes or permissions \
+changed. app is the app's name in keys.json.";
+
+/// `certificates` (Paykit wire 3.1): each app's certificate of this set, which Paykit's
+/// verifiers take.
+fn certificates(keys: &Keys) -> Value {
+    let cases: Vec<Value> = keys
+        .apps
+        .iter()
+        .map(|app| {
+            let doc = cert_doc(&app.name);
+            verify_certificate(&doc, &app.identity).unwrap_or_else(|e| panic!("{}: {e}", app.name));
+            json!({
+                "app": app.name,
+                "name": format!("{} certificate", app.name),
+                "signed": signed_json(&doc),
+            })
+        })
+        .collect();
+    json!({ "cases": cases, "description": CERTIFICATES_DESCRIPTION })
+}
+
+const EXTENSION_APP_DESCRIPTION: &str = "Wire 3.1, 3.2, Switch wire 3.1, 3.2: bob's \
+extension app cap. certificate is its certificate of certificates, holding request beside \
+the extension scope ext:paykit-cap. app_record is its app record, signed by its signing key \
+under pubky-switch/v1/app-record: it carries that certificate, accepts the kinds a payee \
+app takes from payers and the extension kind paykit-cap.offer, and its Paykit member states \
+its endpoint identifiers and no public endpoints; its label is bob cap, its updated_at its \
+certificate's issued_at, and its expires_at null. The switch takes the record, and a Paykit \
+reader reads its member.";
+
+/// `extension_app` (Paykit wire 3.1, 3.2): the `cap` app's certificate and its app record,
+/// which accepts an extension kind.
+fn extension_app(keys: &Keys) -> Value {
+    let record = cap_app_record(keys);
+    let read = AppRecord::verify(record.signed(), &pubky(BOB)).unwrap();
+    assert!(read.accepts(crate::common::CAP_EXTENSION_KIND));
+    PaykitMember::read(&read).unwrap();
+    json!({
+        "app_record": {
+            "app": "cap",
+            "name": "cap app record, accepting the extension kind paykit-cap.offer",
+            "signed": signed_json(record.signed()),
+        },
+        "certificate": {
+            "app": "cap",
+            "name": "cap certificate",
+            "signed": signed_json(&cert_doc("cap")),
+        },
+        "description": EXTENSION_APP_DESCRIPTION,
+    })
 }
 
 /// The cases paykit-lib generates in `documents.json` (README "How the files were
 /// generated"), compared with the file, and written into it with `PAYKIT_WRITE_VECTORS`.
 fn generate(keys: &Keys) {
-    // The certificates rebuild the Switch set's byte for byte before any change.
+    // Signed again with their own scopes and permissions, the certificates are the same byte
+    // for byte.
     for app in ["shop", "cap"] {
         let a = keys.app(app);
         let held = cert(a);
@@ -568,6 +627,8 @@ fn generate(keys: &Keys) {
             payer_certificates(keys),
         ),
         (Place::Member("/multi_protocol_certificates"), member),
+        (Place::Member("/certificates"), certificates(keys)),
+        (Place::Member("/extension_app"), extension_app(keys)),
         (
             Place::Member("/app_records/description"),
             json!(APP_RECORDS_DESCRIPTION),
@@ -621,7 +682,7 @@ fn check_multi_protocol_certificates(d: &Value) {
 /// every one; a Paykit reader reads the accepted ones as `reads` says, and refuses the others.
 fn check_app_records(keys: &Keys, d: &Value) {
     let (shop, bob) = (keys.app("shop"), pubky(BOB));
-    let base: Value = serde_json::from_str(&body_text(&document("shop app record"))).unwrap();
+    let base: Value = serde_json::from_str(&body_text(shop_app_record(keys).signed())).unwrap();
     let records = &d["app_records"];
     for (list, accepted) in [("accepted", true), ("refused", false)] {
         for case in arr(records, list) {
