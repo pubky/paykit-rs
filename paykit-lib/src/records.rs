@@ -828,9 +828,8 @@ pub struct UnrequestedDestination {
     pub list_version: Option<u64>,
     /// Whether the endpoint was single-use.
     pub single_use: bool,
-    /// The asset and amount being paid, written with the `attempt`; `None` in a record whose
-    /// writer doesn't know the member, until the proof is stored.
-    pub amount: Option<PaymentAmount>,
+    /// The asset and amount being paid, written with the `attempt` (Paykit wire 5.3).
+    pub amount: PaymentAmount,
 }
 
 /// An entry of a payer's request record's `reassociations` (Paykit spec 8.3, Paykit wire
@@ -1094,10 +1093,7 @@ fn read_unrequested(value: &Value) -> Result<UnrequestedDestination> {
         single_use: u
             .opt_bool("single_use")?
             .ok_or_else(|| bad(ACTIVITY, "unrequested.single_use", "missing"))?,
-        amount: u
-            .opt("amount")
-            .map(|a| crate::bodies::read_amount(a, ACTIVITY, "unrequested.amount"))
-            .transpose()?,
+        amount: crate::bodies::read_amount(u.req("amount")?, ACTIVITY, "unrequested.amount")?,
     })
 }
 
@@ -1180,9 +1176,7 @@ fn unrequested_json(u: &UnrequestedDestination) -> Value {
         DestinationSource::Public => "public",
     };
     map.insert("source".into(), Value::String(source.into()));
-    if let Some(amount) = &u.amount {
-        map.insert("amount".into(), crate::bodies::amount_json(amount));
-    }
+    map.insert("amount".into(), crate::bodies::amount_json(&u.amount));
     Value::Object(map)
 }
 
@@ -1376,8 +1370,7 @@ impl ActivityRecord {
     /// stored messages are between the counterparty and one other identity, each of its
     /// role's kind, from the side that sends it and addressed to the other; the members'
     /// shapes; the binding; the members only some records carry; the `refs` that tie the
-    /// messages together; `attempt_id`, and `unrequested.amount` when present, the stored
-    /// proof's; `attempted_periods`, only in a payer's request record of a recurring request,
+    /// messages together; `attempt_id` and `unrequested.amount`, the stored proof's; `attempted_periods`, only in a payer's request record of a recurring request,
     /// ascending, each once, at most 16; `reassociations`, there too, beside `allowance_id`,
     /// each from a Billing Period start of the request; `manual_only`, only in a payer's
     /// request record of a one-time request or a payer's period record; and the period
@@ -1490,7 +1483,7 @@ impl ActivityRecord {
         // Paykit wire 5.3: the destination's amount is the stored proof's.
         if let (RecordBinding::Unrequested, Some(amount), Some(Body::PaymentProof(p))) = (
             binding,
-            self.unrequested.as_ref().and_then(|u| u.amount.as_ref()),
+            self.unrequested.as_ref().map(|u| &u.amount),
             self.proof.as_ref().map(StoredMessage::body),
         ) {
             ensure(
@@ -3248,7 +3241,7 @@ mod tests {
         let destination = |source: &str, version: Option<u64>| {
             let mut v = serde_json::json!({ "app_id": "brrz3m6g5rci6iqnzke44q4djc",
                 "endpoint_id": "btc-bitcoin-p2wpkh", "payload": "bc1q", "source": source,
-                "single_use": false });
+                "single_use": false, "amount": { "asset": "btc", "value": "0.0015" } });
             if let Some(n) = version {
                 v["list_version"] = serde_json::json!(n);
             }
@@ -3303,23 +3296,6 @@ mod tests {
             .collect();
         assert!(check_reassociations(&many, Some(&a)).is_err());
         assert!(check_reassociations(&many[..16], Some(&a)).is_ok());
-    }
-
-    #[test]
-    fn test_unrequested_amount_is_optional() {
-        let mut v = serde_json::json!({ "app_id": "brrz3m6g5rci6iqnzke44q4djc",
-            "endpoint_id": "btc-bitcoin-p2wpkh", "payload": "bc1q", "source": "public",
-            "single_use": false });
-        assert_eq!(read_unrequested(&v).unwrap().amount, None);
-        v["amount"] = serde_json::json!({ "asset": "btc", "value": "0.0015" });
-        let read = read_unrequested(&v).unwrap();
-        assert_eq!(
-            read.amount.as_ref().map(|a| a.value.as_str()),
-            Some("0.0015")
-        );
-        assert_eq!(unrequested_json(&read), v);
-        v["amount"] = serde_json::json!("0.0015");
-        assert!(read_unrequested(&v).is_err());
     }
 
     #[test]
