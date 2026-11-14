@@ -401,13 +401,13 @@ mod tests {
         let destination = usable.destination(id, payload);
         let carrier = Carrier::Record(Box::new(usable.record));
         assert_eq!(
-            carries(&bob.id(), &destination, &carrier, None, NOW + 1),
+            carries(&bob.id(), &destination, &carrier, (None, None), NOW + 1),
             Ok(())
         );
         // Another payload isn't carried.
         let mut other = destination.clone();
         other.payload = "lno1other".into();
-        assert!(carries(&bob.id(), &other, &carrier, None, NOW + 1).is_err());
+        assert!(carries(&bob.id(), &other, &carrier, (None, None), NOW + 1).is_err());
     }
 
     #[test]

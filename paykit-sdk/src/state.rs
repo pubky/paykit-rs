@@ -803,8 +803,8 @@ impl Stored for JournalEntry {
         }
         let blind = binder.blind()?;
         let cert = binder.cert.ok_or_else(PaykitError::corrupt)?;
-        self.check_restored(&binder.own, cert, |payee, request_hash| {
-            request_obligation_blinded(&blind(payee), &blind(request_hash), 0)
+        self.check_restored(&binder.own, cert, |payee, request_hash, period_start| {
+            request_obligation_blinded(&blind(payee), &blind(request_hash), period_start)
         })?;
         if self.request_hash()?.is_none()
             && self.natural_key != natural_key::payer_payment_record(&binder.own, attempt)

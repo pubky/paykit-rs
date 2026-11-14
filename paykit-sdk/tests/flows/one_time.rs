@@ -2230,3 +2230,53 @@ async fn test_one_time_stop_gone_at_30_days_stays_gone_after_a_restore() {
     }
     assert!(!keeps_stop(&w, &wallet, hash).await);
 }
+
+#[tokio::test]
+async fn test_one_time_answer_refused_over_an_unknown_attempt_until_it_is_released() {
+    // The phone's attempt turned `unknown`: the request may be paid, so neither a rejection
+    // nor a cancellation goes (Paykit spec 8.1). Once its owner reports it failed (Switch
+    // spec 10.2 row 5), the cancellation goes through.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let attempt = phone
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+        .attempt_id();
+    let obligation = phone.payments().await.unwrap()[0].obligation;
+    w.clock.advance_ms(4201 * 1000);
+    wallet.receive(None).await.unwrap();
+    let confirmed = pubky_switch_client::app::UserConfirmed::new();
+    wallet
+        .resolve_attempt(
+            &obligation,
+            attempt,
+            paykit_sdk::Resolution::Unknown,
+            confirmed,
+        )
+        .await
+        .unwrap();
+    for refused in [
+        wallet.reject_request(&request, None).await.unwrap_err(),
+        wallet.cancel_request(&request, None).await.unwrap_err(),
+    ] {
+        assert!(
+            matches!(refused.refusal(), Some(Refusal::MayBePaid { .. })),
+            "{refused:?}"
+        );
+    }
+    w.rail.settle(&attempt, false);
+    phone.resume_payments().await.unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.cancel_request(&request, None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+}

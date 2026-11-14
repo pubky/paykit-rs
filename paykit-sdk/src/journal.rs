@@ -21,6 +21,7 @@
 
 use paykit_lib::bodies::Body;
 use paykit_lib::derive::{natural_key, payment_obligation};
+use paykit_lib::periods::PeriodRef;
 use paykit_lib::records::{DestinationSource, StoredMessage};
 use paykit_lib::{
     Asset, AttemptId, Decimal, Label, PaymentAmount, PaymentEndpointIdentifier,
@@ -188,6 +189,33 @@ pub(crate) enum TransferBound {
     },
 }
 
+/// A Billing Period as kept: its start and end, Unix milliseconds (Paykit wire 4.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct KeptPeriod {
+    pub(crate) starts_at: u64,
+    pub(crate) ends_at: u64,
+}
+
+impl KeptPeriod {
+    pub(crate) fn of(period: &PeriodRef) -> Self {
+        Self {
+            starts_at: period.starts_at,
+            ends_at: period.ends_at,
+        }
+    }
+
+    /// The period kept, which ends after it starts; one that doesn't is a corrupt store.
+    pub(crate) fn period(self) -> Result<PeriodRef> {
+        if self.ends_at <= self.starts_at {
+            return Err(PaykitError::corrupt());
+        }
+        Ok(PeriodRef {
+            starts_at: self.starts_at,
+            ends_at: self.ends_at,
+        })
+    }
+}
+
 /// An amount as kept.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct KeptAmount {
@@ -300,6 +328,10 @@ pub(crate) struct JournalEntry {
     /// The Allowance an executor pays the request under, which its proof names (Paykit spec
     /// 8.3 step 4); `None` for a payment the user made.
     pub(crate) allowance_id: Option<String>,
+    /// The Billing Period paid, for a recurring request (Paykit spec 8.2): the obligation is
+    /// the period's, the record the outcome writes is the payer's period record, and the
+    /// proof names the period. `None` for a one-time request and a payment without one.
+    pub(crate) billing_period: Option<KeptPeriod>,
 }
 
 impl std::fmt::Debug for JournalEntry {
@@ -331,6 +363,27 @@ impl JournalEntry {
             .transpose()
     }
 
+    /// The Billing Period paid, read as kept: `None` for a payment of no period.
+    pub(crate) fn period(&self) -> Result<Option<PeriodRef>> {
+        self.billing_period.map(KeptPeriod::period).transpose()
+    }
+
+    /// The start of the Billing Period paid in Unix seconds, as obligation IDs name it
+    /// (Paykit wire 1.5); 0 for a one-time request, Billing Period 0.
+    pub(crate) fn period_start_secs(&self) -> Result<u64> {
+        Ok(self.period()?.map_or(0, |period| period.start_secs()))
+    }
+
+    /// The payer's request record of the request paid, which the attempt is conditioned on
+    /// and a cancellation stops (Paykit spec 7.2, 8.2): the record the outcome writes for a
+    /// one-time request, the request record beside the period record for a Billing Period.
+    /// `None` for a payment without a request.
+    pub(crate) fn request_record(&self) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .request_hash()?
+            .map(|hash| natural_key::request_record(&self.payee, &hash)))
+    }
+
     /// The label kept, read as written: one that doesn't read is a corrupt store.
     pub(crate) fn label(&self) -> Result<Option<Label>> {
         self.label
@@ -348,7 +401,8 @@ impl JournalEntry {
     /// - the attempt ID, the request hash, the amount, the label and the payment reference
     ///   read; the destination's members read and agree;
     /// - a payment of a request has its payment reference, and its record's natural key is
-    ///   the request's; a payment without a request has neither, owes no acceptance, and its
+    ///   the request's, or, for a Billing Period, the period's, which owes no acceptance; a
+    ///   payment without a request has neither, nor a period, owes no acceptance, and its
     ///   claim key is the attempt's;
     /// - an acceptance is kept with its plaintext, which reads, and only when owed;
     /// - the method's proof is kept from `RailPaid` on, and before any payment time or
@@ -368,15 +422,26 @@ impl JournalEntry {
         self.amount.amount()?;
         self.destination.check()?;
         self.label()?;
+        let period = self.period()?;
         match (&request_hash, &self.payment_reference) {
             (Some(hash), Some(reference)) => {
                 PaymentReference::parse(reference).map_err(|_| PaykitError::corrupt())?;
-                if self.natural_key != natural_key::request_record(&self.payee, hash) {
+                let natural = match &period {
+                    // A subscription is accepted before its periods are paid (Paykit spec
+                    // 8.2): no acceptance goes with a period's payment.
+                    Some(_) if self.acceptance_owed => return bad(),
+                    Some(period) => {
+                        natural_key::period_record(&self.payee, hash, period.start_secs())
+                    }
+                    None => natural_key::request_record(&self.payee, hash),
+                };
+                if self.natural_key != natural {
                     return bad();
                 }
             }
             (None, None) => {
                 if self.acceptance_owed
+                    || period.is_some()
                     || self.destination.source()? == DestinationSource::Request
                     || self.obligation != payment_obligation(&attempt)
                 {
@@ -452,18 +517,20 @@ impl JournalEntry {
     }
 
     /// [`JournalEntry::check`], and the entry's claim key bound to what it pays: for a
-    /// payment of a request, the obligation `request_obligation` derives from the payee and
-    /// the request, a one-time request's, Billing Period 0 (Paykit spec 7.1, Paykit wire
-    /// 1.5); a payment without a request's is checked by `check` already. An entry whose
+    /// payment of a request, the obligation `request_obligation` derives from the payee, the
+    /// request and the start of the Billing Period paid, in Unix seconds, 0 for a one-time
+    /// request (Paykit spec 7.1, Paykit wire 1.5); a payment without a request's is checked
+    /// by `check` already. An entry whose
     /// claim key names another obligation would read and write one claim while its record
     /// and proof name another: it is a corrupt store.
     pub(crate) fn check_bound(
         &self,
-        request_obligation: impl Fn(&[u8; 32], &[u8; 32]) -> [u8; 32],
+        request_obligation: impl Fn(&[u8; 32], &[u8; 32], u64) -> [u8; 32],
     ) -> Result<()> {
         self.check()?;
         if let Some(hash) = self.request_hash()? {
-            if self.obligation != request_obligation(&self.payee, &hash) {
+            if self.obligation != request_obligation(&self.payee, &hash, self.period_start_secs()?)
+            {
                 return Err(PaykitError::corrupt());
             }
         }
@@ -488,7 +555,7 @@ impl JournalEntry {
         &self,
         own: &[u8; 32],
         own_cert: &AppCert,
-        request_obligation: impl Fn(&[u8; 32], &[u8; 32]) -> [u8; 32],
+        request_obligation: impl Fn(&[u8; 32], &[u8; 32], u64) -> [u8; 32],
     ) -> Result<()> {
         self.check_bound(request_obligation)?;
         let corrupt = || Err(PaykitError::corrupt());
@@ -626,6 +693,8 @@ pub struct PaymentView {
     pub payee: [u8; 32],
     /// The request paid, `None` for a payment without one.
     pub request_hash: Option<[u8; 32]>,
+    /// The Billing Period paid, for a recurring request.
+    pub billing_period: Option<PeriodRef>,
     /// The amount.
     pub amount: PaymentAmount,
     /// The identifier paid.
@@ -655,6 +724,7 @@ impl JournalEntry {
             obligation: self.obligation,
             payee: self.payee,
             request_hash: self.request_hash()?,
+            billing_period: self.period()?,
             amount: self.amount.amount()?,
             endpoint_id: self.destination.endpoint_id()?,
             stage: self.stage,
@@ -686,6 +756,116 @@ pub(crate) fn dispatched(stage: Stage, restored: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testkit::{object, Party};
+
+    /// A journal entry paying the Billing Period starting at `start` of request `[7; 32]`
+    /// from payee `[5; 32]`.
+    fn period_entry(start: u64) -> JournalEntry {
+        let payee = [5; 32];
+        let request = [7; 32];
+        let alice = Party::new("alice", "wallet", &["paykit_pay"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
+        let kept = KeptMessage::of(&bob.message(
+            &alice,
+            "paykit.payment_request",
+            vec![],
+            object(serde_json::json!({
+                "amount": { "asset": "btc", "value": "1" },
+                "payment_reference": "plan-1",
+                "proposal_expires_at": null
+            })),
+        ));
+        JournalEntry {
+            attempt_id: AttemptId::from_bytes([1; 16]).to_text(),
+            obligation: [3; 32],
+            payee,
+            request_hash: Some(pubky_switch_core::enc::b64(&request)),
+            natural_key: natural_key::period_record(&payee, &request, start / 1000),
+            amount: KeptAmount {
+                value: "1".into(),
+                asset: "btc".into(),
+            },
+            destination: Destination::new(
+                [2; 16],
+                &PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+                &PaymentEndpointPayload::new("lnbc1").unwrap(),
+                DestinationSource::Request,
+                None,
+                false,
+            ),
+            deadline: None,
+            stage: Stage::Recorded,
+            step: None,
+            label: None,
+            payment_reference: Some("plan-1".into()),
+            acceptance_owed: false,
+            acceptance_msg_id: None,
+            acceptance_plaintext: None,
+            acceptance_cert: None,
+            acceptance_released: false,
+            rail_proof: None,
+            paid_at_ms: None,
+            proof_msg_id: None,
+            restored: false,
+            journaled_at_ms: 0,
+            carrier: Some(kept.clone()),
+            carrier_record: None,
+            attempt_proof: None,
+            failed_by_method: false,
+            request: Some(kept),
+            record_held: false,
+            transfer_bound: Some(TransferBound::Asked { cap: None }),
+            failed_on_claim: false,
+            receipted: false,
+            allowance_id: None,
+            billing_period: Some(KeptPeriod {
+                starts_at: start,
+                ends_at: start + 1_000,
+            }),
+        }
+    }
+
+    #[test]
+    fn test_journal_period_entry_bound_to_its_period_record_and_obligation() {
+        let entry = period_entry(5_000);
+        entry.check().unwrap();
+        assert_eq!(entry.period_start_secs().unwrap(), 5);
+        assert_eq!(
+            entry.request_record().unwrap(),
+            Some(natural_key::request_record(&[5; 32], &[7; 32]))
+        );
+        // The obligation is the period's.
+        entry
+            .check_bound(|_, _, start| if start == 5 { [3; 32] } else { [4; 32] })
+            .unwrap();
+        assert!(entry.check_bound(|_, _, _| [4; 32]).is_err());
+    }
+
+    #[test]
+    fn test_journal_period_entry_refused_off_its_record_owing_or_without_a_request() {
+        // The request record's key, another period's, an acceptance owed, an empty period,
+        // or no request: a corrupt store.
+        let mut request_key = period_entry(5_000);
+        request_key.natural_key = natural_key::request_record(&[5; 32], &[7; 32]);
+        let mut other = period_entry(5_000);
+        other.natural_key = period_entry(6_000).natural_key;
+        let mut owing = period_entry(5_000);
+        owing.acceptance_owed = true;
+        let mut empty = period_entry(5_000);
+        empty.billing_period = Some(KeptPeriod {
+            starts_at: 5_000,
+            ends_at: 5_000,
+        });
+        let mut unrequested = period_entry(5_000);
+        unrequested.request_hash = None;
+        unrequested.payment_reference = None;
+        unrequested.obligation = payment_obligation(&unrequested.attempt().unwrap());
+        unrequested.destination.source = "list".into();
+        unrequested.destination.list_version = Some(1);
+        for bad in [request_key, other, owing, empty, unrequested] {
+            assert!(bad.check().is_err());
+        }
+    }
 
     #[test]
     fn test_journal_dispatched_only_at_paying_or_restored_before_an_outcome() {

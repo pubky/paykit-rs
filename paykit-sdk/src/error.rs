@@ -76,10 +76,34 @@ pub enum Refusal {
     /// The attempt's deadline has passed, or the request's proposal expired (Paykit spec 7.1).
     #[error("Paykit spec 7.1: the deadline has passed")]
     DeadlinePassed,
-    /// A recurring request is paid, and cancelled by its payer, per Billing Period (Paykit
-    /// spec 8.2): `pay_request` and `cancel_request` refuse it.
+    /// A recurring request is paid per Billing Period ([`crate::Paykit::pay_period`]),
+    /// never as a whole (Paykit spec 8.2).
     #[error("Paykit spec 8.2: a recurring request is paid per Billing Period")]
     Recurring,
+    /// The Billing Period hasn't started on the latest service time the app verified: it is
+    /// paid before its start only once the user confirms paying it early
+    /// ([`crate::PayOptions::with_early_payment_confirmed`]; Paykit spec 8.2, "Not before its
+    /// start"). Nothing was written.
+    #[error("Paykit spec 8.2: the Billing Period hasn't started")]
+    PeriodNotStarted,
+    /// The Billing Period's payment needs period details the payer's period record doesn't
+    /// hold yet: a later period of a request with `per_period_endpoints` needs valid details
+    /// carrying its destination, and one priced by rates valid details carrying them, both in
+    /// one details when it needs both (Paykit spec 8.2). The payer waits for them. Nothing was
+    /// written.
+    #[error("Paykit spec 8.2: waiting for the Billing Period's period details")]
+    WaitingForPeriodDetails,
+    /// The occurrence is paid only by hand, after the user's confirmation: its request was
+    /// accepted under an Allowance, which alone could pay it automatically (one Allowance
+    /// per request), or its record is marked manual-only (Paykit spec 8.3). Nothing was
+    /// written.
+    #[error("Paykit spec 8.3: paid only by hand")]
+    ManualOnly,
+    /// The request record lists 16 Billing Periods that may have an open attempt, none of
+    /// them finished: no other period is attempted until one is (Paykit spec 8.2, "Attempted
+    /// periods"). Nothing was written.
+    #[error("Paykit spec 8.2: 16 Billing Periods may have an open attempt")]
+    AttemptedPeriodsFull,
     /// Whether this payment is credited already to another occurrence of the payer's can't
     /// be told now: a record of the payee's the app holds can't be opened, or its copy of
     /// them may lack records. One payment credits one occurrence, so nothing is credited

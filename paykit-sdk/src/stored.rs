@@ -1080,11 +1080,37 @@ impl Paykit {
         }
         if self.app.cert().has_permission(Permission::ClaimsWrite) {
             // Read bound to its key and to the claim the receipt settles, as at the first read.
-            let obligation = receipt_claim(&stored, &attempt_id, |request| {
-                self.obligation(&sender, request, 0)
+            let obligation = receipt_claim(&stored, &attempt_id, |request, start| {
+                self.obligation(&sender, request, start)
             });
             let journaled = self.journal_entry_on(&attempt_id, &obligation).await?;
-            let deadline = receipt_deadline(&stored, record, journaled.as_ref());
+            // A Billing Period's deadline is the period's, of the request the payer's request
+            // record holds; a period that isn't the request's settles nothing.
+            let (request_held, period) = match stored.message().refs.get(1) {
+                Some(hash) if stored.body().billing_period().is_some() => {
+                    let request_target =
+                        ActivityTarget::payer(natural_key::request_record(&sender, hash));
+                    let held = self.held_activity(&request_target).await?;
+                    let period = match &held {
+                        Some(held) => match crate::receive::receipt_period(held, &stored) {
+                            Ok(period) => period,
+                            Err(()) => {
+                                self.local_commit(tx).await?;
+                                return Ok(Placed::Done);
+                            }
+                        },
+                        None => None,
+                    };
+                    (held, period)
+                }
+                _ => (Some(record.clone()), None),
+            };
+            let deadline = receipt_deadline(
+                &stored,
+                request_held.as_ref(),
+                period.as_ref(),
+                journaled.as_ref(),
+            );
             // The claim view as the first read takes it, by the same rule
             // (`receive::failure_view`): the view the app keeps, or the switch's read only
             // when it asks for it. A read the switch refuses settles nothing.
