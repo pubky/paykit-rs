@@ -767,6 +767,43 @@ async fn test_blocked_own_block_kept_unanswered_survives_a_restore_and_is_writte
 }
 
 #[tokio::test]
+async fn test_blocked_own_block_restored_written_right_after_a_clean_first_read() {
+    // The backup owes the block's write again. The restored app's first receive reads its
+    // page before it writes, so the held cursor shows the restore clean: nothing is held,
+    // and the block is written right after the read, in the same receive.
+    let w = World::new();
+    let (mut wallet, _, request) = received(&w, PaykitConfig::default()).await;
+    keep_ops(&w, 1);
+    wallet.block(&w.bob_id()).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut wallet = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    wallet.app_mut().refresh_identity().await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.app().restore_held_cursor(),
+        Some(pubky_switch_client::app::HeldCursor::Clean)
+    );
+    let hold: serde_json::Value =
+        serde_json::from_slice(&wallet.app().protocol_get(b"rh").await.unwrap().unwrap()).unwrap();
+    assert_eq!(hold["d"]["verdict"], "clean");
+    let lists = wallet.app_mut().allow_list().await.unwrap();
+    assert!(lists.deny.contains(&w.bob_id()));
+    assert_ne!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Held
+    );
+}
+
+#[tokio::test]
 async fn test_blocked_own_block_restored_written_again_after_a_try_that_could_not_go() {
     // The wallet's block is kept unanswered when the backup is taken. After the restore the
     // first write of it again can't go: a batch the restored app kept meanwhile still can't

@@ -827,8 +827,12 @@ impl Paykit {
         // minutes, for the spam rule (Paykit wire 4.1).
         Box::pin(self.refresh_lists_when_due()).await?;
         // This app's blocks that may not reach the switch otherwise are written again: one
-        // whose batch the client neither keeps nor applied, a restored one among them.
-        if self.certificate_refused().is_none() {
+        // whose batch the client neither keeps nor applied, a restored one among them. While
+        // a restore's verdict waits for this read's first page, they go right after the read
+        // instead: a write before it would send the restored cursor move, and leave the
+        // verdict unknown (`hold.rs`).
+        let blocks_after_read = Box::pin(self.restore_verdict_awaited()).await?;
+        if self.certificate_refused().is_none() && !blocks_after_read {
             Box::pin(self.send_own_blocks_again()).await?;
         }
         // The records paused before this read, for the summary's new ones.
@@ -847,17 +851,19 @@ impl Paykit {
         // What follows the read is its own future on the heap: its steps' futures are built
         // in that future's poll, not in this one's, which stays small beside the client's
         // deep read.
-        Box::pin(self.after_read(report, paused_before, keys_held_before)).await
+        Box::pin(self.after_read(report, paused_before, keys_held_before, blocks_after_read)).await
     }
 
     /// The steps of [`Paykit::receive`] after the client's read returned `report`: the
-    /// records paused before it were `paused_before`, and the app held its scope keys at its
-    /// start when `keys_held_before`.
+    /// records paused before it were `paused_before`, the app held its scope keys at its
+    /// start when `keys_held_before`, and this app's blocks are written again here when
+    /// `blocks_after_read`.
     async fn after_read(
         &mut self,
         report: ReceiveReport,
         paused_before: std::collections::BTreeSet<[u8; 32]>,
         keys_held_before: bool,
+        blocks_after_read: bool,
     ) -> Result<ReceiveSummary> {
         // The data epochs the entries the client stores for a key wait for, as its report
         // names them at every read while any waits.
@@ -913,6 +919,10 @@ impl Paykit {
         // block marks (`marks.rs`): read again now, after the verdict.
         if Box::pin(self.take_restore_verdict()).await? {
             Box::pin(self.refresh_lists_when_due()).await?;
+        }
+        // The blocks held back for the restore's verdict go now, the page read.
+        if blocks_after_read {
+            Box::pin(self.send_own_blocks_again()).await?;
         }
         // The client lists the shared records at its read when a listing is owed, a
         // restore's included, before the read itself, while it holds the keys that read

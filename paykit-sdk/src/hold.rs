@@ -1452,6 +1452,16 @@ impl Paykit {
         Ok(())
     }
 
+    /// Whether a restore's verdict waits for a feed page: the hold's verdict open, and none
+    /// from the client yet.
+    pub(crate) async fn restore_verdict_awaited(&self) -> Result<bool> {
+        Ok(self.app.restore_held_cursor().is_none()
+            && self
+                .local_get::<RestoreHold>(key::RESTORE_HOLD)
+                .await?
+                .is_some_and(|hold| hold.verdict == RestoreVerdict::Open))
+    }
+
     /// Whether a restore's widening of the block marks is kept, still to be applied.
     async fn restore_widening_kept(&self) -> Result<bool> {
         Ok(self
