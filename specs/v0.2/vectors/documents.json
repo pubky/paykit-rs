@@ -961,7 +961,7 @@
         "switch_accepts": true
       },
       {
-        "body": "{\"v\":1,\"kind\":\"pubky-switch.app_cert\",\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"qt4ht86rt815x6nwno8homhwky\",\"signing_key\":\"-n6_hkQIUSztrFP_1eY8bKLkUd-Qs2h4kVekkOpmGvs\",\"bundle_key\":\"21uxosWFW_NEvuqX9mixoKw_6Pblpcy3A7LwU72O0WY\",\"scopes\":[\"paykit_request\",\"paykit_ext:cap\",\"paykit_settlements\",\"paykit_contacts\"],\"permissions\":[\"conversation.add\"],\"issued_at\":\"2025-12-01T00:00:00.000Z\",\"expires_at\":\"2026-12-01T00:00:00.000Z\"}",
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app_cert\",\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"qt4ht86rt815x6nwno8homhwky\",\"signing_key\":\"-n6_hkQIUSztrFP_1eY8bKLkUd-Qs2h4kVekkOpmGvs\",\"bundle_key\":\"21uxosWFW_NEvuqX9mixoKw_6Pblpcy3A7LwU72O0WY\",\"scopes\":[\"paykit_request\",\"paykit_ext:cap\",\"paykit_settlements\",\"paykit_contacts\"],\"permissions\":[\"lists.read\",\"conversation.add\"],\"issued_at\":\"2025-12-01T00:00:00.000Z\",\"expires_at\":\"2026-12-01T00:00:00.000Z\"}",
         "name": "an extension prefix without paykit-: paykit_ext:cap",
         "paykit_permissions": [
           "lists.read",
@@ -973,6 +973,7 @@
           "paykit_contacts"
         ],
         "permissions": [
+          "lists.read",
           "conversation.add"
         ],
         "reason": "invalid: a malformed extension or labelled selling scope",
@@ -983,8 +984,8 @@
           "paykit_contacts"
         ],
         "signed": {
-          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoicXQ0aHQ4NnJ0ODE1eDZud25vOGhvbWh3a3kiLCJzaWduaW5nX2tleSI6Ii1uNl9oa1FJVVN6dHJGUF8xZVk4YktMa1VkLVFzMmg0a1Zla2tPcG1HdnMiLCJidW5kbGVfa2V5IjoiMjF1eG9zV0ZXX05FdnVxWDltaXhvS3dfNlBibHBjeTNBN0x3VTcyTzBXWSIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9leHQ6Y2FwIiwicGF5a2l0X3NldHRsZW1lbnRzIiwicGF5a2l0X2NvbnRhY3RzIl0sInBlcm1pc3Npb25zIjpbImNvbnZlcnNhdGlvbi5hZGQiXSwiaXNzdWVkX2F0IjoiMjAyNS0xMi0wMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMTItMDFUMDA6MDA6MDAuMDAwWiJ9",
-          "sig": "w16shS3Cug2kq2EHnAjhYSy5KRH3YQ35Y-EN0s7KwnLmYPQQ5igMVFQRRQMoKjFvCYWfASn86bmVeRsh1LltDA"
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoicXQ0aHQ4NnJ0ODE1eDZud25vOGhvbWh3a3kiLCJzaWduaW5nX2tleSI6Ii1uNl9oa1FJVVN6dHJGUF8xZVk4YktMa1VkLVFzMmg0a1Zla2tPcG1HdnMiLCJidW5kbGVfa2V5IjoiMjF1eG9zV0ZXX05FdnVxWDltaXhvS3dfNlBibHBjeTNBN0x3VTcyTzBXWSIsInNjb3BlcyI6WyJwYXlraXRfcmVxdWVzdCIsInBheWtpdF9leHQ6Y2FwIiwicGF5a2l0X3NldHRsZW1lbnRzIiwicGF5a2l0X2NvbnRhY3RzIl0sInBlcm1pc3Npb25zIjpbImxpc3RzLnJlYWQiLCJjb252ZXJzYXRpb24uYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "e0LB8BIMUn3tWAFOZJPg9uhnaAqCGhv2jlvx-1e1O3ov6VIMHi0LUADYIQpo7Ni3xmQVaO0LTh0_O5EcuWxjDw"
         },
         "switch_accepts": true
       }
