@@ -84,20 +84,22 @@ Paykit's identifiers, beside the Switch's (Switch wire 1.7):
 | `payment_lists` | one per payee app | `lp(payee identity, publishing app ID (16 bytes))` |
 | `allowances`, `allowance_ledgers` | one per Allowance | `lp(counterparty identity, allowance_id text)` |
 | `block_floor` | the one record | `lp(own identity)` |
+| `settlements` | one per bucket of settlements | `lp(u64(bucket))`, the bucket a number from 0 to 1023, below |
 
 - **Whose naming key** is the Switch's rule (Switch wire 1.5), for obligations too. The obligation of a payment without a request is the exception: it isn't blinded, and is derived from the attempt ID alone (its row in the first table).
 - **Period start** in a derivation is the Billing Period's `starts_at` in Unix seconds, rounded down; periods start on whole seconds whenever the recurrence's `anchor` does, and an anchor with milliseconds is rounded down the same way.
-- **Settlement ID** (spec 8.4): the bytes the payment method defines to name one settlement, the same in every proof of it, such as a Lightning payment hash or an on-chain transaction ID. The payee works it out from the proof's `proof` object and the `payment_endpoint_identifier` (4.10). Every proof of one payment then names one payee record, so a second one is a replay, credited once. A proof whose method gives no settlement ID isn't credited. Each proof `type` has one spelling of its settlement ID, so the same settlement written another way (an upper-case `txid`, say) can't name a second record. A proof whose members aren't in that spelling gives no settlement ID, so it isn't credited:
+- **Settlement ID** (spec 8.4): the bytes the payment method defines to name one settlement, the same in every proof of it, such as a Lightning payment hash or an on-chain transaction ID. The payee works it out from the proof's `proof` object and the `payment_endpoint_identifier` (4.10). Every proof of one payment then names one payee record, so a second one is a replay, credited once. The settlement's mark (5.7) derives from the settlement ID alone, whatever the endpoint, the counterparty or the occurrence, so one settlement is credited once across them all (spec 8.1 step 4); a payment method's settlement IDs therefore never equal another method's, and a method whose IDs could starts each with its own name. A proof whose method gives no settlement ID isn't credited. Each proof `type` has one spelling of its settlement ID, so the same settlement written another way (an upper-case `txid`, say) can't name a second record. A proof whose members aren't in that spelling gives no settlement ID, so it isn't credited:
 
   | Proof `type` | Settlement ID |
   |---|---|
-  | `bitcoin-txid` | the `txid` member, 64 lower-case hex characters, as its UTF-8 text (64 bytes). It has no output index: one transaction is one settlement to a Payment Endpoint, so a payer pays two payments without a request to one endpoint in two transactions. Other members, such as a `vout`, aren't part of it |
+  | `bitcoin-txid` | the `txid` member, 64 lower-case hex characters, as its UTF-8 text (64 bytes). It has no output index: one transaction is one settlement, so a payer pays two payments, with or without a request, to one endpoint or two, in two transactions (spec 8.1 step 4). Other members, such as a `vout`, aren't part of it |
   | the prototype's fake rail (`{ "rail": "fake", "tx": ... }`, no `type`) | its `tx` text, not empty |
   | any other | defined by its payment method; a payee that doesn't know the method credits no payment without a request by it |
 
   The vectors' payment without a request uses `bitcoin-txid` (`identifiers.json`).
+- **Settlement tags and buckets** (5.7): a settlement's tag is `derive("paykit/v1/settlement", "tag", blind(lp(settlement ID)))`. Its bucket is `u16_be(tag[0..2]) >> 6`, 0 to 1023, and a mark stores bytes 2 to 13; bits 10 to 15 are unused. An occurrence's tag is the first 8 bytes of `derive("paykit/v1/settlement", "occurrence", blind(natural key))`, the natural key of the occurrence's `payee_activity` record (above), which is the same under every label's policy. Both are blinded under the naming key, so no payer can aim a settlement at a bucket or a tag, and no app that can't name a settlement or an occurrence can tell which a tag is.
 
-Vectors: `identifiers.json` `request_hash`, `obligations` with the blinded inputs of each, and `terms_hash`. The record keys of these natural keys are `identifiers.json` `record_keys`.
+Vectors: `identifiers.json` `request_hash`, `obligations` with the blinded inputs of each, and `terms_hash`. The record keys of these natural keys are `identifiers.json` `record_keys`, the bucket record of the `bitcoin-txid` settlement of the vectors' payment without a request among them.
 
 ## 2. Signatures
 
@@ -132,7 +134,7 @@ A well-formed list with a permission missing, or, in a certificate that holds no
 
 Only valid names count in this table: a name that starts with `paykit_request:` or `paykit_ext:` but isn't a valid labelled selling scope or extension scope (above), such as `paykit_ext:paykit`, derives no permission. A certificate holding one is invalid at Paykit's verifiers anyway.
 
-`paykit_pay` requires `paykit_contacts`, `paykit_allowance_execute` requires `paykit_allowance`, `paykit_pay` and `paykit_contacts`, and `paykit_manage_contacts` requires `paykit_contacts` (spec 3.1); a certificate that breaks this is invalid. Vectors: `documents.json` `executor_certificates` and `payer_certificates`.
+`paykit_pay` requires `paykit_contacts`, `paykit_allowance_execute` requires `paykit_allowance`, `paykit_pay` and `paykit_contacts`, `paykit_manage_contacts` requires `paykit_contacts`, and `paykit_request` and every `paykit_request:<label>` require `paykit_settlements` (spec 3.1); a certificate that breaks this is invalid. `paykit_settlements` grants no switch permission: it reads and writes `settlements` (5.7). Vectors: `documents.json` `executor_certificates`, `payer_certificates` and `payee_certificates`.
 
 **Several protocols** (spec 3.2, Switch wire 3.1 "Several protocols"). A certificate may hold other protocols' scopes beside Paykit's, or only theirs. Paykit's verifiers apply the Switch's rule with Paykit as the protocol they know:
 
@@ -142,7 +144,7 @@ Only valid names count in this table: a name that starts with `paykit_request:` 
 
 Vectors: `documents.json` `multi_protocol_certificates` (`paykit_request` beside `chat` with `lists.read` and `conversation.add`, taken; without `conversation.add`, refused; `paykit_request` alone with `lists.read` beside `conversation.add`, refused; `chat` alone, taken; `paykit_request` beside `paykit_ext:cap`, refused), and `messages.json` `multi_protocol_senders`.
 
-**Labelled selling scopes** (spec 3.1). `paykit_request:<label>` has the switch permissions of `paykit_request` (above) and sends and receives the kinds of `paykit_request` (4.3), for the requests sent under its label. It is one use of the scope rule (Switch wire 3.1, "Scope names"): plain `paykit_request` covers every `paykit_request:<label>`, a certificate holding `paykit_request` holds every label, and one holding `paykit_request:<label>` holds only that label. So a certificate holds plain `paykit_request` or labelled scopes, never both: every verifier refuses such a certificate, the switch included, the signer never issues one, and it refuses an app request naming both (Switch wire 3.9). Vectors: `documents.json` `certificates`, among them the certificate of bob's hosted app `hosted`, holding `paykit_request:shop1`, and `labelled_scope_rejections` (a label of 33 characters, one in upper case, an empty one, nine labels, `paykit_request` beside a label; only the nine labels pass the switch's rule).
+**Labelled selling scopes** (spec 3.1). `paykit_request:<label>` has the switch permissions of `paykit_request` (above) and sends and receives the kinds of `paykit_request` (4.3), for the requests sent under its label. It is one use of the scope rule (Switch wire 3.1, "Scope names"): plain `paykit_request` covers every `paykit_request:<label>`, a certificate holding `paykit_request` holds every label, and one holding `paykit_request:<label>` holds only that label. So a certificate holds plain `paykit_request` or labelled scopes, never both: every verifier refuses such a certificate, the switch included, the signer never issues one, and it refuses an app request naming both (Switch wire 3.9). Vectors: `documents.json` `certificates`, among them the certificate of bob's hosted app `hosted`, holding `paykit_request:shop1` and `paykit_settlements`, and `labelled_scope_rejections` (a label of 33 characters, one in upper case, an empty one, nine labels, `paykit_request` beside a label; only the nine labels pass the switch's rule).
 
 ### 3.2 App records
 
@@ -742,6 +744,7 @@ Own apps of one identity share state through sealed shared records (spec 6, Swit
 | `allowances` | `paykit_allowance` | `["paykit_allowance"]` | |
 | `allowance_ledgers` | `paykit_allowance` | `["paykit_allowance_execute"]` | |
 | `block_floor` | `paykit_pay` | `["paykit_pay"]` | |
+| `settlements` | `paykit_settlements` | `["paykit_settlements"]` | `identifiers.json` `policies` |
 
 Apps ignore a record in these collections whose policy differs. A labelled request's records, its request record and its period records, have its label's policy, are sealed with the label key (Switch wire 1.5) under the AAD of Switch wire 6.2 with `scope` `paykit_request:<label>`, and bind that label (5.3).
 
@@ -991,6 +994,42 @@ One record per identity, its block floor (spec 8.1, Blocked counterparties):
 
 Vectors: none. Its policy is that of `payer_activity`, whose hash `identifiers.json` `policies` has; `paykit-lib` checks the value and the seen floor (spec 18).
 
+### 5.7 `settlements`
+
+The identity's settlement marks (spec 6, Settlement marks), in at most 1,024 bucket records, one per bucket (1.5): each holds the marks of the settlements of its bucket that any own payee app has credited, labelled or not, under one policy (5.1).
+
+| Field | Type | Req | Notes |
+|---|---|---|---|
+| `v` | int | yes | 1 |
+| `marks` | b64 | yes | the bucket's marks, 21 bytes each, concatenated in ascending byte order: the settlement's tag (12 bytes), the occurrence's kind (1 byte) and the occurrence's tag (8 bytes) (1.5); at most 9,000 marks |
+
+**Kinds:** `1` a one-time request, `2` a Billing Period, `3` a payment without a request. A bucket whose `marks` isn't a whole number of marks, holds more than 9,000, isn't in strictly ascending order of settlement tag, so names a settlement twice, or holds a mark of another kind, which names an occurrence no writer produces, is invalid. The marks name no counterparty, amount, label or settlement ID, since every payee app reads every bucket (spec 3.1, 12).
+
+**Writing** (spec 8.1 step 4): the credit's batch carries the `record.put` of the settlement's bucket at the version the app read, or `{0, 0}` with its `id_inputs` for a bucket not yet written (Switch wire 6.2), holding every mark the bucket held and the new one in its place, beside the `record.put` of the `payee_activity` record that stores the receipt, at the version read, and the queued receipt. When another credit wrote the bucket first, the batch fails with `409 conflict`, whose answer carries the bucket's current write to a writer holding `paykit_settlements` (Switch wire 6.2 and 7.6), and the writer decides again on it: a mark of the settlement there is a credit already; otherwise it adds its mark to that write and sends the batch again. No writer removes or changes a mark, or deletes a bucket.
+
+**Reading:** before a credit, the app reads the settlement's bucket at its switch (Switch wire 7.4.9), never deciding from its copy or a backup alone. The settlement is credited when the bucket holds a mark with its tag, or the app has seen one, whatever its user confirms. While the bucket's current write is a delete, doesn't open or read, or is invalid, while its view shows it divergent, and when the read fails, the settlement may be credited: the app credits it only by hand, once its user has been shown that it may already be credited. A bucket at no key is one no credit has written, or a deleted one the service has forgotten; marks the app has seen in it still count.
+
+**Seen marks** (Switch spec 8.2): a reader that has seen a mark ignores, and shows with its writer, a later write of the bucket that drops or changes it, and the bucket's delete; it keeps every mark it has seen. A reader holding a seen mark that the bucket's current write lacks, where that write is valid and opens, or a delete of the bucket, writes the bucket again at once, at that write's version, or `{0, 0}` over a delete, with the current write's marks and every mark it has seen; an invalid bucket, or one that doesn't open, stays as Repairing says. Where the marks it would write name one settlement with two occurrences, the write keeps the lower mark in byte order, and the app shows its user that the settlement may be credited twice. A reader takes a write that replaces a seen mark with a lower mark of the same settlement as no change, and the higher mark it saw counts as seen. A rewrite that would exceed 9,000 marks is made only by hand (`SettlementBucketFull`).
+
+**Repairing:** a write over a divergent bucket holds every mark of its current write and every mark the app has seen in it; marks only an upload holds, which no app reads, are covered by the provider-loss rule of spec 8.1 step 4. A write over an invalid bucket, or one that doesn't open for good, is made only by hand, at its version, with every mark the app has seen, once its user has been shown that marks may be lost. A credit by hand over a bucket it can't write stores its receipt without a mark.
+
+**Full:** a bucket holds at most 9,000 marks, about 252,000 bytes of JSON, under the 262,140 bytes of the largest value (Switch wire 6.2). A credit whose bucket is full, or whose bucket write the service refuses for the storage quota or the value limit (`429` or `413`, Switch wire 7.6 and 9.2), is made only by hand, once its user has been shown that the settlement can't be marked and so may be credited again; it stores its receipt without a mark, and the app tells its host once per bucket (`SettlementBucketFull`, spec 6). An app that credits only by hand for any other reason tells its host once per settlement (`CreditNeedsUser`, spec 8.1 step 4).
+
+**Capacity:** tags are uniform, so the buckets fill evenly: the first is full at about 8.9 million marks, out of 9.2 million in all, in at most 1,024 live record keys. A mark takes 28 bytes of JSON. The `payee_activity` record each credit keeps for the identity's life reaches the storage quota (`record_quota_bytes`, 64 MiB by default, Switch wire 9.2) and the 100,000 live record keys long before the marks do; 100,000 marks take about 3 MB, and a credit then rewrites a bucket of about 3 KiB sealed.
+
+**Collisions:** two settlements share a bucket and a tag with a chance of about n^2/2^107 for n marks, below 10^-18 for 10 million, and since the tags are blinded no payer can aim one. A collision only refuses a credit, which the user then sees; it never makes one. An occurrence tag only tells an app whether the credit it lost was of its own occurrence, and decides no credit.
+
+Example (a bucket holding two marks, a one-time request's and a Billing Period's; the vectors give real ones):
+
+```json
+{
+  "v": 1,
+  "marks": "fMwzZXxKU-r3TUswAdLhLnFb3qh7uLRaxJvmJjPm0NJwAoHqru5D8S_X"
+}
+```
+
+Vectors: `sealed.json` `settlement_marks`: buckets holding marks of each kind, sealed under `paykit_settlements`, and the rejections (marks out of order, a settlement twice, a length that isn't a whole number of marks, kinds `0` and `4`, 9,001 marks, a value under another policy); `identifiers.json` `policies` (`settlements`) and `record_keys` (the tag, bucket and bucket record key of the vectors' `bitcoin-txid` settlement, and an occurrence's tag); `keys.json` `scope_keys` (`paykit_settlements`). `paykit-lib` checks the seen marks (spec 18).
+
 ## Appendix A. Choices this document made
 
 The prototype fixed every other detail above when this document was written; the rules this revision adds since, which spec Section 18 lists, it predates. These details it left open, so this document chose; a row whose prototype cell says it differs names a divergence:
@@ -1012,5 +1051,6 @@ The prototype fixed every other detail above when this document was written; the
 | A13 | Record age limit | `record_max_age` in whole seconds, at least 1, 90 days when absent; an `updated_at` more than 5 minutes ahead is refused (3.2, Switch wire 3.3) | `DEFAULT_RECORD_MAX_AGE_S`, `AppRecord::payable_until` |
 | A14 | Extension scopes and kinds | `paykit_ext:<prefix>`, prefix `paykit-` and 1 to 25 more of `a-z`, `0-9`, `-` (so its kinds are Paykit's, Switch wire 3.1 "Scope roots"); kind `<prefix>.<name>`, name 1 to 64 of `a-z`, `0-9`, `_`; at most 8 extension scopes per certificate; they give `conversation.add` | differs: accepts a prefix without `-`, but `paykit` (`records::extension_scope`, `check_scopes`); it predates this rule. Received extension messages are handed over in `ReceiveReport::extensions` |
 | A15 | The settlement ID of a `bitcoin-txid` proof | its `txid`, 64 lower-case hex characters, as text, without an output index; a proof in another spelling isn't credited (Switch wire 1.5) | `wire::settlement_id`, which the rail uses for proofs with a `type` |
+| A16 | Settlement marks | derived from the settlement ID alone, never the endpoint; 1,024 buckets by the first 10 bits of a blinded tag, a 21-byte mark (12-byte settlement tag, kind, 8-byte occurrence tag), at most 9,000 per bucket; written in the credit's batch at the bucket's version; the scope `paykit_settlements`, which every payee scope requires (1.5, 3.1, 5.7) | differs: predates it, writes no mark and doesn't require the scope |
 
 The vector files follow these choices.
