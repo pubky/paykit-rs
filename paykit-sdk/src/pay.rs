@@ -3790,8 +3790,9 @@ impl Paykit {
         })
     }
 
-    /// The checks before a repeat, the same as before a first dispatch (Paykit spec 7.2 step
-    /// 1): a repeat may execute money, so an idempotency guarantee alone doesn't let it go.
+    /// The checks before a repeat, those before a first dispatch but for an Allowance in
+    /// force, which a repeat of a payment already dispatched doesn't need (Paykit spec 7.2
+    /// step 1, 8.3): a repeat may execute money, so an idempotency guarantee alone doesn't let it go.
     /// The app may make an automatic attempt now (no alarm, not in reconcile mode, the clocks
     /// within the tolerance), its own `identity.json` is confirmed within the last 60 s, and
     /// the destination passes its checks, for an automatic payment. `None` lets the repeat
@@ -3877,8 +3878,9 @@ impl Paykit {
             return Ok(Err(Held::Check(crate::hold::payer_pass_refusal())));
         }
         // An executor checks its Allowance again before money moves (Paykit spec 7.2 step 1,
-        // 8.3): one ended, rejected, handed off or off the consent list pays nothing.
-        // Checked against its proof first (`Paykit::entry_allowance`): an entry it doesn't
+        // 8.3): at a first dispatch, one ended, rejected, handed off or off the consent list
+        // pays nothing; a repeat is held only by what can't be known (below). Checked against
+        // its proof first (`Paykit::entry_allowance`): an entry it doesn't
         // bear out is held, that entry alone, never paid.
         let allowance_id = match self.entry_allowance(entry).await? {
             Ok(allowance_id) => allowance_id,

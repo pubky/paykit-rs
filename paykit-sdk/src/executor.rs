@@ -789,7 +789,7 @@ impl Paykit {
     /// "Handoff"), and neither does its consent removed for those. What can't be known holds
     /// it: the record not held or not binding, its view or its ledger's divergent or seen so
     /// and not confirmed (Paykit spec 6), its current write one the app ignores and the user
-    /// hasn't confirmed, its consent to be confirmed again after a restore or a `missed`
+    /// hasn't confirmed or a removed app's after its `distrust_from`, its consent to be confirmed again after a restore or a `missed`
     /// item, or no consent entry at all.
     pub(crate) async fn repeat_under_allowance_held(
         &mut self,
@@ -807,6 +807,11 @@ impl Paykit {
         }
         if shared.flagged && !self.ignored_write_confirmed(record).await? {
             return refuse("the Allowance record's current write is one this app ignores");
+        }
+        if written_by_removed_app(self.app.own_identity(), &shared) {
+            return refuse(
+                "the Allowance record's write is a removed app's after its distrust_from",
+            );
         }
         let ledger = self.app.record_key(&ledger_target(
             &allowance.counterparty,

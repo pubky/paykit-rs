@@ -1336,14 +1336,16 @@ async fn test_executor_pays_inside_its_limits_until_ended_through_a_restore() {
 /// a request for 0.5 btc paid under it and the dispatch left in flight. Returns bob's shop,
 /// the wallet, the wallet's record key and the attempt.
 async fn executor_in_flight(w: &World) -> (Paykit, Paykit, [u8; 32], paykit_lib::AttemptId) {
-    executor_in_flight_on(w, true).await
+    let (shop, wallet, record, attempt, _) = executor_in_flight_on(w, true).await;
+    (shop, wallet, record, attempt)
 }
 
-/// [`executor_in_flight`] on a rail that is idempotent on the attempt ID or not.
+/// [`executor_in_flight`] on a rail that is idempotent on the attempt ID or not, with the
+/// request paid.
 async fn executor_in_flight_on(
     w: &World,
     idempotent: bool,
-) -> (Paykit, Paykit, [u8; 32], paykit_lib::AttemptId) {
+) -> (Paykit, Paykit, [u8; 32], paykit_lib::AttemptId, RequestRef) {
     w.rail.set_declaration(
         paykit_sdk::rail::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
             .with_idempotent(idempotent),
@@ -1377,7 +1379,7 @@ async fn executor_in_flight_on(
     else {
         panic!("in flight");
     };
-    (shop, wallet, record, attempt_id)
+    (shop, wallet, record, attempt_id, request)
 }
 
 /// The rail's calls for `attempt` once `wallet` resumes a minute later.
@@ -1429,10 +1431,19 @@ async fn test_executor_repeat_finishes_a_dispatch_under_an_allowance_conflicted_
     // Allowance is conflicted, and one already dispatched finishes (Paykit spec 8.3,
     // "Conflicted"): the resume repeats it with the same idempotency key.
     let w = World::new();
-    let (_shop, mut wallet, record, attempt) = executor_in_flight(&w).await;
+    let (mut shop, mut wallet, record, attempt) = executor_in_flight(&w).await;
     propose_again(&w, &wallet, &record).await;
     wallet.receive(None).await.unwrap();
     assert_eq!(calls_after_resume(&w, &mut wallet, &attempt).await, 2);
+    let next = request(&w, &mut shop, &mut wallet, "0.1").await;
+    let refused = wallet
+        .pay_under_allowance(&next, &record)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::AllowanceConflicted)),
+        "{refused:?}"
+    );
 }
 
 #[tokio::test]
@@ -1441,7 +1452,7 @@ async fn test_executor_no_repeat_under_an_allowance_on_a_method_without_idempote
     // or not, and the attempt stays "may be paid" (Paykit spec 7.2, "What a payment method
     // declares").
     let w = World::new();
-    let (mut shop, mut wallet, _, attempt) = executor_in_flight_on(&w, false).await;
+    let (mut shop, mut wallet, _, attempt, _) = executor_in_flight_on(&w, false).await;
     shop.receive(None).await.unwrap();
     let theirs = shop.allowances().await.unwrap()[0].record;
     shop.end_allowance(&theirs).await.unwrap();
@@ -1452,15 +1463,26 @@ async fn test_executor_no_repeat_under_an_allowance_on_a_method_without_idempote
 #[tokio::test]
 async fn test_executor_no_repeat_while_the_allowance_needs_confirming_again() {
     // A `missed` item while the dispatch is in flight: every Allowance on the consent list
-    // is to be confirmed again, so the method isn't called again until the user does
-    // (Paykit spec 7.2, 8.3).
+    // is to be confirmed again, so the method isn't called again until the user does, also
+    // once the user has seen that the request may have been cancelled (Paykit spec 7.2,
+    // 8.3, "After a restore").
     let w = World::new();
-    let (_shop, mut wallet, _, attempt) = executor_in_flight(&w).await;
+    let (_shop, mut wallet, record, attempt, request) = executor_in_flight_on(&w, true).await;
     let now = w.clock.now_ms();
     w.alice.switch().push_missed(1, now - 1_000, now);
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
+    wallet
+        .confirm_possibly_cancelled(&request, UserConfirmed::new())
+        .await
+        .unwrap();
     assert_eq!(calls_after_resume(&w, &mut wallet, &attempt).await, 1);
+    // Once the user confirms the Allowance again, the repeat goes.
+    wallet
+        .confirm_allowance_again(&record, UserConfirmed::new())
+        .await
+        .unwrap();
+    assert_eq!(calls_after_resume(&w, &mut wallet, &attempt).await, 2);
 }
 
 #[tokio::test]
