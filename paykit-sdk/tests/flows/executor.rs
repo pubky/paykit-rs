@@ -3212,3 +3212,99 @@ async fn test_executor_refuses_an_occurrence_attempted_under_another_allowance()
     let (_, ledger) = held(&other, &second).await;
     assert!(ledger.is_none_or(|l| l.entries.is_empty()));
 }
+
+/// Bob's one-time request for 0.5 btc, signed by his shop with a `created_at` `age` before
+/// now and received by the wallet, which verifies a service time now as it does.
+async fn request_aged(w: &World, wallet: &mut Paykit, age: u64) -> RequestRef {
+    let now = w.clock.now_ms();
+    let body = json!({
+        "amount": { "asset": "btc", "value": "0.5" },
+        "payment_reference": "order-1",
+        "proposal_expires_at": null,
+        "payment_endpoints": { "btc-lightning-bolt11": "lnbc1invoice" }
+    });
+    let keys = w.bob.identity().app_keys("shop");
+    let cert = w.bob.switch().app(&keys.app_id_bytes()).cert.unwrap();
+    let message = pubky_switch_core::message::Message::new(
+        "paykit.payment_request",
+        pubky_switch_core::message::Sender::of_app(w.bob.identity().public(), &keys),
+        w.alice.identity().public(),
+        now - age,
+        Vec::new(),
+        body.as_object().cloned().unwrap(),
+    )
+    .unwrap();
+    w.alice
+        .switch()
+        .send_plaintext(
+            w.bob.identity().public(),
+            &cert,
+            &message.sign(&keys).unwrap(),
+            &[wallet.app_id()],
+        )
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().highest_service_time(), Some(now));
+    wallet.requests().await.unwrap()[0].request
+}
+
+const YEAR_MS: u64 = 365 * 24 * crate::common::HOUR_MS;
+
+#[tokio::test]
+async fn test_executor_pays_a_one_time_request_just_within_365_days() {
+    let w = World::new();
+    let (_shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let request = Box::pin(request_aged(&w, &mut wallet, YEAR_MS - 1)).await;
+    let paid = wallet.pay_under_allowance(&request, &record).await.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_executor_refuses_a_one_time_request_365_days_old() {
+    // Past 365 days on the service time, an attempt made by hand may soon no longer show
+    // to the executor's check of the occurrence: paid only by hand (Paykit spec 8.3,
+    // "Executor"), with nothing written.
+    let w = World::new();
+    let (_shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let request = Box::pin(request_aged(&w, &mut wallet, YEAR_MS)).await;
+    let refused = wallet
+        .pay_under_allowance(&request, &record)
+        .await
+        .unwrap_err();
+    assert!(refused_for(&refused, "365 days old"), "{refused:?}");
+    assert!(w.rail.all_executions().is_empty());
+    let (_, ledger) = held(&wallet, &record).await;
+    assert!(ledger.unwrap().entries.is_empty());
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+}
+
+#[tokio::test]
+async fn test_executor_one_time_request_reaching_365_days_before_the_dispatch_held() {
+    // Bob's request is 365 days less 1 ms old when the executor's checks pass. Right after
+    // the executor reads the ledger, the service time moves 1 ms on: the dispatch judges the
+    // age again on the service time verified then and holds (Paykit spec 8.3, "Executor").
+    let w = Arc::new(World::new());
+    let wallet_store = Arc::new(PayingStore::default());
+    let reads = Arc::new(ReadHook::new(Arc::clone(&w.router)));
+    let (_shop, mut wallet, record) = Box::pin(set_up_through(
+        &w,
+        Arc::clone(&wallet_store) as Arc<dyn StateStore>,
+        Arc::clone(&reads) as Arc<dyn Transport>,
+    ))
+    .await;
+    let request = Box::pin(request_aged(&w, &mut wallet, YEAR_MS - 1)).await;
+    let ledger = ledger_key(&wallet, &record).await;
+    let clock = Arc::clone(&w.clock);
+    reads.after_read(
+        &format!("/records/{}", pubky_switch_core::enc::b64(&ledger)),
+        move || clock.advance_ms(1),
+    );
+    Box::pin(held_at_the_dispatch(&w, &mut wallet, &request, &record)).await;
+    assert!(reads.fired());
+    assert!(!wallet_store.paying_seen());
+}

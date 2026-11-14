@@ -58,8 +58,9 @@
 //! - **Immediately before the dispatch** (Paykit spec 8.1, 8.3): the deny list, the request
 //!   record, the block floor and the Allowance record are read from the switch again, twice,
 //!   before the attempt's `Paying` commit and after it, and the dispatch holds on a block, a
-//!   stop, a raise of the floor past the request's date, an Allowance no longer in force
-//!   (ended, rejected, conflicted, handed off, its grant voided, paused), or a read that
+//!   stop, a raise of the floor past the request's date, a one-time request 365 days old by
+//!   the service time verified then (`ONE_TIME_AUTOMATIC_AGE_MS`), an Allowance no longer in
+//!   force (ended, rejected, conflicted, handed off, its grant voided, paused), or a read that
 //!   fails (`Paykit::automatic_dispatch_held`); the batch doesn't condition on the floor's
 //!   version, and the Allowance record can change after the batch is applied.
 //!
@@ -113,6 +114,22 @@ const COMPACT_FROM: usize = MAX_LEDGER_VALUE / 4 * 3;
 
 /// How many times a grant's write is built again after its record changed meanwhile.
 const GRANT_TRIES: usize = 3;
+
+/// How long after its signed `created_at` an executor pays a one-time request automatically,
+/// on the service clock: 365 days (Paykit spec 8.3, "Executor"). A one-time request without a
+/// payment deadline keeps its claim only 400 days after the claim's last entry; past that, an
+/// earlier attempt made by hand or outside the Allowance no longer shows to the executor's
+/// check of the occurrence. 365 days stays within that retention with margin, and an older
+/// request is paid only by hand.
+pub(crate) const ONE_TIME_AUTOMATIC_AGE_MS: u64 = 365 * 24 * 60 * 60 * 1000;
+
+/// Whether a one-time request signed at `created_at_ms` is past the age an executor pays it
+/// at automatically ([`ONE_TIME_AUTOMATIC_AGE_MS`]) on `service`, the latest service time the
+/// app verified: created that long before it or longer, compared in milliseconds, or with no
+/// service time verified, so its age can't be told.
+pub(crate) fn past_automatic_age_on(created_at_ms: u64, service: Option<u64>) -> bool {
+    service.is_none_or(|service| created_at_ms.saturating_add(ONE_TIME_AUTOMATIC_AGE_MS) <= service)
+}
 
 fn not_automatic(why: &str) -> PaykitError {
     Refusal::NotAutomatic(why.into()).into()
@@ -1326,6 +1343,14 @@ impl Paykit {
                     "the request is dated before the block floor, or the floor can't be read",
                 ));
             }
+            // A one-time request created 365 days or more before the latest service time
+            // verified, or while none is, is paid only by hand ([`ONE_TIME_AUTOMATIC_AGE_MS`]).
+            // Judged again at the first dispatch, on the service time verified then.
+            if self.past_automatic_age(stored) {
+                return Err(not_automatic(
+                    "the one-time request is 365 days old or more, or its age can't be told",
+                ));
+            }
         }
         if record
             .allowance_id
@@ -1346,6 +1371,13 @@ impl Paykit {
             ));
         }
         Ok(())
+    }
+
+    /// Whether `stored` is a one-time request past the age an executor pays it at
+    /// automatically, on the latest service time this app verified ([`past_automatic_age_on`]).
+    pub(crate) fn past_automatic_age(&self, stored: &paykit_lib::records::StoredMessage) -> bool {
+        crate::floor::floor_applies(stored)
+            && past_automatic_age_on(stored.message().created_at_ms, self.service_time())
     }
 
     /// The ledger the executor builds on (Paykit spec 8.3, "Building on a version accepts
@@ -3002,5 +3034,19 @@ mod tests {
         let next = next_ledger(&terms(), &base, &claims, NOW, entry(3, NOW, None)).unwrap();
         let outcomes: Vec<_> = next.entries.iter().map(|e| e.outcome).collect();
         assert_eq!(outcomes, vec![Some(EntryOutcome::Done), None, None]);
+    }
+
+    #[test]
+    fn test_one_time_age_bound_on_the_service_time() {
+        let created = 1_000;
+        let bound = created + ONE_TIME_AUTOMATIC_AGE_MS;
+        assert!(!past_automatic_age_on(created, Some(bound - 1)));
+        assert!(past_automatic_age_on(created, Some(bound)));
+        assert!(!past_automatic_age_on(created, Some(0)));
+    }
+
+    #[test]
+    fn test_one_time_age_unknown_without_a_service_time() {
+        assert!(past_automatic_age_on(1_000, None));
     }
 }
