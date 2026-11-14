@@ -18,10 +18,11 @@
 //! - at a receive once less than half of its current version's lifetime remains (Renewal).
 //!
 //! **Blocked counterparties** (Paykit spec 8.1; v0.1 "Block A Peer"). At an app holding
-//! `paykit_contacts`, no list goes to a counterparty the deny list holds, judged as for a payment
-//! the user starts ([`Paykit::deny_list`]: the copy read in the last 10 minutes, or read
-//! first), nor to anyone when that read fails: no renewal, answer or re-send of a changed
-//! list. What is owed it goes at the first receive after it is unblocked.
+//! `paykit_contacts`, no list goes to a counterparty the deny list holds, judged as for a
+//! payment the user starts ([`Paykit::deny_list`]: the copy read in the last 10 minutes, or
+//! read first), nor to anyone when that read fails: no renewal, answer or re-send of a
+//! changed list. What is owed it goes at the first receive after it is unblocked. A
+//! withdrawal goes all the same ([`Paykit::withdraw_list_from`]).
 //!
 //! Each version is the later of the device clock and one past the last version published
 //! ([`key::LAST_VERSION`]), so it is above every earlier one, also after a restore; its
@@ -74,8 +75,8 @@ use crate::rail::{SingleUseIssue, SingleUseRelease};
 use crate::receive::{Fail, KEPT_MESSAGE_MS};
 use crate::state::{self, key, StateKey, Tx};
 
-/// How long a Private Payment List this app publishes is usable: 30 days from publishing, as
-/// the prototype sets (Paykit wire 4.13), the most a payer uses one for anyway.
+/// How long a Private Payment List this app publishes is usable: 30 days from publishing
+/// (Paykit wire 4.13), the most a payer uses one for anyway.
 pub const LIST_LIFETIME_MS: u64 = 30 * DAY_MS;
 
 /// How often the newest list version is sent again to one counterparty at most, in answer
@@ -258,7 +259,6 @@ pub(crate) struct Offered {
     pub(crate) asked: bool,
     /// A restore brought it back before it was seen delivered (`Fate::Doubtful` once a
     /// receive settles it).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) restored: bool,
 }
 
@@ -321,12 +321,10 @@ pub(crate) struct Recipient {
     pub(crate) resent_at_ms: Option<u64>,
     /// When the app first withdrew its list from the counterparty, device clock: the
     /// withdrawal's re-sends are hourly for a day from then, then daily.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) withdrawn_at_ms: Option<u64>,
     /// When an owed version first failed to go for a reason that isn't a store failure,
     /// such as the size bound, and when it was last tried: it is tried again hourly for a
     /// day from the first, then daily.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) failed_since_ms: Option<(u64, u64)>,
     /// When each newer version sent in answer to a list request went, device clock, within
     /// the last 24 hours.
@@ -335,12 +333,7 @@ pub(crate) struct Recipient {
     /// A restore withdrew the list from it, as the backup's version it holds may carry
     /// endpoints the user removed since ([`Paykit::withdraw_restored_lists`]): it gets the
     /// lists again when the host sets its list, unless the host withdraws it itself first.
-    #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) paused_by_restore: bool,
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 impl Recipient {
@@ -785,9 +778,9 @@ impl Paykit {
     /// the user made since the backup this way, then sets its list. Its version is above
     /// anything an app of this identity sent before the restore: while the lists wait, a
     /// version is strictly above the later of the device clock and the highest service time
-    /// verified, plus twice the clock tolerance. The host's withdrawal also ends the restore's own
-    /// (a list the restored outbox carried, withdrawn behind it): the counterparty doesn't
-    /// get the lists again when the host sets its list.
+    /// verified, plus twice the clock tolerance. The host's withdrawal also ends the
+    /// restore's own, of a list the restored outbox carried ([`Paykit::restore`]): the
+    /// counterparty doesn't get the lists again when the host sets its list.
     ///
     /// # Errors
     ///
@@ -818,13 +811,15 @@ impl Paykit {
     /// After a restore, while the lists wait for the host, withdraw the list from each
     /// counterparty that gets the lists whose newest version the restore brought back before
     /// it was seen delivered, that offers endpoints, and that the restored outbox carries
-    /// (Paykit spec 7.2, 8.4). The restored outbox delivers that version after the restore,
-    /// and it holds the backup's endpoints, which the user may have removed since. The empty version goes behind it, newer, so a payer that
-    /// takes both holds no list; one that takes the old version alone holds it until the
-    /// empty one comes. Such a counterparty gets the lists again when the host sets its list
-    /// ([`Paykit::set_list_endpoints`]). Run by the restore before the app is handed to the
-    /// host, and again at each receive until each has gone; a version the app can't tell was
-    /// delivered counts as not delivered.
+    /// (Paykit spec 7.2, 8.4). That version holds the backup's endpoints, which the user may
+    /// have removed since. Still in the outbox, it is taken out of it before the host can
+    /// flush ([`Paykit::take_out_carried`]), so it never leaves from this store; one
+    /// delivered from it since is superseded by the empty version, newer, which a payer then
+    /// holds instead. The empty version goes in both cases: the device the backup came from
+    /// may have delivered the old one. Such a counterparty gets the lists again when the host
+    /// sets its list ([`Paykit::set_list_endpoints`]). Run by the restore before the app is
+    /// handed to the host, and again at each receive until each has gone; a version the app
+    /// can't tell was delivered counts as not delivered.
     ///
     /// # Errors
     ///
@@ -835,8 +830,7 @@ impl Paykit {
         }
         for mut recipient in self.recipients().await? {
             // A withdrawal this pass recorded whose message the client never took (its
-            // queueing failed) goes again now, not on the withdrawal's hourly cadence: the
-            // carried list may go with the host's next flush.
+            // queueing failed) goes again now, not on the withdrawal's hourly cadence.
             if recipient.paused_by_restore && !recipient.active {
                 let unqueued = match recipient.current() {
                     Some(newest)
@@ -875,23 +869,29 @@ impl Paykit {
                 continue;
             };
             // Only a version the restored outbox carries goes after the restore: one queued
-            // still, or delivered from it since. One the client doesn't know was not carried,
-            // so nothing of this restore sends it. An answer that can't be read counts as
-            // carried.
-            let carried = match self.app.delivery(&newest.msg_id).await {
-                Ok(Some(Delivery::Queued { .. } | Delivery::Accepted { .. })) => true,
-                Ok(_) => false,
+            // still, in a batch the client keeps that queues it, or delivered from it since.
+            // One the client doesn't know wasn't carried, unless an earlier pass marked its
+            // counterparty and took it out before it stopped: that one is withdrawn now. An
+            // answer that can't be read counts as still queued.
+            let (queued, delivered) = match self.app.delivery(&newest.msg_id).await {
+                Ok(Some(Delivery::Queued { .. } | Delivery::Kept { .. })) => (true, false),
+                Ok(Some(Delivery::Accepted { .. })) => (false, true),
+                Ok(_) => (false, false),
                 Err(error @ (AppError::Store(_) | AppError::Alarm(_))) => return Err(error.into()),
-                Err(_) => true,
+                Err(_) => (true, false),
             };
-            if !carried {
+            if !queued && !delivered && !recipient.paused_by_restore {
                 continue;
             }
             let counterparty = recipient.counterparty;
+            // Marked first: a pass that stops after taking the version out still withdraws.
             if !recipient.paused_by_restore {
                 recipient.paused_by_restore = true;
                 self.local_put(&key::list_recipient(&counterparty), &recipient)
                     .await?;
+            }
+            if queued {
+                self.take_out_carried(&recipient).await?;
             }
             match Box::pin(self.publish_to(&[counterparty], true, None)).await {
                 Ok(_) => {}
@@ -899,6 +899,44 @@ impl Paykit {
                     return Err(error)
                 }
                 // Tried again at the next receive.
+                Err(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Take the list versions the restored outbox carries to `recipient` out of it before
+    /// the host can flush (Paykit spec 7.2, "What a restore loses"): the client's
+    /// [`pubky_switch_client::app::App::withdraw_queued`] gives up every message to that
+    /// counterparty not delivered yet, and tells of each once
+    /// ([`AppEvent::MessageUndelivered`]). A list version so given up never leaves from this
+    /// store, but stays Doubtful, its payloads never given back: the device the backup came
+    /// from may have delivered it. Each other message given up is sent again where the client
+    /// still keeps it as sent ([`pubky_switch_client::app::App::resend`]); one it doesn't,
+    /// such as every message the restored outbox carried that this store never saw
+    /// accepted, stays given up, and the host is told of it as of any message given up
+    /// undelivered (Paykit spec 8.1, "Undelivered messages").
+    ///
+    /// # Errors
+    ///
+    /// A store failure or an alarm. A client that has stopped takes nothing out.
+    async fn take_out_carried(&mut self, recipient: &Recipient) -> Result<()> {
+        let withdrawn = match self.app.withdraw_queued(&recipient.counterparty).await {
+            Ok(withdrawn) => withdrawn,
+            Err(error @ (AppError::Store(_) | AppError::Alarm(_))) => return Err(error.into()),
+            Err(_) => return Ok(()),
+        };
+        let lists: BTreeSet<&str> = recipient
+            .versions
+            .iter()
+            .map(|offered| offered.msg_id.as_str())
+            .collect();
+        for msg_id in withdrawn.iter().filter(|id| !lists.contains(id.as_str())) {
+            match Box::pin(self.app.resend(msg_id)).await {
+                Ok(_) => {}
+                Err(error @ (AppError::Store(_) | AppError::Alarm(_))) => return Err(error.into()),
+                // Not kept as sent, or not delivered now: given up, or left queued for the
+                // next flush.
                 Err(_) => {}
             }
         }
@@ -1120,7 +1158,8 @@ impl Paykit {
     /// Send each of `counterparties` a newer version, empty when `withdraw`, each on its own.
     /// One whose sends are held ([`Paykit::list_held`]) is sent nothing: a newer version is
     /// owed it, which goes once a read of the deny list shows it not blocked. A withdrawal
-    /// goes all the same: it only stops payments ([`Paykit::withdraw_list_from`]). `undelivered` is as for [`Paykit::settled`].
+    /// goes all the same: it only stops payments ([`Paykit::withdraw_list_from`]).
+    /// `undelivered` is as for [`Paykit::settled`].
     async fn publish_to(
         &mut self,
         counterparties: &[[u8; 32]],
@@ -1463,9 +1502,9 @@ impl Paykit {
     /// back. Otherwise each counterparty's versions are settled, and a newer version is sent
     /// where one is owed, a list request asks for one within the 24-hour bound, or a renewal
     /// is due; else the newest is sent again where a request named an older one. Nothing is
-    /// sent to a counterparty whose sends are held ([`Paykit::list_held`]). The releases kept are asked of
-    /// the payment method last. `duties` are the duty events the receive listed after its
-    /// read, which tell the messages the client gave up ([`undelivered`]).
+    /// sent to a counterparty whose sends are held ([`Paykit::list_held`]). The releases kept
+    /// are asked of the payment method last. `duties` are the duty events the receive listed
+    /// after its read, which tell the messages the client gave up ([`undelivered`]).
     pub(crate) async fn tend_lists(
         &mut self,
         removed: bool,

@@ -445,7 +445,8 @@ impl Paykit {
     }
 
     /// Keep, in `tx`, the host's notice that the message `msg_id` this app sent was given up
-    /// undelivered, when an activity record of this app holds it ([`crate::NoticeKind::MessageUndelivered`]).
+    /// undelivered, when an activity record of this app holds it
+    /// ([`crate::NoticeKind::MessageUndelivered`]).
     /// Whether it is kept, or was already: `false` when no record holds it.
     async fn note_undelivered(&mut self, msg_id: &str, tx: &mut Tx) -> Result<bool> {
         let Some(record) = self.record_holding(msg_id).await? else {
