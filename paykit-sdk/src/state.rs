@@ -1397,13 +1397,13 @@ pub(crate) mod key {
         format!("{STORED_NOTES}{}/{msg_id}", b64(sender))
     }
 
-    /// The notice that `sender`'s message `msg_id` was given up.
     /// The notice that a `ledger_handoff` `writer` wrote into the Allowance record `record`
     /// is ignored.
     pub(crate) fn handoff_notice(record: &[u8; 32], writer: &[u8; 16]) -> String {
         format!("{NOTICES}{}/handoff-{}", b64(record), b64(writer))
     }
 
+    /// The notice that `sender`'s message `msg_id` was given up.
     pub(crate) fn message_notice(sender: &[u8; 32], msg_id: &str) -> String {
         format!("{NOTICES}{}/{msg_id}", b64(sender))
     }

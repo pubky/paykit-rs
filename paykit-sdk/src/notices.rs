@@ -68,11 +68,14 @@ pub enum NoticeKind {
     /// spec 8.1, "Blocked counterparties"). The app never kept them, so the notice holds no
     /// content: a payment among them shows only in the payment method.
     BlockedMessagesLost,
-    /// The previous executor of an Allowance named, in the Allowance record's
-    /// `ledger_handoff`, a ledger version this app, its new executor, ignores: one before
-    /// the version it holds or built on, or another write at that version (Paykit spec 8.3,
-    /// "Handoff"). The host shows the user the Allowance ([`Notice::allowance`]) and the
-    /// writer ([`Notice::writer_app_id`]); the executor goes on building on its own version.
+    /// This app, the new executor of an Allowance, ignores the Allowance record's
+    /// `ledger_handoff` (Paykit spec 8.3, "Handoff"): the previous executor named a ledger
+    /// version before the one this app holds or built on, or another write at that version,
+    /// and the executor goes on building on its own; or it doesn't read or verify, as when
+    /// any app but the previous executor wrote it, and the executor goes on waiting for one
+    /// that counts. The host shows the user the Allowance ([`Notice::allowance`]) and the
+    /// writer ([`Notice::writer_app_id`]): the named write's signer, or, for one that doesn't
+    /// verify, the app whose Allowance record write carries it.
     LedgerHandoffIgnored,
 }
 

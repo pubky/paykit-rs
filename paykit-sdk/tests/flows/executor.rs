@@ -634,9 +634,10 @@ async fn test_executor_handoff_stops_the_previous_executor() {
     // The notice takes the Allowance off the previous executor's consent list.
     old.receive(None).await.unwrap();
     assert!(!old.allowance(&record).await.unwrap().consented);
-    // The new executor builds on the previous executor's ledger, the version it kept at
-    // the handoff, once it passes every other check (Paykit spec 8.3, "Last ledger
-    // version").
+    // The previous executor names its last ledger version at its next resume; the new
+    // executor then builds on it, the version it kept at the handoff being that one (Paykit
+    // spec 8.3, "Handoff", "Last ledger version").
+    Box::pin(old.resume_payments()).await.unwrap();
     new.receive(None).await.unwrap();
     let paid = new.pay_under_allowance(&second, &record).await.unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");

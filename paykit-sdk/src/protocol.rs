@@ -590,6 +590,7 @@ pub(crate) fn restore_paykit_layer(
                 // but the executor builds on a ledger only through the repair (Paykit spec
                 // 8.3, "Last ledger version").
                 kept.restored = true;
+                kept.term = None;
                 let value = state::encode(&kept).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
@@ -1804,6 +1805,7 @@ mod receive_tests {
                 grants: Vec::new(),
                 msg_ids: Vec::new(),
                 ledger_handoff: None,
+                ledger_handoff_unread: None,
                 unknown: Default::default(),
             }
             .to_json()

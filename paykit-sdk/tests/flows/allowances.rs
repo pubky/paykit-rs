@@ -3465,6 +3465,7 @@ async fn test_allowances_answer_dropped_for_the_bound_taken_again_from_a_resend_
         grants: Vec::new(),
         msg_ids: Vec::new(),
         ledger_handoff: None,
+        ledger_handoff_unread: None,
         unknown: Default::default(),
     };
     let target = allowances_target(&w.alice_id(), &id);
@@ -4011,6 +4012,7 @@ async fn wallet_answer_dropped_then_recorded(
         grants: Vec::new(),
         msg_ids: Vec::new(),
         ledger_handoff: None,
+        ledger_handoff_unread: None,
         unknown: Default::default(),
     };
     let target = allowances_target(&w.bob_id(), &id);
@@ -4313,6 +4315,7 @@ async fn test_allowances_kept_answer_waits_through_a_renewal_without_keys_then_p
         grants: Vec::new(),
         msg_ids: Vec::new(),
         ledger_handoff: None,
+        ledger_handoff_unread: None,
         unknown: Default::default(),
     };
     let target = allowances_target(&w.bob_id(), &record.allowance_id);
@@ -5073,6 +5076,7 @@ async fn test_allowances_answers_of_one_millisecond_placed_in_acceptance_order()
         grants: Vec::new(),
         msg_ids: Vec::new(),
         ledger_handoff: None,
+        ledger_handoff_unread: None,
         unknown: Default::default(),
     };
     let target = allowances_target(&w.bob_id(), &id);
@@ -5637,6 +5641,7 @@ async fn answer_kept_then_recorded_divergent(
         grants: Vec::new(),
         msg_ids: Vec::new(),
         ledger_handoff: None,
+        ledger_handoff_unread: None,
         unknown: Default::default(),
     };
     let target = allowances_target(&w.bob_id(), &id);
@@ -5734,6 +5739,7 @@ async fn records_proposal(
         grants: Vec::new(),
         msg_ids: Vec::new(),
         ledger_handoff: None,
+        ledger_handoff_unread: None,
         unknown: Default::default(),
     };
     let target = allowances_target(&w.bob_id(), id);

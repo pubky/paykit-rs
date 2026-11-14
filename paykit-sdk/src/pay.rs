@@ -2024,7 +2024,6 @@ impl Paykit {
                 for write in ops.entries {
                     batch = batch.entry(write);
                 }
-                batch = batch.locals(ops.locals);
                 if ops.first_ledger_write {
                     first_ledger_write = Some(ops.record_key);
                 }
@@ -2797,7 +2796,7 @@ impl Paykit {
             };
             let applied_ledger = ledger.as_ref().map(|l| (l.record_key, l.ledger.clone()));
             if let Some(ledger) = ledger {
-                batch = batch.entry(ledger.write).locals(ledger.locals);
+                batch = batch.entry(ledger.write);
             }
             let mut finished = entry.clone();
             // An acceptance still owed keeps the entry where a resume visits it: the outcome
@@ -3030,7 +3029,7 @@ impl Paykit {
     /// attempt the client knows no batch of, which never says it was never written. A batch
     /// ended past the client's retention, kept before a restore, or written another way is
     /// unknown to the client, and only the claim tells whether the attempt is on it.
-    async fn attempt_still_kept(&self, entry: &JournalEntry) -> Result<bool> {
+    pub(crate) async fn attempt_still_kept(&self, entry: &JournalEntry) -> Result<bool> {
         let attempt = ClaimAttempt {
             claim_key: entry.obligation,
             attempt_id: entry.attempt()?.to_bytes(),
