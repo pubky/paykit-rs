@@ -2023,15 +2023,21 @@ impl Paykit {
             Err(error) => {
                 if let PaykitError::Client(client) = &error {
                     if let Some(view) = claim_conflict(client.unkept()) {
-                        // A period's claim moved since it was read: an attempt opened on it
-                        // refuses the cancellation; one that finished leaves a conflict,
-                        // for the caller to read again (Paykit spec 8.2).
                         if !recurring {
                             refuse_on_claim(&view)?;
-                        } else if view.status == ClaimStatus::Attempting {
-                            return Err(Refusal::PaymentInProgress.into());
                         }
                     }
+                }
+                // A listed period's claim moved since it was read: the claims, read again,
+                // refuse the cancellation as the check before it does, an open attempt as in
+                // progress and an `unknown` one as may be paid; claims that show no open
+                // attempt leave a conflict, for the caller to read again (Paykit spec 8.2,
+                // "Ending").
+                if recurring
+                    && answer == Answer::Cancel
+                    && error.code() == Some(ErrorCode::Conflict)
+                {
+                    self.cancel_conditions(&record, request).await?;
                 }
                 // The proposal expired at the service: the answer's verified time says so.
                 // Only on `409 conflict`: any other failure is the error. The record the

@@ -2893,3 +2893,73 @@ async fn test_period_payments_by_policy_built_again_over_a_period_record_written
     let outcome = by_policy(&mut wallet, &request, january()).await.unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
+
+#[tokio::test]
+async fn test_period_payments_cancellation_over_a_claim_turned_unknown_refused_as_may_be_paid() {
+    // January's claim shows no open attempt when the wallet's cancellation reads it; before
+    // its batch, the phone opens another attempt on January, which the tablet writes
+    // `unknown`. The batch fails on the claim's step, and the claims, read again, refuse the
+    // cancellation as may be paid, as the check before it does (Paykit spec 8.2, "Ending").
+    let w = Arc::new(World::new());
+    let reads = Arc::new(crate::common::ReadHook::new(Arc::clone(&w.router)));
+    let mut shop = w.shop().await;
+    let mut wallet = w
+        .join_through(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().build().unwrap(),
+            PaykitConfig::default(),
+            store(),
+            Arc::clone(&reads) as Arc<dyn pubky_switch_client::transport::Transport>,
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut phone = w.wallet("phone").await;
+    let mut tablet = w.wallet("tablet").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    phone.receive(None).await.unwrap();
+    // January's first attempt failed: the period stays listed, its claim with no open
+    // attempt.
+    w.rail.next(Behaviour::Fail);
+    let _ = by_user(&mut phone, &request, january(), PayOptions::default()).await;
+    let obligation = period_obligation(&phone, january()).await;
+    wallet.receive(None).await.unwrap();
+    tablet.receive(None).await.unwrap();
+    let world = Arc::clone(&w);
+    reads.after_read(
+        &format!("/claims/{}", pubky_switch_core::enc::b64(&obligation)),
+        move || {
+            std::thread::spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        world.rail.next(Behaviour::Hang);
+                        let pending =
+                            by_user(&mut phone, &request, january(), PayOptions::default())
+                                .await
+                                .unwrap();
+                        world.clock.advance_ms(PAST_ORPHAN_MS);
+                        tablet.receive(None).await.unwrap();
+                        tablet
+                            .resolve_attempt(
+                                &obligation,
+                                pending.attempt_id(),
+                                paykit_sdk::Resolution::Unknown,
+                                UserConfirmed::new(),
+                            )
+                            .await
+                            .unwrap();
+                    });
+            })
+            .join()
+            .unwrap();
+        },
+    );
+    let refused = wallet.cancel_request(&request, None).await.unwrap_err();
+    assert!(reads.fired());
+    assert!(
+        matches!(refusal(&refused), Refusal::MayBePaid { .. }),
+        "{refused:?}"
+    );
+}
