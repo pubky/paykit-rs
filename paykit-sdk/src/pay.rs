@@ -3420,8 +3420,13 @@ impl Paykit {
     /// ([`Paykit::fresh_record_withholds`]: cancelled, rejected, `manual_only`, held after a
     /// restore, divergent), or isn't there, doesn't read as the request or holds none; or the
     /// floor holds the request ([`Paykit::floor_holds_read`]). Then it reads the three again,
-    /// in the same order, judging nothing, and holds unless each shows what its first read
-    /// did: the deny list the same entries, each record the same write ([`WriteStamp`]).
+    /// in the same order, and holds unless each shows what its first read did (the deny list
+    /// the same entries, each record the same write, [`WriteStamp`]), or the deny list now
+    /// holds the payee, or the record isn't there, doesn't read or holds no request. Each read
+    /// shows the switch's current state, never a copy this app keeps: the deny list from
+    /// `GET /allow`, which the client always fetches; the record and the floor from
+    /// `read_record_fresh`, a read that shows anything but the switch's current write holding
+    /// the dispatch.
     ///
     /// Another own app can block the payee, record a cancellation or a rejection, mark the
     /// record `manual_only` or raise the floor while this app awaits anything, between these
@@ -3431,8 +3436,11 @@ impl Paykit {
     /// list, so each value judged held at that instant. A read that fails, or a record not
     /// there or not readable at either read, holds the dispatch. A write that lands after its
     /// own second read is too late for this call: the payment method's call can't be made
-    /// conditional on the switch's state, so no read before it sees a write after that read;
-    /// only code with no await runs between the last read and the call.
+    /// conditional on the switch's state, so no read before it sees a write after that read.
+    /// After the second collect's last switch read, only this app's own store is awaited
+    /// (for a recurring request, the copy of the record just taken; for a payment without a
+    /// request, the commit of the deny list read and the widenings it applies), and then
+    /// only code with no await runs before the call.
     async fn automatic_dispatch_held(&mut self, entry: &JournalEntry) -> Result<bool> {
         let Some(judged) = Box::pin(self.shared_collect(entry, true)).await? else {
             return Ok(true);
@@ -3446,9 +3454,10 @@ impl Paykit {
     /// One read of the identity's state an automatic dispatch of `entry` is judged by
     /// ([`Paykit::automatic_dispatch_held`]): the deny list, then the request record, then the
     /// block floor for a one-time request, each from the switch now. `None` when a read fails,
-    /// the record isn't there, doesn't read or holds no request, or, when `judge`, the deny
-    /// list holds the payee, the record withholds the request or the floor holds it. Without
-    /// `judge`, nothing awaits after the last read.
+    /// the deny list holds the payee, the record isn't there, doesn't read or holds no
+    /// request, or, when `judge`, the record withholds the request or the floor holds it.
+    /// Without `judge`, nothing more is read from the switch after the last read; only the
+    /// app's own store is.
     async fn shared_collect(
         &mut self,
         entry: &JournalEntry,

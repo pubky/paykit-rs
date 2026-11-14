@@ -673,7 +673,12 @@ impl Paykit {
                 fold_into_floor(tx, floor, until)?;
             }
             BlockedCount::Put { mark, evicted } => {
-                if let Some(gone) = evicted {
+                if let Some(mut gone) = evicted {
+                    // A request the mark still names as queued that the outbox shows delivered
+                    // counts as the ask ([`Paykit::delivered_in_time`]), as at expiry.
+                    if gone.asked_at_ms.is_none() {
+                        gone.asked_at_ms = self.delivered_in_time(&gone).await?;
+                    }
                     tell_lost_if_unasked(tx, &gone, raised)?;
                     fold_into_floor(tx, floor, gone.latest_ms)?;
                     tx.delete(&family.key(&gone.sender));
@@ -1066,8 +1071,11 @@ pub(crate) fn fold_into_floor(
     Ok(())
 }
 
-/// Tell the host, in `tx`, that `gone`'s window can no longer come back, when no ask for it
-/// was delivered: a block's mark that expires or that the bound drops (module docs).
+/// Tell the host, in `tx`, that `gone`'s window can no longer come back, when `gone` records
+/// no ask delivered: a block's mark that expires or that the bound drops (module docs). At
+/// expiry and when a widening is applied, the delivery of a request the mark still names as
+/// queued is read first ([`Paykit::delivered_in_time`]); the receive step, which makes no
+/// client reads, tells a mark the bound drops there by the mark alone.
 pub(crate) fn tell_lost_if_unasked(
     tx: &mut crate::state::Tx,
     gone: &DropMark,

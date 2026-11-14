@@ -44,7 +44,9 @@
 use paykit_lib::derive::natural_key;
 use paykit_lib::records::{BlockFloorRecord, StoredMessage};
 use paykit_lib::Body;
-use pubky_switch_client::app::{OpBatch, RecordContent, RecordTarget, SharedRecord, SignedMessage};
+use pubky_switch_client::app::{
+    KeptReason, OpBatch, RecordContent, RecordRead, RecordTarget, SharedRecord, SignedMessage,
+};
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
 
@@ -157,16 +159,29 @@ impl Paykit {
         Ok(dated_before(stored, self.shared_floor().await?, owed))
     }
 
-    /// The floor record read from the switch now (`GET /records/{key}`), as the app holds
-    /// it after the read, `None` inside for no record; `None` for a read that fails, which
-    /// never counts as a floor that doesn't hold a request. Read immediately before an
-    /// automatic dispatch (module docs, "Applied before every automatic attempt"), as the
-    /// deny list is read again there (Paykit spec 8.1, How fresh the deny list is).
+    /// The floor record as the switch holds it now (`GET /records/{key}`, Switch wire 7.4.9):
+    /// the switch's current write, as the app holds it once taken, or `None` inside when the
+    /// switch holds no record (`404`) and the app holds none either. `None` when nothing read
+    /// now shows the switch's write: a read that fails or that the switch refuses, a write the
+    /// app refuses or that is no newer than the one it holds, or a `404` for a record the app
+    /// holds; none of them counts as a floor that doesn't hold a request, and a copy this app
+    /// keeps is never taken for the switch's. Read immediately before an automatic dispatch
+    /// (module docs, "Applied before every automatic attempt"), as the deny list is read
+    /// again there (Paykit spec 8.1, How fresh the deny list is).
     pub(crate) async fn floor_read_now(&mut self) -> Option<Option<SharedRecord>> {
-        self.app
-            .read_record(&floor_target(&self.identity()))
+        match self
+            .app
+            .read_record_fresh(&floor_target(&self.identity()))
             .await
-            .ok()
+            .ok()?
+        {
+            RecordRead::Fresh(record) => Some(Some(record)),
+            RecordRead::Kept {
+                record: None,
+                reason: KeptReason::NotFound,
+            } => Some(None),
+            _ => None,
+        }
     }
 
     /// Whether `stored` is a one-time request dated before the floor as `read`, the record

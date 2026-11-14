@@ -591,16 +591,11 @@ async fn test_blocked_return_asked_window_not_told_lost_at_expiry() {
     assert_eq!(lost_count(&wallet).await, 0);
 }
 
-#[tokio::test]
-async fn test_blocked_return_window_delivered_before_a_crash_not_told_lost_at_expiry() {
-    // Bob's mark asks and the request is delivered, but the app stops before it writes the
-    // delivery into the mark: the mark still names the request as queued, and no ask as
-    // delivered. Past the mark's expiry, the outbox shows the request delivered in time: the
-    // mark goes, and its window isn't told lost.
-    let w = World::new();
-    let mut wallet = contacts_wallet(&w, store()).await;
-    let mut shop = w.shop().await;
-    Box::pin(came_back(&w, &mut wallet, &mut shop)).await;
+/// Write bob's mark back as it stands when its request was delivered and the delivery isn't
+/// written into it yet, as after a crash, or a flush by the host between two mark passes:
+/// `queued` names the delivered request, and `asked_at_ms` is null. `speculative` as a
+/// widening's mark.
+async fn delivery_not_written_into_the_mark(w: &World, wallet: &mut Paykit, speculative: bool) {
     let sent = wallet
         .app()
         .sent_to(&w.bob_id(), 0, u64::MAX)
@@ -618,6 +613,9 @@ async fn test_blocked_return_window_delivered_before_a_crash_not_told_lost_at_ex
         "msg_id": sent.msg_id,
         "hash": pubky_switch_core::enc::b64(&sent.plaintext.hash()),
     });
+    if speculative {
+        mark["d"]["speculative"] = serde_json::Value::Bool(true);
+    }
     wallet
         .app_mut()
         .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
@@ -626,10 +624,47 @@ async fn test_blocked_return_window_delivered_before_a_crash_not_told_lost_at_ex
         }])
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn test_blocked_return_window_delivered_before_a_crash_not_told_lost_at_expiry() {
+    // Bob's mark asks and the request is delivered, but the app stops before it writes the
+    // delivery into the mark. Past the mark's expiry, the outbox shows the request delivered
+    // in time: the mark goes, and its window isn't told lost.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    Box::pin(came_back(&w, &mut wallet, &mut shop)).await;
+    delivery_not_written_into_the_mark(&w, &mut wallet, false).await;
     w.clock
         .advance_ms(paykit_sdk::KEPT_MESSAGE_MS - 11 * MINUTE_MS);
     wallet.receive(None).await.unwrap();
     assert_eq!(block_marks(&wallet).await, 0);
+    assert_eq!(lost_count(&wallet).await, 0);
+}
+
+#[tokio::test]
+async fn test_blocked_return_window_delivered_not_told_lost_when_a_widening_drops_it() {
+    // Bob's mark, a widening's, asked and its request was delivered by a flush the mark
+    // pass hasn't seen yet. With the bound on marks full, a `missed` item's widening marks
+    // carol, whom the deny list holds, and the bound drops bob's mark: the outbox shows his
+    // request delivered, so his window isn't told lost.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    wallet.app_mut().invite(&w.carol_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    Box::pin(came_back(&w, &mut wallet, &mut shop)).await;
+    delivery_not_written_into_the_mark(&w, &mut wallet, true).await;
+    let now = w.clock.now_ms();
+    crate::common::seed_marks(&mut wallet, "bd/", paykit_sdk::MAX_DROPPED_MARKS - 1, now).await;
+    wallet.app_mut().deny(&w.carol_id()).await.unwrap();
+    w.alice.switch().push_missed(1, now - 1_000, now);
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    let senders = crate::common::mark_senders(&wallet, "bd/").await;
+    assert!(senders.contains(&w.carol_id()));
+    assert!(!senders.contains(&w.bob_id()));
     assert_eq!(lost_count(&wallet).await, 0);
 }
 
@@ -2170,6 +2205,79 @@ async fn test_blocked_return_floor_raised_after_the_repeat_floor_read_not_repeat
     // the floor holds the repeat.
     let w = Arc::new(World::new());
     Box::pin(repeat_with_a_write_after_its_read(&w, LandsAfter::Floor)).await;
+}
+
+#[tokio::test]
+async fn test_blocked_return_floor_kept_copy_not_taken_for_the_switch_at_a_dispatch() {
+    // The phone holds the floor of a first raise, under carol's request. The wallet raises it
+    // again, past her request, and the phone reads nothing meanwhile. At the phone's
+    // automatic dispatch, the switch answers the floor's reads `404`: nothing shows its
+    // current write, and the copy the phone keeps isn't taken for it, so the method isn't
+    // called and the attempt is known unsubmitted.
+    let w = World::new();
+    w.rail.set_declaration(
+        paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true),
+    );
+    let mut wallet = contacts_wallet(&w, store()).await;
+    wallet.app_mut().invite(&w.carol_id()).await.unwrap();
+    let mut phone = w
+        .join_with(
+            &w.alice,
+            "phone",
+            AppScopes::new().pay().build().unwrap(),
+            crate::common::day_window(),
+            store(),
+        )
+        .await;
+    let mut shop = w.shop().await;
+    Box::pin(wallet_raises_the_floor(&w, &mut wallet, &mut shop)).await;
+    phone.receive(None).await.unwrap();
+    let first = shared_floor(&phone).await.expect("the first raise");
+    w.clock.advance_ms(MINUTE_MS);
+    let mut carol_shop = w
+        .join(
+            &w.carol,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let carols = request_from(&mut carol_shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    phone.receive(None).await.unwrap();
+    assert!(!phone.request(&carols).await.unwrap().manual_only);
+    w.clock.advance_ms(MINUTE_MS);
+    request_from(&mut shop, w.alice_id(), draft("3", w.clock.now_ms())).await;
+    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert!(shared_floor(&wallet)
+        .await
+        .is_some_and(|floor| floor > first));
+    assert_eq!(shared_floor(&phone).await, Some(first));
+    let path = LandsAfter::Floor.path(&w, &phone, &carols);
+    for _ in 0..4 {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: path.clone(),
+                code: pubky_switch_core::http::ErrorCode::NotFound,
+                current: serde_json::Value::Null,
+            });
+    }
+    let outcome = phone
+        .pay_request_automatically(&carols, paykit_sdk::PayOptions::default())
+        .await
+        .unwrap();
+    let (paykit_sdk::PayOutcome::Pending { attempt_id, .. }
+    | paykit_sdk::PayOutcome::Paid { attempt_id, .. }) = &outcome
+    else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(w.rail.pay_calls(attempt_id), 0);
+    let payment = phone.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Attempted);
 }
 
 /// The wallet drops bob's request for the block and asks for it again, raising the floor

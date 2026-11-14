@@ -36,7 +36,9 @@ enum QueuedAskState {
     Waiting,
     /// In the outbox, or delivered.
     Queued,
-    /// Never queued, or refused for good: the ask is asked anew.
+    /// Never queued, refused for good, or one the outbox no longer knows (after a restore, or
+    /// 30 days after its delivery): the ask is asked anew, at most a second request, never
+    /// an ask dropped.
     NotQueued,
 }
 
@@ -162,8 +164,10 @@ impl Paykit {
             let ask_key = format!("{}{rest}", key::ASKS);
             // A request signed for this ask before: one the outbox holds or delivered is the
             // ask's, which goes, the request tried now unless sends to its counterparty are
-            // held; one still in a batch the client keeps waits for it; one never queued, or
-            // refused for good, leaves the ask to be asked anew.
+            // held; one still in a batch the client keeps waits for it; one never queued,
+            // refused for good, or one the outbox no longer knows (after a restore, or 30
+            // days after its delivery) leaves the ask to be asked anew: at most a second
+            // request, never an ask dropped.
             if let Some(queued) = &ask.queued {
                 match self.queued_ask(&ask.sender, queued).await? {
                     QueuedAskState::Waiting => continue,
@@ -247,7 +251,8 @@ impl Paykit {
 
     /// What became of `queued`, the request signed for an ask of `sender`: still waiting in
     /// a batch the client keeps; queued in the outbox or delivered, and shown to be that
-    /// request; or neither, never queued or refused for good.
+    /// request; or neither: never queued, refused for good, or no longer known to the outbox
+    /// (after a restore, or 30 days after its delivery).
     ///
     /// # Errors
     ///
