@@ -826,3 +826,88 @@ async fn test_ledger_compacted_attempt_rebuilt_after_a_restore_stays_doubtful() 
     let named = proofs_name(&mut shop).await;
     assert!(!named.contains(&Value::Null), "{named:?}");
 }
+
+#[tokio::test]
+async fn test_ledger_attempt_rebuilt_on_a_refused_ledger_write_stays_doubtful() {
+    // The backup is taken after the grant. A payment under the Allowance is made and its
+    // outcome's batch refused, so its claim stays open. Another own app then writes the
+    // ledger and is removed with a `distrust_from` before that write, and the device is
+    // lost. The restored app rebuilds the attempt from the request record, which names the
+    // Allowance; the switch's current ledger write fails the client's checks, so no ledger
+    // is read now, and nothing tells the attempt made by hand: it stays doubtful, no proof
+    // written.
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(&w, terms_with(json!({})))).await;
+    let backup = wallet.backup().await.unwrap();
+    let first = Box::pin(request(&w, &mut shop, &mut wallet, "1")).await;
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } =
+        Box::pin(wallet.pay_under_allowance(&first, &record))
+            .await
+            .unwrap()
+    else {
+        panic!("in flight");
+    };
+    w.rail.settle(&attempt_id, true);
+    for _ in 0..2 {
+        w.alice.switch().fail_next(Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::BadRequest,
+            current: Value::Null,
+        });
+    }
+    let resumed = Box::pin(wallet.resume_payments()).await.unwrap();
+    assert!(
+        matches!(
+            resumed.as_slice(),
+            [PayOutcome::PaidOutcomeUnwritten { .. }]
+        ),
+        "{resumed:?}"
+    );
+    let (allowance, _) = held(&wallet, &record).await;
+    let current = ledger(&wallet, &record).await;
+    drop(wallet);
+    let mut other = Box::pin(executor_wallet(&w, "other")).await;
+    other.receive(None).await.unwrap();
+    let before = w.clock.now_ms();
+    w.clock.advance_ms(60_000);
+    let target = ledger_target(&allowance);
+    other.app_mut().read_record(&target).await.unwrap();
+    other
+        .app_mut()
+        .put_record(&target, &current.to_json().unwrap(), Vec::new())
+        .await
+        .unwrap();
+    let other_id = other.app_id();
+    w.alice
+        .next_doc(|body| {
+            body.apps.retain(|a| a.app_id != other_id);
+            body.removed.push(pubky_switch_core::records::RemovedApp {
+                app_id: other_id,
+                distrust_from: before,
+            });
+        })
+        .unwrap();
+    w.clock.advance_ms(1_000);
+
+    let mut wallet = Box::pin(Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    let report = Box::pin(wallet.reconcile()).await.unwrap();
+    assert!(report.resolved.is_empty(), "{report:?}");
+    assert!(
+        report
+            .doubtful
+            .iter()
+            .any(|d| d.attempts.contains(&attempt_id)),
+        "{report:?}"
+    );
+    let named = proofs_name(&mut shop).await;
+    assert!(!named.contains(&Value::Null), "{named:?}");
+}

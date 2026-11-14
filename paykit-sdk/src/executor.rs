@@ -639,11 +639,13 @@ impl Paykit {
     /// The Allowance `named`, of the request record of `payee`, that `attempt` was made
     /// under, for a journal entry rebuilt after a restore: its ledger record, as held or else
     /// as read from the switch once, lists the attempt among its entries or, compacted, in
-    /// `totals.failed`. [`AttemptUnder::ByHand`] for a record naming none, or a ledger that
-    /// reads and binds, was never compacted and doesn't list it: the attempt was made by
-    /// hand, and its proof names no Allowance. [`AttemptUnder::Unknown`] for a ledger that
-    /// can't be read, doesn't read or bind, or was compacted without listing it, since
-    /// compaction drops a `done` entry into the totals: its proof can name neither.
+    /// `totals.failed`. [`AttemptUnder::ByHand`] for a record naming none, or a ledger read
+    /// from the switch now that reads and binds, was never compacted and doesn't list it: the
+    /// attempt was made by hand, and its proof names no Allowance. [`AttemptUnder::Unknown`]
+    /// for a ledger that isn't read from the switch now (the read fails, the switch's write
+    /// fails the checks, or the switch holds none), doesn't read or bind, or was compacted
+    /// without listing it, since compaction drops a `done` entry into the totals: its proof
+    /// can name neither, and the attempt stays doubtful.
     pub(crate) async fn attempt_under(
         &mut self,
         payee: &[u8; 32],
@@ -661,14 +663,20 @@ impl Paykit {
             }
         }
         // The copy a restore holds may predate the attempt's entry: the ledger is read from
-        // the switch once. A read that fails leaves it unknown; only a failure of the app's
-        // own store is an error.
-        if let Err(error) = self.app.read_record(&target).await {
-            let error: PaykitError = error.into();
-            if crate::hold::local_failure(&error) {
-                return Err(error);
+        // the switch once, and only the switch's current write tells the attempt made by
+        // hand. A read that fails, or one that leaves the copy held (a write that fails the
+        // checks, a ledger the switch doesn't hold or forgot), leaves it unknown; only a
+        // failure of the app's own store is an error.
+        match self.app.read_record_fresh(&target).await {
+            Ok(RecordRead::Fresh(_)) => {}
+            Ok(_) => return Ok(AttemptUnder::Unknown),
+            Err(error) => {
+                let error: PaykitError = error.into();
+                if crate::hold::local_failure(&error) {
+                    return Err(error);
+                }
+                return Ok(AttemptUnder::Unknown);
             }
-            return Ok(AttemptUnder::Unknown);
         }
         Ok(match self.held_ledger(&key, payee, allowance_id).await? {
             Some(ledger) if ledger_lists(&ledger, &attempt) => {
