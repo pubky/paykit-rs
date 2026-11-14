@@ -1556,7 +1556,7 @@ impl Paykit {
     /// ignores and its user hasn't confirmed, for a grant of another app, and for terms not
     /// valid: the outcome then goes on its claim alone, which a later write copies.
     async fn outcome_under(&mut self, record: &[u8; 32]) -> Result<Option<Under>> {
-        if !self.holds("allowance_execute") {
+        if !self.holds("paykit_allowance_execute") {
             return Ok(None);
         }
         let Some(allowance) = self.held_allowance(record).await? else {
@@ -1688,7 +1688,7 @@ impl Paykit {
     /// left as it is for the next resume, the others go on; a rollback found raises the
     /// alarm and is passed by. Only a failure of the app's own store is an error.
     pub(crate) async fn record_ledger_outcomes(&mut self) -> Result<()> {
-        if !self.holds("allowance_execute") {
+        if !self.holds("paykit_allowance_execute") {
             return Ok(());
         }
         // Every Allowance on the consent list, whether or not a version of its ledger is kept
@@ -1753,7 +1753,7 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::ScopeMissing`] without `allowance_execute`; [`Refusal::NotAutomatic`] for
+    /// [`Refusal::ScopeMissing`] without `paykit_allowance_execute`; [`Refusal::NotAutomatic`] for
     /// an Allowance this app isn't the current executor of, or whose ledger it doesn't build
     /// on now; the client's errors.
     pub async fn reserved_by_other_apps(
@@ -1790,7 +1790,7 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::ScopeMissing`] without `allowance_execute`; [`Refusal::NotAutomatic`] for
+    /// [`Refusal::ScopeMissing`] without `paykit_allowance_execute`; [`Refusal::NotAutomatic`] for
     /// an Allowance this app isn't the current executor of, or whose ledger it doesn't build
     /// on now; [`Refusal::Usage`] for an attempt the ledger holds no entry for, one with an
     /// outcome, or one whose claim doesn't show it `failed` by another app;

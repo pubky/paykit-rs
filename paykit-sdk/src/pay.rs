@@ -3155,7 +3155,7 @@ impl Paykit {
         // The outcomes the claims show go into the ledgers this app executes, before the
         // journal entries that show own payments made are pruned (Paykit spec 8.3,
         // "Outcomes in the ledger"); not while the payer's side waits for its keys.
-        if self.holds("pay") && !payer_waits {
+        if self.holds("paykit_pay") && !payer_waits {
             Box::pin(self.record_ledger_outcomes()).await?;
         }
         self.prune_journal().await?;
