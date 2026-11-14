@@ -160,6 +160,54 @@ fn stored_ids(record: &ActivityRecord) -> Vec<String> {
         .collect()
 }
 
+/// Whether `message`, a payer's reply to a request (the response role), would take the
+/// empty response of `record` while a different reply from its sender to the same request,
+/// which its inbox accepted before it, at `order` ([`crate::records::KeptOrder`]), is still
+/// kept to write: one of `kept` the record doesn't reflect yet. The earlier of two
+/// different replies is the record's response (Paykit spec 6, 8.1), so the later one is
+/// then only reflected ([`reflect`]).
+pub(crate) fn replied_before(
+    record: &ActivityRecord,
+    message: &StoredMessage,
+    order: crate::records::KeptOrder,
+    kept: &[(StoredMessage, crate::records::KeptOrder)],
+) -> bool {
+    let reply_to = |m: &StoredMessage| {
+        Role::of(m.body()) == Some(Role::Response)
+            && m.sender() == message.sender()
+            && m.message().refs.first() == message.message().refs.first()
+    };
+    reply_to(message)
+        && record.response.is_none()
+        && !record.reflects(&message.message().msg_id)
+        && kept.iter().any(|(other, at)| {
+            *at < order
+                && other.hash() != message.hash()
+                && reply_to(other)
+                && !record.reflects(&other.message().msg_id)
+        })
+}
+
+/// Reflect `message` in `record` by its `msg_id` only, leaving every role as it is: a
+/// reply that an earlier, different one is still kept to take the response of
+/// ([`replied_before`]). Returns `false` when the record already reflects it.
+pub(crate) fn reflect(record: &mut ActivityRecord, message: &StoredMessage) -> bool {
+    let msg_id = message.message().msg_id.clone();
+    if record.reflects(&msg_id) {
+        return false;
+    }
+    let stored = stored_ids(record);
+    let mut others: Vec<String> = record
+        .msg_ids
+        .iter()
+        .filter(|id| !stored.contains(id))
+        .cloned()
+        .collect();
+    others.push(msg_id);
+    record.msg_ids = bounded_msg_ids(&stored, &others);
+    true
+}
+
 /// Place `message` in its role of `record` (Paykit spec 6 "One message per role"): stored
 /// when the role is empty, otherwise reflected by its `msg_id` only. Returns `false` when
 /// the record already reflects the message, so nothing changes.

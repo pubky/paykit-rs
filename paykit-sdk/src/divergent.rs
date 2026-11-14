@@ -49,8 +49,8 @@
 //!   own step writes, kept over the bound until a later one drops it so; one the client
 //!   won't forget yet stays kept, over the bound; of lists, the newest alone), and written
 //!   once the user has confirmed the record, in the order the inbox accepted them
-//!   ([`Order`]: by acceptance time, then, within one millisecond, the feed's order, never
-//!   by `msg_id`), the earliest into its role and the others reflected, or given up 30 days after its acceptance with the host's notice, as
+//!   ([`Order`]: by acceptance time, then, within one millisecond, the feed `seq` its entry
+//!   was read at, never by `msg_id`), the earliest into its role and the others reflected, or given up 30 days after its acceptance with the host's notice, as
 //!   a stored entry's message is, but never while its record's copy may be incomplete; an
 //!   own write of another kind, such as a receipt, waits for the confirmation. One rule for
 //!   every write that adds no stop ([`Pause::adds_no_stop_waits`]): it waits while the view
@@ -666,19 +666,15 @@ pub(crate) struct DivergentWrite {
     seen: SeenVersion,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     settlement: Option<String>,
+    /// The message, with the feed `seq` its entry was read at ([`Order`]). Every writer
+    /// sets it: a value without it is a corrupt store.
     message: KeptMessage,
-    /// Where the receive step took it among the messages kept over the record, of every
-    /// role ([`Order`]). Every writer sets it: a value without it is a corrupt store.
-    intake: u64,
 }
 
 impl DivergentWrite {
-    /// The order the inbox accepted `message`, this value's message, in ([`Order`]).
-    fn order(&self, message: &StoredMessage) -> Order {
-        Order {
-            at: message.accepted_at().unwrap_or(u64::MAX),
-            intake: self.intake,
-        }
+    /// The order the inbox accepted this value's message in ([`Order`]).
+    fn order(&self) -> Result<Order> {
+        self.message.order()
     }
 
     /// The settlement kept, as bytes.
@@ -715,6 +711,7 @@ impl DivergentWrite {
             || stored.message().msg_id != msg_id
             || WriteRole::of(&stored) != Some(role)
             || stored.accepted_at().is_none()
+            || self.message.seq().is_none()
             || settled != settlement.is_some()
         {
             return Err(PaykitError::corrupt());
@@ -745,7 +742,7 @@ impl DivergentWrite {
         }
         let target = write_target(&message, own, settlement).ok_or_else(PaykitError::corrupt)?;
         Ok(Some(KeptWrite {
-            order: self.order(&message),
+            order: self.order()?,
             message,
             target,
             seen: self.seen,
@@ -755,40 +752,12 @@ impl DivergentWrite {
 
 /// The order the inbox accepted a kept message in (Paykit spec 8.1), which keeps the
 /// earliest in its role, drops past the bound, holds a later write behind and places them:
-/// by acceptance time, then, within one millisecond, by where the receive step took it
-/// among the messages kept over its record (`intake`), never by `msg_id`, which its sender
-/// chooses. The step takes the feed's entries in the order of their `seq`, the position the
-/// inbox gives each entry as it accepts it, whoever sent it (Switch spec 8.3), within one
-/// read and across reads, the cursor only moving forward: the order it keeps them in is
-/// the inbox's. An entry the client gives again from its local store, or a receipt moved
-/// over its record from `pr/`, is taken when it comes, after those kept before it in its
-/// millisecond.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct Order {
-    at: u64,
-    intake: u64,
-}
-
-impl Order {
-    /// The order of `stored`, a message not kept over its record: after every kept message
-    /// of its millisecond, as the step takes it after them; so a stored entry's message, a
-    /// kept reply's or a held list's waits behind them.
-    fn after_kept(stored: &StoredMessage) -> Self {
-        Self {
-            at: stored.accepted_at().unwrap_or(u64::MAX),
-            intake: u64::MAX,
-        }
-    }
-}
-
-/// The intake the receive step gives the next message it keeps over a record, `kept` the
-/// values kept over it already, of every role: one after the latest.
-fn next_intake<'a>(kept: impl IntoIterator<Item = &'a DivergentWrite>) -> u64 {
-    kept.into_iter()
-        .map(|kept| kept.intake)
-        .max()
-        .map_or(0, |latest| latest.saturating_add(1))
-}
+/// by acceptance time, then, within one millisecond, by the feed `seq` its entry was read at
+/// ([`crate::records::KeptOrder`]), the token the kept replies and the stored entries carry
+/// too, never by `msg_id`, which its sender chooses, nor by the store a message came from. A
+/// message moved over its record from `pr/`, or a stored entry's written later, keeps its
+/// own.
+pub(crate) type Order = crate::records::KeptOrder;
 
 /// A kept write read bound ([`kept_write_at`]): its message, where it goes, the write it
 /// was kept over, and the order its inbox accepted it in.
@@ -923,8 +892,8 @@ fn kept_id(stored: &StoredMessage) -> KeptId {
 ///   message of the sender keeping the most goes, of the lower identity between senders
 ///   keeping as many, as past the bound in all on replies before their record.
 ///
-/// Each message comes with the order its inbox accepted it in ([`Order`]), `new` after
-/// every message kept. Returns whether `new` is kept, and the identities of the kept messages
+/// Each message comes with the order its inbox accepted it in ([`Order`]), `new` with its
+/// own, which may come before messages kept already. Returns whether `new` is kept, and the identities of the kept messages
 /// that go.
 fn kept_after(
     kept: &[(StoredMessage, Order)],
@@ -1003,14 +972,16 @@ fn kept_after(
 /// Whether a message of `kept`, the messages kept over the record held as `view`, read bound,
 /// waits to be written: one that still points to the record ([`DivergentWrite::kept`],
 /// [`points_to`]) and, when `behind` is given, that its inbox accepted before `behind`, a
-/// message written over the same record, in the order of [`Order`]. One that doesn't point to the record any more holds
+/// message written over the same record, with its order, in the order of [`Order`]: a held
+/// list, which carries none, since the newest list is the one written, waits behind every
+/// kept message of its millisecond and before. One that doesn't point to the record any more holds
 /// nothing back (Paykit spec 8.1, "Stored entries").
 fn waits_behind(
     kept: impl IntoIterator<Item = DivergentWrite>,
     own: &[u8; 32],
     settlement: Settlement<'_>,
     view: Option<&View>,
-    behind: Option<&StoredMessage>,
+    behind: Option<(&StoredMessage, Option<Order>)>,
 ) -> Result<bool> {
     let mut pointing = Vec::new();
     for kept in kept {
@@ -1022,19 +993,20 @@ fn waits_behind(
             pointing.push(kept);
         }
     }
-    let Some(behind) = behind else {
+    let Some((behind, order)) = behind else {
         return Ok(!pointing.is_empty());
     };
-    // A message kept over the record is in the order it was kept in, and never waits behind
-    // itself; any other comes after every message kept in its millisecond.
+    // A message is in its own order, and never waits behind itself; a held list waits behind
+    // every message kept in its millisecond.
     let id = kept_id(behind);
-    let order = pointing
-        .iter()
-        .find(|kept| kept_id(&kept.message) == id)
-        .map_or_else(|| Order::after_kept(behind), |kept| kept.order);
+    let at = behind.accepted_at().ok_or_else(PaykitError::corrupt)?;
+    let earlier = |kept: &Order| match order {
+        Some(order) => *kept < order,
+        None => kept.0 <= at,
+    };
     Ok(pointing
         .iter()
-        .any(|kept| kept_id(&kept.message) != id && kept.order < order))
+        .any(|kept| kept_id(&kept.message) != id && earlier(&kept.order)))
 }
 
 // ---------------------------------------------------------------------------------
@@ -1065,6 +1037,30 @@ fn step_pause(
     Ok(marked.pause(Some(&view)))
 }
 
+/// The payer's replies to requests kept over the record `record` (`dw/`, the response
+/// role), each read bound, with its order ([`Order`]): what [`crate::activity::replied_before`]
+/// looks among, in the receive step.
+pub(crate) fn step_responses_kept(
+    cx: &ReceiveContext<'_>,
+    record: &[u8; 32],
+) -> std::result::Result<Vec<(StoredMessage, Order)>, Fail> {
+    let values = state::cx_scan::<DivergentWrite>(cx, &key::divergent_writes_at(record))?;
+    responses_of(&cx.identity(), values.into_iter().map(|(_, value)| value))
+        .map_err(|_| Fail::corrupt())
+}
+
+/// The messages of the response role among `values`, each read bound, with its order.
+fn responses_of(
+    own: &[u8; 32],
+    values: impl Iterator<Item = DivergentWrite>,
+) -> Result<Vec<(StoredMessage, Order)>> {
+    let mut out = Vec::new();
+    for value in values.filter(|value| value.role == WriteRole::Response) {
+        out.push((value.message.stored(own)?, value.order()?));
+    }
+    Ok(out)
+}
+
 /// In the receive step: take the view of `held` ([`step_pause`]) and tell whether a write of
 /// `stored` over it waits, by the one rule of writes that add no stop
 /// ([`Pause::adds_no_stop_waits`]): a stop never waits; any other message waits while the
@@ -1074,6 +1070,7 @@ pub(crate) fn step_write_waits(
     cx: &mut ReceiveContext<'_>,
     held: &SharedRecord,
     stored: &StoredMessage,
+    seq: u64,
     settlement: Settlement<'_>,
 ) -> std::result::Result<bool, Fail> {
     let pause = step_pause(cx, held)?;
@@ -1086,13 +1083,14 @@ pub(crate) fn step_write_waits(
     let Some(view) = View::of(held) else {
         return Ok(false);
     };
+    let at = stored.accepted_at().ok_or_else(Fail::corrupt)?;
     let kept = state::cx_scan::<DivergentWrite>(cx, &key::divergent_writes_at(&held.key))?;
     waits_behind(
         kept.into_iter().map(|(_, kept)| kept),
         &cx.identity(),
         settlement,
         Some(&view),
-        Some(stored),
+        Some((stored, Some((at, seq)))),
     )
     .map_err(|_| Fail::corrupt())
 }
@@ -1104,6 +1102,7 @@ pub(crate) fn step_keep(
     cx: &mut ReceiveContext<'_>,
     held: &SharedRecord,
     stored: &StoredMessage,
+    seq: u64,
     settlement: Settlement<'_>,
     reads: bool,
 ) -> std::result::Result<(), Fail> {
@@ -1128,10 +1127,8 @@ pub(crate) fn step_keep(
     // against the record, before anything is decided on them: one that doesn't read holds
     // the entry, and is never a reason to drop this one. One that doesn't point to the
     // record, kept over a later write or of another settlement than the rail's, decides
-    // nothing here; this one is kept beside it. This one is taken after every message kept
-    // over the record, of every role ([`Order`]).
+    // nothing here; this one is kept beside it, in its own order ([`Order`]).
     let values = state::cx_scan::<DivergentWrite>(cx, &key::divergent_writes_at(&record))?;
-    let intake = next_intake(values.iter().map(|(_, kept)| kept));
     let mut held_messages = Vec::new();
     for (_, kept) in values.iter().filter(|(_, kept)| kept.role == role) {
         let Some(kept) = kept
@@ -1145,13 +1142,10 @@ pub(crate) fn step_keep(
             held_messages.push((kept.message, kept.order));
         }
     }
-    let order = Order {
-        at: stored.accepted_at().ok_or_else(Fail::corrupt)?,
-        intake,
-    };
+    let order = (stored.accepted_at().ok_or_else(Fail::corrupt)?, seq);
     let (keep, gone) = kept_after(&held_messages, &(stored.clone(), order), reads);
     // This step's own message, when the bound would drop it (it was accepted before the 16
-    // latest kept, or in their millisecond before they were taken), can't be dropped as one never
+    // latest kept, or in their millisecond before them), can't be dropped as one never
     // processed: the step's outcome writes its pair. It is kept instead, one over the bound,
     // until a later message of the role drops it with its pair forgotten.
     let keep = keep || gone.contains(&kept_id(stored));
@@ -1195,8 +1189,7 @@ pub(crate) fn step_keep(
         role,
         seen: view.version,
         settlement: kept_settlement,
-        message: KeptMessage::of(stored),
-        intake,
+        message: KeptMessage::taken(stored, seq),
     };
     let write = state::local_put(&kept_key, &kept).map_err(|_| Fail::corrupt())?;
     crate::receive::keep_local(cx, write);
@@ -1204,6 +1197,18 @@ pub(crate) fn step_keep(
 }
 
 impl Paykit {
+    /// The payer's replies to requests kept over the record `record` (`dw/`, the response
+    /// role), outside the receive step ([`step_responses_kept`]).
+    pub(crate) async fn responses_kept_over(
+        &self,
+        record: &[u8; 32],
+    ) -> Result<Vec<(StoredMessage, Order)>> {
+        let values = self
+            .local_scan::<DivergentWrite>(&key::divergent_writes_at(record))
+            .await?;
+        responses_of(&self.identity(), values.into_iter().map(|(_, value)| value))
+    }
+
     /// The mark at `record`, read bound ([`state::Stored`]) and checked against the record
     /// held there, `view` ([`Marked::of`]), before anything is decided on it.
     async fn marked(&self, record: &[u8; 32], view: Option<&View>) -> Result<Marked> {
@@ -1243,13 +1248,13 @@ impl Paykit {
         self.writes_waiting_before(record, view, None).await
     }
 
-    /// [`Paykit::writes_waiting`], of the messages the inbox accepted before `behind` when it
-    /// is given.
+    /// [`Paykit::writes_waiting`], of the messages the inbox accepted before `behind`, with
+    /// its order ([`waits_behind`]), when it is given.
     async fn writes_waiting_before(
         &self,
         record: &[u8; 32],
         view: Option<&View>,
-        behind: Option<&StoredMessage>,
+        behind: Option<(&StoredMessage, Option<Order>)>,
     ) -> Result<bool> {
         let kept = self
             .local_scan::<DivergentWrite>(&key::divergent_writes_at(record))
@@ -1404,13 +1409,15 @@ impl Paykit {
     /// Whether a later write of `stored` over the record at `record` waits, by the one rule
     /// of writes that add no stop ([`Pause::adds_no_stop_waits`]): a stop never waits; any
     /// other message waits while the record's view is divergent and not confirmed, and while
-    /// messages kept over the record that its inbox accepted before `stored` wait to be
-    /// written, so those go first. The stored entries, the kept replies, the held lists and
-    /// the kept messages themselves are written through here.
+    /// messages kept over the record that its inbox accepted before `stored`, at `order`,
+    /// wait to be written, so those go first. The stored entries, the kept replies, the held
+    /// lists (`order` `None`: [`waits_behind`]) and the kept messages themselves are written
+    /// through here.
     pub(crate) async fn divergent_write_waits(
         &mut self,
         record: &[u8; 32],
         stored: &StoredMessage,
+        order: Option<Order>,
     ) -> Result<bool> {
         if adds_stop(stored) {
             return Ok(false);
@@ -1420,7 +1427,7 @@ impl Paykit {
         }
         let held = self.app.shared_record(record).await?;
         let view = held.as_ref().and_then(View::of);
-        self.writes_waiting_before(record, view.as_ref(), Some(stored))
+        self.writes_waiting_before(record, view.as_ref(), Some((stored, order)))
             .await
     }
 
@@ -1579,11 +1586,11 @@ impl Paykit {
             // `None` for one of another settlement than the rail's names now: it doesn't
             // point to its record.
             let kept = value.kept(&own, &|proof| self.rail.settlement_id(proof))?;
-            let order = value.order(&stored);
+            let order = value.order()?;
             all.push((value.record, order, value.role, kept_key, stored, kept));
         }
         all.sort_by_key(|(record, order, ..)| (*record, *order));
-        for (record, _, role, kept_key, stored, kept) in all {
+        for (record, order, role, kept_key, stored, kept) in all {
             let accepted_at = stored.accepted_at().ok_or_else(PaykitError::corrupt)?;
             // What it points to is checked before anything is written: the record held at its
             // key is of its target's collection, at the write it was kept over or a later one.
@@ -1640,7 +1647,7 @@ impl Paykit {
                             role,
                             creates,
                         } => {
-                            self.place_note(&target, role, creates, stored.clone(), tx)
+                            self.place_note(&target, role, creates, stored.clone(), order, tx)
                                 .await?
                         }
                     }
@@ -1667,8 +1674,8 @@ impl Paykit {
     /// to their order and gates, and written once the user has confirmed the record. Its
     /// processed pair stays as it is, so it is applied once; the copy kept before goes in
     /// the commit that keeps it here. A message kept over the record already, from the same
-    /// sender at the same `msg_id`, stays as it is. It is taken after every message kept over
-    /// the record ([`Order`]). A kept message the bound drops is dropped as one never
+    /// sender at the same `msg_id`, stays as it is. It keeps its order, `order`, its
+    /// acceptance time and the feed `seq` its entry was read at ([`Order`]). A kept message the bound drops is dropped as one never
     /// processed, its pair forgotten in the commit that drops it, as in the receive step
     /// ([`step_keep`]); one the client won't forget yet stays, over the bound, and so does
     /// this one when the bound would drop it, until a later message of its role drops it so.
@@ -1676,6 +1683,7 @@ impl Paykit {
         &mut self,
         held: &SharedRecord,
         stored: &StoredMessage,
+        order: Order,
         kept_key: &str,
     ) -> Result<()> {
         let (Some(role), Some(view)) = (WriteRole::of(stored), View::of(held)) else {
@@ -1686,7 +1694,6 @@ impl Paykit {
         let values = self
             .local_scan::<DivergentWrite>(&key::divergent_writes_at(&record))
             .await?;
-        let intake = next_intake(values.iter().map(|(_, kept)| kept));
         let mut held_messages = Vec::new();
         for (_, kept) in values.iter().filter(|(_, kept)| kept.role == role) {
             let Some(kept) = kept.kept(&own, &|proof| self.rail.settlement_id(proof))? else {
@@ -1699,10 +1706,6 @@ impl Paykit {
         }
         let id = kept_id(stored);
         let kept_already = held_messages.iter().any(|(held, _)| kept_id(held) == id);
-        let order = Order {
-            at: stored.accepted_at().ok_or_else(PaykitError::corrupt)?,
-            intake,
-        };
         let (keep, gone) = kept_after(&held_messages, &(stored.clone(), order), true);
         for (sender, dropped_id) in gone.iter().filter(|gone| **gone != id) {
             let Some((dropped, _)) = held_messages
@@ -1741,8 +1744,7 @@ impl Paykit {
                 role,
                 seen: view.version,
                 settlement,
-                message: KeptMessage::of(stored),
-                intake,
+                message: KeptMessage::taken(stored, order.1),
             };
             tx.put(&key::divergent_write(&record, role, &id.0, &id.1), &kept)?;
         }
@@ -2277,8 +2279,7 @@ mod tests {
             role: WriteRole::Proof,
             seen: view(true, 3).version,
             settlement: Some(pubky_switch_core::enc::b64(b"t1")),
-            message: KeptMessage::of(&proof),
-            intake: 0,
+            message: KeptMessage::taken(&proof, 0),
         };
         let rail = |proof: &serde_json::Map<String, serde_json::Value>| {
             paykit_lib::derive::settlement_id(proof)
@@ -2301,12 +2302,9 @@ mod tests {
         assert!(mark.bind_to(&RECORD).is_err());
     }
 
-    /// `stored`, taken `intake`th among the messages kept over its record.
-    fn taken(stored: StoredMessage, intake: u64) -> (StoredMessage, Order) {
-        let order = Order {
-            at: stored.accepted_at().unwrap(),
-            intake,
-        };
+    /// `stored`, read from the feed at `seq`.
+    fn taken(stored: StoredMessage, seq: u64) -> (StoredMessage, Order) {
+        let order = (stored.accepted_at().unwrap(), seq);
         (stored, order)
     }
 
@@ -2333,7 +2331,7 @@ mod tests {
         let mut taken_in: Vec<(StoredMessage, Order)> = replies
             .into_iter()
             .zip(0..)
-            .map(|(stored, intake)| taken(stored, intake))
+            .map(|(stored, seq)| taken(stored, seq))
             .collect();
         let late = taken_in.pop().unwrap();
         let new = taken_in.pop().unwrap();
@@ -2355,21 +2353,14 @@ mod tests {
         let (keep, gone) = kept_after(&kept, &late, true);
         assert!(keep);
         assert_eq!(gone, vec![kept_id(&kept[1].0)]);
-        // A message not kept comes after every kept one of its millisecond, and every
-        // message of an earlier millisecond before them all.
-        assert!(kept[0].1 < Order::after_kept(&late.0));
-        assert!(
-            Order {
-                at: late.1.at - 1,
-                intake: u64::MAX,
-            } < kept[0].1
-        );
+        // Every message of an earlier millisecond comes before them all, whatever its `seq`.
+        assert!((late.1 .0 - 1, u64::MAX) < kept[0].1);
     }
 
     #[test]
-    fn test_divergent_write_without_its_intake_is_corrupt_at_a_restore() {
-        // Every writer of `dw/` sets the intake: a value without it is no state a run
-        // leaves, and a restore refuses it as it refuses any other such shape.
+    fn test_divergent_write_without_its_seq_is_corrupt_at_a_restore() {
+        // Every writer of `dw/` keeps the feed `seq` its message was read at: a value without
+        // it can't be ordered, and a restore refuses it.
         let alice =
             crate::testkit::Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
         let bob = crate::testkit::Party::new("bob", "shop", &["paykit_request"]);
@@ -2395,8 +2386,7 @@ mod tests {
             role: WriteRole::Response,
             seen: view(true, 3).version,
             settlement: None,
-            message: KeptMessage::of(&reply),
-            intake: 0,
+            message: KeptMessage::taken(&reply, 0),
         };
         let key = key::divergent_write(
             &record,
@@ -2408,13 +2398,18 @@ mod tests {
         let value = state::encode(&kept).unwrap();
         assert!(state::restored::<DivergentWrite>(key.as_bytes(), &value, &binder).is_ok());
         let mut without: serde_json::Value = serde_json::from_slice(&value).unwrap();
-        assert!(without["d"]
+        assert!(without["d"]["message"]
             .as_object_mut()
             .unwrap()
-            .remove("intake")
+            .remove("seq")
             .is_some());
         let without = serde_json::to_vec(&without).unwrap();
         assert!(state::restored::<DivergentWrite>(key.as_bytes(), &without, &binder).is_err());
+        // Nor one without its acceptance time.
+        let mut untimed: serde_json::Value = serde_json::from_slice(&value).unwrap();
+        untimed["d"]["message"]["accepted_at"] = serde_json::Value::Null;
+        let untimed = serde_json::to_vec(&untimed).unwrap();
+        assert!(state::restored::<DivergentWrite>(key.as_bytes(), &untimed, &binder).is_err());
     }
 
     #[test]
@@ -2436,11 +2431,11 @@ mod tests {
             )
         };
         let mut kept: Vec<(StoredMessage, Order)> = (0..=KEPT_OTHERS)
-            .map(|intake| taken(reply(&alice), intake as u64))
+            .map(|seq| taken(reply(&alice), seq as u64))
             .collect();
         let alices: Vec<KeptId> = kept.iter().map(|(stored, _)| kept_id(stored)).collect();
-        for intake in 0..3 {
-            let new = taken(reply(&carol), (KEPT_OTHERS + 1 + intake) as u64);
+        for seq in 0..3 {
+            let new = taken(reply(&carol), (KEPT_OTHERS + 1 + seq) as u64);
             let (_, gone) = kept_after(&kept, &new, false);
             assert!(gone.iter().all(|id| !alices.contains(id)), "{gone:?}");
             kept.retain(|(stored, _)| !gone.contains(&kept_id(stored)));
@@ -2473,7 +2468,7 @@ mod tests {
         let in_order = |from: Vec<StoredMessage>| -> Vec<(StoredMessage, Order)> {
             from.into_iter()
                 .zip(0..)
-                .map(|(stored, intake)| taken(stored, intake))
+                .map(|(stored, seq)| taken(stored, seq))
                 .collect()
         };
         // Over a record that reads, the counterparty's message: past the cap, another

@@ -769,6 +769,10 @@ impl Paykit {
         if !Box::pin(self.payer_waits(keys)).await? {
             Box::pin(self.place_stored()).await?;
         }
+        // The Allowance answers the read kept go into their records next, in the order their
+        // inbox accepted them, after the stored entries noted above, so an earlier answer
+        // whose write the switch refused is seen first (`allowances.rs`).
+        Box::pin(self.place_kept_allowance_responses()).await?;
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1), unless the payer's side waits for its scope keys:
         // they build on request records the copy may lack, and stay kept meanwhile.
