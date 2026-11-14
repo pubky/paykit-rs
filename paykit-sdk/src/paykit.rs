@@ -532,9 +532,9 @@ impl Paykit {
         paykit.bound_restored_cursor_time().await?;
         paykit.stamp_restore_time().await?;
         // The backup's lists that may still be in the restored outbox, with endpoints the
-        // user may have removed since, are taken out of it and withdrawn before the host can
-        // flush it (`Paykit::withdraw_restored_lists`); a withdrawal that doesn't go now goes
-        // at a receive.
+        // user may have removed since, are withdrawn behind it, by an empty newer version,
+        // before the host can flush it (`Paykit::withdraw_restored_lists`); a withdrawal that
+        // doesn't go now goes at a receive.
         if paykit.certificate_refused().is_none() {
             Box::pin(paykit.withdraw_restored_lists()).await?;
         }

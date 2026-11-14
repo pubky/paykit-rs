@@ -2160,12 +2160,11 @@ async fn test_publishing_change_reaches_a_counterparty_the_failed_fan_out_never_
     assert_eq!(lists_taken(&mut other).await, 1);
 }
 
-/// The backup's list still queued at the backup is taken out of the restored outbox before
-/// the host flushes, and an empty newer version goes instead: the payer takes that one
-/// alone, holds no list, and can't pay the endpoints the user removed since. Once the host
-/// sets its list, she gets it.
+/// The backup's list still queued at the backup goes from the restored outbox; the restore
+/// queues an empty newer version behind it, so a payer that takes both holds no list and
+/// can't pay the endpoints the user removed since. Once the host sets its list, she gets it.
 #[tokio::test]
-async fn test_publishing_restored_outbox_list_taken_out_and_withdrawn() {
+async fn test_publishing_restored_outbox_list_superseded_by_a_withdrawal_behind_it() {
     let w = World::new();
     // Alice's wallet doesn't admit bob yet: what he sends her stays queued.
     let mut wallet = w
@@ -2181,8 +2180,8 @@ async fn test_publishing_restored_outbox_list_taken_out_and_withdrawn() {
     assert!(shop.lists_await_host().await.unwrap());
     wallet.app_mut().invite(&w.bob_id()).await.unwrap();
     shop.flush().await.unwrap();
-    // She takes the empty version alone: the carried one never left.
-    assert_eq!(lists_taken(&mut wallet).await, 1);
+    // She takes both: the newer, empty one is what she holds.
+    lists_taken(&mut wallet).await;
     assert!(no_usable_list(&w, &mut wallet).await);
     assert!(wallet
         .pay_without_request(to_bob(&w, "btc-lightning-bolt12"))
@@ -2199,83 +2198,57 @@ async fn test_publishing_restored_outbox_list_taken_out_and_withdrawn() {
     assert_eq!(last_offered(&w, "btc-lightning-bolt12"), "lno1changed");
 }
 
-/// The restore's empty version fails to reach the payer's inbox at the host's first flush:
-/// the backup's list, taken out of the restored outbox, doesn't go in its place, so she
-/// holds nothing she could pay, and takes the empty version alone once it goes.
+/// The restore's withdrawal of a carried list leaves every other message the restored
+/// outbox carries to that payer queued: a receipt the shop sent her that her inbox hadn't
+/// accepted by the backup reaches her after the restore, beside the empty version.
 #[tokio::test]
-async fn test_publishing_restored_outbox_list_never_goes_while_the_withdrawal_fails() {
+async fn test_publishing_restored_withdrawal_leaves_a_carried_receipt_to_go() {
     let w = World::new();
-    // Alice's wallet doesn't admit bob yet: what he sends her stays queued.
-    let mut wallet = w
-        .join(&w.alice, "wallet", AppScopes::new().pay().build().unwrap())
-        .await;
+    let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     w.publish_to_alice(&mut shop).await;
-    let backup = shop.backup().await.unwrap();
-    drop(shop);
-    let mut shop = restored_shop(&w, &backup).await;
-    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
-    // The first delivery to her inbox fails to connect.
-    w.alice
-        .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
-            path: "inbox".into(),
-            after: 0,
-        });
-    shop.flush().await.unwrap();
-    assert_eq!(lists_taken(&mut wallet).await, 0);
-    assert!(wallet
+    assert_eq!(lists_taken(&mut wallet).await, 1);
+    let paid = wallet
         .pay_without_request(to_bob(&w, "btc-lightning-bolt12"))
         .await
-        .is_err());
-    shop.flush().await.unwrap();
-    assert_eq!(lists_taken(&mut wallet).await, 1);
-    assert!(no_usable_list(&w, &mut wallet).await);
-}
-
-/// Taking the carried list out of the restored outbox gives up every message to that
-/// payer the outbox carries: a request queued with it, which this store never saw accepted,
-/// isn't sent again, and the host is told of it as undelivered, naming her and the request.
-#[tokio::test]
-async fn test_publishing_restored_outbox_take_out_tells_of_a_request_carried_with_the_list() {
-    let w = World::new();
-    // Alice's wallet doesn't admit bob yet: what he sends her stays queued.
-    let mut wallet = w
-        .join(&w.alice, "wallet", AppScopes::new().pay().build().unwrap())
-        .await;
-    let mut shop = w.shop().await;
-    w.publish_to_alice(&mut shop).await;
-    let now = w.clock.now_ms();
-    let sent = shop
-        .send_request(w.alice_id(), crate::common::draft("1", now))
-        .await
         .unwrap();
-    let request = sent.request.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    shop.receive(None).await.unwrap();
+    let sales = shop.payee_activity().await.unwrap();
+    assert_eq!(sales.len(), 1, "{sales:?}");
+    // Her inbox doesn't take the receipt, then the changed list, for now: both stay queued,
+    // and the backup's outbox carries them.
+    for _ in 0..2 {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "inbox".into(),
+                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                current: serde_json::Value::Null,
+            });
+    }
+    assert!(shop
+        .confirm_payment(&sales[0].record)
+        .await
+        .unwrap()
+        .is_some());
+    let changed = shop.set_list_endpoints(list("lno1changed")).await.unwrap();
+    assert_eq!(changed.sent.len(), 1, "{changed:?}");
     let backup = shop.backup().await.unwrap();
     drop(shop);
     let mut shop = restored_shop(&w, &backup).await;
-    shop.receive(None).await.unwrap();
-    let notices = shop.notices().await.unwrap();
-    let told = notices
-        .iter()
-        .find(|notice| notice.kind == paykit_sdk::NoticeKind::MessageUndelivered);
-    let told = told.unwrap_or_else(|| panic!("{notices:?}"));
-    assert_eq!(told.counterparty, w.alice_id());
-    assert_eq!(told.msg_id.as_deref(), Some(sent.msg_id.as_str()));
-    assert_eq!(told.request_hash, Some(request.request_hash));
-    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
     shop.flush().await.unwrap();
     let got = wallet.receive(None).await.unwrap();
-    let kinds: Vec<&str> = got
+    let receipts = got
         .report
         .events
         .iter()
-        .filter_map(|event| match event {
-            AppEvent::MessageReceived { kind, .. } => Some(kind.as_str()),
-            _ => None,
+        .filter(|event| {
+            matches!(event, AppEvent::MessageReceived { kind, .. }
+                if kind == "paykit.payment_receipt")
         })
-        .collect();
-    assert_eq!(kinds, ["paykit.private_payment_list"], "{kinds:?}");
+        .count();
+    assert_eq!(receipts, 1, "{:?}", got.report.events);
     assert!(no_usable_list(&w, &mut wallet).await);
 }
 
@@ -2376,9 +2349,8 @@ async fn restored_then_loaded(
     .await
 }
 
-/// A restore whose withdrawal of the carried list fails after its commit: the load takes
-/// the list out and withdraws it before the host can flush, so the payer takes the empty
-/// version alone and holds no list.
+/// A restore whose withdrawal of the carried list fails after its commit: the load makes
+/// it before the host can flush, so the payer takes both versions and holds none.
 #[tokio::test]
 async fn test_publishing_restored_outbox_list_withdrawn_by_the_load_after_a_failed_restore() {
     let w = World::new();
@@ -2393,7 +2365,7 @@ async fn test_publishing_restored_outbox_list_withdrawn_by_the_load_after_a_fail
     let mut shop = restored_then_loaded(&w, &backup, b"p/lp/", 1).await;
     wallet.app_mut().invite(&w.bob_id()).await.unwrap();
     shop.flush().await.unwrap();
-    assert_eq!(lists_taken(&mut wallet).await, 1);
+    lists_taken(&mut wallet).await;
     assert!(no_usable_list(&w, &mut wallet).await);
 }
 
@@ -2409,18 +2381,17 @@ async fn test_publishing_restored_withdrawal_not_queued_sent_again_at_once() {
     w.publish_to_alice(&mut shop).await;
     let backup = shop.backup().await.unwrap();
     drop(shop);
-    // The restore's commit, carrying the outbox, goes, and so does taking the carried list
-    // out of it, which writes nothing there; the withdrawal's queueing fails.
+    // The restore's commit, carrying the outbox, goes; the withdrawal's queueing fails.
     let mut shop = restored_then_loaded(&w, &backup, b"out/", 1).await;
     wallet.app_mut().invite(&w.bob_id()).await.unwrap();
     shop.flush().await.unwrap();
-    assert_eq!(lists_taken(&mut wallet).await, 1);
+    lists_taken(&mut wallet).await;
     assert!(no_usable_list(&w, &mut wallet).await);
 }
 
 /// Two versions the restored outbox carries for a counterparty blocked since the backup:
-/// the restore takes both out and withdraws once, above both, though she is blocked, and no
-/// receive withdraws again.
+/// the restore withdraws once, above both, though she is blocked, and no receive withdraws
+/// again.
 #[tokio::test]
 async fn test_publishing_restored_outbox_versions_withdrawn_once_above_each() {
     let w = World::new();
@@ -2457,7 +2428,7 @@ async fn test_publishing_restored_outbox_versions_withdrawn_once_above_each() {
     }
     wallet.app_mut().invite(&w.bob_id()).await.unwrap();
     shop.flush().await.unwrap();
-    // The withdrawal alone: neither carried version left.
-    assert_eq!(lists_taken(&mut wallet).await, 1);
+    // The two carried versions and one withdrawal.
+    assert_eq!(lists_taken(&mut wallet).await, 3);
     assert!(no_usable_list(&w, &mut wallet).await);
 }

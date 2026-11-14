@@ -779,8 +779,9 @@ impl Paykit {
     /// anything an app of this identity sent before the restore: while the lists wait, a
     /// version is strictly above the later of the device clock and the highest service time
     /// verified, plus twice the clock tolerance. The host's withdrawal also ends the
-    /// restore's own, of a list the restored outbox carried ([`Paykit::restore`]): the
-    /// counterparty doesn't get the lists again when the host sets its list.
+    /// restore's own, of a list the restored outbox carried, withdrawn behind it
+    /// ([`Paykit::restore`]): the counterparty doesn't get the lists again when the host sets
+    /// its list.
     ///
     /// # Errors
     ///
@@ -812,11 +813,16 @@ impl Paykit {
     /// counterparty that gets the lists whose newest version the restore brought back before
     /// it was seen delivered, that offers endpoints, and that the restored outbox carries
     /// (Paykit spec 7.2, 8.4). That version holds the backup's endpoints, which the user may
-    /// have removed since. Still in the outbox, it is taken out of it before the host can
-    /// flush ([`Paykit::take_out_carried`]), so it never leaves from this store; one
-    /// delivered from it since is superseded by the empty version, newer, which a payer then
-    /// holds instead. The empty version goes in both cases: the device the backup came from
-    /// may have delivered the old one. Such a counterparty gets the lists again when the host
+    /// have removed since. It isn't taken out of the outbox: the client offers no call that
+    /// withdraws one message, and its call for a counterparty
+    /// ([`pubky_switch_client::app::App::withdraw_queued`]) gives up every message to it not
+    /// delivered yet, proofs, acceptances, receipts and stops among them, which a restored
+    /// store can't send again. So the carried version may still be delivered, before or after
+    /// the empty newer version queued behind it; the empty one supersedes it, being the
+    /// newest, so a payer holding both holds no list (Paykit wire 4.13), and one that takes
+    /// the old version first holds it until the empty one comes. The device the backup came
+    /// from may have delivered the old version too. Such a counterparty gets the lists again
+    /// when the host
     /// sets its list ([`Paykit::set_list_endpoints`]). Run by the restore before the app is
     /// handed to the host, and again at each receive until each has gone; a version the app
     /// can't tell was delivered counts as not delivered.
@@ -870,28 +876,24 @@ impl Paykit {
             };
             // Only a version the restored outbox carries goes after the restore: one queued
             // still, in a batch the client keeps that queues it, or delivered from it since.
-            // One the client doesn't know wasn't carried, unless an earlier pass marked its
-            // counterparty and took it out before it stopped: that one is withdrawn now. An
-            // answer that can't be read counts as still queued.
-            let (queued, delivered) = match self.app.delivery(&newest.msg_id).await {
-                Ok(Some(Delivery::Queued { .. } | Delivery::Kept { .. })) => (true, false),
-                Ok(Some(Delivery::Accepted { .. })) => (false, true),
-                Ok(_) => (false, false),
+            // One the client doesn't know was not carried, so nothing of this restore sends
+            // it. An answer that can't be read counts as carried.
+            let carried = match self.app.delivery(&newest.msg_id).await {
+                Ok(Some(
+                    Delivery::Queued { .. } | Delivery::Kept { .. } | Delivery::Accepted { .. },
+                )) => true,
+                Ok(_) => false,
                 Err(error @ (AppError::Store(_) | AppError::Alarm(_))) => return Err(error.into()),
-                Err(_) => (true, false),
+                Err(_) => true,
             };
-            if !queued && !delivered && !recipient.paused_by_restore {
+            if !carried {
                 continue;
             }
             let counterparty = recipient.counterparty;
-            // Marked first: a pass that stops after taking the version out still withdraws.
             if !recipient.paused_by_restore {
                 recipient.paused_by_restore = true;
                 self.local_put(&key::list_recipient(&counterparty), &recipient)
                     .await?;
-            }
-            if queued {
-                self.take_out_carried(&recipient).await?;
             }
             match Box::pin(self.publish_to(&[counterparty], true, None)).await {
                 Ok(_) => {}
@@ -899,44 +901,6 @@ impl Paykit {
                     return Err(error)
                 }
                 // Tried again at the next receive.
-                Err(_) => {}
-            }
-        }
-        Ok(())
-    }
-
-    /// Take the list versions the restored outbox carries to `recipient` out of it before
-    /// the host can flush (Paykit spec 7.2, "What a restore loses"): the client's
-    /// [`pubky_switch_client::app::App::withdraw_queued`] gives up every message to that
-    /// counterparty not delivered yet, and tells of each once
-    /// ([`AppEvent::MessageUndelivered`]). A list version so given up never leaves from this
-    /// store, but stays Doubtful, its payloads never given back: the device the backup came
-    /// from may have delivered it. Each other message given up is sent again where the client
-    /// still keeps it as sent ([`pubky_switch_client::app::App::resend`]); one it doesn't,
-    /// such as every message the restored outbox carried that this store never saw
-    /// accepted, stays given up, and the host is told of it as of any message given up
-    /// undelivered (Paykit spec 8.1, "Undelivered messages").
-    ///
-    /// # Errors
-    ///
-    /// A store failure or an alarm. A client that has stopped takes nothing out.
-    async fn take_out_carried(&mut self, recipient: &Recipient) -> Result<()> {
-        let withdrawn = match self.app.withdraw_queued(&recipient.counterparty).await {
-            Ok(withdrawn) => withdrawn,
-            Err(error @ (AppError::Store(_) | AppError::Alarm(_))) => return Err(error.into()),
-            Err(_) => return Ok(()),
-        };
-        let lists: BTreeSet<&str> = recipient
-            .versions
-            .iter()
-            .map(|offered| offered.msg_id.as_str())
-            .collect();
-        for msg_id in withdrawn.iter().filter(|id| !lists.contains(id.as_str())) {
-            match Box::pin(self.app.resend(msg_id)).await {
-                Ok(_) => {}
-                Err(error @ (AppError::Store(_) | AppError::Alarm(_))) => return Err(error.into()),
-                // Not kept as sent, or not delivered now: given up, or left queued for the
-                // next flush.
                 Err(_) => {}
             }
         }
