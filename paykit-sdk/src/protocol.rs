@@ -34,9 +34,10 @@ use paykit_lib::records::{
 use paykit_lib::scopes::{acts_as_payee, check_certificate, PaykitScope, ScopeName};
 use paykit_lib::{Label, PaykitKindRules};
 use pubky_switch_client::app::{
-    decode_local_state, Collection as SwitchCollection, Effect, LocalView, LocalWrite, LossActions,
-    MissedEntries, OpaqueRule, Outcome, Protocol, ProtocolLayer, ProviderLoss, ReceiveContext,
-    ReceivedMessage, ResendNeeded, RestoreContext, StoreFailure, WriteBase,
+    decode_local_state, AppBackup, AppError, Collection as SwitchCollection, Effect, LocalView,
+    LocalWrite, LossActions, MissedEntries, OpaqueRule, Outcome, Protocol, ProtocolLayer,
+    ProviderLoss, ReceiveContext, ReceivedMessage, ResendNeeded, RestoreContext, StoreFailure,
+    WriteBase,
 };
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
@@ -809,6 +810,60 @@ pub(crate) fn restore_paykit_layer(
         writes.push(notice);
     }
     Ok(writes)
+}
+
+/// Refuses `backup` when the provider loss its Paykit layer keeps (`pl`) was recovered at a
+/// later generation than the one its client follows (Paykit spec 7.3): the protocol's loss
+/// step writes the boundary of the loss the client follows, in the commit that follows it,
+/// so no run keeps one above it, and one above would leave every later loss's step writing
+/// nothing ([`crate::loss::loss_writes`]). Checked before the restore writes anything. A
+/// layer or value that doesn't read is left to the layer's own check
+/// ([`restore_paykit_layer`]), which refuses it.
+///
+/// # Errors
+///
+/// [`pubky_switch_client::app::AppError::InvalidData`] for such a backup; the client's
+/// errors for one whose bytes don't read.
+pub(crate) fn check_restored_loss(backup: &AppBackup) -> crate::error::Result<()> {
+    /// The part of the client's backup this check reads: the identity and the generation
+    /// its client follows.
+    #[derive(Deserialize)]
+    struct Followed {
+        meta: FollowedMeta,
+    }
+    #[derive(Deserialize)]
+    struct FollowedMeta {
+        #[serde(with = "serde_b64")]
+        identity: [u8; 32],
+        generation: u64,
+    }
+    let Some(layer) = backup.protocol_layer()? else {
+        return Ok(());
+    };
+    let Some(state) = decode_local_state(&layer.data) else {
+        return Ok(());
+    };
+    let Some((at, value)) = state
+        .iter()
+        .find(|(at, _)| at.as_slice() == key::LOSS_BOUNDARY.as_bytes())
+    else {
+        return Ok(());
+    };
+    let followed: Followed = serde_json::from_slice(&backup.to_bytes()?)
+        .map_err(|_| AppError::InvalidData("the backup doesn't read".into()))?;
+    let binder = state::Binder::unblinded(followed.meta.identity);
+    let Ok(kept) = state::restored::<crate::loss::LossBoundary>(at, value, &binder) else {
+        return Ok(());
+    };
+    if kept.generation > followed.meta.generation {
+        return Err(AppError::InvalidData(
+            "the backup: Paykit spec 7.3: its provider loss is of a later generation than \
+             its client follows"
+                .into(),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 impl Protocol for PaykitProtocol {

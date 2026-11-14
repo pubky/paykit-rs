@@ -522,8 +522,9 @@ impl Paykit {
     /// ([`orphan_floor_s`]), before anything is written. The client's errors, all before
     /// anything is written but a store failure: `InvalidData` for a backup whose certificate
     /// Paykit refuses (Paykit wire 3.1), one without Paykit's layer or one another protocol
-    /// made, or a journal with a malformed entry or two open entries for one obligation; a
-    /// store failure. After the commit, a store failure or an alarm from the withdrawals of
+    /// made, a journal with a malformed entry or two open entries for one obligation, or a
+    /// provider loss kept at a later generation than the backup's client follows; a store
+    /// failure. After the commit, a store failure or an alarm from the withdrawals of
     /// the lists the restored outbox carries: the restored state is in the store then, and
     /// [`Paykit::load`] makes those withdrawals before it hands the app back, so the host
     /// loads the app before it flushes.
@@ -549,6 +550,7 @@ impl Paykit {
         // whole journal (`PaykitProtocol::restore_layer`), before anything is written; then
         // both go in one commit: on an error, neither is in the store.
         check_orphan_window(&config, rail.as_ref())?;
+        crate::protocol::check_restored_loss(&backup.app)?;
         let protocol = Self::new_protocol(&rail);
         let app = App::restore(
             env.clone(),

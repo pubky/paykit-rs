@@ -34,7 +34,7 @@ use pubky_switch_core::chain::TransitionProof;
 use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{Refusal, Result};
 use crate::journal::JournalEntry;
 use crate::paykit::Paykit;
 use crate::state::{self, key};
@@ -79,7 +79,8 @@ impl LossBoundary {
     /// or, with `period_starts_at_ms`, those of its Billing Period starting then. A request
     /// counts as made before the loss when the app held it in local state then, its inbox
     /// having accepted it before the end of the residual window, or when its signed
-    /// `created_at` is earlier than the declaration plus the clock tolerance. A Billing Period
+    /// `created_at` is earlier than the end of the residual window plus the clock tolerance:
+    /// the old service could still have taken an attempt on it until then. A Billing Period
     /// starting after the end of the residual window is never uncertain. What the app can't
     /// place is: a request it holds no copy of, one with no acceptance time, and every
     /// request while the declaration time isn't known.
@@ -101,7 +102,7 @@ impl LossBoundary {
             .accepted_at()
             .is_none_or(|at| at < self.uncertain_until_ms);
         held || request.message().created_at_ms
-            < self.declared_at_ms.saturating_add(CLOCK_TOLERANCE_MS)
+            < self.uncertain_until_ms.saturating_add(CLOCK_TOLERANCE_MS)
     }
 }
 
@@ -117,11 +118,15 @@ pub(crate) fn loss_writes(
     loss: &ProviderLoss,
     view: &LocalView<'_>,
 ) -> std::result::Result<Vec<LocalWrite>, StoreFailure> {
-    let boundary = LossBoundary::of(loss);
     let kept = state::view_get::<LossBoundary>(view, key::LOSS_BOUNDARY)
         .map_err(crate::protocol::view_failure)?;
-    let put =
-        || state::local_put(key::LOSS_BOUNDARY, &boundary).map_err(crate::protocol::view_failure);
+    writes_over(kept, LossBoundary::of(loss)).map_err(crate::protocol::view_failure)
+}
+
+/// The writes of [`loss_writes`] for `boundary`, the loss followed, over `kept`, the boundary
+/// kept before it.
+fn writes_over(kept: Option<LossBoundary>, boundary: LossBoundary) -> Result<Vec<LocalWrite>> {
+    let put = || state::local_put(key::LOSS_BOUNDARY, &boundary);
     Ok(match kept {
         Some(kept) if kept.generation > boundary.generation => Vec::new(),
         Some(kept) if kept.generation == boundary.generation => vec![put()?],
@@ -220,12 +225,16 @@ impl Paykit {
     /// payment the user makes over that doubt instead
     /// ([`crate::PayOptions::with_may_be_paid_confirmed`]) states nothing: one that fails
     /// leaves the obligation in doubt. The statement holds for the loss it was given after;
-    /// a newer loss puts the obligation in doubt again. Without a loss followed, nothing is
-    /// in doubt and nothing is written.
+    /// a newer loss puts the obligation in doubt again. Without a loss kept, it is refused
+    /// and nothing is written: no loss followed leaves nothing in doubt, and a statement given
+    /// before the loss's step has run would be dropped by that step, the loss being newer
+    /// than any kept.
     ///
     /// # Errors
     ///
-    /// [`crate::PaykitError::Lib`] for a certificate Paykit refuses; a store failure.
+    /// [`crate::Refusal::NotNow`] while the app keeps no provider loss: none followed, or the
+    /// one followed has no step run yet. [`crate::PaykitError::Lib`] for a certificate Paykit
+    /// refuses; a store failure.
     pub async fn confirm_not_paid_before_loss(
         &mut self,
         obligation: &[u8; 32],
@@ -237,7 +246,11 @@ impl Paykit {
             .await?
             .is_none()
         {
-            return Ok(());
+            return Err(Refusal::NotNow(
+                "Paykit spec 7.3: no provider loss is kept, so nothing is in doubt after one"
+                    .into(),
+            )
+            .into());
         }
         self.local_put(&key::not_paid_before_loss(obligation), &true)
             .await
@@ -286,18 +299,31 @@ mod tests {
         let loss = boundary();
         // Held in local state: accepted before the end of the residual window.
         assert!(loss.uncertain(Some(&request(UNTIL, Some(UNTIL - 1))), None));
-        // Created before the declaration plus the clock tolerance, accepted later.
-        let created = DECLARED + CLOCK_TOLERANCE_MS - 1;
-        assert!(loss.uncertain(Some(&request(created, Some(UNTIL + 5))), None));
+        // Created before the declaration, accepted after the residual window.
+        assert!(loss.uncertain(Some(&request(DECLARED - 1, Some(UNTIL + 5))), None));
         // Created and accepted after: not uncertain.
-        let created = DECLARED + CLOCK_TOLERANCE_MS;
+        let created = UNTIL + CLOCK_TOLERANCE_MS;
         assert!(!loss.uncertain(Some(&request(created, Some(UNTIL))), None));
+    }
+
+    #[test]
+    fn test_loss_uncertain_request_created_inside_the_residual_window() {
+        let loss = boundary();
+        // Created after the declaration plus the clock tolerance, but while the old service
+        // could still take an attempt, and accepted only after the residual window.
+        let created = DECLARED + CLOCK_TOLERANCE_MS;
+        assert!(loss.uncertain(Some(&request(created, Some(UNTIL + 5))), None));
+        let created = UNTIL + CLOCK_TOLERANCE_MS - 1;
+        assert!(loss.uncertain(Some(&request(created, Some(UNTIL + 5))), None));
+        // From the end of the residual window plus the clock tolerance on: not uncertain.
+        let created = UNTIL + CLOCK_TOLERANCE_MS;
+        assert!(!loss.uncertain(Some(&request(created, Some(UNTIL + 5))), None));
     }
 
     #[test]
     fn test_loss_uncertain_what_can_not_be_placed() {
         let loss = boundary();
-        let after = DECLARED + CLOCK_TOLERANCE_MS + 1;
+        let after = UNTIL + CLOCK_TOLERANCE_MS + 1;
         assert!(loss.uncertain(None, None));
         assert!(loss.uncertain(Some(&request(after, None)), None));
         let unknown = LossBoundary {
@@ -314,5 +340,55 @@ mod tests {
         assert!(loss.uncertain(Some(&before), Some(UNTIL)));
         assert!(!loss.uncertain(Some(&before), Some(UNTIL + 1)));
         assert!(!loss.uncertain(None, Some(UNTIL + 1)));
+    }
+
+    /// The boundary of a loss recovered at `generation`.
+    fn at(generation: u64) -> LossBoundary {
+        LossBoundary {
+            generation,
+            ..boundary()
+        }
+    }
+
+    fn put(boundary: LossBoundary) -> LocalWrite {
+        state::local_put(key::LOSS_BOUNDARY, &boundary).unwrap()
+    }
+
+    fn statements_dropped() -> LocalWrite {
+        LocalWrite::DeletePrefix {
+            prefix: key::NOT_PAID_BEFORE_LOSS.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn test_loss_writes_newer_loss_drops_the_statements() {
+        let newer = LossBoundary {
+            declared_at_ms: UNTIL + 1,
+            uncertain_until_ms: UNTIL + 70_000,
+            ..at(3)
+        };
+        assert_eq!(
+            writes_over(Some(at(2)), newer).unwrap(),
+            vec![put(newer), statements_dropped()]
+        );
+        // The first loss the app keeps drops any statement as well.
+        assert_eq!(
+            writes_over(None, at(2)).unwrap(),
+            vec![put(at(2)), statements_dropped()]
+        );
+    }
+
+    #[test]
+    fn test_loss_writes_same_loss_keeps_the_statements() {
+        let again = LossBoundary {
+            uncertain_until_ms: UNTIL + 1,
+            ..at(2)
+        };
+        assert_eq!(writes_over(Some(at(2)), again).unwrap(), vec![put(again)]);
+    }
+
+    #[test]
+    fn test_loss_writes_older_loss_writes_nothing() {
+        assert!(writes_over(Some(at(3)), at(2)).unwrap().is_empty());
     }
 }

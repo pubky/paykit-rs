@@ -7,24 +7,33 @@ use std::sync::Arc;
 use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{
     PayOptions, PayOutcome, Paykit, PaykitBackup, PaykitConfig, PaykitError, PaymentDoubt, Rail,
-    Refusal, RequestRef, RequestStatus,
+    RailDeclaration, Refusal, RequestRef, RequestStatus,
 };
 use pubky_switch_client::app::UserConfirmed;
 use pubky_switch_client::clock::Clock;
 use pubky_switch_client::testing::{ScriptedSwitch, SWITCH_ORIGIN};
 use pubky_switch_core::claims::ClaimStatus;
-use pubky_switch_core::records::Inbox;
+use pubky_switch_core::records::{Inbox, CLOCK_TOLERANCE_MS};
 
 use crate::common::{draft, request_from, store, World, ALICE_ORIGIN};
+use crate::restore::{is_refused, layer_of, nothing_restored, refused_restore, with_layer};
 
 /// The new service's key secret.
 const NEXT_SECRET: [u8; 32] = [0x4e; 32];
+
+/// The key secret of the service after a second loss.
+const LATER_SECRET: [u8; 32] = [0x4f; 32];
 
 /// Alice's signer declares her current generation lost (Switch spec 12.6 step 1): a new
 /// service recovering the account at the next generation, routed at [`SWITCH_ORIGIN`], the
 /// next `identity.json` naming it with `recovery_from`, delivered there and published; then
 /// the old service is unreachable.
 fn declare_loss(w: &World) {
+    declare_loss_of(w, ALICE_ORIGIN, NEXT_SECRET);
+}
+
+/// [`declare_loss`] of the service at `lost_origin`, the new one under `secret`.
+fn declare_loss_of(w: &World, lost_origin: &str, secret: [u8; 32]) {
     let lost_generation = w
         .homeserver
         .identity_doc(&w.alice_id())
@@ -32,13 +41,12 @@ fn declare_loss(w: &World) {
         .generation();
     let next = ScriptedSwitch::recovering(
         w.alice.identity().key(),
-        NEXT_SECRET,
+        secret,
         Arc::clone(&w.clock),
         lost_generation + 1,
         lost_generation,
     )
     .unwrap();
-    w.router.add_switch(SWITCH_ORIGIN, &next);
     let doc = w
         .alice
         .sign_next(|body| {
@@ -48,7 +56,8 @@ fn declare_loss(w: &World) {
         })
         .unwrap();
     next.deliver_identity(&doc).unwrap();
-    w.router.remove(ALICE_ORIGIN);
+    w.router.remove(lost_origin);
+    w.router.add_switch(SWITCH_ORIGIN, &next);
 }
 
 /// `app` follows the loss: its own `identity.json` from the Homeserver, then reads at the new
@@ -389,4 +398,183 @@ async fn test_provider_loss_settled_claim_at_the_new_service_ends_the_doubt() {
         "{again:?}"
     );
     assert_eq!(executions(&w), 1);
+}
+
+#[tokio::test]
+async fn test_provider_loss_request_created_inside_the_residual_window_is_paid_only_by_hand() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    // An earlier request of bob's, which the loss's steps carry to the new service.
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    let uncertain_until_ms = follow_loss(&mut wallet).await;
+    let loss = wallet.app().recovery_info().await.unwrap().unwrap().loss;
+    // Bob's request is signed after the declaration plus the clock tolerance, but before the
+    // end of the residual window plus the tolerance, and reaches the wallet only after the
+    // window: the old service could have taken another own app's attempt on it.
+    let created = uncertain_until_ms + CLOCK_TOLERANCE_MS - 1_000;
+    assert!(created >= loss.declared_at_ms + CLOCK_TOLERANCE_MS);
+    w.clock.advance_ms(created.saturating_sub(w.clock.now_ms()));
+    let request = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(status(&wallet, &request).await, RequestStatus::MayBePaid);
+    // Never paid automatically, a confirmation of its doubt passing nothing.
+    let refused = wallet
+        .pay_request_automatically(&request, PayOptions::default())
+        .await;
+    let doubt = doubt_of(&refused);
+    assert!(doubt.before_loss, "{doubt:?}");
+    let refused = wallet
+        .pay_request_automatically(
+            &request,
+            PayOptions::default().with_may_be_paid_confirmed(doubt),
+        )
+        .await;
+    assert!(doubt_of(&refused).before_loss);
+    // By hand, it is met by the prompt that it may already be paid, and goes only on the
+    // user's confirmation.
+    let doubt = doubt_of(&wallet.pay_request(&request, PayOptions::default()).await);
+    assert!(doubt.before_loss, "{doubt:?}");
+    assert_eq!(executions(&w), 0);
+    let paid = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_may_be_paid_confirmed(doubt),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(executions(&w), 1);
+}
+
+#[tokio::test]
+async fn test_provider_loss_resume_never_repeats_a_dispatch_from_before_the_loss() {
+    let w = World::new();
+    w.rail.set_declaration(
+        RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS).with_idempotent(true),
+    );
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    // Dispatched at the old service, its answer never coming: a resume on this idempotent
+    // method without a history would repeat it.
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("in flight");
+    };
+    let obligation = wallet.payments().await.unwrap().remove(0).obligation;
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    follow_loss(&mut wallet).await;
+    // The new service's claim shows this app's attempt from before the loss open: the one
+    // a resume would repeat.
+    let read = wallet
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    let attempt = read.view.attempt(&attempt_id.to_bytes()).unwrap();
+    assert_eq!(attempt.owner, wallet.app_id());
+    assert_eq!(attempt.outcome, pubky_switch_core::claims::Outcome::Open);
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        resumed.iter().any(|outcome| matches!(
+            outcome,
+            PayOutcome::Uncertain { attempt_id: id, .. } if *id == attempt_id
+        )),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_provider_loss_newer_loss_puts_a_stated_obligation_in_doubt_again() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    follow_loss(&mut wallet).await;
+    let doubt = doubt_of(&wallet.pay_request(&request, PayOptions::default()).await);
+    wallet
+        .confirm_not_paid_before_loss(&doubt.obligation, UserConfirmed::new())
+        .await
+        .unwrap();
+    assert_eq!(status(&wallet, &request).await, RequestStatus::Open);
+    // The new service is lost too: what the user stated was about the first loss.
+    w.clock.advance_ms(60_000);
+    declare_loss_of(&w, SWITCH_ORIGIN, LATER_SECRET);
+    follow_loss(&mut wallet).await;
+    let loss = wallet.app().recovery_info().await.unwrap().unwrap().loss;
+    let kept: serde_json::Value =
+        serde_json::from_slice(&wallet.app().protocol_get(b"pl").await.unwrap().unwrap()).unwrap();
+    assert_eq!(kept["d"]["generation"], loss.generation);
+    assert_eq!(status(&wallet, &request).await, RequestStatus::MayBePaid);
+    let again = wallet.pay_request(&request, PayOptions::default()).await;
+    assert!(doubt_of(&again).before_loss, "{again:?}");
+    assert_eq!(executions(&w), 0);
+}
+
+#[tokio::test]
+async fn test_provider_loss_confirm_not_paid_before_loss_refused_without_a_loss_kept() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    // No loss followed: nothing to state, and nothing is written.
+    let refused = wallet
+        .confirm_not_paid_before_loss(&[7; 32], UserConfirmed::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{refused:?}"
+    );
+    assert!(wallet.app().protocol_scan(b"pn/").await.unwrap().is_empty());
+    assert_eq!(status(&wallet, &request).await, RequestStatus::Open);
+}
+
+#[tokio::test]
+async fn test_provider_loss_restore_refuses_a_loss_above_the_clients_generation() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    follow_loss(&mut wallet).await;
+    let bytes = wallet.backup().await.unwrap().to_bytes().unwrap();
+    let id = wallet.app_id();
+    drop(wallet);
+    let backup: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let followed = backup["meta"]["generation"].as_u64().unwrap();
+    // The kept loss as no run writes it: recovered at a generation after the client's.
+    let mut raised = false;
+    let state = layer_of(&backup)
+        .into_iter()
+        .map(|(key, mut value)| {
+            if key == b"pl" {
+                assert_eq!(value["d"]["generation"], followed);
+                value["d"]["generation"] = serde_json::json!(followed + 1);
+                raised = true;
+            }
+            (key, value)
+        })
+        .collect();
+    assert!(raised);
+    let backup = with_layer(&backup, state);
+    let at = store();
+    let refused = refused_restore(&w, backup, Arc::clone(&at)).await;
+    assert!(is_refused(&refused), "{refused:?}");
+    nothing_restored(&w, at, id).await;
 }
