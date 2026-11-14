@@ -765,6 +765,23 @@ pub(crate) fn restore_paykit_layer(
     // hold names this restore's own widening, so a clean verdict drops it alone; a carried
     // one at the same start stands for it, and is kept.
     let mut restore_hold = RestoreHold::of(cursor_time_ms, before.as_ref());
+    // A widening the backup's hold still owed as of an earlier restore's first read of the
+    // lists, its clean verdict ended, goes back as a window waiting with that read, carried
+    // as the backup's windows are (`Paykit::take_restore_verdict`).
+    if let Some((owed_from, read)) = before.as_ref().and_then(RestoreHold::widening_owed) {
+        if carried_widenings.insert(owed_from) {
+            let owed = state::local_put(
+                &key::blocked_widening(owed_from),
+                &crate::marks::BlockedWindow {
+                    from_ms: owed_from,
+                    until_ms: crate::marks::BlockedWindow::TO_NOW,
+                    read: Some(read),
+                },
+            )
+            .map_err(|_| String::from("the restore's block widening can't be written"))?;
+            writes.push(owed);
+        }
+    }
     let from = cursor_time_ms.saturating_sub(pubky_switch_core::records::CLOCK_TOLERANCE_MS);
     if carried_widenings.contains(&from) {
         restore_hold.widening_from_ms = None;

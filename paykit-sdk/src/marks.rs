@@ -49,7 +49,9 @@
 //!   lists made meanwhile: a verdict that isn't clean applies it as of that read, and a
 //!   clean one, which shows no entry after the backup's position passed, so none dropped
 //!   for a block, drops it with no mark, ask or raise of the block floor
-//!   (`Paykit::take_restore_verdict`).
+//!   (`Paykit::take_restore_verdict`). The restore's hold keeps that first read, or the
+//!   first made after the clean verdict, so a later report that ends the clean verdict puts
+//!   the widening back as of the restore's first read of the lists.
 //!
 //! **The block floor** (`crate::floor`). The time before which a one-time request is paid
 //! only by hand is the identity's, in its shared `block_floor` record, so every payer app
@@ -121,7 +123,8 @@ pub(crate) struct BlockedWindow {
     pub(crate) until_ms: u64,
     /// For a restore's widening, the first read of the lists after the restore, taken while
     /// the client's verdict on the restore wasn't known: the widening is applied as of that
-    /// read once a verdict that isn't clean comes, and goes with a clean one (module docs).
+    /// read once a verdict that isn't clean comes, and goes with a clean one, which the
+    /// restore's hold keeps it for (module docs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) read: Option<WideningRead>,
 }
@@ -830,6 +833,39 @@ impl Paykit {
     /// read (`deny`): every counterparty it holds is marked from each widening's start to
     /// its end (module docs), and the widening goes, in one commit.
     pub(crate) async fn apply_block_widenings(&mut self, deny: &[[u8; 32]]) -> Result<()> {
+        let now = self.service_time().unwrap_or_else(|| self.now());
+        let hold = self
+            .local_get::<crate::hold::RestoreHold>(key::RESTORE_HOLD)
+            .await?;
+        if let Some(mut hold) = hold.clone() {
+            if let Some((from_ms, read)) = hold.widening_owed() {
+                // A later report ended the restore's clean verdict: its widening is applied as
+                // of the first read the hold kept, from the hold, so a `missed` item's
+                // widening at the same start, such as the gap that report shows, stays beside
+                // it. Kept for the next read while some counterparty can't be marked yet.
+                if self.widen_marks(&read.deny, from_ms, read.at_ms).await? {
+                    let mut tx = crate::state::Tx::default();
+                    let floor = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
+                    fold_into_floor(&mut tx, floor, read.at_ms)?;
+                    hold.widening_read = None;
+                    tx.put(key::RESTORE_HOLD, &hold)?;
+                    self.local_commit(tx).await?;
+                }
+            } else if let (crate::hold::RestoreVerdict::Clean, Some(from_ms), None) =
+                (hold.verdict, hold.widening_from_ms, &hold.widening_read)
+            {
+                // A restore's first read of the lists, made after a clean verdict dropped its
+                // widening before any read, is kept with the hold, for a later report that
+                // ends the verdict (`Paykit::take_restore_verdict`).
+                hold.widening_read = Some(WideningRead {
+                    at_ms: now.max(from_ms),
+                    deny: deny.to_vec(),
+                });
+                let mut tx = crate::state::Tx::default();
+                tx.put(key::RESTORE_HOLD, &hold)?;
+                self.local_commit(tx).await?;
+            }
+        }
         let widenings = self
             .local_scan::<BlockedWindow>(key::BLOCKED_WIDENINGS)
             .await?;
@@ -842,11 +878,8 @@ impl Paykit {
         // start; a `missed` item's keeps the item's end. A restore's waits while the client's
         // verdict on the restore isn't known, keeping the first read made meanwhile, as of
         // which it is applied: a clean verdict drops it (module docs).
-        let now = self.service_time().unwrap_or_else(|| self.now());
-        let verdict_open = self
-            .local_get::<crate::hold::RestoreHold>(key::RESTORE_HOLD)
-            .await?
-            .is_some_and(|hold| hold.verdict == crate::hold::RestoreVerdict::Open);
+        let verdict_open =
+            hold.is_some_and(|hold| hold.verdict == crate::hold::RestoreVerdict::Open);
         for (_, window) in &widenings {
             if window.until_ms == BlockedWindow::TO_NOW && verdict_open {
                 if window.read.is_none() {
@@ -869,14 +902,7 @@ impl Paykit {
                 None if window.until_ms == BlockedWindow::TO_NOW => (now.max(window.from_ms), deny),
                 None => (window.until_ms, deny),
             };
-            let mut applied = true;
-            for counterparty in deny {
-                let mut tx = crate::state::Tx::default();
-                applied &= self
-                    .count_widened_blocked(&mut tx, *counterparty, window.from_ms, until)
-                    .await?;
-                self.local_commit(tx).await?;
-            }
+            let applied = self.widen_marks(deny, window.from_ms, until).await?;
             // A window some counterparty couldn't be marked for yet stays, for the next read.
             // A restore's window also raises the block floor to the time it is applied, in
             // the commit that drops it: a sender blocked and unblocked again after the
@@ -893,6 +919,21 @@ impl Paykit {
             }
         }
         Ok(())
+    }
+
+    /// Mark each of `deny` for a widening from `from` to `until`, one commit per counterparty,
+    /// so the bound on marks counts each mark already put. Returns whether every one was
+    /// marked.
+    async fn widen_marks(&mut self, deny: &[[u8; 32]], from: u64, until: u64) -> Result<bool> {
+        let mut applied = true;
+        for counterparty in deny {
+            let mut tx = crate::state::Tx::default();
+            applied &= self
+                .count_widened_blocked(&mut tx, *counterparty, from, until)
+                .await?;
+            self.local_commit(tx).await?;
+        }
+        Ok(applied)
     }
 
     /// Act on `mark`, of `family` at the key whose rest after the prefix is `rest`: it goes

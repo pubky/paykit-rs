@@ -53,7 +53,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::allowances::{Consent, ConsentEntry};
 use crate::error::{PaykitError, Refusal, Result};
-use crate::marks::BlockedWindow;
+use crate::marks::{BlockedWindow, WideningRead};
 use crate::paykit::Paykit;
 use crate::requests::{cancelled, rejected, RequestStatus};
 use crate::state::{key, Tx};
@@ -87,6 +87,14 @@ pub(crate) struct RestoreHold {
     /// start stands for it. Kept in step with the window when the restore's bound moves
     /// it ([`Paykit::bound_restored_cursor_time`]).
     pub(crate) widening_from_ms: Option<u64>,
+    /// This restore's first read of the lists, while a clean verdict holds: the one the
+    /// widening had kept when the clean verdict dropped it, or the first made after that.
+    /// Once a later report ends the verdict, the widening is applied as of this read, the
+    /// restore's first read of the lists (Paykit spec 8.1, Blocked counterparties), from
+    /// here at the next read of the lists, and the read goes. `None` while the verdict is
+    /// open, and before such a read; only with a widening of its own, the read no earlier
+    /// than its start.
+    pub(crate) widening_read: Option<WideningRead>,
 }
 
 /// The client's verdict on a restore, as Paykit took it (Switch spec 12.4, "The held
@@ -120,6 +128,7 @@ impl RestoreHold {
             earlier_asks,
             verdict: RestoreVerdict::Open,
             widening_from_ms: Some(own),
+            widening_read: None,
         }
     }
 
@@ -146,6 +155,26 @@ impl RestoreHold {
     /// backup held: what a backup of this state carries over ([`RestoreHold::earlier`]).
     pub(crate) fn holds_all(&self) -> bool {
         self.in_force() || self.earlier
+    }
+
+    /// The widening still to be applied as of the first read it kept, once a later report
+    /// ended its clean verdict: its start and that read.
+    pub(crate) fn widening_owed(&self) -> Option<(u64, WideningRead)> {
+        match (self.verdict, self.widening_from_ms, &self.widening_read) {
+            (RestoreVerdict::NotClean, Some(from_ms), Some(read)) => Some((from_ms, read.clone())),
+            _ => None,
+        }
+    }
+
+    /// Whether its times are in order: a read kept only once a verdict is taken, with a
+    /// widening of its own, and no earlier than the widening's start.
+    pub(crate) fn in_order(&self) -> bool {
+        self.widening_read.as_ref().is_none_or(|read| {
+            self.verdict != RestoreVerdict::Open
+                && self
+                    .widening_from_ms
+                    .is_some_and(|from_ms| read.at_ms >= from_ms)
+        })
     }
 }
 
@@ -630,6 +659,18 @@ impl Paykit {
                 }
             }
             tx.put(&key::blocked_widening(bounded.from_ms), &bounded)?;
+        }
+        // So are the start of a widening the hold names that a clean verdict dropped, and the
+        // first read of the lists the hold keeps for it, both brought down to the same bound,
+        // so they stay in order; the read goes with a widening the hold no longer names.
+        if let Some(hold) = hold.as_mut() {
+            hold.widening_from_ms = hold.widening_from_ms.map(|from_ms| from_ms.min(bound));
+            if hold.widening_from_ms.is_none() {
+                hold.widening_read = None;
+            }
+            if let Some(read) = hold.widening_read.as_mut() {
+                read.at_ms = read.at_ms.min(bound);
+            }
         }
         if hold != held {
             if let Some(hold) = &hold {
@@ -1330,15 +1371,17 @@ impl Paykit {
     ///   restore, no re-send is asked for it, and the consents the restore marked (`rc/`)
     ///   are as the backup held them again, but while a `missed` item's mark (`mc`) is still
     ///   to be applied, which marks them all. The restore's widening of the block marks goes
-    ///   unapplied, so no request is paid only by hand for it (`marks.rs`). What the backup
-    ///   held itself stays held ([`Paykit::held`]).
+    ///   unapplied, so no request is paid only by hand for it (`marks.rs`); the hold keeps
+    ///   the first read of the lists it waited with, or keeps the first made after
+    ///   ([`RestoreHold::widening_read`]). What the backup held itself stays held
+    ///   ([`Paykit::held`]).
     /// - **Ahead or unknown**: the hold stays, for good. Ahead is a gap the client hands as
     ///   a `missed` item, whose own hold the protocol's step sets in the commit that passes
     ///   it. A clean verdict a later report ends brings the hold back as after a restore
     ///   that isn't clean, in one commit: every open request held, the user's earlier
     ///   confirmations dropped, every Allowance on the consent list to be confirmed again,
     ///   and the re-sends asked for from the backup's position, the widening of the block
-    ///   marks with them.
+    ///   marks with them, as of the restore's first read of the lists the hold kept.
     ///
     /// The client commits the verdict before this runs: a crash between the two leaves the
     /// hold in force, and the next load or receive takes the verdict again. Returns whether
@@ -1380,12 +1423,15 @@ impl Paykit {
                 // block since it: this restore's own widening of the block marks goes
                 // unapplied, with no mark, ask or raise of the block floor (`marks.rs`). One
                 // the backup carried, of an earlier restore or a `missed` item, stays.
+                // The first read of the lists it kept stays with the hold, for a later report
+                // that ends the verdict to put it back as of that read.
                 if let Some(from) = hold.widening_from_ms {
-                    if self
+                    if let Some(window) = self
                         .local_get::<BlockedWindow>(&key::blocked_widening(from))
                         .await?
-                        .is_some_and(|window| window.until_ms == BlockedWindow::TO_NOW)
+                        .filter(|window| window.until_ms == BlockedWindow::TO_NOW)
                     {
+                        hold.widening_read = window.read;
                         tx.delete(&key::blocked_widening(from));
                     }
                 }
@@ -1413,15 +1459,16 @@ impl Paykit {
                     }
                 }
                 // This restore's own widening of the block marks, which the clean verdict
-                // dropped, comes back for the next read of the lists, made due now. It is
-                // applied as of that read, not the first read after the restore, which the
-                // clean verdict dropped with it: the later read's deny list may hold more
-                // counterparties, whose marks are speculative and only ask once each is
-                // unblocked, and its floor raise is later, so it holds more requests for
-                // payment by hand, never fewer.
+                // dropped, comes back as of the restore's first read of the lists (Paykit
+                // spec 8.1), at the next read, made due now: the first read the hold kept is
+                // applied from the hold, with that read's time and deny list (`marks.rs`).
+                // With no read made since the restore, the next is the first: the widening is
+                // put back, unless a window at its start stands for it.
                 if let Some(from) = hold.widening_from_ms {
                     let at = key::blocked_widening(from);
-                    if self.local_get::<BlockedWindow>(&at).await?.is_none() {
+                    if hold.widening_read.is_none()
+                        && self.local_get::<BlockedWindow>(&at).await?.is_none()
+                    {
                         tx.put(
                             &at,
                             &BlockedWindow {
@@ -1657,6 +1704,41 @@ mod tests {
     use pubky_switch_client::error::{ClientError, StoreError, TransportError};
 
     use super::*;
+
+    fn hold_with_read(verdict: RestoreVerdict, from_ms: Option<u64>, at_ms: u64) -> RestoreHold {
+        RestoreHold {
+            verdict,
+            widening_from_ms: from_ms,
+            widening_read: Some(WideningRead {
+                at_ms,
+                deny: vec![[7; 32]],
+            }),
+            ..RestoreHold::of(10_000, None)
+        }
+    }
+
+    #[test]
+    fn test_restore_hold_in_order_keeps_a_read_only_after_a_verdict() {
+        assert!(RestoreHold::of(10_000, None).in_order());
+        assert!(hold_with_read(RestoreVerdict::Clean, Some(5), 9).in_order());
+        assert!(hold_with_read(RestoreVerdict::NotClean, Some(5), 5).in_order());
+        // A read while the verdict is open, before the widening's start, or with no
+        // widening of the hold's own: out of order.
+        assert!(!hold_with_read(RestoreVerdict::Open, Some(5), 9).in_order());
+        assert!(!hold_with_read(RestoreVerdict::Clean, Some(5), 4).in_order());
+        assert!(!hold_with_read(RestoreVerdict::Clean, None, 9).in_order());
+    }
+
+    #[test]
+    fn test_restore_hold_widening_owed_only_once_a_clean_verdict_ended() {
+        let ended = hold_with_read(RestoreVerdict::NotClean, Some(5), 9);
+        let (from_ms, read) = ended.widening_owed().unwrap();
+        assert_eq!((from_ms, read.at_ms), (5, 9));
+        assert!(hold_with_read(RestoreVerdict::Clean, Some(5), 9)
+            .widening_owed()
+            .is_none());
+        assert!(RestoreHold::of(10_000, None).widening_owed().is_none());
+    }
 
     fn switch(code: ErrorCode) -> PaykitError {
         PaykitError::Client(AppError::Switch(ClientError::Switch {

@@ -541,11 +541,11 @@ impl Stored for bool {
 
 impl sealed::Sealed for RestoreHold {}
 
-/// A restore's hold, which names nothing.
+/// A restore's hold, which names nothing, its times in order ([`RestoreHold::in_order`]).
 impl Stored for RestoreHold {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::RestoreHold => Ok(()),
+            StateKey::RestoreHold if self.in_order() => Ok(()),
             _ => corrupt(),
         }
     }

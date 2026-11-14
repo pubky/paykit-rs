@@ -436,6 +436,49 @@ async fn test_blocked_return_restore_widening_applied_as_of_its_first_read() {
 }
 
 #[tokio::test]
+async fn test_blocked_return_ended_clean_verdict_widening_applied_as_of_the_first_read() {
+    let w = World::new();
+    let (backup, _) = backed_up_blocking_bob(&w).await;
+    let mut restored = restore_from(&w, &backup).await;
+    // The first read of the lists shows bob blocked, and its page shows the restore clean:
+    // the widening goes unapplied, with no mark.
+    restored.app_mut().refresh_identity().await.unwrap();
+    restored.receive(None).await.unwrap();
+    assert_eq!(
+        restored.app().restore_held_cursor(),
+        Some(pubky_switch_client::app::HeldCursor::Clean)
+    );
+    assert_eq!(block_marks(&restored).await, 0);
+    assert!(widening_starts(&restored).await.is_empty());
+    let first_read = w.clock.now_ms();
+    w.clock.advance_ms(MINUTE_MS);
+    restored.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    restored.receive(None).await.unwrap();
+    assert_eq!(block_marks(&restored).await, 0);
+    // A later page reports the cursor ahead of the app's own position: the clean verdict
+    // ends, and the widening comes back as of the restore's first read of the lists, which
+    // held bob, though the lists no longer do. The gap it shows, a `missed` item from the
+    // same cursor time, widens the marks beside it.
+    let position = restored.app().cursor().seq;
+    w.alice
+        .switch()
+        .set_held_cursor(&restored.app_id(), position + 3);
+    restored.receive(None).await.unwrap();
+    assert!(matches!(
+        restored.app().restore_held_cursor(),
+        Some(pubky_switch_client::app::HeldCursor::Ahead { .. })
+    ));
+    let marks = block_mark_values(&restored).await;
+    assert_eq!(marks.len(), 1, "{marks:?}");
+    assert!(
+        marks[0]["latest_ms"].as_u64().unwrap() <= first_read,
+        "{marks:?}"
+    );
+    assert!(widening_starts(&restored).await.is_empty());
+}
+
+#[tokio::test]
 async fn test_blocked_return_clean_restore_over_an_earlier_hold_drops_only_its_own_widening() {
     let w = World::new();
     let (backup, taken) = backed_up_blocking_bob(&w).await;
