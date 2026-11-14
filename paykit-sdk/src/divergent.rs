@@ -591,12 +591,15 @@ pub(crate) enum WriteRole {
     Request,
     /// A payer's acceptance, in the payee's request record.
     Response,
-    /// A payer's proof, in the payee's record of the request or of the settlement.
+    /// A payer's proof, in the payee's record of the request, of its Billing Period or of
+    /// the settlement.
     Proof,
     /// A payee's receipt, in the payer's record.
     Receipt,
     /// A Private Payment List, in its `payment_lists` record.
     List,
+    /// A payee's period details, in the payer's period record.
+    Details,
 }
 
 impl WriteRole {
@@ -608,14 +611,17 @@ impl WriteRole {
             Self::Proof => "proof",
             Self::Receipt => "receipt",
             Self::List => "list",
+            Self::Details => "details",
         }
     }
 
-    /// The side of the records a message of this role goes into: a request, a receipt and a
-    /// list are the payer's, an acceptance and a proof the payee's.
+    /// The side of the records a message of this role goes into: a request, a receipt, a
+    /// list and period details are the payer's, an acceptance and a proof the payee's.
     fn side(self) -> crate::hold::RecordSide {
         match self {
-            Self::Request | Self::Receipt | Self::List => crate::hold::RecordSide::Payer,
+            Self::Request | Self::Receipt | Self::List | Self::Details => {
+                crate::hold::RecordSide::Payer
+            }
             Self::Response | Self::Proof => crate::hold::RecordSide::Payee,
         }
     }
@@ -628,6 +634,7 @@ impl WriteRole {
             "proof" => Self::Proof,
             "receipt" => Self::Receipt,
             "list" => Self::List,
+            "details" => Self::Details,
             _ => return None,
         })
     }
@@ -641,6 +648,7 @@ impl WriteRole {
             Body::PaymentProof(_) => Self::Proof,
             Body::PaymentReceipt(_) => Self::Receipt,
             Body::PrivatePaymentList(_) => Self::List,
+            Body::PaymentPeriodDetails(_) => Self::Details,
             _ => return None,
         })
     }
@@ -796,8 +804,10 @@ impl WriteTarget {
 
 /// The record `stored`, a kept message, goes into, as the receive step places it: a request
 /// into the payer's request record, an acceptance or a proof into the payee's record of the
-/// request it names, a proof of a payment without a request into the payee's record of its
-/// settlement, a receipt into the payer's record, a list into its `payment_lists` record.
+/// request it names, a Billing Period's proof into the payee's period record of the period
+/// it names, period details into the payer's period record of theirs, a proof of a payment
+/// without a request into the payee's record of its settlement, a receipt into the payer's
+/// record, a list into its `payment_lists` record.
 pub(crate) fn write_target(
     stored: &StoredMessage,
     own: &[u8; 32],
@@ -832,6 +842,28 @@ pub(crate) fn write_target(
                 true,
             )
         }
+        // A Billing Period's proof and period details go into the period record, never the
+        // request's (Paykit wire 5.3, "Binding"), which they may open.
+        Body::PaymentProof(_) if stored.body().billing_period().is_some() => {
+            let period = stored.body().billing_period().copied()?;
+            activity(
+                ActivityTarget::payee(
+                    crate::periods::period_key(own, &first?, &period),
+                    stored.body().label(),
+                ),
+                Role::Proof,
+                true,
+            )
+        }
+        Body::PaymentPeriodDetails(details) => activity(
+            ActivityTarget::payer(crate::periods::period_key(
+                &sender,
+                &first?,
+                &details.billing_period,
+            )),
+            Role::PeriodDetails,
+            true,
+        ),
         Body::PaymentRequestAcceptance(_) | Body::PaymentProof(_) => {
             let role = Role::of(stored.body())?;
             activity(
@@ -854,6 +886,14 @@ pub(crate) fn write_target(
         ))),
         _ => None,
     }
+}
+
+/// Whether `stored` is a Billing Period's message: period details, or a proof naming a
+/// period.
+fn periodic(stored: &StoredMessage) -> bool {
+    matches!(stored.body(), Body::PaymentPeriodDetails(_))
+        || matches!(stored.body(), Body::PaymentProof(_))
+            && stored.body().billing_period().is_some()
 }
 
 /// How many later messages of one role a kept record reflects besides the one it stores
@@ -1106,10 +1146,10 @@ pub(crate) fn step_keep(
     settlement: Settlement<'_>,
     reads: bool,
 ) -> std::result::Result<(), Fail> {
-    // A message no kept write holds for this record, such as period details, or a period's
-    // proof, whose period record a kept write can't name, is held on the feed instead, never
-    // written past the pause nor lost, until the user confirms the record or its 30 days
-    // pass, when it is given up with the host's notice.
+    // Every message the receive step writes over a record names that record by its kind
+    // ([`write_target`]), period details and a Billing Period's proof their period record
+    // among them. One that doesn't is no write of this step's: its entry is held, never
+    // written past the pause nor lost.
     let names_record = write_target(stored, &cx.identity(), settlement)
         .map(|target| cx.record_key(&target.record_target()))
         .transpose()?
@@ -1642,6 +1682,13 @@ impl Paykit {
                             self.hold_kept_list(record, &stored, tx).await?;
                             crate::stored::Placed::Done
                         }
+                        // A Billing Period's message goes where a stored entry's later write
+                        // puts it, by the same rule: period details only while the payer
+                        // stores them for the period, a proof once the period record holds
+                        // the details it names ([`Paykit::period_place`]).
+                        WriteTarget::Activity { .. } if periodic(&stored) => {
+                            Box::pin(self.place_periodic(&stored, order, tx)).await?
+                        }
                         WriteTarget::Activity {
                             target,
                             role,
@@ -1666,6 +1713,45 @@ impl Paykit {
             }
         }
         Ok(())
+    }
+
+    /// Write `stored`, a Billing Period's message kept over its period record, once the user
+    /// has confirmed the record, with `tx`, which drops the kept copy, as a stored entry's
+    /// later write places it ([`Paykit::period_place`]): into the period record when it
+    /// takes it now; taken with no effect, as at its first read, for period details the
+    /// payer doesn't store any more, and dropped for a period that isn't the request's; and
+    /// waiting, within its window, for a proof naming details the period record doesn't hold
+    /// yet, or for a request record not held.
+    async fn place_periodic(
+        &mut self,
+        stored: &StoredMessage,
+        order: Order,
+        tx: Tx,
+    ) -> Result<crate::stored::Placed> {
+        use crate::stored::{Place, Placed};
+        let request = stored
+            .message()
+            .refs
+            .first()
+            .copied()
+            .ok_or_else(PaykitError::corrupt)?;
+        Ok(match Box::pin(self.period_place(stored, &request)).await? {
+            Some(Place::Record {
+                target,
+                role,
+                creates,
+            }) => {
+                self.place_note(&target, role, creates, stored.clone(), order, tx)
+                    .await?
+            }
+            Some(Place::Taken) | None => {
+                self.local_commit(tx).await?;
+                Placed::Done
+            }
+            Some(Place::Undecided) => Placed::Waits,
+            Some(Place::AwaitsRequest(side)) if self.side_unlisted(side).await? => Placed::Waits,
+            Some(_) => Placed::Not,
+        })
     }
 
     /// Move `stored`, a message kept at `kept_key` before its record `held` read (`pr/`),
@@ -2522,6 +2608,7 @@ mod tests {
             WriteRole::Proof,
             WriteRole::Receipt,
             WriteRole::List,
+            WriteRole::Details,
         ] {
             assert_eq!(WriteRole::from_tag(role.tag()), Some(role));
         }

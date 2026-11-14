@@ -394,8 +394,9 @@ pub enum RequestStatus {
     /// seen that ([`Paykit::confirm_divergent`], Paykit spec 6).
     Divergent,
     /// A recurring request this identity accepted, the subscription running: each Billing
-    /// Period is paid on its own (Paykit spec 8.2). The payee may cancel it; the SDK refuses
-    /// the payer's cancellation of it ([`Refusal::Recurring`]).
+    /// Period is paid on its own (Paykit spec 8.2). Either side's cancellation ends it: the
+    /// payer's ([`Paykit::cancel_request`]) is refused only while a listed period has an open
+    /// or `unknown` attempt (Paykit spec 8.2, "Ending").
     Subscribed,
     /// An accepted recurring request whose last Billing Period has ended, on the highest
     /// service time verified: no period is left to come, though a payment of an earlier one

@@ -246,7 +246,7 @@ pub(crate) fn declines(note: Option<&StoredNote>) -> bool {
 }
 
 /// Where a kept message goes.
-enum Place {
+pub(crate) enum Place {
     /// Into this record, in this role; `creates` when the message may open the record.
     Record {
         target: ActivityTarget,
@@ -641,7 +641,7 @@ impl Paykit {
     /// Billing Period's into its period record, once the request record is held to check the
     /// period against, else into the request record ([`Paykit::period_destination`]); `None`
     /// for a period that isn't the request's (Paykit wire 4.4, 5.3).
-    async fn period_place(
+    pub(crate) async fn period_place(
         &self,
         stored: &StoredMessage,
         request: &[u8; 32],

@@ -463,9 +463,10 @@ pub(crate) struct Plan {
     pub(crate) on_record: bool,
     /// The attempt's other conditions: a Billing Period's `server_time_in` (Paykit spec 8.2).
     pub(crate) conditions: Vec<Condition>,
-    /// The request record's write after the attempt, in its batch: a Billing Period not
-    /// listed in `attempted_periods` added (Paykit spec 8.2).
-    pub(crate) request_write: Option<(Vec<Condition>, OpKind)>,
+    /// The record writes after the attempt, in its batch (Paykit spec 8.2): the request
+    /// record with a Billing Period not listed in `attempted_periods` added, and the period
+    /// record a payment by the app's own policy writes at the version it read.
+    pub(crate) record_writes: Vec<(Vec<Condition>, OpKind)>,
     /// Who starts the payment: the user, or an executor (Switch spec 4.3).
     pub(crate) by: Initiator,
     /// The user's confirmation of a payee identity its switch couldn't confirm.
@@ -942,7 +943,7 @@ impl Paykit {
             create: None,
             on_record: true,
             conditions: Vec::new(),
-            request_write: None,
+            record_writes: Vec::new(),
             by,
             unconfirmed: options.unconfirmed_identity_confirmed,
             end_hold,
@@ -1166,7 +1167,7 @@ impl Paykit {
             create: Some(record),
             on_record: false,
             conditions: Vec::new(),
-            request_write: None,
+            record_writes: Vec::new(),
             by: Initiator::User,
             unconfirmed: options.unconfirmed_identity_confirmed,
             end_hold: None,
@@ -1990,7 +1991,7 @@ impl Paykit {
             create,
             on_record,
             conditions: extra,
-            request_write,
+            record_writes,
             by,
             unconfirmed,
             end_hold,
@@ -2030,9 +2031,9 @@ impl Paykit {
         let mut batch = OpBatch::new()
             .op_if(op.kind(), conditions)
             .obligation_deadline(entry.obligation, own_deadline(entry.deadline));
-        if let Some(write) = request_write {
-            // After the attempt, which is conditioned on the version this write builds on
-            // (Paykit wire 5.3, "Attempted periods").
+        for write in record_writes {
+            // After the attempt, which is conditioned on the version of the request record
+            // its write builds on (Paykit wire 5.3, "Attempted periods").
             batch = batch.entry(write);
         }
         if let Some(record_key) = end_hold {
@@ -3586,12 +3587,17 @@ impl Paykit {
             || Box::pin(self.divergent_withholds(entry)).await?)
     }
 
-    /// Whether `entry`'s request record, or the `payment_lists` record of the list its
-    /// destination came from, blocks an automatic payment ([`crate::divergent::Pause`]).
+    /// Whether `entry`'s request record, a Billing Period's period record, or the
+    /// `payment_lists` record of the list its destination came from, blocks an automatic
+    /// payment ([`crate::divergent::Pause`]): a divergent request record pauses every period
+    /// of the request, and a period record its own (Paykit spec 6, 8.3).
     async fn divergent_withholds(&mut self, entry: &JournalEntry) -> Result<bool> {
         let mut records = Vec::new();
         if let Some(natural) = entry.request_record()? {
             records.push(self.activity_key(&ActivityTarget::payer(natural))?);
+        }
+        if entry.period()?.is_some() {
+            records.push(self.activity_key(&ActivityTarget::payer(entry.natural_key.clone()))?);
         }
         if entry.destination.source()? == DestinationSource::List {
             records.push(
@@ -3632,7 +3638,9 @@ impl Paykit {
     ///    attempt's service and generation;
     /// 5. for a repeat, the method's idempotency retention hasn't ended, and the repeat can
     ///    complete before its attempt is orphaned ([`FinalCheck::Lapsed`]); for a first
-    ///    dispatch, the attempt is within its pre-dispatch budget;
+    ///    dispatch, the attempt is within its pre-dispatch budget, and, for an automatic one
+    ///    of a Billing Period, the period's automatic window hasn't ended
+    ///    ([`Paykit::automatic_window_ended`]);
     /// 6. the app may still make the attempt: no alarm or restore question raised meanwhile,
     ///    for an automatic payment the clocks within the tolerance, and its certificate
     ///    holds `paykit_pay`, so an app a renewal reduced moves no money on any path, a repeat at a
@@ -3924,6 +3932,11 @@ impl Paykit {
                 if let Err(refusal) = self.within_budget(&answered, now) {
                     return Ok(FinalCheck::Refused(refusal));
                 }
+                if by == Initiator::Automatic {
+                    if let Some(refusal) = self.automatic_window_ended(entry)? {
+                        return Ok(FinalCheck::Refused(refusal));
+                    }
+                }
             }
         }
         let carrier = entry.kept_carrier(&self.identity())?;
@@ -3940,6 +3953,24 @@ impl Paykit {
         } else {
             FinalCheck::Hold
         })
+    }
+
+    /// The refusal of an automatic first dispatch of the Billing Period `entry` pays once the
+    /// period's automatic window has ended on the highest service time verified
+    /// ([`crate::periods::automatic_window_end`], Paykit spec 8.2, "Paying periods"): the
+    /// attempt is written `failed`, nothing dispatched, and the period stays payable by hand.
+    /// `None` for an entry of no period, or within its window. A repeat, which completes a
+    /// dispatch already made, isn't judged by it.
+    fn automatic_window_ended(&self, entry: &JournalEntry) -> Result<Option<Refusal>> {
+        let Some(period) = entry.period()? else {
+            return Ok(None);
+        };
+        let end = crate::periods::automatic_window_end(&period, entry.deadline);
+        Ok(self.service_time().is_some_and(|t| t >= end).then(|| {
+            Refusal::NotAutomatic(
+                "the Billing Period's automatic window ended before its dispatch".into(),
+            )
+        }))
     }
 
     /// The checks before a repeat, those before a first dispatch but for an Allowance in

@@ -108,6 +108,10 @@ const COMPACT_FROM: usize = MAX_LEDGER_VALUE / 4 * 3;
 /// How many times a grant's write is built again after its record changed meanwhile.
 const GRANT_TRIES: usize = 3;
 
+/// How many times a `manual_only` mark is built, the record read again after a write
+/// another own app made since.
+const MARK_TRIES: usize = 3;
+
 fn not_automatic(why: &str) -> PaykitError {
     Refusal::NotAutomatic(why.into()).into()
 }
@@ -2391,44 +2395,55 @@ impl Paykit {
         }
     }
 
-    /// Mark the one-time request `request` manual-only on its payer record (Paykit spec 8.3,
-    /// "Manual only"; Paykit wire 5.3): no executor pays it automatically once the write
-    /// lands. The mark is never lifted. A write kept unanswered returns `Ok` and lands with
-    /// the app's next write or read, before any executor batch, which sends kept batches
-    /// first; a kept batch the client later drops leaves no mark.
+    /// Mark the request `request` manual-only on its payer request record (Paykit spec 8.3,
+    /// "Manual only"; Paykit wire 5.3): no app pays it automatically once the write lands,
+    /// an executor or, for a recurring request, an app by its own policy. A recurring request
+    /// is marked as a whole: while its record holds the mark, no executor accepts it and no
+    /// app pays one of its Billing Periods automatically, each automatic dispatch of a period
+    /// reading the record again from the switch first; one period alone is marked on its
+    /// period record ([`Paykit::mark_period_manual_only`]). The mark is never lifted. A
+    /// write kept unanswered returns `Ok` and lands with the app's next write or read, before
+    /// any automatic attempt's batch, which sends kept batches first; a kept batch the
+    /// client later drops leaves no mark. A mark that fails because another own app wrote
+    /// the record since is built again on the record read again, at most three times in
+    /// all.
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotFound`]; [`Refusal::Recurring`] for a recurring request, whose periods
-    /// carry their own marks; [`PaykitError::Conflict`] when the record changed meanwhile;
-    /// the client's errors.
+    /// [`Refusal::NotFound`]; [`PaykitError::Conflict`] when the record kept changing; the
+    /// client's errors.
     pub async fn mark_manual_only(&mut self, request: &RequestRef) -> Result<()> {
         Box::pin(async move {
             self.refresh_own()?;
             self.records_known().await?;
             self.require_pay()?;
-            let (target, record) = self.payer_request(request).await?;
-            let (_, body) = crate::requests::request_of(&record).ok_or(Refusal::NotFound)?;
-            if body.is_recurring() {
-                return Err(Refusal::Recurring.into());
-            }
-            if record.manual_only {
-                return Ok(());
-            }
-            let mut next = record.clone();
-            next.manual_only = true;
-            let write = self
-                .app
-                .record_op(&target.record_target(), Some(&next.to_json()?), Vec::new())
-                .await?;
-            match self.app.submit_batch(OpBatch::new().entry(write)).await {
-                Ok(_) => Ok(()),
-                Err(error) if error.kept_batch().is_some() => Ok(()),
-                Err(error) if error.code() == Some(ErrorCode::Conflict) => {
-                    self.app.read_record(&target.record_target()).await?;
-                    Err(crate::records::conflict(error.into()))
+            let mut tries = 0;
+            loop {
+                let (target, record) = self.payer_request(request).await?;
+                crate::requests::request_of(&record).ok_or(Refusal::NotFound)?;
+                if record.manual_only {
+                    return Ok(());
                 }
-                Err(error) => Err(error.into()),
+                let mut next = record.clone();
+                next.manual_only = true;
+                let write = self
+                    .app
+                    .record_op(&target.record_target(), Some(&next.to_json()?), Vec::new())
+                    .await?;
+                match self.app.submit_batch(OpBatch::new().entry(write)).await {
+                    Ok(_) => return Ok(()),
+                    Err(error) if error.kept_batch().is_some() => return Ok(()),
+                    // Another own app wrote the record since it was read: the record is read
+                    // again and the mark built again on it (Paykit spec 8.3, "Manual only").
+                    Err(error) if error.code() == Some(ErrorCode::Conflict) => {
+                        self.app.read_record(&target.record_target()).await?;
+                        tries += 1;
+                        if tries >= MARK_TRIES {
+                            return Err(crate::records::conflict(error.into()));
+                        }
+                    }
+                    Err(error) => return Err(error.into()),
+                }
             }
         })
         .await

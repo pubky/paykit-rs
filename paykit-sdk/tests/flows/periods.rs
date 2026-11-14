@@ -4613,10 +4613,11 @@ async fn test_periods_details_sent_only_once_a_paused_record_is_confirmed() {
 }
 
 #[tokio::test]
-async fn test_periods_details_over_a_paused_period_record_held_then_placed_once_confirmed() {
+async fn test_periods_details_over_a_paused_period_record_kept_then_placed_once_confirmed() {
     // Alice's period record of January holds bob's first details and is then paused as
-    // divergent. Bob's second details are neither written over it nor lost: their entry is
-    // held, and placed beside the first once the user confirms the record.
+    // divergent. Bob's second details are neither written over it nor lost: they are kept
+    // over the record, and placed beside the first once the user confirms it (Paykit spec
+    // 6).
     let w = World::new();
     let base = store();
     let mut shop = w.shop().await;
@@ -4641,7 +4642,7 @@ async fn test_periods_details_over_a_paused_period_record_held_then_placed_once_
         .unwrap();
     wallet.receive(None).await.unwrap();
     assert_eq!(count(&wallet, &request).await, 1);
-    assert!(wallet.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    assert_eq!(wallet.app().protocol_scan(b"dw/").await.unwrap().len(), 1);
     crate::divergent::confirm(&mut wallet, &period)
         .await
         .unwrap();
@@ -4651,11 +4652,10 @@ async fn test_periods_details_over_a_paused_period_record_held_then_placed_once_
 }
 
 #[tokio::test]
-async fn test_periods_proof_over_a_paused_period_record_held_then_placed_once_confirmed() {
+async fn test_periods_proof_over_a_paused_period_record_kept_then_placed_once_confirmed() {
     // The shop's period record of January holds its details and is then paused as
-    // divergent. Alice's proof of January is neither written over it nor lost, and no
-    // kept write names a record it can't: its entry is held, and placed once the user
-    // confirms the record.
+    // divergent. Alice's proof of January is neither written over it nor lost: it is kept
+    // over the period record, and placed once the user confirms it (Paykit spec 6).
     let w = World::new();
     let base = store();
     let mut shop = shop_on(&w, Arc::clone(&base)).await;
@@ -4679,7 +4679,7 @@ async fn test_periods_proof_over_a_paused_period_record_held_then_placed_once_co
     );
     shop.receive(None).await.unwrap();
     assert!(!shop.payee_activity().await.unwrap()[0].periods[0].paid);
-    assert!(shop.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    assert_eq!(shop.app().protocol_scan(b"dw/").await.unwrap().len(), 1);
     crate::divergent::confirm(&mut shop, &period).await.unwrap();
     shop.receive(None).await.unwrap();
     shop.receive(None).await.unwrap();

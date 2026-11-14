@@ -95,8 +95,8 @@ pub enum Refusal {
     WaitingForPeriodDetails,
     /// The occurrence is paid only by hand, after the user's confirmation: its request was
     /// accepted under an Allowance, which alone could pay it automatically (one Allowance
-    /// per request), or its record is marked manual-only (Paykit spec 8.3). Nothing was
-    /// written.
+    /// per request), or its record, or a Billing Period's request record, is marked
+    /// manual-only (Paykit spec 8.2, 8.3). Nothing was written.
     #[error("Paykit spec 8.3: paid only by hand")]
     ManualOnly,
     /// The request record lists 16 Billing Periods that may have an open attempt, none of
@@ -221,10 +221,14 @@ pub enum Refusal {
         payment: Box<crate::BlockedPayment>,
     },
     /// The executor doesn't pay the request automatically under the Allowance, for the rule
-    /// named (Paykit spec 8.3, "Executor" and "Paying under an Allowance"). Nothing was
-    /// written or paid; the request may still be paid by hand, after the user's
-    /// confirmation.
-    #[error("Paykit spec 8.3: not paid automatically: {0}")]
+    /// named (Paykit spec 8.3, "Executor" and "Paying under an Allowance"), or the app
+    /// doesn't pay the Billing Period by its own policy, before the period the payer's
+    /// acceptance makes the first paid automatically or past the period's automatic window
+    /// (Paykit spec 8.2, "Paying periods"). Nothing was written or paid; the request or the
+    /// period may still be paid by hand, after the user's confirmation. Found once its
+    /// attempt is journaled, before its dispatch, the attempt is written `failed`
+    /// ([`Refusal::AttemptFailed`]).
+    #[error("Paykit spec 8.2, 8.3: not paid automatically: {0}")]
     NotAutomatic(String),
     /// A record the call acts on is divergent after a provider loss, or was seen so, and the
     /// user hasn't confirmed it (Paykit spec 6, "Divergent records"): its upload may hold
