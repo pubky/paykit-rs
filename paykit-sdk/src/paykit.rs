@@ -489,7 +489,7 @@ impl Paykit {
     /// 12.4, "The held cursor"). The verdict settles at the first feed page read once the
     /// app has confirmed its newest `identity.json`, and before any cursor move of its own:
     /// the host calls `app_mut().refresh_identity()` and then [`Paykit::receive`] right
-    /// after the restore, before [`Paykit::reconcile`] or any write, which sends the
+    /// after the restore, before [`Paykit::reconcile`] or any write: a write sends the
     /// restored cursor move and leaves the verdict unknown.
     ///
     /// - **Clean**, the service reporting a cursor at or behind the backup's position: the
@@ -837,7 +837,11 @@ impl Paykit {
         // The client's verdict on a restore, settled by this read's first page or ended by a
         // later report, lifts or brings back the restore's hold before anything acts on it
         // (`hold.rs`).
-        Box::pin(self.take_restore_verdict()).await?;
+        // A verdict that isn't clean makes the lists due, for the restore's widening of the
+        // block marks (`marks.rs`): read again now, after the verdict.
+        if Box::pin(self.take_restore_verdict()).await? {
+            Box::pin(self.refresh_lists_when_due()).await?;
+        }
         // The client lists the shared records at its read when a listing is owed, a
         // restore's included, before the read itself, while it holds the keys that read
         // them: a read that wasn't stopped got past that listing, so the restore's mark goes

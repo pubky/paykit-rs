@@ -1006,7 +1006,12 @@ impl Stored for crate::marks::BlockedWindow {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
             StateKey::BlockedWidening { from_ms }
-                if self.from_ms == *from_ms && self.from_ms <= self.until_ms =>
+                if self.from_ms == *from_ms
+                    && self.from_ms <= self.until_ms
+                    && self.read.as_ref().is_none_or(|read| {
+                        self.until_ms == crate::marks::BlockedWindow::TO_NOW
+                            && read.at_ms >= self.from_ms
+                    }) =>
             {
                 Ok(())
             }

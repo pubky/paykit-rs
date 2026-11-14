@@ -790,6 +790,7 @@ pub(crate) fn restore_paykit_layer(
         &crate::marks::BlockedWindow {
             from_ms: from,
             until_ms: crate::marks::BlockedWindow::TO_NOW,
+            read: None,
         },
     )
     .map_err(|_| String::from("the restore's block widening can't be written"))?;
@@ -1113,6 +1114,7 @@ impl Protocol for PaykitProtocol {
                 &crate::marks::BlockedWindow {
                     from_ms: missed.accepted_from_ms,
                     until_ms: missed.accepted_until_ms,
+                    read: None,
                 },
             )?,
             local_write(key::MISSED_CONSENTS, &true)?,

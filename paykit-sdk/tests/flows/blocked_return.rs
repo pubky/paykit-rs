@@ -302,10 +302,53 @@ async fn test_blocked_return_restore_marks_every_blocked_counterparty() {
     .await
     .unwrap();
     let mut restored = restored;
-    // The first read of the lists after the restore marks bob, blocked, from the backup's
-    // time on.
+    // A restore that isn't clean, its cursor moved before its first page: the first read
+    // of the lists after it marks bob, blocked, from the backup's time on.
+    restored.app_mut().flush_cursor().await.unwrap();
     restored.receive(None).await.unwrap();
+    assert_eq!(
+        restored.app().restore_held_cursor(),
+        Some(pubky_switch_client::app::HeldCursor::Unknown)
+    );
     assert_eq!(block_marks(&restored).await, 1);
+}
+
+#[tokio::test]
+async fn test_blocked_return_clean_restore_marks_no_one() {
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let _shop = w.shop().await;
+    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    // Nothing after the backup's position was passed, so nothing was dropped for bob's
+    // block since: the restore marks no one, and asks and raises nothing.
+    restored.app_mut().refresh_identity().await.unwrap();
+    restored.receive(None).await.unwrap();
+    assert_eq!(
+        restored.app().restore_held_cursor(),
+        Some(pubky_switch_client::app::HeldCursor::Clean)
+    );
+    restored.receive(None).await.unwrap();
+    assert_eq!(block_marks(&restored).await, 0);
+    assert!(restored
+        .app()
+        .protocol_scan(b"bw/")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(restored.app().protocol_get(b"bf").await.unwrap().is_none());
 }
 
 #[tokio::test]

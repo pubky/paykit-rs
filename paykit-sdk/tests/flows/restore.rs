@@ -2401,6 +2401,9 @@ async fn test_restore_own_rejection_to_a_blocked_payee_waits_until_unblocked() {
     let mut shop = w.shop().await;
     let (_, backup) = wallet_backed_up_with_its_rejection_unqueued(&w, wallet, &mut shop).await;
     let mut wallet = restored_unreceived(&w, &w.alice, &backup).await;
+    // A restore that isn't clean, its cursor moved before its first page: it widens the
+    // block marks.
+    wallet.app_mut().flush_cursor().await.unwrap();
     wallet.block(&w.bob_id()).await.unwrap();
     let before = w.bob.switch().entries_from(&w.alice_id());
     for _ in 0..2 {

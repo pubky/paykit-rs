@@ -1342,6 +1342,19 @@ async fn backed_up_with_requests(
     (shop, [first, second], backup, id, position)
 }
 
+/// The `manual_only` mark of each payer record `app` holds a value of (Paykit wire 5.3).
+async fn manual_only_marks(app: &Paykit) -> Vec<bool> {
+    let records = app.app().records_of("payer_activity").await.unwrap();
+    records
+        .iter()
+        .filter_map(|record| record.content.value())
+        .map(|value| {
+            let value: serde_json::Value = serde_json::from_slice(value).unwrap();
+            value["manual_only"] == serde_json::Value::Bool(true)
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn test_restore_clean_resumes_without_a_hold() {
     // Nothing after the backup's position was passed: the held cursor shows the restore
@@ -1352,10 +1365,15 @@ async fn test_restore_clean_resumes_without_a_hold() {
     let mut app = restored_read_first(&w, &backup, store()).await;
     assert_eq!(app.app().restore_held_cursor(), Some(HeldCursor::Clean));
     reconciled(&mut app).await;
-    assert_eq!(
-        app.request(&first).await.unwrap().status,
-        RequestStatus::Open
-    );
+    // Neither request is held or paid only by hand, nor does its record carry the mark.
+    for request in [&first, &second] {
+        let view = app.request(request).await.unwrap();
+        assert_eq!(view.status, RequestStatus::Open, "{view:?}");
+        assert!(!view.manual_only, "{view:?}");
+    }
+    let marks = manual_only_marks(&app).await;
+    assert_eq!(marks.len(), 2, "{marks:?}");
+    assert!(marks.iter().all(|marked| !marked), "{marks:?}");
     assert_eq!(shop.receive(None).await.unwrap().resends, 0);
     let paid = app
         .pay_request_automatically(&first, PayOptions::default())
@@ -1451,10 +1469,9 @@ async fn test_restore_clean_verdict_ended_by_a_later_report_holds_again() {
     let (mut shop, [first, _], backup, id, _) = backed_up_with_requests(&w).await;
     let mut app = restored_read_first(&w, &backup, store()).await;
     assert_eq!(restore_verdict(&app).await, "clean");
-    assert_eq!(
-        app.request(&first).await.unwrap().status,
-        RequestStatus::Open
-    );
+    let view = app.request(&first).await.unwrap();
+    assert_eq!(view.status, RequestStatus::Open);
+    assert!(!view.manual_only, "{view:?}");
     assert_eq!(shop.receive(None).await.unwrap().resends, 0);
     let position = app.app().cursor().seq;
     w.alice.switch().set_held_cursor(&id, position + 3);
@@ -1464,6 +1481,9 @@ async fn test_restore_clean_verdict_ended_by_a_later_report_holds_again() {
         Some(HeldCursor::Ahead { .. })
     ));
     assert_eq!(restore_verdict(&app).await, "not_clean");
+    // The restore's widening of the block marks comes back with the hold, its raise of the
+    // block floor holding the request for payment by hand.
+    assert!(app.request(&first).await.unwrap().manual_only);
     reconciled(&mut app).await;
     assert_held_as_before(&mut app, &mut shop, &first).await;
     assert!(w.rail.all_executions().is_empty());
@@ -1550,9 +1570,10 @@ async fn test_restore_clean_keeps_the_hold_its_backup_held() {
 }
 
 #[tokio::test]
-async fn test_restore_held_cursor_asks_sent_before_the_first_page_make_it_unknown() {
-    // A host that reconciles before its first read sends the restore's asks, in batches
-    // that carry the restored cursor move: the verdict is unknown, and the asks were owed.
+async fn test_restore_held_cursor_asks_sent_before_the_first_page_stay_sent() {
+    // A host that reconciles before its first read sends the restore's asks, queued alone
+    // with no raise of the block floor: they move no cursor, so the first page still shows
+    // the restore clean, and the hold lifts; the asks reached bob all the same.
     let w = World::new();
     let (mut shop, [first, _], backup, ..) = backed_up_with_requests(&w).await;
     let mut app = Paykit::restore(
@@ -1567,6 +1588,10 @@ async fn test_restore_held_cursor_asks_sent_before_the_first_page_make_it_unknow
     app.app_mut().refresh_identity().await.unwrap();
     reconciled(&mut app).await;
     app.receive(None).await.unwrap();
-    assert_eq!(app.app().restore_held_cursor(), Some(HeldCursor::Unknown));
-    assert_held_as_before(&mut app, &mut shop, &first).await;
+    assert!(shop.receive(None).await.unwrap().resends >= 1);
+    assert_eq!(app.app().restore_held_cursor(), Some(HeldCursor::Clean));
+    assert_eq!(restore_verdict(&app).await, "clean");
+    let view = app.request(&first).await.unwrap();
+    assert_eq!(view.status, RequestStatus::Open, "{view:?}");
+    assert!(!view.manual_only, "{view:?}");
 }

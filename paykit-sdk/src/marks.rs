@@ -44,7 +44,12 @@
 //!   one the bound drops in a receive step owes its notice until the pass after the read has
 //!   read that delivery ([`LostOwed`]). A restore and a `missed` item widen
 //!   these marks for every counterparty the deny list holds then (`bw/`), at the next read
-//!   of the lists; such a speculative mark is the first the bound drops.
+//!   of the lists; such a speculative mark is the first the bound drops. A restore's
+//!   widening waits for the client's verdict on the restore, keeping the first read of the
+//!   lists made meanwhile: a verdict that isn't clean applies it as of that read, and a
+//!   clean one, which shows no entry after the backup's position passed, so none dropped
+//!   for a block, drops it with no mark, ask or raise of the block floor
+//!   (`Paykit::take_restore_verdict`).
 //!
 //! **The block floor** (`crate::floor`). The time before which a one-time request is paid
 //! only by hand is the identity's, in its shared `block_floor` record, so every payer app
@@ -114,6 +119,20 @@ pub const MAX_FLAGGED_COPY: usize = 4096;
 pub(crate) struct BlockedWindow {
     pub(crate) from_ms: u64,
     pub(crate) until_ms: u64,
+    /// For a restore's widening, the first read of the lists after the restore, taken while
+    /// the client's verdict on the restore wasn't known: the widening is applied as of that
+    /// read once a verdict that isn't clean comes, and goes with a clean one (module docs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) read: Option<WideningRead>,
+}
+
+/// A read of the lists a restore's widening waits with ([`BlockedWindow::read`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WideningRead {
+    /// The read's time: the widening's end.
+    pub(crate) at_ms: u64,
+    /// The deny list the read showed, as this app judges it.
+    pub(crate) deny: Vec<[u8; 32]>,
 }
 
 impl BlockedWindow {
@@ -792,13 +811,35 @@ impl Paykit {
         // One commit per counterparty, so the bound on marks counts each mark already put; the
         // widening goes last, so a failure part way applies it again, which changes nothing.
         // A restore's widening runs to the time it is applied (`TO_NOW`), at least to its
-        // start; a `missed` item's keeps the item's end.
+        // start; a `missed` item's keeps the item's end. A restore's waits while the client's
+        // verdict on the restore isn't known, keeping the first read made meanwhile, as of
+        // which it is applied: a clean verdict drops it (module docs).
         let now = self.service_time().unwrap_or_else(|| self.now());
+        let verdict_open = self
+            .local_get::<crate::hold::RestoreHold>(key::RESTORE_HOLD)
+            .await?
+            .is_some_and(|hold| hold.verdict == crate::hold::RestoreVerdict::Open);
         for (_, window) in &widenings {
-            let until = if window.until_ms == BlockedWindow::TO_NOW {
-                now.max(window.from_ms)
-            } else {
-                window.until_ms
+            if window.until_ms == BlockedWindow::TO_NOW && verdict_open {
+                if window.read.is_none() {
+                    let read = WideningRead {
+                        at_ms: now.max(window.from_ms),
+                        deny: deny.to_vec(),
+                    };
+                    let waiting = BlockedWindow {
+                        read: Some(read),
+                        ..window.clone()
+                    };
+                    let mut tx = crate::state::Tx::default();
+                    tx.put(&key::blocked_widening(window.from_ms), &waiting)?;
+                    self.local_commit(tx).await?;
+                }
+                continue;
+            }
+            let (until, deny) = match &window.read {
+                Some(read) => (read.at_ms, read.deny.as_slice()),
+                None if window.until_ms == BlockedWindow::TO_NOW => (now.max(window.from_ms), deny),
+                None => (window.until_ms, deny),
             };
             let mut applied = true;
             for counterparty in deny {
