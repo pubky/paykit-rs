@@ -12,7 +12,9 @@ use pubky_switch_core::ops::Condition;
 use serde_json::{json, Value};
 
 use crate::common::World;
-use crate::executor::{held, ledger_key, refused_for, request, set_up, terms_with};
+use crate::executor::{
+    executor_wallet, held, ledger_key, refused_for, request, set_up, terms_with,
+};
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
@@ -476,6 +478,45 @@ async fn test_ledger_shown_neither_kept_nor_built_on_raises_the_alarm() {
         matches!(by_hand.refusal(), Some(Refusal::NotNow(_))),
         "{by_hand:?}"
     );
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_ledger_missing_after_a_held_delete_is_usage_history_lost() {
+    // Another own app deletes the ledger after the version the executor kept, and the
+    // executor holds that delete from the feed. The switch then answers `404` for the
+    // ledger: after a delete held at or after the version kept that isn't a rollback
+    // (Paykit spec 8.3, "Last ledger version"; Paykit wire 5.5) but usage history lost
+    // ("A grant implies a ledger"), so no alarm and no automatic payment.
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let first = request(&w, &mut shop, &mut wallet, "0.5").await;
+    wallet.pay_under_allowance(&first, &record).await.unwrap();
+    let (allowance, _) = held(&wallet, &record).await;
+    let target = ledger_target(&allowance);
+    let mut other = executor_wallet(&w, "other").await;
+    other.receive(None).await.unwrap();
+    other.app_mut().read_record(&target).await.unwrap();
+    other
+        .app_mut()
+        .delete_record(&target, Vec::new())
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let key = ledger_key(&wallet, &record).await;
+    w.alice.switch().fail_next(Fault::Error {
+        path: format!("records/{}", pubky_switch_core::enc::b64(&key)),
+        code: pubky_switch_core::http::ErrorCode::NotFound,
+        current: Value::Null,
+    });
+    let second = request(&w, &mut shop, &mut wallet, "0.5").await;
+    let refused = wallet
+        .pay_under_allowance(&second, &record)
+        .await
+        .unwrap_err();
+    assert!(!is_rollback(&refused), "{refused:?}");
+    assert!(refused_for(&refused, "usage history lost"), "{refused:?}");
+    assert!(wallet.ledger_alarm().is_none());
     assert_eq!(w.rail.all_executions().len(), 1);
 }
 
