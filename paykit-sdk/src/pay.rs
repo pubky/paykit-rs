@@ -1401,7 +1401,7 @@ impl Paykit {
     /// isn't removed. A request whose destination any current app may give is not judged,
     /// and no copy is read for it. A read that fails is the refusal: no app is taken as
     /// current nor as removed without it.
-    async fn refuse_unpayable_request(
+    pub(crate) async fn refuse_unpayable_request(
         &mut self,
         payee: &[u8; 32],
         request: &StoredMessage,

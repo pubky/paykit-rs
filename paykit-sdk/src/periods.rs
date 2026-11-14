@@ -722,6 +722,22 @@ impl Paykit {
                 }
             }
         } else if !self.deadline_passed(deadline) {
+            // As for a one-time request, a period whose request's endpoints' app is no longer
+            // current, or that requires an app the payee removed, is refused for that instead
+            // of paused: no confirmation could let it be paid (Paykit spec 6).
+            let mut paused = false;
+            for key in [record_key, period_record_key] {
+                paused |= Box::pin(self.pause_at(&key)).await?.blocks_by_hand();
+            }
+            if paused {
+                Box::pin(self.refuse_unpayable_request(
+                    &request.payee,
+                    &stored,
+                    &body.destination,
+                    &options,
+                ))
+                .await?;
+            }
             Box::pin(self.refuse_while_paused(&[record_key, period_record_key])).await?;
         }
         let end_hold = if automatic {
