@@ -347,6 +347,39 @@ impl Paykit {
         Ok(Ok(Some(allowance_id)))
     }
 
+    /// The Allowance `named`, of the request record of `payee`, that `attempt` was made
+    /// under: the one its ledger record, as held, holds an entry for the attempt in. `None`
+    /// for a record naming none, or a ledger not held, that doesn't read or bind, or holds no
+    /// such entry: the attempt is then taken as made by hand, and its proof names no
+    /// Allowance. For a journal entry rebuilt after a restore.
+    pub(crate) async fn attempt_under(
+        &self,
+        payee: &[u8; 32],
+        named: Option<&AllowanceId>,
+        attempt: AttemptId,
+    ) -> Result<Option<AllowanceId>> {
+        let Some(allowance_id) = named else {
+            return Ok(None);
+        };
+        let key = self.app.record_key(&ledger_target(payee, allowance_id))?;
+        let Some(held) = self.app.shared_record(&key).await? else {
+            return Ok(None);
+        };
+        let Some(ledger) = held
+            .content
+            .value()
+            .and_then(|value| Ledger::from_json(value).ok())
+            .filter(|l| l.counterparty == *payee && &l.allowance_id == allowance_id)
+        else {
+            return Ok(None);
+        };
+        Ok(ledger
+            .entries
+            .iter()
+            .any(|e| e.attempt_id == attempt)
+            .then(|| allowance_id.clone()))
+    }
+
     /// The kept ledger version of the Allowance at `record`, read bound to its key as a
     /// restore reads it (`state::Stored`).
     async fn kept_ledger(&self, record: &[u8; 32]) -> Result<Option<(KeptLedger, Ledger)>> {
@@ -728,7 +761,7 @@ impl Paykit {
         }
         if self.stored_answer_from(&allowance.counterparty).await? {
             return refuse(
-                "the client stores an entry from the counterparty that may be an answer",
+                "the client stores an entry from the counterparty that may be an Allowance message",
             );
         }
         if self.resend_owed_by(&allowance.counterparty).await? {

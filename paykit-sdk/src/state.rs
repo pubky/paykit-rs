@@ -1112,7 +1112,9 @@ impl sealed::Sealed for FlagConfirmed {}
 impl Stored for FlagConfirmed {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::FlagConfirmed(record) if self.record == *record && self.version >= 1 => {
+            StateKey::FlagConfirmed(record)
+                if self.record == *record && self.generation >= 1 && self.version >= 1 =>
+            {
                 Ok(())
             }
             _ => corrupt(),

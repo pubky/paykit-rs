@@ -408,7 +408,17 @@ impl Paykit {
             record_held: false,
             transfer_bound: None,
             failed_on_claim: false,
-            allowance_id: None,
+            // Made under an Allowance when the request record names it and that Allowance's
+            // ledger, as held, holds an entry for the attempt: its proof names the Allowance
+            // then, as the executor's own would (Paykit spec 8.3 step 4).
+            allowance_id: self
+                .attempt_under(
+                    &obligation.payee,
+                    obligation.record.allowance_id.as_ref(),
+                    attempt,
+                )
+                .await?
+                .map(|allowance_id| allowance_id.as_str().to_owned()),
         };
         entry.keep_carrier(&carrier);
         Ok(Some(entry))

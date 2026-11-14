@@ -2252,9 +2252,9 @@ async fn test_executor_pays_nothing_under_an_allowance_record_seen_divergent_unt
 async fn test_executor_pays_nothing_under_a_ledger_seen_divergent() {
     // The ledger record's view shows it divergent: its upload may hold entries the current
     // write lacks, so the room left under the limits isn't known. The executor pays nothing
-    // under the Allowance, and the ledger is shown among the divergent records; nothing is
-    // paid until the user confirms it and a newer write clears the view (Paykit spec 6,
-    // "Divergent records"; 8.3, "Building on a version accepts it").
+    // under the Allowance, and the ledger is shown among the divergent records, for the user
+    // to confirm (Paykit spec 6, "Divergent records"; 8.3, "Building on a version accepts
+    // it").
     let w = World::new();
     let (mut shop, mut wallet, record) = Box::pin(set_up(&w, terms_with(json!({})))).await;
     let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
@@ -2681,4 +2681,63 @@ async fn test_executor_pays_nothing_while_the_client_stores_an_answer_of_its_cou
         .await
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+}
+
+#[tokio::test]
+async fn test_executor_attempt_rebuilt_after_a_restore_keeps_its_allowance() {
+    // The backup is taken after the grant; the payment under the Allowance is made after it
+    // and left in flight, then the device is lost. The restored app's journal doesn't hold
+    // the attempt, so its reconcile rebuilds the entry from the request record, and the
+    // ledger it holds has an entry for the attempt: the proof names the Allowance, as the
+    // executor's own would (Paykit spec 8.3 step 4).
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let id = wallet.allowance(&record).await.unwrap().allowance_id;
+    let backup = wallet.backup().await.unwrap();
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } =
+        Box::pin(wallet.pay_under_allowance(&request, &record))
+            .await
+            .unwrap()
+    else {
+        panic!("in flight");
+    };
+    w.rail.settle(&attempt_id, true);
+    drop(wallet);
+
+    let mut wallet = Box::pin(Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    let report = Box::pin(wallet.reconcile()).await.unwrap();
+    assert!(report.doubtful.is_empty(), "{report:?}");
+    assert!(
+        matches!(report.resolved.as_slice(), [PayOutcome::Paid { .. }]),
+        "{report:?}"
+    );
+    Box::pin(wallet.end_reconcile(UserConfirmed::new()))
+        .await
+        .unwrap();
+    Box::pin(wallet.receive(None)).await.unwrap();
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+
+    Box::pin(shop.receive(None)).await.unwrap();
+    let mut proofs = 0;
+    for held in shop.app().records_of("payee_activity").await.unwrap() {
+        let value: Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+        let Some(proof) = value["proof"]["plaintext"]["json"].as_str() else {
+            continue;
+        };
+        let bytes = pubky_switch_core::enc::unb64(proof).unwrap();
+        let proof: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(proof["body"]["allowance_id"], json!(id.as_str()));
+        proofs += 1;
+    }
+    assert_eq!(proofs, 1);
 }

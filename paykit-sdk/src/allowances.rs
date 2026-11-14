@@ -1250,13 +1250,14 @@ impl Paykit {
         Ok(!answers_kept(&own, Some(&allowance.allowance_id), before, notes, None)?.is_empty())
     }
 
-    /// Whether the client stores an entry from `counterparty` that may be an answer to an
-    /// Allowance's proposal (Switch spec 8.2): an acceptance or a rejection, or one whose
-    /// message doesn't read, so its kind can't be told. Such an entry is applied, noted or
-    /// tried again later, and may be an earlier answer than the record's response, so an
-    /// executor pays nothing under an Allowance of that counterparty meanwhile (Paykit spec
-    /// 8.1, "Stored entries"; 8.3, "Conflicted"). An entry stored unverified names its
-    /// sender as its message claims it, and holds the same way.
+    /// Whether the client stores an entry from `counterparty` that may be an Allowance
+    /// message (Switch spec 8.2): a proposal, an acceptance, a rejection or an end, or one
+    /// whose message doesn't read, so its kind can't be told. Such an entry is applied, noted
+    /// or tried again later, and may be an earlier answer than the record's response, a
+    /// second proposal that makes the Allowance conflicted, or an end, so an executor pays
+    /// nothing under an Allowance of that counterparty meanwhile (Paykit spec 8.1, "Stored
+    /// entries"; 8.3, "Conflicted", "Ends reach the executor"). An entry stored unverified
+    /// names its sender as its message claims it, and holds the same way.
     pub(crate) async fn stored_answer_from(&mut self, counterparty: &[u8; 32]) -> Result<bool> {
         for entry in Box::pin(self.app.parked_entries()).await? {
             if !entry.readable {
@@ -1270,9 +1271,14 @@ impl Paykit {
                 continue;
             }
             let answer = parked.message.as_ref().is_none_or(|message| {
-                [Kind::AllowanceAcceptance, Kind::AllowanceRejection]
-                    .iter()
-                    .any(|kind| message.kind == kind.as_str())
+                [
+                    Kind::AllowanceProposal,
+                    Kind::AllowanceAcceptance,
+                    Kind::AllowanceRejection,
+                    Kind::AllowanceEnd,
+                ]
+                .iter()
+                .any(|kind| message.kind == kind.as_str())
             });
             if answer {
                 return Ok(true);
