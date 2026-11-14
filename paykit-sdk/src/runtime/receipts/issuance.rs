@@ -59,7 +59,7 @@ where
                         source: None,
                     });
                 }
-                return Ok(ReceiptIssuanceView::from(&existing));
+                return self.receipt_issuance_view(&existing).await;
             }
         }
 
@@ -146,7 +146,7 @@ where
             });
         }
         if record.status == ReceiptIssuanceStatus::AccessQueued {
-            return Ok(ReceiptIssuanceView::from(&record));
+            return self.receipt_issuance_view(&record).await;
         }
         self.ensure_private_outbound_ready(&counterparty).await?;
         let (session_access, _) = self.private_link_session_access().await?;
@@ -198,7 +198,7 @@ where
         match enqueue_receipt_access_for_issuance(&self.storage, record.clone(), self.clock.now())
             .await
         {
-            Ok(queued) => Ok(ReceiptIssuanceView::from(&queued)),
+            Ok(queued) => self.receipt_issuance_view(&queued).await,
             Err(err) => {
                 self.save_receipt_issuance_failure(
                     &counterparty,
@@ -213,6 +213,9 @@ where
     }
 
     /// List local receipt issuance records for one counterparty.
+    ///
+    /// Each status includes Receipt Access delivery (`AccessSent` or
+    /// `AccessFailed`) from whichever call drained the outbound queue.
     /// Returns `Policy` while the counterparty is `Blocked`.
     pub async fn receipt_issuance_records(
         &self,
@@ -223,11 +226,18 @@ where
             return Ok(Vec::new());
         }
         self.ensure_peer_not_blocked(counterparty).await?;
-        let mut records = load_receipt_issuance_records(&self.storage, counterparty)
-            .await?
-            .iter()
-            .map(ReceiptIssuanceView::from)
-            .collect::<Vec<_>>();
+        let counterparty = counterparty.clone();
+        let mut records = self
+            .storage
+            .transaction(move |tx| {
+                let outbound = tx.outbound_private_messages(&counterparty);
+                Ok(tx
+                    .receipt_issuance_records(&counterparty)
+                    .iter()
+                    .map(|record| ReceiptIssuanceView::with_access_delivery(record, &outbound))
+                    .collect::<Vec<_>>())
+            })
+            .await?;
         records.sort_by_key(|record| Reverse(record.created_at));
         Ok(records)
     }
@@ -271,6 +281,10 @@ where
     }
 
     /// List issued receipts across non-blocked counterparties, newest first.
+    ///
+    /// Each status includes Receipt Access delivery (`AccessSent` or
+    /// `AccessFailed`) from whichever call drained the outbound queue, so a
+    /// wallet needs no bookkeeping of its own around those calls.
     pub async fn issued_receipts(&self) -> Result<Vec<ReceiptIssuanceView>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.public_key.is_none() {
@@ -279,19 +293,44 @@ where
         self.storage
             .transaction(|tx| {
                 let snapshot = tx.export_storage_state();
+                let outbound = snapshot
+                    .outbound_private_messages
+                    .iter()
+                    .map(|message| (message.outbound_message_id, message))
+                    .collect::<HashMap<_, _>>();
                 let mut records = snapshot
                     .receipt_issuance_records
-                    .into_values()
+                    .values()
                     .filter(|record| {
                         !snapshot
                             .linked_peers
                             .get(&record.counterparty)
                             .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
                     })
-                    .map(|record| ReceiptIssuanceView::from(&record))
+                    .map(|record| {
+                        let access = record
+                            .outbound_message_id
+                            .and_then(|id| outbound.get(&id).copied());
+                        ReceiptIssuanceView::with_access_delivery(record, access)
+                    })
                     .collect::<Vec<_>>();
                 records.sort_by_key(|record| Reverse(record.created_at));
                 Ok(records)
+            })
+            .await
+    }
+
+    async fn receipt_issuance_view(
+        &self,
+        record: &ReceiptIssuanceRecord,
+    ) -> Result<ReceiptIssuanceView> {
+        let record = record.clone();
+        self.storage
+            .transaction(move |tx| {
+                let outbound = tx.outbound_private_messages(&record.counterparty);
+                Ok(ReceiptIssuanceView::with_access_delivery(
+                    &record, &outbound,
+                ))
             })
             .await
     }

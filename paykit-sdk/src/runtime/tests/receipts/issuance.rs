@@ -688,3 +688,138 @@ async fn test_receipt_issuance_failure_respects_storage_and_queue_progress() {
     assert_eq!(stored.status, ReceiptIssuanceStatus::AccessQueued);
     assert!(stored.last_error.is_none());
 }
+
+#[tokio::test]
+async fn test_issued_receipts_report_receipt_access_delivery() {
+    use crate::domain::outbound_private::{
+        mark_outbound_failed, mark_outbound_invalid, mark_outbound_recovery_required,
+        mark_outbound_sent,
+    };
+
+    let storage = registered_test_storage();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .save_identity_state(IdentityState {
+            public_key: Some(local_public_key),
+            initialized_at: FixedClock.now(),
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+    let prepared = sdk
+        .prepare_receipt_issuance(
+            counterparty.clone(),
+            receipt_draft("550e8400-e29b-41d4-a716-446655440000"),
+        )
+        .await
+        .unwrap();
+    let stored = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            let receipt_id = prepared.receipt_id.clone();
+            move |tx| {
+                let stored = tx
+                    .receipt_issuance_record(&counterparty, &receipt_id)
+                    .unwrap()
+                    .mark_stored(FixedClock.now());
+                tx.save_receipt_issuance_record(stored.clone());
+                Ok(stored)
+            }
+        })
+        .await
+        .unwrap();
+    let queued = crate::domain::receipts::enqueue_receipt_access_for_issuance(
+        &storage,
+        stored,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let outbound_message_id = queued.outbound_message_id.unwrap();
+
+    let set_outbound =
+        |update: fn(OutboundPrivateMessageRecord) -> OutboundPrivateMessageRecord| {
+            let storage = storage.clone();
+            let counterparty = counterparty.clone();
+            async move {
+                storage
+                    .transaction(move |tx| {
+                        let message = tx
+                            .outbound_private_messages(&counterparty)
+                            .into_iter()
+                            .find(|message| message.outbound_message_id == outbound_message_id)
+                            .unwrap();
+                        tx.save_outbound_private_message(update(message))
+                    })
+                    .await
+                    .unwrap();
+            }
+        };
+    let views = || async {
+        let all = sdk.issued_receipts().await.unwrap();
+        let to = sdk.issued_receipts_to(&counterparty).await.unwrap();
+        assert_eq!(all, to);
+        assert_eq!(all.len(), 1);
+        all.into_iter().next().unwrap()
+    };
+
+    let view = views().await;
+    assert_eq!(view.status, ReceiptIssuanceStatus::AccessQueued);
+    assert_eq!(view.outbound_message_id, Some(outbound_message_id));
+    assert!(view.access_sent_at.is_none() && view.last_error.is_none());
+
+    // A failed attempt is retried, so the receipt stays queued with the error.
+    set_outbound(|message| mark_outbound_failed(message, "timeout".into(), FixedClock.now())).await;
+    let view = views().await;
+    assert_eq!(view.status, ReceiptIssuanceStatus::AccessQueued);
+    assert_eq!(view.last_error.as_deref(), Some("timeout"));
+
+    set_outbound(|message| mark_outbound_invalid(message, "bad payload".into(), FixedClock.now()))
+        .await;
+    let view = views().await;
+    assert_eq!(view.status, ReceiptIssuanceStatus::AccessFailed);
+    assert_eq!(view.last_error.as_deref(), Some("bad payload"));
+
+    set_outbound(|message| {
+        mark_outbound_recovery_required(message, "link lost".into(), FixedClock.now())
+    })
+    .await;
+    let view = views().await;
+    assert_eq!(view.status, ReceiptIssuanceStatus::AccessFailed);
+    assert_eq!(view.last_error.as_deref(), Some("link lost"));
+
+    set_outbound(|message| mark_outbound_sent(message, FixedClock.now())).await;
+    let view = views().await;
+    assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
+    assert_eq!(view.access_sent_at, Some(FixedClock.now()));
+    assert!(view.last_error.is_none());
+
+    // A failed retry of the unconfirmed event does not undo the publication.
+    set_outbound(|message| mark_outbound_failed(message, "retry".into(), FixedClock.now())).await;
+    assert_eq!(views().await.status, ReceiptIssuanceStatus::AccessSent);
+
+    // Repeating issuance returns the same delivery status.
+    let repeated = sdk
+        .process_receipt_issuance(counterparty.clone(), &prepared.receipt_id)
+        .await
+        .unwrap();
+    assert_eq!(repeated.status, ReceiptIssuanceStatus::AccessSent);
+
+    // The stored record keeps `AccessQueued`; delivery is derived on read.
+    let stored = storage
+        .transaction(move |tx| {
+            Ok(tx
+                .receipt_issuance_record(&counterparty, &prepared.receipt_id)
+                .unwrap())
+        })
+        .await
+        .unwrap();
+    assert_eq!(stored.status, ReceiptIssuanceStatus::AccessQueued);
+}

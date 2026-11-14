@@ -22,7 +22,7 @@ pub(crate) use access::{
 pub(crate) use issuance::{
     decrypt_issued_receipt, enqueue_receipt_access_for_issuance, receipt_issuance_record,
     receipt_issuance_record_by_receipt_id, receipt_issuance_record_matches_draft,
-    receipt_issuance_records, store_encrypted_receipt_json,
+    store_encrypted_receipt_json,
 };
 
 #[cfg(test)]

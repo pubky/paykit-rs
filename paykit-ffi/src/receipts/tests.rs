@@ -88,6 +88,8 @@ fn test_receipt_issuance_view_redacts_reference() {
         updated_at: Utc::now(),
         stored_at: Some(Utc::now()),
         access_queued_at: Some(Utc::now()),
+        access_sent_at: None,
+        last_error: None,
     };
 
     let ffi = FfiReceiptIssuanceView::from(view);
@@ -95,6 +97,44 @@ fn test_receipt_issuance_view_redacts_reference() {
     assert_eq!(ffi.status, FfiReceiptIssuanceStatus::AccessQueued);
     assert_eq!(ffi.payment_reference.export_text(), "invoice secret");
     assert!(!format!("{:?}", ffi.payment_reference).contains("invoice secret"));
+}
+
+#[test]
+fn test_receipt_issuance_view_maps_access_delivery() {
+    let sent_at = Utc::now();
+    let view = ReceiptIssuanceView {
+        counterparty: public_key(),
+        app_id: paykit_sdk::PaykitAppId::new("bitkit").unwrap(),
+        receipt_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+        receipt_access_event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
+        payment_reference: "invoice secret".into(),
+        payment_request_id: None,
+        billing_period: None,
+        payment_endpoint_identifier: None,
+        amount: None,
+        status: ReceiptIssuanceStatus::AccessSent,
+        outbound_message_id: Some(7),
+        created_at: sent_at,
+        updated_at: sent_at,
+        stored_at: Some(sent_at),
+        access_queued_at: Some(sent_at),
+        access_sent_at: Some(sent_at),
+        last_error: None,
+    };
+
+    let sent = FfiReceiptIssuanceView::from(view.clone());
+    assert_eq!(sent.status, FfiReceiptIssuanceStatus::AccessSent);
+    assert_eq!(sent.access_sent_at, Some(sent_at.to_rfc3339()));
+
+    let failed = FfiReceiptIssuanceView::from(ReceiptIssuanceView {
+        status: ReceiptIssuanceStatus::AccessFailed,
+        access_sent_at: None,
+        last_error: Some("link secret detail".into()),
+        ..view
+    });
+    assert_eq!(failed.status, FfiReceiptIssuanceStatus::AccessFailed);
+    assert_eq!(failed.last_error.as_deref(), Some("link secret detail"));
+    assert!(!format!("{failed:?}").contains("link secret detail"));
 }
 
 #[test]

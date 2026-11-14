@@ -64,18 +64,6 @@ pub(crate) fn receipt_issuance_record_matches_draft(
         && receipt.metadata == draft.metadata)
 }
 
-pub(crate) async fn receipt_issuance_records<S>(
-    storage: &S,
-    counterparty: &PubkyPublicKey,
-) -> Result<Vec<ReceiptIssuanceRecord>>
-where
-    S: StorageAdapter,
-{
-    storage
-        .transaction(|tx| Ok(tx.receipt_issuance_records(counterparty)))
-        .await
-}
-
 pub(crate) async fn receipt_issuance_record<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,

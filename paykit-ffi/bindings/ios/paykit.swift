@@ -20732,6 +20732,16 @@ public struct ReceiptIssuanceView {
      * Time Receipt Access was queued for private delivery as RFC3339 text.
      */
     public var accessQueuedAt: String?
+    /**
+     * Time Receipt Access was first published as RFC3339 text, once
+     * `AccessSent`.
+     */
+    public var accessSentAt: String?
+    /**
+     * Last storage, queueing or Receipt Access delivery error. While the
+     * status stays `AccessQueued`, the outbound queue retries delivery.
+     */
+    public var lastError: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -20780,7 +20790,15 @@ public struct ReceiptIssuanceView {
          */storedAt: String?,
         /**
          * Time Receipt Access was queued for private delivery as RFC3339 text.
-         */accessQueuedAt: String?) {
+         */accessQueuedAt: String?,
+        /**
+         * Time Receipt Access was first published as RFC3339 text, once
+         * `AccessSent`.
+         */accessSentAt: String?,
+        /**
+         * Last storage, queueing or Receipt Access delivery error. While the
+         * status stays `AccessQueued`, the outbound queue retries delivery.
+         */lastError: String?) {
         self.counterparty = counterparty
         self.appId = appId
         self.receiptId = receiptId
@@ -20796,6 +20814,8 @@ public struct ReceiptIssuanceView {
         self.updatedAt = updatedAt
         self.storedAt = storedAt
         self.accessQueuedAt = accessQueuedAt
+        self.accessSentAt = accessSentAt
+        self.lastError = lastError
     }
 }
 
@@ -20826,7 +20846,9 @@ public struct FfiConverterTypeReceiptIssuanceView: FfiConverterRustBuffer {
                 createdAt: FfiConverterString.read(from: &buf),
                 updatedAt: FfiConverterString.read(from: &buf),
                 storedAt: FfiConverterOptionString.read(from: &buf),
-                accessQueuedAt: FfiConverterOptionString.read(from: &buf)
+                accessQueuedAt: FfiConverterOptionString.read(from: &buf),
+                accessSentAt: FfiConverterOptionString.read(from: &buf),
+                lastError: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -20846,6 +20868,8 @@ public struct FfiConverterTypeReceiptIssuanceView: FfiConverterRustBuffer {
         FfiConverterString.write(value.updatedAt, into: &buf)
         FfiConverterOptionString.write(value.storedAt, into: &buf)
         FfiConverterOptionString.write(value.accessQueuedAt, into: &buf)
+        FfiConverterOptionString.write(value.accessSentAt, into: &buf)
+        FfiConverterOptionString.write(value.lastError, into: &buf)
     }
 }
 
@@ -24919,6 +24943,15 @@ public enum ReceiptIssuanceStatus {
      */
     case failed
     /**
+     * Receipt Access was published to the counterparty.
+     */
+    case accessSent
+    /**
+     * Receipt Access delivery stopped without automatic retry; `last_error`
+     * carries the failure. Recovering the Encrypted Link queues it again.
+     */
+    case accessFailed
+    /**
      * SDK returned a value this binding version does not understand.
      */
     case unknown
@@ -24947,7 +24980,11 @@ public struct FfiConverterTypeReceiptIssuanceStatus: FfiConverterRustBuffer {
 
         case 4: return .failed
 
-        case 5: return .unknown
+        case 5: return .accessSent
+
+        case 6: return .accessFailed
+
+        case 7: return .unknown
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -24973,8 +25010,16 @@ public struct FfiConverterTypeReceiptIssuanceStatus: FfiConverterRustBuffer {
             writeInt(&buf, Int32(4))
 
 
-        case .unknown:
+        case .accessSent:
             writeInt(&buf, Int32(5))
+
+
+        case .accessFailed:
+            writeInt(&buf, Int32(6))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(7))
 
         }
     }
