@@ -779,7 +779,7 @@ async fn test_issued_receipts_report_receipt_access_delivery() {
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessQueued);
     assert_eq!(view.outbound_message_id, Some(outbound_message_id));
     assert_eq!(view.updated_at, queued_at);
-    assert!(view.access_sent_at.is_none() && view.last_error.is_none());
+    assert!(view.last_error.is_none());
 
     let recover = |now| {
         let storage = storage.clone();
@@ -833,8 +833,8 @@ async fn test_issued_receipts_report_receipt_access_delivery() {
     assert!(view.last_error.is_none());
     assert_eq!(view.updated_at, at(4));
 
-    // A Delivery Confirmation after an ambiguous publication proves delivery
-    // without a known first publication time.
+    // A Delivery Confirmation after an ambiguous publication, which left
+    // `sent_at` empty, proves delivery at the confirmation time.
     set_outbound(Box::new(move |mut message| {
         message.status = OutboundPrivateMessageStatus::Failed;
         message.confirmed_at = Some(at(5));
@@ -843,21 +843,24 @@ async fn test_issued_receipts_report_receipt_access_delivery() {
     .await;
     let view = views().await;
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
-    assert!(view.access_sent_at.is_none());
     assert_eq!(view.updated_at, at(5));
 
-    // Recovery completes the confirmed message and records `sent_at` at
-    // recovery time; that is not a publication time.
-    set_outbound(Box::new(move |message| {
-        mark_outbound_recovery_required(message, "rotated".into(), at(6))
-    }))
-    .await;
-    recover(at(7)).await;
-    let view = views().await;
-    assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
-    assert!(view.access_sent_at.is_none());
-    assert_eq!(view.updated_at, at(5));
+    // Recovery completes the confirmed message and fills `sent_at` with its
+    // own time without publishing. Neither an equal nor an earlier recovery
+    // clock may show that time.
+    for recovered_at in [at(5), at(2)] {
+        set_outbound(Box::new(move |mut message| {
+            message.sent_at = None;
+            mark_outbound_recovery_required(message, "rotated".into(), recovered_at)
+        }))
+        .await;
+        recover(recovered_at).await;
+        let view = views().await;
+        assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
+        assert_eq!(view.updated_at, at(5));
+    }
 
+    // A real publication, then failed retries, then the peer's confirmation.
     set_outbound(Box::new(move |mut message| {
         message.confirmed_at = None;
         message.sent_at = None;
@@ -866,21 +869,26 @@ async fn test_issued_receipts_report_receipt_access_delivery() {
     .await;
     let view = views().await;
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
-    assert_eq!(view.access_sent_at, Some(at(8)));
     assert_eq!(view.updated_at, at(8));
     assert!(view.last_error.is_none());
 
-    // A failed retry of the unconfirmed event does not undo the publication
-    // or move its time.
     set_outbound(Box::new(move |message| {
         mark_outbound_failed(message, "retry".into(), at(9))
     }))
     .await;
     let view = views().await;
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
-    assert_eq!(view.access_sent_at, Some(at(8)));
     assert_eq!(view.updated_at, at(8));
     assert!(view.last_error.is_none());
+
+    set_outbound(Box::new(move |mut message| {
+        message.confirmed_at = Some(at(10));
+        message
+    }))
+    .await;
+    let view = views().await;
+    assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
+    assert_eq!(view.updated_at, at(10));
 
     // Repeating issuance returns the same delivery status.
     let repeated = sdk

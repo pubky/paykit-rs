@@ -127,17 +127,13 @@ pub struct FfiReceiptIssuanceView {
     pub created_at: String,
     /// Last change to the issuance or its Receipt Access delivery as RFC3339
     /// text. Until `AccessSent`, each delivery attempt, failure or recovery
-    /// requeue moves it; once sent, it stays at the first publication, or at
-    /// the peer's confirmation when the publication time is unknown.
+    /// requeue moves it; once sent, it is the publication time, then the
+    /// peer's Delivery Confirmation time once confirmed.
     pub updated_at: String,
     /// Time the Encrypted Receipt was stored as RFC3339 text.
     pub stored_at: Option<String>,
     /// Time Receipt Access was queued for private delivery as RFC3339 text.
     pub access_queued_at: Option<String>,
-    /// Time Receipt Access was first published as RFC3339 text, once
-    /// `AccessSent`. Empty when the peer confirmed delivery of an access
-    /// message whose publication was never recorded.
-    pub access_sent_at: Option<String>,
     /// Last storage, queueing or Receipt Access delivery error. While the
     /// status stays `AccessQueued`, the outbound queue retries delivery.
     pub last_error: Option<String>,
@@ -164,7 +160,6 @@ impl fmt::Debug for FfiReceiptIssuanceView {
             .field("updated_at", &self.updated_at)
             .field("stored_at", &self.stored_at)
             .field("access_queued_at", &self.access_queued_at)
-            .field("access_sent_at", &self.access_sent_at)
             .field(
                 "last_error",
                 &self

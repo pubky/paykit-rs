@@ -20723,8 +20723,8 @@ public struct ReceiptIssuanceView {
     /**
      * Last change to the issuance or its Receipt Access delivery as RFC3339
      * text. Until `AccessSent`, each delivery attempt, failure or recovery
-     * requeue moves it; once sent, it stays at the first publication, or at
-     * the peer's confirmation when the publication time is unknown.
+     * requeue moves it; once sent, it is the publication time, then the
+     * peer's Delivery Confirmation time once confirmed.
      */
     public var updatedAt: String
     /**
@@ -20735,12 +20735,6 @@ public struct ReceiptIssuanceView {
      * Time Receipt Access was queued for private delivery as RFC3339 text.
      */
     public var accessQueuedAt: String?
-    /**
-     * Time Receipt Access was first published as RFC3339 text, once
-     * `AccessSent`. Empty when the peer confirmed delivery of an access
-     * message whose publication was never recorded.
-     */
-    public var accessSentAt: String?
     /**
      * Last storage, queueing or Receipt Access delivery error. While the
      * status stays `AccessQueued`, the outbound queue retries delivery.
@@ -20789,8 +20783,8 @@ public struct ReceiptIssuanceView {
         /**
          * Last change to the issuance or its Receipt Access delivery as RFC3339
          * text. Until `AccessSent`, each delivery attempt, failure or recovery
-         * requeue moves it; once sent, it stays at the first publication, or at
-         * the peer's confirmation when the publication time is unknown.
+         * requeue moves it; once sent, it is the publication time, then the
+         * peer's Delivery Confirmation time once confirmed.
          */updatedAt: String,
         /**
          * Time the Encrypted Receipt was stored as RFC3339 text.
@@ -20798,11 +20792,6 @@ public struct ReceiptIssuanceView {
         /**
          * Time Receipt Access was queued for private delivery as RFC3339 text.
          */accessQueuedAt: String?,
-        /**
-         * Time Receipt Access was first published as RFC3339 text, once
-         * `AccessSent`. Empty when the peer confirmed delivery of an access
-         * message whose publication was never recorded.
-         */accessSentAt: String?,
         /**
          * Last storage, queueing or Receipt Access delivery error. While the
          * status stays `AccessQueued`, the outbound queue retries delivery.
@@ -20822,7 +20811,6 @@ public struct ReceiptIssuanceView {
         self.updatedAt = updatedAt
         self.storedAt = storedAt
         self.accessQueuedAt = accessQueuedAt
-        self.accessSentAt = accessSentAt
         self.lastError = lastError
     }
 }
@@ -20855,7 +20843,6 @@ public struct FfiConverterTypeReceiptIssuanceView: FfiConverterRustBuffer {
                 updatedAt: FfiConverterString.read(from: &buf),
                 storedAt: FfiConverterOptionString.read(from: &buf),
                 accessQueuedAt: FfiConverterOptionString.read(from: &buf),
-                accessSentAt: FfiConverterOptionString.read(from: &buf),
                 lastError: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -20876,7 +20863,6 @@ public struct FfiConverterTypeReceiptIssuanceView: FfiConverterRustBuffer {
         FfiConverterString.write(value.updatedAt, into: &buf)
         FfiConverterOptionString.write(value.storedAt, into: &buf)
         FfiConverterOptionString.write(value.accessQueuedAt, into: &buf)
-        FfiConverterOptionString.write(value.accessSentAt, into: &buf)
         FfiConverterOptionString.write(value.lastError, into: &buf)
     }
 }

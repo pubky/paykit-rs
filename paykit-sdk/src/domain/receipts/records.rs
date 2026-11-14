@@ -251,20 +251,14 @@ pub struct ReceiptIssuanceView {
     /// Last change to the issuance or its Receipt Access delivery.
     ///
     /// Until Receipt Access is published, each delivery attempt, failure or
-    /// recovery requeue moves it. Once `AccessSent`, it stays at the first
-    /// publication, or at the peer's confirmation when the publication time
-    /// is unknown; later retries of the unconfirmed event do not move it.
+    /// recovery requeue moves it. Once `AccessSent`, it is the publication
+    /// time, then the peer's Delivery Confirmation time once confirmed;
+    /// retries of the unconfirmed event in between do not move it.
     pub updated_at: DateTime<Utc>,
     /// Time the Encrypted Receipt was stored.
     pub stored_at: Option<DateTime<Utc>>,
     /// Time Receipt Access was queued for private delivery.
     pub access_queued_at: Option<DateTime<Utc>>,
-    /// Time Receipt Access was first published, once `AccessSent`.
-    ///
-    /// Empty when the peer confirmed delivery of an access message whose
-    /// publication was never recorded; `updated_at` then holds the
-    /// confirmation time.
-    pub access_sent_at: Option<DateTime<Utc>>,
     /// Last storage, queueing or Receipt Access delivery error.
     ///
     /// While the status stays `AccessQueued`, this is the last failed delivery
@@ -293,7 +287,6 @@ impl fmt::Debug for ReceiptIssuanceView {
             .field("updated_at", &self.updated_at)
             .field("stored_at", &self.stored_at)
             .field("access_queued_at", &self.access_queued_at)
-            .field("access_sent_at", &self.access_sent_at)
             .field(
                 "last_error",
                 &self
@@ -333,27 +326,14 @@ impl ReceiptIssuanceView {
         // `sent_at` survives a later failed retry of an unconfirmed event, so
         // it, not `status`, tells whether Receipt Access was published.
         //
-        // A Delivery Confirmation can arrive after an ambiguous publication
-        // left `sent_at` empty, and completing that confirmed message later
-        // (for example on Encrypted Link recovery) records `sent_at` at
-        // completion time without publishing. The peer can only confirm what
-        // was already published, so a `sent_at` after `confirmed_at` is not
-        // the first publication: its time stays unknown and only
-        // `updated_at` takes the confirmation time.
-        let first_publication = message.sent_at.filter(|sent_at| {
-            message
-                .confirmed_at
-                .is_none_or(|confirmed| *sent_at <= confirmed)
-        });
-        if let Some(sent_at) = first_publication {
+        // Only a successful send writes `sent_at` on an unconfirmed message.
+        // Completing an already-confirmed message (for example on Encrypted
+        // Link recovery) fills an empty `sent_at` with the completion time
+        // without publishing, so once the peer confirmed delivery its
+        // confirmation time is the delivery evidence, never `sent_at`.
+        if let Some(delivered_at) = message.confirmed_at.or(message.sent_at) {
             view.status = ReceiptIssuanceStatus::AccessSent;
-            view.access_sent_at = Some(sent_at);
-            view.updated_at = view.updated_at.max(sent_at);
-            return view;
-        }
-        if let Some(confirmed_at) = message.confirmed_at {
-            view.status = ReceiptIssuanceStatus::AccessSent;
-            view.updated_at = view.updated_at.max(confirmed_at);
+            view.updated_at = view.updated_at.max(delivered_at);
             return view;
         }
         // Until publication, every delivery change (an attempt, a failure, a
@@ -388,7 +368,6 @@ impl From<&ReceiptIssuanceRecord> for ReceiptIssuanceView {
             updated_at: record.updated_at,
             stored_at: record.stored_at,
             access_queued_at: record.access_queued_at,
-            access_sent_at: None,
             last_error: record.last_error.clone(),
         }
     }

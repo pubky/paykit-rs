@@ -88,7 +88,6 @@ fn test_receipt_issuance_view_redacts_reference() {
         updated_at: Utc::now(),
         stored_at: Some(Utc::now()),
         access_queued_at: Some(Utc::now()),
-        access_sent_at: None,
         last_error: None,
     };
 
@@ -118,17 +117,15 @@ fn test_receipt_issuance_view_maps_access_delivery() {
         updated_at: sent_at,
         stored_at: Some(sent_at),
         access_queued_at: Some(sent_at),
-        access_sent_at: Some(sent_at),
         last_error: None,
     };
 
     let sent = FfiReceiptIssuanceView::from(view.clone());
     assert_eq!(sent.status, FfiReceiptIssuanceStatus::AccessSent);
-    assert_eq!(sent.access_sent_at, Some(sent_at.to_rfc3339()));
+    assert_eq!(sent.updated_at, sent_at.to_rfc3339());
 
     let failed = FfiReceiptIssuanceView::from(ReceiptIssuanceView {
         status: ReceiptIssuanceStatus::AccessFailed,
-        access_sent_at: None,
         last_error: Some("link secret detail".into()),
         ..view
     });

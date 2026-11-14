@@ -43,7 +43,7 @@ async fn issued_receipt(user: &TestUser, receipt_id: &str) -> ReceiptIssuanceVie
 async fn assert_access_sent(pair: &TwoParty, issuance: &ReceiptIssuanceView) {
     let all = issued_receipt(&pair.alice, &issuance.receipt_id).await;
     assert_eq!(all.status, ReceiptIssuanceStatus::AccessSent);
-    assert!(all.access_sent_at.is_some());
+    assert!(all.updated_at >= issuance.updated_at);
     assert!(all.last_error.is_none());
     let to_bob = pair
         .alice

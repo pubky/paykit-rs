@@ -112,7 +112,6 @@ impl From<ReceiptIssuanceView> for FfiReceiptIssuanceView {
             updated_at: value.updated_at.to_rfc3339(),
             stored_at: value.stored_at.map(|time| time.to_rfc3339()),
             access_queued_at: value.access_queued_at.map(|time| time.to_rfc3339()),
-            access_sent_at: value.access_sent_at.map(|time| time.to_rfc3339()),
             last_error: value.last_error,
         }
     }
