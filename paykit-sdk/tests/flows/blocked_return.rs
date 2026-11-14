@@ -1740,21 +1740,117 @@ async fn test_blocked_return_payee_blocked_during_the_paying_commit_not_paid() {
 
 #[tokio::test]
 async fn test_blocked_return_request_marked_manual_only_after_the_repeat_read_not_repeated() {
-    // The phone pays carol's request by hand, left in flight. At the resume, the repeat reads
-    // her record, open and not `manual_only`; then, while the phone reads the deny list,
-    // another payer app marks the record `manual_only`, raising no floor. The record read
-    // again just before the call holds the repeat: the method isn't called again, and the
-    // attempt stays open for the method's history or a receipt.
+    // At the resume, the repeat reads carol's record, open and not `manual_only`; then
+    // another payer app marks it `manual_only`, raising no floor. The record read again just
+    // before the call holds the repeat.
     let w = World::new();
+    Box::pin(repeat_while_the_wallet_writes(&w, OwnWrite::ManualOnly)).await;
+}
+
+#[tokio::test]
+async fn test_blocked_return_request_cancelled_after_the_repeat_read_not_repeated() {
+    // Carol cancels her request. At the resume, the repeat reads her record, open: no payer
+    // app has received the cancellation yet. Then another payer app receives it and records
+    // it. The record read again just before the call holds the repeat.
+    let w = World::new();
+    Box::pin(repeat_while_the_wallet_writes(&w, OwnWrite::Cancellation)).await;
+}
+
+#[tokio::test]
+async fn test_blocked_return_request_cancelled_during_the_paying_commit_not_paid() {
+    // An automatic first dispatch reads carol's record, open, and journals `Paying`. While
+    // that write commits, carol cancels her request, and another payer app receives the
+    // cancellation and records it. The record read again after the commit holds the payment:
+    // the method isn't called, and the attempt is known unsubmitted.
+    let w = Arc::new(World::new());
+    let (phone, attempt_id) = automatic_first_dispatch_with(&w, false, |w, mut wallet, _shop| {
+        let carol = w.carol_id();
+        // Carol and the wallet run on their own thread while the phone's commit waits.
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        Box::pin(carol_cancels(w)).await;
+                        OwnWrite::Cancellation.run(&mut wallet, &carol).await;
+                    })
+            });
+        });
+    })
+    .await;
+    assert_eq!(w.rail.pay_calls(&attempt_id), 0);
+    let payment = phone.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Attempted);
+}
+
+/// What another payer app writes to carol's request record while the phone pays it.
+#[derive(Clone, Copy)]
+enum OwnWrite {
+    /// Marks it `manual_only`, raising no floor.
+    ManualOnly,
+    /// Records carol's cancellation, sent before.
+    Cancellation,
+}
+
+impl OwnWrite {
+    /// `app` reads its messages, then writes this to `payee`'s one request it holds.
+    async fn run(self, app: &mut Paykit, payee: &[u8; 32]) {
+        app.receive(None).await.unwrap();
+        match self {
+            Self::ManualOnly => {
+                mark_manual_only(app, payee).await;
+                assert_eq!(shared_floor(app).await, None);
+            }
+            Self::Cancellation => {
+                let request = app
+                    .requests()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|view| view.request.payee == *payee)
+                    .expect("the request")
+                    .request;
+                assert_eq!(
+                    app.request(&request).await.unwrap().status,
+                    paykit_sdk::RequestStatus::Cancelled
+                );
+            }
+        }
+    }
+}
+
+/// Carol cancels her one request to alice, from another app of hers.
+async fn carol_cancels(w: &World) {
+    let mut till = w
+        .join(
+            &w.carol,
+            "till",
+            AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let record = till.payee_activity().await.unwrap()[0].record;
+    till.cancel_sent_request(&record, None).await.unwrap();
+}
+
+/// The phone pays carol's request by hand, left in flight. At the resume, the repeat reads
+/// her record; then, while the phone reads the deny list, the wallet makes `write` (carol's
+/// cancellation is sent before the resume). The
+/// method isn't called again, and the attempt stays open for the method's history or a
+/// receipt, at this resume and the next.
+async fn repeat_while_the_wallet_writes(w: &World, write: OwnWrite) {
     let phone_store = Arc::new(PayingStore::default());
     // On the heap: the setup nests deep.
     let (mut wallet, mut phone, _shop, carols) = Box::pin(phone_paying_carol_on(
-        &w,
+        w,
         Arc::clone(&phone_store) as Arc<dyn StateStore>,
     ))
     .await;
-    let attempt_id = paid_in_flight(&w, &mut phone, &carols).await;
+    let attempt_id = paid_in_flight(w, &mut phone, &carols).await;
     w.clock.advance_ms(MINUTE_MS);
+    if matches!(write, OwnWrite::Cancellation) {
+        Box::pin(carol_cancels(w)).await;
+    }
     let carol = w.carol_id();
     phone_store.on_deny_list_read(move || {
         // The wallet runs on its own thread while the phone's commit waits for it.
@@ -1762,11 +1858,7 @@ async fn test_blocked_return_request_marked_manual_only_after_the_repeat_read_no
             tokio::runtime::Builder::new_current_thread()
                 .build()
                 .unwrap()
-                .block_on(async {
-                    wallet.receive(None).await.unwrap();
-                    mark_manual_only(&mut wallet, &carol).await;
-                    assert_eq!(shared_floor(&wallet).await, None);
-                })
+                .block_on(write.run(&mut wallet, &carol))
         })
         .join()
         .unwrap();
@@ -1775,7 +1867,6 @@ async fn test_blocked_return_request_marked_manual_only_after_the_repeat_read_no
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
     let payment = phone.payments().await.unwrap().remove(0);
     assert_eq!(payment.stage, paykit_sdk::Stage::Paying);
-    // The mark is sticky: the next resume withholds the repeat too.
     Box::pin(phone.resume_payments()).await.unwrap();
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }

@@ -3282,18 +3282,35 @@ impl Paykit {
         }
         Ok(match self.fresh_request(&target).await? {
             Fresh::Held(fresh) => {
-                cancelled(&fresh)
-                    || rejected(&fresh)
-                    || fresh.manual_only
-                    || self.held(&self.activity_key(&target)?, &fresh).await?
+                self.fresh_record_withholds(entry, &target, &fresh).await?
                     || match crate::requests::request_of(&fresh) {
                         Some((stored, _)) => self.floor_holds(stored).await?,
                         None => false,
                     }
-                    || Box::pin(self.divergent_withholds(entry)).await?
             }
             Fresh::Missing | Fresh::Unreadable => true,
         })
+    }
+
+    /// Whether `fresh`, `entry`'s request record as the switch holds it now, read again
+    /// ([`Paykit::fresh_request`]), withholds an automatic payment of it, at a repeat's
+    /// withheld check and at the last check before any automatic call
+    /// ([`Paykit::automatic_dispatch_held`]): the record shows the request cancelled or
+    /// rejected, or holds `manual_only`; the request is held after a restore or a `missed`
+    /// item until the user confirms it (Paykit spec 7.2); or the record, or the list's
+    /// record, is divergent or paused since it was seen so, the view read after the record
+    /// (Paykit spec 6, 8.1, 8.3).
+    async fn fresh_record_withholds(
+        &mut self,
+        entry: &JournalEntry,
+        target: &ActivityTarget,
+        fresh: &ActivityRecord,
+    ) -> Result<bool> {
+        Ok(cancelled(fresh)
+            || rejected(fresh)
+            || fresh.manual_only
+            || self.held(&self.activity_key(target)?, fresh).await?
+            || Box::pin(self.divergent_withholds(entry)).await?)
     }
 
     /// Whether `entry`'s request record, or the `payment_lists` record of the list its
@@ -3388,15 +3405,17 @@ impl Paykit {
     /// Whether `entry` is held from an automatic dispatch, a first dispatch or a repeat, as
     /// the switch holds the identity's state now: the deny list, read again, holds the payee
     /// or can't be read (Paykit spec 8.1); the request record, read again
-    /// ([`Paykit::fresh_request`]), holds `manual_only`, the request being paid only by hand
-    /// (Paykit wire 5.3, spec 8.3), or isn't there, doesn't read as the request or holds none,
-    /// or can't be read; or the block floor, read again, holds the request
+    /// ([`Paykit::fresh_request`]), withholds it as a repeat's withheld check judges it
+    /// ([`Paykit::fresh_record_withholds`]: cancelled, rejected, `manual_only`, held after a
+    /// restore, divergent), or isn't there, doesn't read as the request or holds none, or
+    /// can't be read; or the block floor, read again, holds the request
     /// ([`Paykit::floor_holds_fresh`]). For a payment without a request, the deny list only.
     ///
-    /// Another own app can block the payee, or mark the record `manual_only` from a live block
-    /// mark before any floor is raised, while this app awaits anything: a copy this app keeps,
-    /// or a read made before an await, shows nothing of that, so they are read here, one after
-    /// the other, and nothing else awaits after them before the call.
+    /// Another own app can block the payee, record a cancellation or a rejection, or mark the
+    /// record `manual_only` from a live block mark before any floor is raised, while this app
+    /// awaits anything: a copy this app keeps, or a read made before an await, shows nothing
+    /// of that, so they are read here, one after the other, and nothing else awaits after
+    /// them before the call.
     async fn automatic_dispatch_held(&mut self, entry: &JournalEntry) -> Result<bool> {
         if self.denied(&entry.payee).await.unwrap_or(true) {
             return Ok(true);
@@ -3409,7 +3428,7 @@ impl Paykit {
             Ok(Fresh::Held(record)) => *record,
             Ok(Fresh::Missing | Fresh::Unreadable) | Err(_) => return Ok(true),
         };
-        if record.manual_only {
+        if self.fresh_record_withholds(entry, &target, &record).await? {
             return Ok(true);
         }
         let Some((stored, _)) = crate::requests::request_of(&record) else {
