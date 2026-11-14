@@ -1676,7 +1676,7 @@ async fn test_certificate_stored_entry_the_app_cant_keep_stays_for_the_host() {
 }
 
 /// A payment in flight, its method hanging, when the wallet takes a certificate renewed to
-/// read `request` too, whose scope keys no bundle brings: the records stay unlisted, and
+/// read `paykit_request` too, whose scope keys no bundle brings: the records stay unlisted, and
 /// can't be listed until the keys come. Returns the wallet, the shop, the request paid and a
 /// second request, and the attempt.
 async fn in_flight_under_a_wider_certificate_without_keys(
@@ -1987,7 +1987,7 @@ async fn narrowed_then_renewed_back(narrowed: Narrowed) {
             AppScopes::new().request().build().unwrap(),
         )
         .await;
-    // Bob pays a first request of the till while the wallet reads `request`: his wallet
+    // Bob pays a first request of the till while the wallet reads `paykit_request`: his wallet
     // reads alice's directory, which lists the wallet under the wider certificate, and
     // keeps that copy for the rest of the flow.
     let first = till
@@ -2101,13 +2101,13 @@ async fn test_certificate_narrowed_then_stopped_taking_the_wider_one_holds_a_rep
 
 #[tokio::test]
 async fn test_certificate_narrowed_on_one_side_widened_on_another_then_back_holds_a_receipt() {
-    // `request` reads the payee's side, whose keys wait, and no longer the payer's.
+    // `paykit_request` reads the payee's side, whose keys wait, and no longer the payer's.
     narrowed_on_the_payer_side_then_back(AppScopes::new().request().build().unwrap()).await;
 }
 
 #[tokio::test]
 async fn test_certificate_narrowed_to_allowance_then_back_holds_a_receipt() {
-    // `allowance` reads none of the payer's side.
+    // `paykit_allowance` reads none of the payer's side.
     narrowed_on_the_payer_side_then_back(AppScopes::new().allowance().build().unwrap()).await;
 }
 
@@ -2232,7 +2232,7 @@ async fn test_certificate_wider_on_the_payer_side_writes_nothing_while_keys_wait
     // In flight, the wallet is narrowed, then renewed to `paykit_pay` and `paykit_request` with no
     // bundle: it holds the `paykit_pay` key from before, but the new certificate reads more of the
     // payer's side than the one listed under: its records, through `paykit_pay`, after either, and
-    // its claims too after `paykit_contacts` (`allowance` reads claims). The resume journals the
+    // its claims too after `paykit_contacts` (`paykit_allowance` reads claims). The resume journals the
     // payment made
     // and writes nothing, rather than build on a copy that may lack what was written
     // meanwhile.
@@ -2346,7 +2346,7 @@ async fn acceptances_received(shop: &mut Paykit) -> usize {
 #[tokio::test]
 async fn test_certificate_restore_unlisted_with_payee_keys_awaited_resumes_nothing() {
     // The backup holds a payment in flight, which the wallet then finishes; the wallet is
-    // renewed to read `request` too. The restored app's first read takes that renewal from
+    // renewed to read `paykit_request` too. The restored app's first read takes that renewal from
     // its record, then reads no feed: its copy counts as unlisted since the restore, and the
     // listing waits for the payee's keys. The resume treats the payer's side as waiting too:
     // it journals what the method says and sends nothing, no acceptance again among it.
@@ -2426,7 +2426,7 @@ async fn test_certificate_restore_unlisted_with_payee_keys_awaited_resumes_nothi
 
 #[tokio::test]
 async fn test_certificate_payee_side_widening_with_a_data_epoch_rotation_writes_nothing() {
-    // The attempt is open, nothing dispatched. The wallet is renewed to read `request` too,
+    // The attempt is open, nothing dispatched. The wallet is renewed to read `paykit_request` too,
     // with no bundle, and the data epoch rotates: it reads no more of the payer's side, but
     // lacks the current `paykit_pay` key. The payer's side waits: the resume writes no `failed`
     // and leaves the attempt as it is.
@@ -2761,7 +2761,7 @@ async fn test_certificate_receipt_for_a_record_not_listed_yet_is_held_until_list
 #[tokio::test]
 async fn test_certificate_proof_for_a_payee_record_not_listed_yet_is_held_until_listed() {
     // Alice's till sends bob a request; its payee record is written while the wallet, which
-    // holds `paykit_pay` only, can't read it. The wallet is renewed to read `request` too, with no
+    // holds `paykit_pay` only, can't read it. The wallet is renewed to read `paykit_request` too, with no
     // bundle, and bob pays. The record's absence from the wallet's copy decides nothing: the
     // proof's entry is held, not taken as a reply to a request the wallet didn't send.
     // Once the keys come and the records are listed, the proof goes into the record, once.
@@ -2829,7 +2829,7 @@ async fn test_certificate_proof_for_a_payee_record_not_listed_yet_is_held_until_
 
 #[tokio::test]
 async fn test_certificate_restore_taking_a_wider_one_without_keys_stays_unlisted() {
-    // After the backup, the wallet is renewed to read `request` too, and alice's till sends
+    // After the backup, the wallet is renewed to read `paykit_request` too, and alice's till sends
     // bob a request. The restored app takes the renewal from its record at its first read,
     // whose scope keys it lacks, so the client skips the restore's listing: the restore's
     // mark stays, and bob's proof, whose payee record the copy lacks, is held. Once the keys
@@ -2910,7 +2910,7 @@ async fn test_certificate_restore_taking_a_wider_one_without_keys_stays_unlisted
 
 #[tokio::test]
 async fn test_certificate_restore_taking_allowance_without_its_key_lists_once_it_comes() {
-    // The renewal after the backup adds `allowance`, whose key the restored app lacks and
+    // The renewal after the backup adds `paykit_allowance`, whose key the restored app lacks and
     // which reads `allowances`: the client skips the restore's listing, so the restore's
     // mark stays and the Allowances aren't shown. Once the key comes, a read lists, the
     // mark goes and the requests and Allowances show.

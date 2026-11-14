@@ -143,9 +143,13 @@ async fn test_allowances_answer_refused_to_the_proposer_and_once_answered() {
         .propose_allowance(w.bob_id(), AllowanceRole::Allower, terms())
         .await
         .unwrap_err();
-    assert!(
-        matches!(refusal(&error), Some(Refusal::ScopeMissing(_))),
-        "{error:?}"
+    let Some(missing @ Refusal::ScopeMissing(scope)) = refusal(&error) else {
+        panic!("{error:?}")
+    };
+    assert_eq!(scope, "paykit_allowance");
+    assert_eq!(
+        missing.to_string(),
+        "Paykit spec 3.1: the certificate doesn't hold paykit_allowance"
     );
 }
 

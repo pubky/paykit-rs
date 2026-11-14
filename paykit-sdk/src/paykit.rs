@@ -587,7 +587,7 @@ impl Paykit {
         if acts_as_payee(self.app.cert().scopes()) {
             Ok(())
         } else {
-            Err(Refusal::ScopeMissing("request or a labelled selling scope".into()).into())
+            Err(Refusal::ScopeMissing("paykit_request or paykit_request:<label>".into()).into())
         }
     }
 

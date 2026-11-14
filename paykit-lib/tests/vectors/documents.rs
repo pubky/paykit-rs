@@ -111,7 +111,7 @@ fn check_executor_grant(keys: &Keys, d: &Value) {
     assert!(grant
         .verify(&alice, &bob, &other, &terms, built_on)
         .is_err());
-    // A certificate without allowance_execute can't hold a grant: the phone's.
+    // A certificate without paykit_allowance_execute can't hold a grant: the phone's.
     let phone = ExecutorGrant {
         app_id: keys.app("phone").keys.app_id_bytes(),
         cert: cert_doc("phone"),
@@ -451,7 +451,7 @@ fn check_executor_certificates(keys: &Keys, d: &Value) {
                     assert!(
                         error
                             .to_string()
-                            .contains("allowance_execute requires paykit_allowance, paykit_pay and paykit_contacts"),
+                            .contains("paykit_allowance_execute requires paykit_allowance, paykit_pay and paykit_contacts"),
                         "{name}: {error}"
                     );
                 }
