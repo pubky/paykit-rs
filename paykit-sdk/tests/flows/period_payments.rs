@@ -2655,3 +2655,110 @@ async fn test_period_payments_period_marked_after_the_paying_commit_holds_the_di
     let payment = wallet.payments().await.unwrap().remove(0);
     assert_eq!(payment.stage, paykit_sdk::Stage::Attempted);
 }
+
+/// A monthly request for 1 btc from the start of the world's clock, paid to the Private
+/// Payment List or public endpoints of bob's app `app`.
+fn monthly_requiring(app: [u8; 16]) -> RequestDraft {
+    let rule = AnchoredRule::new(START_MS, 1, Unit::Month).unwrap();
+    RequestDraft::new(
+        btc("1"),
+        PaymentReference::new("plan-1").unwrap(),
+        RequestDestination::RequiredApp(app),
+    )
+    .with_proposal_expires_at_ms(START_MS + DAY_MS)
+    .with_recurrence(Recurrence::new(rule, START_MS, None).unwrap())
+}
+
+#[tokio::test]
+async fn test_period_payments_paused_period_requiring_a_removed_app_refused_for_its_destination() {
+    // The request record is divergent, and the subscription requires the shop, which bob's
+    // signer has since removed: a removed app is never listed again, so no confirmation
+    // could let January be paid, and it is refused for that, not paused (Paykit spec 6,
+    // 8.1).
+    let w = World::new();
+    let base = store();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let draft = monthly_requiring(shop.app_id());
+    let (request, _) = subscribed_to(&w, &mut shop, &mut wallet, draft).await;
+    let record = wallet.request(&request).await.unwrap().record;
+    crate::divergent::set_divergent(&base, &wallet, &record, true);
+    crate::divergent::remove_from_bob(&w, shop.app_id());
+    let refused = by_user(&mut wallet, &request, january(), PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refusal(&refused), Refusal::Destination(_)),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_period_payments_paused_period_of_a_removed_app_refused_for_its_destination() {
+    // The request record is divergent, and bob's signer removed the shop that sent the
+    // request and owns its endpoints, which pay January: no confirmation could let it be
+    // paid, so it is refused as the destination check refuses it (Paykit spec 4, 6).
+    let w = World::new();
+    let base = store();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    let record = wallet.request(&request).await.unwrap().record;
+    crate::divergent::set_divergent(&base, &wallet, &record, true);
+    crate::divergent::remove_from_bob(&w, shop.app_id());
+    let refused = by_user(&mut wallet, &request, january(), PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refusal(&refused), Refusal::Destination(_)),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_period_payments_paused_period_paid_by_a_current_apps_details_waits_for_the_user() {
+    // The request record is divergent, and bob's signer removed the shop that sent the
+    // request; February's period details come from his till, which is current, and pay
+    // February. The app judged is the till's, so February is paused, for the user to
+    // confirm, not refused for the shop's removal; once confirmed, it is paid by the
+    // details (Paykit spec 6, 8.2).
+    let w = World::new();
+    let base = store();
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    till.receive(None).await.unwrap();
+    let sale = till.payee_activity().await.unwrap()[0].record;
+    let now = w.clock.now_ms();
+    till.send_period_details(&sale, details(february(), "lnbc1feb", now + DAY_MS))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let record = wallet.request(&request).await.unwrap().record;
+    crate::divergent::set_divergent(&base, &wallet, &record, true);
+    crate::divergent::remove_from_bob(&w, shop.app_id());
+    let refused = by_user(&mut wallet, &request, february(), early())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refusal(&refused), Refusal::Divergent { .. }),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    crate::divergent::confirm(&mut wallet, &record)
+        .await
+        .unwrap();
+    let outcome = by_user(&mut wallet, &request, february(), early())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    let record = period_record(&w, &wallet, &request, february())
+        .await
+        .unwrap();
+    assert_eq!(proof_of(&record).1.billing_period, Some(february()));
+}

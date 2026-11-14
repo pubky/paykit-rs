@@ -52,7 +52,8 @@ use crate::destination::Carrier;
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::{Destination, JournalEntry, KeptAmount, KeptPeriod, Stage};
 use crate::pay::{
-    unsupported, BlockedPayment, Choice, Chosen, PayOptions, PayOutcome, PaymentMode, Plan,
+    unsupported, BlockedPayment, Choice, Chosen, DestinationFrom, PayOptions, PayOutcome,
+    PaymentMode, Plan,
 };
 use crate::paykit::Paykit;
 use crate::receipts::{received_receipt, ReceivedReceipt};
@@ -722,21 +723,34 @@ impl Paykit {
                 }
             }
         } else if !self.deadline_passed(deadline) {
-            // As for a one-time request, a period whose request's endpoints' app is no longer
+            // As for a one-time request, a period whose destination's app is no longer
             // current, or that requires an app the payee removed, is refused for that instead
-            // of paused: no confirmation could let it be paid (Paykit spec 6).
+            // of paused: no confirmation could let it be paid (Paykit spec 6). The app judged
+            // is the one of the carrier that would pay this period: the period details it
+            // would be paid by, whichever payee app sent them, else the request's own
+            // destination. With no carrier for it yet, such as a later period of a request
+            // with `per_period_endpoints` waiting for its details, no app is judged.
             let mut paused = false;
             for key in [record_key, period_record_key] {
                 paused |= Box::pin(self.pause_at(&key)).await?.blocks_by_hand();
             }
             if paused {
-                Box::pin(self.refuse_unpayable_request(
-                    &request.payee,
-                    &stored,
-                    &body.destination,
+                let details = match self.period_details_for(
+                    &body,
+                    &billing,
+                    held_period.as_ref(),
                     &options,
-                ))
-                .await?;
+                ) {
+                    Ok(details) => Some(details),
+                    Err(error) if error.refusal().is_some() => None,
+                    Err(error) => return Err(error),
+                };
+                let from = match &details {
+                    Some(Some(details)) => Some(DestinationFrom::Endpoints(details)),
+                    Some(None) => DestinationFrom::of_request(&stored, &body.destination),
+                    None => None,
+                };
+                Box::pin(self.refuse_unpayable(&request.payee, from, &options)).await?;
             }
             Box::pin(self.refuse_while_paused(&[record_key, period_record_key])).await?;
         }
@@ -1121,53 +1135,7 @@ impl Paykit {
         options: &PayOptions,
         by: Initiator,
     ) -> Result<Chosen> {
-        let now = self.now();
-        // Only details of a period that takes them now, the periods the payer stores them
-        // for ([`takes_details`]), are paid by.
-        let paid = held.is_some_and(ActivityRecord::shows_paid);
-        let takes = matches!(
-            takes_details(body, billing, paid, self.service_time()),
-            Ok(Window::Takes)
-        );
-        let mut details: Vec<StoredMessage> = held
-            .filter(|_| takes)
-            .map(|record| record.details().into_iter().cloned().collect())
-            .unwrap_or_default();
-        details.sort_by(|a, b| period_details_order(b.message(), a.message()));
-        let first = body
-            .recurrence
-            .as_ref()
-            .and_then(|r| r.first().ok())
-            .is_some_and(|first| first == *billing);
-        // Rates price no payment yet: each one is to an endpoint of the requested asset.
-        let needs = DetailsNeeds {
-            destination: body.per_period_endpoints && !first,
-            rates: false,
-        };
-        let chosen = match &options.period_details {
-            Some(msg_id) => Some(
-                details
-                    .iter()
-                    .find(|d| &d.message().msg_id == msg_id)
-                    .filter(|d| {
-                        let needs = DetailsNeeds {
-                            destination: true,
-                            ..needs
-                        };
-                        needs.carried_by(d, now)
-                    })
-                    .cloned()
-                    .ok_or_else(|| {
-                        Refusal::NoDestination(
-                            "Paykit spec 8.2: the period record holds no such unexpired period \
-                             details with a destination"
-                                .into(),
-                        )
-                    })?,
-            ),
-            None => details_paid_by(&details, now, needs)?.cloned(),
-        };
-        if let Some(details) = chosen {
+        if let Some(details) = self.period_details_for(body, billing, held, options)? {
             let Body::PaymentPeriodDetails(period) = details.body() else {
                 return Err(unsupported("the period details' endpoints"));
             };
@@ -1211,6 +1179,72 @@ impl Paykit {
         );
         self.request_destination(payee, stored, body, options, accepted, by)
             .await
+    }
+
+    /// The period details a payment of Billing Period `billing` of the request `body` is
+    /// paid by (Paykit spec 8.2): the ones `options` names by `msg_id`, or by default the
+    /// ones [`details_paid_by`] picks, among those the payer's period record, `held`, holds
+    /// for a period that takes details now ([`takes_details`]). `None` when none are: the
+    /// request's own destination pays the period then.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::NoDestination`] for details `options` names that the record doesn't hold
+    /// unexpired with a destination; [`Refusal::WaitingForPeriodDetails`] as
+    /// [`details_paid_by`].
+    fn period_details_for(
+        &self,
+        body: &PaymentRequest,
+        billing: &BillingPeriod,
+        held: Option<&ActivityRecord>,
+        options: &PayOptions,
+    ) -> Result<Option<StoredMessage>> {
+        let now = self.now();
+        // Only details of a period that takes them now, the periods the payer stores them
+        // for ([`takes_details`]), are paid by.
+        let paid = held.is_some_and(ActivityRecord::shows_paid);
+        let takes = matches!(
+            takes_details(body, billing, paid, self.service_time()),
+            Ok(Window::Takes)
+        );
+        let mut details: Vec<StoredMessage> = held
+            .filter(|_| takes)
+            .map(|record| record.details().into_iter().cloned().collect())
+            .unwrap_or_default();
+        details.sort_by(|a, b| period_details_order(b.message(), a.message()));
+        let first = body
+            .recurrence
+            .as_ref()
+            .and_then(|r| r.first().ok())
+            .is_some_and(|first| first == *billing);
+        // Rates price no payment yet: each one is to an endpoint of the requested asset.
+        let needs = DetailsNeeds {
+            destination: body.per_period_endpoints && !first,
+            rates: false,
+        };
+        Ok(match &options.period_details {
+            Some(msg_id) => Some(
+                details
+                    .iter()
+                    .find(|d| &d.message().msg_id == msg_id)
+                    .filter(|d| {
+                        let needs = DetailsNeeds {
+                            destination: true,
+                            ..needs
+                        };
+                        needs.carried_by(d, now)
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        Refusal::NoDestination(
+                            "Paykit spec 8.2: the period record holds no such unexpired period \
+                             details with a destination"
+                                .into(),
+                        )
+                    })?,
+            ),
+            None => details_paid_by(&details, now, needs)?.cloned(),
+        })
     }
 
     /// The payee sends the payer period details for one Billing Period of the recurring

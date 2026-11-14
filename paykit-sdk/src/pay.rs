@@ -431,6 +431,30 @@ impl UnrequestedPayment {
     }
 }
 
+/// What gives a payment's destination, as [`Paykit::refuse_unpayable`] judges it.
+pub(crate) enum DestinationFrom<'a> {
+    /// The endpoints a message carries, a request's own or period details', which are the
+    /// endpoints of the app that sent it.
+    Endpoints(&'a StoredMessage),
+    /// The lists of the app a request requires (Paykit wire 4.5).
+    RequiredApp([u8; 16]),
+}
+
+impl<'a> DestinationFrom<'a> {
+    /// What gives the destination of the request `request` by its own terms, `destination`:
+    /// `None` for one any current app may give.
+    pub(crate) fn of_request(
+        request: &'a StoredMessage,
+        destination: &RequestDestination,
+    ) -> Option<Self> {
+        match destination {
+            RequestDestination::Endpoints(_) => Some(Self::Endpoints(request)),
+            RequestDestination::RequiredApp(app) => Some(Self::RequiredApp(*app)),
+            RequestDestination::Any => None,
+        }
+    }
+}
+
 /// What held a payment back at [`Paykit::pay_gate`].
 pub(crate) enum Held {
     /// The own `identity.json` isn't confirmed in the last 60 s (check 4).
@@ -824,10 +848,9 @@ impl Paykit {
         if Box::pin(self.pause_at(&record_key)).await?.blocks_by_hand()
             && !self.deadline_passed(deadline)
         {
-            Box::pin(self.refuse_unpayable_request(
+            Box::pin(self.refuse_unpayable(
                 &request.payee,
-                &stored,
-                &body.destination,
+                DestinationFrom::of_request(&stored, &body.destination),
                 &options,
             ))
             .await?;
@@ -1392,25 +1415,24 @@ impl Paykit {
         Ok(view.map_or(0, |v| v.step))
     }
 
-    /// Refused when the app the destination of `request` must come from can't give one
-    /// whatever the user confirms (Paykit spec 4, 7.2, 8.1), judged on the payee's
-    /// `identity.json` read fresh, as for a request's endpoint: a request carrying
-    /// endpoints, as the destination check refuses it, when the app that sent it, whose
-    /// endpoints they are, isn't current; a request requiring an app, when the payee has
-    /// removed that app, which is never listed again (Switch spec 4.3). An app not listed yet
-    /// isn't removed. A request whose destination any current app may give is not judged,
-    /// and no copy is read for it. A read that fails is the refusal: no app is taken as
-    /// current nor as removed without it.
-    pub(crate) async fn refuse_unpayable_request(
+    /// Refused when the app the destination of a payment must come from, `from`, can't give
+    /// one whatever the user confirms (Paykit spec 4, 7.2, 8.1, 8.2), judged on the payee's
+    /// `identity.json` read fresh, as for a request's endpoint: endpoints a message carries,
+    /// a request's own or period details', as the destination check refuses them, when the
+    /// app that sent the message, whose endpoints they are, isn't current; a request
+    /// requiring an app, when the payee has removed that app, which is never listed again
+    /// (Switch spec 4.3). An app not listed yet isn't removed. A destination any current app
+    /// may give, `None`, is not judged, and no copy is read for it. A read that fails is the
+    /// refusal: no app is taken as current nor as removed without it.
+    pub(crate) async fn refuse_unpayable(
         &mut self,
         payee: &[u8; 32],
-        request: &StoredMessage,
-        destination: &RequestDestination,
+        from: Option<DestinationFrom<'_>>,
         options: &PayOptions,
     ) -> Result<()> {
-        if let RequestDestination::Any = destination {
+        let Some(from) = from else {
             return Ok(());
-        }
+        };
         let identity = match self
             .payee_identity(
                 payee,
@@ -1423,8 +1445,8 @@ impl Paykit {
             Ok(identity) => identity,
             Err(refusal) => return Err(refusal.into()),
         };
-        match destination {
-            RequestDestination::RequiredApp(app) if identity.doc.lists_removed(app) => {
+        match from {
+            DestinationFrom::RequiredApp(app) if identity.doc.lists_removed(&app) => {
                 Err(Refusal::Destination(
                     "Paykit spec 8.1: the request's required app is removed from the payee's \
                      identity.json"
@@ -1432,13 +1454,13 @@ impl Paykit {
                 )
                 .into())
             }
-            RequestDestination::Endpoints(_) => {
-                let carrier = Carrier::Message(Box::new(request.clone()));
-                let app_id = request.message().from.app_id;
+            DestinationFrom::RequiredApp(_) => Ok(()),
+            DestinationFrom::Endpoints(message) => {
+                let carrier = Carrier::Message(Box::new(message.clone()));
+                let app_id = message.message().from.app_id;
                 crate::destination::current(&identity.doc, &app_id, &carrier, self.now())
                     .map_err(|why| Refusal::Destination(why).into())
             }
-            _ => Ok(()),
         }
     }
 

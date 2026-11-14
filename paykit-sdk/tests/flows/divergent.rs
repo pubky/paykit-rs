@@ -3556,7 +3556,7 @@ async fn till_list(w: &World, wallet: &Paykit, expires_at: u64) -> Paykit {
 
 /// Bob's signer removes `app` from his `identity.json`, and the payer's copy of it is let
 /// grow older than 10 minutes, so the next payment reads the new one.
-fn remove_from_bob(w: &World, app: [u8; 16]) {
+pub fn remove_from_bob(w: &World, app: [u8; 16]) {
     let now = w.clock.now_ms();
     w.bob
         .next_doc(|body| {
