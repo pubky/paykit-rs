@@ -166,6 +166,20 @@
       },
       {
         "amount": {
+          "asset": "usdt",
+          "value": "10.000001"
+        },
+        "fraction_digits": 6,
+        "name": "the requested asset rounded up",
+        "payment_endpoint_identifier": "usdt-ethereum-address",
+        "rates": null,
+        "requested": {
+          "asset": "usdt",
+          "value": "10.0000001"
+        }
+      },
+      {
+        "amount": {
           "asset": "btc",
           "value": "0.00000062"
         },
