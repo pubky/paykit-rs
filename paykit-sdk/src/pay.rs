@@ -2347,10 +2347,15 @@ impl Paykit {
         if matches!(kind, Dispatch::First { .. }) {
             self.set_stage(&mut entry, Stage::Paying).await?;
             // The commit was an await, during which another payer app can raise the block
-            // floor: an automatic payment reads the floor again now, from the switch, and a
-            // read that fails holds it (Paykit spec 8.1, `crate::floor`). The entry goes back
-            // to `Attempted`, known unsubmitted, as it does when the fence stops it.
-            if by == Initiator::Automatic && self.floor_holds_dispatch(&entry).await.unwrap_or(true)
+            // floor or mark the request record `manual_only`: an automatic payment reads the
+            // record and the floor again now, from the switch, and a read that fails holds it
+            // (Paykit spec 8.1, 8.3, `crate::floor`). The entry goes back to `Attempted`, known
+            // unsubmitted, as it does when the fence stops it.
+            if by == Initiator::Automatic
+                && self
+                    .automatic_dispatch_held(&entry, kind)
+                    .await
+                    .unwrap_or(true)
             {
                 return self.stopped_at_the_fence(entry, FinalCheck::Hold).await;
             }
@@ -3301,9 +3306,11 @@ impl Paykit {
     /// spec 4, 7.2). In order:
     ///
     /// 0. for an automatic payment, the deny list, read again: a blocked payee, or a list
-    ///    that can't be read, holds it ([`FinalCheck::Hold`], Paykit spec 8.1); and the
-    ///    block floor, read again: a one-time request dated before it, or a floor that can't
-    ///    be read, holds it too (`crate::floor`);
+    ///    that can't be read, holds it ([`FinalCheck::Hold`], Paykit spec 8.1); for a first
+    ///    dispatch, the request record, read again: one that holds `manual_only`, or isn't
+    ///    there or can't be read, holds it too (Paykit spec 8.3); and the block floor, read
+    ///    again: a one-time request dated before it, or a floor that can't be read, holds it
+    ///    too (`crate::floor`);
     /// 1. a switch lookup kept for the payee whose answer has come is taken, so a late
     ///    answer that removes the destination's app is acted on (Switch spec 4.3), and one
     ///    the client refuses, such as an equivocation, stops the payment
@@ -3326,8 +3333,8 @@ impl Paykit {
     ///
     /// Checks 2 to 6 run on the clock after the one await ([`Paykit::final_gates`]). A
     /// repeat's call follows them with no await; a first dispatch's follows the journal
-    /// write of `Paying`, after which an automatic one reads the block floor again and the
-    /// fence ([`Paykit::payment_fence`]) runs them all again. Anything but
+    /// write of `Paying`, after which an automatic one reads its request record and the block
+    /// floor again and the fence ([`Paykit::payment_fence`]) runs them all again. Anything but
     /// [`FinalCheck::Pay`]: nothing is paid; a copy past its age is looked up again by the
     /// next check, at a resume. Returns the payee's copy the checks judged, for the fence.
     pub(crate) async fn final_payment_check(
@@ -3346,11 +3353,12 @@ impl Paykit {
         if by == Initiator::Automatic && self.denied(&entry.payee).await.unwrap_or(true) {
             return Ok((FinalCheck::Hold, payee));
         }
-        // Nor of a one-time request dated before the block floor, as a read of its record
-        // made now shows it, a read that fails holding it too (`crate::floor`): the attempt's
-        // batch doesn't condition on the floor, so a raise the copy doesn't hold yet, made
-        // before the attempt's commit or after it, is met here.
-        if by == Initiator::Automatic && self.floor_holds_dispatch(entry).await? {
+        // Nor of a request paid only by hand, its record's `manual_only` (Paykit spec 8.3),
+        // or a one-time request dated before the block floor, as a read of the floor made now
+        // shows it, a read that fails holding it too (`crate::floor`): the attempt's batch
+        // doesn't condition on the floor, so a raise the copy doesn't hold yet, made before
+        // the attempt's commit or after it, is met here.
+        if by == Initiator::Automatic && self.automatic_dispatch_held(entry, kind).await? {
             return Ok((FinalCheck::Hold, payee));
         }
         let payee = match self.take_kept_lookup(&entry.payee).await? {
@@ -3362,19 +3370,42 @@ impl Paykit {
         Ok((check, payee))
     }
 
-    /// Whether the block floor, read now, holds the request `entry` pays
-    /// ([`Paykit::floor_holds_fresh`]): `false` for a payment without a request or a request
-    /// record that doesn't read, which the checks before this one judge.
-    async fn floor_holds_dispatch(&mut self, entry: &JournalEntry) -> Result<bool> {
+    /// Whether the request `entry` pays is held from an automatic dispatch `kind`: its record
+    /// holds `manual_only`, the request is paid only by hand (Paykit wire 5.3, spec 8.3), or
+    /// the block floor, read now, holds it ([`Paykit::floor_holds_fresh`]). `false` for a
+    /// payment without a request.
+    ///
+    /// A first dispatch reads the record again, from the switch ([`Paykit::fresh_request`]):
+    /// a receive of this app or another own app can mark it `manual_only` from a live block
+    /// mark before any floor is raised, or while an attempt's commit awaits. A record that
+    /// isn't there, doesn't read as the request, or can't be read holds it: nothing shows
+    /// the request may be paid automatically. A repeat judges the copy, which its withheld
+    /// check has just read again ([`Paykit::repeat_withheld`]); a copy that doesn't read is
+    /// that check's.
+    async fn automatic_dispatch_held(
+        &mut self,
+        entry: &JournalEntry,
+        kind: Dispatch,
+    ) -> Result<bool> {
         if entry.request_hash()?.is_none() {
             return Ok(false);
         }
         let target = ActivityTarget::payer(entry.natural_key.clone());
-        let Some(record) = self.held_activity(&target).await? else {
-            return Ok(false);
+        let record = match kind {
+            Dispatch::First { .. } => match self.fresh_request(&target).await {
+                Ok(Fresh::Held(record)) => *record,
+                Ok(Fresh::Missing | Fresh::Unreadable) | Err(_) => return Ok(true),
+            },
+            Dispatch::Repeat { .. } => match self.held_activity(&target).await? {
+                Some(record) => record,
+                None => return Ok(false),
+            },
         };
+        if record.manual_only {
+            return Ok(true);
+        }
         let Some((stored, _)) = crate::requests::request_of(&record) else {
-            return Ok(false);
+            return Ok(matches!(kind, Dispatch::First { .. }));
         };
         let stored = stored.clone();
         self.floor_holds_fresh(&stored).await
@@ -3392,9 +3423,10 @@ impl Paykit {
     ///
     /// The kept stop and the restore hold aren't judged again: Paykit's own state, which
     /// only this app's own calls change (a receive, a placement, a confirmation), and none
-    /// can run while the payment holds the app. The block floor is the identity's, which
-    /// another payer app can raise during the commit: an automatic first dispatch reads it
-    /// again, from the switch, between the commit and this fence ([`Paykit::dispatch`]).
+    /// can run while the payment holds the app. The block floor and the request record are
+    /// the identity's, which another payer app can raise or mark `manual_only` during the
+    /// commit: an automatic first dispatch reads them again, from the switch, between the
+    /// commit and this fence ([`Paykit::dispatch`]).
     fn payment_fence(
         &mut self,
         entry: &JournalEntry,

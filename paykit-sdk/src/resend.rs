@@ -89,7 +89,9 @@ impl Paykit {
     /// can't read the block floor it must raise first (Paykit wire 5.6: when `counterparty`
     /// has a live block mark here, or the app owes a raise), with nothing queued;
     /// [`paykit_lib::Error::Validation`] for a selection that selects nothing; the client's
-    /// errors, a `409 conflict` on the block floor after it is read again. When the client
+    /// errors, a `409 conflict` on the block floor after it is read again, and the switch's
+    /// refusal of the raise that the same request won't change, such as `403
+    /// permission_missing`, as it is, with nothing queued. When the client
     /// kept the batch that raises the floor and queues the ask
     /// ([`crate::PaykitError::kept_batch`]), both go, the same bytes, at the app's next write
     /// or read: the call isn't made again.
@@ -170,8 +172,8 @@ impl Paykit {
             match asked {
                 Ok(_) => {}
                 // An ask that must raise the block floor stays while the floor can't be read
-                // (`crate::floor`).
-                Err(error) if crate::floor::is_unreadable_floor(&error) => continue,
+                // or the switch refuses the raise (`crate::floor`).
+                Err(error) if crate::floor::floor_write_waits(&error) => continue,
                 Err(error) => return Err(error),
             }
             self.local_delete(&format!("{}{rest}", key::ASKS)).await?;

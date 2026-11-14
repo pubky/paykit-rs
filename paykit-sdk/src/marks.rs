@@ -889,8 +889,9 @@ impl Paykit {
         });
         self.local_put(key, &held).await?;
         // With the raise of the block floor its mark needs, in one batch: a floor that can't
-        // be read, or a conflict, leaves the request kept as queued and not sent, so the next
-        // pass asks anew (`crate::floor`). A failure of the app itself is returned as it is.
+        // be read, the switch's refusal of the raise, or a conflict, leaves the request kept
+        // as queued and not sent, so the next pass asks anew (`crate::floor`). A failure of
+        // the app itself is returned as it is.
         match self.queue_resend_request(signed, &sender).await {
             Ok(_) => {}
             // The client kept the batch to send again: the raise and the request go together
@@ -907,7 +908,7 @@ impl Paykit {
                 return Ok(1);
             }
             Err(error)
-                if crate::floor::is_unreadable_floor(&error)
+                if crate::floor::floor_write_waits(&error)
                     || error.code() == Some(pubky_switch_core::http::ErrorCode::Conflict) =>
             {
                 return Ok(0)

@@ -4,7 +4,10 @@
 //!
 //! A notice is raised once per attempt and kind, or per message given up: raising it again,
 //! as a re-sent receipt or a
-//! later resume would, changes nothing, and an acknowledged one stays acknowledged.
+//! later resume would, changes nothing, and an acknowledged one stays acknowledged. A notice
+//! that messages a block dropped can no longer come back is kept per window: per
+//! counterparty and the window's earliest acceptance time, which its key names; it is
+//! deleted at its acknowledgement.
 
 use paykit_lib::AttemptId;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
@@ -117,8 +120,10 @@ pub struct Notice {
     pub lost_until_ms: Option<u64>,
 }
 
-/// A notice as kept (`p/nt/<attempt_id>/<kind>`, or `p/nt/<sender>/<msg_id>` for a message
-/// given up): what its key names repeats in it, so a restore binds the value to its key.
+/// A notice as kept (`p/nt/<attempt_id>/<kind>`, `p/nt/<sender>/<msg_id>` for a message
+/// given up, or `p/nt/<counterparty>/lost-<from_ms>` for a window of messages a block
+/// dropped that can no longer come back, `from_ms` its earliest acceptance time, zero-padded
+/// to 20 digits): what its key names repeats in it, so a restore binds the value to its key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct KeptNotice {
     pub(crate) kind: NoticeKind,

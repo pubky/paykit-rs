@@ -283,9 +283,10 @@ impl Paykit {
     /// # Errors
     ///
     /// [`Refusal::NotNow`] while a raise is needed and the floor can't be read, or the own
-    /// switch refuses its write other than by a conflict or doesn't answer it, or the client
-    /// refuses the batch for now, with nothing queued and the raise still owed; a `409 conflict` after the floor is read again; the
-    /// client's error, as it is, when the client kept the batch
+    /// switch refuses its write with an answer it may change or doesn't answer it, or the
+    /// client refuses the batch for now, with nothing queued and the raise still owed; a `409 conflict` after the floor is read again; the
+    /// switch's refusal, as it is, for an answer the same request won't change, with nothing
+    /// queued and the raise still owed; the client's error, as it is, when the client kept the batch
     /// ([`crate::PaykitError::kept_batch`]: the raise and the ask go together, the same bytes,
     /// at the app's next write or read, so the ask isn't made again), and for a failure of
     /// the app itself (its store, an alarm, an app stopped), which no later try gets past by
@@ -408,6 +409,10 @@ fn unreadable_floor() -> crate::error::PaykitError {
 ///   raise, and an ask queued with it, go at the app's next write or read, so something was
 ///   queued, and the caller must not take it for a floor that can't be read;
 /// - a `409 conflict`: as it is, the floor read again ([`Paykit::submit_floor`]);
+/// - an answer of the own switch that the same request won't change (the Retry column of
+///   Switch spec 6.4 saying "No", such as `403 permission_missing`), with nothing kept: as
+///   it is, so the caller sees the switch's refusal, never a floor to wait for. Nothing was
+///   queued and the raise stays owed;
 /// - any other answer of the own switch, or none, with nothing kept, and a batch the client
 ///   refuses for now and keeps nothing of (its `Refusal::NotNow`: one it may submit again
 ///   later): [`unreadable_floor`]. Nothing was queued, the ask waits and the raise stays
@@ -417,10 +422,16 @@ fn unreadable_floor() -> crate::error::PaykitError {
 ///   as a floor to wait for.
 fn floor_write_error(error: crate::error::PaykitError) -> crate::error::PaykitError {
     use pubky_switch_client::app::{AppError, Refusal as ClientRefusal};
+    use pubky_switch_core::http::Retry;
     if error.kept_batch().is_some() || error.code() == Some(ErrorCode::Conflict) {
         return error;
     }
     match &error {
+        crate::error::PaykitError::Client(AppError::Switch(answer))
+            if answer.retry() == Some(Retry::No) =>
+        {
+            error
+        }
         crate::error::PaykitError::Client(
             AppError::Switch(_)
             | AppError::Transport(_)
@@ -434,6 +445,21 @@ fn floor_write_error(error: crate::error::PaykitError) -> crate::error::PaykitEr
 /// Whether `error` is [`unreadable_floor`]'s: the ask that needs the raise waits.
 pub(crate) fn is_unreadable_floor(error: &crate::error::PaykitError) -> bool {
     matches!(error.refusal(), Some(Refusal::NotNow(why)) if why == UNREADABLE_FLOOR)
+}
+
+/// Whether `error`, of an ask queued with its raise ([`Paykit::queue_resend_request`]),
+/// leaves a pass's ask waiting with nothing queued: [`unreadable_floor`]'s, or the own
+/// switch's refusal that the same request won't change, which only the raise's write meets
+/// (queuing an ask alone doesn't reach the switch). The pass marks nothing done and doesn't
+/// fail its read; the raise stays owed, and a later pass writes it once the switch takes it.
+pub(crate) fn floor_write_waits(error: &crate::error::PaykitError) -> bool {
+    use pubky_switch_client::app::AppError;
+    is_unreadable_floor(error)
+        || matches!(
+            error,
+            crate::error::PaykitError::Client(AppError::Switch(answer))
+                if answer.retry() == Some(pubky_switch_core::http::Retry::No)
+        )
 }
 
 #[cfg(test)]
@@ -542,15 +568,33 @@ mod tests {
     }
 
     #[test]
-    fn test_floor_write_error_waits_for_a_switch_that_refuses_or_does_not_answer() {
-        // With nothing kept, the switch's refusal other than a conflict, no answer, or a
-        // batch the client refuses for now queues nothing: the ask waits as for a floor that
-        // can't be read.
+    fn test_floor_write_error_waits_for_a_switch_that_may_answer_otherwise_or_does_not_answer() {
+        // With nothing kept, an answer the switch may change, no answer, or a batch the
+        // client refuses for now queues nothing: the ask waits as for a floor that can't be
+        // read.
         let not_now = pubky_switch_client::app::AppError::Refused(
             pubky_switch_client::app::Refusal::NotNow("kept batches at their bound".into()),
         );
-        for error in [answered(ErrorCode::PermissionMissing), lost(), not_now] {
+        for error in [
+            answered(ErrorCode::Unavailable),
+            answered(ErrorCode::RateLimited),
+            lost(),
+            not_now,
+        ] {
             assert!(is_unreadable_floor(&floor_write_error(client(error))));
+        }
+    }
+
+    #[test]
+    fn test_floor_write_error_keeps_a_refusal_the_same_request_does_not_change() {
+        use pubky_switch_core::http::Retry;
+        // An answer the Retry column says "No" to is the switch's refusal, as it is: never a
+        // floor to wait for.
+        for code in [ErrorCode::PermissionMissing, ErrorCode::CertExpired] {
+            assert_eq!(code.retry(), Retry::No);
+            let error = floor_write_error(client(answered(code)));
+            assert!(!is_unreadable_floor(&error), "{error}");
+            assert_eq!(error.code(), Some(code));
         }
     }
 

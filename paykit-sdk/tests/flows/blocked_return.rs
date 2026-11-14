@@ -1537,9 +1537,20 @@ async fn wallet_about_to_raise_the_floor(w: &World, wallet: &mut Paykit, shop: &
 }
 
 /// The phone starts carol's payment automatically, a first dispatch, and `during` runs
-/// while its journal write of `Paying` commits. Returns the attempt, left open.
+/// while its journal write of `Paying` commits, the wallet about to raise the floor. Returns
+/// the attempt, left open.
 async fn automatic_first_dispatch(
     w: &Arc<World>,
+    during: impl FnOnce(&World, Paykit, Paykit) + Send + 'static,
+) -> (Paykit, paykit_lib::AttemptId) {
+    automatic_first_dispatch_with(w, true, during).await
+}
+
+/// [`automatic_first_dispatch`], the wallet about to raise the floor when `about_to_raise`;
+/// `during` also gets carol's request.
+async fn automatic_first_dispatch_with(
+    w: &Arc<World>,
+    about_to_raise: bool,
     during: impl FnOnce(&World, Paykit, Paykit) + Send + 'static,
 ) -> (Paykit, paykit_lib::AttemptId) {
     let phone_store = Arc::new(PayingStore::default());
@@ -1549,7 +1560,9 @@ async fn automatic_first_dispatch(
         Arc::clone(&phone_store) as Arc<dyn StateStore>,
     ))
     .await;
-    Box::pin(wallet_about_to_raise_the_floor(w, &mut wallet, &mut shop)).await;
+    if about_to_raise {
+        Box::pin(wallet_about_to_raise_the_floor(w, &mut wallet, &mut shop)).await;
+    }
     assert_eq!(shared_floor(&wallet).await, None);
     let world = Arc::clone(w);
     phone_store.on_paying(move || during(&world, wallet, shop));
@@ -1600,17 +1613,120 @@ async fn test_blocked_return_floor_read_that_fails_after_the_paying_commit_holds
     // it never counts as a floor that doesn't hold the request, so the method isn't called.
     let w = Arc::new(World::new());
     let (phone, attempt_id) = automatic_first_dispatch(&w, |w, _wallet, _shop| {
+        // The request record is read again first, then the floor, which fails.
         w.alice
             .switch()
             .fail_next(pubky_switch_client::testing::Fault::Unreachable {
                 path: "/records/".into(),
-                after: 0,
+                after: 1,
             });
     })
     .await;
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
     let payment = phone.payments().await.unwrap().remove(0);
     assert_eq!(payment.stage, paykit_sdk::Stage::Attempted);
+}
+
+#[tokio::test]
+async fn test_blocked_return_request_back_by_a_live_mark_not_paid_automatically() {
+    // Bob's request is dropped for the block and he is unblocked; whether he is flagged
+    // isn't known, so nothing asks him and no app raises the floor. He sends a request again
+    // on his own: the live block mark marks its record `manual_only`. An automatic first
+    // dispatch reads the record and holds: the method isn't called. The user pays it by
+    // hand.
+    let w = World::new();
+    let lists = Arc::new(ListsStore::default());
+    let mut wallet = contacts_wallet(&w, Arc::clone(&lists) as Arc<dyn StateStore>).await;
+    let mut shop = w.shop().await;
+    Box::pin(dropped_for_the_block(&w, &mut wallet, &mut shop)).await;
+    lists.flagged_unknown(true);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    let again = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    assert!(asked(&wallet, &w.bob_id()).await.is_empty());
+    assert_eq!(shared_floor(&wallet).await, None);
+    assert!(wallet.request(&again).await.unwrap().manual_only);
+    assert!(held_for_the_user(&wallet).await);
+    let outcome = wallet
+        .pay_request_automatically(&again, paykit_sdk::PayOptions::default())
+        .await
+        .unwrap();
+    let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(w.rail.pay_calls(&attempt_id), 0);
+    let payment = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Attempted);
+    // The resume ends the held attempt, known unsubmitted; by hand, the request is paid.
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt_id), 0);
+    let paid = wallet
+        .pay_request(&again, paykit_sdk::PayOptions::default())
+        .await
+        .unwrap();
+    assert!(
+        matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
+        "{paid:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_blocked_return_request_marked_manual_only_during_the_paying_commit_not_paid() {
+    // An automatic first dispatch reads carol's record, open and not `manual_only`, and
+    // journals `Paying`. While that write commits, another payer app marks the record
+    // `manual_only`, raising no floor. The record read again after the commit holds the
+    // payment: the method isn't called, and the attempt is known unsubmitted.
+    let w = Arc::new(World::new());
+    let (phone, attempt_id) = automatic_first_dispatch_with(&w, false, |w, mut wallet, _shop| {
+        let carol = w.carol_id();
+        // The wallet runs on its own thread while the phone's commit waits for it.
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    wallet.receive(None).await.unwrap();
+                    mark_manual_only(&mut wallet, &carol).await;
+                    assert_eq!(shared_floor(&wallet).await, None);
+                })
+        })
+        .join()
+        .unwrap();
+    })
+    .await;
+    assert_eq!(w.rail.pay_calls(&attempt_id), 0);
+    let payment = phone.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Attempted);
+}
+
+/// `app` writes the payer record of `payee`'s one request it holds with `manual_only`.
+async fn mark_manual_only(app: &mut Paykit, payee: &[u8; 32]) {
+    let request = app
+        .requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|view| view.request.payee == *payee)
+        .expect("the request")
+        .request;
+    let collection = paykit_lib::collections::Collection::PayerActivity;
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(collection.name(), collection.policy(None)),
+        &paykit_lib::derive::natural_key::request_record(payee, &request.request_hash),
+    );
+    let key = app.app().record_key(&target).unwrap();
+    let records = app.app().records_of(collection.name()).await.unwrap();
+    let held = records
+        .iter()
+        .find(|record| record.key == key)
+        .expect("the record");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(held.content.value().expect("a value")).unwrap();
+    value["manual_only"] = serde_json::Value::Bool(true);
+    app.app_mut()
+        .put_record(&target, &serde_json::to_vec(&value).unwrap(), Vec::new())
+        .await
+        .unwrap();
 }
 
 /// The wallet drops bob's request for the block and asks for it again, raising the floor
@@ -1779,6 +1895,43 @@ async fn test_blocked_return_floor_write_that_fails_keeps_the_ask_waiting() {
     assert_eq!(shared_floor(&wallet).await, None);
     assert_eq!(block_marks(&wallet).await, 1);
     wallet.receive(None).await.unwrap();
+    assert_eq!(asked(&wallet, &w.bob_id()).await.len(), 1);
+    assert!(shared_floor(&wallet).await.is_some());
+}
+
+#[tokio::test]
+async fn test_blocked_return_floor_write_refused_for_good_returns_the_refusal() {
+    // Bob is unblocked, and the host asks him for his messages again. The switch refuses the
+    // batch that raises the floor with an answer the same request won't change: the call
+    // returns the switch's refusal, never a floor to wait for. Nothing is queued and the
+    // raise stays owed: a later call raises the floor and asks.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    dropped_for_the_block(&w, &mut wallet, &mut shop).await;
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    let selection = || paykit_sdk::ResendSelection::default().with_accepted_from_ms(0);
+    let code = pubky_switch_core::http::ErrorCode::PermissionMissing;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code,
+            current: serde_json::Value::Null,
+        });
+    let error = wallet
+        .request_resend(w.bob_id(), selection())
+        .await
+        .unwrap_err();
+    assert!(error.refusal().is_none(), "{error}");
+    assert!(error.kept_batch().is_none(), "{error}");
+    assert_eq!(error.code(), Some(code), "{error}");
+    assert!(asked(&wallet, &w.bob_id()).await.is_empty());
+    assert_eq!(shared_floor(&wallet).await, None);
+    wallet
+        .request_resend(w.bob_id(), selection())
+        .await
+        .unwrap();
     assert_eq!(asked(&wallet, &w.bob_id()).await.len(), 1);
     assert!(shared_floor(&wallet).await.is_some());
 }
