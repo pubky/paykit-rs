@@ -639,7 +639,22 @@ fn place(
     }
     let reads = read.is_some();
     let mut record = read.unwrap_or_else(|| activity::empty(side, counterparty));
-    if !activity::place(&mut record, role, stored.clone()) {
+    // A payer's reply never takes the response while a different one its inbox accepted
+    // earlier is still kept to write, before the record, stored, or over it while its view
+    // is divergent: it is only reflected, and the earlier one is the response once written.
+    let placed = if role == Role::Response
+        && record.response.is_none()
+        && activity::replied_before(
+            &record,
+            stored,
+            (stored.accepted_at().ok_or_else(Fail::corrupt)?, seq),
+            &step_replies_kept(cx, &cx.record_key(&record_target)?, stored)?,
+        ) {
+        activity::reflect(&mut record, stored)
+    } else {
+        activity::place(&mut record, role, stored.clone())
+    };
+    if !placed {
         return Ok(());
     }
     // Over a divergent record its user hasn't confirmed, only a stop is written; any other
@@ -653,6 +668,35 @@ fn place(
     }
     cx.put_record(&target.record_target(), &record.to_json()?, Vec::new())?;
     Ok(())
+}
+
+/// The payer's replies from the sender of `stored` the app keeps to write into the request
+/// record at `record`, in the receive step, each read bound to its key, with its order: those
+/// kept before the record (`pr/`), the stored entries' not yet placed (`se/`), and those
+/// kept over the record while its view is divergent (`dw/`). Only a reply of the response
+/// role to the request `stored` names counts ([`activity::replied_before`]).
+fn step_replies_kept(
+    cx: &ReceiveContext<'_>,
+    record: &[u8; 32],
+    stored: &StoredMessage,
+) -> Result<Vec<(StoredMessage, crate::records::KeptOrder)>, Fail> {
+    let own = cx.identity();
+    let sender = stored.sender();
+    let mut kept = Vec::new();
+    for (_, message) in state::cx_scan::<KeptMessage>(cx, &key::kept_reply(&sender, record, ""))? {
+        let reply = message.stored(&own).map_err(|_| Fail::corrupt())?;
+        kept.push((reply, ordered(&message)?));
+    }
+    for (name, note) in
+        state::cx_scan::<crate::stored::StoredNote>(cx, &key::stored_notes_of(&sender))?
+    {
+        if !note.placed {
+            let reply = note.bound(&name, &own).map_err(|_| Fail::corrupt())?;
+            kept.push((reply, ordered(&note.message)?));
+        }
+    }
+    kept.extend(crate::divergent::step_responses_kept(cx, record)?);
+    Ok(kept)
 }
 
 /// A payee's cancellation of a one-time request, kept with the cursor move (Paykit spec
@@ -689,7 +733,8 @@ fn keep_cancellation(
         return Ok(());
     }
     if !held {
-        make_room_for_stop(cx, &stored.sender())?;
+        let order = (stored.accepted_at().ok_or_else(Fail::corrupt)?, seq);
+        make_room_for_stop(cx, &stored.sender(), order)?;
     }
     keep_local(cx, local(&kept, &KeptMessage::taken(stored, seq))?);
     Ok(())
@@ -769,7 +814,10 @@ fn ordered(kept: &KeptMessage) -> Result<crate::records::KeptOrder, Fail> {
 /// stops could be paid once it came. The stop counts in its sender's mark of dropped replies,
 /// due at once ([`mark_dropped`]), so the sender is asked to send it again, at most once a day
 /// and not while sends to it are held (`marks.rs`). When the client won't forget the pair
-/// now, the stop stays kept and the bounds are over by one for this step.
+/// now, the stop stays kept and the bounds are over by one for this step. The new stop,
+/// accepted at `new`, counts among its sender's: when it is the one the bounds would drop,
+/// a stored entry tried again after later ones were kept, it is kept one over the bound and
+/// nothing goes.
 ///
 /// One that is left out no longer counts again from then on, which can put its sender past
 /// the bound: the loop drops back to it. A new stop is reached here only once its own side's
@@ -780,6 +828,7 @@ fn ordered(kept: &KeptMessage) -> Result<crate::records::KeptOrder, Fail> {
 pub(crate) fn make_room_for_stop(
     cx: &mut ReceiveContext<'_>,
     sender: &[u8; 32],
+    new: crate::records::KeptOrder,
 ) -> Result<(), Fail> {
     // Each stop counted, with the order its inbox accepted it in (`records::KeptOrder`).
     let mut counted = Vec::new();
@@ -851,15 +900,15 @@ pub(crate) fn make_room_for_stop(
     let mut kept = Vec::new();
     let mut names = Vec::new();
     let mut msg_ids = Vec::new();
-    for ((at, _), from, name, msg_id) in counted {
-        kept.push((from, at));
+    for (order, from, name, msg_id) in counted {
+        kept.push((from, order));
         names.push(name);
         msg_ids.push(msg_id);
     }
     let mut dropped: std::collections::BTreeMap<[u8; 32], (u64, u64)> =
         std::collections::BTreeMap::new();
-    while let Some(index) = kept_reply_evicted(&kept, sender) {
-        let (from, at) = kept[index];
+    while let Some(index) = kept_reply_evicted(&kept, sender, new) {
+        let (from, (at, _)) = kept[index];
         match cx.forget_processed(from, &msg_ids[index]) {
             Ok(_) => {}
             // The client won't forget the pair now: dropped without forgetting it, the stop
@@ -1173,7 +1222,8 @@ fn keep_reply(
     let kept = key::kept_reply(&sender, &record, &stored.message().msg_id);
     // One kept already is read bound to its key, and stays as it is.
     if state::cx_get::<KeptMessage>(cx, &kept)?.is_none() {
-        make_room_for_reply(cx, &sender)?;
+        let order = (stored.accepted_at().ok_or_else(Fail::corrupt)?, seq);
+        make_room_for_reply(cx, &sender, order)?;
         keep_local(cx, local(&kept, &KeptMessage::taken(stored, seq))?);
     }
     Ok(())
@@ -1734,14 +1784,23 @@ pub const MAX_KEPT_REPLIES_PER_SENDER: usize = 64;
 /// the most is dropped.
 pub const MAX_KEPT_REPLIES: usize = 128;
 
-/// A kept reply, as the bounds count it: its sender and its acceptance time.
-pub(crate) type CountedReply = ([u8; 32], u64);
+/// A kept reply, as the bounds count it: its sender and the order its inbox accepted it in
+/// ([`crate::records::KeptOrder`]).
+pub(crate) type CountedReply = ([u8; 32], crate::records::KeptOrder);
 
-/// Which of `kept` goes for a new reply from `sender` to be kept (Switch spec 8.2's rule):
-/// past the sender's [`MAX_KEPT_REPLIES_PER_SENDER`], its reply accepted earliest; past
-/// [`MAX_KEPT_REPLIES`] in all, the one accepted earliest of the sender holding the most, a
-/// tie going against the lower sender identity. `None` while there is room.
-pub(crate) fn kept_reply_evicted(kept: &[CountedReply], sender: &[u8; 32]) -> Option<usize> {
+/// Which of `kept` goes for a new reply from `sender`, accepted at `new`, to be kept (Switch
+/// spec 8.2's rule): past the sender's [`MAX_KEPT_REPLIES_PER_SENDER`], its reply accepted
+/// earliest; past [`MAX_KEPT_REPLIES`] in all, the one accepted earliest of the sender
+/// holding the most, a tie going against the lower sender identity. The new reply counts
+/// among its sender's: when it was accepted before the one so picked, it is that sender's
+/// earliest, and it can't be dropped as one never processed, since the step's outcome
+/// writes its pair, so it is kept, one over the bound, and nothing goes. `None` while there
+/// is room, and then.
+pub(crate) fn kept_reply_evicted(
+    kept: &[CountedReply],
+    sender: &[u8; 32],
+    new: crate::records::KeptOrder,
+) -> Option<usize> {
     let earliest_of = |who: &[u8; 32]| {
         kept.iter()
             .enumerate()
@@ -1750,21 +1809,23 @@ pub(crate) fn kept_reply_evicted(kept: &[CountedReply], sender: &[u8; 32]) -> Op
             .map(|(index, _)| index)
     };
     let held = |who: &[u8; 32]| kept.iter().filter(|(from, _)| from == who).count();
-    if held(sender) >= MAX_KEPT_REPLIES_PER_SENDER {
-        return earliest_of(sender);
-    }
-    if kept.len() < MAX_KEPT_REPLIES {
+    let index = if held(sender) >= MAX_KEPT_REPLIES_PER_SENDER {
+        earliest_of(sender)?
+    } else if kept.len() < MAX_KEPT_REPLIES {
         return None;
-    }
-    let most = kept
-        .iter()
-        .map(|(from, _)| *from)
-        .max_by_key(|from| (held(from), std::cmp::Reverse(*from)))?;
-    earliest_of(&most)
+    } else {
+        let most = kept
+            .iter()
+            .map(|(from, _)| *from)
+            .max_by_key(|from| (held(from), std::cmp::Reverse(*from)))?;
+        earliest_of(&most)?
+    };
+    let (from, at) = kept[index];
+    (from != *sender || at < new).then_some(index)
 }
 
-/// Make room for a new reply from `sender` among the kept replies, in the step: the one the
-/// bounds drop ([`kept_reply_evicted`]) goes, and counts in its sender's mark
+/// Make room for a new reply from `sender`, accepted at `new`, among the kept replies, in
+/// the step: the one the bounds drop ([`kept_reply_evicted`]) goes, and counts in its sender's mark
 /// (`pd/<sender>`, `marks.rs`) with its acceptance time, so the sender is asked to send it
 /// again once the record of a request, of either side, naming it as counterparty reads. It
 /// is dropped as one never processed (Paykit spec 8.1, "Replies before their record"): the
@@ -1776,6 +1837,7 @@ pub(crate) fn kept_reply_evicted(kept: &[CountedReply], sender: &[u8; 32]) -> Op
 pub(crate) fn make_room_for_reply(
     cx: &mut ReceiveContext<'_>,
     sender: &[u8; 32],
+    new: crate::records::KeptOrder,
 ) -> Result<(), Fail> {
     // Earliest accepted first (`records::KeptOrder`), so a sender's earliest goes first:
     // within one millisecond the one its inbox took first, never by `msg_id`.
@@ -1788,15 +1850,15 @@ pub(crate) fn make_room_for_reply(
     let mut kept = Vec::new();
     let mut names = Vec::new();
     let mut msg_ids = Vec::new();
-    for ((at, _), reply, name) in counted {
-        kept.push((reply.sender(), at));
+    for (order, reply, name) in counted {
+        kept.push((reply.sender(), order));
         names.push(name.into_bytes());
         msg_ids.push(reply.message().msg_id.clone());
     }
-    let Some(index) = kept_reply_evicted(&kept, sender) else {
+    let Some(index) = kept_reply_evicted(&kept, sender, new) else {
         return Ok(());
     };
-    let (from, at) = kept[index];
+    let (from, (at, _)) = kept[index];
     match cx.forget_processed(from, &msg_ids[index]) {
         Ok(_) => {}
         // The client won't forget the pair now: an entry it stores locally, or an effect it
@@ -2042,8 +2104,8 @@ impl Paykit {
     /// error, returned, and the message stays kept. Every kept message is read with a
     /// restore's check, and one that fails it fails the call as a corrupt store.
     ///
-    /// The Allowance answers kept before their record, or waiting over it, go too
-    /// ([`Paykit::place_kept_allowance_response`]), each once the Allowances side is listed.
+    /// The Allowance answers kept go by their own placement
+    /// ([`Paykit::place_kept_allowance_responses`]), which no payer's wait holds.
     ///
     /// Every kept reply is taken in the order its inbox accepted it
     /// ([`crate::records::KeptOrder`]), so the replies of one record are placed in that
@@ -2065,10 +2127,9 @@ impl Paykit {
             // corrupt store, so the receive fails rather than drop, give up or place it.
             let reply = kept.stored(&own)?;
             let kept_key = format!("{}{rest}", key::KEPT_REPLIES);
-            // An Allowance's answer kept before its record (`allowances.rs`): the first
-            // placed is the record's response, and a different later one conflicts with it.
+            // An Allowance's answer goes by its own placement
+            // (`Paykit::place_kept_allowance_responses`).
             if crate::allowances::is_allowance_response(reply.body()) {
-                Box::pin(self.place_kept_allowance_response(&kept_key, reply, order)).await?;
                 continue;
             }
             let (Some(role), Some(accepted_at)) =
@@ -2850,28 +2911,31 @@ mod tests {
     /// `n` replies from `sender`, accepted from `from` on.
     fn replies(sender: u8, n: usize, from: u64) -> Vec<CountedReply> {
         (0..n)
-            .map(|i| ([sender; 32], from + u64::try_from(i).unwrap()))
+            .map(|i| ([sender; 32], (from + u64::try_from(i).unwrap(), 0)))
             .collect()
     }
+
+    /// The order of a new reply accepted after every one kept.
+    const LATEST: crate::records::KeptOrder = (u64::MAX, 0);
 
     #[test]
     fn test_kept_reply_evicted_none_within_both_bounds() {
         let kept = replies(1, MAX_KEPT_REPLIES_PER_SENDER - 1, 10);
-        assert_eq!(kept_reply_evicted(&kept, &[1; 32]), None);
+        assert_eq!(kept_reply_evicted(&kept, &[1; 32], LATEST), None);
         let mut kept = replies(1, MAX_KEPT_REPLIES_PER_SENDER, 10);
         kept.extend(replies(
             2,
             MAX_KEPT_REPLIES - MAX_KEPT_REPLIES_PER_SENDER - 1,
             5,
         ));
-        assert_eq!(kept_reply_evicted(&kept, &[3; 32]), None);
+        assert_eq!(kept_reply_evicted(&kept, &[3; 32], LATEST), None);
     }
 
     #[test]
     fn test_kept_reply_evicted_past_a_senders_bound_its_earliest() {
         let mut kept = replies(2, 3, 1);
         kept.extend(replies(1, MAX_KEPT_REPLIES_PER_SENDER, 10));
-        assert_eq!(kept_reply_evicted(&kept, &[1; 32]), Some(3));
+        assert_eq!(kept_reply_evicted(&kept, &[1; 32], LATEST), Some(3));
     }
 
     #[test]
@@ -2879,20 +2943,43 @@ mod tests {
         // Bob holds 64, alice 63 and carol 1: a reply from carol drops bob's earliest.
         let mut kept = replies(1, MAX_KEPT_REPLIES_PER_SENDER - 1, 100);
         kept.extend(replies(2, MAX_KEPT_REPLIES_PER_SENDER, 500));
-        kept.push(([3; 32], 7));
+        kept.push(([3; 32], (7, 0)));
         assert_eq!(
-            kept_reply_evicted(&kept, &[3; 32]),
+            kept_reply_evicted(&kept, &[3; 32], LATEST),
             Some(MAX_KEPT_REPLIES_PER_SENDER - 1)
         );
         // Tied, the lower sender identity gives, wherever its replies come.
         let mut tied = replies(2, MAX_KEPT_REPLIES_PER_SENDER, 100);
         tied.extend(replies(1, MAX_KEPT_REPLIES_PER_SENDER, 500));
         assert_eq!(
-            kept_reply_evicted(&tied, &[3; 32]),
+            kept_reply_evicted(&tied, &[3; 32], LATEST),
             Some(MAX_KEPT_REPLIES_PER_SENDER)
         );
         let mut tied = replies(1, MAX_KEPT_REPLIES_PER_SENDER, 500);
         tied.extend(replies(2, MAX_KEPT_REPLIES_PER_SENDER, 100));
-        assert_eq!(kept_reply_evicted(&tied, &[3; 32]), Some(0));
+        assert_eq!(kept_reply_evicted(&tied, &[3; 32], LATEST), Some(0));
+    }
+
+    #[test]
+    fn test_kept_reply_evicted_none_for_a_new_reply_earliest_of_its_sender() {
+        // A stored entry tried again, read at an earlier `seq` of the millisecond of the
+        // sender's earliest kept reply: it is that sender's earliest, kept one over the
+        // bound, and none of the later ones goes.
+        let kept = replies(1, MAX_KEPT_REPLIES_PER_SENDER, 10);
+        assert_eq!(kept_reply_evicted(&kept, &[1; 32], (10, 1)), Some(0));
+        let kept: Vec<CountedReply> = kept.into_iter().map(|(s, (at, _))| (s, (at, 5))).collect();
+        assert_eq!(kept_reply_evicted(&kept, &[1; 32], (10, 4)), None);
+        assert_eq!(kept_reply_evicted(&kept, &[1; 32], (9, 9)), None);
+        assert_eq!(kept_reply_evicted(&kept, &[1; 32], (10, 6)), Some(0));
+        // Past the total, as the earliest of the sender holding the most.
+        let mut kept = replies(1, MAX_KEPT_REPLIES_PER_SENDER - 1, 100);
+        kept.extend(replies(2, MAX_KEPT_REPLIES_PER_SENDER, 500));
+        kept.push(([3; 32], (7, 0)));
+        assert_eq!(kept_reply_evicted(&kept, &[2; 32], (400, 0)), None);
+        // Another sender's new reply drops the earliest of the largest, however early it is.
+        assert_eq!(
+            kept_reply_evicted(&kept, &[3; 32], (1, 0)),
+            Some(MAX_KEPT_REPLIES_PER_SENDER - 1)
+        );
     }
 }

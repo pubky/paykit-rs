@@ -992,9 +992,54 @@ impl Paykit {
                 if role == Role::Receipt {
                     return self.place_receipt(target, &record, stored, locals).await;
                 }
+                // A payer's reply never takes the response while a different one its inbox
+                // accepted earlier is still kept to write, as at receive: it is only
+                // reflected, and the earlier one is the response once written.
+                if role == Role::Response
+                    && record.response.is_none()
+                    && crate::activity::replied_before(
+                        &record,
+                        &stored,
+                        order,
+                        &Box::pin(self.replies_kept(&key, &stored)).await?,
+                    )
+                {
+                    return self.write_placed(target, stored, locals, true).await;
+                }
             }
         }
-        self.write_placed(target, stored, locals).await
+        self.write_placed(target, stored, locals, false).await
+    }
+
+    /// The payer's replies from the sender of `stored` the app keeps to write into the
+    /// request record at `record`, outside the receive step, as the step reads them
+    /// (`receive::step_replies_kept`): kept before the record (`pr/`), stored and not yet
+    /// placed (`se/`), and kept over it while its view is divergent (`dw/`).
+    async fn replies_kept(
+        &self,
+        record: &[u8; 32],
+        stored: &StoredMessage,
+    ) -> Result<Vec<(StoredMessage, crate::records::KeptOrder)>> {
+        let own = self.identity();
+        let sender = stored.sender();
+        let mut kept = Vec::new();
+        for (_, message) in self
+            .local_scan::<KeptMessage>(&key::kept_reply(&sender, record, ""))
+            .await?
+        {
+            kept.push((message.stored(&own)?, message.order()?));
+        }
+        let prefix = key::stored_notes_of(&sender);
+        for (rest, note) in self.local_scan::<StoredNote>(&prefix).await? {
+            if !note.placed {
+                kept.push((
+                    note.bound(&format!("{prefix}{rest}"), &own)?,
+                    note.message.order()?,
+                ));
+            }
+        }
+        kept.extend(Box::pin(self.responses_kept_over(record)).await?);
+        Ok(kept)
     }
 
     /// A stored receipt's later write, into `record`, the payer's record at `target` it
@@ -1092,13 +1137,15 @@ impl Paykit {
         submitted(self.app.submit_batch(batch.locals(tx.into_writes())).await)
     }
 
-    /// Write `stored` into its record at `target`, with `locals` in the same batch, or
-    /// committed alone when the record reflects it already.
+    /// Write `stored` into its record at `target`, in its role or, when `reflect_only`, by
+    /// its `msg_id` alone, with `locals` in the same batch, or committed alone when the
+    /// record reflects it already.
     async fn write_placed(
         &mut self,
         target: &ActivityTarget,
         stored: StoredMessage,
         locals: Tx,
+        reflect_only: bool,
     ) -> Result<Placed> {
         let role = Role::of(stored.body()).unwrap_or(Role::Response);
         let sender = stored.sender();
@@ -1109,7 +1156,7 @@ impl Paykit {
             tx.put(&peer, &at)?;
         }
         let Some(entry) = self
-            .placed_write(target, sender, role, stored, Vec::new())
+            .placed_write_as(target, sender, role, stored, Vec::new(), reflect_only)
             .await?
         else {
             self.local_commit(tx).await?;

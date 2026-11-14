@@ -202,6 +202,21 @@ impl Paykit {
         stored: StoredMessage,
         conditions: Vec<Condition>,
     ) -> Result<Option<(Vec<Condition>, OpKind)>> {
+        self.placed_write_as(target, counterparty, role, stored, conditions, false)
+            .await
+    }
+
+    /// [`Paykit::placed_write`], or, when `reflect_only`, the write that reflects `stored`
+    /// by its `msg_id` alone, leaving every role as it is ([`activity::reflect`]).
+    pub(crate) async fn placed_write_as(
+        &mut self,
+        target: &ActivityTarget,
+        counterparty: [u8; 32],
+        role: Role,
+        stored: StoredMessage,
+        conditions: Vec<Condition>,
+        reflect_only: bool,
+    ) -> Result<Option<(Vec<Condition>, OpKind)>> {
         let own = self.identity();
         let side = target.side.side();
         let key = self.activity_key(target)?;
@@ -214,7 +229,12 @@ impl Paykit {
         let current = held.as_ref().and_then(|r| r.content.value());
         let mut record = activity::read(current, &own, side)
             .unwrap_or_else(|| activity::empty(side, counterparty));
-        if !activity::place(&mut record, role, stored) {
+        let placed = if reflect_only {
+            activity::reflect(&mut record, &stored)
+        } else {
+            activity::place(&mut record, role, stored)
+        };
+        if !placed {
             return Ok(None);
         }
         let value = record.to_json()?;

@@ -13,9 +13,11 @@
 //!   Allowance record is one to be sent; the re-send after a restore builds on that
 //!   (`stores_unqueued`).
 //! - **Receiving:** a proposal opens the record, gated by the spam rule; an acceptance or a
-//!   rejection goes into the proposer's record, or is kept until the app holds it (Paykit
-//!   spec 8.1, "Replies before their record"). Every branch holds its entry while the app's
-//!   copy of `allowances` isn't listed yet, never deciding from a record's absence (Paykit
+//!   rejection that would take the record's response is kept by the receive step (`pr/`)
+//!   and goes into the proposer's record after the read, once the read's stored entries
+//!   are noted, or once the app holds the record (Paykit spec 8.1, "Replies before their
+//!   record"); a rejection's stop acts from when it is kept. Every branch holds its entry
+//!   while the app's copy of `allowances` isn't listed yet, never deciding from a record's absence (Paykit
 //!   spec 8.1, "Records not listed yet"). One whose record the app holds as a value it
 //!   can't read is never written over that record, nor dropped at once: it waits
 //!   unprocessed while the value waits for its scope key, and is otherwise kept as a stored
@@ -609,8 +611,9 @@ pub(crate) fn receive_effect(
     }
 }
 
-/// Keep `stored`, an answer the app can't place in the Allowance record at `target` yet,
-/// with the replies kept to place (`pr/<sender>/<record key>/<msg_id>`), within their bounds
+/// Keep `stored`, an answer the receive step doesn't place in the Allowance record at
+/// `target`, held or not yet, with the replies kept to place
+/// (`pr/<sender>/<record key>/<msg_id>`), within their bounds
 /// ([`receive::make_room_for_reply`]) and with the feed `seq` it was read at, which orders it
 /// among them and among the stored entries ([`crate::records::KeptOrder`]). One kept already
 /// is read bound to its key and stays as it is. Admission is the caller's.
@@ -624,7 +627,8 @@ fn keep_answer(
     let record = cx.record_key(target)?;
     let kept = key::kept_reply(&sender, &record, &stored.message().msg_id);
     if state::cx_get::<KeptMessage>(cx, &kept)?.is_none() {
-        receive::make_room_for_reply(cx, &sender)?;
+        let order = (stored.accepted_at().ok_or_else(Fail::corrupt)?, seq);
+        receive::make_room_for_reply(cx, &sender, order)?;
         receive::keep_local(cx, receive::local(&kept, &KeptMessage::taken(stored, seq))?);
     }
     Ok(())
@@ -674,7 +678,8 @@ fn stored_entry(
 
 /// Write `record` with `stored` placed, in the step, unless it reflects it already. A
 /// message that makes the Allowance conflicted ([`conflicts`]) is kept as the stop instead
-/// ([`keep_conflict`]).
+/// ([`keep_conflict`]), and an answer that would take the empty response is kept to write
+/// after the read ([`keep_answer`]).
 fn put_placed(
     cx: &mut ReceiveContext<'_>,
     target: &RecordTarget,
@@ -708,13 +713,38 @@ fn put_placed(
     {
         return keep_conflict(cx, target, stored, scopes);
     }
+    // The step never writes an answer into the record's empty response. The answer is kept
+    // with the replies kept to place (`pr/`), with its place in the inbox's order, and
+    // written by the placement after the read, once that read's stored entries are noted
+    // (`se/`), in that order ([`Paykit::place_kept_allowance_responses`]): an earlier answer
+    // kept or stored, one of the same read whose entry the client stored included, takes the
+    // response first, and a later one conflicts with it ([`answered_before`]). A rejection's stop acts at once: an
+    // app holding `allowance_execute` removes the Allowance from its consent list for good
+    // in this commit, and [`Paykit::consents`] refuses payment while the rejection is kept.
+    if is_allowance_response(stored.body())
+        && record.response.is_none()
+        && !reflects(&record, &stored.message().msg_id)
+    {
+        keep_answer(cx, target, stored, seq)?;
+        if matches!(stored.body(), Body::AllowanceRejection(_))
+            && scopes.iter().any(|s| s == "allowance_execute")
+        {
+            let allowance_id = named_allowance(stored.body()).ok_or_else(Fail::corrupt)?;
+            let record_key = cx.record_key(target)?;
+            drop_consent(
+                cx,
+                &record_key,
+                (stored.sender(), allowance_id),
+                ConsentEnd::Rejected,
+            )?;
+        }
+        return Ok(());
+    }
     // Over a record whose view is divergent and unconfirmed, a write that adds no stop, a
-    // proposal or an acceptance, waits, and is written once the user confirms the record
-    // (Paykit spec 6, 8.1 "Stored entries"); a rejection goes over it
-    // (`divergent::adds_stop`). A proposal is stored, its entry tried again at each read. An
-    // acceptance is kept with the replies kept to place (`pr/`), with its place in the
-    // inbox's order, where this step finds it when a later answer comes, and is written by
-    // a later write of the app's own ([`Paykit::place_kept_allowance_response`]).
+    // proposal or a second acceptance the record only reflects, waits, and is written once
+    // the user confirms the record (Paykit spec 6, 8.1 "Stored entries"). A proposal is
+    // stored, its entry tried again at each read; an acceptance is kept with the replies
+    // kept to place (`pr/`).
     if !reflects(&record, &stored.message().msg_id) {
         if let Some(held) = cx.record(target)? {
             if crate::divergent::step_write_waits(cx, &held, stored, seq, &|_| None)? {
@@ -934,7 +964,8 @@ fn keep_end(
             || (end_bounded(cx, content.as_ref(), stored)?
                 && !keeps_stored_message(cx, &record_key)?)
         {
-            receive::make_room_for_stop(cx, &sender)?;
+            let order = (stored.accepted_at().ok_or_else(Fail::corrupt)?, seq);
+            receive::make_room_for_stop(cx, &sender, order)?;
         }
         receive::keep_local(cx, receive::local(&stop, &KeptMessage::taken(stored, seq))?);
     }
@@ -1773,8 +1804,8 @@ impl Paykit {
     /// Whether this app's consent list holds the Allowance at `record`, confirmed since any
     /// restore or `missed` item (Paykit spec 8.3, "Executor"). None is confirmed while a
     /// `missed` item's mark (`mc`) waits for [`Paykit::confirm_consents_again`], nor while
-    /// this app keeps a counterparty's end or a conflicting message of the Allowance as a
-    /// stop, whatever the entry says: a stop the receive step kept, or one a stored entry
+    /// this app keeps a counterparty's end, rejection or conflicting message of the Allowance
+    /// as a stop, whatever the entry says: a stop the receive step kept, or one a stored entry
     /// kept, stops payment before the record shows it. Nor is one whose record isn't held
     /// now as a value that reads and binds and shows no end, rejection or conflict, read
     /// here, so a record that changed outside a receive counts at once: one held as deleted
@@ -1798,13 +1829,35 @@ impl Paykit {
             Some(held) if held.end.is_none() && !rejected(&held) && held.conflicted.is_none() => {}
             _ => return Ok(false),
         }
-        let held = self
+        let Some(held) = self
             .local_get::<ConsentEntry>(&key::consent(record))
-            .await?;
-        Ok(held.map(|entry| entry.consent)
-            == Some(Consent::Held {
+            .await?
+        else {
+            return Ok(false);
+        };
+        if Box::pin(self.rejection_kept(record, &held.counterparty)).await? {
+            return Ok(false);
+        }
+        Ok(held.consent
+            == Consent::Held {
                 confirm_again: false,
-            }))
+            })
+    }
+
+    /// Whether this app keeps a rejection from `counterparty` of the Allowance at `record`
+    /// to write (`pr/`), not yet in the record: the receive step keeps every answer it takes
+    /// for the placement after the read, and a rejection is a stop from when it is kept.
+    async fn rejection_kept(&self, record: &[u8; 32], counterparty: &[u8; 32]) -> Result<bool> {
+        let own = self.identity();
+        for (_, kept) in
+            Box::pin(self.local_scan::<KeptMessage>(&key::kept_reply(counterparty, record, "")))
+                .await?
+        {
+            if matches!(kept.stored(&own)?.body(), Body::AllowanceRejection(_)) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// After a `missed` item, which sets `mc` in the commit that passes it: mark every
@@ -2106,14 +2159,40 @@ impl Paykit {
         Ok(())
     }
 
+    /// Place every Allowance answer kept (`pr/`) in the order its inbox accepted it
+    /// ([`AnswerOrder`]), then its key, each by [`Paykit::place_kept_allowance_response`]:
+    /// the answers the receive step kept for a record it holds, which it never writes into
+    /// the record's response itself, those kept before their record, and those waiting over
+    /// a divergent one. Run after each receive, after the read's stored entries are noted,
+    /// so an earlier answer stored (`se/`) is seen ([`answered_before`]) whatever keeps it
+    /// from its record.
+    pub(crate) async fn place_kept_allowance_responses(&mut self) -> Result<()> {
+        let own = self.identity();
+        let mut kept = Vec::new();
+        for (rest, message) in Box::pin(self.local_scan::<KeptMessage>(key::KEPT_REPLIES)).await? {
+            // Read bound to its key, as a restore reads it: a message that fails it is a
+            // corrupt store, so the receive fails rather than drop, give up or place it.
+            let answer = message.stored(&own)?;
+            if is_allowance_response(answer.body()) {
+                kept.push((message.order()?, rest, answer));
+            }
+        }
+        kept.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        for (order, rest, answer) in kept {
+            let kept_key = format!("{}{rest}", key::KEPT_REPLIES);
+            Box::pin(self.place_kept_allowance_response(&kept_key, answer, order)).await?;
+        }
+        Ok(())
+    }
+
     /// Place the kept acceptance or rejection `reply`, kept at `kept_key` at its order `order`
-    /// before its Allowance record was held, or while it waited over it for the user's
-    /// confirmation, once the app holds that record, as a later write of its own with the
-    /// kept copy dropped (Paykit spec 8.1). Nothing runs while the copy of
-    /// `allowances` may lack records. One whose record isn't held, or is held deleted, goes
-    /// 30 days from its acceptance with no notice: its sender keeps it no longer either. One
-    /// over a held record goes through the stored entries' later write of an Allowance
-    /// message ([`Paykit::place_allowance_later`]) and its one rule
+    /// by the receive step, over its Allowance record or before it was held, or while it
+    /// waited over it for the user's confirmation, once the app holds that record, as a
+    /// later write of its own with the kept copy dropped (Paykit spec 8.1). Nothing runs
+    /// while the copy of `allowances` may lack records. One whose record isn't held, or is
+    /// held deleted, goes 30 days from its acceptance with no notice: its sender keeps it no
+    /// longer either. One over a held record goes through the stored entries' later write
+    /// of an Allowance message ([`Paykit::place_allowance_later`]) and its one rule
     /// ([`crate::stored::later_write`]), as a payer's kept reply does: one not written now,
     /// its record sealed under a scope key not held yet, a value that doesn't read or bind,
     /// or a write the switch refuses, is kept, and given up past its window with the host's

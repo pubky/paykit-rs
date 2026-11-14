@@ -1037,6 +1037,30 @@ fn step_pause(
     Ok(marked.pause(Some(&view)))
 }
 
+/// The payer's replies to requests kept over the record `record` (`dw/`, the response
+/// role), each read bound, with its order ([`Order`]): what [`crate::activity::replied_before`]
+/// looks among, in the receive step.
+pub(crate) fn step_responses_kept(
+    cx: &ReceiveContext<'_>,
+    record: &[u8; 32],
+) -> std::result::Result<Vec<(StoredMessage, Order)>, Fail> {
+    let values = state::cx_scan::<DivergentWrite>(cx, &key::divergent_writes_at(record))?;
+    responses_of(&cx.identity(), values.into_iter().map(|(_, value)| value))
+        .map_err(|_| Fail::corrupt())
+}
+
+/// The messages of the response role among `values`, each read bound, with its order.
+fn responses_of(
+    own: &[u8; 32],
+    values: impl Iterator<Item = DivergentWrite>,
+) -> Result<Vec<(StoredMessage, Order)>> {
+    let mut out = Vec::new();
+    for value in values.filter(|value| value.role == WriteRole::Response) {
+        out.push((value.message.stored(own)?, value.order()?));
+    }
+    Ok(out)
+}
+
 /// In the receive step: take the view of `held` ([`step_pause`]) and tell whether a write of
 /// `stored` over it waits, by the one rule of writes that add no stop
 /// ([`Pause::adds_no_stop_waits`]): a stop never waits; any other message waits while the
@@ -1173,6 +1197,18 @@ pub(crate) fn step_keep(
 }
 
 impl Paykit {
+    /// The payer's replies to requests kept over the record `record` (`dw/`, the response
+    /// role), outside the receive step ([`step_responses_kept`]).
+    pub(crate) async fn responses_kept_over(
+        &self,
+        record: &[u8; 32],
+    ) -> Result<Vec<(StoredMessage, Order)>> {
+        let values = self
+            .local_scan::<DivergentWrite>(&key::divergent_writes_at(record))
+            .await?;
+        responses_of(&self.identity(), values.into_iter().map(|(_, value)| value))
+    }
+
     /// The mark at `record`, read bound ([`state::Stored`]) and checked against the record
     /// held there, `view` ([`Marked::of`]), before anything is decided on it.
     async fn marked(&self, record: &[u8; 32], view: Option<&View>) -> Result<Marked> {
