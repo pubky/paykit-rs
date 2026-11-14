@@ -49,24 +49,28 @@ pub(crate) struct KeptMessage {
     #[serde(with = "serde_b64_vec")]
     plaintext: Vec<u8>,
     accepted_at: Option<u64>,
-    /// Where the receive step took it among the messages of its bounded pool, for the kept
-    /// replies (`pr/`, every kind) and the kept stops (`kc/` and `ae/`, counted together):
-    /// the inbox's order within one millisecond ([`KeptMessage::order`]), which decides
-    /// which one the pool's bounds drop, which of an Allowance's ends stops it and which of
-    /// its answers is its record's response. The binding refuses a value of those families
-    /// without it (`state::Stored`). A held list (`lh/`) and a conflict (`cf/`) are no
-    /// pool's members and have none.
+    /// The feed `seq` its entry was read at, for the members of the bounded pools, the kept
+    /// replies (`pr/`, every kind) and the kept stops (`kc/` and `ae/`, counted together),
+    /// and for the messages of the stored entries (`se/`) and of the writes kept over a
+    /// divergent record (`dw/`): the inbox's position for the entry, which orders it within
+    /// one millisecond ([`KeptMessage::order`]). The receive step takes it from the entry it
+    /// is handed, a stored entry's note from the entry the client stored, which keeps the
+    /// `seq` it was read at; so every one of them is ordered by the same token, whichever
+    /// store keeps it. The binding refuses a member of those families without it, and one
+    /// of any other family with it (`state::Stored`): a held list (`lh/`) and a conflict
+    /// (`cf/`) are ordered by nothing and carry none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    intake: Option<u64>,
+    seq: Option<u64>,
 }
 
 /// The order the inbox accepted a kept message in (Paykit spec 8.1): by acceptance time,
-/// then, within one millisecond, by where the receive step took it (`intake`), never by its
-/// `msg_id`, which its sender chooses. The step takes the feed's entries in the order of
-/// their `seq`, the position the inbox gives each entry as it accepts it, whoever sent it
-/// (Switch spec 8.3), within one read and across reads: the order it keeps them in is the
-/// inbox's. Every member of a pool takes its intake from one counter for the pool
-/// ([`next_intake`]), so any two members compare, whatever their families.
+/// then, within one millisecond, by the feed `seq` its entry was read at, the position the
+/// inbox gives each entry as it accepts it, whoever sent it (Switch spec 8.3), never by its
+/// `msg_id`, which its sender chooses, nor by the store that keeps it. A stored entry keeps
+/// the `seq` it was read at when the client tries it again, so a message keeps its position
+/// whichever store keeps it and however often it is taken. The `seq` starts again at a
+/// provider change, and the entry's generation is not handed to the receive step: two
+/// messages of one millisecond accepted under two generations are ordered by their `seq`s.
 pub(crate) type KeptOrder = (u64, u64);
 
 impl std::fmt::Debug for KeptMessage {
@@ -83,29 +87,29 @@ impl KeptMessage {
             cert: stored.cert().signed().clone(),
             plaintext: stored.plaintext().encode(),
             accepted_at: stored.accepted_at(),
-            intake: None,
+            seq: None,
         }
     }
 
-    /// Keep `stored`, taken `intake`th among the kept messages of its family
-    /// ([`next_intake`]).
-    pub(crate) fn taken(stored: &StoredMessage, intake: u64) -> Self {
+    /// Keep `stored`, read from the feed at `seq` ([`KeptOrder`]).
+    pub(crate) fn taken(stored: &StoredMessage, seq: u64) -> Self {
         Self {
-            intake: Some(intake),
+            seq: Some(seq),
             ..Self::of(stored)
         }
     }
 
-    /// Where the receive step took it among the members of its pool ([`KeptOrder`]).
-    pub(crate) fn intake(&self) -> Option<u64> {
-        self.intake
+    /// The feed `seq` its entry was read at, for a message ordered among others
+    /// ([`KeptOrder`]).
+    pub(crate) fn seq(&self) -> Option<u64> {
+        self.seq
     }
 
-    /// The order its inbox accepted it in, a member of a bounded pool ([`KeptOrder`]): one
-    /// without its acceptance time or its intake is a corrupt store.
+    /// The order its inbox accepted it in ([`KeptOrder`]): one without its acceptance time
+    /// or its `seq` is a corrupt store.
     pub(crate) fn order(&self) -> Result<KeptOrder> {
-        match (self.accepted_at, self.intake) {
-            (Some(at), Some(intake)) => Ok((at, intake)),
+        match (self.accepted_at, self.seq) {
+            (Some(at), Some(seq)) => Ok((at, seq)),
             _ => Err(PaykitError::corrupt()),
         }
     }
@@ -142,15 +146,6 @@ impl KeptMessage {
         )
         .map_err(|_| PaykitError::corrupt())
     }
-}
-
-/// The intake the receive step gives the next message it keeps in a pool, `kept` the
-/// messages kept in it already, of every family of the pool: one after the latest.
-pub(crate) fn next_intake<'a>(kept: impl IntoIterator<Item = &'a KeptMessage>) -> u64 {
-    kept.into_iter()
-        .filter_map(|kept| kept.intake)
-        .max()
-        .map_or(0, |latest| latest.saturating_add(1))
 }
 
 impl Paykit {

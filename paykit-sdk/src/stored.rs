@@ -152,7 +152,7 @@ pub(crate) fn record_side(target: &ActivityTarget) -> crate::hold::RecordSide {
 /// A stored entry's message Paykit writes into its record later (`p/se/<sender>/<msg_id>`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct StoredNote {
-    /// The entry's local ID at the client.
+    /// The entry's local ID at the client, its handle there; it orders nothing.
     pub(crate) stored_id: u64,
     /// The entry's message hash, which the client checks a forget by
     /// ([`pubky_switch_client::app::App::forget_parked`]): the note's message's own, so the
@@ -219,6 +219,10 @@ impl StoredNote {
         {
             return Err(PaykitError::corrupt());
         }
+        // Every note keeps the acceptance time and the feed `seq` its entry was read at,
+        // which order it among the stored entries and the kept replies
+        // (`records::KeptOrder`): one without them can't be ordered.
+        self.message.order()?;
         Ok(stored)
     }
 }
@@ -479,7 +483,7 @@ impl Paykit {
         if self.stored_note(&note_key).await?.is_some() {
             return Ok(true);
         }
-        match self.place_of(&stored).await? {
+        match self.place_of(&stored, entry.seq).await? {
             None => return Ok(false),
             // Held as a list whose record doesn't read is held at its first read, and its
             // sender noted with the hold, as there.
@@ -508,7 +512,7 @@ impl Paykit {
             hash: stored.hash(),
             sender: entry.sender,
             msg_id: stored.message().msg_id.clone(),
-            message: KeptMessage::of(&stored),
+            message: KeptMessage::taken(&stored, entry.seq),
             placed: false,
         };
         tx.put(&note_key, &note)?;
@@ -521,7 +525,7 @@ impl Paykit {
     /// which it may open (Paykit spec 8.4); a receipt into the payer's record; a list held
     /// over its record, unless a list as new is held. `None` for a kind no record of this
     /// app's holds, or one its scopes don't write.
-    async fn place_of(&self, stored: &StoredMessage) -> Result<Option<Place>> {
+    async fn place_of(&self, stored: &StoredMessage, seq: u64) -> Result<Option<Place>> {
         let own = self.identity();
         let sender = stored.sender();
         let scopes = self.scopes();
@@ -621,15 +625,11 @@ impl Paykit {
                 }
                 let stop = key::allowance_end(&record, &stored.message().msg_id);
                 let kept = self.local_get::<KeptMessage>(&stop).await?.is_some();
-                // Taken now, after every stop kept before it, of the pool the kept
-                // cancellations and the ends share (`records::KeptOrder`).
-                let mut pool = self
-                    .local_scan::<KeptMessage>(key::KEPT_CANCELLATIONS)
-                    .await?;
-                pool.extend(self.local_scan::<KeptMessage>(key::ALLOWANCE_ENDS).await?);
-                let intake = crate::records::next_intake(pool.iter().map(|(_, kept)| kept));
+                // With the feed `seq` its entry was read at, which orders it in the pool the
+                // kept cancellations and the ends share (`records::KeptOrder`), as the
+                // receive step keeps it.
                 Some(Place::Stop(
-                    (!kept).then(|| (stop, KeptMessage::taken(stored, intake))),
+                    (!kept).then(|| (stop, KeptMessage::taken(stored, seq))),
                 ))
             }
             _ => None,
@@ -746,26 +746,27 @@ impl Paykit {
     /// a message not written within [`crate::KEPT_MESSAGE_MS`] of its acceptance, on the
     /// highest service time verified, is given up, its entry left stored for the host. The
     /// messages are taken in the order their inbox accepted them, by acceptance time and
-    /// then by their entries' local IDs, never in the order of their `msg_id`s.
+    /// then by the feed `seq` their entries were read at, as the kept replies are, never in
+    /// the order of their `msg_id`s nor of their entries' local IDs.
     pub(crate) async fn place_stored(&mut self) -> Result<()> {
         let own = self.identity();
         // Every note in the order its inbox accepted its message, never in the order of the
         // keys, which end in a `msg_id` its sender chooses: by acceptance time, then by the
-        // entry's local ID, which the client gives its entries in the order it stores them
-        // (Paykit spec 8.1). Each is read bound to its key first.
+        // feed `seq` its entry was read at (`records::KeptOrder`, Paykit spec 8.1), the
+        // token the kept replies carry too. Each is read bound to its key first.
         let mut notes = Vec::new();
         for (rest, note) in self.local_scan::<StoredNote>(key::STORED_NOTES).await? {
             let note_key = format!("{}{rest}", key::STORED_NOTES);
             let stored = note.bound(&note_key, &own)?;
-            notes.push((stored.accepted_at(), note_key, note, stored));
+            notes.push((note.message.order()?, note_key, note, stored));
         }
-        notes.sort_by(|a, b| (a.0, a.2.stored_id, &a.1).cmp(&(b.0, b.2.stored_id, &b.1)));
-        for (_, note_key, mut note, stored) in notes {
+        notes.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        for (order, note_key, mut note, stored) in notes {
             if !note.placed {
                 // A kept message carries its entry's acceptance time; one without it is a
                 // corrupt store, never a message past its window.
                 let accepted_at = stored.accepted_at().ok_or_else(PaykitError::corrupt)?;
-                let placed = match self.place_of(&stored.clone()).await? {
+                let placed = match self.place_of(&stored.clone(), order.1).await? {
                     Some(Place::List(hold)) | Some(Place::Stop(hold)) => {
                         if let Some((held, kept)) = hold {
                             self.local_put(&held, &kept).await?;
@@ -773,7 +774,7 @@ impl Paykit {
                         Placed::Done
                     }
                     Some(Place::Allowance) => {
-                        Box::pin(self.place_allowance_note(stored.clone(), note.stored_id)).await?
+                        Box::pin(self.place_allowance_note(stored.clone(), order)).await?
                     }
                     Some(Place::Record {
                         target,
@@ -782,8 +783,15 @@ impl Paykit {
                         // An error isn't a refusal: the write wasn't evaluated, so the note stays,
                         // neither counted nor given up, and the receive returns the error.
                     }) => {
-                        self.place_note(&target, role, creates, stored.clone(), Tx::default())
-                            .await?
+                        self.place_note(
+                            &target,
+                            role,
+                            creates,
+                            stored.clone(),
+                            order,
+                            Tx::default(),
+                        )
+                        .await?
                     }
                     Some(Place::AwaitsRequest(side)) => {
                         if self.side_unlisted(side).await? {
@@ -928,6 +936,7 @@ impl Paykit {
         role: Role,
         creates: bool,
         stored: StoredMessage,
+        order: crate::records::KeptOrder,
         locals: Tx,
     ) -> Result<Placed> {
         let key = self.activity_key(target)?;
@@ -944,7 +953,7 @@ impl Paykit {
         // Over a divergent record its user hasn't confirmed, only a stop is written, and while
         // messages kept over it before this one wait to be written, they go first: the
         // message waits, within its own window (Paykit spec 6, 8.1 "Stored entries").
-        if Box::pin(self.divergent_write_waits(&key, &stored)).await? {
+        if Box::pin(self.divergent_write_waits(&key, &stored, Some(order))).await? {
             return Ok(Placed::Not);
         }
         // Without the current data epoch's key of the record's scope, nothing can be sealed
@@ -1137,7 +1146,7 @@ mod tests {
             hash: stored.hash(),
             sender: bob.id(),
             msg_id: stored.message().msg_id.clone(),
-            message: KeptMessage::of(&stored),
+            message: KeptMessage::taken(&stored, 1),
             placed,
         }
     }

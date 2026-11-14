@@ -1580,7 +1580,8 @@ mod receive_tests {
         // The kept replies and the kept stops are bounded pools ordered by when their inbox
         // accepted each member, which decides what the bounds drop, which of an Allowance's
         // ends stops it and which of its answers is the record's response: a member without
-        // its intake can't be ordered, so a restore refuses it, of every family of a pool.
+        // the feed `seq` its entry was read at can't be ordered, so a restore refuses it, of
+        // every family of a pool.
         let (alice, bob, _, end) = allowance_end();
         let Body::AllowanceEnd(reply) = end.body() else {
             panic!("an end");
@@ -1712,6 +1713,48 @@ mod receive_tests {
     }
 
     #[test]
+    fn test_protocol_restore_refuses_a_held_list_without_its_acceptance_time() {
+        // Every writer of `lh/` keeps a list its inbox accepted, with the time, which orders
+        // it behind the writes kept over its record: a restore refuses one without it.
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let list = bob.message(
+            &alice,
+            "paykit.private_payment_list",
+            vec![],
+            object(json!({
+                "version": 7,
+                "expires_at": pubky_switch_core::time::rfc3339(NOW + 3_600_000),
+                "payment_endpoints": {
+                    "btc-bitcoin-p2wpkh": { "payload": "bc1q", "single_use": true }
+                }
+            })),
+        );
+        let target = crate::records::list_target(&bob.id(), &list.message().from.app_id);
+        let at = key::held_list(&fake_key(&target));
+        let value = state::encode(&KeptMessage::of(&list)).unwrap();
+        assert!(restores::<KeptMessage>(&alice, at.as_bytes(), &value));
+        assert!(!restores::<KeptMessage>(
+            &alice,
+            at.as_bytes(),
+            &without_acceptance(&value)
+        ));
+    }
+
+    #[test]
+    fn test_protocol_restore_refuses_a_kept_conflict_with_a_feed_seq() {
+        // A conflict is ordered by nothing, and no writer gives it the feed `seq` a pooled
+        // message carries: a restore refuses one that has it.
+        let (alice, bob, proposal, _) = allowance_end();
+        let Body::AllowanceProposal(body) = proposal.body() else {
+            panic!("a proposal");
+        };
+        let at = key::conflict(&fake_key(&allowance_target(&bob.id(), &body.allowance_id)));
+        let value = state::encode(&KeptMessage::taken(&proposal, 1)).unwrap();
+        assert!(!restores::<KeptMessage>(&alice, at.as_bytes(), &value));
+    }
+
+    #[test]
     fn test_protocol_restore_refuses_a_kept_reply_without_its_acceptance_time() {
         // A reply is kept only as its inbox accepted it: one without the time can't come
         // from a valid run.
@@ -1808,7 +1851,7 @@ mod receive_tests {
             hash: request.hash(),
             sender: bob.id(),
             msg_id: msg_id.clone(),
-            message: KeptMessage::of(&request),
+            message: KeptMessage::taken(&request, 1),
             placed: false,
         };
         let value = state::encode(&note).unwrap();

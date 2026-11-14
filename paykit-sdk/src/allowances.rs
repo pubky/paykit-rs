@@ -375,26 +375,12 @@ pub(crate) fn reflects(record: &AllowanceRecord, msg_id: &str) -> bool {
     stored_ids(record).iter().any(|id| id == msg_id) || record.msg_ids.iter().any(|id| id == msg_id)
 }
 
-/// Where an Allowance answer the app keeps to write is kept, in the order answers of one
-/// acceptance millisecond are taken in ([`AnswerOrder`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum AnswerKept {
-    /// With the replies kept to place (`pr/`), before its record or while it waits over
-    /// it, with its intake in their pool ([`crate::records::KeptOrder`]).
-    Reply(u64),
-    /// A stored entry's (`se/`), with the entry's local ID, which the client gives its
-    /// entries in the order it stores them.
-    Stored(u64),
-    /// The message the receive step is taking, after every one kept.
-    Taken,
-}
-
 /// The order the inbox accepted an Allowance answer in among those of its record (Paykit
-/// spec 8.1): by acceptance time, then, within one millisecond, by where the receive step
-/// took it ([`AnswerKept`]), never by its `msg_id`, which its sender chooses: the kept
-/// replies by their intake, then the stored entries by their local ID, then the message the
-/// step is taking, which came after every one kept.
-pub(crate) type AnswerOrder = (u64, AnswerKept);
+/// spec 8.1): its acceptance time, then the feed `seq` its entry was read at
+/// ([`crate::records::KeptOrder`]), the same token whichever store keeps the answer, the kept
+/// replies (`pr/`) or the stored entries (`se/`), and for the message the receive step is
+/// taking; never its `msg_id`, which its sender chooses, nor the store that keeps it.
+pub(crate) type AnswerOrder = crate::records::KeptOrder;
 
 /// Whether the response of `record` belongs to another answer than `stored`: one of `kept`,
 /// the answers the app keeps to write, is a different response to `record`'s proposal that
@@ -420,10 +406,10 @@ fn answered_before(
             .any(|(other, at)| *at < order && other.hash() != stored.hash() && response(other))
 }
 
-/// The order of a kept answer, whose acceptance time a kept message always carries: one
-/// without it is a corrupt store.
-fn answer_order(stored: &StoredMessage, kept: AnswerKept) -> Result<AnswerOrder> {
-    Ok((stored.accepted_at().ok_or_else(PaykitError::corrupt)?, kept))
+/// The order of `stored`, read from the feed at `seq`, whose acceptance time a message the
+/// app takes always carries: one without it is a corrupt store.
+fn answer_order(stored: &StoredMessage, seq: u64) -> Result<AnswerOrder> {
+    Ok((stored.accepted_at().ok_or_else(PaykitError::corrupt)?, seq))
 }
 
 /// Place `stored` in `record` (Paykit spec 6 "One message per role", Paykit wire 5.4): a
@@ -550,6 +536,7 @@ enum Held {
 pub(crate) fn receive_effect(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
+    seq: u64,
     scopes: &[String],
 ) -> std::result::Result<(), Fail> {
     let sender = stored.sender();
@@ -559,7 +546,7 @@ pub(crate) fn receive_effect(
     };
     let target = allowance_target(&sender, &allowance_id);
     if let Body::AllowanceEnd(_) = stored.body() {
-        return keep_end(cx, &target, &allowance_id, stored, scopes);
+        return keep_end(cx, &target, &allowance_id, stored, seq, scopes);
     }
     // The request path's own read (`receive::held_or_unlisted_at`, which
     // `receive::held_or_unlisted` is): the entry waits for the record's scope key, and an
@@ -602,7 +589,7 @@ pub(crate) fn receive_effect(
                 }
                 Ok(())
             }
-            Held::Record(record) => put_placed(cx, &target, *record, stored, scopes),
+            Held::Record(record) => put_placed(cx, &target, *record, stored, seq, scopes),
             Held::Unreadable => stored_entry(cx, stored),
         },
         _ => match held {
@@ -612,11 +599,11 @@ pub(crate) fn receive_effect(
             // placed once the record is held (Paykit spec 8.1).
             Held::None => {
                 if receive::admits_new_state(cx, &sender, scopes)? {
-                    keep_answer(cx, &target, stored)?;
+                    keep_answer(cx, &target, stored, seq)?;
                 }
                 Ok(())
             }
-            Held::Record(record) => put_placed(cx, &target, *record, stored, scopes),
+            Held::Record(record) => put_placed(cx, &target, *record, stored, seq, scopes),
             Held::Unreadable => stored_entry(cx, stored),
         },
     }
@@ -624,24 +611,21 @@ pub(crate) fn receive_effect(
 
 /// Keep `stored`, an answer the app can't place in the Allowance record at `target` yet,
 /// with the replies kept to place (`pr/<sender>/<record key>/<msg_id>`), within their bounds
-/// ([`receive::make_room_for_reply`]) and with its intake in their pool, which orders it
-/// among them ([`receive::reply_intake`]). One kept already is read bound to its key and
-/// stays as it is. Admission is the caller's.
+/// ([`receive::make_room_for_reply`]) and with the feed `seq` it was read at, which orders it
+/// among them and among the stored entries ([`crate::records::KeptOrder`]). One kept already
+/// is read bound to its key and stays as it is. Admission is the caller's.
 fn keep_answer(
     cx: &mut ReceiveContext<'_>,
     target: &RecordTarget,
     stored: &StoredMessage,
+    seq: u64,
 ) -> std::result::Result<(), Fail> {
     let sender = stored.sender();
     let record = cx.record_key(target)?;
     let kept = key::kept_reply(&sender, &record, &stored.message().msg_id);
     if state::cx_get::<KeptMessage>(cx, &kept)?.is_none() {
         receive::make_room_for_reply(cx, &sender)?;
-        let intake = receive::reply_intake(cx)?;
-        receive::keep_local(
-            cx,
-            receive::local(&kept, &KeptMessage::taken(stored, intake))?,
-        );
+        receive::keep_local(cx, receive::local(&kept, &KeptMessage::taken(stored, seq))?);
     }
     Ok(())
 }
@@ -696,6 +680,7 @@ fn put_placed(
     target: &RecordTarget,
     mut record: AllowanceRecord,
     stored: &StoredMessage,
+    seq: u64,
     scopes: &[String],
 ) -> std::result::Result<(), Fail> {
     if misreferenced(&record, stored) && !reflects(&record, &stored.message().msg_id) {
@@ -717,7 +702,7 @@ fn put_placed(
         && answered_before(
             &record,
             stored,
-            step_answer_order(cx, stored)?,
+            answer_order(stored, seq).map_err(|_| Fail::corrupt())?,
             &step_answers_kept(cx, target, stored)?,
         )
     {
@@ -732,10 +717,10 @@ fn put_placed(
     // a later write of the app's own ([`Paykit::place_kept_allowance_response`]).
     if !reflects(&record, &stored.message().msg_id) {
         if let Some(held) = cx.record(target)? {
-            if crate::divergent::step_write_waits(cx, &held, stored, &|_| None)? {
+            if crate::divergent::step_write_waits(cx, &held, stored, seq, &|_| None)? {
                 return match stored.body() {
                     Body::AllowanceProposal(_) => stored_entry(cx, stored),
-                    _ => keep_answer(cx, target, stored),
+                    _ => keep_answer(cx, target, stored, seq),
                 };
             }
         }
@@ -744,20 +729,6 @@ fn put_placed(
         cx.put_record(target, &record.to_json()?, Vec::new())?;
     }
     Ok(())
-}
-
-/// The order of `stored`, the answer the receive step is taking: a stored entry's, tried
-/// again, keeps the order of its entry; any other comes after every answer kept.
-fn step_answer_order(
-    cx: &ReceiveContext<'_>,
-    stored: &StoredMessage,
-) -> std::result::Result<AnswerOrder, Fail> {
-    let note = key::stored_note(&stored.sender(), &stored.message().msg_id);
-    let kept = match state::cx_get::<StoredNote>(cx, &note)? {
-        Some(note) if note.hash == stored.hash() => AnswerKept::Stored(note.stored_id),
-        _ => AnswerKept::Taken,
-    };
-    answer_order(stored, kept).map_err(|_| Fail::corrupt())
 }
 
 /// The answers of the Allowance record at `target` that the app keeps to write, from the
@@ -792,8 +763,7 @@ fn answers_kept(
     for message in before {
         let answer = message.stored(own)?;
         if is_allowance_response(answer.body()) {
-            let (at, intake) = message.order()?;
-            kept.push((answer, (at, AnswerKept::Reply(intake))));
+            kept.push((answer, message.order()?));
         }
     }
     for (note_key, note) in notes {
@@ -802,8 +772,7 @@ fn answers_kept(
             && is_allowance_response(answer.body())
             && named_allowance(answer.body()) == allowance_id
         {
-            let order = answer_order(&answer, AnswerKept::Stored(note.stored_id))?;
-            kept.push((answer, order));
+            kept.push((answer, note.message.order()?));
         }
     }
     Ok(kept)
@@ -915,6 +884,7 @@ fn keep_end(
     target: &RecordTarget,
     allowance_id: &AllowanceId,
     stored: &StoredMessage,
+    seq: u64,
     scopes: &[String],
 ) -> std::result::Result<(), Fail> {
     let sender = stored.sender();
@@ -966,11 +936,7 @@ fn keep_end(
         {
             receive::make_room_for_stop(cx, &sender)?;
         }
-        let intake = receive::stop_intake(cx)?;
-        receive::keep_local(
-            cx,
-            receive::local(&stop, &KeptMessage::taken(stored, intake))?,
-        );
+        receive::keep_local(cx, receive::local(&stop, &KeptMessage::taken(stored, seq))?);
     }
     if checked && scopes.iter().any(|s| s == "allowance_execute") {
         drop_consent(cx, &record_key, (sender, allowance_id), ConsentEnd::Ended)?;
@@ -2140,7 +2106,7 @@ impl Paykit {
         Ok(())
     }
 
-    /// Place the kept acceptance or rejection `reply`, kept at `kept_key` with its `intake`
+    /// Place the kept acceptance or rejection `reply`, kept at `kept_key` at its order `order`
     /// before its Allowance record was held, or while it waited over it for the user's
     /// confirmation, once the app holds that record, as a later write of its own with the
     /// kept copy dropped (Paykit spec 8.1). Nothing runs while the copy of
@@ -2160,7 +2126,7 @@ impl Paykit {
         &mut self,
         kept_key: &str,
         reply: StoredMessage,
-        intake: u64,
+        order: AnswerOrder,
     ) -> Result<()> {
         if Box::pin(self.side_unlisted(RecordSide::Allowances)).await? {
             return Ok(());
@@ -2186,7 +2152,6 @@ impl Paykit {
         let drop_kept = LocalWrite::Delete {
             key: kept_key.as_bytes().to_vec(),
         };
-        let order = answer_order(&reply, AnswerKept::Reply(intake))?;
         let placed = self
             .place_allowance_later(reply.clone(), order, vec![drop_kept])
             .await?;
@@ -2220,15 +2185,14 @@ impl Paykit {
         Ok(Box::pin(self.app.protocol_commit(&locals)).await?)
     }
 
-    /// A stored entry's proposal, acceptance or rejection (`stored.rs`), the entry stored
-    /// at `stored_id`, written into its Allowance record by a later write of the app's own
-    /// ([`Paykit::place_allowance_later`]).
+    /// A stored entry's proposal, acceptance or rejection (`stored.rs`), read from the feed
+    /// at the order `order` ([`AnswerOrder`]), written into its Allowance record by a later
+    /// write of the app's own ([`Paykit::place_allowance_later`]).
     pub(crate) async fn place_allowance_note(
         &mut self,
         stored: StoredMessage,
-        stored_id: u64,
+        order: AnswerOrder,
     ) -> Result<Placed> {
-        let order = answer_order(&stored, AnswerKept::Stored(stored_id))?;
         Box::pin(self.place_allowance_later(stored, order, Vec::new())).await
     }
 
@@ -2356,7 +2320,8 @@ impl Paykit {
                 // confirms it, as at receive; a rejection goes.
                 Some(held)
                     if !reflects(&held, &stored.message().msg_id)
-                        && Box::pin(self.divergent_write_waits(&record, &stored)).await? =>
+                        && Box::pin(self.divergent_write_waits(&record, &stored, Some(order)))
+                            .await? =>
                 {
                     return Ok(Placed::Not);
                 }

@@ -164,7 +164,7 @@ pub(crate) fn effect(
                 ActivityTarget::payer(natural_key::request_record(&sender, &stored.hash()));
             let held = held_or_unlisted(cx, &target, RecordSide::Payer)?;
             if held.is_some() || admits_new_state(cx, &sender, &scopes)? {
-                place(cx, &target, sender, Role::Request, stored, settlement)?;
+                place(cx, &target, sender, Role::Request, stored, seq, settlement)?;
                 note_peer(cx, &sender, stored)?;
             }
         }
@@ -173,7 +173,7 @@ pub(crate) fn effect(
         | Body::PaymentProof(_)
             if payee =>
         {
-            payer_reply(cx, stored, &scopes, settlement)?;
+            payer_reply(cx, stored, seq, &scopes, settlement)?;
         }
         Body::PaymentRequestCancellation(_) => {
             let Some(request) = stored.message().refs.first().copied() else {
@@ -190,7 +190,7 @@ pub(crate) fn effect(
             // key, so the stop never waits for the value's key or a listing, and no give-up
             // of the entry can lose it.
             if pay && held_request(cx, &payer_target)? {
-                return keep_cancellation(cx, &payer_target, stored, true);
+                return keep_cancellation(cx, &payer_target, stored, seq, true);
             }
             // A payer's cancellation of a request this app holds goes into its record. One
             // naming a request held on neither side is new state, which the spam rule gates
@@ -207,7 +207,7 @@ pub(crate) fn effect(
             let payee_held = payee && cx.record(&payee_target.record_target())?.is_some();
             if !pay || payee_held {
                 if payee {
-                    payer_reply(cx, stored, &scopes, settlement)?;
+                    payer_reply(cx, stored, seq, &scopes, settlement)?;
                 }
                 return Ok(());
             }
@@ -224,17 +224,17 @@ pub(crate) fn effect(
                 hold_while_unlisted(cx, RecordSide::Payee)?;
             }
             if admits_new_state(cx, &sender, &scopes)? {
-                keep_cancellation(cx, &payer_target, stored, false)?;
+                keep_cancellation(cx, &payer_target, stored, seq, false)?;
                 if reply {
-                    keep_reply(cx, &payee_target, stored)?;
+                    keep_reply(cx, &payee_target, stored, seq)?;
                 }
             }
         }
         Body::PaymentReceipt(receipt) if pay => {
-            receipt_effect(cx, stored, receipt.attempt_id, settlement)?;
+            receipt_effect(cx, stored, seq, receipt.attempt_id, settlement)?;
         }
         Body::PaymentPeriodDetails(_) if pay => {
-            period_details_effect(cx, stored, &scopes, settlement)?;
+            period_details_effect(cx, stored, seq, &scopes, settlement)?;
         }
         Body::PrivatePaymentList(_) if pay => {
             let target = list_target(&sender, &stored.message().from.app_id);
@@ -244,7 +244,7 @@ pub(crate) fn effect(
             }
             let held = record.is_some_and(|held| held.content.value().is_some());
             if held || admits_new_state(cx, &sender, &scopes)? {
-                list_effect(cx, stored)?;
+                list_effect(cx, stored, seq)?;
                 note_peer(cx, &sender, stored)?;
             }
         }
@@ -272,7 +272,7 @@ pub(crate) fn effect(
         | Body::AllowanceEnd(_)
             if scopes.iter().any(|s| s == "allowance") =>
         {
-            crate::allowances::receive_effect(cx, stored, &scopes)?;
+            crate::allowances::receive_effect(cx, stored, seq, &scopes)?;
         }
         Body::ExecutorNotice(notice) if scopes.iter().any(|s| s == "allowance_execute") => {
             crate::allowances::notice_effect(cx, notice)?;
@@ -603,6 +603,7 @@ fn place(
     counterparty: [u8; 32],
     role: Role,
     stored: &StoredMessage,
+    seq: u64,
     settlement: Settlement<'_>,
 ) -> Result<(), Fail> {
     wait_for_key(cx, target)?;
@@ -646,8 +647,8 @@ fn place(
     // messages kept over the record before it wait to be written. The view is taken either
     // way: a stop written over it leaves the record paused.
     if let Some(held) = held {
-        if crate::divergent::step_write_waits(cx, &held, stored, settlement)? {
-            return crate::divergent::step_keep(cx, &held, stored, settlement, reads);
+        if crate::divergent::step_write_waits(cx, &held, stored, seq, settlement)? {
+            return crate::divergent::step_keep(cx, &held, stored, seq, settlement, reads);
         }
     }
     cx.put_record(&target.record_target(), &record.to_json()?, Vec::new())?;
@@ -680,6 +681,7 @@ fn keep_cancellation(
     cx: &mut ReceiveContext<'_>,
     target: &ActivityTarget,
     stored: &StoredMessage,
+    seq: u64,
     held: bool,
 ) -> Result<(), Fail> {
     let kept = key::kept_cancellation(&cx.record_key(&target.record_target())?);
@@ -689,30 +691,8 @@ fn keep_cancellation(
     if !held {
         make_room_for_stop(cx, &stored.sender())?;
     }
-    let intake = stop_intake(cx)?;
-    keep_local(cx, local(&kept, &KeptMessage::taken(stored, intake))?);
+    keep_local(cx, local(&kept, &KeptMessage::taken(stored, seq))?);
     Ok(())
-}
-
-/// The intake of the next stop the step keeps: the kept cancellations (`kc/`) and the
-/// Allowance ends (`ae/`) are one pool, counted under one bound
-/// ([`make_room_for_stop`]), so they take their intakes from one counter
-/// (`records::KeptOrder`).
-pub(crate) fn stop_intake(cx: &ReceiveContext<'_>) -> Result<u64, Fail> {
-    let mut kept = state::cx_scan::<KeptMessage>(cx, key::KEPT_CANCELLATIONS)?;
-    kept.extend(state::cx_scan::<KeptMessage>(cx, key::ALLOWANCE_ENDS)?);
-    Ok(crate::records::next_intake(
-        kept.iter().map(|(_, kept)| kept),
-    ))
-}
-
-/// The intake of the next reply the step keeps (`pr/`, every kind): one pool under one
-/// bound ([`make_room_for_reply`]), one counter (`records::KeptOrder`).
-pub(crate) fn reply_intake(cx: &ReceiveContext<'_>) -> Result<u64, Fail> {
-    let kept = state::cx_scan::<KeptMessage>(cx, key::KEPT_REPLIES)?;
-    Ok(crate::records::next_intake(
-        kept.iter().map(|(_, kept)| kept),
-    ))
 }
 
 /// Keep `stored`, a message whose record this app holds no record of yet, as a message
@@ -722,11 +702,12 @@ pub(crate) fn reply_intake(cx: &ReceiveContext<'_>) -> Result<u64, Fail> {
 fn keep_before_record(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
+    seq: u64,
     scopes: &[String],
     record: &ActivityTarget,
 ) -> Result<(), Fail> {
     if admits_new_state(cx, &stored.sender(), scopes)? {
-        keep_reply(cx, record, stored)?;
+        keep_reply(cx, record, stored, seq)?;
     }
     Ok(())
 }
@@ -745,13 +726,14 @@ fn keep_before_record(
 fn keep_until_placed(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
+    seq: u64,
     scopes: &[String],
     record: &ActivityTarget,
 ) -> Result<(), Fail> {
     if held_request(cx, record)? {
-        return keep_reply(cx, record, stored);
+        return keep_reply(cx, record, stored, seq);
     }
-    keep_before_record(cx, stored, scopes, record)
+    keep_before_record(cx, stored, seq, scopes, record)
 }
 
 /// The order a kept message of a bounded pool was accepted in (`records::KeptOrder`), in
@@ -929,6 +911,7 @@ pub(crate) fn make_room_for_stop(
 fn period_details_effect(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
+    seq: u64,
     scopes: &[String],
     settlement: Settlement<'_>,
 ) -> Result<(), Fail> {
@@ -939,10 +922,10 @@ fn period_details_effect(
     };
     let request_target = ActivityTarget::payer(natural_key::request_record(&sender, &request_hash));
     let Some(value) = held_or_unlisted(cx, &request_target, RecordSide::Payer)? else {
-        return keep_until_placed(cx, stored, scopes, &request_target);
+        return keep_until_placed(cx, stored, seq, scopes, &request_target);
     };
     let Some(record) = bound_activity(cx, &request_target, &value, settlement)? else {
-        return keep_until_placed(cx, stored, scopes, &request_target);
+        return keep_until_placed(cx, stored, seq, scopes, &request_target);
     };
     if record.counterparty != sender || record.request.is_none() {
         return Ok(());
@@ -963,12 +946,12 @@ fn period_details_effect(
     wait_for_key(cx, &target)?;
     let period = match held_value(cx, &target)? {
         None if held_request(cx, &target)? => {
-            return keep_until_placed(cx, stored, scopes, &request_target);
+            return keep_until_placed(cx, stored, seq, scopes, &request_target);
         }
         None => None,
         Some(value) => match bound_activity(cx, &target, &value, settlement)? {
             Some(period) => Some(period),
-            None => return keep_until_placed(cx, stored, scopes, &request_target),
+            None => return keep_until_placed(cx, stored, seq, scopes, &request_target),
         },
     };
     let stores = crate::periods::stores_details(
@@ -1000,7 +983,15 @@ fn period_details_effect(
     }
     // The period record is of the request record's side, whose hold was judged above, and
     // `place` holds the entry while its value waits for its key.
-    place(cx, &target, sender, Role::PeriodDetails, stored, settlement)
+    place(
+        cx,
+        &target,
+        sender,
+        Role::PeriodDetails,
+        stored,
+        seq,
+        settlement,
+    )
 }
 
 /// The message `kept`, read bound to its key (`state::Stored`), with its acceptance time,
@@ -1037,6 +1028,7 @@ fn keeps_stored_of(
 fn payer_reply(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
+    seq: u64,
     scopes: &[String],
     settlement: Settlement<'_>,
 ) -> Result<bool, Fail> {
@@ -1073,7 +1065,7 @@ fn payer_reply(
                 None => None,
             };
             let Some(bound) = bound else {
-                keep_before_record(cx, stored, scopes, &target)?;
+                keep_before_record(cx, stored, seq, scopes, &target)?;
                 return Ok(false);
             };
             // A Billing Period's proof goes into its period record, never the request's
@@ -1097,33 +1089,33 @@ fn payer_reply(
                 // another counterparty; it is new state, kept through the spam rule as a
                 // reply before its record ([`keep_before_record`]), and never placed.
                 if bound.counterparty != sender {
-                    keep_before_record(cx, stored, scopes, &request_target)?;
+                    keep_before_record(cx, stored, seq, scopes, &request_target)?;
                     return Ok(true);
                 }
                 // From the counterparty, a proof the period record can't take now updates
                 // activity the app holds: kept outside the spam rule ([`keep_reply`]).
                 let held = match held_or_unlisted(cx, &target, RecordSide::Payee)? {
                     None if held_request(cx, &target)? => {
-                        keep_reply(cx, &request_target, stored)?;
+                        keep_reply(cx, &request_target, stored, seq)?;
                         return Ok(true);
                     }
                     None => None,
                     Some(value) => match bound_activity(cx, &target, &value, settlement)? {
                         Some(period) => Some(period),
                         None => {
-                            keep_reply(cx, &request_target, stored)?;
+                            keep_reply(cx, &request_target, stored, seq)?;
                             return Ok(true);
                         }
                     },
                 };
                 if awaits_named_details(held.as_ref(), ActivitySide::Payee, stored) {
-                    keep_reply(cx, &request_target, stored)?;
+                    keep_reply(cx, &request_target, stored, seq)?;
                     return Ok(true);
                 }
             }
             // A period record is of the request record's side, whose hold was judged above,
             // and `place` holds the entry while its value waits for its key.
-            place(cx, &target, sender, role, stored, settlement)?;
+            place(cx, &target, sender, role, stored, seq, settlement)?;
             Ok(true)
         }
         None => {
@@ -1151,12 +1143,12 @@ fn payer_reply(
             let content = cx.record(&target.record_target())?.map(|held| held.content);
             if holds_record(content.as_ref()) && held_bound(cx, &target, settlement)?.is_none() {
                 if admits_new_state(cx, &sender, scopes)? {
-                    keep_reply(cx, &target, stored)?;
+                    keep_reply(cx, &target, stored, seq)?;
                 }
                 return Ok(true);
             }
             if held.is_some() || admits_new_state(cx, &sender, scopes)? {
-                place(cx, &target, sender, role, stored, settlement)?;
+                place(cx, &target, sender, role, stored, seq, settlement)?;
             }
             Ok(true)
         }
@@ -1174,6 +1166,7 @@ fn keep_reply(
     cx: &mut ReceiveContext<'_>,
     target: &ActivityTarget,
     stored: &StoredMessage,
+    seq: u64,
 ) -> Result<(), Fail> {
     let sender = stored.sender();
     let record = cx.record_key(&target.record_target())?;
@@ -1181,8 +1174,7 @@ fn keep_reply(
     // One kept already is read bound to its key, and stays as it is.
     if state::cx_get::<KeptMessage>(cx, &kept)?.is_none() {
         make_room_for_reply(cx, &sender)?;
-        let intake = reply_intake(cx)?;
-        keep_local(cx, local(&kept, &KeptMessage::taken(stored, intake))?);
+        keep_local(cx, local(&kept, &KeptMessage::taken(stored, seq))?);
     }
     Ok(())
 }
@@ -1209,6 +1201,7 @@ fn keep_reply(
 fn receipt_effect(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
+    seq: u64,
     attempt_id: AttemptId,
     settlement: Settlement<'_>,
 ) -> Result<(), Fail> {
@@ -1237,23 +1230,30 @@ fn receipt_effect(
     // Kept so over a record that doesn't read, it takes the spam rule a reply before its
     // record takes ([`admits_receipt_over_unread_record`]).
     if let Some(held) = held.filter(|held| holds_record(Some(&held.content))) {
-        if crate::divergent::step_write_waits(cx, &held, stored, settlement)? {
+        if crate::divergent::step_write_waits(cx, &held, stored, seq, settlement)? {
             if record.is_none() && !admits_receipt_over_unread_record(cx, stored)? {
                 return Ok(());
             }
-            return crate::divergent::step_keep(cx, &held, stored, settlement, record.is_some());
+            return crate::divergent::step_keep(
+                cx,
+                &held,
+                stored,
+                seq,
+                settlement,
+                record.is_some(),
+            );
         }
     }
     let (Some(record), Some(found)) = (record, found) else {
         // No record, or one deleted: the record says the receipt has nowhere to go. Held,
         // though, it may read later.
         if holds_record(content.as_ref()) {
-            return receipt_over_unread_record(cx, &target, stored);
+            return receipt_over_unread_record(cx, &target, stored, seq);
         }
         return Ok(());
     };
     if found.names_held_proof {
-        place(cx, &target, sender, Role::Receipt, stored, settlement)?;
+        place(cx, &target, sender, Role::Receipt, stored, seq, settlement)?;
     }
     // The journal entry of the attempt, if this app made it: it holds a payment without a
     // request's deadline, and whether `failed` stands on the claim of a payment made. One
@@ -1341,11 +1341,12 @@ fn receipt_over_unread_record(
     cx: &mut ReceiveContext<'_>,
     target: &ActivityTarget,
     stored: &StoredMessage,
+    seq: u64,
 ) -> Result<(), Fail> {
     if !admits_receipt_over_unread_record(cx, stored)? {
         return Ok(());
     }
-    keep_reply(cx, target, stored)
+    keep_reply(cx, target, stored, seq)
 }
 
 /// Whether `stored`, a receipt over a payer record the app holds but can't read now, may be
@@ -1628,7 +1629,7 @@ pub(crate) fn obligation(
 /// its feed or a read. To an app that never held the record, a deleted one looks absent,
 /// and the switch takes a create over a delete, so its first list is written afresh. A
 /// record merely absent is never held, or a payee's first list could never be stored.
-fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Result<(), Fail> {
+fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage, seq: u64) -> Result<(), Fail> {
     let payee = stored.sender();
     let app_id = stored.message().from.app_id;
     if !matches!(stored.body(), Body::PrivatePaymentList(_)) {
@@ -1639,8 +1640,8 @@ fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Result<()
     // Over a divergent record its user hasn't confirmed, or while a list kept over it waits
     // to be written, the list is kept, and written once the user confirms (Paykit spec 6).
     if let Some(held) = cx.record(&target)? {
-        if crate::divergent::step_write_waits(cx, &held, stored, &|_| None)? {
-            return crate::divergent::step_keep(cx, &held, stored, &|_| None, true);
+        if crate::divergent::step_write_waits(cx, &held, stored, seq, &|_| None)? {
+            return crate::divergent::step_keep(cx, &held, stored, seq, &|_| None, true);
         }
     }
     let held = match cx.record(&target)?.map(|r| r.content) {
@@ -1962,7 +1963,7 @@ impl Paykit {
         }
         // A newer list over a divergent record its user hasn't confirmed stays held (Paykit
         // spec 6).
-        if Box::pin(self.divergent_write_waits(&record_key, &list)).await? {
+        if Box::pin(self.divergent_write_waits(&record_key, &list, None)).await? {
             return Ok(());
         }
         let held = match self
@@ -2059,7 +2060,7 @@ impl Paykit {
             held.push((kept.order()?, rest, kept));
         }
         held.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-        for ((_, intake), rest, kept) in held {
+        for (order, rest, kept) in held {
             // Read bound to its key, as a restore reads it: a message that fails it is a
             // corrupt store, so the receive fails rather than drop, give up or place it.
             let reply = kept.stored(&own)?;
@@ -2067,7 +2068,7 @@ impl Paykit {
             // An Allowance's answer kept before its record (`allowances.rs`): the first
             // placed is the record's response, and a different later one conflicts with it.
             if crate::allowances::is_allowance_response(reply.body()) {
-                Box::pin(self.place_kept_allowance_response(&kept_key, reply, intake)).await?;
+                Box::pin(self.place_kept_allowance_response(&kept_key, reply, order)).await?;
                 continue;
             }
             let (Some(role), Some(accepted_at)) =
@@ -2170,7 +2171,7 @@ impl Paykit {
                         .shared_record(&record_key)
                         .await?
                         .ok_or_else(crate::error::PaykitError::corrupt)?;
-                    Box::pin(self.keep_over_paused(&held, &reply, &kept_key)).await?;
+                    Box::pin(self.keep_over_paused(&held, &reply, order, &kept_key)).await?;
                     continue;
                 }
                 // A receipt goes into the payer's record it names, which now reads, and a
@@ -2178,7 +2179,8 @@ impl Paykit {
                 Some(_) if matches!(reply.body(), Body::PaymentReceipt(_)) || unrequested => {
                     let mut tx = Tx::default();
                     tx.delete(&kept_key);
-                    Box::pin(self.place_note(&target, role, false, reply.clone(), tx)).await?
+                    Box::pin(self.place_note(&target, role, false, reply.clone(), order, tx))
+                        .await?
                 }
                 Some(record) => {
                     // Every message kept but a receipt and a proof without a request names its
@@ -2195,8 +2197,15 @@ impl Paykit {
                             tx.delete(&kept_key);
                             // The write goes on the heap, as `receive`'s steps do: it nests
                             // deep.
-                            Box::pin(self.place_note(&into, role, creates, reply.clone(), tx))
-                                .await?
+                            Box::pin(self.place_note(
+                                &into,
+                                role,
+                                creates,
+                                reply.clone(),
+                                order,
+                                tx,
+                            ))
+                            .await?
                         }
                         // Invalid against its request, or details the payer doesn't store:
                         // dropped, as at receive.
@@ -2216,7 +2225,8 @@ impl Paykit {
                 None => {
                     let mut tx = Tx::default();
                     tx.delete(&kept_key);
-                    Box::pin(self.place_note(&target, role, false, reply.clone(), tx)).await?
+                    Box::pin(self.place_note(&target, role, false, reply.clone(), order, tx))
+                        .await?
                 }
             };
             if crate::stored::later_write(placed, accepted_at, self.service_time())
