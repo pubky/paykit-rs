@@ -6293,3 +6293,221 @@ async fn test_allowances_acceptance_kept_through_a_stop_after_every_commit_place
         "a stop between the keep and the placement leaves the acceptance kept"
     );
 }
+
+/// Alice's app `name`, joined now, writes a value that doesn't read at her record of bob's
+/// Allowance `id`, as a faulty own app could; then her `phone`, joined after it, reads only
+/// now and holds that value. Returns the phone.
+async fn phone_over_a_value_that_doesnt_read(w: &World, id: &paykit_lib::AllowanceId) -> Paykit {
+    let both = || AppScopes::new().pay().allowance().build().unwrap();
+    let mut tool = Box::pin(alice_app(w, "fixer", both())).await;
+    Box::pin(writes_value(&mut tool, w, id, Some(NOT_A_RECORD))).await;
+    let mut phone = Box::pin(alice_app(w, "phone", both())).await;
+    phone.receive(None).await.unwrap();
+    phone
+}
+
+/// `app` writes `value` (`None`: a delete) at alice's record of bob's Allowance `id`.
+async fn writes_value(
+    app: &mut Paykit,
+    w: &World,
+    id: &paykit_lib::AllowanceId,
+    value: Option<&[u8]>,
+) {
+    let target = allowances_target(&w.bob_id(), id);
+    app.app_mut().read_record(&target).await.unwrap();
+    let op = app
+        .app_mut()
+        .record_op(&target, value, Vec::new())
+        .await
+        .unwrap();
+    app.app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+}
+
+/// A value that doesn't read as an Allowance record.
+const NOT_A_RECORD: &[u8] = b"{\"not\":\"an allowance record\"}";
+
+#[tokio::test]
+async fn test_allowances_answer_over_a_held_record_never_dropped_for_the_bounds() {
+    // In one read, bob's acceptance of alice's proposal, then 64 of his answers to
+    // Allowances the wallet holds no record of, kept before their records, then his
+    // rejection of the proposal. The acceptance, kept to write over the record the wallet
+    // holds, is under no bound: the 64 drop none of it, so the rejection conflicts with it,
+    // and the acceptance is the response (Paykit spec 8.1, 8.3).
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(wallet(&w)).await;
+    let (mine, proposal, id) = Box::pin(recorded_proposal_of(&w, &mut shop, &mut wallet)).await;
+    answers_with_id(
+        &w,
+        &wallet,
+        "paykit.allowance_acceptance",
+        &proposal,
+        &id,
+        SENT_FIRST,
+    );
+    for i in 0..paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER {
+        send(
+            &w,
+            &w.bob,
+            "shop",
+            &w.alice,
+            wallet.app_id(),
+            "paykit.allowance_acceptance",
+            vec![[u8::try_from(i + 1).unwrap(); 32]],
+            json!({ "allowance_id": format!("d0efffb7-191b-4709-b6c7-{i:012x}") }),
+        );
+    }
+    answers_with_id(
+        &w,
+        &wallet,
+        "paykit.allowance_rejection",
+        &proposal,
+        &id,
+        SORTS_FIRST,
+    );
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        Box::pin(response_and_conflicted(&w, &wallet, &mine)).await,
+        (Some(SENT_FIRST.to_owned()), Some(SORTS_FIRST.to_owned()))
+    );
+}
+
+#[tokio::test]
+async fn test_allowances_stored_answer_ranks_before_a_later_answer_of_one_millisecond() {
+    // Bob's acceptance comes while alice's phone holds her record as a value that doesn't
+    // read: the client stores its entry and tries it again at each read, before the feed.
+    // The phone writes the record readable again, and bob's rejection comes in the same
+    // millisecond, under the `msg_id` that sorts first. The rejection never takes the
+    // response of the stored acceptance its inbox accepted first: it is kept as the
+    // conflict's stop at once, and once the acceptance is written it is the response and
+    // the rejection its `conflicted` (Paykit spec 8.1, 8.3).
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(wallet(&w)).await;
+    let (mine, proposal, id) = Box::pin(recorded_proposal_of(&w, &mut shop, &mut wallet)).await;
+    let written = serde_json::to_vec(&Box::pin(value(&wallet, &mine)).await).unwrap();
+    let mut phone = Box::pin(phone_over_a_value_that_doesnt_read(&w, &id)).await;
+    answers_with_id(
+        &w,
+        &phone,
+        "paykit.allowance_acceptance",
+        &proposal,
+        &id,
+        SENT_FIRST,
+    );
+    let got = phone.receive(None).await.unwrap();
+    assert!(stored_locally(&got), "{got:?}");
+    assert!(!received(&got, "paykit.allowance_acceptance"), "{got:?}");
+    Box::pin(writes_value(&mut phone, &w, &id, Some(&written))).await;
+    answers_with_id(
+        &w,
+        &phone,
+        "paykit.allowance_rejection",
+        &proposal,
+        &id,
+        SORTS_FIRST,
+    );
+    phone.receive(None).await.unwrap();
+    assert_eq!(
+        phone.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Conflicted
+    );
+    for _ in 0..3 {
+        phone.receive(None).await.unwrap();
+    }
+    assert_eq!(
+        Box::pin(response_and_conflicted(&w, &phone, &mine)).await,
+        (Some(SENT_FIRST.to_owned()), Some(SORTS_FIRST.to_owned()))
+    );
+}
+
+#[tokio::test]
+async fn test_allowances_retried_answers_keep_the_feed_positions_they_were_read_at() {
+    // Bob's acceptance and then his rejection come in one millisecond and one read, the
+    // rejection under the `msg_id` that sorts first, while alice's phone holds her record as
+    // a value that doesn't read: the client stores both entries. Once the phone writes the
+    // record readable again, the client tries them again, each with the `seq` it was read
+    // at: the acceptance, accepted first, is the response, and the rejection conflicts with
+    // it (Paykit spec 8.1, 8.3).
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(wallet(&w)).await;
+    let (mine, proposal, id) = Box::pin(recorded_proposal_of(&w, &mut shop, &mut wallet)).await;
+    let written = serde_json::to_vec(&Box::pin(value(&wallet, &mine)).await).unwrap();
+    let mut phone = Box::pin(phone_over_a_value_that_doesnt_read(&w, &id)).await;
+    for (kind, msg_id) in [
+        ("paykit.allowance_acceptance", SENT_FIRST),
+        ("paykit.allowance_rejection", SORTS_FIRST),
+    ] {
+        answers_with_id(&w, &phone, kind, &proposal, &id, msg_id);
+    }
+    let got = phone.receive(None).await.unwrap();
+    assert!(stored_locally(&got), "{got:?}");
+    assert!(!received(&got, "paykit.allowance_acceptance"), "{got:?}");
+    assert!(!received(&got, "paykit.allowance_rejection"), "{got:?}");
+    Box::pin(writes_value(&mut phone, &w, &id, Some(&written))).await;
+    for _ in 0..3 {
+        phone.receive(None).await.unwrap();
+    }
+    assert_eq!(
+        Box::pin(response_and_conflicted(&w, &phone, &mine)).await,
+        (Some(SENT_FIRST.to_owned()), Some(SORTS_FIRST.to_owned()))
+    );
+}
+
+#[tokio::test]
+async fn test_allowances_rejection_kept_to_write_stops_the_consent_at_once() {
+    // Alice's wallet, an executor too, holds a consent for her proposal. Bob's rejection's
+    // write is refused, so it stays kept to write: the receive step removed the consent for
+    // good, and a consent held again meanwhile, as a restore may bring back, isn't consented
+    // while the rejection is kept. Once it is written, the Allowance is rejected.
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(alice_app(
+        &w,
+        "wallet",
+        AppScopes::new()
+            .pay()
+            .allowance()
+            .allowance_execute()
+            .build()
+            .unwrap(),
+    ))
+    .await;
+    let (mine, proposal, id) = Box::pin(recorded_proposal_of(&w, &mut shop, &mut wallet)).await;
+    Box::pin(consent(&mut wallet, &mine)).await;
+    assert!(wallet.allowance(&mine).await.unwrap().consented);
+    answers_with_id(
+        &w,
+        &wallet,
+        "paykit.allowance_rejection",
+        &proposal,
+        &id,
+        SORTS_FIRST,
+    );
+    fail_writes_with(&w, 1, pubky_switch_core::http::ErrorCode::TooLarge);
+    wallet.receive(None).await.unwrap();
+    assert!(Box::pin(keeps(&wallet, b"pr/", SORTS_FIRST)).await);
+    assert_eq!(
+        Box::pin(response_and_conflicted(&w, &wallet, &mine)).await,
+        (None, None)
+    );
+    assert_eq!(
+        Box::pin(consent_entry(&wallet, &mine)).await,
+        Some(json!({ "removed": { "reason": "rejected" } }))
+    );
+    Box::pin(consent(&mut wallet, &mine)).await;
+    assert!(!wallet.allowance(&mine).await.unwrap().consented);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        Box::pin(response_and_conflicted(&w, &wallet, &mine)).await,
+        (Some(SORTS_FIRST.to_owned()), None)
+    );
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Rejected
+    );
+}

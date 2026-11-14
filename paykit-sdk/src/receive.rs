@@ -816,8 +816,8 @@ fn ordered(kept: &KeptMessage) -> Result<crate::records::KeptOrder, Fail> {
 /// and not while sends to it are held (`marks.rs`). When the client won't forget the pair
 /// now, the stop stays kept and the bounds are over by one for this step. The new stop,
 /// accepted at `new`, counts among its sender's: when it is the one the bounds would drop,
-/// a stored entry tried again after later ones were kept, it is kept one over the bound and
-/// nothing goes.
+/// a stored entry tried again after later ones were kept, it is kept over the bound, by one
+/// for each such stop, and nothing goes.
 ///
 /// One that is left out no longer counts again from then on, which can put its sender past
 /// the bound: the loop drops back to it. A new stop is reached here only once its own side's
@@ -1794,8 +1794,8 @@ pub(crate) type CountedReply = ([u8; 32], crate::records::KeptOrder);
 /// holding the most, a tie going against the lower sender identity. The new reply counts
 /// among its sender's: when it was accepted before the one so picked, it is that sender's
 /// earliest, and it can't be dropped as one never processed, since the step's outcome
-/// writes its pair, so it is kept, one over the bound, and nothing goes. `None` while there
-/// is room, and then.
+/// writes its pair, so it is kept over the bound, by one for each such reply, and nothing
+/// goes. `None` while there is room, and then.
 pub(crate) fn kept_reply_evicted(
     kept: &[CountedReply],
     sender: &[u8; 32],
@@ -1846,6 +1846,33 @@ pub(crate) fn make_room_for_reply(
         let (reply, _) = kept_with_time(cx, &kept)?;
         counted.push((ordered(&kept)?, reply, name));
     }
+    // The earliest Allowance answer kept for each Allowance record the app holds is under
+    // no bound: it is the one that takes the record's response once placed, and dropping it
+    // would let a later different answer of its sender take the response instead (Paykit
+    // spec 8.1, 8.3). One per held record, so at most as many as the app holds Allowance
+    // records; each goes when it is placed, at the end of the read that keeps it, or when
+    // its write is given up.
+    let mut exempt: std::collections::BTreeMap<[u8; 32], (crate::records::KeptOrder, String)> =
+        std::collections::BTreeMap::new();
+    for (order, reply, name) in &counted {
+        if !crate::allowances::is_allowance_response(reply.body()) {
+            continue;
+        }
+        let Some(crate::state::StateKey::KeptReply { record, .. }) =
+            crate::state::StateKey::parse(name.as_bytes())
+        else {
+            return Err(Fail::corrupt());
+        };
+        let content = cx.record_at(&record)?.map(|held| held.content);
+        if !holds_record(content.as_ref()) {
+            continue;
+        }
+        let first = exempt.entry(record).or_insert((*order, name.clone()));
+        if *order < first.0 {
+            *first = (*order, name.clone());
+        }
+    }
+    counted.retain(|(_, _, name)| !exempt.values().any(|(_, exempt)| exempt == name));
     counted.sort_by_key(|(order, ..)| *order);
     let mut kept = Vec::new();
     let mut names = Vec::new();

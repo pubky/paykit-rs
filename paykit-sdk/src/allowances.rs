@@ -601,7 +601,7 @@ pub(crate) fn receive_effect(
             // placed once the record is held (Paykit spec 8.1).
             Held::None => {
                 if receive::admits_new_state(cx, &sender, scopes)? {
-                    keep_answer(cx, &target, stored, seq)?;
+                    keep_answer(cx, &target, stored, seq, false)?;
                 }
                 Ok(())
             }
@@ -617,18 +617,38 @@ pub(crate) fn receive_effect(
 /// ([`receive::make_room_for_reply`]) and with the feed `seq` it was read at, which orders it
 /// among them and among the stored entries ([`crate::records::KeptOrder`]). One kept already
 /// is read bound to its key and stays as it is. Admission is the caller's.
+///
+/// Over a record the app holds (`over_held`), the earliest Allowance answer kept for that
+/// record is under no bound ([`receive::make_room_for_reply`]): it is the one that would
+/// take the record's response, and the bounds dropping it would let a later different
+/// answer of its sender take the response instead. So when this answer is that earliest
+/// one, no room is made for it.
 fn keep_answer(
     cx: &mut ReceiveContext<'_>,
     target: &RecordTarget,
     stored: &StoredMessage,
     seq: u64,
+    over_held: bool,
 ) -> std::result::Result<(), Fail> {
     let sender = stored.sender();
     let record = cx.record_key(target)?;
     let kept = key::kept_reply(&sender, &record, &stored.message().msg_id);
     if state::cx_get::<KeptMessage>(cx, &kept)?.is_none() {
         let order = (stored.accepted_at().ok_or_else(Fail::corrupt)?, seq);
-        receive::make_room_for_reply(cx, &sender, order)?;
+        let earliest = over_held && {
+            let mut earlier = false;
+            for (_, other) in
+                state::cx_scan::<KeptMessage>(cx, &key::kept_reply(&sender, &record, ""))?
+            {
+                let answer = other.stored(&cx.identity()).map_err(|_| Fail::corrupt())?;
+                let at = other.order().map_err(|_| Fail::corrupt())?;
+                earlier |= is_allowance_response(answer.body()) && at < order;
+            }
+            !earlier
+        };
+        if !earliest {
+            receive::make_room_for_reply(cx, &sender, order)?;
+        }
         receive::keep_local(cx, receive::local(&kept, &KeptMessage::taken(stored, seq))?);
     }
     Ok(())
@@ -725,7 +745,7 @@ fn put_placed(
         && record.response.is_none()
         && !reflects(&record, &stored.message().msg_id)
     {
-        keep_answer(cx, target, stored, seq)?;
+        keep_answer(cx, target, stored, seq, true)?;
         if matches!(stored.body(), Body::AllowanceRejection(_))
             && scopes.iter().any(|s| s == "allowance_execute")
         {
@@ -750,7 +770,7 @@ fn put_placed(
             if crate::divergent::step_write_waits(cx, &held, stored, seq, &|_| None)? {
                 return match stored.body() {
                     Body::AllowanceProposal(_) => stored_entry(cx, stored),
-                    _ => keep_answer(cx, target, stored, seq),
+                    _ => keep_answer(cx, target, stored, seq, false),
                 };
             }
         }
@@ -1845,8 +1865,9 @@ impl Paykit {
     }
 
     /// Whether this app keeps a rejection from `counterparty` of the Allowance at `record`
-    /// to write (`pr/`), not yet in the record: the receive step keeps every answer it takes
-    /// for the placement after the read, and a rejection is a stop from when it is kept.
+    /// to write (`pr/`), not yet in the record: the receive step keeps every answer that
+    /// would take the record's empty response for the placement after the read, and a
+    /// rejection is a stop from when it is kept.
     async fn rejection_kept(&self, record: &[u8; 32], counterparty: &[u8; 32]) -> Result<bool> {
         let own = self.identity();
         for (_, kept) in
