@@ -1847,11 +1847,12 @@ pub(crate) fn make_room_for_reply(
         counted.push((ordered(&kept)?, reply, name));
     }
     // The earliest Allowance answer kept for each Allowance record the app holds is under
-    // no bound: it is the one that takes the record's response once placed, and dropping it
-    // would let a later different answer of its sender take the response instead (Paykit
-    // spec 8.1, 8.3). One per held record, so at most as many as the app holds Allowance
-    // records; each goes when it is placed, at the end of the read that keeps it, or when
-    // its write is given up.
+    // no bound, and so is the earliest kept for one the app holds deleted, which another own
+    // app may record again: it is the one that takes the record's response once placed, and
+    // dropping it would let a later different answer of its sender take the response
+    // instead (Paykit spec 8.1, 8.3). One per record the copy holds, as a value or a delete,
+    // so at most as many as those records; each goes when it is placed, or when it is given
+    // up at its 30 days.
     let mut exempt: std::collections::BTreeMap<[u8; 32], (crate::records::KeptOrder, String)> =
         std::collections::BTreeMap::new();
     for (order, reply, name) in &counted {
@@ -1863,8 +1864,7 @@ pub(crate) fn make_room_for_reply(
         else {
             return Err(Fail::corrupt());
         };
-        let content = cx.record_at(&record)?.map(|held| held.content);
-        if !holds_record(content.as_ref()) {
+        if cx.record_at(&record)?.is_none() {
             continue;
         }
         let first = exempt.entry(record).or_insert((*order, name.clone()));

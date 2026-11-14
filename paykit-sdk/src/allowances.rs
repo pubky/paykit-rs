@@ -599,9 +599,11 @@ pub(crate) fn receive_effect(
             // proposal another own app sent whose record this app hasn't read yet: kept,
             // as new state the spam rule gates, within the bounds on kept replies, and
             // placed once the record is held (Paykit spec 8.1).
+            // Over a record held deleted, the earliest kept is under no bound, as over one
+            // held ([`keep_answer`]).
             Held::None => {
                 if receive::admits_new_state(cx, &sender, scopes)? {
-                    keep_answer(cx, &target, stored, seq, false)?;
+                    keep_answer(cx, &target, stored, seq, deleted)?;
                 }
                 Ok(())
             }
@@ -618,8 +620,8 @@ pub(crate) fn receive_effect(
 /// among them and among the stored entries ([`crate::records::KeptOrder`]). One kept already
 /// is read bound to its key and stays as it is. Admission is the caller's.
 ///
-/// Over a record the app holds (`over_held`), the earliest Allowance answer kept for that
-/// record is under no bound ([`receive::make_room_for_reply`]): it is the one that would
+/// Over a record the app holds, or holds deleted (`over_held`), the earliest Allowance
+/// answer kept for that record is under no bound ([`receive::make_room_for_reply`]): it is the one that would
 /// take the record's response, and the bounds dropping it would let a later different
 /// answer of its sender take the response instead. So when this answer is that earliest
 /// one, no room is made for it.
@@ -742,6 +744,7 @@ fn put_placed(
     // app holding `allowance_execute` removes the Allowance from its consent list for good
     // in this commit, and [`Paykit::consents`] refuses payment while the rejection is kept.
     if is_allowance_response(stored.body())
+        && stored.sender() == record.proposal.message().to
         && record.response.is_none()
         && !reflects(&record, &stored.message().msg_id)
     {
