@@ -750,7 +750,7 @@ impl Paykit {
         self.refresh_own()?;
         self.records_known().await?;
         self.require_pay()?;
-        self.app.may_attempt(false).map_err(not_now)?;
+        self.may_attempt(false).map_err(not_now)?;
         self.refuse_while_payer_pass_owed().await?;
         let (target, record) = self.payer_request(request).await?;
         let (stored, body) = request_of(&record).ok_or(Refusal::NotFound)?;
@@ -946,6 +946,7 @@ impl Paykit {
             record_held: false,
             transfer_bound: Some(bound),
             failed_on_claim: false,
+            receipted: false,
             allowance_id: under
                 .as_ref()
                 .map(|u| u.allowance.allowance_id.as_str().to_owned()),
@@ -987,7 +988,7 @@ impl Paykit {
         self.refresh_own()?;
         self.records_known().await?;
         self.require_pay()?;
-        self.app.may_attempt(false).map_err(not_now)?;
+        self.may_attempt(false).map_err(not_now)?;
         self.refuse_while_payer_pass_owed().await?;
         let options = payment.options;
         // A payment to a blocked payee is made only once the user confirms it (Paykit spec
@@ -1066,6 +1067,7 @@ impl Paykit {
             record_held: false,
             transfer_bound: Some(bound),
             failed_on_claim: false,
+            receipted: false,
             allowance_id: None,
         };
         self.execute(Plan {
@@ -2683,6 +2685,10 @@ impl Paykit {
         if paid && self.entry_allowance(entry).await?.is_err() {
             return Err(PaykitError::corrupt());
         }
+        // After a `409` on a batch carrying the ledger's write, the outcome goes on its claim
+        // alone: the Allowance record or the ledger may have changed in a way only the next
+        // read of the feed shows, and the outcome never waits for it. A later write copies it.
+        let mut with_ledger = true;
         for _ in 0..OUTCOME_TRIES {
             // A batch kept from before may have been applied since: it finished the entry.
             // Read bound to its key and to the entry's claim: a value of another attempt or
@@ -2739,6 +2745,19 @@ impl Paykit {
             if let Some(write) = record_write {
                 batch = batch.entry(write);
             }
+            // The executor writes the attempt's outcome into its ledger entry in the batch
+            // that records it (Paykit spec 8.3, "Outcomes in the ledger"): a payment made as
+            // `done`, and `failed` only where this batch writes it `failed` as the attempt's
+            // owner. Without a ledger it builds on, the outcome goes on its claim alone.
+            let ledger = if with_ledger {
+                Box::pin(self.ledger_outcome_write(entry, paid, step.is_some())).await?
+            } else {
+                None
+            };
+            let applied_ledger = ledger.as_ref().map(|l| (l.record_key, l.ledger.clone()));
+            if let Some(ledger) = ledger {
+                batch = batch.entry(ledger.write);
+            }
             let mut finished = entry.clone();
             // An acceptance still owed keeps the entry where a resume visits it: the outcome
             // is written, the acceptance not yet sent or placed.
@@ -2765,6 +2784,9 @@ impl Paykit {
             match self.app.submit_batch(batch).await {
                 Ok(_) => {
                     *entry = finished;
+                    if let Some((record, ledger)) = applied_ledger {
+                        self.executor_applied(record, ledger).await?;
+                    }
                     return Ok(Written::Done);
                 }
                 // A repair builds on the version the user saw: one changed since is read
@@ -2777,7 +2799,18 @@ impl Paykit {
                 }
                 Err(error) if error.code() == Some(ErrorCode::Conflict) => {
                     entry.step = None;
+                    with_ledger &= applied_ledger.is_none();
                     self.app.read_record(&target.record_target()).await?;
+                }
+                // Any other refusal of a batch carrying the ledger's write, applied nowhere:
+                // the outcome goes on its claim alone at the next try.
+                Err(error)
+                    if applied_ledger.is_some()
+                        && with_ledger
+                        && error.kept_batch().is_none()
+                        && error.code().is_some() =>
+                {
+                    with_ledger = false;
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -3124,6 +3157,12 @@ impl Paykit {
         if self.holds("pay") && !payer_waits {
             out.extend(self.recheck_failed().await?);
         }
+        // The outcomes the claims show go into the ledgers this app executes, before the
+        // journal entries that show own payments made are pruned (Paykit spec 8.3,
+        // "Outcomes in the ledger"); not while the payer's side waits for its keys.
+        if self.holds("pay") && !payer_waits {
+            Box::pin(self.record_ledger_outcomes()).await?;
+        }
         self.prune_journal().await?;
         // Last, after every payment's own work: what can't be delivered now stays queued.
         let _ = self.app.flush_outbox().await;
@@ -3191,8 +3230,10 @@ impl Paykit {
     ///
     /// What a later reconcile, a restore's included, needs stays: every entry still open
     /// or owing its acceptance, one whose dispatch the payment method reported failed while
-    /// its history may still show it paid, and one paid after `failed` was written, whose
-    /// receipt the user is told about. A bound passes as [`bound_passed`] says. An entry's
+    /// its history may still show it paid, one paid after `failed` was written, whose
+    /// receipt the user is told about, and a payment made under an Allowance this app
+    /// executes whose kept ledger version doesn't show it paid yet
+    /// ([`Paykit::journal_decides_ledger`]). A bound passes as [`bound_passed`] says. An entry's
     /// acknowledged notices go with it.
     ///
     /// Two of those have no bound of their own: a payment made after `failed` was written
@@ -3213,6 +3254,11 @@ impl Paykit {
                 continue;
             };
             if bound_passed(bound, service, now) {
+                // A payment made under an Allowance stays while its ledger entry doesn't
+                // show it paid: the journal is what writes it `done` there.
+                if Box::pin(self.journal_decides_ledger(&entry)).await? {
+                    continue;
+                }
                 let attempt = entry.attempt()?;
                 tx.delete(&key::journal(&attempt));
                 // Its acknowledged notices go with it; one not acknowledged stays for the
@@ -3778,7 +3824,7 @@ impl Paykit {
             .is_ok();
         // An alarm or a restore question raised during any await holds the payment back
         // (Switch spec 10.1, 12.4).
-        let clear = self.app.may_attempt(by == Initiator::Automatic).is_ok()
+        let clear = self.may_attempt(by == Initiator::Automatic).is_ok()
             && destination
             && self.payee_copy_usable(payee, Need::of(&carrier), by, confirmed)
             && self.own_identity_fresh()
@@ -3872,7 +3918,7 @@ impl Paykit {
         refresh: bool,
         repeat: bool,
     ) -> Result<std::result::Result<PeerIdentity, Held>> {
-        if let Err(refusal) = self.app.may_attempt(by == Initiator::Automatic) {
+        if let Err(refusal) = self.may_attempt(by == Initiator::Automatic) {
             return Ok(Err(Held::Check(Refusal::NotNow(refusal.to_string()))));
         }
         if self.payer_pass_owed().await? {

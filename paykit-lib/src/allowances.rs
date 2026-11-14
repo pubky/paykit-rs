@@ -919,6 +919,22 @@ impl Ledger {
     fn spent_scaled(&self) -> u128 {
         self.spent.as_ref().map_or(0, Decimal::scaled)
     }
+
+    /// The length of the value [`Ledger::to_json`] writes once every entry without an
+    /// outcome has one, the longer `failed`: a ledger that fits this way can take each of
+    /// its attempts' outcomes later, as no other write of an outcome grows it
+    /// ([`record_outcomes`] moves a `totals.failed` item into the totals, which is shorter).
+    ///
+    /// # Errors
+    ///
+    /// As [`Ledger::to_json`].
+    pub fn len_with_outcomes(&self) -> Result<usize> {
+        let mut resolved = self.clone();
+        for entry in &mut resolved.entries {
+            entry.outcome.get_or_insert(EntryOutcome::Failed);
+        }
+        Ok(resolved.to_json()?.len())
+    }
 }
 
 /// What an attempt's claim shows (Paykit wire 5.5 "Counting", Switch wire 6.8).
@@ -1278,6 +1294,62 @@ pub fn compact(terms: &AllowanceTerms, ledger: &Ledger, now: u64) -> Result<Opti
         failed,
         unknown: ledger.unknown.clone(),
     }))
+}
+
+/// "Outcomes written" (Paykit spec 8.3, Paykit wire 5.5): the outcomes the claims in
+/// `claims` show, written into the ledger. An entry whose claim shows `done` becomes `done`,
+/// over none or `failed`; one without an outcome whose claim shows `failed` by the attempt's
+/// owner becomes `failed`; a `failed` by another app writes nothing, since only the user's
+/// release frees it. A `totals.failed` item whose claim shows `done` moves into `spent` and
+/// `count`, once. A claim gone, or one that doesn't hold the attempt, writes nothing: such an
+/// entry counts as spent where it has no outcome, and its outcome stays where it has one.
+///
+/// Each move is one "From one version to the next" allows, and the ledger written counts
+/// the same as `ledger` does with `claims` at every time: an entry that counted spent or
+/// released by its claim counts so by its own outcome.
+///
+/// Returns `None` when nothing changes.
+///
+/// # Errors
+///
+/// [`Error::Invalid`] for a ledger that isn't valid against the terms, or a sum that
+/// overflows.
+pub fn record_outcomes(
+    terms: &AllowanceTerms,
+    ledger: &Ledger,
+    claims: &HashMap<AttemptId, ClaimState>,
+) -> Result<Option<Ledger>> {
+    ledger.check_valid(terms)?;
+    let mut next = ledger.clone();
+    let mut changed = false;
+    for entry in &mut next.entries {
+        let outcome = match (entry.outcome, claims.get(&entry.attempt_id)) {
+            (None | Some(EntryOutcome::Failed), Some(ClaimState::Done)) => EntryOutcome::Done,
+            (None, Some(ClaimState::Failed { by_owner: true })) => EntryOutcome::Failed,
+            _ => continue,
+        };
+        entry.outcome = Some(outcome);
+        changed = true;
+    }
+    let mut spent = next.spent_scaled();
+    let mut kept = Vec::with_capacity(next.failed.len());
+    for item in std::mem::take(&mut next.failed) {
+        if claims.get(&item.attempt_id) == Some(&ClaimState::Done) {
+            spent = add(spent, item.value.scaled())?;
+            next.count = next.count.checked_add(1).ok_or_else(overflow)?;
+            changed = true;
+        } else {
+            kept.push(item);
+        }
+    }
+    next.failed = kept;
+    if !changed {
+        return Ok(None);
+    }
+    if spent != ledger.spent_scaled() {
+        next.spent = Some(Decimal::from_scaled(spent));
+    }
+    Ok(Some(next))
 }
 
 /// "From one version to the next" (Paykit spec 8.3, Paykit wire 5.5): a reader that holds
@@ -2025,6 +2097,201 @@ mod tests {
         let mut back = before.clone();
         back.entries[0].outcome = Some(EntryOutcome::Failed);
         assert!(check_successor(&terms, &before, &back, now).is_err());
+    }
+
+    /// Terms with a rolling 30-day limit and a lifetime limit, so compaction is judged on a
+    /// period limit and the total.
+    fn rolling_terms() -> AllowanceTerms {
+        AllowanceTerms::from_json(&with_limits(json!([{ "amount_limit": "0.05",
+            "payment_count_limit": 4,
+            "period": { "kind": "rolling", "every": 30, "unit": "day" } }])))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_compaction_keeps_usage_for_a_period_limit_and_the_lifetime_limit() {
+        let terms = rolling_terms();
+        let before = ledger(vec![
+            entry(
+                1,
+                "0.01",
+                "2026-01-02T00:00:00.000Z",
+                Some(EntryOutcome::Done),
+            ),
+            entry(
+                2,
+                "0.02",
+                "2026-01-03T00:00:00.000Z",
+                Some(EntryOutcome::Failed),
+            ),
+            entry(
+                3,
+                "0.01",
+                "2026-01-04T00:00:00.000Z",
+                Some(EntryOutcome::Failed),
+            ),
+            entry(4, "0.01", "2026-01-05T00:00:00.000Z", None),
+            entry(
+                5,
+                "0.01",
+                "2026-03-01T00:00:00.000Z",
+                Some(EntryOutcome::Done),
+            ),
+            entry(6, "0.01", "2026-03-02T00:00:00.000Z", None),
+        ]);
+        let now = t("2026-03-10T00:00:00.000Z");
+        // The claim of compacted failed attempt 3 shows `done` later: it still counts, once.
+        let mut claims = HashMap::new();
+        claims.insert(AttemptId::from_bytes([3; 16]), ClaimState::Done);
+        claims.insert(AttemptId::from_bytes([4; 16]), ClaimState::Open);
+        claims.insert(AttemptId::from_bytes([6; 16]), ClaimState::Unknown);
+        let after = compact(&terms, &before, now).unwrap().unwrap();
+        // Only the final entries older than the longest period plus 60 s left.
+        let left: Vec<u8> = after
+            .entries
+            .iter()
+            .map(|e| e.attempt_id.to_bytes()[0])
+            .collect();
+        assert_eq!(left, vec![4, 5, 6]);
+        assert_eq!(after.count, 1);
+        assert_eq!(after.failed.len(), 2);
+        for at in [
+            now,
+            t("2026-03-20T00:00:00.000Z"),
+            t("2026-05-01T00:00:00.000Z"),
+        ] {
+            let was = usage(&terms, &before, &claims, at).unwrap();
+            let is = usage(&terms, &after, &claims, at).unwrap();
+            assert_eq!(was.lifetime(), is.lifetime(), "{at}");
+            assert_eq!(was.periods(), is.periods(), "{at}");
+            assert_eq!(
+                check_limits(&terms, &was, &Decimal::parse("0.01").unwrap()),
+                check_limits(&terms, &is, &Decimal::parse("0.01").unwrap())
+            );
+        }
+        check_successor(&terms, &before, &after, now).unwrap();
+    }
+
+    #[test]
+    fn test_compaction_leaves_entries_a_period_limit_still_counts() {
+        let terms = rolling_terms();
+        // Final, but inside the 30-day window plus 60 s at `now`: compacting it would drop it
+        // from the period's usage.
+        let before = ledger(vec![entry(
+            1,
+            "0.01",
+            "2026-02-08T00:00:00.000Z",
+            Some(EntryOutcome::Done),
+        )]);
+        let now = t("2026-03-10T00:00:00.000Z");
+        assert!(compact(&terms, &before, now).unwrap().is_none());
+        let used = usage(&terms, &before, &HashMap::new(), now).unwrap();
+        assert_eq!(used.periods()[0].count(), 1);
+    }
+
+    #[test]
+    fn test_record_outcomes_writes_what_the_claims_show() {
+        let terms = rolling_terms();
+        let mut held = ledger(vec![
+            entry(1, "0.01", "2026-03-01T00:00:00.000Z", None),
+            entry(2, "0.01", "2026-03-01T00:01:00.000Z", None),
+            entry(
+                3,
+                "0.01",
+                "2026-03-01T00:02:00.000Z",
+                Some(EntryOutcome::Failed),
+            ),
+            entry(4, "0.01", "2026-03-01T00:03:00.000Z", None),
+        ]);
+        held.failed.push(CompactedFailed {
+            obligation: [9; 32],
+            attempt_id: AttemptId::from_bytes([9; 16]),
+            value: Decimal::parse("0.02").unwrap(),
+        });
+        let mut claims = HashMap::new();
+        claims.insert(AttemptId::from_bytes([1; 16]), ClaimState::Done);
+        claims.insert(
+            AttemptId::from_bytes([2; 16]),
+            ClaimState::Failed { by_owner: true },
+        );
+        claims.insert(AttemptId::from_bytes([3; 16]), ClaimState::Done);
+        claims.insert(AttemptId::from_bytes([4; 16]), ClaimState::Open);
+        claims.insert(AttemptId::from_bytes([9; 16]), ClaimState::Done);
+        let next = record_outcomes(&terms, &held, &claims).unwrap().unwrap();
+        let outcomes: Vec<_> = next.entries.iter().map(|e| e.outcome).collect();
+        assert_eq!(
+            outcomes,
+            vec![
+                Some(EntryOutcome::Done),
+                Some(EntryOutcome::Failed),
+                Some(EntryOutcome::Done),
+                None
+            ]
+        );
+        assert!(next.failed.is_empty());
+        assert_eq!(next.count, 1);
+        assert_eq!(next.spent.as_ref().map(Decimal::as_str), Some("0.02"));
+        // It counts the same with the claims, and no longer needs them for what it wrote.
+        let at = t("2026-03-02T00:00:00.000Z");
+        let was = usage(&terms, &held, &claims, at).unwrap();
+        assert_eq!(usage(&terms, &next, &claims, at).unwrap(), was);
+        let mut open_only = HashMap::new();
+        open_only.insert(AttemptId::from_bytes([4; 16]), ClaimState::Open);
+        assert_eq!(usage(&terms, &next, &open_only, at).unwrap(), was);
+        check_successor(&terms, &held, &next, at).unwrap();
+        // Written once: the same claims again change nothing, the compacted attempt counted
+        // once in the totals.
+        assert!(record_outcomes(&terms, &next, &claims).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_record_outcomes_frees_nothing_another_app_failed_or_a_claim_gone() {
+        let terms = rolling_terms();
+        let held = ledger(vec![
+            entry(1, "0.01", "2026-03-01T00:00:00.000Z", None),
+            entry(2, "0.01", "2026-03-01T00:01:00.000Z", None),
+            entry(
+                3,
+                "0.01",
+                "2026-03-01T00:02:00.000Z",
+                Some(EntryOutcome::Done),
+            ),
+        ]);
+        let mut claims = HashMap::new();
+        claims.insert(
+            AttemptId::from_bytes([1; 16]),
+            ClaimState::Failed { by_owner: false },
+        );
+        claims.insert(
+            AttemptId::from_bytes([3; 16]),
+            ClaimState::Failed { by_owner: true },
+        );
+        // Entry 2's claim is gone: it counts as spent, and nothing is written for it; a
+        // `done` never goes back to `failed`.
+        assert!(record_outcomes(&terms, &held, &claims).unwrap().is_none());
+        let mut twice = held.clone();
+        twice.entries.push(held.entries[0].clone());
+        assert!(record_outcomes(&terms, &twice, &claims).is_err());
+    }
+
+    #[test]
+    fn test_ledger_len_with_outcomes_leaves_room_for_every_outcome() {
+        let held = ledger(vec![
+            entry(1, "0.01", "2026-03-01T00:00:00.000Z", None),
+            entry(
+                2,
+                "0.01",
+                "2026-03-01T00:01:00.000Z",
+                Some(EntryOutcome::Done),
+            ),
+        ]);
+        let room = held.len_with_outcomes().unwrap();
+        assert!(room > held.to_json().unwrap().len());
+        let mut resolved = held.clone();
+        resolved.entries[0].outcome = Some(EntryOutcome::Done);
+        assert!(resolved.to_json().unwrap().len() <= room);
+        resolved.entries[0].outcome = Some(EntryOutcome::Failed);
+        assert_eq!(resolved.to_json().unwrap().len(), room);
     }
 
     #[test]

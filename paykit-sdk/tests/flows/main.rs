@@ -17,6 +17,7 @@ mod erasure;
 mod executor;
 mod final_check;
 mod labels;
+mod ledger;
 mod local_state;
 mod mixed_versions;
 mod notices;

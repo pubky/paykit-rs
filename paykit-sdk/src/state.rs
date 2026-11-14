@@ -88,7 +88,7 @@ use crate::activity::{ActivityTarget, KeptSide};
 use crate::allowances::{allowance_target, ConsentEntry, NoticeTarget, OwedEnd};
 use crate::app_records::SeenRecords;
 use crate::error::{PaykitError, Result};
-use crate::executor::{EmptyLedgerMark, FlagConfirmed, KeptLedger};
+use crate::executor::{EmptyLedgerMark, FlagConfirmed, KeptLedger, LedgerAlarm};
 use crate::hold::HeldAnswer;
 use crate::hold::MissedHold;
 use crate::hold::OwnResendOwed;
@@ -1122,6 +1122,19 @@ impl Stored for FlagConfirmed {
     }
 }
 
+impl sealed::Sealed for LedgerAlarm {}
+
+/// An Allowance ledger's rollback found: at a generation an `identity.json` has, with the
+/// rule its ledger broke.
+impl Stored for LedgerAlarm {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::LedgerAlarm if self.generation >= 1 && !self.reason.is_empty() => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for NoticeTarget {}
 
 /// The executor app an `executor_notice` is wrapped to: of the notice's `msg_id` its key
@@ -1177,6 +1190,8 @@ pub(crate) mod key {
     pub(crate) const FLAGGED: &str = "fg";
     /// The raise of the block floor this app owes (`crate::floor`).
     pub(crate) const BLOCK_FLOOR: &str = "bf";
+    /// The rollback of an Allowance ledger this app found (`crate::executor::LedgerAlarm`).
+    pub(crate) const LEDGER_ALARM: &str = "la";
     /// The request records this read opened without `manual_only`, to check against the
     /// block floor once it is done (`crate::floor`).
     pub(crate) const FLOOR_OPENED: &str = "fo/";
@@ -1557,6 +1572,8 @@ pub(crate) enum StateKey {
     EmptyLedger([u8; 32]),
     /// `fc/<record key>`: an ignored current write the user confirmed paying under.
     FlagConfirmed([u8; 32]),
+    /// `la`: the rollback of an Allowance ledger this app found.
+    LedgerAlarm,
     /// `eo/<record key>`: this app's own crossing end, recorded while sends were held, whose
     /// message is owed.
     OwedEnd([u8; 32]),
@@ -1602,6 +1619,7 @@ impl StateKey {
             "dl" => Self::Denied,
             "fg" => Self::Flagged,
             "bf" => Self::BlockFloor,
+            "la" => Self::LedgerAlarm,
             _ => {
                 let (family, rest) = text.split_once('/')?;
                 match family {
@@ -2272,6 +2290,7 @@ mod tests {
             ),
             (key::FLAGGED.into(), StateKey::Flagged),
             (key::BLOCK_FLOOR.into(), StateKey::BlockFloor),
+            (key::LEDGER_ALARM.into(), StateKey::LedgerAlarm),
             (key::floor_opened(&pubky), StateKey::FloorOpened(pubky)),
             (
                 key::blocked_lost(&pubky, 9),

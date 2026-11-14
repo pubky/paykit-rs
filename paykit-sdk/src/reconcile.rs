@@ -408,6 +408,7 @@ impl Paykit {
             record_held: false,
             transfer_bound: None,
             failed_on_claim: false,
+            receipted: false,
             // Made under an Allowance when the request record names it and that Allowance's
             // ledger, as held, holds an entry for the attempt: its proof names the Allowance
             // then, as the executor's own would (Paykit spec 8.3 step 4).

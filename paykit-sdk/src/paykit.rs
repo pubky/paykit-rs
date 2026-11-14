@@ -302,6 +302,10 @@ pub struct Paykit {
     /// before money moves is still used (Paykit spec 4).
     pub(crate) lookups: HashMap<[u8; 32], KeptLookup>,
     pub(crate) config: PaykitConfig,
+    /// The rollback of an Allowance ledger this app found, as kept (`la`): held in memory
+    /// so every check before money moves reads it without an await
+    /// ([`Paykit::may_attempt`]).
+    pub(crate) ledger_alarm: Option<crate::executor::LedgerAlarm>,
 }
 
 impl std::fmt::Debug for Paykit {
@@ -343,6 +347,7 @@ impl Paykit {
             timer,
             lookups: HashMap::new(),
             config,
+            ledger_alarm: None,
         })
     }
 
@@ -428,6 +433,7 @@ impl Paykit {
         let protocol = Self::new_protocol(&rail);
         let app = App::load(env.clone(), protocol.clone(), config.app.clone(), app_id).await?;
         let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
+        paykit.ledger_alarm = paykit.local_get(key::LEDGER_ALARM).await?;
         // A record a view showed divergent pauses, also when a crash came before the
         // receive's events were taken (`divergent.rs`): every record held is looked at once.
         Box::pin(paykit.sweep_divergent()).await?;
@@ -490,6 +496,7 @@ impl Paykit {
         )
         .await?;
         let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
+        paykit.ledger_alarm = paykit.local_get(key::LEDGER_ALARM).await?;
         paykit.bound_restored_cursor_time().await?;
         paykit.stamp_restore_time().await?;
         Ok(paykit)

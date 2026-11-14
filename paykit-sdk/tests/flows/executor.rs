@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 
 use crate::common::{draft, request_from, ReadHook, World};
 
-fn terms_with(extra: Value) -> AllowanceTerms {
+pub(crate) fn terms_with(extra: Value) -> AllowanceTerms {
     let mut terms = json!({
         "asset": "btc",
         "per_payment_amount": { "minimum": "0.0001", "maximum": "1" },
@@ -93,7 +93,7 @@ pub(crate) async fn accepted(
 }
 
 /// An Allowance under `terms`, accepted, with the wallet as its executor.
-async fn set_up(w: &World, terms: AllowanceTerms) -> (Paykit, Paykit, [u8; 32]) {
+pub(crate) async fn set_up(w: &World, terms: AllowanceTerms) -> (Paykit, Paykit, [u8; 32]) {
     let mut shop = allowance_shop(w).await;
     let mut wallet = executor_wallet(w, "wallet").await;
     let record = accepted(w, &mut shop, &mut wallet, terms).await;
@@ -105,7 +105,12 @@ async fn set_up(w: &World, terms: AllowanceTerms) -> (Paykit, Paykit, [u8; 32]) 
 }
 
 /// Bob's request for `value` btc, received by the wallet.
-async fn request(w: &World, shop: &mut Paykit, wallet: &mut Paykit, value: &str) -> RequestRef {
+pub(crate) async fn request(
+    w: &World,
+    shop: &mut Paykit,
+    wallet: &mut Paykit,
+    value: &str,
+) -> RequestRef {
     let request = request_from(shop, w.alice_id(), draft(value, w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     request
@@ -135,12 +140,12 @@ fn not_automatic(error: &PaykitError) -> bool {
 }
 
 /// Whether `error` is the executor's refusal for the check whose rule says `why`.
-fn refused_for(error: &PaykitError, why: &str) -> bool {
+pub(crate) fn refused_for(error: &PaykitError, why: &str) -> bool {
     matches!(error.refusal(), Some(Refusal::NotAutomatic(rule)) if rule.contains(why))
 }
 
 /// The wallet's Allowance record and ledger, as it holds them.
-async fn held(wallet: &Paykit, record: &[u8; 32]) -> (AllowanceRecord, Option<Ledger>) {
+pub(crate) async fn held(wallet: &Paykit, record: &[u8; 32]) -> (AllowanceRecord, Option<Ledger>) {
     let shared = wallet.app().shared_record(record).await.unwrap().unwrap();
     let allowance =
         AllowanceRecord::read(shared.content.value().unwrap(), &wallet.identity()).unwrap();
@@ -1136,7 +1141,7 @@ async fn test_executor_pauses_under_an_ignored_write_until_the_user_confirms() {
 }
 
 /// The ledger's key at the wallet, for scripting the switch's answers to its reads.
-async fn ledger_key(wallet: &Paykit, record: &[u8; 32]) -> [u8; 32] {
+pub(crate) async fn ledger_key(wallet: &Paykit, record: &[u8; 32]) -> [u8; 32] {
     let (allowance, _) = held(wallet, record).await;
     let target = pubky_switch_client::app::RecordTarget::new(
         pubky_switch_client::app::Collection::new(
@@ -1196,6 +1201,9 @@ async fn test_executor_missing_ledger_after_its_own_ledger_write_is_usage_histor
         .await
         .unwrap_err();
     assert!(refused_for(&refused, "usage history lost"), "{refused:?}");
+    // With no version kept, a missing ledger isn't a rollback: no alarm (Paykit spec 8.3,
+    // "Last ledger version").
+    assert!(wallet.ledger_alarm().is_none());
     assert!(w.rail.all_executions().is_empty());
 }
 
@@ -1262,8 +1270,8 @@ async fn test_executor_empty_ledger_owed_after_a_kept_grant_written_before_the_f
     assert_eq!(w.record_writes(&w.alice, &key), 0);
     let paid = wallet.pay_under_allowance(&first, &record).await.unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
-    // The empty ledger, then the payment's entry.
-    assert_eq!(w.record_writes(&w.alice, &key), 2);
+    // The empty ledger, the payment's entry, then its outcome.
+    assert_eq!(w.record_writes(&w.alice, &key), 3);
     let (_, ledger) = held(&wallet, &record).await;
     assert_eq!(ledger.unwrap().entries.len(), 1);
 }
@@ -1531,11 +1539,12 @@ async fn test_executor_restored_with_an_older_ledger_version_builds_on_the_newer
 }
 
 #[tokio::test]
-async fn test_executor_missing_ledger_after_its_first_payment_write_is_usage_history_lost() {
+async fn test_executor_missing_ledger_after_its_first_payment_write_raises_the_alarm() {
     // The first grant's empty ledger is refused, so the first payment's own batch writes the
     // ledger, and money moves; that write is kept as the last version from the copy its
-    // answer leaves, with no read. The switch then answers `404` for the ledger: the
-    // executor pays nothing over the lifetime limit.
+    // answer leaves, with no read, and the payment's outcome goes into it. The switch then
+    // answers `404` for the ledger: against the version kept that is a rollback (Paykit spec
+    // 8.3, "Last ledger version"), so the executor raises the alarm and pays nothing.
     let w = World::new();
     let mut shop = allowance_shop(&w).await;
     let mut wallet = executor_wallet(&w, "wallet").await;
@@ -1568,7 +1577,8 @@ async fn test_executor_missing_ledger_after_its_first_payment_write_is_usage_his
         });
     let paid = wallet.pay_under_allowance(&first, &record).await.unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
-    assert_eq!(w.record_writes(&w.alice, &key), 1);
+    // The payment's batch and its outcome's.
+    assert_eq!(w.record_writes(&w.alice, &key), 2);
     assert_eq!(wallet.app().protocol_scan(b"lv/").await.unwrap().len(), 1);
     w.alice
         .switch()
@@ -1582,7 +1592,8 @@ async fn test_executor_missing_ledger_after_its_first_payment_write_is_usage_his
         .pay_under_allowance(&second, &record)
         .await
         .unwrap_err();
-    assert!(refused_for(&refused, "usage history lost"), "{refused:?}");
+    assert!(crate::ledger::is_rollback(&refused), "{refused:?}");
+    assert!(wallet.ledger_alarm().is_some());
     assert_eq!(w.rail.all_executions().len(), 1);
 }
 

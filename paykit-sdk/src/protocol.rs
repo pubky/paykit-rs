@@ -367,6 +367,15 @@ pub(crate) fn restore_paykit_layer(
             // spec 8.3, "A grant implies a ledger"). A user's confirmation of an ignored write
             // isn't restored either: a restore asks the user to confirm again.
             StateKey::EmptyLedger(_) | StateKey::FlagConfirmed(_) => continue,
+            // A ledger rollback found is restored: the evidence of the service's misbehaviour
+            // stays, and the app makes no new attempt at that generation (Paykit spec 8.3,
+            // "Last ledger version"; Switch spec 10.1).
+            StateKey::LedgerAlarm => {
+                state::restored::<crate::executor::LedgerAlarm>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
             // An own crossing end owed while sends were held isn't restored: the restore queues
             // the record's own end again itself, under the same gate (`hold.rs`,
             // `queue_own_again`).

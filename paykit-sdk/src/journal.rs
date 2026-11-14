@@ -302,6 +302,11 @@ pub(crate) struct JournalEntry {
     /// "What a payment method declares").
     #[serde(default)]
     pub(crate) failed_on_claim: bool,
+    /// The payee's receipt of this payment reached this app, for a payment made under an
+    /// Allowance: the attempt is `done` by evidence, so its ledger entry is written `done`
+    /// over a `failed`, also once the claim is gone and the receipt can't settle it there
+    /// (Paykit spec 8.3, "`failed` isn't final").
+    pub(crate) receipted: bool,
     /// The Allowance an executor pays the request under, which its proof names (Paykit spec
     /// 8.3 step 4); `None` for a payment the user made.
     pub(crate) allowance_id: Option<String>,

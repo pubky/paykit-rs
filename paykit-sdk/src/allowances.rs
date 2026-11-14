@@ -493,7 +493,7 @@ fn status(record: &AllowanceRecord, stopped: bool, conflict: bool) -> AllowanceS
 
 /// The record key the consent list's entry `ac/<rest>` is kept under, read whole and
 /// strictly: any other key is corrupt state.
-fn consent_record(rest: &str) -> Result<[u8; 32]> {
+pub(crate) fn consent_record(rest: &str) -> Result<[u8; 32]> {
     match crate::state::StateKey::parse(format!("{}{rest}", key::CONSENTS).as_bytes()) {
         Some(crate::state::StateKey::Consent(record)) => Ok(record),
         _ => Err(PaykitError::corrupt()),

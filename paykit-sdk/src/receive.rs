@@ -1803,14 +1803,38 @@ pub(crate) struct ReceiptSettles {
 ///
 /// The client's refusal of the claim operation as built.
 pub(crate) fn receipt_settles(claim: &ReceiptClaim<'_>) -> Result<ReceiptSettles, AppError> {
+    // A payment made under an Allowance is marked received in its entry, whatever its
+    // claim shows: the executor writes its ledger entry `done` from it (Paykit spec 8.3,
+    // "`failed` isn't final").
+    let receipted = claim
+        .journaled
+        .clone()
+        .filter(|entry| entry.allowance_id.is_some() && !entry.receipted)
+        .map(|mut entry| {
+            entry.receipted = true;
+            entry
+        });
     let waiting = claim
         .journaled
         .clone()
         .filter(|entry| entry.failed_on_claim)
         .map(|mut entry| {
             entry.failed_on_claim = false;
+            entry.receipted |= entry.allowance_id.is_some();
             entry
         });
+    let out = receipt_settles_claim(claim, waiting)?;
+    Ok(ReceiptSettles {
+        received: out.received.or(receipted),
+        ..out
+    })
+}
+
+/// [`receipt_settles`] for the claim and a payment waiting for its receipt.
+fn receipt_settles_claim(
+    claim: &ReceiptClaim<'_>,
+    waiting: Option<JournalEntry>,
+) -> Result<ReceiptSettles, AppError> {
     let gone = claim.view.is_none_or(|view| {
         view.deadline.is_some_and(|deadline| {
             claim
