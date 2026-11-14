@@ -24,7 +24,7 @@ pub(crate) fn is_rollback(error: &PaykitError) -> bool {
         if matches!(client.unkept(), AppError::Alarm(Alarm::Rollback { .. })))
 }
 
-fn ledger_target(allowance: &AllowanceRecord) -> RecordTarget {
+pub(crate) fn ledger_target(allowance: &AllowanceRecord) -> RecordTarget {
     RecordTarget::new(
         pubky_switch_client::app::Collection::new(
             "allowance_ledgers",

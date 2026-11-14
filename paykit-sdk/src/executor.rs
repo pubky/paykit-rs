@@ -28,6 +28,12 @@
 //! - **Compaction:** once the ledger nears the record's size limit, the executor batch
 //!   compacts it before adding its entry, and a ledger that can't take the entry even then,
 //!   with room for every outcome, pays nothing automatically.
+//! - **After a confirmation:** a ledger the executor doesn't accept (refused by a check of
+//!   policy, missing or deleted, at its key before the first grant, or past a version kept at
+//!   an earlier generation) is written again once its user confirms the figures shown
+//!   ([`Paykit::ledger_repair`], [`Paykit::confirm_ledger_repair`]): a merge that never
+//!   counts less of the version kept, what the ledger shown adds, the journal's attempts and
+//!   the claims'. A rollback isn't repaired.
 //! - **Paying under an Allowance:** the executor's checks (the Allowance record read now,
 //!   its grant, the consent list, the stops, the holds, the deny list read now, the
 //!   occurrence's record, the block floor, the terms and the limits at the service's time),
@@ -72,8 +78,9 @@
 use std::collections::HashMap;
 
 use paykit_lib::allowances::{
-    check_limits, check_successor_since, compact, record_outcomes, usage, AllowanceTerms,
-    ClaimState, EntryOutcome, Ledger, LedgerEntry,
+    check_limits, check_successor, check_successor_since, compact, merge_for_repair,
+    record_outcomes, usage, AllowanceTerms, ClaimState, EntryOutcome, Ledger, LedgerEntry,
+    PeriodUsage,
 };
 use paykit_lib::bodies::{Body, ExecutorNotice, NoticeReason, PaymentRequest, ProposerRole};
 use paykit_lib::collections::Collection;
@@ -85,7 +92,7 @@ use paykit_lib::{AllowanceId, AttemptId, PaymentAmount, PaymentEndpointIdentifie
 use pubky_switch_client::app::{
     Initiator, OpBatch, RecordContent, RecordRead, RecordTarget, SharedRecord, UserConfirmed,
 };
-use pubky_switch_core::claims::Outcome;
+use pubky_switch_core::claims::{ClaimView, Outcome};
 use pubky_switch_core::enc::{serde_b64, serde_b64_vec};
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::ops::{Condition, OpKind, RecordVersion, SignedOp};
@@ -304,6 +311,160 @@ impl LedgerClaims {
     fn both(&mut self, attempt: AttemptId, state: ClaimState) {
         self.usage.insert(attempt, state);
         self.outcomes.insert(attempt, state);
+    }
+}
+
+/// Why a ledger is refused while its version kept is of an earlier generation than the
+/// service now serving (Paykit spec 8.3, "Last ledger version").
+const EARLIER_GENERATION: &str = "the ledger kept is of an earlier generation than the service's";
+
+/// How long after the service time it states the repair's ledger write may be applied:
+/// `server_time_in(at, at + 60 s)`, as an executor batch's (Paykit wire 5.5).
+const REPAIR_WINDOW_MS: u64 = paykit_lib::allowances::ENTRY_WINDOW_MS;
+
+/// What the executor makes of the ledger the switch shows (`Paykit::ledger_shown`).
+enum LedgerShown {
+    /// One it builds on, kept as the last version; `None` for the absence the first grant's
+    /// executor takes as an empty ledger.
+    Accepted(Option<Ledger>),
+    /// One it doesn't accept: the Allowance pays nothing automatically until its user
+    /// confirms a repair (Paykit spec 8.3, "After a confirmation").
+    Unaccepted {
+        /// The rule, without content.
+        why: String,
+        /// What the switch shows of it.
+        content: ShownContent,
+    },
+}
+
+/// The content of a ledger the executor doesn't accept, as a repair takes it.
+enum ShownContent {
+    /// A value that reads as a ledger and binds to its Allowance.
+    Ledger(Box<Ledger>),
+    /// None: a ledger missing or deleted, or a value that doesn't read as the Allowance's
+    /// ledger or never opens. For a write the client refused, which it hands without
+    /// content, what is shown is the copy the app trusts.
+    Nothing,
+    /// A value not open for now, its scope key not held yet: what it adds can't be told.
+    Unknown,
+}
+
+fn unaccepted(why: &str, content: ShownContent) -> LedgerShown {
+    LedgerShown::Unaccepted {
+        why: why.into(),
+        content,
+    }
+}
+
+/// The claims one computation reads, each once ([`Paykit::claim_view`]): what each shows,
+/// `None` for one the switch doesn't hold.
+#[derive(Default)]
+struct ClaimReads {
+    views: std::collections::BTreeMap<[u8; 32], Option<ClaimView>>,
+}
+
+impl ClaimReads {
+    /// Each claim read, by its key, with the step it showed.
+    fn steps(&self) -> Vec<([u8; 32], Option<u64>)> {
+        self.views
+            .iter()
+            .map(|(key, view)| (*key, view.as_ref().map(|v| v.step)))
+            .collect()
+    }
+}
+
+/// What a ledger repair was built from (Paykit spec 8.3, "After a confirmation"): its
+/// confirmation writes the ledger only while each is as it was shown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RepairBasis {
+    /// The Allowance record version read, which the write is conditioned on.
+    record_version: RecordVersion,
+    /// The ledger version kept and its write's item hash, if any.
+    kept: Option<(RecordVersion, [u8; 32])>,
+    /// The ledger version the write builds on (its `expected_version`): the write shown, a
+    /// refused write's version, or none for a ledger absent.
+    built_on: RecordVersion,
+    /// The item hash of the ledger write the app holds, if any.
+    shown_item: Option<[u8; 32]>,
+    /// The journal's attempts under the Allowance.
+    journal: Vec<[u8; 16]>,
+    /// The counterparty's payer records read, by key, with their versions.
+    records: RecordsRead,
+    /// Every claim read, by key, with the step it showed.
+    claims: Vec<([u8; 32], Option<u64>)>,
+}
+
+/// Records read, by key, with the version of each.
+type RecordsRead = Vec<([u8; 32], RecordVersion)>;
+
+/// A repair of an Allowance ledger the executor didn't accept (Paykit spec 8.3, "After a
+/// confirmation"), as [`Paykit::ledger_repair`] computes it: the figures the host shows its
+/// user, counted over the ledger the repair writes at the service time `at_ms`, and, held
+/// inside, the ledger itself and what it was built from. Once the user has seen the
+/// figures, [`Paykit::confirm_ledger_repair`] writes exactly that ledger, or refuses with
+/// the figures computed then if anything it was built from changed.
+///
+/// The ledger is a merge that never counts less: the last version the executor accepted, as
+/// it was; what the ledger shown adds to it; every attempt the journal holds under the
+/// Allowance; and every attempt of an app the grant history names that the claims of the
+/// counterparty's obligations show, unless the attempt's owner failed it or the payment's
+/// proof names no Allowance or another one
+/// ([`paykit_lib::allowances::merge_for_repair`]).
+#[derive(Clone, PartialEq, Eq)]
+pub struct LedgerRepair {
+    /// The Allowance record's key.
+    pub allowance: [u8; 32],
+    /// Why the executor didn't accept the ledger shown: the rule, without content.
+    pub reason: String,
+    /// The service time the figures are counted at.
+    pub at_ms: u64,
+    /// Each period limit's usage, its amount and its count of payments, in the order of the
+    /// terms' `period_limits`.
+    pub periods: Vec<PeriodUsage>,
+    /// The lifetime amount: compacted totals, entries reserved and spent, and compacted
+    /// failed attempts whose claim shows `done`.
+    pub lifetime: paykit_lib::Decimal,
+    /// The entries reserved: an attempt open or `unknown`, or `failed` by an app other than
+    /// its owner.
+    pub reserved: u64,
+    /// The entries spent: paid, or whose claim is gone.
+    pub spent: u64,
+    /// The entries released: `failed` by their owner, or released by the user.
+    pub released: u64,
+    /// The amounts held reserved because an app other than the attempt's owner wrote it
+    /// `failed`: only the user's release frees one ([`Paykit::release_allowance_attempt`]).
+    pub reserved_by_other_apps: Vec<ReservedByOtherApp>,
+    basis: RepairBasis,
+    ledger: Vec<u8>,
+}
+
+impl std::fmt::Debug for LedgerRepair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LedgerRepair")
+            .field("reason", &self.reason)
+            .field("at_ms", &self.at_ms)
+            .field("periods", &self.periods)
+            .field("lifetime", &self.lifetime)
+            .field("reserved", &self.reserved)
+            .field("spent", &self.spent)
+            .field("released", &self.released)
+            .field("reserved_by_other_apps", &self.reserved_by_other_apps)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Whether `record`'s proof is of `attempt` and names no Allowance or another one than
+/// `allowance`: the payment wasn't made under it (Paykit spec 8.3, "After a confirmation").
+fn proof_names_another(
+    record: &ActivityRecord,
+    attempt: &AttemptId,
+    allowance: &AllowanceId,
+) -> bool {
+    match record.proof.as_ref().map(|proof| proof.body()) {
+        Some(Body::PaymentProof(proof)) if proof.attempt_id == *attempt => {
+            proof.allowance_id.as_ref() != Some(allowance)
+        }
+        _ => false,
     }
 }
 
@@ -1382,12 +1543,28 @@ impl Paykit {
 
     /// The ledger the executor builds on (Paykit spec 8.3, "Building on a version accepts
     /// it"), read from the switch now and checked; `None` for the absence the executor of
-    /// the first grant takes as an empty ledger, until it has written one.
+    /// the first grant takes as an empty ledger, until it has written one. A ledger it
+    /// doesn't accept is refused, naming the rule, and pays nothing until its user confirms
+    /// a repair ([`Paykit::ledger_repair`]).
     async fn ledger_base(&mut self, under: &Under) -> Result<Option<Ledger>> {
+        match self.ledger_shown(under).await? {
+            LedgerShown::Accepted(ledger) => Ok(ledger),
+            LedgerShown::Unaccepted { why, .. } => Err(not_automatic(&why)),
+        }
+    }
+
+    /// What the executor makes of the ledger the switch shows now (Paykit spec 8.3, "Last
+    /// ledger version", "Building on a version accepts it", "A grant implies a ledger"): one
+    /// it builds on, which it then keeps as the last version, or one it doesn't accept, with
+    /// what the switch shows of it. A rollback raises the alarm and is the error, as are a
+    /// read that fails or isn't of the switch now, a ledger divergent or seen so and not
+    /// confirmed, and a write the app doesn't hold: none of them is repaired.
+    async fn ledger_shown(&mut self, under: &Under) -> Result<LedgerShown> {
         let own = self.identity();
         let target = ledger_target(&under.allowance.counterparty, &under.allowance.allowance_id);
         let ledger_key = self.app.record_key(&target)?;
         let kept = self.kept_ledger(&under.record_key).await?;
+        let generation = self.app.own_identity().generation();
         let shared = match self.app.read_record_fresh(&target).await? {
             RecordRead::Fresh(shared) => Some(shared),
             RecordRead::Kept {
@@ -1403,10 +1580,12 @@ impl Paykit {
                             && held.version >= kept.version()
                     });
                     if !deleted_since {
+                        if kept.generation != generation {
+                            return Ok(unaccepted(EARLIER_GENERATION, ShownContent::Nothing));
+                        }
                         return Err(self
                             .raise_ledger_alarm(
                                 &under.record_key,
-                                kept.generation,
                                 "is missing against the version kept",
                             )
                             .await);
@@ -1414,6 +1593,13 @@ impl Paykit {
                 }
                 None
             }
+            // The switch's current write is one the client refused (Switch spec 8.2): the copy
+            // the app trusts is held, the refused write's content isn't, and the app's next
+            // write builds on the refused write's version.
+            RecordRead::Kept {
+                record: Some(shared),
+                reason: pubky_switch_client::app::KeptReason::Refused,
+            } if shared.flagged => Some(shared),
             RecordRead::Kept {
                 reason: pubky_switch_client::app::KeptReason::Unreachable(why),
                 ..
@@ -1429,15 +1615,23 @@ impl Paykit {
             // journal, not one restored from a backup, shows the empty ledger not yet sent,
             // takes the absence as empty (Paykit spec 8.3).
             if kept.is_none() && first_grant && self.empty_ledger_unsent(&under.record_key).await? {
-                return Ok(None);
+                return Ok(LedgerShown::Accepted(None));
             }
-            return Err(not_automatic("usage history lost: the ledger is missing"));
+            return Ok(unaccepted(
+                "usage history lost: the ledger is missing",
+                ShownContent::Nothing,
+            ));
         };
+        let content = self.shown_content(under, &shared, &ledger_key)?;
         if shared.divergent || shared.flagged || shared.doubtful {
             // The view is taken first, so a ledger divergent now is marked, and stays paused
-            // until the user confirms it, also once a newer write clears the view.
-            self.pause_of(&shared).await?;
-            return Err(not_automatic("the ledger is divergent or untrusted"));
+            // until the user confirms it, also once a newer write clears the view. A write
+            // refused or doubtful but not divergent is one the executor doesn't accept.
+            let paused = self.pause_of(&shared).await?.blocks_automatic();
+            if shared.divergent || paused {
+                return Err(not_automatic("the ledger is divergent or untrusted"));
+            }
+            return Ok(unaccepted("the ledger is divergent or untrusted", content));
         }
         if self.pause_of(&shared).await?.blocks_automatic() {
             return Err(not_automatic(
@@ -1459,60 +1653,55 @@ impl Paykit {
                 _ => return Err(PaykitError::corrupt()),
             };
             if item != kept.item_hash && built_on < kept.version() {
+                if kept.generation != generation {
+                    return Ok(unaccepted(EARLIER_GENERATION, content));
+                }
                 return Err(self
                     .raise_ledger_alarm(
                         &under.record_key,
-                        kept.generation,
                         "shown is neither the version kept nor built on it",
                     )
                     .await);
             }
         }
         if written_by_removed_app(self.app.own_identity(), &shared) {
-            return Err(not_automatic(
+            return Ok(unaccepted(
                 "the ledger's write is a removed app's after its distrust_from",
+                content,
             ));
         }
-        let value = match &shared.content {
-            RecordContent::Value(value) if !value.is_empty() => value.clone(),
-            _ => {
-                return Err(not_automatic(
-                    "usage history lost: the ledger is deleted or unread",
+        let ledger = match content {
+            ShownContent::Ledger(ledger) => *ledger,
+            other => {
+                return Ok(unaccepted(
+                    match &shared.content {
+                        RecordContent::Value(value) if !value.is_empty() => {
+                            "the ledger doesn't bind to its Allowance"
+                        }
+                        _ => "usage history lost: the ledger is deleted or unread",
+                    },
+                    other,
                 ))
             }
         };
-        // The binding rule (Paykit wire 5.5): the key derives from the ledger's own
-        // counterparty and Allowance, and both are its Allowance record's.
-        let ledger = Ledger::from_json(&value)
-            .ok()
-            .filter(|l| {
-                l.counterparty == under.allowance.counterparty
-                    && l.allowance_id == under.allowance.allowance_id
-            })
-            .ok_or_else(|| not_automatic("the ledger doesn't bind to its Allowance"))?;
-        if self
-            .app
-            .record_key(&ledger_target(&ledger.counterparty, &ledger.allowance_id))?
-            != ledger_key
-        {
-            return Err(not_automatic("the ledger doesn't bind to its Allowance"));
-        }
         // A ledger that was at its key at the first grant is one the executor didn't accept
         // (Paykit spec 8.3, "A grant implies a ledger"), whoever wrote it.
         if kept.is_none() && self.ledger_unaccepted(&under.record_key).await? {
-            return Err(not_automatic(
+            return Ok(unaccepted(
                 "the ledger at its key before the first grant isn't one this executor accepted",
+                ShownContent::Ledger(Box::new(ledger)),
             ));
         }
-        written_by_executor(
+        if let Err(why) = written_by_executor(
             &under.allowance,
             &own,
             &under.record_key,
             under.version,
             &op,
             shared.writer,
-        )
-        .map_err(not_automatic)?;
+        ) {
+            return Ok(unaccepted(why, ShownContent::Ledger(Box::new(ledger))));
+        }
         // An executor that never held a ledger version, such as a new executor after a
         // handoff that never read the ledger, or one restored from a backup that holds none,
         // builds on the write shown once it passes every other check, and keeps it from then
@@ -1529,21 +1718,60 @@ impl Paykit {
                     .written_at_ms
                     .or(self.service_time())
                     .ok_or_else(|| not_automatic("no service time verified"))?;
-                check_successor_since(&under.terms, held, kept.written_at, &ledger, at).map_err(
-                    |error| match error {
+                if let Err(error) =
+                    check_successor_since(&under.terms, held, kept.written_at, &ledger, at)
+                {
+                    let why = match error {
                         paykit_lib::Error::Invalid(why) if why.contains("too many periods") => {
-                            not_automatic("too many periods since the version kept to judge it")
+                            "too many periods since the version kept to judge it"
                         }
-                        _ => not_automatic("the ledger counts less than the version kept"),
-                    },
-                )?;
+                        _ => "the ledger counts less than the version kept",
+                    };
+                    return Ok(unaccepted(why, ShownContent::Ledger(Box::new(ledger))));
+                }
             }
         }
-        ledger
-            .check_valid(&under.terms)
-            .map_err(|_| not_automatic("the ledger isn't valid"))?;
+        if ledger.check_valid(&under.terms).is_err() {
+            return Ok(unaccepted(
+                "the ledger isn't valid",
+                ShownContent::Ledger(Box::new(ledger)),
+            ));
+        }
         self.keep_ledger(&under.record_key, &ledger_key).await?;
-        Ok(Some(ledger))
+        Ok(LedgerShown::Accepted(Some(ledger)))
+    }
+
+    /// What `shared`, the ledger record of `under` at `ledger_key`, shows for a repair: a
+    /// value that reads as a ledger and binds to its Allowance (Paykit wire 5.5, "Binding"),
+    /// else nothing, or unknown while the value isn't open for now. A ledger that reads but
+    /// isn't valid is shown as it reads: the repair leaves out what isn't of the terms.
+    fn shown_content(
+        &self,
+        under: &Under,
+        shared: &SharedRecord,
+        ledger_key: &[u8; 32],
+    ) -> Result<ShownContent> {
+        let value = match &shared.content {
+            RecordContent::Value(value) => value,
+            RecordContent::Unreadable(pubky_switch_client::app::Unopened::KeyNotHeld {
+                ..
+            }) => return Ok(ShownContent::Unknown),
+            _ => return Ok(ShownContent::Nothing),
+        };
+        let Some(ledger) = Ledger::from_json(value).ok().filter(|l| {
+            l.counterparty == under.allowance.counterparty
+                && l.allowance_id == under.allowance.allowance_id
+        }) else {
+            return Ok(ShownContent::Nothing);
+        };
+        if self
+            .app
+            .record_key(&ledger_target(&ledger.counterparty, &ledger.allowance_id))?
+            != *ledger_key
+        {
+            return Ok(ShownContent::Nothing);
+        }
+        Ok(ShownContent::Ledger(Box::new(ledger)))
     }
 
     /// The executor's batch beyond the `attempt` (Paykit spec 8.3 steps 2 and 3): usage
@@ -1718,6 +1946,16 @@ impl Paykit {
     /// A read that fails is the error: never taken as a claim gone, which counts as spent,
     /// or as one that releases.
     async fn ledger_claims(&mut self, ledger: &Ledger) -> Result<LedgerClaims> {
+        self.ledger_claims_from(ledger, &mut ClaimReads::default())
+            .await
+    }
+
+    /// [`Paykit::ledger_claims`], each claim read once into `reads`.
+    async fn ledger_claims_from(
+        &mut self,
+        ledger: &Ledger,
+        reads: &mut ClaimReads,
+    ) -> Result<LedgerClaims> {
         let mut out = LedgerClaims::default();
         let open: Vec<([u8; 32], AttemptId, Option<EntryOutcome>)> = ledger
             .entries
@@ -1741,8 +1979,8 @@ impl Paykit {
                 out.both(attempt_id, ClaimState::Done);
                 continue;
             }
-            let shown = match self.app.read_claim(&obligation).await? {
-                Some(read) => claim_state(&read.view, &attempt_id),
+            let shown = match self.claim_view(reads, &obligation).await? {
+                Some(view) => claim_state(&view, &attempt_id),
                 None => None,
             };
             if let Some(state) = shown {
@@ -1772,6 +2010,21 @@ impl Paykit {
             }
         }
         Ok(out)
+    }
+
+    /// The claim of `obligation` as the switch shows it, read once into `reads`: `None` for
+    /// one the switch doesn't hold. A read that fails is the error.
+    async fn claim_view(
+        &mut self,
+        reads: &mut ClaimReads,
+        obligation: &[u8; 32],
+    ) -> Result<Option<ClaimView>> {
+        if let Some(view) = reads.views.get(obligation) {
+            return Ok(view.clone());
+        }
+        let view = self.app.read_claim(obligation).await?.map(|read| read.view);
+        reads.views.insert(*obligation, view.clone());
+        Ok(view)
     }
 
     /// This app's copies of its payer records of `counterparty`'s one-time requests that
@@ -2154,26 +2407,405 @@ impl Paykit {
         Ok((under, ledger))
     }
 
+    /// The repair of the ledger of the Allowance at `allowance`, which the executor doesn't
+    /// accept (Paykit spec 8.3, "After a confirmation"): the figures the host shows its user
+    /// before asking to confirm it, computed over the ledger the repair would write. Nothing
+    /// is written. The user's confirmation goes to [`Paykit::confirm_ledger_repair`] with
+    /// the repair returned here.
+    ///
+    /// A ledger refused by a check of policy (its writer, the ledger rules, a write the
+    /// client refused or a removed app's), a missing or deleted ledger ("usage history
+    /// lost"), one at its key before the first grant, and one whose version kept is of an
+    /// earlier generation are repaired. A rollback isn't: the alarm holds every attempt.
+    /// Only the current executor repairs, and only an Allowance it may otherwise pay under
+    /// ([`Paykit::pay_under_allowance`]'s checks of the Allowance): after a restore, its
+    /// user confirms the Allowance again first ([`Paykit::confirm_allowance_again`]), and
+    /// the repair's confirmation stands for that of the ledger alone.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::ScopeMissing`] without `paykit_allowance_execute`; [`Refusal::NotNow`] while
+    /// a rollback alarm stands, the records aren't listed, the ledger shown or a payer record
+    /// of the counterparty can't be opened; [`Refusal::Usage`] for a ledger the executor
+    /// accepts, which needs no repair; [`Refusal::NotAutomatic`] for an Allowance this app
+    /// isn't the current executor of or doesn't pay under now, naming the check, and for a
+    /// ledger divergent or seen so and not confirmed; [`Refusal::SwitchUnavailable`] when
+    /// the switch can't be read now; the Allowance's own refusals as
+    /// [`Paykit::pay_under_allowance`] gives them; the client's errors, a claim that can't be
+    /// read among them: no figures come from a partial read.
+    pub async fn ledger_repair(&mut self, allowance: &[u8; 32]) -> Result<LedgerRepair> {
+        Box::pin(async move {
+            self.refresh_own()?;
+            self.records_known().await?;
+            self.require_executor()?;
+            self.repair_of(allowance).await
+        })
+        .await
+    }
+
+    /// Write, as its user confirmed, the ledger repair `repair` of the Allowance at
+    /// `allowance`, which [`Paykit::ledger_repair`] returned and the host showed (Paykit spec
+    /// 8.3, "After a confirmation"). The repair is computed again first: if anything it was
+    /// built from changed since, nothing is written and the refusal carries the repair
+    /// computed now, whose figures the user confirms in turn. Otherwise exactly that ledger
+    /// is written, in one batch conditioned on the Allowance record version read, on the
+    /// ledger record at the version shown or its absence, and on the service time, as an
+    /// executor batch's ledger write is. Once applied it is kept as the last ledger version,
+    /// the first grant's mark of a ledger the executor didn't accept goes with it, and the
+    /// executor pays under the Allowance again. A write kept unanswered returns `Ok` and goes
+    /// with the app's next write or read; the Allowance pays nothing until it lands, and then
+    /// the executor takes it, its own write, as the ledger shown.
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::ledger_repair`]; [`Refusal::Usage`] for a repair of another Allowance;
+    /// [`Refusal::LedgerRepairChanged`] when what it was built from changed, the switch's
+    /// `409` included; [`Refusal::NotAutomatic`] when the device clock and the service's
+    /// differ by more than the tolerance; the client's errors.
+    pub async fn confirm_ledger_repair(
+        &mut self,
+        allowance: &[u8; 32],
+        repair: &LedgerRepair,
+        confirmed: UserConfirmed,
+    ) -> Result<()> {
+        let _ = confirmed;
+        Box::pin(async move {
+            self.refresh_own()?;
+            self.records_known().await?;
+            self.require_executor()?;
+            if repair.allowance != *allowance {
+                return Err(Refusal::Usage(
+                    "Paykit spec 8.3: the ledger repair is another Allowance's".into(),
+                )
+                .into());
+            }
+            let now = self.repair_of(allowance).await?;
+            if now.basis != repair.basis || now.ledger != repair.ledger {
+                return Err(Refusal::LedgerRepairChanged(Box::new(now)).into());
+            }
+            let at = self
+                .service_time()
+                .ok_or_else(|| not_automatic("no service time verified"))?;
+            if self.now().abs_diff(at) > CLOCK_TOLERANCE_MS {
+                return Err(not_automatic(
+                    "the device clock and the service's differ by more than the tolerance",
+                ));
+            }
+            let held = self
+                .held_allowance(allowance)
+                .await?
+                .ok_or(Refusal::NotFound)?;
+            let lt = ledger_target(&held.counterparty, &held.allowance_id);
+            let write = self
+                .app
+                .record_op(
+                    &lt,
+                    Some(&now.ledger),
+                    vec![
+                        Condition::RecordVersion {
+                            key: *allowance,
+                            version: now.basis.record_version,
+                        },
+                        Condition::ServerTimeIn {
+                            start: Some(at),
+                            end: Some(at.saturating_add(REPAIR_WINDOW_MS)),
+                        },
+                    ],
+                )
+                .await?;
+            // The write builds on the ledger version shown, or on its absence: the
+            // compare-and-swap of its `expected_version` (Switch spec 10.3).
+            match &write.1 {
+                OpKind::RecordPut(put) if put.expected_version == now.basis.built_on => {}
+                OpKind::RecordPut(_) => {
+                    return Err(PaykitError::Conflict("the ledger changed meanwhile".into()))
+                }
+                _ => return Err(PaykitError::corrupt()),
+            }
+            // The pause the repair lifts goes with the write, committed once the switch
+            // applies it, a kept batch that lands later included, and never if it is
+            // refused: the first grant's mark of a ledger the executor didn't accept (Paykit
+            // spec 8.3, "A grant implies a ledger"). Every other refusal of the ledger is
+            // judged again on the write shown, which the repair's write then is.
+            let lifted = pubky_switch_client::app::LocalWrite::Delete {
+                key: key::empty_ledger(allowance).into_bytes(),
+            };
+            match self
+                .app
+                .submit_batch(OpBatch::new().entry(write).local(lifted))
+                .await
+            {
+                Ok(_) => self.keep_own_ledger(allowance, &lt).await,
+                Err(error) if error.kept_batch().is_some() => Ok(()),
+                Err(error) if error.code() == Some(ErrorCode::Conflict) => {
+                    self.app.read_record(&lt).await?;
+                    let again = self.repair_of(allowance).await?;
+                    Err(Refusal::LedgerRepairChanged(Box::new(again)).into())
+                }
+                Err(error) => Err(error.into()),
+            }
+        })
+        .await
+    }
+
+    /// The repair of the ledger of the Allowance at `record`, read and computed now
+    /// ([`Paykit::ledger_repair`]).
+    async fn repair_of(&mut self, record: &[u8; 32]) -> Result<LedgerRepair> {
+        if self.ledger_alarm_active().is_some() || self.app.alarm().is_some() {
+            return Err(Refusal::NotNow(
+                "Paykit spec 8.3: a rollback alarm stands; no ledger is repaired while it holds"
+                    .into(),
+            )
+            .into());
+        }
+        let under = self.allowance_gate(record, true).await??;
+        let (reason, content) =
+            match self.ledger_shown(&under).await? {
+                LedgerShown::Accepted(_) => return Err(Refusal::Usage(
+                    "Paykit spec 8.3: the executor accepts the ledger shown; it needs no repair"
+                        .into(),
+                )
+                .into()),
+                LedgerShown::Unaccepted { why, content } => (why, content),
+            };
+        let shown = match content {
+            ShownContent::Ledger(ledger) => Some(*ledger),
+            ShownContent::Nothing => None,
+            ShownContent::Unknown => {
+                return Err(Refusal::NotNow(
+                    "Paykit spec 8.3: the ledger shown can't be opened yet, so what it adds can't be told"
+                        .into(),
+                )
+                .into())
+            }
+        };
+        let lt = ledger_target(&under.allowance.counterparty, &under.allowance.allowance_id);
+        let ledger_key = self.app.record_key(&lt)?;
+        let kept = self.kept_ledger(record).await?;
+        let shown_item = match self.held_op(&ledger_key).await? {
+            Some(op) => Some(op.item_hash().map_err(|_| PaykitError::corrupt())?),
+            None => None,
+        };
+        let mut reads = ClaimReads::default();
+        let journal = self.journal_attempts_under(record, &mut reads).await?;
+        let (records, claimed) = self.claimed_attempts_under(&under, &mut reads).await?;
+        let at = self
+            .service_time()
+            .ok_or_else(|| not_automatic("no service time verified"))?;
+        let base = kept.as_ref().map_or_else(
+            || {
+                Ledger::empty(
+                    under.allowance.counterparty,
+                    under.allowance.allowance_id.clone(),
+                )
+            },
+            |(_, ledger)| ledger.clone(),
+        );
+        let merged = merge_for_repair(&under.terms, &base, shown.as_ref(), &journal, &claimed)
+            .map_err(|_| not_automatic("the repair's ledger can't be counted"))?;
+        // Never a ledger that counts less than the version kept: the merge keeps every one
+        // of its entries and items, so it is that version's successor at any time.
+        if let Some((_, held)) = &kept {
+            check_successor(&under.terms, held, &merged, at)
+                .map_err(|_| not_automatic("the repair would count less than the version kept"))?;
+        }
+        let ledger = merged.to_json()?;
+        if ledger.len() > MAX_LEDGER_VALUE {
+            return Err(not_automatic("the repair's ledger doesn't fit its record"));
+        }
+        // The version the write would build on, as the client builds it.
+        let built_on = match self.app.record_op(&lt, Some(&ledger), Vec::new()).await?.1 {
+            OpKind::RecordPut(put) => put.expected_version,
+            _ => return Err(PaykitError::corrupt()),
+        };
+        let claims = self.ledger_claims_from(&merged, &mut reads).await?;
+        let used = usage(&under.terms, &merged, &claims.usage, at)
+            .map_err(|_| not_automatic("usage can't be counted"))?;
+        let reserved_by_other_apps = merged
+            .entries
+            .iter()
+            .filter(|e| {
+                e.outcome.is_none()
+                    && claims.usage.get(&e.attempt_id)
+                        == Some(&ClaimState::Failed { by_owner: false })
+            })
+            .map(|e| ReservedByOtherApp {
+                attempt_id: e.attempt_id,
+                value: e.value.clone(),
+            })
+            .collect();
+        let mut journal_ids: Vec<[u8; 16]> =
+            journal.iter().map(|e| e.attempt_id.to_bytes()).collect();
+        journal_ids.sort_unstable();
+        Ok(LedgerRepair {
+            allowance: *record,
+            reason,
+            at_ms: at,
+            periods: used.periods().to_vec(),
+            lifetime: used.lifetime().clone(),
+            reserved: used.reserved(),
+            spent: used.spent(),
+            released: used.released(),
+            reserved_by_other_apps,
+            basis: RepairBasis {
+                record_version: under.version,
+                kept: kept.map(|(kept, _)| (kept.version(), kept.item_hash)),
+                built_on,
+                shown_item,
+                journal: journal_ids,
+                records,
+                claims: reads.steps(),
+            },
+            ledger,
+        })
+    }
+
+    /// The attempts this app's journal holds under the Allowance at `record`, as ledger
+    /// entries (Paykit spec 8.3, "After a confirmation"): each with its amount, dated by its
+    /// claim's `opened_at` where the claim, read into `reads`, shows it, else by when it was
+    /// journaled, before its batch went.
+    async fn journal_attempts_under(
+        &mut self,
+        record: &[u8; 32],
+        reads: &mut ClaimReads,
+    ) -> Result<Vec<LedgerEntry>> {
+        let mut out = Vec::new();
+        for entry in self.journal().await? {
+            let Some(allowance_id) = entry.allowance()? else {
+                continue;
+            };
+            if self
+                .app
+                .record_key(&allowance_target(&entry.payee, &allowance_id))?
+                != *record
+            {
+                continue;
+            }
+            let attempt = entry.attempt()?;
+            let amount = entry.amount.amount()?;
+            let view = self.claim_view(reads, &entry.obligation).await?;
+            let at = view
+                .as_ref()
+                .and_then(|view| view.attempt(&attempt.to_bytes()))
+                .map_or(entry.journaled_at_ms, |shown| shown.opened_at);
+            out.push(LedgerEntry {
+                obligation: entry.obligation,
+                attempt_id: attempt,
+                value: amount.value,
+                asset: amount.asset,
+                at,
+                outcome: None,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The attempts of an app the grant history of `under` names that the claims of the
+    /// counterparty's obligations show, read into `reads`, as ledger entries (Paykit spec
+    /// 8.3, "After a confirmation"; Paykit wire 5.5): every one-time request of this app's
+    /// payer records from the counterparty in the Allowance's asset, and every Billing Period
+    /// of a recurring one that may have an open attempt (`attempted_periods`), each attempt
+    /// with the request's amount and its `opened_at`, but one its owner failed and one whose
+    /// proof names no Allowance or another one. With them, the payer records read, by key and
+    /// version.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::NotNow`] for a payer record that can't be read: which counterparty's it is
+    /// can't be told, so neither can the attempts. The client's errors.
+    async fn claimed_attempts_under(
+        &mut self,
+        under: &Under,
+        reads: &mut ClaimReads,
+    ) -> Result<(RecordsRead, Vec<LedgerEntry>)> {
+        let own = self.identity();
+        let counterparty = under.allowance.counterparty;
+        let owners: Vec<[u8; 16]> = under
+            .allowance
+            .grants
+            .iter()
+            .map(|entry| entry.grant.app_id)
+            .collect();
+        let unread = || -> PaykitError {
+            Refusal::NotNow(
+                "Paykit spec 8.3: a payer record can't be read, so the counterparty's claims can't be told"
+                    .into(),
+            )
+            .into()
+        };
+        let mut records = Vec::new();
+        let mut out = Vec::new();
+        for held in self
+            .app
+            .records_of(Collection::PayerActivity.name())
+            .await?
+        {
+            let value = match &held.content {
+                RecordContent::Deleted => continue,
+                RecordContent::Value(value) => value,
+                RecordContent::Unreadable(_) => return Err(unread()),
+            };
+            let record =
+                crate::activity::read(Some(value), &own, paykit_lib::records::ActivitySide::Payer)
+                    .ok_or_else(unread)?;
+            if record.counterparty != counterparty {
+                continue;
+            }
+            records.push((held.key, held.version));
+            let Some((stored, body)) = crate::requests::request_of(&record) else {
+                continue;
+            };
+            if body.amount.asset != under.terms.asset {
+                continue;
+            }
+            let hash = stored.hash();
+            let periods = if body.is_recurring() {
+                record.attempted_periods.clone()
+            } else {
+                vec![0]
+            };
+            for period in periods {
+                let obligation = self.obligation(&counterparty, &hash, period);
+                let Some(view) = self.claim_view(reads, &obligation).await? else {
+                    continue;
+                };
+                for shown in &view.attempts {
+                    let attempt = AttemptId::from_bytes(shown.attempt_id);
+                    let failed_by_owner =
+                        shown.outcome == Outcome::Failed && shown.resolved_by == Some(shown.owner);
+                    if !owners.contains(&shown.owner)
+                        || failed_by_owner
+                        || proof_names_another(&record, &attempt, &under.allowance.allowance_id)
+                    {
+                        continue;
+                    }
+                    out.push(LedgerEntry {
+                        obligation,
+                        attempt_id: attempt,
+                        value: body.amount.value.clone(),
+                        asset: body.amount.asset.clone(),
+                        at: shown.opened_at,
+                        outcome: None,
+                    });
+                }
+            }
+        }
+        records.sort_unstable();
+        Ok((records, out))
+    }
+
     /// Raise the alarm for a rollback of the ledger of the Allowance at `record` (Paykit spec
     /// 8.3, "Last ledger version"; Switch spec 10.1): kept, and returned as the client
     /// returns its own alarm. From then on, while the own `identity.json` is at this
     /// generation, the app makes no new attempt ([`Paykit::may_attempt`]). An alarm kept
     /// already at this generation stays the one shown.
     ///
-    /// Only against a version kept at the own `identity.json`'s current generation: one kept
-    /// at an earlier generation, before a move or a provider loss, may name a write the
-    /// service now serving never held, so that ledger only pauses the Allowance, as one the
-    /// executor doesn't accept, and the alarm, which only a later generation lifts, isn't
-    /// raised on it.
-    async fn raise_ledger_alarm(
-        &mut self,
-        record: &[u8; 32],
-        kept_generation: u64,
-        reason: &str,
-    ) -> PaykitError {
-        if kept_generation != self.app.own_identity().generation() {
-            return not_automatic("the ledger kept is of an earlier generation than the service's");
-        }
+    /// Only against a version kept at the own `identity.json`'s current generation
+    /// ([`Paykit::ledger_shown`]): one kept at an earlier generation, before a move or a
+    /// provider loss, may name a write the service now serving never held, so that ledger
+    /// only pauses the Allowance, as one the executor doesn't accept, and the alarm, which
+    /// only a later generation lifts, isn't raised on it.
+    async fn raise_ledger_alarm(&mut self, record: &[u8; 32], reason: &str) -> PaykitError {
         let alarm = match self.ledger_alarm_active() {
             Some(held) => held.clone(),
             None => {

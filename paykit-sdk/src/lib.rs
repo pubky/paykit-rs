@@ -77,7 +77,7 @@ pub use approval::{AppScopes, RequestedScopes};
 pub use destination::IDENTITY_GRACE_MS;
 pub use divergent::DivergentRecord;
 pub use error::{PaykitError, Refusal, Result};
-pub use executor::ReservedByOtherApp;
+pub use executor::{LedgerRepair, ReservedByOtherApp};
 pub use journal::{PaymentView, Stage};
 pub use marks::MAX_DROPPED_MARKS;
 pub use notices::{Notice, NoticeKind};

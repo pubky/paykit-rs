@@ -202,6 +202,14 @@ pub enum Refusal {
     /// confirmation.
     #[error("Paykit spec 8.3: not paid automatically: {0}")]
     NotAutomatic(String),
+    /// What the ledger repair the user confirmed was built from changed since it was shown
+    /// (Paykit spec 8.3, "After a confirmation"): the ledger shown, the version kept, the
+    /// journal's attempts, a claim or a request record read, or the Allowance record.
+    /// Nothing was written. The repair carried is the one computed now: the host shows the
+    /// user its figures and, once the user confirms them, confirms it
+    /// ([`crate::Paykit::confirm_ledger_repair`]).
+    #[error("Paykit spec 8.3: the ledger repair changed since it was shown; confirm it again")]
+    LedgerRepairChanged(Box<crate::LedgerRepair>),
     /// A record the call acts on is divergent after a provider loss, or was seen so, and the
     /// user hasn't confirmed it (Paykit spec 6, "Divergent records"): its upload may hold
     /// what the current write lacks, such as a cancellation of the request, a receipt, or a
