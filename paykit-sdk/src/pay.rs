@@ -698,13 +698,33 @@ impl Paykit {
         options: PayOptions,
     ) -> Result<PayOutcome> {
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(self.pay_request_inner(request, options)).await
+        Box::pin(self.pay_request_inner(request, options, Initiator::User)).await
+    }
+
+    /// [`Paykit::pay_request`] started as an automatic payment ([`Initiator::Automatic`]), for
+    /// tests only (feature `test-support`): no public call starts a one-time request's payment
+    /// automatically, so the checks an automatic first dispatch passes once its attempt is
+    /// journaled are tested through this one. It makes none of the checks an executor makes
+    /// before it starts a payment.
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::pay_request`].
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn pay_request_automatically(
+        &mut self,
+        request: &RequestRef,
+        options: PayOptions,
+    ) -> Result<PayOutcome> {
+        Box::pin(self.pay_request_inner(request, options, Initiator::Automatic)).await
     }
 
     async fn pay_request_inner(
         &mut self,
         request: &RequestRef,
         options: PayOptions,
+        by: Initiator,
     ) -> Result<PayOutcome> {
         self.refresh_own()?;
         self.records_known().await?;
@@ -878,7 +898,7 @@ impl Paykit {
             reserve,
             create: None,
             on_record: true,
-            by: Initiator::User,
+            by,
             unconfirmed: options.unconfirmed_identity_confirmed,
             end_hold,
         })
@@ -2323,11 +2343,19 @@ impl Paykit {
         }
         // Starting to pay is journaled just before the payment begins (Paykit spec 7.2): from
         // here on it may be paid. A repeat's entry is `Paying` already, and nothing awaits
-        // between its final check and its call.
+        // between its final check, which read the block floor, and its call.
         if matches!(kind, Dispatch::First { .. }) {
             self.set_stage(&mut entry, Stage::Paying).await?;
-            // The commit was an await: the fence judges every gate again, and nothing awaits
-            // after it before the call.
+            // The commit was an await, during which another payer app can raise the block
+            // floor: an automatic payment reads the floor again now, from the switch, and a
+            // read that fails holds it (Paykit spec 8.1, `crate::floor`). The entry goes back
+            // to `Attempted`, known unsubmitted, as it does when the fence stops it.
+            if by == Initiator::Automatic && self.floor_holds_dispatch(&entry).await.unwrap_or(true)
+            {
+                return self.stopped_at_the_fence(entry, FinalCheck::Hold).await;
+            }
+            // That read was an await too: the fence judges every other gate again, and
+            // nothing awaits after it before the call.
             match self.payment_fence(&entry, &payee, by, confirmed, kind)? {
                 FinalCheck::Pay => {}
                 stopped => return self.stopped_at_the_fence(entry, stopped).await,
@@ -3298,8 +3326,8 @@ impl Paykit {
     ///
     /// Checks 2 to 6 run on the clock after the one await ([`Paykit::final_gates`]). A
     /// repeat's call follows them with no await; a first dispatch's follows the journal
-    /// write of `Paying`, after which the fence ([`Paykit::payment_fence`]) runs them all
-    /// again. Anything but [`FinalCheck::Pay`]: nothing is paid; a copy past its age is
+    /// write of `Paying`, after which an automatic one reads the block floor again and the
+    /// fence ([`Paykit::payment_fence`]) runs them all again. Anything but [`FinalCheck::Pay`]: nothing is paid; a copy past its age is
     /// looked up again by the next check, at a resume. Returns the payee's copy the checks
     /// judged, for the fence.
     pub(crate) async fn final_payment_check(
@@ -3364,7 +3392,9 @@ impl Paykit {
     ///
     /// The kept stop and the restore hold aren't judged again: Paykit's own state, which
     /// only this app's own calls change (a receive, a placement, a confirmation), and none
-    /// can run while the payment holds the app.
+    /// can run while the payment holds the app. The block floor is the identity's, which
+    /// another payer app can raise during the commit: an automatic first dispatch reads it
+    /// again, from the switch, between the commit and this fence ([`Paykit::dispatch`]).
     fn payment_fence(
         &mut self,
         entry: &JournalEntry,

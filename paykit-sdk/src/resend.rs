@@ -89,7 +89,10 @@ impl Paykit {
     /// can't read the block floor it must raise first (Paykit wire 5.6: when `counterparty`
     /// has a live block mark here, or the app owes a raise), with nothing queued;
     /// [`paykit_lib::Error::Validation`] for a selection that selects nothing; the client's
-    /// errors, a `409 conflict` on the block floor after it is read again.
+    /// errors, a `409 conflict` on the block floor after it is read again. When the client
+    /// kept the batch that raises the floor and queues the ask
+    /// ([`crate::PaykitError::kept_batch`]), both go, the same bytes, at the app's next write
+    /// or read: the call isn't made again.
     pub async fn request_resend(
         &mut self,
         counterparty: [u8; 32],

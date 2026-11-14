@@ -1485,6 +1485,10 @@ impl Paykit {
         if live(&status) && stopped {
             status = RequestStatus::Cancelled;
         }
+        // Whether the request is still open, taken before the status is overlaid for display
+        // with a restore's hold, a block or a divergent record: none of them ends the request,
+        // and the block floor holds an open one whatever its status shows.
+        let open = live(&status);
         if live(&status) && self.held(&record_key, record).await? {
             status = RequestStatus::Held;
         }
@@ -1493,7 +1497,7 @@ impl Paykit {
         }
         // The record's mark, or, for a request still open, the block floor (`crate::floor`):
         // no automatic attempt is made on it either way.
-        let manual_only = record.manual_only || (live(&status) && self.floor_holds(stored).await?);
+        let manual_only = record.manual_only || (open && self.floor_holds(stored).await?);
         // Divergent shows on its own field whatever the status, so a request held after a
         // restore or blocked shows that too; the status says so only when nothing else holds
         // the request.

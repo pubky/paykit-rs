@@ -166,6 +166,12 @@ pub(crate) struct QueuedRequest {
     pub(crate) msg_id: String,
     #[serde(with = "serde_b64")]
     pub(crate) hash: [u8; 32],
+    /// The batch the client kept to send again, when the write that queues the request with
+    /// the raise of the block floor wasn't answered ([`crate::PaykitError::kept_batch`]):
+    /// while the client still keeps it, the request isn't in the outbox yet and isn't asked
+    /// anew. `None` for a request queued at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) kept_batch: Option<[u8; 16]>,
 }
 
 impl DropMark {
@@ -569,7 +575,6 @@ impl Paykit {
     async fn ask_on_block_marks(&mut self) -> Result<u64> {
         let family = MarkFamily::Blocked;
         let now = self.now();
-        let service = self.service_time();
         // The raise owed goes first, so the floor every payer app reads covers the marks gone
         // before anything this pass asks for comes back (`crate::floor`).
         self.write_floor_owed().await?;
@@ -578,50 +583,59 @@ impl Paykit {
             .await?
             .is_some_and(|read| read <= now && now - read < crate::LISTS_REFRESH_MS);
         let kept_flagged = self.local_get::<Vec<[u8; 32]>>(key::FLAGGED).await?;
-        let mut ready = Vec::new();
-        for (rest, mark) in self.local_scan::<DropMark>(family.prefix()).await? {
-            let own_change = self
-                .local_get::<crate::state::OwnBlockMark>(&key::own_block(&mark.sender))
-                .await?
-                .is_some();
-            // Whether it would send now: a request queued, or none delivered in the last 24
-            // hours; one past its expiry only goes.
-            let would_send = mark.queued.is_some()
-                || mark
-                    .asked_at_ms
-                    .is_none_or(|at| at > now || now - at >= DAY_MS);
-            let ready_now = mark.pending_forget.is_empty()
-                && !own_change
-                && would_send
-                && !mark.expired(service);
+        // Whether any mark needs the read: one ready to ask that a fresh copy doesn't hold.
+        let mut needs_read = false;
+        for (_, mark) in self.local_scan::<DropMark>(family.prefix()).await? {
+            if !self.block_mark_ready(&mark).await? {
+                continue;
+            }
             // A fresh copy that still holds the sender spares the read for it.
-            let held_by_fresh_copy = ready_now
-                && fresh_copy
+            let held_by_fresh_copy = fresh_copy
                 && (self.denied_as_last_read(&mark.sender).await?
                     || kept_flagged
                         .as_ref()
                         .is_some_and(|flagged| flagged.contains(&mark.sender)));
-            ready.push((rest, mark, ready_now && !held_by_fresh_copy));
+            needs_read |= !held_by_fresh_copy;
         }
-        let read = if ready.iter().any(|(_, _, ready_now)| *ready_now) {
-            Box::pin(self.read_lists_now()).await?
-        } else {
-            false
-        };
+        let read = needs_read && Box::pin(self.read_lists_now()).await?;
         let flagged = if read {
             self.local_get::<Vec<[u8; 32]>>(key::FLAGGED).await?
         } else {
             None
         };
+        // The read changes marks: a widening it applies extends a blocked sender's window or
+        // adds a mark, and the bound on marks may drop one (`Paykit::apply_block_widenings`).
+        // So the marks are read again after it, and each is judged as it is kept now: a mark
+        // captured before the read is never expired, asked on or written back.
         let mut asked = 0u64;
-        for (rest, mark, ready_now) in ready {
-            let due = ready_now
+        for (rest, mark) in self.local_scan::<DropMark>(family.prefix()).await? {
+            let due = self.block_mark_ready(&mark).await?
                 && flagged
                     .as_ref()
                     .is_some_and(|flagged| !flagged.contains(&mark.sender));
             asked = asked.saturating_add(self.on_mark(family, &rest, mark, due).await?);
         }
         Ok(asked)
+    }
+
+    /// Whether a block's mark is ready to ask, as it is kept now: every pair it names is
+    /// forgotten, no block or unblock of its sender this app wrote is still to be shown by
+    /// the lists (`bk/`), it would send now (a request queued, or none delivered in the last
+    /// 24 hours), and it isn't past its expiry, which only lets it go.
+    async fn block_mark_ready(&self, mark: &DropMark) -> Result<bool> {
+        let now = self.now();
+        let own_change = self
+            .local_get::<crate::state::OwnBlockMark>(&key::own_block(&mark.sender))
+            .await?
+            .is_some();
+        let would_send = mark.queued.is_some()
+            || mark
+                .asked_at_ms
+                .is_none_or(|at| at > now || now - at >= DAY_MS);
+        Ok(mark.pending_forget.is_empty()
+            && !own_change
+            && would_send
+            && !mark.expired(self.service_time()))
     }
 
     /// Count a widening's window from `from` to `until` in `sender`'s block mark, in `tx`
@@ -797,6 +811,16 @@ impl Paykit {
         let sender = held.drop_mark().sender;
         if let Some(queued) = held.drop_mark().queued.clone() {
             let msg_id = &queued.msg_id;
+            // The batch that queues it with the raise is still kept by the client, to send
+            // again: the request goes with it, and nothing is asked anew meanwhile.
+            if let Some(batch) = queued.kept_batch {
+                if matches!(
+                    self.app.kept_batch(batch).await?,
+                    Some(pubky_switch_client::app::KeptBatchStatus::Kept { .. })
+                ) {
+                    return Ok(0);
+                }
+            }
             if matches!(
                 self.app.delivery(msg_id).await?,
                 Some(Delivery::Queued { .. })
@@ -857,16 +881,31 @@ impl Paykit {
         let msg_id = signed.msg_id().to_owned();
         // Kept before it is queued: a crash between the two finds the request not kept by
         // the outbox, and asks anew.
+        let hash = signed.hash();
         held.drop_mark().queued = Some(QueuedRequest {
             msg_id: msg_id.clone(),
-            hash: signed.hash(),
+            hash,
+            kept_batch: None,
         });
         self.local_put(key, &held).await?;
         // With the raise of the block floor its mark needs, in one batch: a floor that can't
         // be read, or a conflict, leaves the request kept as queued and not sent, so the next
-        // pass asks anew (`crate::floor`).
+        // pass asks anew (`crate::floor`). A failure of the app itself is returned as it is.
         match self.queue_resend_request(signed, &sender).await {
             Ok(_) => {}
+            // The client kept the batch to send again: the raise and the request go together
+            // at the app's next write or read. The mark names the batch, so the next pass
+            // waits while the client keeps it, and reads the request's delivery once it
+            // doesn't.
+            Err(error) if error.kept_batch().is_some() => {
+                held.drop_mark().queued = Some(QueuedRequest {
+                    msg_id,
+                    hash,
+                    kept_batch: error.kept_batch(),
+                });
+                self.local_put(key, &held).await?;
+                return Ok(1);
+            }
             Err(error)
                 if crate::floor::is_unreadable_floor(&error)
                     || error.code() == Some(pubky_switch_core::http::ErrorCode::Conflict) =>
@@ -1049,6 +1088,7 @@ mod tests {
         asked.queued = Some(QueuedRequest {
             msg_id: "m".into(),
             hash: [0; 32],
+            kept_batch: None,
         });
         let BlockedCount::Put {
             mark: next,
@@ -1065,6 +1105,7 @@ mod tests {
         unasked.queued = Some(QueuedRequest {
             msg_id: "m".into(),
             hash: [0; 32],
+            kept_batch: None,
         });
         let BlockedCount::Put { mark: next, .. } =
             count_blocked(Some(unasked), &[], [1; 32], (5, 30), true)

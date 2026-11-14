@@ -32,7 +32,10 @@
 //!   before each automatic dispatch the record is read again from the switch
 //!   ([`Paykit::floor_holds_fresh`]), as the deny list is: a raise the app's copy doesn't
 //!   hold yet, applied before the attempt's commit or after it, still holds the dispatch. A
-//!   raise after the dispatch began is too late for that payment.
+//!   first dispatch journals `Paying` after that read, and reads the record once more after
+//!   that commit, with no await between the last checks and the payment method's call
+//!   (`Paykit::dispatch`), so a raise applied while the journal write commits holds it too.
+//!   A raise after the dispatch began is too late for that payment.
 //! - **Unknown holds:** while the floor can't be read (the payer's records not listed yet, its
 //!   value sealed under a key not held, or a value that doesn't read with none seen before),
 //!   every one-time request counts as dated before it.
@@ -92,6 +95,21 @@ pub(crate) fn shared_floor_of(held: Option<&SharedRecord>, seen: Option<&[u8]>) 
         }
         RecordContent::Unreadable(_) => SharedFloor::Unknown,
     }
+}
+
+/// The record a raise is built on, so every member the writer doesn't know is written back
+/// as read (Paykit wire 5): the value held when it reads; when it doesn't read or the record
+/// is deleted, the last value seen that reads (`seen`, the mark `shared_floor_of` takes the
+/// floor from), with its unknown members; with neither, a record of `floor` alone.
+pub(crate) fn write_base(
+    held: Option<&[u8]>,
+    seen: Option<&[u8]>,
+    floor: Option<u64>,
+) -> BlockFloorRecord {
+    let read = |value: &[u8]| BlockFloorRecord::read(value).ok();
+    held.and_then(read)
+        .or_else(|| seen.and_then(read))
+        .unwrap_or_else(|| BlockFloorRecord::new(floor.unwrap_or(0)))
 }
 
 /// Whether `stored`, a one-time request, is dated before the floor (module docs): its signed
@@ -226,13 +244,12 @@ impl Paykit {
             }
             return Ok(None);
         }
-        // Built on the value held, whose unknown members it keeps; on the floor seen when the
-        // value held doesn't read.
-        let base = held
-            .as_ref()
-            .and_then(|held| held.content.value())
-            .and_then(|value| BlockFloorRecord::read(value).ok())
-            .unwrap_or_else(|| BlockFloorRecord::new(floor.unwrap_or(0)));
+        let seen = self.app.record_seen(&key).await?;
+        let base = write_base(
+            held.as_ref().and_then(|held| held.content.value()),
+            seen.as_deref(),
+            floor,
+        );
         let raised = base
             .raised(to_ms)
             .unwrap_or_else(|| BlockFloorRecord::new(to_ms));
@@ -265,10 +282,14 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotNow`] while a raise is needed and the floor can't be read, or its write
-    /// fails other than by a conflict, with nothing queued and the raise still owed; a `409
-    /// conflict` after the floor is read again; the client's errors queuing an ask that needs
-    /// no raise.
+    /// [`Refusal::NotNow`] while a raise is needed and the floor can't be read, or the own
+    /// switch refuses its write other than by a conflict or doesn't answer it, with nothing
+    /// queued and the raise still owed; a `409 conflict` after the floor is read again; the
+    /// client's error, as it is, when the client kept the batch
+    /// ([`crate::PaykitError::kept_batch`]: the raise and the ask go together, the same bytes,
+    /// at the app's next write or read, so the ask isn't made again), and for a failure of
+    /// the app itself (its store, an alarm, an app stopped), which no later try gets past by
+    /// itself; the client's errors queuing an ask that needs no raise.
     pub(crate) async fn queue_resend_request(
         &mut self,
         signed: SignedMessage,
@@ -280,13 +301,10 @@ impl Paykit {
             None => None,
         };
         match batch {
-            Some(batch) => match self.submit_floor(batch.queue(signed)).await {
-                Ok(()) => {}
-                Err(error) if error.code() == Some(ErrorCode::Conflict) => return Err(error),
-                // Any other failure of the raise queues nothing: the ask waits as for a floor
-                // it can't read, and the raise stays owed.
-                Err(_) => return Err(unreadable_floor()),
-            },
+            Some(batch) => self
+                .submit_floor(batch.queue(signed))
+                .await
+                .map_err(floor_write_error)?,
             None => {
                 self.app.queue_signed(signed).await?;
             }
@@ -384,6 +402,30 @@ fn unreadable_floor() -> crate::error::PaykitError {
     Refusal::NotNow(UNREADABLE_FLOOR.into()).into()
 }
 
+/// The error of a raise's batch that wasn't applied, as its caller gets it:
+///
+/// - the client kept the batch ([`crate::PaykitError::kept_batch`]): the error as it is. The
+///   raise, and an ask queued with it, go at the app's next write or read, so something was
+///   queued, and the caller must not take it for a floor that can't be read;
+/// - a `409 conflict`: as it is, the floor read again ([`Paykit::submit_floor`]);
+/// - any other answer of the own switch, or none, with nothing kept: [`unreadable_floor`].
+///   Nothing was queued, the ask waits and the raise stays owed;
+/// - a failure of the app itself (its store, the protocol's store, an alarm, an app stopped
+///   or gone): as it is. A later try doesn't get past it by itself, and it is never reported
+///   as a floor to wait for.
+fn floor_write_error(error: crate::error::PaykitError) -> crate::error::PaykitError {
+    use pubky_switch_client::app::AppError;
+    if error.kept_batch().is_some() || error.code() == Some(ErrorCode::Conflict) {
+        return error;
+    }
+    match &error {
+        crate::error::PaykitError::Client(
+            AppError::Switch(_) | AppError::Transport(_) | AppError::NotAnsweringAsAccount { .. },
+        ) => unreadable_floor(),
+        _ => error,
+    }
+}
+
 /// Whether `error` is [`unreadable_floor`]'s: the ask that needs the raise waits.
 pub(crate) fn is_unreadable_floor(error: &crate::error::PaykitError) -> bool {
     matches!(error.refusal(), Some(Refusal::NotNow(why)) if why == UNREADABLE_FLOOR)
@@ -400,6 +442,121 @@ mod tests {
         assert_eq!(
             shared_floor_of(None, Some(&seen)),
             SharedFloor::Known(Some(70))
+        );
+    }
+
+    /// A floor value of `floor_ms` with a member no writer here knows.
+    fn with_unknown_member(floor_ms: u64) -> Vec<u8> {
+        let json = BlockFloorRecord::new(floor_ms).to_json().unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        value["later_member"] = serde_json::json!({"kinds": ["a", {"b": null}]});
+        serde_json::to_vec(&value).unwrap()
+    }
+
+    #[test]
+    fn test_floor_write_base_keeps_the_seen_unknown_members_over_a_value_that_does_not_read() {
+        let seen = with_unknown_member(70);
+        let expected = BlockFloorRecord::read(&seen).unwrap();
+        assert!(!expected.unknown.is_empty());
+        // The value held doesn't read, or the record is deleted: the value seen is the base.
+        let malformed = br#"{"v":1}"#;
+        assert_eq!(write_base(Some(malformed), Some(&seen), Some(70)), expected);
+        assert_eq!(write_base(None, Some(&seen), Some(70)), expected);
+        // Raised, it writes those members back as read.
+        let raised = expected.raised(90).unwrap().to_json().unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&seen).unwrap();
+        value["floor"] =
+            serde_json::from_slice::<serde_json::Value>(&raised).unwrap()["floor"].clone();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&raised).unwrap(),
+            value
+        );
+    }
+
+    fn client(error: pubky_switch_client::app::AppError) -> crate::error::PaykitError {
+        crate::error::PaykitError::Client(error)
+    }
+
+    fn answered(code: ErrorCode) -> pubky_switch_client::app::AppError {
+        pubky_switch_client::app::AppError::Switch(
+            pubky_switch_client::error::ClientError::Switch {
+                status: 400,
+                code,
+                message: String::new(),
+                current: serde_json::Value::Null,
+                known_version: None,
+                retry_after: None,
+            },
+        )
+    }
+
+    fn lost() -> pubky_switch_client::app::AppError {
+        pubky_switch_client::app::AppError::Transport(
+            pubky_switch_client::error::TransportError::Connect("down".into()),
+        )
+    }
+
+    #[test]
+    fn test_floor_write_error_keeps_a_failure_of_the_app_itself() {
+        use pubky_switch_client::app::{Alarm, AppError, Refusal as ClientRefusal, StoreFailure};
+        use pubky_switch_client::error::StoreError;
+        // A store failure, the protocol's included, an alarm and an app stopped are returned
+        // as they are: none is a floor to wait for.
+        let failures = [
+            AppError::Store(StoreError::Unavailable),
+            AppError::Protocol(StoreFailure::unavailable(StoreError::Unavailable)),
+            AppError::Alarm(Alarm::Equivocation { version: 3 }),
+            AppError::Refused(ClientRefusal::Stopped),
+        ];
+        for failure in failures {
+            let text = failure.to_string();
+            let error = floor_write_error(client(failure));
+            assert!(!is_unreadable_floor(&error), "{text}");
+            assert!(
+                matches!(&error, crate::error::PaykitError::Client(kept) if kept.to_string() == text),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_floor_write_error_keeps_a_kept_batch_and_a_conflict() {
+        use pubky_switch_client::app::AppError;
+        // A batch the client kept goes at the next write or read: never "nothing queued",
+        // whatever failed, an answer lost included.
+        for inner in [lost(), answered(ErrorCode::Unavailable)] {
+            let error = floor_write_error(client(AppError::Kept {
+                batch_id: [7; 16],
+                error: Box::new(inner),
+            }));
+            assert_eq!(error.kept_batch(), Some([7; 16]));
+            assert!(!is_unreadable_floor(&error));
+        }
+        let conflict = floor_write_error(client(answered(ErrorCode::Conflict)));
+        assert_eq!(conflict.code(), Some(ErrorCode::Conflict));
+    }
+
+    #[test]
+    fn test_floor_write_error_waits_for_a_switch_that_refuses_or_does_not_answer() {
+        // With nothing kept, the switch's refusal other than a conflict, or no answer, queues
+        // nothing: the ask waits as for a floor that can't be read.
+        for error in [answered(ErrorCode::PermissionMissing), lost()] {
+            assert!(is_unreadable_floor(&floor_write_error(client(error))));
+        }
+    }
+
+    #[test]
+    fn test_floor_write_base_is_the_value_held_when_it_reads() {
+        let held = with_unknown_member(40);
+        let seen = BlockFloorRecord::new(70).to_json().unwrap();
+        assert_eq!(
+            write_base(Some(&held), Some(&seen), Some(70)),
+            BlockFloorRecord::read(&held).unwrap()
+        );
+        // With nothing that reads, a record of the floor alone.
+        assert_eq!(
+            write_base(Some(br#"{"v":1}"#), None, None),
+            BlockFloorRecord::new(0)
         );
     }
 }
