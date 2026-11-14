@@ -7,7 +7,7 @@ use paykit_lib::periods::{
 use pubky_switch_core::time::rfc3339;
 use serde_json::{json, Value};
 
-use crate::common::{arr, generated, message, paykit, st, time, Place};
+use crate::common::{arr, generated, message, paykit, st, time, writing, Keys, Place};
 
 fn period_json(p: &BillingPeriod) -> Value {
     json!({ "k": p.index, "starts_at": rfc3339(p.starts_at), "ends_at": rfc3339(p.ends_at),
@@ -16,7 +16,16 @@ fn period_json(p: &BillingPeriod) -> Value {
 
 #[test]
 fn test_vectors_periods() {
-    generated("periods.json", &details_rates_members());
+    if !writing() {
+        check();
+    }
+}
+
+/// `periods.json` against paykit-lib: its generated cases, then the recurrences and the
+/// rates. With [`WRITE_VECTORS`](crate::common::WRITE_VECTORS) set, the regeneration driver
+/// runs it once it has written the set.
+pub(crate) fn check() {
+    generate(&Keys::from_seeds());
     let v = paykit("periods.json");
     let cases = arr(&v, "cases");
     assert_eq!(cases.len(), 10);
@@ -69,6 +78,13 @@ fn test_vectors_periods() {
         }
     }
     check_details_rates(&v);
+}
+
+/// The cases paykit-lib generates in `periods.json` (README "How the files were
+/// generated"), compared with the file, and written into the set by the regeneration driver
+/// (`regenerate.rs`): [`details_rates_members`].
+pub(crate) fn generate(_keys: &Keys) {
+    generated("periods.json", &details_rates_members());
 }
 
 /// The verified payment times of `details_rates`, each with whether the rates apply: at

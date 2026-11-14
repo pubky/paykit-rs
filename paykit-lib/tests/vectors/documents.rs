@@ -20,11 +20,20 @@ use serde_json::{json, Value};
 use crate::common::{
     arr, b64n, base_cert, body_text, cap_app_record, cert, cert_doc, executor_cert, generated,
     paykit, phone_cert, pubky, quoted, recertified, reissued, shop_app_record, signed, signed_json,
-    st, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
+    st, writing, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
 };
 
 #[test]
 fn test_vectors_documents() {
+    if !writing() {
+        check();
+    }
+}
+
+/// `documents.json` against paykit-lib: its generated cases, then every check of its cases. With
+/// [`WRITE_VECTORS`](crate::common::WRITE_VECTORS) set, the regeneration driver runs it once it
+/// has written the set.
+pub(crate) fn check() {
     let keys = Keys::from_seeds();
     generate(&keys);
     let d = paykit("documents.json");
@@ -595,8 +604,9 @@ fn extension_app(keys: &Keys) -> Value {
 }
 
 /// The cases paykit-lib generates in `documents.json` (README "How the files were
-/// generated"), compared with the file, and written into it with `PAYKIT_WRITE_VECTORS`.
-fn generate(keys: &Keys) {
+/// generated"), compared with the file, and written into the set by the
+/// regeneration driver (`regenerate.rs`).
+pub(crate) fn generate(keys: &Keys) {
     // Signed again with their own scopes and permissions, the certificates are the same byte
     // for byte.
     for app in ["shop", "cap"] {

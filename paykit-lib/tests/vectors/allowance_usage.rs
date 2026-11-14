@@ -11,7 +11,7 @@ use paykit_lib::amount::Decimal;
 use paykit_lib::identifiers::AttemptId;
 use serde_json::{json, Value};
 
-use crate::common::{arr, generated, paykit, pubky, quoted, st, time, Place, BOB};
+use crate::common::{arr, generated, paykit, pubky, quoted, st, time, writing, Keys, Place, BOB};
 
 fn usage_json(u: &Usage) -> Value {
     json!({
@@ -49,7 +49,16 @@ fn ledger(v: &Value) -> Ledger {
 
 #[test]
 fn test_vectors_allowance_usage() {
-    generate();
+    if !writing() {
+        check();
+    }
+}
+
+/// `allowance_usage.json` against paykit-lib: its generated cases, then every case's verdict.
+/// With [`WRITE_VECTORS`](crate::common::WRITE_VECTORS) set, the regeneration driver runs it
+/// once it has written the set.
+pub(crate) fn check() {
+    generate(&Keys::from_seeds());
     let v = paykit("allowance_usage.json");
     let cases = arr(&v, "cases");
     assert_eq!(cases.len(), 9);
@@ -202,8 +211,9 @@ fn spelling_terms(limits: &Value) -> Value {
 }
 
 /// The cases paykit-lib generates in `allowance_usage.json` (README "How the files were
-/// generated"), compared with the file, and written into it with `PAYKIT_WRITE_VECTORS`.
-fn generate() {
+/// generated"), compared with the file, and written into the set by the
+/// regeneration driver (`regenerate.rs`).
+pub(crate) fn generate(_keys: &Keys) {
     let (accepted, refused) = spelling_cases();
     let accepted: Vec<Value> = accepted
         .iter()

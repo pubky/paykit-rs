@@ -2,10 +2,19 @@
 
 use paykit_lib::amount::Decimal;
 
-use crate::common::{arr, paykit, st};
+use crate::common::{arr, generated, paykit, st, writing, Keys};
 
 #[test]
 fn test_vectors_encoding() {
+    if !writing() {
+        check();
+    }
+}
+
+/// `encoding.json` against paykit-lib's decimal parser. With
+/// [`WRITE_VECTORS`](crate::common::WRITE_VECTORS) set, the regeneration driver runs it once it
+/// has written the set.
+pub(crate) fn check() {
     let e = paykit("encoding.json");
     let valid = arr(&e["amounts"], "valid");
     assert!(!valid.is_empty());
@@ -24,4 +33,10 @@ fn test_vectors_encoding() {
         let error = Decimal::parse(st(case, "text")).unwrap_err().to_string();
         assert!(error.contains("Paykit wire 1.2"), "{case}: {error}");
     }
+}
+
+/// `encoding.json` is written by hand (README "How the files were generated"): paykit-lib
+/// generates none of its cases, and the driver writes it again unchanged.
+pub(crate) fn generate(_keys: &Keys) {
+    generated("encoding.json", &[]);
 }

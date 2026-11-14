@@ -15,12 +15,21 @@ use pubky_switch_core::labels;
 use serde_json::{json, Value};
 
 use crate::common::{
-    arr, b64n, generated, hex, message_json, paykit, pubky, st, Keys, Place, ALICE, ALLOWANCE_ID,
-    BOB, SHOP1,
+    arr, b64n, generated, hex, message_json, paykit, pubky, st, writing, Keys, Place, ALICE,
+    ALLOWANCE_ID, BOB, SHOP1,
 };
 
 #[test]
 fn test_vectors_identifiers() {
+    if !writing() {
+        check();
+    }
+}
+
+/// `identifiers.json` against paykit-lib: its generated cases, then every check of its cases. With
+/// [`WRITE_VECTORS`](crate::common::WRITE_VECTORS) set, the regeneration driver runs it once it
+/// has written the set.
+pub(crate) fn check() {
     let keys = Keys::from_seeds();
     generate(&keys);
     let v = paykit("identifiers.json");
@@ -86,8 +95,8 @@ fn test_vectors_identifiers() {
 }
 
 /// The cases paykit-lib generates in `identifiers.json`, compared with the file, and written
-/// into it with `PAYKIT_WRITE_VECTORS`.
-fn generate(keys: &Keys) {
+/// into the set by the regeneration driver (`regenerate.rs`).
+pub(crate) fn generate(keys: &Keys) {
     let mut cases = vec![
         (Place::Member("/policies"), policies()),
         (Place::Member("/record_keys"), record_keys(keys)),

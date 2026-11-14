@@ -15,12 +15,21 @@ use pubky_switch_core::sealed::{aad, pad, RecordValue, SealedValue};
 use serde_json::Value;
 
 use crate::common::{
-    arr, b64n, generated, hex, message_json, paykit, pubky, quoted, recertified, st, unhex32, Keys,
-    Place, ALICE, ALLOWANCE_ID, BOB,
+    arr, b64n, generated, hex, message_json, paykit, pubky, quoted, recertified, st, unhex32,
+    writing, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
 };
 
 #[test]
 fn test_vectors_sealed() {
+    if !writing() {
+        check();
+    }
+}
+
+/// `sealed.json` against paykit-lib: its generated cases, then every check of its cases. With
+/// [`WRITE_VECTORS`](crate::common::WRITE_VECTORS) set, the regeneration driver runs it once it
+/// has written the set.
+pub(crate) fn check() {
     let keys = Keys::from_seeds();
     generate(&keys);
     let v = paykit("sealed.json");
@@ -1227,8 +1236,9 @@ fn check_later_writes(keys: &Keys, v: &Value) {
 }
 
 /// The cases paykit-lib generates in `sealed.json` (README "How the files were generated"),
-/// compared with the file, and written into it with `PAYKIT_WRITE_VECTORS`.
-fn generate(keys: &Keys) {
+/// compared with the file, and written into the set by the
+/// regeneration driver (`regenerate.rs`).
+pub(crate) fn generate(keys: &Keys) {
     let (accepted, refused) = activity_cases(keys);
     let write = |(name, record, key): &ActivityCase, taken: bool| -> Value {
         // A refused record is written without the writer's rules, which refuse it too.

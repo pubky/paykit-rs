@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use crate::common::{
     arr, cert, generated, hex, message, message_json, paykit, pubky, quoted, reissued, signed,
-    signed_json, st, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
+    signed_json, st, writing, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
 };
 
 /// One message of the file, checked and read.
@@ -29,6 +29,15 @@ struct Read {
 
 #[test]
 fn test_vectors_messages() {
+    if !writing() {
+        check();
+    }
+}
+
+/// `messages.json` against paykit-lib: its generated cases, then every check of its cases. With
+/// [`WRITE_VECTORS`](crate::common::WRITE_VECTORS) set, the regeneration driver runs it once it
+/// has written the set.
+pub(crate) fn check() {
     let keys = Keys::from_seeds();
     generate(&keys);
     let file = paykit("messages.json");
@@ -452,8 +461,9 @@ fn at_wallet(keys: &Keys, json: &[u8], sender: &AppCert) -> pubky_switch_core::R
 }
 
 /// The cases paykit-lib generates in `messages.json` (README "How the files were
-/// generated"), compared with the file, and written into it with `PAYKIT_WRITE_VECTORS`.
-fn generate(keys: &Keys) {
+/// generated"), compared with the file, and written into the set by the
+/// regeneration driver (`regenerate.rs`).
+pub(crate) fn generate(keys: &Keys) {
     let wallet = keys.app("wallet");
     let case = |name: &str, base: &str, chat_only: bool| -> Value {
         let m = message(base);
