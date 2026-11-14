@@ -34,8 +34,8 @@ pub(crate) fn terms_with(extra: Value) -> AllowanceTerms {
     AllowanceTerms::from_json(&terms).unwrap()
 }
 
-/// Alice's executor wallet: `pay`, `allowance`, `allowance_execute` and `contacts`; she
-/// admits bob.
+/// Alice's executor wallet: `paykit_pay`, `paykit_allowance`, `paykit_allowance_execute` and
+/// `paykit_contacts`; she admits bob.
 pub(crate) async fn executor_wallet(w: &World, name: &str) -> Paykit {
     let mut app = w
         .join(
@@ -54,7 +54,7 @@ pub(crate) async fn executor_wallet(w: &World, name: &str) -> Paykit {
     app
 }
 
-/// Bob's shop, holding `request` and `allowance`; he admits alice.
+/// Bob's shop, holding `paykit_request` and `paykit_allowance`; he admits alice.
 pub(crate) async fn allowance_shop(w: &World) -> Paykit {
     let mut shop = w
         .join(
@@ -649,7 +649,7 @@ async fn test_executor_handoff_stops_the_previous_executor() {
 async fn test_executor_refuses_a_ledger_written_by_another_app() {
     let w = World::new();
     let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
-    // Another own app holding `allowance_execute`, never the executor, writes the ledger.
+    // Another own app holding `paykit_allowance_execute`, never the executor, writes the ledger.
     let mut other = executor_wallet(&w, "other").await;
     other.receive(None).await.unwrap();
     let (allowance, _) = held(&wallet, &record).await;
@@ -1525,6 +1525,10 @@ async fn test_executor_restored_with_an_older_ledger_version_builds_on_the_newer
         .confirm_allowance_again(&record, UserConfirmed::new())
         .await
         .unwrap();
+    // The restore's block floor rises to the time the lists are first read after it
+    // (Paykit spec 8.1, "Blocked counterparties"): they are read before the requests below.
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    wallet.receive(None).await.unwrap();
     let third = request_after_restore(&w, &mut shop, &mut wallet, "0.4").await;
     let fourth = request_after_restore(&w, &mut shop, &mut wallet, "0.1").await;
     let refused = wallet
@@ -2520,7 +2524,7 @@ impl StateStore for PayingStore {
     }
 }
 
-/// Another payer app of alice's, holding `pay` and `manage_contacts`.
+/// Another payer app of alice's, holding `paykit_pay` and `paykit_manage_contacts`.
 async fn keeper(w: &World) -> Paykit {
     let mut keeper = w
         .join(

@@ -686,7 +686,7 @@ impl Paykit {
     /// written; [`PaykitError::Conflict`] when the request record changed
     /// meanwhile; the client's errors. A failure after money may have moved is never an
     /// error: it is [`PayOutcome::Pending`] or [`PayOutcome::Uncertain`]. At an app holding
-    /// `contacts`, the deny list as read at most 10 minutes ago, or read first, decides: a
+    /// `paykit_contacts`, the deny list as read at most 10 minutes ago, or read first, decides: a
     /// request from a blocked payee is [`Refusal::Blocked`] until the user confirms paying
     /// it. A request whose record is divergent, or was seen so, is [`Refusal::Divergent`]
     /// until the user confirms it ([`Paykit::confirm_divergent`]), except in three cases
@@ -2267,7 +2267,7 @@ impl Paykit {
             return Ok(None);
         };
         // A new acceptance goes only under a certificate that may send one: after a renewal
-        // that dropped `pay`, none is signed (Paykit spec 3.3); one signed before keeps its
+        // that dropped `paykit_pay`, none is signed (Paykit spec 3.3); one signed before keeps its
         // own certificate ([`JournalEntry::acceptance_cert`]).
         self.require_pay()?;
         let label = entry.label()?;
@@ -2840,8 +2840,6 @@ impl Paykit {
     ///   that saw it would ignore the write (Paykit wire 5.3, "Seen roles"), so the user
     ///   decides ([`Paykit::repair_activity_record`], `overwrite`): the rebuilt record then
     ///   replaces it, built on the version seen.
-    /// - an entry that can't rebuild its record (one journaled before requests were kept)
-    ///   holds too.
     ///
     /// A failure moves no money, and its `failed` is what lets a payment be made again: it
     /// goes with the record's update when the record reads, and alone otherwise.
@@ -2892,10 +2890,7 @@ impl Paykit {
         let (mut record, mut changed) = match read {
             Some(record) => (record, false),
             None if !paid => return Ok(OutcomeRecord::Unchanged),
-            None => match self.rebuilt_record(entry)? {
-                Some(record) => (record, true),
-                None => return Ok(OutcomeRecord::Held),
-            },
+            None => (self.rebuilt_record(entry)?, true),
         };
         changed |= self.place_acceptance(&mut record, entry)?;
         if let Some(proof) = proof {
@@ -2944,15 +2939,15 @@ impl Paykit {
 
     /// The payer's activity record of `entry`'s payment, rebuilt from the journal without
     /// its acceptance and proof, which the outcome places: the request kept with the entry,
-    /// or a payment without a request's own members (Paykit wire 5.3). `None` when the entry
-    /// keeps no request it can be rebuilt from.
-    pub(crate) fn rebuilt_record(&self, entry: &JournalEntry) -> Result<Option<ActivityRecord>> {
+    /// or a payment without a request's own members (Paykit wire 5.3). A payment of a request
+    /// that keeps no request is a corrupt store ([`JournalEntry::check`] refuses it).
+    pub(crate) fn rebuilt_record(&self, entry: &JournalEntry) -> Result<ActivityRecord> {
         let own = self.identity();
         let mut record = activity::empty(ActivitySide::Payer, entry.payee);
         match entry.request_hash()? {
             Some(hash) => {
                 let Some(kept) = &entry.request else {
-                    return Ok(None);
+                    return Err(PaykitError::corrupt());
                 };
                 let request = kept.stored(&own)?;
                 if request.hash() != hash || request.sender() != entry.payee {
@@ -2971,7 +2966,7 @@ impl Paykit {
                 record.status = Some("paying".into());
             }
         }
-        Ok(Some(record))
+        Ok(record)
     }
 
     /// The claim's step and this attempt's outcome, read from the switch; `None` when the
@@ -3065,10 +3060,10 @@ impl Paykit {
     async fn resume_payments_inner(&mut self) -> Result<Vec<PayOutcome>> {
         self.refresh_own()?;
         // While a wider certificate's scope keys are missing, the resume goes on only on the
-        // payer's side it can read: with the `pay` key held and the payer's records and
+        // payer's side it can read: with the `paykit_pay` key held and the payer's records and
         // claims read as before, its writes are built on versions it holds. Otherwise it
         // asks the method's history only, journals what it says, and writes nothing to the
-        // switch, as without `pay`, until the keys come.
+        // switch, as without `paykit_pay`, until the keys come.
         // A restore's copy not listed yet lacks every record: while keys wait, which leaves it
         // unlisted, the payer's side waits too.
         let keys = self.scope_keys_awaited().await?;
@@ -3099,17 +3094,17 @@ impl Paykit {
                 }
                 continue;
             }
-            let held = !self.holds("pay") || payer_waits;
+            let held = !self.holds("paykit_pay") || payer_waits;
             if !held {
-                // Under `pay` again, the payment is held without it no more: that notice goes,
-                // so a later certificate without `pay` tells the host again.
+                // Under `paykit_pay` again, the payment is held without it no more: that notice
+                // goes, so a later certificate without `paykit_pay` tells the host again.
                 self.drop_notice(NoticeKind::HeldWithoutPay, &entry).await?;
             }
             if !entry.open() {
                 continue;
             }
             let attempt_id = entry.attempt()?;
-            // Without `pay` the app reads and writes no claim and no payer record (the
+            // Without `paykit_pay` the app reads and writes no claim and no payer record (the
             // service refuses both, `403 permission_missing`), and makes no payment
             // ([`Paykit::final_payment_check`]): every open entry waits for an app holding
             // it, its proof kept if it has one, and the other entries go on.
@@ -3154,7 +3149,7 @@ impl Paykit {
                 Stage::AcceptanceOwed | Stage::Finished | Stage::Abandoned => {}
             }
         }
-        if self.holds("pay") && !payer_waits {
+        if self.holds("paykit_pay") && !payer_waits {
             out.extend(self.recheck_failed().await?);
         }
         // The outcomes the claims show go into the ledgers this app executes, before the
@@ -3188,10 +3183,10 @@ impl Paykit {
         self.set_stage(entry, Stage::Finished).await
     }
 
-    /// An open entry under a certificate without `pay`, which reads and writes no claim and
+    /// An open entry under a certificate without `paykit_pay`, which reads and writes no claim and
     /// no payer record: a dispatch that may have been made asks the method's history alone,
     /// so a payment made is journaled with its proof (`RailPaid`) and one that failed as such
-    /// (`RailFailed`), each for an app holding `pay` to report; nothing else is touched. The
+    /// (`RailFailed`), each for an app holding `paykit_pay` to report; nothing else is touched. The
     /// host is told why the payment waits ([`NoticeKind::HeldWithoutPay`]).
     async fn held_without_pay(&mut self, entry: &mut JournalEntry) -> Result<PayOutcome> {
         let attempt_id = entry.attempt()?;
@@ -3520,7 +3515,7 @@ impl Paykit {
     ///    dispatch, the attempt is within its pre-dispatch budget;
     /// 6. the app may still make the attempt: no alarm or restore question raised meanwhile,
     ///    for an automatic payment the clocks within the tolerance, and its certificate
-    ///    holds `pay`, so an app a renewal reduced moves no money on any path, a repeat at a
+    ///    holds `paykit_pay`, so an app a renewal reduced moves no money on any path, a repeat at a
     ///    resume or a recovery included ([`FinalCheck::Hold`]: nothing is paid, the attempt
     ///    stays open for an app that holds it).
     ///
@@ -3776,7 +3771,7 @@ impl Paykit {
         confirmed: Option<UserConfirmed>,
         kind: Dispatch,
     ) -> Result<FinalCheck> {
-        if !self.holds("pay") {
+        if !self.holds("paykit_pay") {
             return Ok(FinalCheck::Hold);
         }
         if let Err(refusal) = self.transfer_holds(entry)? {
@@ -3810,9 +3805,7 @@ impl Paykit {
                 }
             }
         }
-        let Some(carrier) = entry.kept_carrier(&self.identity())? else {
-            return Ok(FinalCheck::Hold);
-        };
+        let carrier = entry.kept_carrier(&self.identity())?;
         let destination = self
             .destination_valid(
                 &entry.payee,
@@ -3856,9 +3849,7 @@ impl Paykit {
         claim: &ClaimView,
     ) -> Result<std::result::Result<PeerIdentity, PayOutcome>> {
         let attempt_id = entry.attempt()?;
-        let Some(carrier) = entry.kept_carrier(&self.identity())? else {
-            return Ok(Err(PayOutcome::Uncertain { attempt_id }));
-        };
+        let carrier = entry.kept_carrier(&self.identity())?;
         let gate = self
             .pay_gate(
                 entry,

@@ -7,7 +7,7 @@
 //! Allowance record version the grant's write builds on.
 //!
 //! Security: the signed version ties a grant to its place in the grant history, so an own app
-//! with `allowance` can't move a grant to make a ledger write look like another executor's,
+//! with `paykit_allowance` can't move a grant to make a ledger write look like another executor's,
 //! and a grant can't be moved to another counterparty or Allowance. Changing the terms voids
 //! it.
 
@@ -59,7 +59,7 @@ pub struct ExecutorGrant {
     pub terms_hash: [u8; 32],
     /// The generation in which the executor's user last confirmed the Allowance.
     pub confirmed_generation: u64,
-    /// The executor's certificate, holding `allowance_execute`.
+    /// The executor's certificate, holding `paykit_allowance_execute`.
     pub cert: SignedDoc,
     /// The signature.
     pub sig: [u8; 64],
@@ -143,7 +143,7 @@ impl ExecutorGrant {
     }
 
     /// Verify the grant (Paykit wire 3.3): `cert` verifies as a Paykit certificate of the own
-    /// `identity`, names `app_id` and holds `allowance_execute`; `terms_hash` is
+    /// `identity`, names `app_id` and holds `paykit_allowance_execute`; `terms_hash` is
     /// `expected_terms`; and the signature verifies with the certificate's signing key for
     /// this identity, counterparty and Allowance at `built_on`, the version its grant history
     /// entry names. Returns the executor's certificate.
@@ -165,7 +165,9 @@ impl ExecutorGrant {
             return invalid("Paykit wire 3.3: the grant's certificate names another app");
         }
         if !scopes::holds(cert.scopes(), &PaykitScope::AllowanceExecute) {
-            return invalid("Paykit wire 3.3: the grant's certificate lacks allowance_execute");
+            return invalid(
+                "Paykit wire 3.3: the grant's certificate lacks paykit_allowance_execute",
+            );
         }
         if &self.terms_hash != expected_terms {
             return invalid("Paykit wire 3.3: the grant names other terms");

@@ -34,7 +34,7 @@ fn confirmed() -> PayOptions {
     PayOptions::default().with_possibly_cancelled_confirmed(UserConfirmed::new())
 }
 
-/// The record of bob's shop app the wallet holds for `request`.
+/// The record of bob's shop app the wallet holds for `paykit_request`.
 async fn cancel(shop: &mut Paykit, request: &RequestRef) {
     let record = shop
         .payee_activity()

@@ -194,7 +194,7 @@ impl PaykitProtocol {
             None => match self.own() {
                 Some(own)
                     if acts_as_payee(own.cert.scopes())
-                        && !own.cert.scopes().iter().any(|s| s == "pay") =>
+                        && !own.cert.scopes().iter().any(|s| s == "paykit_pay") =>
                 {
                     Side::Payee
                 }
@@ -247,10 +247,10 @@ pub(crate) fn stored_copy(message: &ReceivedMessage) -> Result<StoredMessage, St
 /// Whether a certificate's scopes hold one of `roles` (Paykit spec 3.3).
 pub(crate) fn holds_role(scopes: &[String], roles: &[KindRole]) -> bool {
     roles.iter().any(|role| match role {
-        KindRole::Pay => scopes.iter().any(|s| s == "pay"),
+        KindRole::Pay => scopes.iter().any(|s| s == "paykit_pay"),
         KindRole::Request => acts_as_payee(scopes),
-        KindRole::Allowance => scopes.iter().any(|s| s == "allowance"),
-        KindRole::AllowanceExecute => scopes.iter().any(|s| s == "allowance_execute"),
+        KindRole::Allowance => scopes.iter().any(|s| s == "paykit_allowance"),
+        KindRole::AllowanceExecute => scopes.iter().any(|s| s == "paykit_allowance_execute"),
         // Any Paykit App: another protocol's scopes alone take no Paykit kind (Switch wire
         // 3.1 "Several protocols").
         KindRole::Any => paykit_lib::scopes::holds_paykit_scope(scopes),
@@ -304,8 +304,8 @@ pub const BACKUP_NAME: &str = "paykit";
 /// a queued `resend_request` (`ans/`: the requester's certificate, a `resend_request`'s
 /// body, and the `seq` and `msg_id` its key names), and a payee app's records seen (`ar/`,
 /// bound to the payee and app its key names). The rest is the app's own data, read as its
-/// family's and bound to its key (`ask/`, times and counts, `side/`, `en/`, notices `nt/`,
-/// the consent list `ac/`, each entry marked to be confirmed again): a
+/// family's and bound to its key (`ask/`, times and counts, `side/`, `en/`, notices `nt/`
+/// and those owed `bl/`, the consent list `ac/`, each entry marked to be confirmed again): a
 /// backup carries the app's signing keys, so whoever can write one can sign anything the
 /// app can, and a check of what the app signed guards against corruption only.
 pub(crate) fn restore_paykit_layer(
@@ -546,6 +546,19 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            // A notice of lost messages owed is carried as the marks and the notices are: the
+            // mark it stands for is gone, so a backup without it would lose the notice. The
+            // restore writes back the outbox's records the backup carries, under the same
+            // `msg_id`s, and no sent messages: the pass after the read settles the notice from
+            // the restored outbox's answer on its request (`Paykit::settle_lost_owed`). Its
+            // times aren't bounded as a mark's are: it asks nothing, and its latest time is
+            // already in the raise owed, which is.
+            StateKey::LostOwed { .. } => {
+                state::restored::<crate::marks::LostOwed>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
             StateKey::BlockedWidening { .. } => {
                 state::restored::<crate::marks::BlockedWindow>(&key, &value, &binder)
                     .map_err(|_| unread())?;
@@ -621,7 +634,7 @@ pub(crate) fn restore_paykit_layer(
     // No certificate is kept as listed under, a backup's included: only a listing Paykit
     // makes keeps one (`Paykit::list_records`), so the restored copy counts as unlisted
     // until then, whichever certificate the client lists under.
-    // No new attempt until a reconcile has run the payer pass, under `pay`: the backup
+    // No new attempt until a reconcile has run the payer pass, under `paykit_pay`: the backup
     // doesn't hold the attempts made after it (`Paykit::payer_pass_owed`).
     let owed = state::local_put(key::PAYER_PASS_OWED, &true)
         .map_err(|_| String::from("the restore's payer pass mark can't be written"))?;
@@ -738,9 +751,9 @@ impl Protocol for PaykitProtocol {
     }
 
     /// The label narrowing of Paykit spec 3.4: a payer's acceptance, rejection,
-    /// cancellation and proof about a labelled request go only to apps holding `request` or
-    /// that label, and about an unlabelled request only to apps holding `request`; a payee's
-    /// cancellation, without a label, to apps holding `pay` or `request`.
+    /// cancellation and proof about a labelled request go only to apps holding `paykit_request` or
+    /// that label, and about an unlabelled request only to apps holding `paykit_request`; a payee's
+    /// cancellation, without a label, to apps holding `paykit_pay` or `paykit_request`.
     fn sends_to(&self, message: &Message, recipient: &AppRecord) -> bool {
         self.narrows(message, recipient, None)
     }
@@ -941,8 +954,8 @@ impl Protocol for PaykitProtocol {
     }
 
     /// Paykit's collections with their fixed policies (Paykit spec 6, Paykit wire 5.1):
-    /// `payee_activity` with one policy per label, so an app holding `request` lists and
-    /// takes every label's records, and one holding `request:<label>` its label's.
+    /// `payee_activity` with one policy per label, so an app holding `paykit_request` lists and
+    /// takes every label's records, and one holding `paykit_request:<label>` its label's.
     fn collections(&self) -> Vec<SwitchCollection> {
         crate::hold::RecordSide::All.collections()
     }
@@ -1085,7 +1098,7 @@ impl PaykitProtocol {
 pub(crate) fn writes_payee_label(scopes: &[String], label: Option<&Label>) -> bool {
     match label {
         Some(label) => switch_scopes::holds(scopes, &label.scope()),
-        None => scopes.iter().any(|s| s == "request"),
+        None => scopes.iter().any(|s| s == "paykit_request"),
     }
 }
 
@@ -1101,10 +1114,10 @@ mod tests {
     #[test]
     fn test_protocol_keys_paykit_scopes_and_labels_only() {
         let p = protocol();
-        assert!(p.has_keys("pay"));
-        assert!(p.has_keys("request:shop1"));
-        assert!(!p.has_keys("ext:paykit-cap"));
-        assert!(!p.has_keys("pay:x"));
+        assert!(p.has_keys("paykit_pay"));
+        assert!(p.has_keys("paykit_request:shop1"));
+        assert!(!p.has_keys("paykit_ext:paykit-cap"));
+        assert!(!p.has_keys("paykit_pay:x"));
         assert!(!p.has_keys("other"));
     }
 
@@ -1117,8 +1130,8 @@ mod tests {
 
     #[test]
     fn test_protocol_roles_follow_the_scope_table() {
-        let pay = vec!["pay".to_owned()];
-        let shop = vec!["request:shop1".to_owned()];
+        let pay = vec!["paykit_pay".to_owned()];
+        let shop = vec!["paykit_request:shop1".to_owned()];
         assert!(holds_role(&pay, Kind::PaymentRequest.recipients()));
         assert!(!holds_role(&shop, Kind::PaymentRequest.recipients()));
         assert!(holds_role(&shop, Kind::PaymentProof.recipients()));
@@ -1128,10 +1141,16 @@ mod tests {
     #[test]
     fn test_protocol_payee_label_write_scope() {
         let label = Label::parse("shop1").unwrap();
-        assert!(writes_payee_label(&["request".into()], Some(&label)));
-        assert!(writes_payee_label(&["request:shop1".into()], Some(&label)));
-        assert!(!writes_payee_label(&["request:shop2".into()], Some(&label)));
-        assert!(!writes_payee_label(&["request:shop1".into()], None));
+        assert!(writes_payee_label(&["paykit_request".into()], Some(&label)));
+        assert!(writes_payee_label(
+            &["paykit_request:shop1".into()],
+            Some(&label)
+        ));
+        assert!(!writes_payee_label(
+            &["paykit_request:shop2".into()],
+            Some(&label)
+        ));
+        assert!(!writes_payee_label(&["paykit_request:shop1".into()], None));
     }
 
     #[test]
@@ -1217,8 +1236,8 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_check_body_passes_a_valid_message_kept_as_stored() {
-        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
         let stored = bob.message(&alice, "paykit.payment_request", vec![], request_body());
         let message = received(&stored);
         assert_eq!(protocol_of(&alice).check_body(&message), Ok(()));
@@ -1229,8 +1248,12 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_check_body_drops_an_unhandled_kind_and_a_bad_body() {
-        let alice = Party::new("alice", "wallet", &["pay", "allowance", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request", "allowance"]);
+        let alice = Party::new(
+            "alice",
+            "wallet",
+            &["paykit_pay", "paykit_allowance", "paykit_contacts"],
+        );
+        let bob = Party::new("bob", "shop", &["paykit_request", "paykit_allowance"]);
         let p = protocol_of(&alice);
         let stored = bob.message(&alice, "paykit.payment_request", vec![], request_body());
         let mut message = received(&stored);
@@ -1247,10 +1270,10 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_sends_payer_replies_by_label() {
-        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
-        let shop1 = Party::new("bob", "shop1", &["request:shop1"]);
-        let shop2 = Party::new("bob", "shop2", &["request:shop2"]);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
+        let shop1 = Party::new("bob", "shop1", &["paykit_request:shop1"]);
+        let shop2 = Party::new("bob", "shop2", &["paykit_request:shop2"]);
         let accepts = ["paykit.payment_request_acceptance"];
         let p = protocol_of(&alice);
         let labelled = alice.message(
@@ -1274,13 +1297,21 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_accepts_only_handled_kinds_its_scopes_receive() {
-        let p = protocol_of(&Party::new("alice", "wallet", &["pay", "contacts"]));
-        let wallet = Party::new("alice", "wallet", &["pay", "allowance", "contacts"]);
+        let p = protocol_of(&Party::new(
+            "alice",
+            "wallet",
+            &["paykit_pay", "paykit_contacts"],
+        ));
+        let wallet = Party::new(
+            "alice",
+            "wallet",
+            &["paykit_pay", "paykit_allowance", "paykit_contacts"],
+        );
         let kinds = p.accepts(&wallet.cert);
         assert!(kinds.contains(&"paykit.payment_request".to_owned()));
         assert!(!kinds.contains(&"paykit.payment_proof".to_owned()));
-        // `allowance` takes the four Allowance messages; only `allowance_execute` takes
-        // `executor_notice` (Paykit spec 3.3).
+        // `paykit_allowance` takes the four Allowance messages; only `paykit_allowance_execute`
+        // takes `executor_notice` (Paykit spec 3.3).
         for kind in [
             "paykit.allowance_proposal",
             "paykit.allowance_acceptance",
@@ -1293,7 +1324,12 @@ mod receive_tests {
         let executor = Party::new(
             "alice",
             "executor",
-            &["pay", "allowance", "allowance_execute", "contacts"],
+            &[
+                "paykit_pay",
+                "paykit_allowance",
+                "paykit_allowance_execute",
+                "paykit_contacts",
+            ],
         );
         assert!(p
             .accepts(&executor.cert)
@@ -1301,7 +1337,7 @@ mod receive_tests {
         // Another app's scopes receive by Paykit's table.
         assert!(p.receives("paykit.allowance_proposal", &wallet.cert));
         assert!(!p.receives("paykit.payment_proof", &wallet.cert));
-        let plain = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let plain = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
         assert!(!p
             .accepts(&plain.cert)
             .contains(&"paykit.allowance_proposal".to_owned()));
@@ -1310,35 +1346,39 @@ mod receive_tests {
     #[test]
     fn test_protocol_cert_paykit_refuses_receives_and_accepts_nothing() {
         use pubky_switch_core::scopes::Permission;
-        let p = protocol_of(&Party::new("alice", "wallet", &["pay", "contacts"]));
-        // `request` needs exactly `conversation.add` (Paykit wire 3.1): one without it, or
+        let p = protocol_of(&Party::new(
+            "alice",
+            "wallet",
+            &["paykit_pay", "paykit_contacts"],
+        ));
+        // `paykit_request` needs exactly `conversation.add` (Paykit wire 3.1): one without it, or
         // with `lists.read` beside it, is a certificate the Switch takes and Paykit refuses.
-        let missing = Party::with_permissions("bob", "shop", &["request"], &[]);
+        let missing = Party::with_permissions("bob", "shop", &["paykit_request"], &[]);
         let extra = Party::with_permissions(
             "bob",
             "shop",
-            &["request"],
+            &["paykit_request"],
             &[Permission::ListsRead, Permission::ConversationAdd],
         );
         for app in [&missing, &extra] {
             assert!(!p.receives("paykit.payment_proof", &app.cert));
             assert!(p.accepts(&app.cert).is_empty());
         }
-        let valid = Party::new("bob", "shop", &["request"]);
+        let valid = Party::new("bob", "shop", &["paykit_request"]);
         assert!(p.receives("paykit.payment_proof", &valid.cert));
         assert!(!p.accepts(&valid.cert).is_empty());
     }
 
     #[test]
     fn test_protocol_pay_certificate_without_contacts_refused() {
-        // A paying app reads the deny list (Paykit spec 3.1): a certificate holding `pay`
-        // without `contacts`, its permissions exactly what its scopes need, is one the
+        // A paying app reads the deny list (Paykit spec 3.1): a certificate holding `paykit_pay`
+        // without `paykit_contacts`, its permissions exactly what its scopes need, is one the
         // Switch takes and Paykit's verifiers refuse, as a sender, a recipient and an own
         // certificate.
-        let wallet = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
+        let wallet = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
         let request = bob.message(&wallet, "paykit.payment_request", vec![], request_body());
-        let pay_only = Party::new("alice", "phone", &["pay"]);
+        let pay_only = Party::new("alice", "phone", &["paykit_pay"]);
         let p = protocol_of(&wallet);
         assert!(!p.receives("paykit.payment_request", &pay_only.cert));
         assert!(p.accepts(&pay_only.cert).is_empty());
@@ -1354,7 +1394,10 @@ mod receive_tests {
         let error = protocol_of(&bob)
             .check_scopes(&proof, &pay_only.cert, &bob.cert)
             .unwrap_err();
-        assert!(error.contains("pay requires contacts"), "{error}");
+        assert!(
+            error.contains("paykit_pay requires paykit_contacts"),
+            "{error}"
+        );
         assert!(pay_only
             .try_message(
                 &bob,
@@ -1372,8 +1415,8 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_pay_certificate_with_contacts_accepted() {
-        let wallet = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
+        let wallet = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
         let p = protocol_of(&bob);
         assert!(p.receives("paykit.payment_request", &wallet.cert));
         assert!(p
@@ -1390,8 +1433,8 @@ mod receive_tests {
     fn test_protocol_record_regression_judges_a_reassociation_by_the_version_built_on() {
         use paykit_lib::identifiers::AllowanceId;
         use paykit_lib::records::Reassociation;
-        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
         let p = protocol_of(&alice);
         let mut body = request_body();
         body.insert(
@@ -1485,8 +1528,8 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_restore_takes_a_kept_reply_at_its_record() {
-        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
         let (reply, value, record) = kept_reply(&alice, &bob);
         let at = key::kept_reply(&alice.id(), &record, &reply.message().msg_id);
         assert!(restores::<KeptMessage>(&bob, at.as_bytes(), &value));
@@ -1494,8 +1537,12 @@ mod receive_tests {
 
     /// Bob's Allowance proposal to alice, his end of it, and the parties.
     fn allowance_end() -> (Party, Party, StoredMessage, StoredMessage) {
-        let alice = Party::new("alice", "wallet", &["pay", "allowance", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request", "allowance"]);
+        let alice = Party::new(
+            "alice",
+            "wallet",
+            &["paykit_pay", "paykit_allowance", "paykit_contacts"],
+        );
+        let bob = Party::new("bob", "shop", &["paykit_request", "paykit_allowance"]);
         let id = "d0efffb7-191b-4709-b6c7-e343af5500b4";
         let terms = json!({
             "asset": "btc", "per_payment_amount": null, "period_limits": [],
@@ -1606,8 +1653,8 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_restore_refuses_a_kept_reply_at_another_key() {
-        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
         let (reply, value, record) = kept_reply(&alice, &bob);
         let msg_id = reply.message().msg_id.clone();
         let other = "123e4567-e89b-42d3-a456-426614174000";
@@ -1622,7 +1669,7 @@ mod receive_tests {
             );
         }
         // A kind that isn't a payer's reply, naming the same request.
-        let carol = Party::new("carol", "shop", &["request"]);
+        let carol = Party::new("carol", "shop", &["paykit_request"]);
         let receipt = carol.message(
             &bob,
             "paykit.payment_receipt",
@@ -1654,8 +1701,12 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_restore_takes_a_kept_allowance_answer_and_refuses_one_elsewhere() {
-        let alice = Party::new("alice", "wallet", &["pay", "allowance", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request", "allowance"]);
+        let alice = Party::new(
+            "alice",
+            "wallet",
+            &["paykit_pay", "paykit_allowance", "paykit_contacts"],
+        );
+        let bob = Party::new("bob", "shop", &["paykit_request", "paykit_allowance"]);
         let (answer, value, record) = kept_allowance_answer(&alice, &bob);
         let msg_id = answer.message().msg_id.clone();
         let at = key::kept_reply(&alice.id(), &record, &msg_id);
@@ -1693,8 +1744,12 @@ mod receive_tests {
         let key = key::allowance_end(&fake_key(&target), &end.message().msg_id);
         let unordered = state::encode(&KeptMessage::of(&end)).unwrap();
         assert!(!restores::<KeptMessage>(&alice, key.as_bytes(), &unordered));
-        let alice = Party::new("alice", "wallet", &["pay", "allowance", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request", "allowance"]);
+        let alice = Party::new(
+            "alice",
+            "wallet",
+            &["paykit_pay", "paykit_allowance", "paykit_contacts"],
+        );
+        let bob = Party::new("bob", "shop", &["paykit_request", "paykit_allowance"]);
         let (answer, _, record) = kept_allowance_answer(&alice, &bob);
         let at = key::kept_reply(&alice.id(), &record, &answer.message().msg_id);
         let unordered = state::encode(&KeptMessage::of(&answer)).unwrap();
@@ -1703,8 +1758,8 @@ mod receive_tests {
         let at = key::kept_reply(&alice.id(), &record, &reply.message().msg_id);
         let unordered = state::encode(&KeptMessage::of(&reply)).unwrap();
         assert!(!restores::<KeptMessage>(&bob, at.as_bytes(), &unordered));
-        let wallet = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let shop = Party::new("bob", "shop", &["request"]);
+        let wallet = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let shop = Party::new("bob", "shop", &["paykit_request"]);
         let cancellation = shop.message(
             &wallet,
             "paykit.payment_request_cancellation",
@@ -1819,8 +1874,8 @@ mod receive_tests {
     fn test_protocol_restore_refuses_a_held_list_without_its_acceptance_time() {
         // Every writer of `lh/` keeps a list its inbox accepted, with the time, which orders
         // it behind the writes kept over its record: a restore refuses one without it.
-        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
         let list = bob.message(
             &alice,
             "paykit.private_payment_list",
@@ -1876,8 +1931,8 @@ mod receive_tests {
         // is placed among them in the order its inbox accepted it: one kept without its feed
         // `seq`, or with a null one, can't be ordered, so a restore refuses it, though its
         // record, which only the rail names, isn't bound until it is placed.
-        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
         let proof = alice.message(
             &bob,
             "paykit.payment_proof",
@@ -1912,8 +1967,8 @@ mod receive_tests {
     fn test_protocol_restore_refuses_a_kept_reply_without_its_acceptance_time() {
         // A reply is kept only as its inbox accepted it: one without the time can't come
         // from a valid run.
-        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
         let (reply, value, record) = kept_reply(&alice, &bob);
         let at = key::kept_reply(&alice.id(), &record, &reply.message().msg_id);
         assert!(!restores::<KeptMessage>(
@@ -1940,16 +1995,16 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_restore_takes_a_kept_cancellation_at_its_record() {
-        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
         let (key, value) = kept_cancellation(&alice, &bob);
         assert!(restores::<KeptMessage>(&alice, &key, &value));
     }
 
     #[test]
     fn test_protocol_restore_refuses_a_kept_cancellation_at_another_key_or_without_its_time() {
-        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
         let (key, value) = kept_cancellation(&alice, &bob);
         let other = key::kept_cancellation(&[9; 32]).into_bytes();
         assert!(!restores::<KeptMessage>(&alice, &other, &value));
@@ -1962,7 +2017,7 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_missed_marks_bound_to_their_time_and_asks() {
-        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
         let time = state::encode(&5u64).unwrap();
         assert!(restores::<u64>(&alice, key::missed(5).as_bytes(), &time));
         assert!(!restores::<u64>(&alice, key::missed(6).as_bytes(), &time));
@@ -1996,8 +2051,8 @@ mod receive_tests {
     fn test_protocol_stored_note_bound_to_its_key() {
         // A note read back names the sender and `msg_id` its key does, and so does the
         // message it keeps: one under another key is a corrupt store.
-        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
         let request = bob.message(&alice, "paykit.payment_request", vec![], request_body());
         let msg_id = request.message().msg_id.clone();
         let note = crate::stored::StoredNote {
@@ -2050,9 +2105,9 @@ mod receive_tests {
         // A restore queues again a payee's own receipt and cancellation from its record: this
         // app stores its own receipt only in the batch that queues it, so the record holds
         // one it sent (Paykit spec 7.2); never a message another app signed.
-        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
-        let till = Party::new("bob", "till", &["request"]);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
+        let till = Party::new("bob", "till", &["paykit_request"]);
         let mut record = ActivityRecord::new(paykit_lib::records::ActivitySide::Payee, alice.id());
         let receipt = |by: &Party| {
             by.message(
@@ -2099,9 +2154,9 @@ mod receive_tests {
         // `period_details` and the others in `earlier_details`: a restore queues again each
         // this app signed, the earlier ones first, and none another app signed (Paykit spec
         // 7.2, "What a restore loses").
-        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
-        let till = Party::new("bob", "till", &["request"]);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
+        let till = Party::new("bob", "till", &["paykit_request"]);
         let details = |by: &Party, expires: &str| {
             by.message(
                 &alice,
@@ -2205,8 +2260,8 @@ mod receive_tests {
 
     #[test]
     fn test_protocol_record_regression_on_a_dropped_role() {
-        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
         let p = protocol_of(&alice);
         let request = bob.message(&alice, "paykit.payment_request", vec![], request_body());
         let mut seen = activity::empty(ActivitySide::Payer, bob.id());

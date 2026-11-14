@@ -41,12 +41,12 @@ pub const CAROL_ORIGIN: &str = "https://carol-switch.example";
 pub fn spec() -> ProtocolSpec {
     ProtocolSpec {
         keyed_scopes: [
-            "pay",
-            "request",
-            "allowance",
-            "allowance_execute",
-            "contacts",
-            "manage_contacts",
+            "paykit_pay",
+            "paykit_request",
+            "paykit_allowance",
+            "paykit_allowance_execute",
+            "paykit_contacts",
+            "paykit_manage_contacts",
         ]
         .iter()
         .map(|s| (*s).to_owned())
@@ -234,7 +234,7 @@ impl World {
             .await
     }
 
-    /// Alice's wallet, holding `pay`. Alice buys from bob: the wallet invites him, a
+    /// Alice's wallet, holding `paykit_pay`. Alice buys from bob: the wallet invites him, a
     /// conversation she starts, as at a checkout, so his first request is admitted (Paykit
     /// spec 1).
     pub async fn wallet(&self, name: &str) -> Paykit {
@@ -266,7 +266,7 @@ impl World {
         wallet
     }
 
-    /// Bob's shop, holding `request`.
+    /// Bob's shop, holding `paykit_request`.
     pub async fn shop(&self) -> Paykit {
         self.join(
             &self.bob,
@@ -276,7 +276,7 @@ impl World {
         .await
     }
 
-    /// Bob's labelled selling app, holding `request:<label>`.
+    /// Bob's labelled selling app, holding `paykit_request:<label>`.
     pub async fn labelled_shop(&self, name: &str, label: &str) -> Paykit {
         let label = Label::parse(label).unwrap();
         self.join(

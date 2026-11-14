@@ -1,7 +1,7 @@
 //! The executor (Paykit spec 8.3): the grant, the ledger it builds on, and paying a request
 //! automatically under an Allowance.
 //!
-//! - **The grant:** an app holding `allowance_execute` becomes an Allowance's executor once
+//! - **The grant:** an app holding `paykit_allowance_execute` becomes an Allowance's executor once
 //!   its user confirms it: it signs its executor grant with its own signing key over the
 //!   identity, the counterparty, the Allowance, the terms hash, the current generation and
 //!   the Allowance record version its write builds on (Paykit wire 3.3), appends it to the
@@ -496,10 +496,10 @@ fn written_by_executor(
 
 impl Paykit {
     fn require_executor(&self) -> Result<()> {
-        if self.holds("allowance_execute") {
+        if self.holds("paykit_allowance_execute") {
             Ok(())
         } else {
-            Err(Refusal::ScopeMissing("allowance_execute".into()).into())
+            Err(Refusal::ScopeMissing("paykit_allowance_execute".into()).into())
         }
     }
 
@@ -548,12 +548,13 @@ impl Paykit {
     }
 
     /// The Allowance `named`, of the request record of `payee`, that `attempt` was made
-    /// under: the one its ledger record, as held, holds an entry for the attempt in. `None`
-    /// for a record naming none, or a ledger not held, that doesn't read or bind, or holds no
-    /// such entry: the attempt is then taken as made by hand, and its proof names no
-    /// Allowance. For a journal entry rebuilt after a restore.
+    /// under: the one its ledger record, as held or else as read from the switch once, holds
+    /// an entry for the attempt in. `None` for a record naming none, or a ledger not held,
+    /// that doesn't read or bind, or holds no such entry: the attempt is then taken as made
+    /// by hand, and its proof names no Allowance. For a journal entry rebuilt after a
+    /// restore.
     pub(crate) async fn attempt_under(
-        &self,
+        &mut self,
         payee: &[u8; 32],
         named: Option<&AllowanceId>,
         attempt: AttemptId,
@@ -561,23 +562,48 @@ impl Paykit {
         let Some(allowance_id) = named else {
             return Ok(None);
         };
-        let key = self.app.record_key(&ledger_target(payee, allowance_id))?;
-        let Some(held) = self.app.shared_record(&key).await? else {
+        let target = ledger_target(payee, allowance_id);
+        let key = self.app.record_key(&target)?;
+        if self
+            .held_ledger_names(&key, payee, allowance_id, attempt)
+            .await?
+        {
+            return Ok(Some(allowance_id.clone()));
+        }
+        // The copy a restore holds may predate the attempt's entry: the ledger is read from
+        // the switch once. A read that fails leaves the copy as it was; only a failure of the
+        // app's own store is an error.
+        if let Err(error) = self.app.read_record(&target).await {
+            let error: PaykitError = error.into();
+            if crate::hold::local_failure(&error) {
+                return Err(error);
+            }
             return Ok(None);
+        }
+        Ok(self
+            .held_ledger_names(&key, payee, allowance_id, attempt)
+            .await?
+            .then(|| allowance_id.clone()))
+    }
+
+    /// Whether the ledger the app holds at `key`, bound to `payee`'s Allowance
+    /// `allowance_id`, holds an entry for `attempt`.
+    async fn held_ledger_names(
+        &self,
+        key: &[u8; 32],
+        payee: &[u8; 32],
+        allowance_id: &AllowanceId,
+        attempt: AttemptId,
+    ) -> Result<bool> {
+        let Some(held) = self.app.shared_record(key).await? else {
+            return Ok(false);
         };
-        let Some(ledger) = held
+        Ok(held
             .content
             .value()
             .and_then(|value| Ledger::from_json(value).ok())
             .filter(|l| l.counterparty == *payee && &l.allowance_id == allowance_id)
-        else {
-            return Ok(None);
-        };
-        Ok(ledger
-            .entries
-            .iter()
-            .any(|e| e.attempt_id == attempt)
-            .then(|| allowance_id.clone()))
+            .is_some_and(|ledger| ledger.entries.iter().any(|e| e.attempt_id == attempt)))
     }
 
     /// The kept ledger version of the Allowance at `record`, read bound to its key as a
@@ -992,8 +1018,8 @@ impl Paykit {
     /// "Handoff"), and neither does its consent removed for those. What can't be known holds
     /// it: the record not held or not binding, its view or its ledger's divergent or seen so
     /// and not confirmed (Paykit spec 6), its current write one the app ignores and the user
-    /// hasn't confirmed or a removed app's after its `distrust_from`, its consent to be confirmed again after a restore or a `missed`
-    /// item, or no consent entry at all.
+    /// hasn't confirmed or a removed app's after its `distrust_from`, its consent to be
+    /// confirmed again after a restore or a `missed` item, or no consent entry at all.
     pub(crate) async fn repeat_under_allowance_held(
         &mut self,
         record: &[u8; 32],
@@ -1945,7 +1971,7 @@ impl Paykit {
     /// for an Allowance record not held, held as deleted, or not binding;
     /// [`Refusal::SwitchUnavailable`] when the Allowance record can't be read from the switch
     /// now; [`Refusal::NotNow`] while the app may not attempt automatically or the records
-    /// aren't listed; [`Refusal::ScopeMissing`] without `allowance_execute`; otherwise as
+    /// aren't listed; [`Refusal::ScopeMissing`] without `paykit_allowance_execute`; otherwise as
     /// [`Paykit::pay_request`], whose checks it takes too, a doubtful claim refused as
     /// [`Refusal::MayBePaid`] and never paid over.
     pub async fn pay_under_allowance(
@@ -1983,7 +2009,7 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::ScopeMissing`] without `allowance_execute`; [`Refusal::NotFound`];
+    /// [`Refusal::ScopeMissing`] without `paykit_allowance_execute`; [`Refusal::NotFound`];
     /// [`Refusal::AllowanceEnded`] or [`Refusal::Rejected`]; [`Refusal::Usage`] for an
     /// Allowance not accepted, one this identity is the allowee of, or one that left the
     /// consent list for good; [`Refusal::AllowanceConflicted`] for a conflicted one;

@@ -1,29 +1,14 @@
 //! Records written by apps of other versions (Paykit wire 5, 5.3): a writer keeps every member
-//! it doesn't know as it read it, and reads `unrequested` without `amount`.
+//! it doesn't know as it read it.
 
-use paykit_lib::collections::Collection;
-use paykit_lib::derive::natural_key;
-use paykit_lib::AttemptId;
 use paykit_sdk::rail::Behaviour;
-use paykit_sdk::{PayOptions, PayOutcome, Paykit, RequestRef, UnrequestedPayment};
-use pubky_switch_client::app::{Collection as SwitchCollection, OpBatch, RecordTarget};
+use paykit_sdk::{PayOptions, PayOutcome, Paykit, RequestRef};
+use pubky_switch_client::app::{OpBatch, RecordTarget};
 use pubky_switch_client::clock::Clock;
-use pubky_switch_client::store::StateStore;
 use serde_json::{json, Value};
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
-use crate::common::{btc, draft, endpoint, request_from, World};
-use crate::outcome_record::{payer_record, NoSeenMarks};
-
-/// Alice's payer record of her payment without a request `attempt_id`.
-fn unrequested_record(w: &World, attempt_id: &AttemptId) -> RecordTarget {
-    let collection = Collection::PayerActivity;
-    RecordTarget::new(
-        SwitchCollection::new(collection.name(), collection.policy(None)),
-        &natural_key::payer_payment_record(&w.alice_id(), attempt_id),
-    )
-}
+use crate::common::{draft, request_from, World};
+use crate::outcome_record::payer_record;
 
 /// The value at `target`, read again from the switch by `app`.
 async fn value_at(app: &mut Paykit, target: &RecordTarget) -> Value {
@@ -98,56 +83,4 @@ async fn test_mixed_versions_payment_keeps_members_its_writer_does_not_know() {
     assert_eq!(value["future_member"], note, "{value}");
     assert_eq!(value["request"]["relayed_by"], "bob's relay", "{value}");
     assert_eq!(value["manual_only"], true, "{value}");
-}
-
-#[tokio::test]
-async fn test_mixed_versions_unrequested_without_amount_reads() {
-    let w = World::new();
-    // The wallet keeps no mark of the values it saw, so it acts on the value the phone
-    // writes only if that value reads.
-    let store = Arc::new(NoSeenMarks::default());
-    let mut wallet = w
-        .wallet_on("wallet", Arc::clone(&store) as Arc<dyn StateStore>)
-        .await;
-    let mut phone = w.wallet("phone").await;
-    let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
-        .await;
-    wallet.receive(None).await.unwrap();
-    w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id, .. } = wallet
-        .pay_without_request(
-            UnrequestedPayment::new(w.bob_id(), btc("0.0015")).with_options(
-                PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")),
-            ),
-        )
-        .await
-        .unwrap()
-    else {
-        panic!("pending");
-    };
-    // The attempt's batch wrote the amount with the destination.
-    let target = unrequested_record(&w, &attempt_id);
-    let value = value_at(&mut phone, &target).await;
-    assert_eq!(
-        value["unrequested"]["amount"],
-        json!({ "asset": "btc", "value": "0.0015" }),
-        "{value}"
-    );
-    // An app that doesn't know the member writes the record without it.
-    store.armed.store(true, Ordering::SeqCst);
-    phone_rewrites(&mut phone, &target, |v| {
-        v["unrequested"].as_object_mut().unwrap().remove("amount");
-    })
-    .await;
-
-    w.rail.settle(&attempt_id, true);
-    let resumed = wallet.resume_payments().await.unwrap();
-    assert!(
-        matches!(resumed.as_slice(), [PayOutcome::Paid { .. }]),
-        "{resumed:?}"
-    );
-    let value = value_at(&mut wallet, &target).await;
-    assert!(!value["proof"].is_null(), "{value}");
-    assert!(!value["unrequested"].is_null(), "{value}");
 }
