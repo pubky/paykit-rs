@@ -949,7 +949,7 @@ An entry:
 |---|---|---|---|
 | `obligation` | `b64(32)` | yes | the request's obligation ID, the claim key of its claim (Switch wire 6.2) |
 | `attempt_id` | `b64(16)` | yes | |
-| `value` | amount | yes | the amount paid; the payment method transfers exactly this (spec 7.2 step 1), and fees aren't counted |
+| `value` | amount | yes | the amount the payment transfers in the requested asset, never less than the requested amount (spec 7.2 step 1, 8.2), and fees aren't counted |
 | `asset` | string | yes | |
 | `at` | time | yes | the time the executor stated, vouched for by `server_time_in(at, at + 60 s)` |
 | `outcome` | `"done" \| "failed"` | no | the attempt's outcome, once known: `done` is final; `failed`, written only when the attempt's owner failed it or the user released the amount, releases it until a later `done` replaces it |
