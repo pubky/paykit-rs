@@ -3620,9 +3620,7 @@ impl Paykit {
     /// when a read fails, the deny list holds the payee, the record isn't there, doesn't read
     /// or holds no request, the Allowance record doesn't let the executor pay under it (for a
     /// repeat: ended, rejected or not read), or,
-    /// when `judge`, the record withholds the request or the floor holds it, or, at a `first`
-    /// dispatch, the one-time request is past the age an executor pays it at automatically
-    /// (`crate::executor::ONE_TIME_AUTOMATIC_AGE_MS`). Without `judge`,
+    /// when `judge`, the record withholds the request or the floor holds it. Without `judge`,
     /// nothing more is read from the switch after the last read; only the app's own store is.
     async fn shared_collect(
         &mut self,
@@ -3663,11 +3661,6 @@ impl Paykit {
                     return Ok(None);
                 };
                 if judge && self.floor_holds_read(&stored, floor.as_ref()).await? {
-                    return Ok(None);
-                }
-                // The request's age, judged before the batch, again on the service time
-                // verified since (`crate::executor::ONE_TIME_AUTOMATIC_AGE_MS`).
-                if judge && first && self.past_automatic_age(&stored) {
                     return Ok(None);
                 }
                 (Some(stamp), Some(floor.as_ref().map(WriteStamp::of)))
