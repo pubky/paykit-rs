@@ -1626,19 +1626,48 @@ async fn restored_bare(w: &World, backup: &PaykitBackup) -> Paykit {
 async fn test_restore_clean_reconcile_right_after_the_restore_reads_first() {
     // The host reconciles right after the restore, with no refresh or receive of its own:
     // Paykit makes the first read first, so the held cursor judges the restore clean, and
-    // the host's next receive gets that read's summary.
+    // the host's next receive gets that read's summary, the payer records that read took
+    // told once.
     let w = World::new();
     let (mut shop, [first, second], backup, ..) = backed_up_with_requests(&w).await;
     let mut app = restored_bare(&w, &backup).await;
     app.reconcile().await.unwrap();
     assert_eq!(app.app().restore_held_cursor(), Some(HeldCursor::Clean));
     assert_eq!(restore_verdict(&app).await, "clean");
+    let records: Vec<[u8; 32]> = app
+        .app()
+        .records_of("payer_activity")
+        .await
+        .unwrap()
+        .iter()
+        .map(|record| record.key)
+        .collect();
+    assert_eq!(records.len(), 2, "{records:?}");
+    let changed = |summary: &paykit_sdk::ReceiveSummary| -> Vec<[u8; 32]> {
+        summary
+            .report
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                pubky_switch_client::app::AppEvent::RecordChanged { key } => Some(*key),
+                _ => None,
+            })
+            .filter(|key| records.contains(key))
+            .collect()
+    };
     let handed = app.receive(None).await.unwrap();
     assert_eq!(
         handed.report.held_cursor,
         Some(HeldCursor::Clean),
         "{handed:?}"
     );
+    let mut told = changed(&handed);
+    told.sort_unstable();
+    let mut expected = records.clone();
+    expected.sort_unstable();
+    assert_eq!(told, expected, "{handed:?}");
+    let again = app.receive(None).await.unwrap();
+    assert!(changed(&again).is_empty(), "{again:?}");
     app.end_reconcile(UserConfirmed::new()).await.unwrap();
     for request in [&first, &second] {
         let view = app.request(request).await.unwrap();
@@ -1668,6 +1697,52 @@ async fn test_restore_clean_write_right_after_the_restore_reads_first() {
         app.request(&second).await.unwrap().status,
         RequestStatus::Rejected
     );
+    app.receive(None).await.unwrap();
+    assert_eq!(shop.receive(None).await.unwrap().resends, 0);
+}
+
+#[tokio::test]
+async fn test_restore_clean_write_while_the_homeserver_is_unreachable_waits() {
+    // Right after a clean restore the Homeserver can't be read: the own identity.json can't
+    // be confirmed, so no page could settle the verdict, and the first write is refused
+    // before it reads or writes anything, leaving the cursor where it was. Once the
+    // Homeserver answers, the next write reads first and the verdict is clean.
+    let w = World::new();
+    let (mut shop, [first, second], backup, ..) = backed_up_with_requests(&w).await;
+    let reads = Arc::new(crate::common::ScriptedIdentityReads::new(
+        Arc::clone(&w.homeserver),
+        Arc::clone(&w.clock),
+    ));
+    let mut env = w.env(&w.alice, store());
+    env.homeserver = Arc::clone(&reads) as Arc<dyn pubky_switch_client::app::HomeserverReader>;
+    let mut app = Paykit::restore(
+        env,
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    let applied = w.alice.switch().applied().len();
+    let cursor = app.app().cursor();
+    reads.then(w.alice_id(), 0, true);
+    let refused = app.reject_request(&second, None).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::IdentityUnavailable(_))),
+        "{refused:?}"
+    );
+    assert_eq!(w.alice.switch().applied().len(), applied);
+    assert_eq!(app.app().cursor(), cursor);
+    assert_eq!(app.app().restore_held_cursor(), None);
+    assert_eq!(restore_verdict(&app).await, "open");
+    app.reject_request(&second, None).await.unwrap();
+    assert_eq!(app.app().restore_held_cursor(), Some(HeldCursor::Clean));
+    assert_eq!(restore_verdict(&app).await, "clean");
+    reconciled(&mut app).await;
+    let view = app.request(&first).await.unwrap();
+    assert_eq!(view.status, RequestStatus::Open, "{view:?}");
+    assert!(!view.manual_only, "{view:?}");
     app.receive(None).await.unwrap();
     assert_eq!(shop.receive(None).await.unwrap().resends, 0);
 }

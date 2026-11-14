@@ -151,7 +151,9 @@ pub enum Refusal {
         quote: Box<crate::TransferQuote>,
     },
     /// The payee's `identity.json` couldn't be read, or the app's own couldn't be revalidated,
-    /// before money moves (Paykit spec 4, 7.2).
+    /// before money moves (Paykit spec 4, 7.2); or the Homeserver couldn't be read to confirm
+    /// the app's own before a restore's first read, which settles the restore's verdict only
+    /// once it is confirmed (Switch spec 12.4): nothing was read or written.
     #[error("Paykit spec 7.2: {0}")]
     IdentityUnavailable(String),
     /// The payee's switch couldn't confirm its `identity.json` in time: a payment the user

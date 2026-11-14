@@ -1416,16 +1416,17 @@ impl Paykit {
     /// page read once the own `identity.json` is confirmed, before any cursor move of the
     /// app's, and every write carries the restored cursor move, which would leave it unknown.
     /// While the restore's verdict is open and the client has none, the first such call
-    /// confirms the newest `identity.json` and makes the first [`Paykit::receive`] itself
-    /// before it does anything else; that receive's summary goes to the host with its next
-    /// [`Paykit::receive`]. Made once per load: a page that settles nothing leaves the call
-    /// to go on, as a read the host made would.
+    /// makes the first [`Paykit::receive`] itself before it does anything else, which
+    /// confirms the newest `identity.json` before it reads; that receive's summary goes to
+    /// the host with its next [`Paykit::receive`]. Made once per load: a page that settles
+    /// nothing leaves the call to go on, as a read the host made would.
     ///
     /// # Errors
     ///
     /// [`Refusal::CertificateRefused`] for a certificate Paykit refuses; the errors of the
-    /// identity's refresh and of the receive: the calling call does nothing then, and the
-    /// next one tries again.
+    /// receive, [`Refusal::IdentityUnavailable`] among them for a Homeserver that can't be
+    /// read to confirm the `identity.json`: the calling call does nothing then, the read
+    /// stays owed, and the next call tries again.
     pub(crate) async fn verdict_before_writing(&mut self) -> Result<()> {
         if !matches!(self.restore_read, crate::paykit::RestoreRead::Owed) {
             return Ok(());
@@ -1446,7 +1447,6 @@ impl Paykit {
             self.restore_read = crate::paykit::RestoreRead::Done;
             return Ok(());
         }
-        self.app.refresh_identity().await?;
         let summary = Box::pin(self.receive(None)).await?;
         self.restore_read = crate::paykit::RestoreRead::Made(Box::new(summary));
         Ok(())

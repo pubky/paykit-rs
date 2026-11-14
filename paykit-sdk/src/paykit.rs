@@ -20,7 +20,7 @@ use paykit_lib::{Asset, Decimal, Label};
 use pubky_switch_client::app::Protocol as _;
 use pubky_switch_client::app::{
     App, AppBackup, AppConfig, AppEnv, AppError, AppEvent, HeldCursor, HomeserverReader,
-    JoinRequest, ReceiveReport,
+    IdentityRefresh, JoinRequest, ReceiveReport,
 };
 use pubky_switch_client::clock::Clock;
 use pubky_switch_core::records::{AppCert, Approval};
@@ -308,8 +308,10 @@ fn key_epochs_awaited(events: &[AppEvent]) -> Vec<u64> {
 impl ReceiveSummary {
     /// The summary of two receives, `earlier` and then `self`, as one: the events, messages,
     /// re-sends, lists sent and records paused of both, in order; the held cursor the worse
-    /// of the two reads' (ahead over unknown over clean); what tells the state now, the
-    /// cursor and the lists not sent among it, the later one's.
+    /// of the two reads' (ahead over unknown over clean); the data epochs either waited for,
+    /// ascending, each once, as the events of both name them, and scope keys awaited while
+    /// any is; what tells the state now, the cursor and the lists not sent among it, the
+    /// later one's.
     fn after(mut self, earlier: Self) -> Self {
         let report = &mut self.report;
         report.events.splice(0..0, earlier.report.events);
@@ -326,6 +328,10 @@ impl ReceiveSummary {
         self.lists.sent.splice(0..0, earlier.lists.sent);
         self.lists.resent.splice(0..0, earlier.lists.resent);
         self.divergent.splice(0..0, earlier.divergent);
+        self.key_epochs_awaited.extend(earlier.key_epochs_awaited);
+        self.key_epochs_awaited.sort_unstable();
+        self.key_epochs_awaited.dedup();
+        self.scope_keys_awaited |= !self.key_epochs_awaited.is_empty();
         self
     }
 }
@@ -538,7 +544,9 @@ impl Paykit {
     /// first [`Paykit::receive`] themselves before anything else, once per load, and the
     /// host's next `receive` hands that read's summary over with its own; a host's own
     /// [`Paykit::receive`] confirms the newest `identity.json` before it reads too. A refresh
-    /// or read that fails fails the call, with nothing written. Only a write the host makes
+    /// or read that fails fails the call, with nothing written: a Homeserver that can't be
+    /// read now, [`crate::Refusal::IdentityUnavailable`], and the next call tries again.
+    /// Only a write the host makes
     /// through the client itself (`app_mut()`) can still go first, and leave the verdict
     /// unknown.
     ///
@@ -794,12 +802,20 @@ impl Paykit {
     ///
     /// While a restore's verdict waits for a page, the call confirms the newest own
     /// `identity.json` before it reads, so its first page settles the verdict; a refresh that
-    /// can't be made now fails the call, with nothing read, and one refused for good, as for
-    /// an app no longer listed, leaves the read to report it ([`Paykit::restore`]). After a
-    /// restore, a call that writes may have made the first receive itself, for the client's
-    /// verdict on the restore: the next call's summary holds that receive's too, before its
-    /// own ([`ReceiveSummary`] of both, in order), so the host acknowledges the duty events
-    /// of both. Kept in memory until a call returns it.
+    /// can't be made now fails the call, with nothing read: a Homeserver that can't be read,
+    /// [`Refusal::IdentityUnavailable`], or a copy that doesn't verify, the client's error. A
+    /// Homeserver that serves no copy, or an older one, and a refresh refused for good, as
+    /// for an app no longer listed, leave the read to go on and report it
+    /// ([`Paykit::restore`]). After a restore, a call that writes may have made the first
+    /// receive itself, for the client's verdict on the restore: the next call's summary holds
+    /// that receive's too, before its own ([`ReceiveSummary`] of both, in order), so the host
+    /// acknowledges the duty events of both. That summary is kept in memory until a call
+    /// returns it: a crash, or dropping the [`Paykit`] first, loses it, but only its
+    /// informational events and its `applied`, `resends` and `lists`. Its duty events stay
+    /// unacknowledged at the client and come back through [`App::unacknowledged_events`],
+    /// and what the SDK took from that read is stored: its notices ([`Paykit::notices`]),
+    /// the records it paused ([`Paykit::divergent_records`]) and the obligations a provider
+    /// loss leaves in doubt.
     pub async fn receive(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
         // The read's future goes on the heap: the client's read nests deep, and a host
         // polling it on a small stack, such as a test thread's 2 MiB, keeps room for it.
@@ -831,11 +847,23 @@ impl Paykit {
         }
         // While a restore's verdict waits for a page, the newest own `identity.json` is
         // confirmed first, as before a write: only a page read once it is settles the verdict
-        // (`hold.rs`). A refresh that can't be made now fails the receive, with nothing read;
-        // one refused for good, such as for an app no longer listed, leaves the read to go on
-        // and report it, as the client's read does.
+        // (`hold.rs`). A Homeserver that can't be read now confirms nothing, and a read made
+        // then would spend the restore's one read before a write on a page that settles
+        // nothing, the write's cursor move leaving the verdict unknown: the receive fails,
+        // with nothing read, and the next call tries again. A copy that doesn't verify, a
+        // store that fails or an alarm fail it too, the client's error. A Homeserver that
+        // serves no copy or an older one, and a refresh refused for good, such as for an app
+        // no longer listed, leave the read to go on and report it, as the client's read does.
         if self.certificate_refused().is_none() && Box::pin(self.restore_verdict_awaited()).await? {
             match self.app.refresh_identity().await {
+                Ok(IdentityRefresh::Unavailable) | Err(AppError::Transport(_)) => {
+                    return Err(Refusal::IdentityUnavailable(
+                        "Switch spec 12.4: the Homeserver can't be read to confirm the own \
+                         identity.json before the restore's first read"
+                            .into(),
+                    )
+                    .into());
+                }
                 Ok(_) | Err(AppError::Refused(_)) => {}
                 Err(error) => return Err(error.into()),
             }
@@ -1072,9 +1100,11 @@ mod tests {
     use std::sync::Arc;
 
     use paykit_lib::AttemptId;
-    use pubky_switch_client::app::{AppEnv, JoinRequest, UserConfirmed};
+    use pubky_switch_client::app::{
+        AppEnv, AppEvent, HeldCursor, JoinRequest, ReceiveReport, UserConfirmed,
+    };
 
-    use super::{Paykit, PaykitBackup, PaykitConfig};
+    use super::{Paykit, PaykitBackup, PaykitConfig, ReceiveSummary};
     use crate::pay::{PayOptions, UnrequestedPayment};
     use crate::rail::Rail;
     use crate::receipts::{ReceiptDetails, ReceiptsOf};
@@ -1180,5 +1210,113 @@ mod tests {
     fn test_paykit_futures_are_send() {
         assert_send_sync::<Paykit>();
         let _ = public_futures_are_send;
+    }
+
+    /// A summary of one receive: `events`, `held_cursor`, the messages `applied`, `resends`,
+    /// one list sent at `version`, and the data epochs awaited.
+    fn summary(
+        events: Vec<AppEvent>,
+        held_cursor: Option<HeldCursor>,
+        applied: &[&str],
+        resends: u64,
+        version: u64,
+        key_epochs_awaited: Vec<u64>,
+    ) -> ReceiveSummary {
+        let mut report = ReceiveReport::default();
+        report.events = events;
+        report.held_cursor = held_cursor;
+        let mut lists = crate::publish::ListsPublished::default();
+        lists.sent.push(crate::publish::SentList {
+            counterparty: [1; 32],
+            version,
+            msg_id: format!("list-{version}"),
+        });
+        ReceiveSummary {
+            report,
+            applied: applied.iter().map(|id| (*id).to_string()).collect(),
+            resends,
+            scope_keys_awaited: !key_epochs_awaited.is_empty(),
+            key_epochs_awaited,
+            lists,
+            ..ReceiveSummary::default()
+        }
+    }
+
+    #[test]
+    fn test_receive_summary_after_orders_and_merges() {
+        let earlier = summary(
+            vec![
+                AppEvent::AwaitingKeys {
+                    epochs: vec![3, 5],
+                    entries: 2,
+                },
+                AppEvent::RenewalSeen,
+            ],
+            Some(HeldCursor::Clean),
+            &["a", "b"],
+            2,
+            1,
+            vec![3, 5],
+        );
+        let later = summary(
+            vec![AppEvent::FullBundleRequested],
+            None,
+            &["c"],
+            3,
+            2,
+            vec![4, 5],
+        );
+        let merged = later.after(earlier.clone());
+        assert_eq!(
+            merged.report.events,
+            vec![
+                AppEvent::AwaitingKeys {
+                    epochs: vec![3, 5],
+                    entries: 2,
+                },
+                AppEvent::RenewalSeen,
+                AppEvent::FullBundleRequested,
+            ]
+        );
+        assert_eq!(merged.report.held_cursor, Some(HeldCursor::Clean));
+        assert_eq!(merged.applied, ["a", "b", "c"]);
+        assert_eq!(merged.resends, 5);
+        let versions: Vec<u64> = merged.lists.sent.iter().map(|list| list.version).collect();
+        assert_eq!(versions, [1, 2]);
+        assert_eq!(merged.key_epochs_awaited, [3, 4, 5]);
+        assert!(merged.scope_keys_awaited);
+
+        // Earlier epochs stay awaited after a later read that names none.
+        let quiet = summary(Vec::new(), Some(HeldCursor::Clean), &[], 0, 3, Vec::new());
+        let merged = quiet.after(earlier.clone());
+        assert_eq!(merged.key_epochs_awaited, [3, 5]);
+        assert!(merged.scope_keys_awaited);
+
+        // The worse held cursor wins: ahead over unknown over clean, either way round.
+        let ahead = HeldCursor::Ahead {
+            held: 9,
+            position: 4,
+        };
+        let cursor = |earlier: Option<HeldCursor>, later: Option<HeldCursor>| {
+            summary(Vec::new(), later, &[], 0, 1, Vec::new())
+                .after(summary(Vec::new(), earlier, &[], 0, 1, Vec::new()))
+                .report
+                .held_cursor
+        };
+        assert_eq!(cursor(Some(HeldCursor::Clean), Some(ahead)), Some(ahead));
+        assert_eq!(cursor(Some(ahead), Some(HeldCursor::Unknown)), Some(ahead));
+        assert_eq!(
+            cursor(Some(HeldCursor::Unknown), Some(HeldCursor::Clean)),
+            Some(HeldCursor::Unknown)
+        );
+        assert_eq!(
+            cursor(Some(HeldCursor::Clean), Some(HeldCursor::Unknown)),
+            Some(HeldCursor::Unknown)
+        );
+        assert_eq!(
+            cursor(None, Some(HeldCursor::Clean)),
+            Some(HeldCursor::Clean)
+        );
+        assert_eq!(cursor(None, None), None);
     }
 }
