@@ -49,7 +49,30 @@ pub(crate) struct KeptMessage {
     #[serde(with = "serde_b64_vec")]
     plaintext: Vec<u8>,
     accepted_at: Option<u64>,
+    /// The feed `seq` its entry was read at, for the members of the bounded pools, the kept
+    /// replies (`pr/`, every kind) and the kept stops (`kc/` and `ae/`, counted together),
+    /// for an Allowance's conflict stop (`cf/`), ordered among its record's answers, and for
+    /// the messages of the stored entries (`se/`) and of the writes kept over a divergent
+    /// record (`dw/`): the inbox's position for the entry, which orders it within one
+    /// millisecond ([`KeptMessage::order`]). The receive step takes it from the entry it is
+    /// handed, a stored entry's note from the entry the client stored, which keeps the `seq`
+    /// it was read at; so every one of them is ordered by the same token, whichever store
+    /// keeps it. The binding refuses a member of those families without it, and one of any
+    /// other family with it (`state::Stored`): a held list (`lh/`) is ordered by nothing and
+    /// carries none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seq: Option<u64>,
 }
+
+/// The order the inbox accepted a kept message in (Paykit spec 8.1): by acceptance time,
+/// then, within one millisecond, by the feed `seq` its entry was read at, the position the
+/// inbox gives each entry as it accepts it, whoever sent it (Switch spec 8.3), never by its
+/// `msg_id`, which its sender chooses, nor by the store that keeps it. A stored entry keeps
+/// the `seq` it was read at when the client tries it again, so a message keeps its position
+/// whichever store keeps it and however often it is taken. The `seq` starts again at a
+/// provider change, and the entry's generation is not handed to the receive step: two
+/// messages of one millisecond accepted under two generations are ordered by their `seq`s.
+pub(crate) type KeptOrder = (u64, u64);
 
 impl std::fmt::Debug for KeptMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -65,6 +88,30 @@ impl KeptMessage {
             cert: stored.cert().signed().clone(),
             plaintext: stored.plaintext().encode(),
             accepted_at: stored.accepted_at(),
+            seq: None,
+        }
+    }
+
+    /// Keep `stored`, read from the feed at `seq` ([`KeptOrder`]).
+    pub(crate) fn taken(stored: &StoredMessage, seq: u64) -> Self {
+        Self {
+            seq: Some(seq),
+            ..Self::of(stored)
+        }
+    }
+
+    /// The feed `seq` its entry was read at, for a message ordered among others
+    /// ([`KeptOrder`]).
+    pub(crate) fn seq(&self) -> Option<u64> {
+        self.seq
+    }
+
+    /// The order its inbox accepted it in ([`KeptOrder`]): one without its acceptance time
+    /// or its `seq` is a corrupt store.
+    pub(crate) fn order(&self) -> Result<KeptOrder> {
+        match (self.accepted_at, self.seq) {
+            (Some(at), Some(seq)) => Ok((at, seq)),
+            _ => Err(PaykitError::corrupt()),
         }
     }
 
@@ -156,13 +203,15 @@ impl Paykit {
         stored: StoredMessage,
         conditions: Vec<Condition>,
     ) -> Result<Option<(Vec<Condition>, OpKind)>> {
-        self.placed_write_with(target, counterparty, role, stored, conditions, false)
+        self.placed_write_with(target, counterparty, role, stored, conditions, false, false)
             .await
     }
 
     /// [`Paykit::placed_write`], setting `manual_only` (Paykit wire 5.3) on a record it opens
     /// when `manual_only`: a one-time request that came back after the user's block
-    /// (`receive.rs`).
+    /// (`receive.rs`); and, when `reflect_only`, the write that reflects `stored` by its
+    /// `msg_id` alone, leaving every role as it is ([`activity::reflect`]).
+    #[allow(clippy::too_many_arguments)] // the write's target and message, and its two flags
     pub(crate) async fn placed_write_with(
         &mut self,
         target: &ActivityTarget,
@@ -171,6 +220,7 @@ impl Paykit {
         stored: StoredMessage,
         conditions: Vec<Condition>,
         manual_only: bool,
+        reflect_only: bool,
     ) -> Result<Option<(Vec<Condition>, OpKind)>> {
         let own = self.identity();
         let side = target.side.side();
@@ -185,7 +235,12 @@ impl Paykit {
         let held_record = activity::read(current, &own, side);
         let opens = held_record.is_none();
         let mut record = held_record.unwrap_or_else(|| activity::empty(side, counterparty));
-        if !activity::place(&mut record, role, stored) {
+        let placed = if reflect_only {
+            activity::reflect(&mut record, &stored)
+        } else {
+            activity::place(&mut record, role, stored)
+        };
+        if !placed {
             return Ok(None);
         }
         if manual_only && opens {

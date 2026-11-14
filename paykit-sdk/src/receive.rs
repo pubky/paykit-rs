@@ -169,9 +169,9 @@ pub(crate) fn effect(
                 let one_time =
                     matches!(stored.body(), Body::PaymentRequest(r) if !r.is_recurring());
                 if held.is_none() && one_time && came_back_from_block(cx, &sender, stored)? {
-                    place_manual_only(cx, &target, sender, stored, settlement)?;
+                    place_manual_only(cx, &target, sender, stored, seq, settlement)?;
                 } else {
-                    place(cx, &target, sender, Role::Request, stored, settlement)?;
+                    place(cx, &target, sender, Role::Request, stored, seq, settlement)?;
                     // A record this step opens without the mark is checked again once the
                     // read is done: a raise of the block floor the read took before this
                     // entry isn't committed yet, so this step doesn't see it
@@ -189,7 +189,7 @@ pub(crate) fn effect(
         | Body::PaymentProof(_)
             if payee =>
         {
-            payer_reply(cx, stored, &scopes, settlement)?;
+            payer_reply(cx, stored, seq, &scopes, settlement)?;
         }
         Body::PaymentRequestCancellation(_) => {
             let Some(request) = stored.message().refs.first().copied() else {
@@ -206,7 +206,7 @@ pub(crate) fn effect(
             // key, so the stop never waits for the value's key or a listing, and no give-up
             // of the entry can lose it.
             if pay && held_request(cx, &payer_target)? {
-                return keep_cancellation(cx, &payer_target, stored, true);
+                return keep_cancellation(cx, &payer_target, stored, seq, true);
             }
             // A payer's cancellation of a request this app holds goes into its record. One naming a
             // request held on neither side is new state, which the spam rule gates once: at an app
@@ -223,7 +223,7 @@ pub(crate) fn effect(
             let payee_held = payee && cx.record(&payee_target.record_target())?.is_some();
             if !pay || payee_held {
                 if payee {
-                    payer_reply(cx, stored, &scopes, settlement)?;
+                    payer_reply(cx, stored, seq, &scopes, settlement)?;
                 }
                 return Ok(());
             }
@@ -240,17 +240,17 @@ pub(crate) fn effect(
                 hold_while_unlisted(cx, RecordSide::Payee)?;
             }
             if admits_new_state(cx, &sender, &scopes, stored)? {
-                keep_cancellation(cx, &payer_target, stored, false)?;
+                keep_cancellation(cx, &payer_target, stored, seq, false)?;
                 if reply {
-                    keep_reply(cx, &payee_target, stored)?;
+                    keep_reply(cx, &payee_target, stored, seq)?;
                 }
             }
         }
         Body::PaymentReceipt(receipt) if pay => {
-            receipt_effect(cx, stored, receipt.attempt_id, settlement)?;
+            receipt_effect(cx, stored, seq, receipt.attempt_id, settlement)?;
         }
         Body::PaymentPeriodDetails(_) if pay => {
-            period_details_effect(cx, stored, &scopes, settlement)?;
+            period_details_effect(cx, stored, seq, &scopes, settlement)?;
         }
         Body::PrivatePaymentList(_) if pay => {
             let target = list_target(&sender, &stored.message().from.app_id);
@@ -260,7 +260,7 @@ pub(crate) fn effect(
             }
             let held = record.is_some_and(|held| held.content.value().is_some());
             if held || admits_new_state(cx, &sender, &scopes, stored)? {
-                list_effect(cx, stored)?;
+                list_effect(cx, stored, seq)?;
                 note_peer(cx, &sender, stored)?;
             }
         }
@@ -288,7 +288,7 @@ pub(crate) fn effect(
         | Body::AllowanceEnd(_)
             if scopes.iter().any(|s| s == "paykit_allowance") =>
         {
-            crate::allowances::receive_effect(cx, stored, &scopes)?;
+            crate::allowances::receive_effect(cx, stored, seq, &scopes)?;
         }
         Body::ExecutorNotice(notice) if scopes.iter().any(|s| s == "paykit_allowance_execute") => {
             crate::allowances::notice_effect(cx, notice)?;
@@ -789,18 +789,30 @@ fn place(
     counterparty: [u8; 32],
     role: Role,
     stored: &StoredMessage,
+    seq: u64,
     settlement: Settlement<'_>,
 ) -> Result<(), Fail> {
-    place_with(cx, target, counterparty, role, stored, settlement, false)
+    place_with(
+        cx,
+        target,
+        counterparty,
+        role,
+        stored,
+        seq,
+        settlement,
+        false,
+    )
 }
 
 /// [`place`], setting `manual_only` on a record it opens when `manual_only`.
+#[allow(clippy::too_many_arguments)] // the step's context, the message and its feed `seq`
 fn place_with(
     cx: &mut ReceiveContext<'_>,
     target: &ActivityTarget,
     counterparty: [u8; 32],
     role: Role,
     stored: &StoredMessage,
+    seq: u64,
     settlement: Settlement<'_>,
     manual_only: bool,
 ) -> Result<(), Fail> {
@@ -837,7 +849,22 @@ fn place_with(
     }
     let reads = read.is_some();
     let mut record = read.unwrap_or_else(|| activity::empty(side, counterparty));
-    if !activity::place(&mut record, role, stored.clone()) {
+    // A payer's reply never takes the response while a different one its inbox accepted
+    // earlier is still kept to write, before the record, stored, or over it while its view
+    // is divergent: it is only reflected, and the earlier one is the response once written.
+    let placed = if role == Role::Response
+        && record.response.is_none()
+        && activity::replied_before(
+            &record,
+            stored,
+            (stored.accepted_at().ok_or_else(Fail::corrupt)?, seq),
+            &step_replies_kept(cx, &cx.record_key(&record_target)?, stored)?,
+        ) {
+        activity::reflect(&mut record, stored)
+    } else {
+        activity::place(&mut record, role, stored.clone())
+    };
+    if !placed {
         return Ok(());
     }
     if manual_only && !reads {
@@ -848,12 +875,41 @@ fn place_with(
     // messages kept over the record before it wait to be written. The view is taken either
     // way: a stop written over it leaves the record paused.
     if let Some(held) = held {
-        if crate::divergent::step_write_waits(cx, &held, stored, settlement)? {
-            return crate::divergent::step_keep(cx, &held, stored, settlement, reads);
+        if crate::divergent::step_write_waits(cx, &held, stored, seq, settlement)? {
+            return crate::divergent::step_keep(cx, &held, stored, seq, settlement, reads);
         }
     }
     cx.put_record(&target.record_target(), &record.to_json()?, Vec::new())?;
     Ok(())
+}
+
+/// The payer's replies from the sender of `stored` the app keeps to write into the request
+/// record at `record`, in the receive step, each read bound to its key, with its order: those
+/// kept before the record (`pr/`), the stored entries' not yet placed (`se/`), and those
+/// kept over the record while its view is divergent (`dw/`). Only a reply of the response
+/// role to the request `stored` names counts ([`activity::replied_before`]).
+fn step_replies_kept(
+    cx: &ReceiveContext<'_>,
+    record: &[u8; 32],
+    stored: &StoredMessage,
+) -> Result<Vec<(StoredMessage, crate::records::KeptOrder)>, Fail> {
+    let own = cx.identity();
+    let sender = stored.sender();
+    let mut kept = Vec::new();
+    for (_, message) in state::cx_scan::<KeptMessage>(cx, &key::kept_reply(&sender, record, ""))? {
+        let reply = message.stored(&own).map_err(|_| Fail::corrupt())?;
+        kept.push((reply, ordered(&message)?));
+    }
+    for (name, note) in
+        state::cx_scan::<crate::stored::StoredNote>(cx, &key::stored_notes_of(&sender))?
+    {
+        if !note.placed {
+            let reply = note.bound(&name, &own).map_err(|_| Fail::corrupt())?;
+            kept.push((reply, ordered(&note.message)?));
+        }
+    }
+    kept.extend(crate::divergent::step_responses_kept(cx, record)?);
+    Ok(kept)
 }
 
 /// [`place`] for a request that opens its record, with `manual_only` set (Paykit wire 5.3):
@@ -863,6 +919,7 @@ fn place_manual_only(
     target: &ActivityTarget,
     counterparty: [u8; 32],
     stored: &StoredMessage,
+    seq: u64,
     settlement: Settlement<'_>,
 ) -> Result<(), Fail> {
     place_with(
@@ -871,6 +928,7 @@ fn place_manual_only(
         counterparty,
         Role::Request,
         stored,
+        seq,
         settlement,
         true,
     )
@@ -902,6 +960,7 @@ fn keep_cancellation(
     cx: &mut ReceiveContext<'_>,
     target: &ActivityTarget,
     stored: &StoredMessage,
+    seq: u64,
     held: bool,
 ) -> Result<(), Fail> {
     let kept = key::kept_cancellation(&cx.record_key(&target.record_target())?);
@@ -909,9 +968,10 @@ fn keep_cancellation(
         return Ok(());
     }
     if !held {
-        make_room_for_stop(cx, &stored.sender())?;
+        let order = (stored.accepted_at().ok_or_else(Fail::corrupt)?, seq);
+        make_room_for_stop(cx, &stored.sender(), order)?;
     }
-    keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
+    keep_local(cx, local(&kept, &KeptMessage::taken(stored, seq))?);
     Ok(())
 }
 
@@ -922,11 +982,12 @@ fn keep_cancellation(
 fn keep_before_record(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
+    seq: u64,
     scopes: &[String],
     record: &ActivityTarget,
 ) -> Result<(), Fail> {
     if admits_new_state(cx, &stored.sender(), scopes, stored)? {
-        keep_reply(cx, record, stored)?;
+        keep_reply(cx, record, stored, seq)?;
     }
     Ok(())
 }
@@ -945,13 +1006,20 @@ fn keep_before_record(
 fn keep_until_placed(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
+    seq: u64,
     scopes: &[String],
     record: &ActivityTarget,
 ) -> Result<(), Fail> {
     if held_request(cx, record)? {
-        return keep_reply(cx, record, stored);
+        return keep_reply(cx, record, stored, seq);
     }
-    keep_before_record(cx, stored, scopes, record)
+    keep_before_record(cx, stored, seq, scopes, record)
+}
+
+/// The order a kept message of a bounded pool was accepted in (`records::KeptOrder`), in
+/// the step: one without it is a corrupt store.
+fn ordered(kept: &KeptMessage) -> Result<crate::records::KeptOrder, Fail> {
+    kept.order().map_err(|_| Fail::corrupt())
 }
 
 /// Make room for a new stop from `sender` among the stops kept for records not held, in the
@@ -981,7 +1049,10 @@ fn keep_until_placed(
 /// stops could be paid once it came. The stop counts in its sender's mark of dropped replies,
 /// due at once ([`mark_dropped`]), so the sender is asked to send it again, at most once a day
 /// and not while sends to it are held (`marks.rs`). When the client won't forget the pair
-/// now, the stop stays kept and the bounds are over by one for this step.
+/// now, the stop stays kept and the bounds are over by one for this step. The new stop,
+/// accepted at `new`, counts among its sender's: when it is the one the bounds would drop,
+/// a stored entry tried again after later ones were kept, it is kept over the bound, by one
+/// for each such stop, and nothing goes.
 ///
 /// One that is left out no longer counts again from then on, which can put its sender past
 /// the bound: the loop drops back to it. A new stop is reached here only once its own side's
@@ -992,10 +1063,10 @@ fn keep_until_placed(
 pub(crate) fn make_room_for_stop(
     cx: &mut ReceiveContext<'_>,
     sender: &[u8; 32],
+    new: crate::records::KeptOrder,
 ) -> Result<(), Fail> {
-    let mut kept = Vec::new();
-    let mut names = Vec::new();
-    let mut msg_ids = Vec::new();
+    // Each stop counted, with the order its inbox accepted it in (`records::KeptOrder`).
+    let mut counted = Vec::new();
     if !side_may_lack(cx, RecordSide::Payer)? {
         for (name, stop) in state::cx_scan::<KeptMessage>(cx, key::KEPT_CANCELLATIONS)? {
             let Some(crate::state::StateKey::KeptCancellation(record)) =
@@ -1003,7 +1074,7 @@ pub(crate) fn make_room_for_stop(
             else {
                 return Err(Fail::corrupt());
             };
-            let (cancellation, at) = kept_with_time(cx, &stop)?;
+            let (cancellation, _) = kept_with_time(cx, &stop)?;
             let content = cx.record_at(&record)?.map(|held| held.content);
             if holds_record(content.as_ref()) {
                 continue;
@@ -1014,9 +1085,12 @@ pub(crate) fn make_room_for_stop(
                     continue;
                 }
             }
-            kept.push((from, at));
-            names.push(name.into_bytes());
-            msg_ids.push(cancellation.message().msg_id.clone());
+            counted.push((
+                ordered(&stop)?,
+                from,
+                name.into_bytes(),
+                cancellation.message().msg_id.clone(),
+            ));
         }
     }
     if !side_may_lack(cx, RecordSide::Allowances)? {
@@ -1030,29 +1104,46 @@ pub(crate) fn make_room_for_stop(
             else {
                 return Err(Fail::corrupt());
             };
-            let (end, at) = kept_with_time(cx, &stop)?;
-            ends.entry(record).or_default().push((at, name, end));
+            let (end, _) = kept_with_time(cx, &stop)?;
+            ends.entry(record)
+                .or_default()
+                .push((ordered(&stop)?, name, end));
         }
         for (record, mut group) in ends {
-            group.sort_by(|a, b| (a.0, &a.2.message().msg_id).cmp(&(b.0, &b.2.message().msg_id)));
+            group.sort_by_key(|(order, _, _)| *order);
             let content = cx.record_at(&record)?.map(|held| held.content);
-            for (index, (at, name, end)) in group.into_iter().enumerate() {
+            for (index, (order, name, end)) in group.into_iter().enumerate() {
                 if index == 0
                     && (!crate::allowances::end_bounded(cx, content.as_ref(), &end)?
                         || crate::allowances::keeps_stored_message(cx, &record)?)
                 {
                     continue;
                 }
-                kept.push((end.sender(), at));
-                names.push(name.into_bytes());
-                msg_ids.push(end.message().msg_id.clone());
+                counted.push((
+                    order,
+                    end.sender(),
+                    name.into_bytes(),
+                    end.message().msg_id.clone(),
+                ));
             }
         }
     }
+    // Earliest accepted first, so a sender's earliest goes first: within one millisecond
+    // the one its inbox took first, never the one whose `msg_id` sorts first. The removals
+    // keep that order.
+    counted.sort_by_key(|(order, ..)| *order);
+    let mut kept = Vec::new();
+    let mut names = Vec::new();
+    let mut msg_ids = Vec::new();
+    for (order, from, name, msg_id) in counted {
+        kept.push((from, order));
+        names.push(name);
+        msg_ids.push(msg_id);
+    }
     let mut dropped: std::collections::BTreeMap<[u8; 32], (u64, u64)> =
         std::collections::BTreeMap::new();
-    while let Some(index) = kept_reply_evicted(&kept, sender) {
-        let (from, at) = kept[index];
+    while let Some(index) = kept_reply_evicted(&kept, sender, new) {
+        let (from, (at, _)) = kept[index];
         match cx.forget_processed(from, &msg_ids[index]) {
             Ok(_) => {}
             // The client won't forget the pair now: dropped without forgetting it, the stop
@@ -1063,12 +1154,12 @@ pub(crate) fn make_room_for_stop(
             Err(AppError::Refused(ClientRefusal::Usage(_))) => {}
             Err(error) => return Err(error.into()),
         }
-        kept.swap_remove(index);
-        msg_ids.swap_remove(index);
+        kept.remove(index);
+        msg_ids.remove(index);
         keep_local(
             cx,
             LocalWrite::Delete {
-                key: names.swap_remove(index),
+                key: names.remove(index),
             },
         );
         let times = dropped.entry(from).or_insert((at, at));
@@ -1104,6 +1195,7 @@ pub(crate) fn make_room_for_stop(
 fn period_details_effect(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
+    seq: u64,
     scopes: &[String],
     settlement: Settlement<'_>,
 ) -> Result<(), Fail> {
@@ -1114,10 +1206,10 @@ fn period_details_effect(
     };
     let request_target = ActivityTarget::payer(natural_key::request_record(&sender, &request_hash));
     let Some(value) = held_or_unlisted(cx, &request_target, RecordSide::Payer)? else {
-        return keep_until_placed(cx, stored, scopes, &request_target);
+        return keep_until_placed(cx, stored, seq, scopes, &request_target);
     };
     let Some(record) = bound_activity(cx, &request_target, &value, settlement)? else {
-        return keep_until_placed(cx, stored, scopes, &request_target);
+        return keep_until_placed(cx, stored, seq, scopes, &request_target);
     };
     if record.counterparty != sender || record.request.is_none() {
         return Ok(());
@@ -1138,12 +1230,12 @@ fn period_details_effect(
     wait_for_key(cx, &target)?;
     let period = match held_value(cx, &target)? {
         None if held_request(cx, &target)? => {
-            return keep_until_placed(cx, stored, scopes, &request_target);
+            return keep_until_placed(cx, stored, seq, scopes, &request_target);
         }
         None => None,
         Some(value) => match bound_activity(cx, &target, &value, settlement)? {
             Some(period) => Some(period),
-            None => return keep_until_placed(cx, stored, scopes, &request_target),
+            None => return keep_until_placed(cx, stored, seq, scopes, &request_target),
         },
     };
     let stores = crate::periods::stores_details(
@@ -1175,7 +1267,15 @@ fn period_details_effect(
     }
     // The period record is of the request record's side, whose hold was judged above, and
     // `place` holds the entry while its value waits for its key.
-    place(cx, &target, sender, Role::PeriodDetails, stored, settlement)
+    place(
+        cx,
+        &target,
+        sender,
+        Role::PeriodDetails,
+        stored,
+        seq,
+        settlement,
+    )
 }
 
 /// The message `kept`, read bound to its key (`state::Stored`), with its acceptance time,
@@ -1212,6 +1312,7 @@ fn keeps_stored_of(
 fn payer_reply(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
+    seq: u64,
     scopes: &[String],
     settlement: Settlement<'_>,
 ) -> Result<bool, Fail> {
@@ -1248,7 +1349,7 @@ fn payer_reply(
                 None => None,
             };
             let Some(bound) = bound else {
-                keep_before_record(cx, stored, scopes, &target)?;
+                keep_before_record(cx, stored, seq, scopes, &target)?;
                 return Ok(false);
             };
             // A Billing Period's proof goes into its period record, never the request's
@@ -1272,33 +1373,33 @@ fn payer_reply(
                 // another counterparty; it is new state, kept through the spam rule as a
                 // reply before its record ([`keep_before_record`]), and never placed.
                 if bound.counterparty != sender {
-                    keep_before_record(cx, stored, scopes, &request_target)?;
+                    keep_before_record(cx, stored, seq, scopes, &request_target)?;
                     return Ok(true);
                 }
                 // From the counterparty, a proof the period record can't take now updates
                 // activity the app holds: kept outside the spam rule ([`keep_reply`]).
                 let held = match held_or_unlisted(cx, &target, RecordSide::Payee)? {
                     None if held_request(cx, &target)? => {
-                        keep_reply(cx, &request_target, stored)?;
+                        keep_reply(cx, &request_target, stored, seq)?;
                         return Ok(true);
                     }
                     None => None,
                     Some(value) => match bound_activity(cx, &target, &value, settlement)? {
                         Some(period) => Some(period),
                         None => {
-                            keep_reply(cx, &request_target, stored)?;
+                            keep_reply(cx, &request_target, stored, seq)?;
                             return Ok(true);
                         }
                     },
                 };
                 if awaits_named_details(held.as_ref(), ActivitySide::Payee, stored) {
-                    keep_reply(cx, &request_target, stored)?;
+                    keep_reply(cx, &request_target, stored, seq)?;
                     return Ok(true);
                 }
             }
             // A period record is of the request record's side, whose hold was judged above,
             // and `place` holds the entry while its value waits for its key.
-            place(cx, &target, sender, role, stored, settlement)?;
+            place(cx, &target, sender, role, stored, seq, settlement)?;
             Ok(true)
         }
         None => {
@@ -1326,12 +1427,12 @@ fn payer_reply(
             let content = cx.record(&target.record_target())?.map(|held| held.content);
             if holds_record(content.as_ref()) && held_bound(cx, &target, settlement)?.is_none() {
                 if admits_new_state(cx, &sender, scopes, stored)? {
-                    keep_reply(cx, &target, stored)?;
+                    keep_reply(cx, &target, stored, seq)?;
                 }
                 return Ok(true);
             }
             if held.is_some() || admits_new_state(cx, &sender, scopes, stored)? {
-                place(cx, &target, sender, role, stored, settlement)?;
+                place(cx, &target, sender, role, stored, seq, settlement)?;
             }
             Ok(true)
         }
@@ -1349,14 +1450,16 @@ fn keep_reply(
     cx: &mut ReceiveContext<'_>,
     target: &ActivityTarget,
     stored: &StoredMessage,
+    seq: u64,
 ) -> Result<(), Fail> {
     let sender = stored.sender();
     let record = cx.record_key(&target.record_target())?;
     let kept = key::kept_reply(&sender, &record, &stored.message().msg_id);
     // One kept already is read bound to its key, and stays as it is.
     if state::cx_get::<KeptMessage>(cx, &kept)?.is_none() {
-        make_room_for_reply(cx, &sender)?;
-        keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
+        let order = (stored.accepted_at().ok_or_else(Fail::corrupt)?, seq);
+        make_room_for_reply(cx, &sender, order)?;
+        keep_local(cx, local(&kept, &KeptMessage::taken(stored, seq))?);
     }
     Ok(())
 }
@@ -1383,6 +1486,7 @@ fn keep_reply(
 fn receipt_effect(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
+    seq: u64,
     attempt_id: AttemptId,
     settlement: Settlement<'_>,
 ) -> Result<(), Fail> {
@@ -1411,23 +1515,30 @@ fn receipt_effect(
     // Kept so over a record that doesn't read, it takes the spam rule a reply before its
     // record takes ([`admits_receipt_over_unread_record`]).
     if let Some(held) = held.filter(|held| holds_record(Some(&held.content))) {
-        if crate::divergent::step_write_waits(cx, &held, stored, settlement)? {
+        if crate::divergent::step_write_waits(cx, &held, stored, seq, settlement)? {
             if record.is_none() && !admits_receipt_over_unread_record(cx, stored)? {
                 return Ok(());
             }
-            return crate::divergent::step_keep(cx, &held, stored, settlement, record.is_some());
+            return crate::divergent::step_keep(
+                cx,
+                &held,
+                stored,
+                seq,
+                settlement,
+                record.is_some(),
+            );
         }
     }
     let (Some(record), Some(found)) = (record, found) else {
         // No record, or one deleted: the record says the receipt has nowhere to go. Held,
         // though, it may read later.
         if holds_record(content.as_ref()) {
-            return receipt_over_unread_record(cx, &target, stored);
+            return receipt_over_unread_record(cx, &target, stored, seq);
         }
         return Ok(());
     };
     if found.names_held_proof {
-        place(cx, &target, sender, Role::Receipt, stored, settlement)?;
+        place(cx, &target, sender, Role::Receipt, stored, seq, settlement)?;
     }
     // The journal entry of the attempt, if this app made it: it holds a payment without a
     // request's deadline, and whether `failed` stands on the claim of a payment made. One
@@ -1517,11 +1628,12 @@ fn receipt_over_unread_record(
     cx: &mut ReceiveContext<'_>,
     target: &ActivityTarget,
     stored: &StoredMessage,
+    seq: u64,
 ) -> Result<(), Fail> {
     if !admits_receipt_over_unread_record(cx, stored)? {
         return Ok(());
     }
-    keep_reply(cx, target, stored)
+    keep_reply(cx, target, stored, seq)
 }
 
 /// Whether `stored`, a receipt over a payer record the app holds but can't read now, may be
@@ -1804,7 +1916,7 @@ pub(crate) fn obligation(
 /// its feed or a read. To an app that never held the record, a deleted one looks absent,
 /// and the switch takes a create over a delete, so its first list is written afresh. A
 /// record merely absent is never held, or a payee's first list could never be stored.
-fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Result<(), Fail> {
+fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage, seq: u64) -> Result<(), Fail> {
     let payee = stored.sender();
     let app_id = stored.message().from.app_id;
     if !matches!(stored.body(), Body::PrivatePaymentList(_)) {
@@ -1815,8 +1927,8 @@ fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Result<()
     // Over a divergent record its user hasn't confirmed, or while a list kept over it waits
     // to be written, the list is kept, and written once the user confirms (Paykit spec 6).
     if let Some(held) = cx.record(&target)? {
-        if crate::divergent::step_write_waits(cx, &held, stored, &|_| None)? {
-            return crate::divergent::step_keep(cx, &held, stored, &|_| None, true);
+        if crate::divergent::step_write_waits(cx, &held, stored, seq, &|_| None)? {
+            return crate::divergent::step_keep(cx, &held, stored, seq, &|_| None, true);
         }
     }
     let held = match cx.record(&target)?.map(|r| r.content) {
@@ -1909,14 +2021,23 @@ pub const MAX_KEPT_REPLIES_PER_SENDER: usize = 64;
 /// the most is dropped.
 pub const MAX_KEPT_REPLIES: usize = 128;
 
-/// A kept reply, as the bounds count it: its sender and its acceptance time.
-pub(crate) type CountedReply = ([u8; 32], u64);
+/// A kept reply, as the bounds count it: its sender and the order its inbox accepted it in
+/// ([`crate::records::KeptOrder`]).
+pub(crate) type CountedReply = ([u8; 32], crate::records::KeptOrder);
 
-/// Which of `kept` goes for a new reply from `sender` to be kept (Switch spec 8.2's rule):
-/// past the sender's [`MAX_KEPT_REPLIES_PER_SENDER`], its reply accepted earliest; past
-/// [`MAX_KEPT_REPLIES`] in all, the one accepted earliest of the sender holding the most, a
-/// tie going against the lower sender identity. `None` while there is room.
-pub(crate) fn kept_reply_evicted(kept: &[CountedReply], sender: &[u8; 32]) -> Option<usize> {
+/// Which of `kept` goes for a new reply from `sender`, accepted at `new`, to be kept (Switch
+/// spec 8.2's rule): past the sender's [`MAX_KEPT_REPLIES_PER_SENDER`], its reply accepted
+/// earliest; past [`MAX_KEPT_REPLIES`] in all, the one accepted earliest of the sender
+/// holding the most, a tie going against the lower sender identity. The new reply counts
+/// among its sender's: when it was accepted before the one so picked, it is that sender's
+/// earliest, and it can't be dropped as one never processed, since the step's outcome
+/// writes its pair, so it is kept over the bound, by one for each such reply, and nothing
+/// goes. `None` while there is room, and then.
+pub(crate) fn kept_reply_evicted(
+    kept: &[CountedReply],
+    sender: &[u8; 32],
+    new: crate::records::KeptOrder,
+) -> Option<usize> {
     let earliest_of = |who: &[u8; 32]| {
         kept.iter()
             .enumerate()
@@ -1925,21 +2046,23 @@ pub(crate) fn kept_reply_evicted(kept: &[CountedReply], sender: &[u8; 32]) -> Op
             .map(|(index, _)| index)
     };
     let held = |who: &[u8; 32]| kept.iter().filter(|(from, _)| from == who).count();
-    if held(sender) >= MAX_KEPT_REPLIES_PER_SENDER {
-        return earliest_of(sender);
-    }
-    if kept.len() < MAX_KEPT_REPLIES {
+    let index = if held(sender) >= MAX_KEPT_REPLIES_PER_SENDER {
+        earliest_of(sender)?
+    } else if kept.len() < MAX_KEPT_REPLIES {
         return None;
-    }
-    let most = kept
-        .iter()
-        .map(|(from, _)| *from)
-        .max_by_key(|from| (held(from), std::cmp::Reverse(*from)))?;
-    earliest_of(&most)
+    } else {
+        let most = kept
+            .iter()
+            .map(|(from, _)| *from)
+            .max_by_key(|from| (held(from), std::cmp::Reverse(*from)))?;
+        earliest_of(&most)?
+    };
+    let (from, at) = kept[index];
+    (from != *sender || at < new).then_some(index)
 }
 
-/// Make room for a new reply from `sender` among the kept replies, in the step: the one the
-/// bounds drop ([`kept_reply_evicted`]) goes, and counts in its sender's mark
+/// Make room for a new reply from `sender`, accepted at `new`, among the kept replies, in
+/// the step: the one the bounds drop ([`kept_reply_evicted`]) goes, and counts in its sender's mark
 /// (`pd/<sender>`, `marks.rs`) with its acceptance time, so the sender is asked to send it
 /// again once the record of a request, of either side, naming it as counterparty reads. It
 /// is dropped as one never processed (Paykit spec 8.1, "Replies before their record"): the
@@ -1951,20 +2074,55 @@ pub(crate) fn kept_reply_evicted(kept: &[CountedReply], sender: &[u8; 32]) -> Op
 pub(crate) fn make_room_for_reply(
     cx: &mut ReceiveContext<'_>,
     sender: &[u8; 32],
+    new: crate::records::KeptOrder,
 ) -> Result<(), Fail> {
+    // Earliest accepted first (`records::KeptOrder`), so a sender's earliest goes first:
+    // within one millisecond the one its inbox took first, never by `msg_id`.
+    let mut counted = Vec::new();
+    for (name, kept) in state::cx_scan::<KeptMessage>(cx, key::KEPT_REPLIES)? {
+        let (reply, _) = kept_with_time(cx, &kept)?;
+        counted.push((ordered(&kept)?, reply, name));
+    }
+    // The earliest Allowance answer kept for each Allowance record the app holds is under
+    // no bound, and so is the earliest kept for one the app holds deleted, which another own
+    // app may record again: it is the one that takes the record's response once placed, and
+    // dropping it would let a later different answer of its sender take the response
+    // instead (Paykit spec 8.1, 8.3). One per record the copy holds, as a value or a delete,
+    // so at most as many as those records; each goes when it is placed, or when it is given
+    // up at its 30 days.
+    let mut exempt: std::collections::BTreeMap<[u8; 32], (crate::records::KeptOrder, String)> =
+        std::collections::BTreeMap::new();
+    for (order, reply, name) in &counted {
+        if !crate::allowances::is_allowance_response(reply.body()) {
+            continue;
+        }
+        let Some(crate::state::StateKey::KeptReply { record, .. }) =
+            crate::state::StateKey::parse(name.as_bytes())
+        else {
+            return Err(Fail::corrupt());
+        };
+        if cx.record_at(&record)?.is_none() {
+            continue;
+        }
+        let first = exempt.entry(record).or_insert((*order, name.clone()));
+        if *order < first.0 {
+            *first = (*order, name.clone());
+        }
+    }
+    counted.retain(|(_, _, name)| !exempt.values().any(|(_, exempt)| exempt == name));
+    counted.sort_by_key(|(order, ..)| *order);
     let mut kept = Vec::new();
     let mut names = Vec::new();
     let mut msg_ids = Vec::new();
-    for (name, reply) in state::cx_scan::<KeptMessage>(cx, key::KEPT_REPLIES)? {
-        let (reply, at) = kept_with_time(cx, &reply)?;
-        kept.push((reply.sender(), at));
+    for (order, reply, name) in counted {
+        kept.push((reply.sender(), order));
         names.push(name.into_bytes());
         msg_ids.push(reply.message().msg_id.clone());
     }
-    let Some(index) = kept_reply_evicted(&kept, sender) else {
+    let Some(index) = kept_reply_evicted(&kept, sender, new) else {
         return Ok(());
     };
-    let (from, at) = kept[index];
+    let (from, (at, _)) = kept[index];
     match cx.forget_processed(from, &msg_ids[index]) {
         Ok(_) => {}
         // The client won't forget the pair now: an entry it stores locally, or an effect it
@@ -2131,7 +2289,7 @@ impl Paykit {
         }
         // A newer list over a divergent record its user hasn't confirmed stays held (Paykit
         // spec 6).
-        if Box::pin(self.divergent_write_waits(&record_key, &list)).await? {
+        if Box::pin(self.divergent_write_waits(&record_key, &list, None)).await? {
             return Ok(());
         }
         let held = match self
@@ -2210,19 +2368,32 @@ impl Paykit {
     /// error, returned, and the message stays kept. Every kept message is read with a
     /// restore's check, and one that fails it fails the call as a corrupt store.
     ///
-    /// The Allowance answers kept before their record go too
-    /// ([`Paykit::place_kept_allowance_response`]), each once the Allowances side is listed.
+    /// The Allowance answers kept go by their own placement
+    /// ([`Paykit::place_kept_allowance_responses`]), which no payer's wait holds.
+    ///
+    /// Every kept reply is taken in the order its inbox accepted it
+    /// ([`crate::records::KeptOrder`]), so the replies of one record are placed in that
+    /// order, never in the order of their `msg_id`s.
     pub(crate) async fn place_kept_replies(&mut self) -> crate::error::Result<()> {
         use crate::stored::{PeriodPlace, Placed};
         let own = self.identity();
+        // Every kept reply in the order its inbox accepted it (`records::KeptOrder`), never
+        // in the order of the keys, which end in a `msg_id` its sender chooses: the replies
+        // of one record are placed in that order, and those that move over a record paused
+        // as divergent are kept there in it (Paykit spec 8.1).
+        let mut held = Vec::new();
         for (rest, kept) in self.local_scan::<KeptMessage>(key::KEPT_REPLIES).await? {
+            held.push((kept.order()?, rest, kept));
+        }
+        held.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        for (order, rest, kept) in held {
             // Read bound to its key, as a restore reads it: a message that fails it is a
             // corrupt store, so the receive fails rather than drop, give up or place it.
             let reply = kept.stored(&own)?;
             let kept_key = format!("{}{rest}", key::KEPT_REPLIES);
-            // An Allowance's answer kept before its record (`allowances.rs`).
+            // An Allowance's answer goes by its own placement
+            // (`Paykit::place_kept_allowance_responses`).
             if crate::allowances::is_allowance_response(reply.body()) {
-                Box::pin(self.place_kept_allowance_response(&kept_key, reply)).await?;
                 continue;
             }
             let (Some(role), Some(accepted_at)) =
@@ -2325,7 +2496,7 @@ impl Paykit {
                         .shared_record(&record_key)
                         .await?
                         .ok_or_else(crate::error::PaykitError::corrupt)?;
-                    Box::pin(self.keep_over_paused(&held, &reply, &kept_key)).await?;
+                    Box::pin(self.keep_over_paused(&held, &reply, order, &kept_key)).await?;
                     continue;
                 }
                 // A receipt goes into the payer's record it names, which now reads, and a
@@ -2333,7 +2504,8 @@ impl Paykit {
                 Some(_) if matches!(reply.body(), Body::PaymentReceipt(_)) || unrequested => {
                     let mut tx = Tx::default();
                     tx.delete(&kept_key);
-                    Box::pin(self.place_note(&target, role, false, reply.clone(), tx)).await?
+                    Box::pin(self.place_note(&target, role, false, reply.clone(), order, tx))
+                        .await?
                 }
                 Some(record) => {
                     // Every message kept but a receipt and a proof without a request names its
@@ -2350,8 +2522,15 @@ impl Paykit {
                             tx.delete(&kept_key);
                             // The write goes on the heap, as `receive`'s steps do: it nests
                             // deep.
-                            Box::pin(self.place_note(&into, role, creates, reply.clone(), tx))
-                                .await?
+                            Box::pin(self.place_note(
+                                &into,
+                                role,
+                                creates,
+                                reply.clone(),
+                                order,
+                                tx,
+                            ))
+                            .await?
                         }
                         // Invalid against its request, or details the payer doesn't store:
                         // dropped, as at receive.
@@ -2371,7 +2550,8 @@ impl Paykit {
                 None => {
                     let mut tx = Tx::default();
                     tx.delete(&kept_key);
-                    Box::pin(self.place_note(&target, role, false, reply.clone(), tx)).await?
+                    Box::pin(self.place_note(&target, role, false, reply.clone(), order, tx))
+                        .await?
                 }
             };
             if crate::stored::later_write(placed, accepted_at, self.service_time())
@@ -3044,28 +3224,31 @@ mod tests {
     /// `n` replies from `sender`, accepted from `from` on.
     fn replies(sender: u8, n: usize, from: u64) -> Vec<CountedReply> {
         (0..n)
-            .map(|i| ([sender; 32], from + u64::try_from(i).unwrap()))
+            .map(|i| ([sender; 32], (from + u64::try_from(i).unwrap(), 0)))
             .collect()
     }
+
+    /// The order of a new reply accepted after every one kept.
+    const LATEST: crate::records::KeptOrder = (u64::MAX, 0);
 
     #[test]
     fn test_kept_reply_evicted_none_within_both_bounds() {
         let kept = replies(1, MAX_KEPT_REPLIES_PER_SENDER - 1, 10);
-        assert_eq!(kept_reply_evicted(&kept, &[1; 32]), None);
+        assert_eq!(kept_reply_evicted(&kept, &[1; 32], LATEST), None);
         let mut kept = replies(1, MAX_KEPT_REPLIES_PER_SENDER, 10);
         kept.extend(replies(
             2,
             MAX_KEPT_REPLIES - MAX_KEPT_REPLIES_PER_SENDER - 1,
             5,
         ));
-        assert_eq!(kept_reply_evicted(&kept, &[3; 32]), None);
+        assert_eq!(kept_reply_evicted(&kept, &[3; 32], LATEST), None);
     }
 
     #[test]
     fn test_kept_reply_evicted_past_a_senders_bound_its_earliest() {
         let mut kept = replies(2, 3, 1);
         kept.extend(replies(1, MAX_KEPT_REPLIES_PER_SENDER, 10));
-        assert_eq!(kept_reply_evicted(&kept, &[1; 32]), Some(3));
+        assert_eq!(kept_reply_evicted(&kept, &[1; 32], LATEST), Some(3));
     }
 
     #[test]
@@ -3073,21 +3256,44 @@ mod tests {
         // Bob holds 64, alice 63 and carol 1: a reply from carol drops bob's earliest.
         let mut kept = replies(1, MAX_KEPT_REPLIES_PER_SENDER - 1, 100);
         kept.extend(replies(2, MAX_KEPT_REPLIES_PER_SENDER, 500));
-        kept.push(([3; 32], 7));
+        kept.push(([3; 32], (7, 0)));
         assert_eq!(
-            kept_reply_evicted(&kept, &[3; 32]),
+            kept_reply_evicted(&kept, &[3; 32], LATEST),
             Some(MAX_KEPT_REPLIES_PER_SENDER - 1)
         );
         // Tied, the lower sender identity gives, wherever its replies come.
         let mut tied = replies(2, MAX_KEPT_REPLIES_PER_SENDER, 100);
         tied.extend(replies(1, MAX_KEPT_REPLIES_PER_SENDER, 500));
         assert_eq!(
-            kept_reply_evicted(&tied, &[3; 32]),
+            kept_reply_evicted(&tied, &[3; 32], LATEST),
             Some(MAX_KEPT_REPLIES_PER_SENDER)
         );
         let mut tied = replies(1, MAX_KEPT_REPLIES_PER_SENDER, 500);
         tied.extend(replies(2, MAX_KEPT_REPLIES_PER_SENDER, 100));
-        assert_eq!(kept_reply_evicted(&tied, &[3; 32]), Some(0));
+        assert_eq!(kept_reply_evicted(&tied, &[3; 32], LATEST), Some(0));
+    }
+
+    #[test]
+    fn test_kept_reply_evicted_none_for_a_new_reply_earliest_of_its_sender() {
+        // A stored entry tried again, read at an earlier `seq` of the millisecond of the
+        // sender's earliest kept reply: it is that sender's earliest, kept one over the
+        // bound, and none of the later ones goes.
+        let kept = replies(1, MAX_KEPT_REPLIES_PER_SENDER, 10);
+        assert_eq!(kept_reply_evicted(&kept, &[1; 32], (10, 1)), Some(0));
+        let kept: Vec<CountedReply> = kept.into_iter().map(|(s, (at, _))| (s, (at, 5))).collect();
+        assert_eq!(kept_reply_evicted(&kept, &[1; 32], (10, 4)), None);
+        assert_eq!(kept_reply_evicted(&kept, &[1; 32], (9, 9)), None);
+        assert_eq!(kept_reply_evicted(&kept, &[1; 32], (10, 6)), Some(0));
+        // Past the total, as the earliest of the sender holding the most.
+        let mut kept = replies(1, MAX_KEPT_REPLIES_PER_SENDER - 1, 100);
+        kept.extend(replies(2, MAX_KEPT_REPLIES_PER_SENDER, 500));
+        kept.push(([3; 32], (7, 0)));
+        assert_eq!(kept_reply_evicted(&kept, &[2; 32], (400, 0)), None);
+        // Another sender's new reply drops the earliest of the largest, however early it is.
+        assert_eq!(
+            kept_reply_evicted(&kept, &[3; 32], (1, 0)),
+            Some(MAX_KEPT_REPLIES_PER_SENDER - 1)
+        );
     }
 
     fn flagged(n: usize) -> Vec<pubky_switch_client::client::answers::Flagged> {

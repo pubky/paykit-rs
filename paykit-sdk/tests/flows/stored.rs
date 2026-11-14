@@ -2366,3 +2366,116 @@ async fn test_stored_reply_dropped_mark_waits_at_the_payee_over_a_payment_withou
     assert_eq!(shop.receive(None).await.unwrap().resends, 1);
     assert_eq!(asked(&shop, &alice).await, vec![(Some(at), None)]);
 }
+
+/// The `msg_id` of the response bob's shop holds in its record of `request`.
+async fn payee_response(
+    w: &World,
+    shop: &Paykit,
+    request: &paykit_sdk::RequestRef,
+) -> Option<String> {
+    let record = shop
+        .payee_activity()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|a| a.request_hash == Some(request.request_hash))
+        .unwrap()
+        .record;
+    let held = shop.app().shared_record(&record).await.unwrap().unwrap();
+    let read = paykit_lib::records::ActivityRecord::read(
+        held.content.value().unwrap(),
+        &w.bob_id(),
+        paykit_lib::records::ActivitySide::Payee,
+    )
+    .unwrap();
+    read.response.map(|m| m.message().msg_id.clone())
+}
+
+#[tokio::test]
+async fn test_stored_reply_takes_the_response_before_a_later_different_reply() {
+    // Alice's acceptance of bob's request is refused at the shop, its step and the shop's
+    // first later write: the entry is stored. A different acceptance of hers comes later
+    // and its write is admissible: it is only reflected while the earlier one is kept to
+    // write, and the earlier is the record's response once written (Paykit spec 6, 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let shop_id = shop.app_id();
+    let acceptance = || {
+        w.inject(
+            &w.alice,
+            "wallet",
+            &w.bob,
+            &[shop_id],
+            "paykit.payment_request_acceptance",
+            vec![request.request_hash],
+            serde_json::json!({ "label": null })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        )
+    };
+    let first = acceptance();
+    refuse_writes(&w.bob, 2);
+    shop.receive(None).await.unwrap();
+    assert_eq!(Box::pin(payee_response(&w, &shop, &request)).await, None);
+    w.clock.advance_ms(1_000);
+    let second = acceptance();
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        Box::pin(payee_response(&w, &shop, &request)).await,
+        Some(first)
+    );
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    let held = shop.app().shared_record(&record).await.unwrap().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    assert!(value["msg_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|id| id.as_str() == Some(second.as_str())));
+}
+
+#[tokio::test]
+async fn test_stored_later_reply_stored_too_never_takes_the_response_of_an_earlier_one() {
+    // Both of alice's acceptances are refused at their steps, a read apart, and so is the
+    // earlier one's later write each time, while the later one's later write is admissible:
+    // the later one is only reflected while the earlier is kept to write, and the earlier
+    // is the record's response once written (Paykit spec 6, 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let shop_id = shop.app_id();
+    let acceptance = || {
+        w.inject(
+            &w.alice,
+            "wallet",
+            &w.bob,
+            &[shop_id],
+            "paykit.payment_request_acceptance",
+            vec![request.request_hash],
+            serde_json::json!({ "label": null })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        )
+    };
+    let first = acceptance();
+    refuse_writes(&w.bob, 2);
+    shop.receive(None).await.unwrap();
+    w.clock.advance_ms(1_000);
+    acceptance();
+    // The later one's step, then the earlier one's later write.
+    refuse_writes(&w.bob, 2);
+    shop.receive(None).await.unwrap();
+    assert_eq!(Box::pin(payee_response(&w, &shop, &request)).await, None);
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        Box::pin(payee_response(&w, &shop, &request)).await,
+        Some(first)
+    );
+}

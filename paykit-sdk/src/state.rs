@@ -58,14 +58,14 @@
 //! | `bw/<from_ms>` | a widening of the block marks, from `from_ms` to the time it holds, owed to every counterparty the deny list holds at the next read of the lists: written by a restore and by a `missed` item (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `kw/<sender>` | a mark of a sender's entries the client dropped while they waited for a scope key, as `pd/` holds, with the data epochs they waited for; it asks only while the app holds every key of those epochs (`marks.rs`) | |
-//! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply, or a payee's period details, for a request the app holds no record of yet, or whose record it holds but can't open, read or bind, kept until it does, placed only once the record names its sender, a proof of a payment without a request for the payee's record of its settlement that the app holds but can't read, placed once it reads naming its sender and removed if it names another, or a receipt for a payer record the app holds but can't read and that isn't paused as divergent, kept until it reads, and moved to `dw/` if it reads paused (`receive.rs`), or a counterparty's Allowance answer before the app holds its Allowance record (`allowances.rs`) | |
+//! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply, or a payee's period details, for a request the app holds no record of yet, or whose record it holds but can't open, read or bind, kept until it does, placed only once the record names its sender, a proof of a payment without a request for the payee's record of its settlement that the app holds but can't read, placed once it reads naming its sender and removed if it names another, or a receipt for a payer record the app holds but can't read and that isn't paused as divergent, kept until it reads, and moved to `dw/` if it reads paused (`receive.rs`), or a counterparty's Allowance answer the receive step took, which it never writes into the record's response itself, placed after the read, or kept before the app holds its Allowance record, or waiting over a record seen divergent for the user's confirmation (`allowances.rs`); each with the feed `seq` its entry was read at, which orders it (`records::KeptOrder`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing, since a dropped entry's time is already in its sender's mark | |
 //! | `dv/<record key>` | the pause mark of a record the app has seen divergent: paused until the user confirms, or the write the user confirmed over, with the write a credit's refusal showed it at and the write a credit's confirmation was given over, which is always the write that showing names, at or before the plain confirmation: any other stored state reads as a corrupt store (`divergent.rs`); a restore installs it paused, neither shown nor confirmed for a credit | |
-//! | `dw/<record key>/<role>/<sender>/<msg_id>` | a received message, by its sender and `msg_id`, whose write over a divergent record waits for the user's confirmation, or for the messages kept over the record before it, to write into its record later, in the order its inbox accepted them (by acceptance time, then where the receive step took it among those kept over the record, which is the feed's order, never by `msg_id`), a receipt over a payer record that doesn't read included, written once the record also reads, and one kept in `pr/` whose record read paused; never one from anyone but the counterparty of a record that reads; given up at its 30 days, also one that no longer points to its record (`divergent.rs`) | |
-//! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, with the entry's ID and message hash, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
-//! | `ae/<record key>/<msg_id>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection; every distinct end is kept, each under its `msg_id`, until the record shows which one names what it holds (`allowances.rs`, Paykit spec 8.3) | |
+//! | `dw/<record key>/<role>/<sender>/<msg_id>` | a received message, by its sender and `msg_id`, whose write over a divergent record waits for the user's confirmation, or for the messages kept over the record before it, to write into its record later, in the order its inbox accepted them (by acceptance time, then the feed `seq` its entry was read at, as the kept replies are, never by `msg_id`), a receipt over a payer record that doesn't read included, written once the record also reads, and one kept in `pr/` whose record read paused; never one from anyone but the counterparty of a record that reads; given up at its 30 days, also one that no longer points to its record (`divergent.rs`) | |
+//! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, with the entry's ID and message hash and the feed `seq` it was read at, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
+//! | `ae/<record key>/<msg_id>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection; every distinct end is kept, each under its `msg_id` and with the feed `seq` that orders it, until the record shows which one names what it holds (`allowances.rs`, Paykit spec 8.3) | |
 //! | `ac/<record key>` | the consent list: an Allowance this app may pay under, or removed from it for good (`allowances.rs`, Paykit spec 8.3); a restore marks every entry to confirm again | |
-//! | `cf/<record key>` | a second, different proposal or response of an Allowance, kept as the stop until the Allowance record holds `conflicted` (`allowances.rs`, Paykit spec 8.3) | |
+//! | `cf/<record key>` | a second, different proposal or response of an Allowance, with the feed `seq` its entry was read at, kept as the stop until the Allowance record holds `conflicted` (`allowances.rs`, Paykit spec 8.3) | |
 //! | `mc` | set by a `missed` item: every entry of the consent list is to be confirmed again, as after a restore; nothing is consented while it is set, and the next receive marks each entry so and clears it (`allowances.rs`); never restored | |
 //! | `en/<msg_id>` | the executor app an `executor_notice` is wrapped to, kept with the batch that queues it | |
 //! | `eo/<record key>` | this app's own crossing end of an Allowance, recorded while sends to its counterparty were held, whose message is sent from the record once they aren't (`allowances.rs`, `Paykit::send_owed_ends`); never restored | |
@@ -601,20 +601,43 @@ impl sealed::Sealed for KeptMessage {}
 ///   proven against the rail before it is placed.
 /// - At `lh/<record key>`, a `paykit.private_payment_list`, kept under the record key of its
 ///   payee app's `payment_lists` record, from its sender and App ID (Paykit wire 5.4).
-/// - At `pr/<sender>/<record key>/<msg_id>` too, an Allowance's acceptance or rejection its
-///   inbox accepted before this app held the proposal's record, from that sender and of that
-///   `msg_id`, kept under the record key of the Allowance record it names (Paykit spec 8.1,
-///   8.3).
+/// - At `pr/<sender>/<record key>/<msg_id>` too, an Allowance's acceptance or rejection the
+///   receive step took, to write into the proposal's record after the read, or one its
+///   inbox accepted before this app held that record, or an acceptance that waits over that
+///   record for the user's confirmation, from that sender and of that `msg_id`,
+///   kept under the record key of the Allowance record it names, with its feed `seq` (Paykit
+///   spec 6, 8.1, 8.3).
 /// - At `ae/<record key>/<msg_id>`, a counterparty's `paykit.allowance_end` its inbox
-///   accepted, of that `msg_id`, kept as the stop under the record key of the Allowance
-///   record of its sender and the Allowance it names (Paykit spec 8.3, "Ends reach the
-///   executor").
+///   accepted, of that `msg_id`, with its feed `seq`, kept as the stop under the record key of
+///   the Allowance record of its sender and the Allowance it names (Paykit spec 8.3, "Ends
+///   reach the executor").
 /// - At `cf/<record key>`, a second, different proposal, acceptance or rejection its inbox
-///   accepted, with its acceptance time, kept as the stop under the record key of the
-///   Allowance record of its sender and the Allowance it names (Paykit spec 8.3,
-///   "Conflicted").
+///   accepted, with its acceptance time and its feed `seq`, kept as the stop under the
+///   record key of the Allowance record of its sender and the Allowance it names (Paykit
+///   spec 8.3, "Conflicted").
 impl Stored for KeptMessage {
     fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        // A member of a bounded pool, the kept replies or the kept stops, is ordered by when
+        // its inbox accepted it, by the feed `seq` its entry was read at within one
+        // millisecond (`records::KeptOrder`): which one the bounds drop, which of an
+        // Allowance's ends stops it and which of its answers is the record's response. A
+        // conflict's stop is ordered the same way among its record's answers: an answer
+        // accepted after it never takes the response. One without its acceptance time or its
+        // `seq` can't be ordered, whatever its kind, so this is checked first, before any
+        // kind's own check can take the value; a held list is ordered by nothing, and no
+        // writer gives it a `seq`.
+        let pooled = matches!(
+            family,
+            StateKey::KeptCancellation(_)
+                | StateKey::KeptReply { .. }
+                | StateKey::AllowanceEnd { .. }
+                | StateKey::Conflict(_)
+        );
+        if pooled {
+            self.order()?;
+        } else if self.seq().is_some() {
+            return corrupt();
+        }
         let message = self.stored(&binder.own)?;
         let first = || {
             message
@@ -681,10 +704,14 @@ impl Stored for KeptMessage {
                     crate::receive::receipt_target(&message, &binder.own, &receipt.attempt_id);
                 (target.record_target(), record)
             }
-            (StateKey::HeldList(record_key), Body::PrivatePaymentList(_)) => (
-                list_target(&message.sender(), &message.message().from.app_id),
-                record_key,
-            ),
+            (StateKey::HeldList(record_key), Body::PrivatePaymentList(_))
+                if message.accepted_at().is_some() =>
+            {
+                (
+                    list_target(&message.sender(), &message.message().from.app_id),
+                    record_key,
+                )
+            }
             (
                 StateKey::KeptReply {
                     sender,
