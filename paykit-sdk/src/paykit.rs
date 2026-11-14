@@ -776,7 +776,10 @@ impl Paykit {
         // bounds once the app holds the record of a request, of either side, naming them, of
         // entries dropped unverified at once, then again at most once a day while the mark
         // lives. The pairs a block's marks counted are forgotten first, so their asks may go
-        // (`marks.rs`).
+        // (`marks.rs`). Before them, the notices of lost messages owed on block marks the
+        // receive steps dropped for the bound are settled from the outbox's answer, which
+        // only this side of the read can make (`marks::LostOwed`).
+        Box::pin(self.settle_lost_owed()).await?;
         Box::pin(self.forget_blocked_pairs()).await?;
         let marked = Box::pin(self.ask_on_marks()).await?;
         // The payer's records opened before this app held the block floor they fall under

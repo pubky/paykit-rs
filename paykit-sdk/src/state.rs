@@ -921,6 +921,26 @@ impl Stored for crate::marks::BlockedWindow {
     }
 }
 
+impl sealed::Sealed for crate::marks::LostOwed {}
+
+/// A notice of lost messages owed (`bl/<sender>/<msg_id>`): of the sender and request its key
+/// names, its window's times not crossed. The request is checked against the outbox when the
+/// notice is settled (`Paykit::delivered_request`): its hash is the proof of the pointer.
+impl Stored for crate::marks::LostOwed {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::LostOwed { sender, msg_id }
+                if self.sender == *sender
+                    && self.msg_id == *msg_id
+                    && self.earliest_ms <= self.latest_ms =>
+            {
+                Ok(())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for KeyWaitMark {}
 
 /// A mark of a sender's entries dropped while they waited for a scope key: of the sender its
@@ -1072,6 +1092,9 @@ pub(crate) mod key {
     pub(crate) const DROPPED_UNVERIFIED: &str = "ud/";
     pub(crate) const DROPPED_BLOCKED: &str = "bd/";
     pub(crate) const BLOCKED_WIDENINGS: &str = "bw/";
+    /// The notices of lost messages owed on block marks the receive step dropped for the
+    /// bound (`crate::marks::LostOwed`).
+    pub(crate) const LOST_OWED: &str = "bl/";
     pub(crate) const FLAGGED: &str = "fg";
     /// The raise of the block floor this app owes (`crate::floor`).
     pub(crate) const BLOCK_FLOOR: &str = "bf";
@@ -1175,6 +1198,12 @@ pub(crate) mod key {
     /// list holds at the next read of the lists.
     pub(crate) fn blocked_widening(from_ms: u64) -> String {
         format!("{BLOCKED_WIDENINGS}{from_ms:020}")
+    }
+
+    /// The notice of lost messages owed on `sender`'s block mark, dropped for the bound while
+    /// it named the request `msg_id` as queued.
+    pub(crate) fn lost_owed(sender: &[u8; 32], msg_id: &str) -> String {
+        format!("{LOST_OWED}{}/{msg_id}", b64(sender))
     }
 
     /// The notice that what `counterparty`'s inbox accepted from `from_ms`, dropped for the
@@ -1386,6 +1415,9 @@ pub(crate) enum StateKey {
     DroppedBlocked { sender: [u8; 32] },
     /// `bw/<from_ms>`: a widening of the block marks owed at the next read of the lists.
     BlockedWidening { from_ms: u64 },
+    /// `bl/<sender>/<msg_id>`: the notice of lost messages owed on a sender's block mark the
+    /// receive step dropped for the bound, naming `msg_id` as queued.
+    LostOwed { sender: [u8; 32], msg_id: String },
     /// `fg`: the flagged senders as the app last read them.
     Flagged,
     /// `bf`: the raise of the block floor this app owes.
@@ -1579,6 +1611,13 @@ impl StateKey {
                     "bw" => Self::BlockedWidening {
                         from_ms: number(rest)?,
                     },
+                    "bl" => {
+                        let (sender, id) = rest.split_once('/')?;
+                        Self::LostOwed {
+                            sender: b64_32(sender)?,
+                            msg_id: msg_id(id)?,
+                        }
+                    }
                     "kw" => Self::KeyWaits {
                         sender: b64_32(rest)?,
                     },
@@ -1747,6 +1786,33 @@ mod tests {
     fn reads<T: Stored>(key: &str, value: serde_json::Value) -> bool {
         let bytes = serde_json::to_vec(&serde_json::json!({ "v": 1, "d": value })).unwrap();
         bound::<T>(key.as_bytes(), &bytes, &Binder::unblinded([1; 32])).is_ok()
+    }
+
+    #[test]
+    fn test_state_lost_owed_bound_to_its_sender_and_request() {
+        let id = "6f1c2b8e-3d4a-4f5b-9c6d-7e8f9a0b1c2d";
+        let owed = |sender: u8, earliest: u64, latest: u64, msg_id: &str| {
+            serde_json::json!({
+                "sender": pubky_switch_core::enc::b64(&[sender; 32]),
+                "earliest_ms": earliest, "latest_ms": latest, "raised_ms": 9,
+                "msg_id": msg_id, "hash": pubky_switch_core::enc::b64(&[3; 32]),
+            })
+        };
+        let at = key::lost_owed(&[1; 32], id);
+        assert!(reads::<crate::marks::LostOwed>(&at, owed(1, 5, 6, id)));
+        assert!(!reads::<crate::marks::LostOwed>(&at, owed(2, 5, 6, id)));
+        assert!(!reads::<crate::marks::LostOwed>(&at, owed(1, 7, 6, id)));
+        let other = "7a2d3c9f-4e5b-4a6c-8d7e-8f9a0b1c2d3e";
+        assert!(!reads::<crate::marks::LostOwed>(&at, owed(1, 5, 6, other)));
+        assert!(!reads::<crate::marks::LostOwed>(
+            &key::dropped_blocked(&[1; 32]),
+            owed(1, 5, 6, id)
+        ));
+        // Every member is written: one without the time it was raised at is no run's.
+        let mut partial = owed(1, 5, 6, id);
+        partial.as_object_mut().unwrap().remove("raised_ms");
+        assert!(!reads::<crate::marks::LostOwed>(&at, partial));
+        assert!(StateKey::parse(key::lost_owed(&[1; 32], "not-a-uuid").as_bytes()).is_none());
     }
 
     #[test]
@@ -2105,6 +2171,13 @@ mod tests {
             (
                 key::blocked_widening(7),
                 StateKey::BlockedWidening { from_ms: 7 },
+            ),
+            (
+                key::lost_owed(&pubky, id),
+                StateKey::LostOwed {
+                    sender: pubky,
+                    msg_id: id.into(),
+                },
             ),
             (key::FLAGGED.into(), StateKey::Flagged),
             (key::BLOCK_FLOOR.into(), StateKey::BlockFloor),

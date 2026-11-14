@@ -304,8 +304,8 @@ pub const BACKUP_NAME: &str = "paykit";
 /// a queued `resend_request` (`ans/`: the requester's certificate, a `resend_request`'s
 /// body, and the `seq` and `msg_id` its key names), and a payee app's records seen (`ar/`,
 /// bound to the payee and app its key names). The rest is the app's own data, read as its
-/// family's and bound to its key (`ask/`, times and counts, `side/`, `en/`, notices `nt/`,
-/// the consent list `ac/`, each entry marked to be confirmed again): a
+/// family's and bound to its key (`ask/`, times and counts, `side/`, `en/`, notices `nt/`
+/// and those owed `bl/`, the consent list `ac/`, each entry marked to be confirmed again): a
 /// backup carries the app's signing keys, so whoever can write one can sign anything the
 /// app can, and a check of what the app signed guards against corruption only.
 pub(crate) fn restore_paykit_layer(
@@ -521,6 +521,17 @@ pub(crate) fn restore_paykit_layer(
                         "Switch spec 8.2: a kept payer's reply in the backup doesn't verify",
                     )
                 })?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            // A notice of lost messages owed is carried as the marks and the notices are: the
+            // mark it stands for is gone, so a backup without it would lose the notice. The
+            // restored outbox doesn't know a request queued before the restore, so it settles
+            // as one not delivered, and is told. Its times aren't bounded as a mark's are: it
+            // asks nothing, and its latest time is already in the raise owed, which is.
+            StateKey::LostOwed { .. } => {
+                state::restored::<crate::marks::LostOwed>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }

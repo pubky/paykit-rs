@@ -395,10 +395,13 @@ pub(crate) fn admits_new_state(
 /// instead, so none is lost and no pair is left unforgotten: while the mark already names
 /// [`crate::marks::MAX_PENDING_FORGETS`] pairs, or while past the bound on marks every mark
 /// that could go still names pairs to forget. A mark the bound drops before it asked raises
-/// the notice that its window can no longer come back. A request the dropped mark still
-/// names as queued isn't read here and isn't cancelled: it may already be delivered, or the
-/// host's next flush may still deliver it, and its window's messages then come back after
-/// that notice.
+/// the notice that its window can no longer come back: at once when it names no request as
+/// queued; otherwise the notice is kept owed in the commit that drops the mark
+/// ([`crate::marks::LostOwed`]), and the pass after the read tells it unless the outbox shows
+/// that request delivered before the mark's expiry. Past [`crate::marks::MAX_LOST_OWED`]
+/// notices owed, the entry is held instead. A request still queued isn't cancelled: the
+/// host's next flush may still deliver it after the notice, and its window's messages then
+/// come back.
 fn mark_blocked(
     cx: &mut ReceiveContext<'_>,
     sender: &[u8; 32],
@@ -428,8 +431,25 @@ fn mark_blocked(
         crate::marks::BlockedCount::Put { mut mark, evicted } => {
             if let Some(gone) = evicted {
                 let mut tx = Tx::default();
-                crate::marks::tell_lost_if_unasked(&mut tx, &gone, raised)
-                    .map_err(|_| Fail::corrupt())?;
+                match (&gone.asked_at_ms, &gone.queued) {
+                    // Whether the request it names was delivered is the outbox's to answer,
+                    // which this step can't read: the notice is owed, in this commit, so the
+                    // mark goes now and the bounds hold. Nothing is written before the bound
+                    // on notices owed is checked: an entry held there changes nothing.
+                    (None, Some(queued)) => {
+                        let owed = state::cx_scan::<crate::marks::LostOwed>(cx, key::LOST_OWED)?;
+                        if owed.len() >= crate::marks::MAX_LOST_OWED {
+                            return Err(held_entry());
+                        }
+                        tx.put(
+                            &key::lost_owed(&gone.sender, &queued.msg_id),
+                            &crate::marks::LostOwed::of(&gone, queued, raised),
+                        )
+                        .map_err(|_| Fail::corrupt())?;
+                    }
+                    _ => crate::marks::tell_lost_if_unasked(&mut tx, &gone, raised)
+                        .map_err(|_| Fail::corrupt())?,
+                }
                 let floor = state::cx_get::<u64>(cx, key::BLOCK_FLOOR)?;
                 crate::marks::fold_into_floor(&mut tx, floor, gone.latest_ms)
                     .map_err(|_| Fail::corrupt())?;
