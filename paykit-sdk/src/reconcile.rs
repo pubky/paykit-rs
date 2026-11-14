@@ -13,6 +13,13 @@
 //! the user: [`Paykit::resolve_attempt`] writes the user's choice (`done` basis
 //! `reconcile`, `unknown`, or `failed`). [`Paykit::end_reconcile`] ends the mode.
 //!
+//! After a provider loss, a reconcile also lists each one-time request of the payer's records
+//! still in doubt from before the loss ([`Doubtful::before_loss`], Paykit spec 7.3, "After a
+//! provider loss"), with no attempt when the new service holds none: the user pays it by hand
+//! over the doubt or states it wasn't paid before the loss
+//! ([`Paykit::confirm_not_paid_before_loss`]). One whose claim there is SETTLED, or that the
+//! user's statement for that loss covers, isn't listed.
+//!
 //! The payer pass, the reading of the payer's obligations above, needs `paykit_pay`: without it the
 //! switch answers no claim read. After a restore, no new attempt is made and nothing is
 //! dispatched until a reconcile under `paykit_pay` has run it, even once reconcile mode has ended,
@@ -29,7 +36,7 @@ use paykit_lib::{AttemptId, Body};
 use pubky_switch_client::app::{
     ClaimOp, ObligationDeadline, OpBatch, RecordContent, UserConfirmed,
 };
-use pubky_switch_core::claims::{Basis, Outcome};
+use pubky_switch_core::claims::{Basis, ClaimStatus, Outcome};
 use pubky_switch_core::ops::{Condition, OpKind};
 
 use crate::activity::{self, ActivityTarget};
@@ -41,7 +48,7 @@ use crate::pay::{own_deadline, PayOutcome, Written};
 use crate::paykit::Paykit;
 use crate::rail::{RailOutcome, RailPaid};
 use crate::records::KeptMessage;
-use crate::requests::request_of;
+use crate::requests::{cancelled, rejected, request_of};
 use crate::state::key;
 
 /// How the user resolves a doubtful attempt (Paykit spec 7.3).
@@ -62,12 +69,24 @@ pub enum Resolution {
 pub struct Doubtful {
     /// The claim key.
     pub obligation: [u8; 32],
-    /// The attempts in doubt: `unknown`, or open and orphaned or unresolved here.
+    /// The attempts in doubt: `unknown`, or open and orphaned or unresolved here. Empty for
+    /// an obligation in doubt only after a provider loss ([`Doubtful::before_loss`]): the
+    /// attempts the old service took don't reach the new one.
     pub attempts: Vec<AttemptId>,
     /// The payee, when the app's records name the obligation.
     pub payee: Option<[u8; 32]>,
     /// The request, when there is one.
     pub request_hash: Option<[u8; 32]>,
+    /// The obligation is in doubt after a provider loss (Paykit spec 7.3, "After a provider
+    /// loss"): a one-time request payable before the loss, not answered here, whose claim at
+    /// the new service isn't SETTLED, so another own app, or this one, may have paid it at
+    /// the old service. It is listed as [`crate::RequestStatus::MayBePaid`] shows the
+    /// request, until its claim shows it SETTLED or the user states it wasn't paid before
+    /// the loss. The host shows the user that it may already be paid; the user pays it by
+    /// hand over the doubt ([`crate::PayOptions::with_may_be_paid_confirmed`], with the
+    /// doubt [`Paykit::pay_request`] refuses it with) or states it wasn't paid
+    /// ([`Paykit::confirm_not_paid_before_loss`]). A newer loss lists it again.
+    pub before_loss: bool,
 }
 
 /// What a reconciliation did.
@@ -76,12 +95,13 @@ pub struct Doubtful {
 pub struct ReconcileReport {
     /// The outcomes of the payments it finished.
     pub resolved: Vec<PayOutcome>,
-    /// What stays doubtful, for the user.
+    /// What stays doubtful, for the user: the attempts nothing here could resolve, and the
+    /// obligations a provider loss leaves in doubt ([`Doubtful::before_loss`]).
     pub doubtful: Vec<Doubtful>,
     /// The payer pass was skipped, the certificate lacking `paykit_pay`: the payer's obligations
-    /// weren't read, so `doubtful` holds only the client's own doubtful claims. After a
-    /// restore, no new attempt is made until a reconcile under `paykit_pay` runs the pass, also
-    /// after [`Paykit::end_reconcile`].
+    /// weren't read, so `doubtful` holds only the client's own doubtful claims, and none a
+    /// provider loss leaves in doubt. After a restore, no new attempt is made until a
+    /// reconcile under `paykit_pay` runs the pass, also after [`Paykit::end_reconcile`].
     pub payer_skipped: bool,
 }
 
@@ -118,6 +138,27 @@ impl Paykit {
             }
         }
         out
+    }
+
+    /// Whether `obligation` is a one-time request's in doubt after a provider loss (Paykit
+    /// spec 7.3), its claim at the new service not SETTLED, which the caller judges first:
+    /// as the request's status reads [`crate::RequestStatus::MayBePaid`] for the loss, the
+    /// record showing it neither paid, rejected nor cancelled.
+    async fn request_in_doubt_after_loss(&self, obligation: &Obligation) -> Result<bool> {
+        let record = &obligation.record;
+        let Some((stored, body)) = request_of(record) else {
+            return Ok(false);
+        };
+        if obligation.request_hash.is_none()
+            || body.is_recurring()
+            || record.shows_paid()
+            || rejected(record)
+            || cancelled(record)
+        {
+            return Ok(false);
+        }
+        self.in_doubt_after_loss(&obligation.claim_key, Some(stored), None)
+            .await
     }
 
     async fn payer_records(&self) -> Result<Vec<ActivityRecord>> {
@@ -195,11 +236,14 @@ impl Paykit {
         };
         let me = self.app_id();
         for obligation in self.obligations(&records) {
-            let Some(read) = self.app.read_claim(&obligation.claim_key).await? else {
-                continue;
-            };
+            let mut read = self.app.read_claim(&obligation.claim_key).await?;
+            let attempts = read
+                .as_ref()
+                .map(|read| read.view.attempts.clone())
+                .unwrap_or_default();
+            let resolved_before = report.resolved.len();
             let mut doubtful = Vec::new();
-            for attempt in &read.view.attempts {
+            for attempt in &attempts {
                 let open = matches!(attempt.outcome, Outcome::Open | Outcome::Unknown);
                 if !open || journaled.contains(&attempt.attempt_id) {
                     continue;
@@ -247,12 +291,22 @@ impl Paykit {
                 }
                 doubtful.push(id);
             }
-            if !doubtful.is_empty() {
+            // An outcome written here may have settled the claim: it is read again for the
+            // doubt a provider loss leaves.
+            if report.resolved.len() > resolved_before {
+                read = self.app.read_claim(&obligation.claim_key).await?;
+            }
+            let settled = read
+                .as_ref()
+                .is_some_and(|read| read.view.status == ClaimStatus::Settled);
+            let before_loss = !settled && self.request_in_doubt_after_loss(&obligation).await?;
+            if !doubtful.is_empty() || before_loss {
                 report.doubtful.push(Doubtful {
                     obligation: obligation.claim_key,
                     attempts: doubtful,
                     payee: Some(obligation.payee),
                     request_hash: obligation.request_hash,
+                    before_loss,
                 });
             }
         }
@@ -271,6 +325,7 @@ impl Paykit {
                 attempts,
                 payee: None,
                 request_hash: None,
+                before_loss: false,
             });
         }
         // Every own attempt on the payer's obligations was read: new attempts may follow

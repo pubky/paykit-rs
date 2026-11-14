@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{
-    PayOptions, PayOutcome, Paykit, PaykitBackup, PaykitConfig, PaykitError, PaymentDoubt, Rail,
-    RailDeclaration, Refusal, RequestRef, RequestStatus,
+    Doubtful, PayOptions, PayOutcome, Paykit, PaykitBackup, PaykitConfig, PaykitError,
+    PaymentDoubt, Rail, RailDeclaration, Refusal, RequestRef, RequestStatus,
 };
 use pubky_switch_client::app::UserConfirmed;
 use pubky_switch_client::clock::Clock;
@@ -583,4 +583,100 @@ async fn test_provider_loss_restore_refuses_a_loss_above_the_clients_generation(
     let refused = refused_restore(&w, backup, Arc::clone(&at)).await;
     assert!(is_refused(&refused), "{refused:?}");
     nothing_restored(&w, at, id).await;
+}
+
+/// The obligations a reconcile of `app` lists as in doubt after a provider loss.
+async fn loss_doubts(app: &mut Paykit) -> Vec<Doubtful> {
+    let report = app.reconcile().await.unwrap();
+    report
+        .doubtful
+        .into_iter()
+        .filter(|doubtful| doubtful.before_loss)
+        .collect()
+}
+
+/// A wallet holding two of bob's requests, received before alice's service is lost and
+/// followed there. Returns the world, the wallet and the requests.
+async fn followed_with_requests() -> (World, Paykit, [RequestRef; 2]) {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let first = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let second = request_from(&mut shop, w.alice_id(), draft("2", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    follow_loss(&mut wallet).await;
+    (w, wallet, [first, second])
+}
+
+#[tokio::test]
+async fn test_provider_loss_reconcile_lists_each_obligation_from_before_the_loss() {
+    // Neither request was attempted at the new service: the reconcile lists both as in
+    // doubt after the loss, with their payee and request and no attempt, the obligation the
+    // refusal of a payment by hand names.
+    let (w, mut wallet, requests) = followed_with_requests().await;
+    let listed = loss_doubts(&mut wallet).await;
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    for request in &requests {
+        let doubtful = listed
+            .iter()
+            .find(|d| d.request_hash == Some(request.request_hash))
+            .unwrap();
+        assert_eq!(doubtful.payee, Some(w.bob_id()));
+        assert!(doubtful.attempts.is_empty(), "{doubtful:?}");
+        let refused = wallet.pay_request(request, PayOptions::default()).await;
+        assert_eq!(doubt_of(&refused).obligation, doubtful.obligation);
+    }
+    assert_eq!(executions(&w), 0);
+}
+
+#[tokio::test]
+async fn test_provider_loss_reconcile_lists_no_obligation_the_user_stated_not_paid() {
+    let (_w, mut wallet, [first, second]) = followed_with_requests().await;
+    let doubt = doubt_of(&wallet.pay_request(&first, PayOptions::default()).await);
+    wallet
+        .confirm_not_paid_before_loss(&doubt.obligation, UserConfirmed::new())
+        .await
+        .unwrap();
+    let listed = loss_doubts(&mut wallet).await;
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].request_hash, Some(second.request_hash));
+}
+
+#[tokio::test]
+async fn test_provider_loss_reconcile_lists_no_obligation_settled_at_the_new_service() {
+    let (w, mut wallet, [first, second]) = followed_with_requests().await;
+    let doubt = doubt_of(&wallet.pay_request(&first, PayOptions::default()).await);
+    let paid = wallet
+        .pay_request(
+            &first,
+            PayOptions::default().with_may_be_paid_confirmed(doubt),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let listed = loss_doubts(&mut wallet).await;
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].request_hash, Some(second.request_hash));
+    assert_eq!(executions(&w), 1);
+}
+
+#[tokio::test]
+async fn test_provider_loss_reconcile_lists_a_stated_obligation_again_after_a_newer_loss() {
+    let (w, mut wallet, [first, _]) = followed_with_requests().await;
+    let doubt = doubt_of(&wallet.pay_request(&first, PayOptions::default()).await);
+    wallet
+        .confirm_not_paid_before_loss(&doubt.obligation, UserConfirmed::new())
+        .await
+        .unwrap();
+    assert_eq!(loss_doubts(&mut wallet).await.len(), 1);
+    w.clock.advance_ms(60_000);
+    declare_loss_of(&w, SWITCH_ORIGIN, LATER_SECRET);
+    follow_loss(&mut wallet).await;
+    let listed = loss_doubts(&mut wallet).await;
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    assert!(listed
+        .iter()
+        .any(|d| d.request_hash == Some(first.request_hash) && d.obligation == doubt.obligation));
 }
