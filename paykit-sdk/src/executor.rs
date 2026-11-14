@@ -81,17 +81,20 @@ use paykit_lib::allowances::{
     record_outcomes, usage, AllowanceTerms, ClaimState, EntryOutcome, Ledger, LedgerEntry,
     PeriodUsage,
 };
-use paykit_lib::bodies::{Body, ExecutorNotice, NoticeReason, PaymentRequest, ProposerRole};
+use paykit_lib::bodies::{
+    Body, ExecutorNotice, NoticeReason, PaymentDeadline, PaymentRequest, ProposerRole,
+};
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
 use paykit_lib::grant::{grant_fields, ExecutorGrant, EXECUTOR_GRANT_LABEL};
 use paykit_lib::kinds::Kind;
-use paykit_lib::records::{ActivityRecord, AllowanceRecord, GrantEntry, Origin};
+use paykit_lib::periods::Recurrence;
+use paykit_lib::records::{ActivityRecord, AllowanceRecord, GrantEntry, Origin, RecordBinding};
 use paykit_lib::{AllowanceId, AttemptId, PaymentAmount, PaymentEndpointIdentifier};
 use pubky_switch_client::app::{
     Initiator, OpBatch, RecordContent, RecordRead, RecordTarget, SharedRecord, UserConfirmed,
 };
-use pubky_switch_core::claims::{ClaimView, Outcome};
+use pubky_switch_core::claims::{ClaimView, Outcome, RECONCILIATION_MS};
 use pubky_switch_core::enc::{serde_b64, serde_b64_vec};
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::ops::{Condition, OpKind, RecordVersion, SignedOp};
@@ -243,9 +246,9 @@ pub(crate) struct LedgerWrite {
 
 /// The ledger an executor batch writes (Paykit spec 8.3, "Outcomes in the ledger" and
 /// "Compaction"; Paykit wire 5.5): `base` with the outcomes its attempts' claims `claims`
-/// show, compacted at `at`, the latest service time verified, once it nears the size limit
-/// ([`COMPACT_FROM`]), and then `entry`. It counts what `base` counts with `claims`, and the
-/// entry: [`paykit_lib::allowances::record_outcomes`] and
+/// show and `entry`, fitted to the record ([`fitted`]): compacted at `at`, the latest service
+/// time verified, once it nears the size limit ([`COMPACT_FROM`]). It counts what `base`
+/// counts with `claims`, and the entry: [`paykit_lib::allowances::record_outcomes`] and
 /// [`paykit_lib::allowances::compact`] each keep usage at `at` and after.
 ///
 /// A ledger that doesn't fit the record even after compaction, with room for an outcome
@@ -263,20 +266,60 @@ pub(crate) fn next_ledger(
     at: u64,
     entry: LedgerEntry,
 ) -> std::result::Result<Ledger, &'static str> {
-    const UNCOUNTED: &str = "usage can't be counted";
     let mut ledger = record_outcomes(terms, base, claims)
         .map_err(|_| UNCOUNTED)?
         .unwrap_or_else(|| base.clone());
     ledger.entries.push(entry);
-    if ledger.len_with_outcomes().map_err(|_| UNCOUNTED)? > COMPACT_FROM {
-        if let Some(compacted) = compact(terms, &ledger, at).map_err(|_| UNCOUNTED)? {
+    fitted(terms, ledger, at)
+        .map_err(|why| why.unwrap_or("the ledger can't take another entry, even after compaction"))
+}
+
+/// Why a ledger can't be counted, as [`next_ledger`] and [`repair_ledger`] refuse it.
+const UNCOUNTED: &str = "usage can't be counted";
+
+/// `ledger` as an executor writes it (Paykit spec 8.3, "Compaction"): compacted at `at`, the
+/// latest service time verified, once it nears the size limit ([`COMPACT_FROM`]), and
+/// refused, `Err(None)`, when it doesn't fit the record even then with room for an outcome
+/// of every attempt it holds ([`Ledger::len_with_outcomes`]); `Err(Some(_))` for a ledger
+/// whose usage can't be counted. [`paykit_lib::allowances::compact`] keeps usage at `at`
+/// and after.
+fn fitted(
+    terms: &AllowanceTerms,
+    mut ledger: Ledger,
+    at: u64,
+) -> std::result::Result<Ledger, Option<&'static str>> {
+    if ledger.len_with_outcomes().map_err(|_| Some(UNCOUNTED))? > COMPACT_FROM {
+        if let Some(compacted) = compact(terms, &ledger, at).map_err(|_| Some(UNCOUNTED))? {
             ledger = compacted;
         }
     }
-    if ledger.len_with_outcomes().map_err(|_| UNCOUNTED)? > MAX_LEDGER_VALUE {
-        return Err("the ledger can't take another entry, even after compaction");
+    if ledger.len_with_outcomes().map_err(|_| Some(UNCOUNTED))? > MAX_LEDGER_VALUE {
+        return Err(None);
     }
     Ok(ledger)
+}
+
+/// The ledger a repair writes (Paykit spec 8.3, "After a confirmation", "Outcomes in the
+/// ledger", "Compaction"): `merged` with the outcomes its attempts' claims `outcomes` show,
+/// then fitted to the record as an executor batch's ledger is ([`fitted`]), so a ledger
+/// near the size limit is compacted and keeps room for every outcome. It counts what
+/// `merged` counts with the claims at `at` and after.
+///
+/// # Errors
+///
+/// The rule that refuses the repair.
+pub(crate) fn repair_ledger(
+    terms: &AllowanceTerms,
+    merged: &Ledger,
+    outcomes: &HashMap<AttemptId, ClaimState>,
+    at: u64,
+) -> std::result::Result<Ledger, &'static str> {
+    let ledger = record_outcomes(terms, merged, outcomes)
+        .map_err(|_| UNCOUNTED)?
+        .unwrap_or_else(|| merged.clone());
+    fitted(terms, ledger, at).map_err(|why| {
+        why.unwrap_or("the repair's ledger doesn't fit its record, even after compaction")
+    })
 }
 
 /// What a ledger's attempts show, as [`Paykit::ledger_claims`] reads them: for usage, and
@@ -301,9 +344,35 @@ impl LedgerClaims {
 /// service now serving (Paykit spec 8.3, "Last ledger version").
 const EARLIER_GENERATION: &str = "the ledger kept is of an earlier generation than the service's";
 
-/// How long after the service time it states the repair's ledger write may be applied:
-/// `server_time_in(at, at + 60 s)`, as an executor batch's (Paykit wire 5.5).
-const REPAIR_WINDOW_MS: u64 = paykit_lib::allowances::ENTRY_WINDOW_MS;
+/// The conditions of a repair's ledger write (Paykit spec 8.3, "After a confirmation";
+/// Paykit wire 5.5): `record_version` on the Allowance record `record` at `version`, and
+/// `server_time_in(at, end)` with the `end` of an executor batch
+/// ([`AllowanceTerms::entry_window_end`]): `at + 60 s`, cut at the next boundary of any
+/// anchored limit, so the write lands in the periods its figures were counted in.
+///
+/// # Errors
+///
+/// [`Refusal::NotAutomatic`] for a window that can't be written.
+fn repair_conditions(
+    terms: &AllowanceTerms,
+    record: &[u8; 32],
+    version: RecordVersion,
+    at: u64,
+) -> Result<Vec<Condition>> {
+    let end = terms
+        .entry_window_end(at)
+        .map_err(|_| not_automatic("the repair's window can't be written"))?;
+    Ok(vec![
+        Condition::RecordVersion {
+            key: *record,
+            version,
+        },
+        Condition::ServerTimeIn {
+            start: Some(at),
+            end: Some(end),
+        },
+    ])
+}
 
 /// What the executor makes of the ledger the switch shows (`Paykit::ledger_shown`).
 enum LedgerShown {
@@ -387,12 +456,16 @@ type RecordsRead = Vec<([u8; 32], RecordVersion)>;
 /// figures, [`Paykit::confirm_ledger_repair`] writes exactly that ledger, or refuses with
 /// the figures computed then if anything it was built from changed.
 ///
-/// The ledger is a merge that never counts less: the last version the executor accepted, as
-/// it was; what the ledger shown adds to it; every attempt the journal holds under the
-/// Allowance; and every attempt of an app the grant history names that the claims of the
-/// counterparty's obligations show, unless the attempt's owner failed it or the payment's
-/// proof names no Allowance or another one
-/// ([`paykit_lib::allowances::merge_for_repair`]).
+/// The ledger is a merge that never counts less
+/// ([`paykit_lib::allowances::merge_for_repair`]): the last version the executor accepted,
+/// as it was; what the ledger shown adds to it; every attempt the journal holds under the
+/// Allowance; every attempt of an app the grant history names that the claims of the
+/// counterparty's obligations show, one-time requests and every Billing Period whose claim
+/// may still be held, unless the attempt's owner failed it or the payer identity's own
+/// evidence shows it made otherwise; and every payment a payer or period record's proof
+/// shows made under the Allowance. Each attempt counts the most any of them shows, and the
+/// outcomes the claims show are written in, compacted near the size limit as an executor
+/// batch's ledger is.
 #[derive(Clone, PartialEq, Eq)]
 pub struct LedgerRepair {
     /// The Allowance record's key.
@@ -436,19 +509,115 @@ impl std::fmt::Debug for LedgerRepair {
     }
 }
 
-/// Whether `record`'s proof is of `attempt` and names no Allowance or another one than
-/// `allowance`: the payment wasn't made under it (Paykit spec 8.3, "After a confirmation").
-fn proof_names_another(
-    record: &ActivityRecord,
+/// Whether `holder`'s proof is the payer identity's own word that `attempt` wasn't made
+/// under `allowance` (Paykit spec 8.3, "After a confirmation"): a proof of the attempt that
+/// names no Allowance or another one, sent by `own`, the payer identity, and signed by
+/// `owner`, the attempt's owner, an app not listed as removed (`removed`). A record reads
+/// only with a proof its payer sent (Paykit wire 5.3), so the counterparty can't supply one;
+/// still a proof another app signed, or one of a removed app, shows nothing of how the
+/// owner made the attempt, and the attempt counts.
+fn proof_shows_made_otherwise(
+    holder: Option<&ActivityRecord>,
+    own: &[u8; 32],
     attempt: &AttemptId,
+    owner: [u8; 16],
+    removed: &[[u8; 16]],
     allowance: &AllowanceId,
 ) -> bool {
-    match record.proof.as_ref().map(|proof| proof.body()) {
-        Some(Body::PaymentProof(proof)) if proof.attempt_id == *attempt => {
-            proof.allowance_id.as_ref() != Some(allowance)
-        }
-        _ => false,
+    let Some(proof) = holder.and_then(|record| record.proof.as_ref()) else {
+        return false;
+    };
+    let Body::PaymentProof(body) = proof.body() else {
+        return false;
+    };
+    proof.sender() == *own
+        && proof.cert().app_id() == owner
+        && !removed.contains(&owner)
+        && body.attempt_id == *attempt
+        && body.allowance_id.as_ref() != Some(allowance)
+}
+
+/// The payment `holder`'s proof shows made under `allowance` on `obligation`, as a ledger
+/// entry (Paykit spec 8.3, "After a confirmation"): `done`, with the request's `amount`,
+/// dated by the proof's `created_at`. A record holds only a proof its payer sent (Paykit
+/// wire 5.3), whichever own app made the payment, so it is the payer identity's own
+/// evidence, also once the claim is gone.
+fn paid_under(
+    holder: Option<&ActivityRecord>,
+    allowance: &AllowanceId,
+    obligation: [u8; 32],
+    amount: &PaymentAmount,
+) -> Option<LedgerEntry> {
+    let proof = holder?.proof.as_ref()?;
+    let Body::PaymentProof(body) = proof.body() else {
+        return None;
+    };
+    (body.allowance_id.as_ref() == Some(allowance)).then(|| LedgerEntry {
+        obligation,
+        attempt_id: body.attempt_id,
+        value: amount.value.clone(),
+        asset: amount.asset.clone(),
+        at: proof.message().created_at_ms,
+        outcome: Some(EntryOutcome::Done),
+    })
+}
+
+/// The most Billing Periods of one recurring request a repair walks ([`periods_to_read`]).
+const MAX_REPAIR_PERIODS: usize = paykit_lib::allowances::MAX_PERIODS_JUDGED;
+
+/// The starts, in Unix seconds, of the Billing Periods of a recurring request, from its
+/// first to the one containing `at`, whose claim the service may still hold (Pubky Switch
+/// spec, Section 6.3; Paykit spec 7.1, "Deadlines"): with a payment deadline, those whose
+/// deadline plus the reconciliation window and the clock tolerance isn't before `at`; without
+/// one, every period, as a claim without a deadline is kept 400 days after its last entry,
+/// which may come at any time. A period paid early is one the request record lists in
+/// `attempted_periods`, or whose period record the app holds, read beside these.
+///
+/// # Errors
+///
+/// The rule, for more such periods than [`MAX_REPAIR_PERIODS`] or a period that can't be
+/// computed: the repair refuses rather than leave one unread.
+fn periods_to_read(
+    recurrence: &Recurrence,
+    deadline: Option<&PaymentDeadline>,
+    at: u64,
+) -> std::result::Result<Vec<u64>, &'static str> {
+    const UNWALKED: &str = "the recurring request's Billing Periods can't be walked";
+    let rule = recurrence.rule();
+    let first = recurrence.first().map_err(|_| UNWALKED)?.index;
+    let mut last = rule.containing(at).map_err(|_| UNWALKED)?.index;
+    if let Some(end) = recurrence.last().map_err(|_| UNWALKED)? {
+        last = last.min(end.index);
     }
+    let window = match deadline {
+        Some(PaymentDeadline::PeriodStart { seconds }) => Some(
+            seconds
+                .checked_mul(1000)
+                .and_then(|d| d.checked_add(1 + RECONCILIATION_MS + CLOCK_TOLERANCE_MS))
+                .ok_or(UNWALKED)?,
+        ),
+        _ => None,
+    };
+    let mut starts = Vec::new();
+    let mut k = last;
+    while k >= first {
+        let period = rule.period(k).map_err(|_| UNWALKED)?;
+        // Periods only start later as k grows: once one's claim is gone, every earlier one's
+        // is.
+        if window.is_some_and(|w| period.starts_at.saturating_add(w) < at) {
+            break;
+        }
+        if starts.len() == MAX_REPAIR_PERIODS {
+            return Err("the recurring request has too many Billing Periods to read for a repair");
+        }
+        starts.push(period.start_secs());
+        let Some(earlier) = k.checked_sub(1) else {
+            break;
+        };
+        k = earlier;
+    }
+    starts.reverse();
+    Ok(starts)
 }
 
 /// What a payer record shows of an attempt under an Allowance (Paykit spec 8.3, "`failed`
@@ -1515,7 +1684,7 @@ impl Paykit {
     /// doesn't accept is refused, naming the rule, and pays nothing until its user confirms
     /// a repair ([`Paykit::ledger_repair`]).
     async fn ledger_base(&mut self, under: &Under) -> Result<Option<Ledger>> {
-        match self.ledger_shown(under).await? {
+        match Box::pin(self.ledger_shown(under)).await? {
             LedgerShown::Accepted(ledger) => Ok(ledger),
             LedgerShown::Unaccepted { why, .. } => Err(not_automatic(&why)),
         }
@@ -1591,6 +1760,50 @@ impl Paykit {
             ));
         };
         let content = self.shown_content(under, &shared, &ledger_key)?;
+        // The kept version first (Paykit spec 8.3, "Last ledger version"), whatever else the
+        // write shown is, a write divergent, refused or doubtful included: it must be that
+        // version, by item hash, or one signed as built on that version or a later one. Any
+        // other write, a delete included, is a rollback, raises the alarm and is never
+        // repaired; a write that is one of those but fails a check by policy, below, only
+        // pauses. A write the client refused (Switch spec 8.2) isn't held, neither its item
+        // nor its signed base: the version the client follows, the refused write's as shown,
+        // is judged instead, and one before the version kept is a rollback.
+        let op = self.held_op(&ledger_key).await?;
+        if let Some((kept, _)) = &kept {
+            let rollback = if shared.flagged {
+                let refused = self
+                    .app
+                    .flagged_writes()
+                    .await?
+                    .into_iter()
+                    .filter(|flagged| flagged.key == ledger_key)
+                    .map(|flagged| flagged.version)
+                    .max()
+                    .ok_or_else(|| not_automatic("the refused ledger write isn't held"))?;
+                refused < kept.version()
+            } else {
+                let op = op
+                    .as_ref()
+                    .ok_or_else(|| not_automatic("the ledger's write isn't held"))?;
+                let item = op.item_hash().map_err(|_| PaykitError::corrupt())?;
+                let built_on = match &op.body().kind {
+                    OpKind::RecordPut(put) => put.expected_version,
+                    _ => return Err(PaykitError::corrupt()),
+                };
+                item != kept.item_hash && built_on < kept.version()
+            };
+            if rollback {
+                if kept.generation != generation {
+                    return Ok(unaccepted(EARLIER_GENERATION, content));
+                }
+                return Err(self
+                    .raise_ledger_alarm(
+                        &under.record_key,
+                        "shown is neither the version kept nor built on it",
+                    )
+                    .await);
+            }
+        }
         if shared.divergent || shared.flagged || shared.doubtful {
             // The view is taken first, so a ledger divergent now is marked, and stays paused
             // until the user confirms it, also once a newer write clears the view. A write
@@ -1606,32 +1819,7 @@ impl Paykit {
                 "the ledger was seen divergent and the user hasn't confirmed it",
             ));
         }
-        let op = self
-            .held_op(&ledger_key)
-            .await?
-            .ok_or_else(|| not_automatic("the ledger's write isn't held"))?;
-        // The kept version first (Paykit spec 8.3, "Last ledger version"): the write shown
-        // must be that one, by item hash, or one signed as built on that version or a later
-        // one. Any other write, a delete included, is a rollback, whatever else it passes;
-        // a write that is one of those but fails a check by policy, below, only pauses.
-        if let Some((kept, _)) = &kept {
-            let item = op.item_hash().map_err(|_| PaykitError::corrupt())?;
-            let built_on = match &op.body().kind {
-                OpKind::RecordPut(put) => put.expected_version,
-                _ => return Err(PaykitError::corrupt()),
-            };
-            if item != kept.item_hash && built_on < kept.version() {
-                if kept.generation != generation {
-                    return Ok(unaccepted(EARLIER_GENERATION, content));
-                }
-                return Err(self
-                    .raise_ledger_alarm(
-                        &under.record_key,
-                        "shown is neither the version kept nor built on it",
-                    )
-                    .await);
-            }
-        }
+        let op = op.ok_or_else(|| not_automatic("the ledger's write isn't held"))?;
         if written_by_removed_app(self.app.own_identity(), &shared) {
             return Ok(unaccepted(
                 "the ledger's write is a removed app's after its distrust_from",
@@ -2447,7 +2635,7 @@ impl Paykit {
                 )
                 .into());
             }
-            let now = self.repair_of(allowance).await?;
+            let (now, terms) = Box::pin(self.repair_with_terms(allowance)).await?;
             if now.basis != repair.basis || now.ledger != repair.ledger {
                 return Err(Refusal::LedgerRepairChanged(Box::new(now)).into());
             }
@@ -2464,22 +2652,10 @@ impl Paykit {
                 .await?
                 .ok_or(Refusal::NotFound)?;
             let lt = ledger_target(&held.counterparty, &held.allowance_id);
+            let conditions = repair_conditions(&terms, allowance, now.basis.record_version, at)?;
             let write = self
                 .app
-                .record_op(
-                    &lt,
-                    Some(&now.ledger),
-                    vec![
-                        Condition::RecordVersion {
-                            key: *allowance,
-                            version: now.basis.record_version,
-                        },
-                        Condition::ServerTimeIn {
-                            start: Some(at),
-                            end: Some(at.saturating_add(REPAIR_WINDOW_MS)),
-                        },
-                    ],
-                )
+                .record_op(&lt, Some(&now.ledger), conditions)
                 .await?;
             // The write builds on the ledger version shown, or on its absence: the
             // compare-and-swap of its `expected_version` (Switch spec 10.3).
@@ -2498,16 +2674,17 @@ impl Paykit {
             let lifted = pubky_switch_client::app::LocalWrite::Delete {
                 key: key::empty_ledger(allowance).into_bytes(),
             };
-            match self
-                .app
-                .submit_batch(OpBatch::new().entry(write).local(lifted))
-                .await
+            match Box::pin(
+                self.app
+                    .submit_batch(OpBatch::new().entry(write).local(lifted)),
+            )
+            .await
             {
-                Ok(_) => self.keep_own_ledger(allowance, &lt).await,
+                Ok(_) => Box::pin(self.keep_own_ledger(allowance, &lt)).await,
                 Err(error) if error.kept_batch().is_some() => Ok(()),
                 Err(error) if error.code() == Some(ErrorCode::Conflict) => {
-                    self.app.read_record(&lt).await?;
-                    let again = self.repair_of(allowance).await?;
+                    Box::pin(self.app.read_record(&lt)).await?;
+                    let again = Box::pin(self.repair_of(allowance)).await?;
                     Err(Refusal::LedgerRepairChanged(Box::new(again)).into())
                 }
                 Err(error) => Err(error.into()),
@@ -2519,6 +2696,14 @@ impl Paykit {
     /// The repair of the ledger of the Allowance at `record`, read and computed now
     /// ([`Paykit::ledger_repair`]).
     async fn repair_of(&mut self, record: &[u8; 32]) -> Result<LedgerRepair> {
+        Ok(Box::pin(self.repair_with_terms(record)).await?.0)
+    }
+
+    /// [`Paykit::repair_of`], with the accepted terms it was counted under.
+    async fn repair_with_terms(
+        &mut self,
+        record: &[u8; 32],
+    ) -> Result<(LedgerRepair, AllowanceTerms)> {
         if self.ledger_alarm_active().is_some() || self.app.alarm().is_some() {
             return Err(Refusal::NotNow(
                 "Paykit spec 8.3: a rollback alarm stands; no ledger is repaired while it holds"
@@ -2526,9 +2711,9 @@ impl Paykit {
             )
             .into());
         }
-        let under = self.allowance_gate(record, true).await??;
+        let under = Box::pin(self.allowance_gate(record, true)).await??;
         let (reason, content) =
-            match self.ledger_shown(&under).await? {
+            match Box::pin(self.ledger_shown(&under)).await? {
                 LedgerShown::Accepted(_) => return Err(Refusal::Usage(
                     "Paykit spec 8.3: the executor accepts the ledger shown; it needs no repair"
                         .into(),
@@ -2554,12 +2739,13 @@ impl Paykit {
             Some(op) => Some(op.item_hash().map_err(|_| PaykitError::corrupt())?),
             None => None,
         };
-        let mut reads = ClaimReads::default();
-        let journal = self.journal_attempts_under(record, &mut reads).await?;
-        let (records, claimed) = self.claimed_attempts_under(&under, &mut reads).await?;
         let at = self
             .service_time()
             .ok_or_else(|| not_automatic("no service time verified"))?;
+        let mut reads = ClaimReads::default();
+        let journal = Box::pin(self.journal_attempts_under(record, &mut reads)).await?;
+        let (records, claimed) =
+            Box::pin(self.claimed_attempts_under(&under, at, &mut reads)).await?;
         let base = kept.as_ref().map_or_else(
             || {
                 Ledger::empty(
@@ -2569,24 +2755,31 @@ impl Paykit {
             },
             |(_, ledger)| ledger.clone(),
         );
-        let merged = merge_for_repair(&under.terms, &base, shown.as_ref(), &journal, &claimed)
-            .map_err(|_| not_automatic("the repair's ledger can't be counted"))?;
+        let merged = merge_for_repair(&under.terms, &base, shown.as_ref(), &journal, &claimed, at)
+            .map_err(|error| match error {
+                paykit_lib::Error::Invalid(why) if why.contains("larger value") => not_automatic(
+                    "an attempt's own evidence shows a larger value than the version kept",
+                ),
+                _ => not_automatic("the repair's ledger can't be counted"),
+            })?;
+        // The outcomes the claims show, and compaction near the size limit, as an executor
+        // batch writes them: the figures are counted over the ledger written.
+        let claims = Box::pin(self.ledger_claims_from(&merged, &mut reads)).await?;
+        let merged =
+            repair_ledger(&under.terms, &merged, &claims.outcomes, at).map_err(not_automatic)?;
         // Never a ledger that counts less than the version kept: the merge keeps every one
-        // of its entries and items, so it is that version's successor at any time.
+        // of its entries and items, and the outcomes and compaction are moves a successor
+        // makes.
         if let Some((_, held)) = &kept {
             check_successor(&under.terms, held, &merged, at)
                 .map_err(|_| not_automatic("the repair would count less than the version kept"))?;
         }
         let ledger = merged.to_json()?;
-        if ledger.len() > MAX_LEDGER_VALUE {
-            return Err(not_automatic("the repair's ledger doesn't fit its record"));
-        }
         // The version the write would build on, as the client builds it.
         let built_on = match self.app.record_op(&lt, Some(&ledger), Vec::new()).await?.1 {
             OpKind::RecordPut(put) => put.expected_version,
             _ => return Err(PaykitError::corrupt()),
         };
-        let claims = self.ledger_claims_from(&merged, &mut reads).await?;
         let used = usage(&under.terms, &merged, &claims.usage, at)
             .map_err(|_| not_automatic("usage can't be counted"))?;
         let reserved_by_other_apps = merged
@@ -2605,7 +2798,7 @@ impl Paykit {
         let mut journal_ids: Vec<[u8; 16]> =
             journal.iter().map(|e| e.attempt_id.to_bytes()).collect();
         journal_ids.sort_unstable();
-        Ok(LedgerRepair {
+        let repair = LedgerRepair {
             allowance: *record,
             reason,
             at_ms: at,
@@ -2625,7 +2818,8 @@ impl Paykit {
                 claims: reads.steps(),
             },
             ledger,
-        })
+        };
+        Ok((repair, under.terms))
     }
 
     /// The attempts this app's journal holds under the Allowance at `record`, as ledger
@@ -2668,26 +2862,40 @@ impl Paykit {
         Ok(out)
     }
 
-    /// The attempts of an app the grant history of `under` names that the claims of the
-    /// counterparty's obligations show, read into `reads`, as ledger entries (Paykit spec
-    /// 8.3, "After a confirmation"; Paykit wire 5.5): every one-time request of this app's
-    /// payer records from the counterparty in the Allowance's asset, and every Billing Period
-    /// of a recurring one that may have an open attempt (`attempted_periods`), each attempt
-    /// with the request's amount and its `opened_at`, but one its owner failed and one whose
-    /// proof names no Allowance or another one. With them, the payer records read, by key and
-    /// version.
+    /// What the payer identity's own evidence shows of the counterparty's obligations under
+    /// `under`, read into `reads`, as ledger entries (Paykit spec 8.3, "After a
+    /// confirmation"; Paykit wire 5.5), for every request of this app's payer records from
+    /// the counterparty in the Allowance's asset, one-time or recurring:
+    ///
+    /// - every attempt of an app the grant history names that the claim of each obligation
+    ///   shows, with the request's amount and its `opened_at`, but one its owner failed and
+    ///   one the payer identity's own evidence shows made otherwise
+    ///   ([`Paykit::made_otherwise`]);
+    /// - every payment a payer or period record's proof shows made under the Allowance, with
+    ///   the request's amount, dated by the proof, `done`: also once its claim is gone.
+    ///
+    /// A recurring request's obligations are its Billing Periods listed in
+    /// `attempted_periods`, those whose period record the app holds, and those from the
+    /// first to the one containing `at`, the latest service time verified, whose claim the
+    /// service may still hold ([`periods_to_read`]): a done period is dropped from
+    /// `attempted_periods`, and its claim may still show it. With them, the payer records
+    /// read, by key and version.
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotNow`] for a payer record that can't be read: which counterparty's it is
-    /// can't be told, so neither can the attempts. The client's errors.
+    /// [`Refusal::NotNow`] for a payer record that can't be read, whose counterparty can't be
+    /// told, and for a period record whose request record isn't held, whose amount can't be
+    /// told; [`Refusal::NotAutomatic`] for a recurring request whose periods can't be walked;
+    /// the client's errors, a claim that can't be read among them.
     async fn claimed_attempts_under(
         &mut self,
         under: &Under,
+        at: u64,
         reads: &mut ClaimReads,
     ) -> Result<(RecordsRead, Vec<LedgerEntry>)> {
         let own = self.identity();
         let counterparty = under.allowance.counterparty;
+        let allowance_id = &under.allowance.allowance_id;
         let owners: Vec<[u8; 16]> = under
             .allowance
             .grants
@@ -2702,7 +2910,8 @@ impl Paykit {
             .into()
         };
         let mut records = Vec::new();
-        let mut out = Vec::new();
+        let mut requests: Vec<ActivityRecord> = Vec::new();
+        let mut periods: HashMap<[u8; 32], Vec<(u64, ActivityRecord)>> = HashMap::new();
         for held in self
             .app
             .records_of(Collection::PayerActivity.name())
@@ -2720,20 +2929,64 @@ impl Paykit {
                 continue;
             }
             records.push((held.key, held.version));
-            let Some((stored, body)) = crate::requests::request_of(&record) else {
+            if record.request.is_some() {
+                requests.push(record);
+            } else if let Ok(RecordBinding::Period {
+                request_hash,
+                billing_period,
+            }) = record.binding()
+            {
+                periods
+                    .entry(request_hash)
+                    .or_default()
+                    .push((billing_period.start_secs(), record));
+            }
+        }
+        let removed: Vec<[u8; 16]> = self
+            .app
+            .own_identity()
+            .body()
+            .removed
+            .iter()
+            .map(|r| r.app_id)
+            .collect();
+        let mut out = Vec::new();
+        let mut held_requests = Vec::with_capacity(requests.len());
+        for record in &requests {
+            let Some((stored, body)) = crate::requests::request_of(record) else {
                 continue;
             };
+            let hash = stored.hash();
+            held_requests.push(hash);
             if body.amount.asset != under.terms.asset {
                 continue;
             }
-            let hash = stored.hash();
-            let periods = if body.is_recurring() {
-                record.attempted_periods.clone()
-            } else {
-                vec![0]
-            };
-            for period in periods {
-                let obligation = self.obligation(&counterparty, &hash, period);
+            // Each obligation, by its period's start (0 for a one-time request), with the
+            // record that holds its proof.
+            let mut obligations: std::collections::BTreeMap<u64, Option<&ActivityRecord>> =
+                std::collections::BTreeMap::new();
+            match &body.recurrence {
+                None => {
+                    obligations.insert(0, Some(record));
+                }
+                Some(recurrence) => {
+                    for start in periods_to_read(recurrence, body.payment_deadline.as_ref(), at)
+                        .map_err(not_automatic)?
+                        .into_iter()
+                        .chain(record.attempted_periods.iter().copied())
+                    {
+                        obligations.entry(start).or_insert(None);
+                    }
+                    for (start, period) in periods.get(&hash).into_iter().flatten() {
+                        obligations.insert(*start, Some(period));
+                    }
+                }
+            }
+            for (start, holder) in obligations {
+                let obligation = self.obligation(&counterparty, &hash, start);
+                if let Some(paid) = paid_under(holder, allowance_id, obligation, &body.amount) {
+                    out.push(paid);
+                }
                 let Some(view) = self.claim_view(reads, &obligation).await? else {
                     continue;
                 };
@@ -2741,9 +2994,18 @@ impl Paykit {
                     let attempt = AttemptId::from_bytes(shown.attempt_id);
                     let failed_by_owner =
                         shown.outcome == Outcome::Failed && shown.resolved_by == Some(shown.owner);
-                    if !owners.contains(&shown.owner)
-                        || failed_by_owner
-                        || proof_names_another(&record, &attempt, &under.allowance.allowance_id)
+                    if !owners.contains(&shown.owner) || failed_by_owner {
+                        continue;
+                    }
+                    if Box::pin(self.made_otherwise(
+                        holder,
+                        &attempt,
+                        &obligation,
+                        shown.owner,
+                        &removed,
+                        allowance_id,
+                    ))
+                    .await?
                     {
                         continue;
                     }
@@ -2758,8 +3020,45 @@ impl Paykit {
                 }
             }
         }
+        if periods.keys().any(|hash| !held_requests.contains(hash)) {
+            return Err(Refusal::NotNow(
+                "Paykit spec 8.3: a period record's request record isn't held, so its payments' amounts can't be told"
+                    .into(),
+            )
+            .into());
+        }
         records.sort_unstable();
         Ok((records, out))
+    }
+
+    /// Whether the payer identity's own evidence shows `attempt`, on the claim of
+    /// `obligation` and owned by `owner`, made by hand or under another Allowance than
+    /// `allowance` (Paykit spec 8.3, "After a confirmation"): this app's own journal entry of
+    /// it naming no Allowance or another one, or, in `holder`, the payer or period record of
+    /// the obligation, a proof of it naming no Allowance or another one that the payer
+    /// identity sent and the attempt's owner signed, while that app isn't listed as removed
+    /// (`removed`). A proof another app signed, or a message the counterparty signed, shows
+    /// nothing of how the owner made it, so the attempt counts.
+    async fn made_otherwise(
+        &self,
+        holder: Option<&ActivityRecord>,
+        attempt: &AttemptId,
+        obligation: &[u8; 32],
+        owner: [u8; 16],
+        removed: &[[u8; 16]],
+        allowance: &AllowanceId,
+    ) -> Result<bool> {
+        if let Some(entry) = self.journal_entry_on(attempt, obligation).await? {
+            return Ok(entry.allowance()?.as_ref() != Some(allowance));
+        }
+        Ok(proof_shows_made_otherwise(
+            holder,
+            &self.identity(),
+            attempt,
+            owner,
+            removed,
+            allowance,
+        ))
     }
 
     /// Raise the alarm for a rollback of the ledger of the Allowance at `record` (Paykit spec
@@ -3634,5 +3933,255 @@ mod tests {
         let next = next_ledger(&terms(), &base, &claims, NOW, entry(3, NOW, None)).unwrap();
         let outcomes: Vec<_> = next.entries.iter().map(|e| e.outcome).collect();
         assert_eq!(outcomes, vec![Some(EntryOutcome::Done), None, None]);
+    }
+    #[test]
+    fn test_executor_repair_ledger_compacts_near_the_size_limit() {
+        // A merge past the record's size, its entries paid long ago: compacted as an
+        // executor batch's ledger is, it fits, and counts the same.
+        let terms = terms();
+        let merged = filled(
+            NOW - 30 * DAY_MS,
+            Some(EntryOutcome::Done),
+            MAX_LEDGER_VALUE + 1_000,
+        );
+        let claims = HashMap::new();
+        let written = repair_ledger(&terms, &merged, &claims, NOW).unwrap();
+        assert!(written.entries.is_empty());
+        assert_eq!(written.count, u64::try_from(merged.entries.len()).unwrap());
+        let before = usage(&terms, &merged, &claims, NOW).unwrap();
+        let after = usage(&terms, &written, &claims, NOW).unwrap();
+        assert_eq!(before.lifetime(), after.lifetime());
+        assert_eq!(before.periods(), after.periods());
+        check_successor(&terms, &merged, &written, NOW).unwrap();
+    }
+
+    #[test]
+    fn test_executor_repair_ledger_keeps_room_for_every_outcome() {
+        // Young entries without an outcome that fit now, but not once each has one: the
+        // repair is refused, so every later outcome's write fits.
+        let mut merged = filled(NOW - DAY_MS, None, MAX_LEDGER_VALUE - 8_000);
+        while merged.len_with_outcomes().unwrap() <= MAX_LEDGER_VALUE {
+            let n = u32::try_from(merged.entries.len()).unwrap();
+            merged.entries.push(entry(n, NOW - DAY_MS, None));
+        }
+        assert!(merged.to_json().unwrap().len() <= MAX_LEDGER_VALUE);
+        let refused = repair_ledger(&terms(), &merged, &HashMap::new(), NOW).unwrap_err();
+        assert!(refused.contains("even after compaction"), "{refused}");
+        // The outcomes the claims show are written in first.
+        let small = Ledger {
+            entries: vec![entry(1, NOW - DAY_MS, None)],
+            ..Ledger::empty([2; 32], AllowanceId::parse(ID).unwrap())
+        };
+        let mut claims = HashMap::new();
+        claims.insert(small.entries[0].attempt_id, ClaimState::Done);
+        let written = repair_ledger(&terms(), &small, &claims, NOW).unwrap();
+        assert_eq!(written.entries[0].outcome, Some(EntryOutcome::Done));
+    }
+
+    #[test]
+    fn test_executor_repair_conditions_cut_at_an_anchored_boundary() {
+        // Ten seconds before a monthly limit's boundary, the write's window ends at that
+        // boundary, as an executor batch's does: it lands in the period its figures were
+        // counted in. Without an anchored limit it is 60 s.
+        let anchored = AllowanceTerms::from_json(&serde_json::json!({
+            "asset": "btc", "active_from": null, "expires_at": null,
+            "allowed_payment_endpoint_identifiers": null,
+            "per_payment_amount": null, "lifetime_amount_limit": "100",
+            "period_limits": [{ "amount_limit": "50", "payment_count_limit": null,
+                "period": { "kind": "anchored", "every": 1, "unit": "month",
+                    "anchor": "2026-01-31T00:00:00.000Z" } }]
+        }))
+        .unwrap();
+        let boundary = pubky_switch_core::time::parse_rfc3339("2026-03-31T00:00:00.000Z").unwrap();
+        let version = RecordVersion {
+            generation: 1,
+            version: 4,
+        };
+        let window = |terms: &AllowanceTerms, at: u64| {
+            repair_conditions(terms, &[9; 32], version, at)
+                .unwrap()
+                .into_iter()
+                .find_map(|c| match c {
+                    Condition::ServerTimeIn { start, end } => Some((start, end)),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let at = boundary - 10_000;
+        assert_eq!(window(&anchored, at), (Some(at), Some(boundary)));
+        assert_eq!(window(&terms(), at), (Some(at), Some(at + 60_000)));
+        let conditions = repair_conditions(&terms(), &[9; 32], version, at).unwrap();
+        assert!(conditions.contains(&Condition::RecordVersion {
+            key: [9; 32],
+            version
+        }));
+    }
+
+    /// A proof by `from`, of attempt 4, naming `allowance_id`, in a payer record of `to`'s
+    /// request.
+    fn proof_record(
+        from: &crate::testkit::Party,
+        to: &crate::testkit::Party,
+        allowance_id: Option<AllowanceId>,
+    ) -> ActivityRecord {
+        let body = paykit_lib::bodies::PaymentProof {
+            attempt_id: AttemptId::from_bytes([4; 16]),
+            billing_period: None,
+            payment_endpoint_identifier: PaymentEndpointIdentifier::new("btc-lightning-bolt11")
+                .unwrap(),
+            payment_app_id: [0; 16],
+            list_version: None,
+            amount: None,
+            allowance_id,
+            label: None,
+            payment_reference: None,
+            proof: serde_json::from_value(serde_json::json!({ "preimage": "00" })).unwrap(),
+        }
+        .to_body(1)
+        .unwrap();
+        let mut record = crate::activity::empty(paykit_lib::records::ActivitySide::Payer, to.id());
+        record.proof = Some(from.message(to, "paykit.payment_proof", vec![[7; 32]], body));
+        record
+    }
+
+    #[test]
+    fn test_executor_attempt_excluded_only_on_its_owners_own_proof() {
+        use crate::testkit::Party;
+        let wallet = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let phone = Party::new("alice", "phone", &["paykit_pay", "paykit_contacts"]);
+        let shop = Party::new(
+            "bob",
+            "shop",
+            &["paykit_pay", "paykit_contacts", "paykit_request"],
+        );
+        let allowance = AllowanceId::parse(ID).unwrap();
+        let attempt = AttemptId::from_bytes([4; 16]);
+        let owner = wallet.app_id();
+        let excluded = |record: &ActivityRecord, removed: &[[u8; 16]]| {
+            proof_shows_made_otherwise(
+                Some(record),
+                &wallet.id(),
+                &attempt,
+                owner,
+                removed,
+                &allowance,
+            )
+        };
+        // The owner's own proof naming no Allowance: made by hand.
+        let by_hand = proof_record(&wallet, &shop, None);
+        assert!(excluded(&by_hand, &[]));
+        // A proof naming the Allowance counts it, as does one by another own app, one whose
+        // signer is removed, and one the counterparty signed leaving `allowance_id` out.
+        assert!(!excluded(
+            &proof_record(&wallet, &shop, Some(allowance.clone())),
+            &[]
+        ));
+        assert!(!excluded(&proof_record(&phone, &shop, None), &[]));
+        assert!(!excluded(&by_hand, &[owner]));
+        let from_counterparty = proof_record(&shop, &wallet, None);
+        assert_eq!(
+            from_counterparty.proof.as_ref().unwrap().sender(),
+            shop.id()
+        );
+        assert!(!excluded(&from_counterparty, &[]));
+        assert!(!proof_shows_made_otherwise(
+            None,
+            &wallet.id(),
+            &attempt,
+            owner,
+            &[],
+            &allowance
+        ));
+        // A payer record holding a proof the counterparty sent is never held as one that
+        // reads: the repair refuses on it rather than count from it.
+        let mut held = from_counterparty.clone();
+        held.counterparty = shop.id();
+        let read = held.to_json().ok().map(|json| {
+            ActivityRecord::read(
+                &json,
+                &wallet.id(),
+                paykit_lib::records::ActivitySide::Payer,
+            )
+        });
+        assert!(!matches!(read, Some(Ok(_))));
+    }
+
+    #[test]
+    fn test_executor_proof_naming_the_allowance_counts_as_paid() {
+        use crate::testkit::Party;
+        let wallet = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let shop = Party::new("bob", "shop", &["paykit_request"]);
+        let allowance = AllowanceId::parse(ID).unwrap();
+        let amount = PaymentAmount {
+            asset: paykit_lib::Asset::parse("btc").unwrap(),
+            value: paykit_lib::Decimal::parse("0.5").unwrap(),
+        };
+        let paid = proof_record(&wallet, &shop, Some(allowance.clone()));
+        let entry = paid_under(Some(&paid), &allowance, [8; 32], &amount).unwrap();
+        assert_eq!(entry.attempt_id, AttemptId::from_bytes([4; 16]));
+        assert_eq!(
+            (entry.obligation, entry.outcome),
+            ([8; 32], Some(EntryOutcome::Done))
+        );
+        assert_eq!(entry.value, amount.value);
+        assert!(paid_under(
+            Some(&proof_record(&wallet, &shop, None)),
+            &allowance,
+            [8; 32],
+            &amount
+        )
+        .is_none());
+        assert!(paid_under(None, &allowance, [8; 32], &amount).is_none());
+    }
+
+    #[test]
+    fn test_executor_periods_to_read_are_those_whose_claim_may_be_held() {
+        use paykit_lib::periods::{AnchoredRule, Unit};
+        let start = pubky_switch_core::time::parse_rfc3339("2026-01-01T00:00:00.000Z").unwrap();
+        let monthly = |ends_at: Option<u64>| {
+            Recurrence::new(
+                AnchoredRule::new(start, 1, Unit::Month).unwrap(),
+                start,
+                ends_at,
+            )
+            .unwrap()
+        };
+        let at = pubky_switch_core::time::parse_rfc3339("2026-06-10T00:00:00.000Z").unwrap();
+        let secs = |text: &str| pubky_switch_core::time::parse_rfc3339(text).unwrap() / 1000;
+        // Without a deadline every period from the first, through the one containing `at`.
+        let all = periods_to_read(&monthly(None), None, at).unwrap();
+        assert_eq!(all.len(), 6);
+        assert_eq!(all[0], secs("2026-01-01T00:00:00.000Z"));
+        assert_eq!(all[5], secs("2026-06-01T00:00:00.000Z"));
+        // With a deadline of 15 days, a claim is gone 30 days after it: May and June stay.
+        let deadline = PaymentDeadline::PeriodStart {
+            seconds: 15 * 24 * 3600,
+        };
+        let held = periods_to_read(&monthly(None), Some(&deadline), at).unwrap();
+        assert_eq!(
+            held,
+            vec![
+                secs("2026-05-01T00:00:00.000Z"),
+                secs("2026-06-01T00:00:00.000Z")
+            ]
+        );
+        // A request that ended: up to its last period.
+        let ended = monthly(Some(
+            pubky_switch_core::time::parse_rfc3339("2026-03-01T00:00:00.000Z").unwrap(),
+        ));
+        assert_eq!(periods_to_read(&ended, None, at).unwrap().len(), 2);
+        // Before the first period: none.
+        assert!(periods_to_read(&monthly(None), None, start - 1)
+            .unwrap()
+            .is_empty());
+        // More periods than a repair reads refuse it.
+        let minutely = Recurrence::new(
+            AnchoredRule::new(start, 1, Unit::Minute).unwrap(),
+            start,
+            None,
+        )
+        .unwrap();
+        let refused = periods_to_read(&minutely, None, at).unwrap_err();
+        assert!(refused.contains("too many Billing Periods"), "{refused}");
     }
 }

@@ -922,7 +922,7 @@ impl Paykit {
         });
         let executor = match &under {
             Some(under) => Some(
-                self.executor_ops(
+                Box::pin(self.executor_ops(
                     under,
                     &target,
                     &record,
@@ -930,7 +930,7 @@ impl Paykit {
                     &attempt_id,
                     &body.amount,
                     &destination,
-                )
+                ))
                 .await?,
             ),
             None => None,
@@ -972,7 +972,7 @@ impl Paykit {
                 .map(|u| u.allowance.allowance_id.as_str().to_owned()),
             initiator: StartedBy::of(by),
         };
-        self.execute(Plan {
+        Box::pin(self.execute(Plan {
             entry,
             record: target,
             carrier,
@@ -985,7 +985,7 @@ impl Paykit {
             end_hold,
             executor,
             mark,
-        })
+        }))
         .await
     }
 

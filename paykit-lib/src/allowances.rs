@@ -1540,93 +1540,202 @@ fn of_the_terms(terms: &AllowanceTerms, entry: &LedgerEntry) -> bool {
     entry.asset == terms.asset && entry.at <= MAX_TIME_MS
 }
 
+/// The larger of `a` and `b`.
+fn larger(a: &Decimal, b: &Decimal) -> Decimal {
+    if b > a {
+        b.clone()
+    } else {
+        a.clone()
+    }
+}
+
 /// The ledger a repair writes (Paykit spec 8.3, "After a confirmation"; Paykit wire 5.5): a
-/// merge that never counts less, from these, in this order:
+/// merge that never counts less, from:
 ///
-/// - `kept`, the last ledger version the executor accepted, as it was, or the empty ledger
-///   when it accepted none;
-/// - what `shown`, the ledger the service shows now, adds to it: each entry and
-///   `totals.failed` item for an attempt `kept` doesn't list, an entry's `outcome` taken
-///   only when it is `done`; a `done` for an entry `kept` lists, and for a `totals.failed`
-///   item it lists, which moves into `spent` and `count` once; and the higher `spent` and
-///   `count`;
-/// - each of `journal`, the attempts the executor's journal holds under the Allowance, and
-///   then of `claims`, the attempts the claims of the counterparty's obligations show, for
-///   an attempt not listed yet, without an outcome.
+/// - `kept`, the last ledger version the executor accepted, or the empty ledger when it
+///   accepted none. Its entries and `totals.failed` items stay as they are, so the result is
+///   its successor ([`check_successor`]); only a `done` another input shows is taken, and a
+///   `totals.failed` item shown paid moves into `spent` and `count` once;
+/// - `shown`, the ledger the service shows now, which the executor didn't accept: its higher
+///   `spent` and `count`, and the attempts `kept` doesn't list;
+/// - `journal`, the attempts the executor's journal holds under the Allowance, and `claims`,
+///   the attempts the claims of the counterparty's obligations show, with a `done` where a
+///   payer or period record's proof shows the payment made under the Allowance: the payer
+///   identity's own evidence.
+///
+/// For an attempt `kept` doesn't list, the entry takes what counts it most: the largest
+/// value any input shows, the latest `at`, so it counts in every limit an earlier one would
+/// from then on, an `at` after `now`, the repair's service time, counting as `now`, since no
+/// attempt is made after it; the obligation of the journal or the claim; and `done` where an
+/// input shows it. A `failed` outcome shown is never taken, and a `totals.failed` item shown
+/// stays one only for an attempt neither the journal nor a claim shows: otherwise it is an
+/// entry, which counts by its claim in every limit. A shown copy, such as a removed app's
+/// write, so never counts an attempt the payer's own evidence shows at less than that
+/// evidence does.
+///
+/// An attempt `kept` lists counts as `kept` has it: the executor accepted that entry, and
+/// every reader holding that version checks the next one against it. Own evidence that
+/// shows such an attempt at a larger value refuses the merge: it can't be counted as both.
+///
+/// The merge may count an attempt twice, never less: an entry `shown` lists that `kept`
+/// compacted into `spent` and `count` is added again, as nothing in the inputs tells it
+/// apart from one `kept` never held.
 ///
 /// An entry of another asset than the terms', or at a time the grammar doesn't write, is
 /// left out: no executor makes an attempt in another asset under the Allowance (Paykit spec
-/// 8.3, "Executor"). Usage over the result is no less than over `kept`, and no less than
-/// over what each of the others adds, by every limit, and the result is a successor of
-/// `kept` ([`check_successor`]).
+/// 8.3, "Executor"). Usage over the result at `now` and later, by every limit, is no less
+/// than over `kept`, over the journal's and the claims' attempts, and over what `shown`
+/// holds of attempts `kept` doesn't list.
 ///
 /// # Errors
 ///
 /// [`Error::Invalid`] for a `kept` that isn't valid against the terms, a `shown` of another
-/// Allowance, or a sum that overflows.
+/// Allowance, own evidence of a larger value than `kept` holds for one of its attempts, or a
+/// sum that overflows.
 pub fn merge_for_repair(
     terms: &AllowanceTerms,
     kept: &Ledger,
     shown: Option<&Ledger>,
     journal: &[LedgerEntry],
     claims: &[LedgerEntry],
+    now: u64,
 ) -> Result<Ledger> {
     kept.check_valid(terms)?;
-    let mut next = kept.clone();
     if let Some(shown) = shown {
         if shown.counterparty != kept.counterparty || shown.allowance_id != kept.allowance_id {
             return invalid("Paykit wire 5.5: the ledger shown is another Allowance's");
         }
-        let mut spent = next.spent_scaled().max(shown.spent_scaled());
-        let mut count = next.count.max(shown.count);
-        for entry in shown.entries.iter().filter(|e| of_the_terms(terms, e)) {
-            let done = entry.outcome == Some(EntryOutcome::Done);
-            if let Some(held) = next
-                .entries
-                .iter_mut()
-                .find(|e| e.attempt_id == entry.attempt_id)
-            {
+    }
+    // The payer identity's own evidence, one entry per attempt: the journal's obligation,
+    // else the claim's, the largest value, the latest time and a `done` either shows.
+    let mut own: Vec<LedgerEntry> = Vec::new();
+    for entry in journal
+        .iter()
+        .chain(claims)
+        .filter(|e| of_the_terms(terms, e))
+    {
+        let at = entry.at.min(now);
+        let done = entry.outcome == Some(EntryOutcome::Done);
+        match own.iter_mut().find(|o| o.attempt_id == entry.attempt_id) {
+            Some(held) => {
+                held.value = larger(&held.value, &entry.value);
+                held.at = held.at.max(at);
                 if done {
                     held.outcome = Some(EntryOutcome::Done);
                 }
-                continue;
             }
-            if let Some(i) = next
-                .failed
-                .iter()
-                .position(|f| f.attempt_id == entry.attempt_id)
-            {
-                // A compacted failed attempt shown paid: into the totals, once.
-                if done {
-                    let item = next.failed.remove(i);
-                    spent = add(spent, item.value.scaled())?;
-                    count = count.checked_add(1).ok_or_else(overflow)?;
-                }
-                continue;
-            }
-            next.entries.push(LedgerEntry {
+            None => own.push(LedgerEntry {
+                at,
                 outcome: done.then_some(EntryOutcome::Done),
                 ..entry.clone()
+            }),
+        }
+    }
+    let own_of = |attempt: &AttemptId| own.iter().find(|o| o.attempt_id == *attempt);
+    let shown_done = |attempt: &AttemptId| {
+        shown.is_some_and(|l| {
+            l.entries.iter().any(|e| {
+                e.attempt_id == *attempt
+                    && e.outcome == Some(EntryOutcome::Done)
+                    && of_the_terms(terms, e)
+            })
+        })
+    };
+    let more_than_kept = || {
+        invalid(
+            "Paykit spec 8.3: an attempt's own evidence shows a larger value than the version kept",
+        )
+    };
+    let mut next = kept.clone();
+    let mut spent = next.spent_scaled();
+    let mut count = next.count;
+    if let Some(shown) = shown {
+        spent = spent.max(shown.spent_scaled());
+        count = count.max(shown.count);
+    }
+    // The version kept, as it was: a `done` any input shows is taken.
+    for entry in &mut next.entries {
+        let evidence = own_of(&entry.attempt_id);
+        if evidence.is_some_and(|o| o.value > entry.value) {
+            return more_than_kept();
+        }
+        if shown_done(&entry.attempt_id)
+            || evidence.is_some_and(|o| o.outcome == Some(EntryOutcome::Done))
+        {
+            entry.outcome = Some(EntryOutcome::Done);
+        }
+    }
+    // A compacted failed attempt shown paid: into the totals, once.
+    let mut failed = Vec::with_capacity(next.failed.len());
+    for item in std::mem::take(&mut next.failed) {
+        let evidence = own_of(&item.attempt_id);
+        if evidence.is_some_and(|o| o.value > item.value) {
+            return more_than_kept();
+        }
+        if shown_done(&item.attempt_id)
+            || evidence.is_some_and(|o| o.outcome == Some(EntryOutcome::Done))
+        {
+            spent = add(spent, item.value.scaled())?;
+            count = count.checked_add(1).ok_or_else(overflow)?;
+        } else {
+            failed.push(item);
+        }
+    }
+    next.failed = failed;
+    // The attempts the version kept doesn't list, each counted the most any input shows.
+    let mut added: Vec<LedgerEntry> = Vec::new();
+    let mut added_failed: Vec<CompactedFailed> = Vec::new();
+    if let Some(shown) = shown {
+        for entry in shown.entries.iter().filter(|e| of_the_terms(terms, e)) {
+            if lists(kept, &entry.attempt_id) {
+                continue;
+            }
+            let done = entry.outcome == Some(EntryOutcome::Done);
+            let at = entry.at.min(now);
+            added.push(match own_of(&entry.attempt_id) {
+                Some(evidence) => LedgerEntry {
+                    value: larger(&evidence.value, &entry.value),
+                    at: evidence.at.max(at),
+                    outcome: (done || evidence.outcome.is_some()).then_some(EntryOutcome::Done),
+                    ..evidence.clone()
+                },
+                None => LedgerEntry {
+                    at,
+                    outcome: done.then_some(EntryOutcome::Done),
+                    ..entry.clone()
+                },
             });
         }
         for item in &shown.failed {
-            if !lists(&next, &item.attempt_id) {
-                next.failed.push(item.clone());
+            if lists(kept, &item.attempt_id)
+                || added.iter().any(|e| e.attempt_id == item.attempt_id)
+            {
+                continue;
+            }
+            match own_of(&item.attempt_id) {
+                // Open, unknown or paid by the payer's own evidence: an entry, never a
+                // compacted failed one.
+                Some(evidence) => added.push(LedgerEntry {
+                    value: larger(&evidence.value, &item.value),
+                    ..evidence.clone()
+                }),
+                None => added_failed.push(item.clone()),
             }
         }
-        if spent != next.spent_scaled() {
-            next.spent = Some(Decimal::from_scaled(spent));
-        }
-        next.count = count;
     }
-    for entry in journal.iter().chain(claims) {
-        if of_the_terms(terms, entry) && !lists(&next, &entry.attempt_id) {
-            next.entries.push(LedgerEntry {
-                outcome: None,
-                ..entry.clone()
-            });
+    for evidence in &own {
+        if !lists(kept, &evidence.attempt_id)
+            && !added.iter().any(|e| e.attempt_id == evidence.attempt_id)
+        {
+            added.push(evidence.clone());
         }
     }
+    next.entries.extend(added);
+    next.failed.extend(added_failed);
+    if spent != next.spent_scaled() {
+        next.spent = Some(Decimal::from_scaled(spent));
+    }
+    next.count = count;
     next.check_valid(terms)?;
     Ok(next)
 }
@@ -2866,7 +2975,8 @@ mod tests {
     fn test_merge_for_repair_never_counts_less_than_any_input() {
         let terms = AllowanceTerms::from_json(&terms()).unwrap();
         let (kept, shown, journal, claims) = repair_inputs();
-        let merged = merge_for_repair(&terms, &kept, Some(&shown), &journal, &claims).unwrap();
+        let merged =
+            merge_for_repair(&terms, &kept, Some(&shown), &journal, &claims, t(IN_MONTH)).unwrap();
         // The ledger shown as usage reads it: without its entry of another asset.
         let mut shown_valid = shown.clone();
         shown_valid.entries.retain(|e| e.asset == terms.asset);
@@ -2877,22 +2987,13 @@ mod tests {
             ledger(claims.clone()),
             Ledger::empty(kept.counterparty, kept.allowance_id.clone()),
         ];
-        for at in [
+        let times = [
             IN_MONTH,
             "2026-03-20T00:00:00.000Z",
             "2026-05-01T00:00:00.000Z",
-        ] {
-            for states in repair_claims() {
-                let after = usage(&terms, &merged, &states, t(at)).unwrap();
-                for input in &inputs {
-                    let before = usage(&terms, input, &states, t(at)).unwrap();
-                    assert!(after.lifetime() >= before.lifetime(), "{at}");
-                    for (a, b) in after.periods().iter().zip(before.periods()) {
-                        assert!(a.amount() >= b.amount(), "{at}");
-                        assert!(a.count() >= b.count(), "{at}");
-                    }
-                }
-            }
+        ];
+        assert_counts_no_less(&terms, &merged, &inputs, &times, &repair_claims());
+        for at in times {
             check_successor(&terms, &kept, &merged, t(at)).unwrap();
         }
     }
@@ -2901,7 +3002,8 @@ mod tests {
     fn test_merge_for_repair_takes_what_the_ledger_shown_adds() {
         let terms = AllowanceTerms::from_json(&terms()).unwrap();
         let (kept, shown, journal, claims) = repair_inputs();
-        let merged = merge_for_repair(&terms, &kept, Some(&shown), &journal, &claims).unwrap();
+        let merged =
+            merge_for_repair(&terms, &kept, Some(&shown), &journal, &claims, t(IN_MONTH)).unwrap();
         let outcome = |n: u8| {
             merged
                 .entries
@@ -2933,13 +3035,13 @@ mod tests {
         assert_eq!(merged.spent.as_ref().map(Decimal::as_str), Some("0.03"));
         assert_eq!(merged.count, 3);
         // Without a ledger shown: the kept version, the journal's and the claims' attempts.
-        let alone = merge_for_repair(&terms, &kept, None, &journal, &claims).unwrap();
+        let alone = merge_for_repair(&terms, &kept, None, &journal, &claims, t(IN_MONTH)).unwrap();
         assert_eq!(alone.entries.len(), 5);
         assert_eq!(alone.failed, kept.failed);
         assert_eq!((alone.spent.clone(), alone.count), (None, 0));
         // From nothing kept: the empty ledger and what the journal and claims show.
         let empty = Ledger::empty(kept.counterparty, kept.allowance_id.clone());
-        let fresh = merge_for_repair(&terms, &empty, None, &journal, &claims).unwrap();
+        let fresh = merge_for_repair(&terms, &empty, None, &journal, &claims, t(IN_MONTH)).unwrap();
         assert_eq!(fresh.entries.len(), 3);
     }
 
@@ -2948,9 +3050,189 @@ mod tests {
         let terms = AllowanceTerms::from_json(&terms()).unwrap();
         let (kept, mut shown, journal, claims) = repair_inputs();
         shown.counterparty = [6; 32];
-        assert!(merge_for_repair(&terms, &kept, Some(&shown), &journal, &claims).is_err());
+        assert!(
+            merge_for_repair(&terms, &kept, Some(&shown), &journal, &claims, t(IN_MONTH)).is_err()
+        );
         let mut invalid_kept = kept.clone();
         invalid_kept.entries[0].asset = Asset::parse("usd").unwrap();
-        assert!(merge_for_repair(&terms, &invalid_kept, None, &journal, &claims).is_err());
+        assert!(
+            merge_for_repair(&terms, &invalid_kept, None, &journal, &claims, t(IN_MONTH)).is_err()
+        );
+    }
+
+    /// Usage over `merged` is no less than over any of `inputs`, by the lifetime amount and
+    /// every period limit's amount and count, at each of `times` and with each of `states`.
+    fn assert_counts_no_less(
+        terms: &AllowanceTerms,
+        merged: &Ledger,
+        inputs: &[Ledger],
+        times: &[&str],
+        states: &[HashMap<AttemptId, ClaimState>],
+    ) {
+        for at in times {
+            for states in states {
+                let after = usage(terms, merged, states, t(at)).unwrap();
+                for (i, input) in inputs.iter().enumerate() {
+                    let before = usage(terms, input, states, t(at)).unwrap();
+                    assert!(after.lifetime() >= before.lifetime(), "{at} input {i}");
+                    for (a, b) in after.periods().iter().zip(before.periods()) {
+                        assert!(a.amount() >= b.amount(), "{at} input {i}");
+                        assert!(a.count() >= b.count(), "{at} input {i}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Terms with a monthly anchored limit and a rolling day, so an entry's time decides
+    /// both.
+    fn month_and_day_terms() -> AllowanceTerms {
+        AllowanceTerms::from_json(&with_limits(json!([
+            { "amount_limit": "0.03", "payment_count_limit": 3,
+              "period": { "anchor": "2026-01-31T00:00:00.000Z", "every": 1, "kind": "anchored", "unit": "month" } },
+            { "amount_limit": "0.02", "payment_count_limit": 2,
+              "period": { "kind": "rolling", "every": 1, "unit": "day" } }
+        ])))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_merge_for_repair_takes_the_evidence_that_counts_most() {
+        // A doubtful copy shown lists an attempt the journal and a claim show open at a tiny
+        // value, dated last year, `failed`; another as a compacted failed item; a third paid
+        // only on a proof, at another time than the claim's. Each merged entry takes the
+        // larger value, the later time, the journal's obligation and a `done` shown by a
+        // proof, never the shown `failed`.
+        let terms = month_and_day_terms();
+        let kept = ledger(vec![entry(1, "0.01", IN_MONTH, None)]);
+        let mut low = entry(
+            10,
+            "0.0001",
+            "2025-03-05T00:00:00.000Z",
+            Some(EntryOutcome::Failed),
+        );
+        low.obligation = [0xee; 32];
+        let mut shown = ledger(vec![
+            // The kept attempt, shown lower and older: the kept entry stands.
+            entry(1, "0.0001", "2025-03-05T00:00:00.000Z", None),
+            low,
+            entry(12, "0.02", "2026-03-04T23:00:00.000Z", None),
+        ]);
+        shown.failed.push(CompactedFailed {
+            obligation: [11; 32],
+            attempt_id: AttemptId::from_bytes([11; 16]),
+            value: Decimal::parse("0.0001").unwrap(),
+        });
+        let journal = vec![entry(10, "0.01", IN_MONTH, None)];
+        let mut later = entry(10, "0.005", "2026-03-05T00:00:30.000Z", None);
+        later.obligation = [0xdd; 32];
+        let claims = vec![
+            later,
+            entry(11, "0.01", IN_MONTH, None),
+            entry(
+                12,
+                "0.01",
+                "2026-03-05T00:00:20.000Z",
+                Some(EntryOutcome::Done),
+            ),
+        ];
+        let now = t("2026-03-05T00:01:00.000Z");
+        let merged = merge_for_repair(&terms, &kept, Some(&shown), &journal, &claims, now).unwrap();
+        let find = |n: u8| {
+            merged
+                .entries
+                .iter()
+                .find(|e| e.attempt_id == AttemptId::from_bytes([n; 16]))
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(find(1), kept.entries[0]);
+        let ten = find(10);
+        assert_eq!(ten.value, Decimal::parse("0.01").unwrap());
+        assert_eq!(ten.at, t("2026-03-05T00:00:30.000Z"));
+        assert_eq!(ten.obligation, [10; 32]);
+        assert_eq!(ten.outcome, None);
+        let eleven = find(11);
+        assert_eq!(eleven.value, Decimal::parse("0.01").unwrap());
+        assert!(merged.failed.is_empty());
+        let twelve = find(12);
+        assert_eq!(twelve.value, Decimal::parse("0.02").unwrap());
+        assert_eq!(twelve.at, t("2026-03-05T00:00:20.000Z"));
+        assert_eq!(twelve.outcome, Some(EntryOutcome::Done));
+        assert_eq!(merged.entries.len(), 4);
+        check_successor(&terms, &kept, &merged, now).unwrap();
+        let inputs = [
+            kept.clone(),
+            shown.clone(),
+            ledger(journal.clone()),
+            ledger(claims.clone()),
+        ];
+        let id = |n: u8| AttemptId::from_bytes([n; 16]);
+        let mut states = vec![HashMap::new()];
+        for state in [
+            ClaimState::Open,
+            ClaimState::Unknown,
+            ClaimState::Done,
+            ClaimState::Failed { by_owner: false },
+            ClaimState::Failed { by_owner: true },
+        ] {
+            states.push(
+                [1, 10, 11, 12]
+                    .into_iter()
+                    .map(|n| (id(n), state))
+                    .collect(),
+            );
+        }
+        assert_counts_no_less(
+            &terms,
+            &merged,
+            &inputs,
+            &[
+                "2026-03-05T00:01:00.000Z",
+                "2026-03-05T23:30:00.000Z",
+                "2026-03-06T00:00:45.000Z",
+                "2026-03-20T00:00:00.000Z",
+                "2026-05-01T00:00:00.000Z",
+            ],
+            &states,
+        );
+    }
+
+    #[test]
+    fn test_merge_for_repair_dates_an_attempt_no_later_than_the_repair() {
+        // A shown copy dated after the repair's time counts as at that time: it counts in
+        // the period the repair is in, as the claim's own time would.
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let kept = ledger(Vec::new());
+        let shown = ledger(vec![entry(3, "0.01", "2026-04-05T00:00:00.000Z", None)]);
+        let merged = merge_for_repair(&terms, &kept, Some(&shown), &[], &[], t(IN_MONTH)).unwrap();
+        assert_eq!(merged.entries[0].at, t(IN_MONTH));
+        let used = usage(&terms, &merged, &HashMap::new(), t(IN_MONTH)).unwrap();
+        assert_eq!(used.periods()[0].count(), 1);
+    }
+
+    #[test]
+    fn test_merge_for_repair_refuses_own_evidence_above_the_version_kept() {
+        // The version kept counts an attempt as accepted; the journal showing it larger
+        // can't be counted as both, so the merge refuses rather than count less.
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let kept = ledger(vec![entry(1, "0.005", IN_MONTH, None)]);
+        let journal = vec![entry(1, "0.01", IN_MONTH, None)];
+        let refused = merge_for_repair(&terms, &kept, None, &journal, &[], t(IN_MONTH));
+        assert!(
+            matches!(&refused, Err(Error::Invalid(why)) if why.contains("larger value")),
+            "{refused:?}"
+        );
+        let mut failed = ledger(Vec::new());
+        failed.failed.push(CompactedFailed {
+            obligation: [1; 32],
+            attempt_id: AttemptId::from_bytes([1; 16]),
+            value: Decimal::parse("0.005").unwrap(),
+        });
+        assert!(merge_for_repair(&terms, &failed, None, &journal, &[], t(IN_MONTH)).is_err());
+        // The same value, a `done` shown by a proof: taken.
+        let same = vec![entry(1, "0.005", IN_MONTH, Some(EntryOutcome::Done))];
+        let merged = merge_for_repair(&terms, &kept, None, &[], &same, t(IN_MONTH)).unwrap();
+        assert_eq!(merged.entries[0].outcome, Some(EntryOutcome::Done));
     }
 }
