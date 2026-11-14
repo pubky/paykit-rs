@@ -683,6 +683,7 @@
       {
         "aad_hex": "000000167075626b792d7377697463682f76312f7365616c656400000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc07000000127061796b69745f736574746c656d656e747300000020e994b77fb8a86adc707ee7964ac4a780af3220a78d3bf358d06c3e150a3e2a4c",
         "bucket": 669,
+        "lost_to_delete": false,
         "marks": [
           {
             "kind": 1,
@@ -707,6 +708,7 @@
       {
         "aad_hex": "000000167075626b792d7377697463682f76312f7365616c656400000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc07000000127061796b69745f736574746c656d656e74730000002032d613a0203fc4ff1a7745bae159c8f46b25acfab68db64ec90c521448e934ef",
         "bucket": 816,
+        "lost_to_delete": false,
         "marks": [
           {
             "kind": 2,
@@ -731,6 +733,7 @@
       {
         "aad_hex": "000000167075626b792d7377697463682f76312f7365616c656400000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc07000000127061796b69745f736574746c656d656e7473000000209332048029e0e24e193a8f74257136764b57c4d2ccb534e48e6e3b5064d51637",
         "bucket": 280,
+        "lost_to_delete": false,
         "marks": [
           {
             "kind": 3,
@@ -751,10 +754,35 @@
           "scope": "paykit_settlements"
         },
         "settlement_id": "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
+      },
+      {
+        "aad_hex": "000000167075626b792d7377697463682f76312f7365616c656400000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc07000000127061796b69745f736574746c656d656e7473000000209332048029e0e24e193a8f74257136764b57c4d2ccb534e48e6e3b5064d51637",
+        "bucket": 280,
+        "lost_to_delete": true,
+        "marks": [
+          {
+            "kind": 3,
+            "occurrence_tag_hex": "cf7d6f998b468bb4",
+            "settlement_tag_hex": "a2d2cb72f49c902268dbf518"
+          }
+        ],
+        "name": "a payment without a request's mark, put back over a delete with lost_to_delete",
+        "nonce_hex": "d0c2dec1b1d02972cf73d802b94e7bcdd03576f672c16de1",
+        "occurrence_natural_key_hex": "000000126274632d626974636f696e2d703277706b680000004034613565316534626161623839663361333235313861383863333162633837663631386637363637336532636337376162323132376237616664656461333362",
+        "padded_len": 512,
+        "plaintext": "{\"v\":1,\"marks\":\"otLLcvSckCJo2_UYA899b5mLRou0\",\"lost_to_delete\":true}",
+        "record_key": "kzIEgCng4k4ZOo90JXE2dktXxNLMtTTkjm47UGTVFjc",
+        "sealed": {
+          "ct": "sLitVfOxTXZxRGdnnhoezXPUp3y_9c2FLOlt_S548jtp18xW8bjGaqzPiX_YGIAdQ2ueLxOh7TYnGxqTS0gMNvoU6X4dNPVdb02jVp4HDiZKBr4SXhlfGEg921oE7PJeufLDo5df_n8ZU9iF6OM5gcK8jyMkNGcch8GRtykEfmiQvbHy97iordU5_EAXfd-zkxGXJIH6HaPnkfGTUVcsT4qtNPmKWH-RO7FVvDj7MRc_8-QnC9YBRQB2ApGpq6cKp2440TJjQormDpCXOhh4nBYMiDkIfe7pTKUTvXoT0i_986k7_ZlIIw16QY11zlwoeT09TlEKL5V4hR8Tjz0nVUrzUGA-mtfn1Lyk4gNEgolk_ecNQDw6pgDqMRSKgZuXA0AZOeCDORLFe5-S28kH1Qu3RbZ91BNiJ2ZD1KqU_Ue3ozfi50eAmYbgsmoQdYjh8CC2DKzO1qRsSOPFpkxORTQyqiG7oKnvK85MQPxUffYKPhEVc0j6H-oBcf9KwQJW93RE972dF78ELuC-fG48rezDralRlr0jcIT7_iwtMxWYvJl0AcSQRd0dYhdgrZGOhwFsJcUQl42Y3aGV6jOqH7Jq1jSnQjc9FimoxjIMTfTMUBfEd3WuFj24OBQTcK4YihN3py52u--0bV8Lp6uEyctyRVYGd8o0XTDohz6yRMB0SsSM5E21w5PAePR46-4y",
+          "data_epoch": 1,
+          "nonce": "0MLewbHQKXLPc9gCuU57zdA1dvZywW3h",
+          "scope": "paykit_settlements"
+        },
+        "settlement_id": "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
       }
     ],
     "data_epoch": 1,
-    "description": "Wire 1.5, 5.7, spec 6: settlements bucket records, which hold the marks of the settlements the identity's payee apps have credited. accepted are bob's buckets, each holding the mark of one settlement, of each kind: a one-time request (kind 1, bob's payee record of messages.json's payment_request), a Billing Period (kind 2, the February period, 1772236800, of payment_request_recurring) and a payment without a request (kind 3, bob's payee record of the payment without a request of identifiers.json record_keys, its bitcoin-txid settlement). Each settlement_id is a txid: the seed of sealed/settlement_marks/<kind>/txid in lower-case hex, and for kind 3 the vectors' own. Each bucket is the settlement's bucket, its record_key that of lp(u64(bucket)) under the policy read_scope paykit_settlements, write_scopes [paykit_settlements], with bob's naming key; each mark is the settlement's tag (bytes 2 to 13 of derive(\"paykit/v1/settlement\", \"tag\", blind(lp(settlement ID)))), the kind and the occurrence's tag (the first 8 bytes of derive(\"paykit/v1/settlement\", \"occurrence\", blind(natural key))); plaintext is the bucket's value, sealed with bob's paykit_settlements key at data epoch 1 (keys.json scope_keys), the nonce the seed of sealed/settlement_marks/<kind>/nonce cut to 24 bytes, and AAD lp(\"pubky-switch/v1/sealed\", identity, \"paykit_settlements\", record key). Neither the paykit_request key nor the shop1 label key opens it. example is the value of wire 5.7's example, which a reader takes, with its marks. refused are values a reader refuses: a bucket with no mark, since a bucket is first written with the credit that adds its first mark and no mark is ever removed, marks out of order, a settlement twice, a length that isn't a whole number of marks, kinds 0 and 4, 9,001 marks (the settlement tags 0 to 9,000 as 12-byte big-endian numbers, each of kind 1 with the one-time request's occurrence tag), each built from the accepted marks, and, last, the kind 3 bucket's value under payee_activity's policy, at the record key that policy gives its bucket, which isn't its bucket's key. reason is paykit-lib's wording at a reader.",
+    "description": "Wire 1.5, 5.7, spec 6: settlements bucket records, which hold the marks of the settlements the identity's payee apps have credited. accepted are bob's buckets, each holding the mark of one settlement, of each kind: a one-time request (kind 1, bob's payee record of messages.json's payment_request), a Billing Period (kind 2, the February period, 1772236800, of payment_request_recurring) and a payment without a request (kind 3, bob's payee record of the payment without a request of identifiers.json record_keys, its bitcoin-txid settlement), and, last, that kind 3 bucket put back over a delete its writer couldn't trace, with lost_to_delete true, its nonce the seed of sealed/settlement_marks/put_back/nonce; lost_to_delete is whether the value carries it. Each settlement_id is a txid: the seed of sealed/settlement_marks/<kind>/txid in lower-case hex, and for kind 3 the vectors' own. Each bucket is the settlement's bucket, its record_key that of lp(u64(bucket)) under the policy read_scope paykit_settlements, write_scopes [paykit_settlements], with bob's naming key; each mark is the settlement's tag (bytes 2 to 13 of derive(\"paykit/v1/settlement\", \"tag\", blind(lp(settlement ID)))), the kind and the occurrence's tag (the first 8 bytes of derive(\"paykit/v1/settlement\", \"occurrence\", blind(natural key))); plaintext is the bucket's value, sealed with bob's paykit_settlements key at data epoch 1 (keys.json scope_keys), the nonce the seed of sealed/settlement_marks/<kind>/nonce cut to 24 bytes, and AAD lp(\"pubky-switch/v1/sealed\", identity, \"paykit_settlements\", record key). Neither the paykit_request key nor the shop1 label key opens it. example is the value of wire 5.7's example, which a reader takes, with its marks. refused are values a reader refuses: lost_to_delete false, which no writer writes, a bucket with no mark, since a bucket is first written with the credit that adds its first mark and no mark is ever removed, marks out of order, a settlement twice, a length that isn't a whole number of marks, kinds 0 and 4, 9,001 marks (the settlement tags 0 to 9,000 as 12-byte big-endian numbers, each of kind 1 with the one-time request's occurrence tag), each built from the accepted marks, and, last, the kind 3 bucket's value under payee_activity's policy, at the record key that policy gives its bucket, which isn't its bucket's key. reason is paykit-lib's wording at a reader.",
     "example": {
       "marks": [
         {
@@ -775,6 +803,11 @@
     "policy_hash": "xIm4ilTz_ofcF_9A-qDIpXcSgID4e9E1N-HigTb5EW8",
     "read_scope": "paykit_settlements",
     "refused": [
+      {
+        "name": "lost_to_delete false",
+        "reason": "invalid: settlements: lost_to_delete: false, which no writer writes",
+        "value": "{\"v\":1,\"marks\":\"IIj_Dafwrj8JCEu0ATdgj2cBdh9b\",\"lost_to_delete\":false}"
+      },
       {
         "name": "a bucket with no mark",
         "reason": "invalid: settlements: marks: no mark",

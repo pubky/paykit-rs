@@ -1031,7 +1031,7 @@ Example (a bucket holding two marks, a one-time request's and a Billing Period's
 }
 ```
 
-Vectors: `sealed.json` `settlement_marks`: buckets holding marks of each kind, sealed under `paykit_settlements`, and the rejections (marks out of order, a settlement twice, a length that isn't a whole number of marks, kinds `0` and `4`, 9,001 marks, a bucket with no mark, a value under another policy); `identifiers.json` `policies` (`settlements`) and `record_keys` (the tag, bucket and bucket record key of the vectors' `bitcoin-txid` settlement, and an occurrence's tag); `keys.json` `scope_keys` (`paykit_settlements`). `paykit-lib` checks the seen marks (spec 18).
+Vectors: `sealed.json` `settlement_marks`: buckets holding marks of each kind, sealed under `paykit_settlements`, one of them put back with `lost_to_delete`, and the rejections (marks out of order, a settlement twice, a length that isn't a whole number of marks, kinds `0` and `4`, 9,001 marks, a bucket with no mark, `lost_to_delete` as `false`, a value under another policy); `identifiers.json` `policies` (`settlements`) and `record_keys` (the tag, bucket and bucket record key of the vectors' `bitcoin-txid` settlement, and an occurrence's tag); `keys.json` `scope_keys` (`paykit_settlements`). `paykit-lib` checks the seen marks (spec 18).
 
 ## Appendix A. Choices this document made
 
