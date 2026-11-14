@@ -16,6 +16,7 @@ mod divergent;
 mod erasure;
 mod executor;
 mod final_check;
+mod handoff;
 mod labels;
 mod ledger;
 mod local_state;

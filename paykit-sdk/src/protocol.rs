@@ -436,7 +436,12 @@ pub(crate) fn restore_paykit_layer(
             // carry: a restored executor takes a missing ledger as usage history lost (Paykit
             // spec 8.3, "A grant implies a ledger"). A user's confirmation of an ignored write
             // isn't restored either: a restore asks the user to confirm again.
-            StateKey::EmptyLedger(_) | StateKey::FlagConfirmed(_) => continue,
+            // The ledger write an executor waits to build on, after a handoff or a repair, is
+            // its own journal's too: a restored executor builds only through the repair
+            // (Paykit spec 8.3, "Last ledger version").
+            StateKey::EmptyLedger(_) | StateKey::LedgerBase(_) | StateKey::FlagConfirmed(_) => {
+                continue
+            }
             // A ledger rollback found is restored: the evidence of the service's misbehaviour
             // stays, and the app makes no new attempt at that generation (Paykit spec 8.3,
             // "Last ledger version"; Switch spec 10.1).
@@ -574,11 +579,18 @@ pub(crate) fn restore_paykit_layer(
                 // at a version a write gives, its content a ledger no longer than a shared
                 // record value (`state::Stored`). Its attempts kept as dropped are checked
                 // against the journal once every entry is read.
-                let kept = state::restored::<crate::executor::KeptLedger>(&key, &value, &binder)
-                    .map_err(|_| unread())?;
+                let mut kept =
+                    state::restored::<crate::executor::KeptLedger>(&key, &value, &binder)
+                        .map_err(|_| unread())?;
                 for attempt in kept.dropped().map_err(|_| unread())? {
                     dropped.push((record, attempt));
                 }
+                // The backup may predate later versions the executor wrote: restored, the
+                // version stays the base a rollback is judged against and a repair merges,
+                // but the executor builds on a ledger only through the repair (Paykit spec
+                // 8.3, "Last ledger version").
+                kept.restored = true;
+                let value = state::encode(&kept).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -1192,8 +1204,13 @@ impl PaykitProtocol {
                     return Some("Paykit wire 5.4: an allowances record that doesn't read".into());
                 };
                 // Wire 5.4 "Seen roles" and "Rewrites": the proposal, the response and the end
-                // seen are kept, and the grant history seen starts the later one.
-                held.check_later_write(&later).err().map(|e| e.to_string())
+                // seen are kept, and the grant history seen starts the later one; and "Ledger
+                // handoff": the one seen is kept, or replaced by the previous executor's for
+                // the current grant (Paykit spec 8.3, "Handoff").
+                held.check_later_write(&later)
+                    .and_then(|()| held.check_later_handoff(&later, &own.identity))
+                    .err()
+                    .map(|e| e.to_string())
             }
             _ => None,
         }
@@ -1785,6 +1802,7 @@ mod receive_tests {
                 grant: None,
                 grants: Vec::new(),
                 msg_ids: Vec::new(),
+                ledger_handoff: None,
                 unknown: Default::default(),
             }
             .to_json()

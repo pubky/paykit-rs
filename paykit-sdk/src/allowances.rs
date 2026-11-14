@@ -326,6 +326,7 @@ fn opened(counterparty: [u8; 32], proposal: StoredMessage) -> Option<AllowanceRe
         grant: None,
         grants: Vec::new(),
         msg_ids: Vec::new(),
+        ledger_handoff: None,
         unknown: Default::default(),
     };
     record.to_json().is_ok().then_some(record)

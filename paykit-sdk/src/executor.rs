@@ -15,7 +15,17 @@
 //!   conditioned on ("Who wrote it"), the kept version or one built on it or later, and
 //!   counting no less than the version last accepted ("From one version to the next"). The
 //!   last version accepted is kept with its content (`lv/`). A missing ledger is taken as
-//!   empty only by the executor of the first grant that kept none.
+//!   empty only by the executor of the first grant that kept none. An executor that holds no
+//!   ledger version builds on none the switch shows alone: after a handoff, only on the write
+//!   the previous executor names, and otherwise only on a ledger its user confirms by the
+//!   repair.
+//! - **The handoff's ledger version** (Paykit spec 8.3, "Handoff"): at its next resume after
+//!   a handoff, the previous executor writes `ledger_handoff` into the Allowance record,
+//!   signed with its certificate, naming its last ledger version, unless it holds none or
+//!   only one a restore installed. The new executor waits for it in its own journal
+//!   (`lb/`): holding no version, it pays nothing automatically until the write named, or
+//!   one built on it, is shown; holding one, it checks the named write against what its
+//!   first ledger write since the handoff built on, and an older base is a rollback.
 //! - **A rollback raises the alarm** (Paykit spec 8.3, "Last ledger version"): a ledger
 //!   write shown that is neither the version kept nor built on it, or a missing ledger
 //!   against the version kept, stops every new attempt of the app at that generation
@@ -86,7 +96,7 @@ use paykit_lib::bodies::{
 };
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
-use paykit_lib::grant::{grant_fields, ExecutorGrant, EXECUTOR_GRANT_LABEL};
+use paykit_lib::grant::{grant_fields, ExecutorGrant, LedgerHandoff, EXECUTOR_GRANT_LABEL};
 use paykit_lib::kinds::Kind;
 use paykit_lib::periods::Recurrence;
 use paykit_lib::records::{ActivityRecord, AllowanceRecord, GrantEntry, Origin, RecordBinding};
@@ -161,6 +171,184 @@ pub(crate) struct KeptLedger {
     /// The attempts, as text, of this app's journal entries under the Allowance that this
     /// version doesn't list among its entries or `totals.failed`.
     pub(crate) dropped: Vec<String>,
+    /// A restore from a backup installed it: it may predate later writes this app made, so
+    /// it is never named in a `ledger_handoff` (Paykit spec 8.3, "Handoff"). A version kept
+    /// since is the app's own again.
+    pub(crate) restored: bool,
+}
+
+/// The ledger write an executor checks what it builds on against
+/// (`lb/<Allowance record key>`, Paykit spec 8.3, "Handoff", "Last ledger version", "After
+/// a confirmation"): after a handoff to this app, until the `ledger_handoff` for it settles;
+/// after a repair its user confirmed, until a version past the repair is kept. Written in the
+/// batch of the grant or of the repair, so only once it is applied. Never restored: a restored
+/// executor that holds no ledger version builds only through the repair, never on a
+/// `ledger_handoff` still in the record. One per Allowance record.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LedgerBase {
+    #[serde(with = "serde_b64")]
+    pub(crate) record: [u8; 32],
+    /// After a handoff to this app.
+    pub(crate) handoff: Option<HandoffWait>,
+    /// After a repair.
+    pub(crate) repair: Option<RepairWrite>,
+}
+
+/// A handoff to this app whose `ledger_handoff` is still to settle (Paykit spec 8.3,
+/// "Handoff").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct HandoffWait {
+    /// The version of the grant history entry that handed the Allowance on to this app.
+    pub(crate) generation: u64,
+    pub(crate) version: u64,
+    /// What this app's first ledger write since the handoff built on, `None` before it has
+    /// written one.
+    pub(crate) first: Option<FirstWrite>,
+}
+
+/// What an executor's first ledger write since a handoff built on: the version its
+/// `expected_version` names, `{0, 0}` for the ledger's absence, with the item hash of the
+/// write at that version when it was the version kept then.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FirstWrite {
+    pub(crate) generation: u64,
+    pub(crate) version: u64,
+    pub(crate) item_hash: Option<[u8; 32]>,
+}
+
+/// A repair's write (Paykit spec 8.3, "After a confirmation"): built on the version
+/// `built_on` names, `{0, 0}` for the ledger's absence, with a value hashing to `value_hash`,
+/// at the own `identity.json`'s generation `generation`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RepairWrite {
+    pub(crate) built_on_generation: u64,
+    pub(crate) built_on_version: u64,
+    #[serde(with = "serde_b64")]
+    pub(crate) value_hash: [u8; 32],
+    pub(crate) generation: u64,
+}
+
+impl LedgerBase {
+    /// Whether it is a form a run writes: something to wait for, versions a write gives or
+    /// the absence, an item hash only for a version a write gives.
+    pub(crate) fn well_formed(&self) -> bool {
+        let pair = |generation: u64, version: u64| (generation == 0) == (version == 0);
+        let handoff = self.handoff.is_none_or(|h| {
+            h.generation > 0
+                && h.first.is_none_or(|f| {
+                    pair(f.generation, f.version) && (f.version > 0 || f.item_hash.is_none())
+                })
+        });
+        let repair = self
+            .repair
+            .is_none_or(|r| pair(r.built_on_generation, r.built_on_version) && r.generation > 0);
+        (self.handoff.is_some() || self.repair.is_some()) && handoff && repair
+    }
+}
+
+impl HandoffWait {
+    fn grant(&self) -> RecordVersion {
+        RecordVersion {
+            generation: self.generation,
+            version: self.version,
+        }
+    }
+}
+
+impl FirstWrite {
+    fn version(&self) -> RecordVersion {
+        RecordVersion {
+            generation: self.generation,
+            version: self.version,
+        }
+    }
+}
+
+impl RepairWrite {
+    fn built_on(&self) -> RecordVersion {
+        RecordVersion {
+            generation: self.built_on_generation,
+            version: self.built_on_version,
+        }
+    }
+}
+
+/// A ledger write the executor builds only on, or on one signed as built on it or a later
+/// one, beside its kept version (Paykit spec 8.3, "Last ledger version").
+#[derive(Clone, Copy, Debug)]
+enum BuildOn {
+    /// The write a counting `ledger_handoff` names, by version and item hash.
+    Named {
+        version: RecordVersion,
+        item_hash: [u8; 32],
+    },
+    /// The repair's own write ([`RepairWrite`]).
+    Repaired(RepairWrite),
+}
+
+impl BuildOn {
+    /// The generation of the own `identity.json` it was named or written at: against one of
+    /// an earlier generation an older write only pauses the Allowance.
+    fn generation(&self) -> u64 {
+        match self {
+            Self::Named { version, .. } => version.generation,
+            Self::Repaired(repair) => repair.generation,
+        }
+    }
+
+    /// Whether the write `op`, with `value`, is older than it: neither it nor signed as built
+    /// on it or a later version.
+    fn older(&self, op: &SignedOp, value: Option<&[u8]>) -> Result<bool> {
+        let built_on = match &op.body().kind {
+            OpKind::RecordPut(put) => put.expected_version,
+            _ => return Err(PaykitError::corrupt()),
+        };
+        Ok(match self {
+            Self::Named { version, item_hash } => {
+                op.item_hash().map_err(|_| PaykitError::corrupt())? != *item_hash
+                    && built_on < *version
+            }
+            // A compare-and-swap applies one write at `built_on`: a write built on a later
+            // version is built on the repair's or after it.
+            Self::Repaired(repair) => {
+                !(built_on > repair.built_on()
+                    || built_on == repair.built_on()
+                        && value
+                            .is_some_and(|v| pubky_switch_core::enc::hash(v) == repair.value_hash))
+            }
+        })
+    }
+
+    /// Whether a write the client refused, at `refused`, is older than it.
+    fn older_refused(&self, refused: RecordVersion) -> bool {
+        match self {
+            Self::Named { version, .. } => refused < *version,
+            Self::Repaired(repair) => refused <= repair.built_on(),
+        }
+    }
+
+    /// Whether a delete held at `deleted` came at or after it.
+    fn deleted_since(&self, deleted: RecordVersion) -> bool {
+        match self {
+            Self::Named { version, .. } => deleted >= *version,
+            Self::Repaired(repair) => deleted > repair.built_on(),
+        }
+    }
+}
+
+/// How a counting `ledger_handoff` settles against what a new executor holds (Paykit spec
+/// 8.3, "Handoff").
+enum Settled {
+    /// None counts yet.
+    Waiting,
+    /// The named write is the one to build on, or on one built on it or later.
+    Take(BuildOn),
+    /// Settled: the kept version stands, the named write being it, or one before it, which
+    /// the executor ignores.
+    Kept,
+    /// The executor built on a version older than the previous executor's last, named at
+    /// the generation given: a rollback.
+    Rollback(u64),
 }
 
 /// The first grant's empty ledger in the executor's own journal (`el/<Allowance record key>`,
@@ -343,6 +531,12 @@ impl LedgerClaims {
 /// Why a ledger is refused while its version kept is of an earlier generation than the
 /// service now serving (Paykit spec 8.3, "Last ledger version").
 const EARLIER_GENERATION: &str = "the ledger kept is of an earlier generation than the service's";
+
+/// Why a new executor that holds no ledger version pays nothing yet after a handoff (Paykit
+/// spec 8.3, "Handoff"): until the record holds a `ledger_handoff` that counts, or its user
+/// confirms the repair.
+const AWAITING_HANDOFF: &str =
+    "after the handoff, the previous executor hasn't named its last ledger version yet";
 
 /// The conditions of a repair's ledger write (Paykit spec 8.3, "After a confirmation";
 /// Paykit wire 5.5): `record_version` on the Allowance record `record` at `version`, and
@@ -684,6 +878,18 @@ fn own_store_failure(error: &PaykitError) -> bool {
         PaykitError::Client(client)
             if matches!(client.unkept(), pubky_switch_client::app::AppError::Store(_))
     )
+}
+
+/// What a first ledger write since a handoff built on, `built_on`, with the item hash of
+/// `before`, the version kept then, when it is that version ([`FirstWrite`]).
+fn first_write(built_on: RecordVersion, before: Option<&KeptLedger>) -> FirstWrite {
+    FirstWrite {
+        generation: built_on.generation,
+        version: built_on.version,
+        item_hash: before
+            .filter(|kept| built_on.version > 0 && kept.version() == built_on)
+            .map(|kept| kept.item_hash),
+    }
 }
 
 impl KeptLedger {
@@ -1097,13 +1303,105 @@ impl Paykit {
             item_hash: op.item_hash().map_err(|_| PaykitError::corrupt())?,
             value: value.to_vec(),
             dropped: dropped.iter().map(|a| a.to_text()).collect(),
+            restored: false,
         };
         check_kept_ledger(record, &kept)?;
+        let before = self.kept_ledger(record).await?.map(|(kept, _)| kept);
         let mut tx = Tx::default();
         tx.put(&key::kept_ledger(record), &kept)?;
         // A version kept answers the first grant's empty ledger.
         tx.delete(&key::empty_ledger(record));
+        if let Some(mut mark) = self.ledger_base_mark(record).await? {
+            // A version kept past the repair answers it: the write shown passed the check
+            // against the repair's own write. This app's first ledger write since a handoff
+            // keeps what it built on, which the `ledger_handoff` is checked against (Paykit
+            // spec 8.3, "Handoff").
+            mark.repair = None;
+            if let Some(wait) = &mut mark.handoff {
+                if wait.first.is_none() && op.body().app_id == Some(self.app_id()) {
+                    let OpKind::RecordPut(put) = &op.body().kind else {
+                        return Err(PaykitError::corrupt());
+                    };
+                    wait.first = Some(first_write(put.expected_version, before.as_ref()));
+                }
+            }
+            if mark.handoff.is_some() {
+                tx.put(&key::ledger_base(record), &mark)?;
+            } else {
+                tx.delete(&key::ledger_base(record));
+            }
+        }
         self.local_commit(tx).await
+    }
+
+    /// The ledger write the executor of the Allowance at `record` checks what it builds on
+    /// against, read bound to its key ([`LedgerBase`]).
+    async fn ledger_base_mark(&self, record: &[u8; 32]) -> Result<Option<LedgerBase>> {
+        self.local_get::<LedgerBase>(&key::ledger_base(record))
+            .await
+    }
+
+    /// Drop the handoff of `mark`, the Allowance at `record`'s, once it has settled: the
+    /// mark goes unless a repair is still to land. Returns what is left.
+    async fn handoff_settled(
+        &mut self,
+        record: &[u8; 32],
+        mark: Option<LedgerBase>,
+    ) -> Result<Option<LedgerBase>> {
+        let Some(mut mark) = mark else {
+            return Ok(None);
+        };
+        mark.handoff = None;
+        if mark.repair.is_some() {
+            self.local_put(&key::ledger_base(record), &mark).await?;
+            Ok(Some(mark))
+        } else {
+            self.local_delete(&key::ledger_base(record)).await?;
+            Ok(None)
+        }
+    }
+
+    /// How the `ledger_handoff` of `under` settles against `wait`, this app's handoff, and
+    /// `kept`, its kept version (Paykit spec 8.3, "Handoff"; Paykit wire 5.4, "Building on
+    /// it"): one that counts, for the grant that handed the Allowance on to this app, by an
+    /// app not removed since. Before this app wrote the ledger since the handoff, a named
+    /// write later than its kept version, or with none kept, is the one to build on, and one
+    /// before it, or another write at its version, is ignored; once it has, the named write
+    /// must be the one its first write built on, and a later one, another write at that
+    /// version, or any where it built on the ledger's absence is a rollback, while one before
+    /// it is ignored. One that doesn't verify the client flags as it reads the record.
+    fn settle_handoff(
+        &self,
+        under: &Under,
+        wait: &HandoffWait,
+        kept: Option<&KeptLedger>,
+    ) -> Settled {
+        let own = self.identity();
+        let Ok(Some(handoff)) = under.allowance.ledger_handoff_counts(&own) else {
+            return Settled::Waiting;
+        };
+        if handoff.grant != wait.grant() || self.app.own_identity().lists_removed(&handoff.app_id) {
+            return Settled::Waiting;
+        }
+        let named = handoff.ledger;
+        match (wait.first, kept) {
+            (Some(first), _) => {
+                let other_at_same = named == first.version()
+                    && first
+                        .item_hash
+                        .is_some_and(|item| item != handoff.item_hash);
+                if first.version == 0 || named > first.version() || other_at_same {
+                    Settled::Rollback(named.generation)
+                } else {
+                    Settled::Kept
+                }
+            }
+            (None, Some(kept)) if named <= kept.version() => Settled::Kept,
+            (None, _) => Settled::Take(BuildOn::Named {
+                version: named,
+                item_hash: handoff.item_hash,
+            }),
+        }
     }
 
     /// The attempts of this app's journal entries under the Allowance at `record` that
@@ -1702,21 +2000,52 @@ impl Paykit {
         let ledger_key = self.app.record_key(&target)?;
         let kept = self.kept_ledger(&under.record_key).await?;
         let generation = self.app.own_identity().generation();
+        // After a handoff or a repair, the ledger write the executor checks what it builds
+        // on against (Paykit spec 8.3, "Handoff", "After a confirmation"), beside its kept
+        // version: the repair's own write, and the write a counting `ledger_handoff` names.
+        let mut mark = self.ledger_base_mark(&under.record_key).await?;
+        let mut extras: Vec<BuildOn> = Vec::new();
+        let mut take_handoff = false;
+        if let Some(wait) = mark.as_ref().and_then(|m| m.handoff) {
+            match self.settle_handoff(under, &wait, kept.as_ref().map(|(k, _)| k)) {
+                Settled::Waiting => {}
+                Settled::Take(named) => {
+                    extras.push(named);
+                    take_handoff = true;
+                }
+                Settled::Kept => {
+                    mark = self.handoff_settled(&under.record_key, mark).await?;
+                }
+                Settled::Rollback(named_at) => {
+                    if named_at != generation {
+                        return Ok(unaccepted(EARLIER_GENERATION, ShownContent::Nothing));
+                    }
+                    return Err(self
+                        .raise_ledger_alarm(
+                            &under.record_key,
+                            "its first write since the handoff built on is older than the previous executor's last",
+                        )
+                        .await);
+                }
+            }
+        }
+        if let Some(repair) = mark.as_ref().and_then(|m| m.repair) {
+            extras.push(BuildOn::Repaired(repair));
+        }
         let shared = match self.app.read_record_fresh(&target).await? {
             RecordRead::Fresh(shared) => Some(shared),
             RecordRead::Kept {
                 reason: pubky_switch_client::app::KeptReason::NotFound,
                 record,
             } => {
-                // A missing ledger record against the version kept is a rollback, but after
-                // a delete the executor holds at or after that version (Paykit spec 8.3,
-                // "Last ledger version"; Paykit wire 5.5).
+                // A missing ledger record against the version kept, or against the write
+                // named or repaired, is a rollback, but after a delete the executor holds at
+                // or after it (Paykit spec 8.3, "Last ledger version"; Paykit wire 5.5).
+                let deleted = record.as_ref().and_then(|held| {
+                    matches!(held.content, RecordContent::Deleted).then_some(held.version)
+                });
                 if let Some((kept, _)) = &kept {
-                    let deleted_since = record.as_ref().is_some_and(|held| {
-                        matches!(held.content, RecordContent::Deleted)
-                            && held.version >= kept.version()
-                    });
-                    if !deleted_since {
+                    if !deleted.is_some_and(|at| at >= kept.version()) {
                         if kept.generation != generation {
                             return Ok(unaccepted(EARLIER_GENERATION, ShownContent::Nothing));
                         }
@@ -1724,6 +2053,19 @@ impl Paykit {
                             .raise_ledger_alarm(
                                 &under.record_key,
                                 "is missing against the version kept",
+                            )
+                            .await);
+                    }
+                }
+                for extra in &extras {
+                    if !deleted.is_some_and(|at| extra.deleted_since(at)) {
+                        if extra.generation() != generation {
+                            return Ok(unaccepted(EARLIER_GENERATION, ShownContent::Nothing));
+                        }
+                        return Err(self
+                            .raise_ledger_alarm(
+                                &under.record_key,
+                                "is missing against the write named or repaired",
                             )
                             .await);
                     }
@@ -1751,7 +2093,11 @@ impl Paykit {
             // A grant implies a ledger: only the first grant's executor, while its own
             // journal, not one restored from a backup, shows the empty ledger not yet sent,
             // takes the absence as empty (Paykit spec 8.3).
-            if kept.is_none() && first_grant && self.empty_ledger_unsent(&under.record_key).await? {
+            if kept.is_none()
+                && mark.is_none()
+                && first_grant
+                && self.empty_ledger_unsent(&under.record_key).await?
+            {
                 return Ok(LedgerShown::Accepted(None));
             }
             return Ok(unaccepted(
@@ -1767,30 +2113,35 @@ impl Paykit {
         // repaired; a write that is one of those but fails a check by policy, below, only
         // pauses. A write the client refused (Switch spec 8.2) isn't held, neither its item
         // nor its signed base: the version the client follows, the refused write's as shown,
-        // is judged instead, and one before the version kept is a rollback.
+        // is judged instead, and one before the version kept is a rollback. The write named
+        // or repaired is judged the same way.
         let op = self.held_op(&ledger_key).await?;
-        if let Some((kept, _)) = &kept {
-            let rollback = if shared.flagged {
-                let refused = self
-                    .app
+        let refused = if shared.flagged {
+            Some(
+                self.app
                     .flagged_writes()
                     .await?
                     .into_iter()
                     .filter(|flagged| flagged.key == ledger_key)
                     .map(|flagged| flagged.version)
                     .max()
-                    .ok_or_else(|| not_automatic("the refused ledger write isn't held"))?;
-                refused < kept.version()
-            } else {
-                let op = op
-                    .as_ref()
-                    .ok_or_else(|| not_automatic("the ledger's write isn't held"))?;
-                let item = op.item_hash().map_err(|_| PaykitError::corrupt())?;
-                let built_on = match &op.body().kind {
-                    OpKind::RecordPut(put) => put.expected_version,
-                    _ => return Err(PaykitError::corrupt()),
-                };
-                item != kept.item_hash && built_on < kept.version()
+                    .ok_or_else(|| not_automatic("the refused ledger write isn't held"))?,
+            )
+        } else {
+            None
+        };
+        let held_op = || {
+            op.as_ref()
+                .ok_or_else(|| not_automatic("the ledger's write isn't held"))
+        };
+        if let Some((kept, _)) = &kept {
+            let base = BuildOn::Named {
+                version: kept.version(),
+                item_hash: kept.item_hash,
+            };
+            let rollback = match refused {
+                Some(refused) => base.older_refused(refused),
+                None => base.older(held_op()?, None)?,
             };
             if rollback {
                 if kept.generation != generation {
@@ -1800,6 +2151,23 @@ impl Paykit {
                     .raise_ledger_alarm(
                         &under.record_key,
                         "shown is neither the version kept nor built on it",
+                    )
+                    .await);
+            }
+        }
+        for extra in &extras {
+            let rollback = match refused {
+                Some(refused) => extra.older_refused(refused),
+                None => extra.older(held_op()?, shared.content.value())?,
+            };
+            if rollback {
+                if extra.generation() != generation {
+                    return Ok(unaccepted(EARLIER_GENERATION, content));
+                }
+                return Err(self
+                    .raise_ledger_alarm(
+                        &under.record_key,
+                        "shown is neither the write named or repaired nor built on it",
                     )
                     .await);
             }
@@ -1858,32 +2226,52 @@ impl Paykit {
         ) {
             return Ok(unaccepted(why, ShownContent::Ledger(Box::new(ledger))));
         }
-        // An executor that never held a ledger version, such as a new executor after a
-        // handoff that never read the ledger, or one restored from a backup that holds none,
-        // builds on the write shown once it passes every other check, and keeps it from then
-        // on (Paykit spec 8.3, "Last ledger version"; open question 32). A ledger that was at
-        // its key at the first grant is the exception: one the executor didn't accept.
-        if let Some((kept, held)) = &kept {
-            let item = op.item_hash().map_err(|_| PaykitError::corrupt())?;
-            if item != kept.item_hash {
-                // Built on the kept version or a later one (checked above): judged by the
-                // ledger rules against the kept content, a version that counts less ignored
-                // and only pausing the Allowance (Paykit spec 8.3, "From one version to the
-                // next").
-                let at = shared
-                    .written_at_ms
-                    .or(self.service_time())
-                    .ok_or_else(|| not_automatic("no service time verified"))?;
-                if let Err(error) =
-                    check_successor_since(&under.terms, held, kept.written_at, &ledger, at)
-                {
-                    let why = match error {
-                        paykit_lib::Error::Invalid(why) if why.contains("too many periods") => {
-                            "too many periods since the version kept to judge it"
+        // What it builds on (Paykit spec 8.3, "Last ledger version"): the write named or
+        // repaired, or one built on it or later (checked above); else its kept version, or one
+        // built on it or later that counts no less. One that holds no ledger version builds
+        // on none the service shows it alone: after a handoff it waits for the write named,
+        // and otherwise, restored from a backup that holds none or the first grant's executor
+        // whose own journal no longer shows the empty ledger not yet sent, it builds only on
+        // a ledger its user confirms by the repair.
+        if extras.is_empty() {
+            match &kept {
+                Some((kept, held)) => {
+                    let item = op.item_hash().map_err(|_| PaykitError::corrupt())?;
+                    if item != kept.item_hash {
+                        // Built on the kept version or a later one (checked above): judged by
+                        // the ledger rules against the kept content, a version that counts
+                        // less ignored and only pausing the Allowance (Paykit spec 8.3, "From
+                        // one version to the next").
+                        let at = shared
+                            .written_at_ms
+                            .or(self.service_time())
+                            .ok_or_else(|| not_automatic("no service time verified"))?;
+                        if let Err(error) =
+                            check_successor_since(&under.terms, held, kept.written_at, &ledger, at)
+                        {
+                            let why = match error {
+                                paykit_lib::Error::Invalid(why)
+                                    if why.contains("too many periods") =>
+                                {
+                                    "too many periods since the version kept to judge it"
+                                }
+                                _ => "the ledger counts less than the version kept",
+                            };
+                            return Ok(unaccepted(why, ShownContent::Ledger(Box::new(ledger))));
                         }
-                        _ => "the ledger counts less than the version kept",
-                    };
-                    return Ok(unaccepted(why, ShownContent::Ledger(Box::new(ledger))));
+                    }
+                }
+                None if mark.as_ref().is_some_and(|m| m.handoff.is_some()) => {
+                    return Ok(unaccepted(
+                        AWAITING_HANDOFF,
+                        ShownContent::Ledger(Box::new(ledger)),
+                    ))
+                }
+                None => {
+                    return Ok(unaccepted(
+                        "the executor holds no ledger version to build on",
+                        ShownContent::Ledger(Box::new(ledger)),
+                    ))
                 }
             }
         }
@@ -1894,6 +2282,11 @@ impl Paykit {
             ));
         }
         self.keep_ledger(&under.record_key, &ledger_key).await?;
+        if take_handoff {
+            // The write named, or one built on it, is read and kept: the handoff is settled.
+            let mark = self.ledger_base_mark(&under.record_key).await?;
+            self.handoff_settled(&under.record_key, mark).await?;
+        }
         Ok(LedgerShown::Accepted(Some(ledger)))
     }
 
@@ -2403,8 +2796,184 @@ impl Paykit {
                 Err(error) if own_store_failure(&error) => return Err(error),
                 _ => {}
             }
+            // As the previous executor, the `ledger_handoff` it owes: a write that fails is
+            // tried again at the next resume.
+            match Box::pin(self.hand_ledger_on(&record)).await {
+                Err(error) if own_store_failure(&error) => return Err(error),
+                _ => {}
+            }
         }
         Ok(())
+    }
+
+    /// The grant history entry this app owes a `ledger_handoff` for, as the previous executor
+    /// of `allowance` (Paykit spec 8.3, "Handoff"; Paykit wire 5.4): the entry just after this
+    /// app's last one, of another app, with every later entry of that same app, so the
+    /// handoff is the one to the current executor; and the record holds no `ledger_handoff`
+    /// that counts for it. `None` once another app's grant follows, and for a history that
+    /// isn't usable.
+    fn handoff_owed(&self, allowance: &AllowanceRecord) -> Option<RecordVersion> {
+        let own = self.identity();
+        if !allowance.history_usable() {
+            return None;
+        }
+        let (current, _) = allowance.current_grant(&own)?;
+        if current.app_id == self.app_id() {
+            return None;
+        }
+        // The first entry of the current executor's last run of entries: a grant it signs
+        // again is no handoff.
+        let mut at = allowance.grants.len().checked_sub(1)?;
+        while at > 0
+            && allowance
+                .grants
+                .get(at - 1)
+                .is_some_and(|entry| entry.grant.app_id == current.app_id)
+        {
+            at -= 1;
+        }
+        let answered = allowance.grants.get(at)?;
+        let before = allowance.grants.get(at.checked_sub(1)?)?;
+        if before.grant.app_id != self.app_id() {
+            return None;
+        }
+        // The executor this app handed on to is the one named just after it.
+        if allowance.executor_at(&own, answered.built_on).ok()?? != self.app_id() {
+            return None;
+        }
+        let counts = allowance
+            .ledger_handoff_counts(&own)
+            .ok()
+            .flatten()
+            .is_some_and(|handoff| handoff.grant == answered.built_on);
+        (!counts).then_some(answered.built_on)
+    }
+
+    /// Write, as the previous executor of the Allowance at `record`, the `ledger_handoff`
+    /// naming its last ledger version for the grant that handed the Allowance on (Paykit spec
+    /// 8.3, "Handoff"; Paykit wire 5.4), at the record version it read, signed with its own
+    /// certificate; it makes no attempt under the Allowance after it, as the current grant
+    /// is another app's. Every ledger write it sent has an answer first: each was conditioned
+    /// on an Allowance record version before the grant, so the ledger read now shows the
+    /// last of them that applied, which it keeps when it is its own write built on its kept
+    /// version or later. None is written while it holds no ledger version, or only one a
+    /// restore installed, which may predate its own later writes; a grant this app signs
+    /// again is no handoff. A record changed meanwhile is read again, a bounded number of
+    /// times; any other failure leaves it for the next resume.
+    async fn hand_ledger_on(&mut self, record: &[u8; 32]) -> Result<()> {
+        let mut tries = 0;
+        loop {
+            match self.write_ledger_handoff(record).await {
+                Err(error) if error.code() == Some(ErrorCode::Conflict) => {
+                    tries += 1;
+                    if tries >= GRANT_TRIES {
+                        return Err(crate::records::conflict(error));
+                    }
+                }
+                other => return other,
+            }
+        }
+    }
+
+    async fn write_ledger_handoff(&mut self, record: &[u8; 32]) -> Result<()> {
+        let own = self.identity();
+        let Some(held) = self.held_allowance(record).await? else {
+            return Ok(());
+        };
+        if self.handoff_owed(&held).is_none() {
+            return Ok(());
+        }
+        if !self
+            .kept_ledger(record)
+            .await?
+            .is_some_and(|(kept, _)| !kept.restored)
+        {
+            return Ok(());
+        }
+        // Its last ledger write applied, read now: the client sends its kept batches first.
+        let lt = ledger_target(&held.counterparty, &held.allowance_id);
+        let ledger_key = self.app.record_key(&lt)?;
+        if let RecordRead::Fresh(shared) = self.app.read_record_fresh(&lt).await? {
+            let own_later = match (
+                self.held_op(&ledger_key).await?,
+                self.kept_ledger(record).await?,
+            ) {
+                (Some(op), Some((kept, _))) if op.body().app_id == Some(self.app_id()) => {
+                    !BuildOn::Named {
+                        version: kept.version(),
+                        item_hash: kept.item_hash,
+                    }
+                    .older(&op, None)?
+                }
+                _ => false,
+            };
+            if own_later && shared.authenticated && !shared.flagged && !shared.divergent {
+                self.keep_ledger(record, &ledger_key).await?;
+            }
+        }
+        let Some((kept, _)) = self.kept_ledger(record).await? else {
+            return Ok(());
+        };
+        if kept.restored {
+            return Ok(());
+        }
+        let target = allowance_target(&held.counterparty, &held.allowance_id);
+        let shared = match self.app.read_record_fresh(&target).await? {
+            RecordRead::Fresh(shared) => shared,
+            RecordRead::Kept {
+                reason: pubky_switch_client::app::KeptReason::Unreachable(why),
+                ..
+            } => return Err(Refusal::SwitchUnavailable(why).into()),
+            _ => return Err(Refusal::NotNow("the Allowance record isn't read now".into()).into()),
+        };
+        if shared.divergent || shared.flagged || shared.doubtful {
+            return Err(
+                Refusal::NotNow("the Allowance record is divergent or flagged".into()).into(),
+            );
+        }
+        let Some(held) = self.held_allowance(record).await? else {
+            return Ok(());
+        };
+        let Some(grant) = self.handoff_owed(&held) else {
+            return Ok(());
+        };
+        let ledger = kept.version();
+        let fields = paykit_lib::grant::handoff_fields(
+            &own,
+            &held.counterparty,
+            &held.allowance_id,
+            grant,
+            ledger,
+            &kept.item_hash,
+        );
+        let refs: Vec<&[u8]> = fields.iter().map(Vec::as_slice).collect();
+        let mut next = held.clone();
+        next.ledger_handoff = Some(LedgerHandoff {
+            app_id: self.app_id(),
+            grant,
+            ledger,
+            item_hash: kept.item_hash,
+            cert: self.app.cert().signed().clone(),
+            sig: self
+                .app
+                .sign_protocol(paykit_lib::grant::LEDGER_HANDOFF_LABEL, &refs)?,
+            origin: Origin::default(),
+        });
+        let write = self
+            .app
+            .record_op(&target, Some(&next.to_json()?), Vec::new())
+            .await?;
+        match self.app.submit_batch(OpBatch::new().entry(write)).await {
+            Ok(_) => Ok(()),
+            // Kept: it goes with the app's next write or read.
+            Err(error) if error.kept_batch().is_some() => Ok(()),
+            Err(error) => {
+                if error.code() == Some(ErrorCode::Conflict) {
+                    self.app.read_record(&target).await?;
+                }
+                Err(error.into())
+            }
+        }
     }
 
     /// One Allowance's pass of [`Paykit::record_ledger_outcomes`].
@@ -2674,9 +3243,34 @@ impl Paykit {
             let lifted = pubky_switch_client::app::LocalWrite::Delete {
                 key: key::empty_ledger(allowance).into_bytes(),
             };
+            // With it, the repair's own write, which the executor then builds on, or on one
+            // built on it or later, also when its batch lands later: and, after a handoff, it
+            // is this app's first ledger write since, which the `ledger_handoff` is checked
+            // against (Paykit spec 8.3, "Handoff").
+            let mut mark = self
+                .ledger_base_mark(allowance)
+                .await?
+                .unwrap_or(LedgerBase {
+                    record: *allowance,
+                    handoff: None,
+                    repair: None,
+                });
+            mark.repair = Some(RepairWrite {
+                built_on_generation: now.basis.built_on.generation,
+                built_on_version: now.basis.built_on.version,
+                value_hash: pubky_switch_core::enc::hash(&now.ledger),
+                generation: self.app.own_identity().generation(),
+            });
+            if let Some(wait) = &mut mark.handoff {
+                if wait.first.is_none() {
+                    let before = self.kept_ledger(allowance).await?.map(|(kept, _)| kept);
+                    wait.first = Some(first_write(now.basis.built_on, before.as_ref()));
+                }
+            }
+            let base = state::local_put(&key::ledger_base(allowance), &mark)?;
             match Box::pin(
                 self.app
-                    .submit_batch(OpBatch::new().entry(write).local(lifted)),
+                    .submit_batch(OpBatch::new().entry(write).locals(vec![lifted, base])),
             )
             .await
             {
@@ -3361,6 +3955,23 @@ impl Paykit {
         // unless a ledger record is already at its key, which it takes as one it didn't
         // accept and writes no empty ledger over (Paykit spec 8.3, "A grant implies a
         // ledger").
+        // A grant that hands the Allowance on to this app waits for the previous executor's
+        // `ledger_handoff` (Paykit spec 8.3, "Handoff"), in this app's own journal with the
+        // grant; a grant this app signs again is no handoff.
+        if next.grants.len() > 1 && previous != Some(self.app_id()) {
+            locals.push(state::local_put(
+                &key::ledger_base(record),
+                &LedgerBase {
+                    record: *record,
+                    handoff: Some(HandoffWait {
+                        generation: built_on.generation,
+                        version: built_on.version,
+                        first: None,
+                    }),
+                    repair: None,
+                },
+            )?);
+        }
         let lt = ledger_target(&held.counterparty, &held.allowance_id);
         let ledger_key = self.app.record_key(&lt)?;
         let ledger_held = self.app.shared_record(&ledger_key).await?.is_some();
@@ -3641,6 +4252,7 @@ mod tests {
             item_hash: [3; 32],
             value: ledger.to_json().unwrap(),
             dropped: Vec::new(),
+            restored: false,
         }
     }
 

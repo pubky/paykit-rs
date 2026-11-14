@@ -75,6 +75,7 @@
 //! | `lv/<record key>` | the last ledger version the executor accepted, with its content and the attempts of its journal entries under the Allowance that this version doesn't list (`dropped`, `executor.rs`, Paykit spec 8.3); its content at most the 256 KiB less 4 bytes a shared record holds (`MAX_LEDGER_VALUE`), `dropped` only attempts of journal entries this app holds naming the Allowance, a pruned entry's attempt leaving it in the prune's commit, and a restore refuses a backup holding a longer content, or an attempt in `dropped` no restored journal entry naming the Allowance holds | |
 //! | `la` | the first rollback of an Allowance ledger this app found, the record, the generation of the own `identity.json` it was found at and the rule its ledger broke; while that generation stands the app makes no new attempt (`executor.rs`, Paykit spec 8.3); one key, so at most one; restored | |
 //! | `el/<record key>` | the first grant's empty ledger, not yet sent or sent without a verified answer (`executor.rs`); never restored, so a restored executor takes a missing ledger as usage history lost | |
+//! | `lb/<record key>` | the ledger write an executor that holds no ledger version it may build on waits to build on: after a handoff to it, the grant whose `ledger_handoff` names it; after a repair its user confirmed, the version the repair's write built on and the hash of its value (`executor.rs`, Paykit spec 8.3); written with the grant or in the repair's batch, gone once a version is kept; never restored, so a restored executor builds only through the repair | |
 //! | `fc/<record key>` | the version of the ignored current write of an Allowance record its user confirmed the executor may pay under (`executor.rs`); never restored | |
 //! | `eo/<record key>` | this app's own crossing end of an Allowance, recorded while sends to its counterparty were held, whose message is sent from the record once they aren't (`allowances.rs`, `Paykit::send_owed_ends`); never restored | |
 
@@ -93,7 +94,7 @@ use crate::activity::{ActivityTarget, KeptSide};
 use crate::allowances::{allowance_target, ConsentEntry, NoticeTarget, OwedEnd};
 use crate::app_records::SeenRecords;
 use crate::error::{PaykitError, Result};
-use crate::executor::{EmptyLedgerMark, FlagConfirmed, KeptLedger, LedgerAlarm};
+use crate::executor::{EmptyLedgerMark, FlagConfirmed, KeptLedger, LedgerAlarm, LedgerBase};
 use crate::hold::HeldAnswer;
 use crate::hold::MissedHold;
 use crate::hold::OwnResendOwed;
@@ -1104,6 +1105,20 @@ impl Stored for EmptyLedgerMark {
     }
 }
 
+impl sealed::Sealed for LedgerBase {}
+
+/// The ledger write an executor waits to build on: of the Allowance record its key names,
+/// after a handoff for a grant after the first, after a repair at a version a write gives
+/// or the absence (`{0, 0}`), any other form no run writes.
+impl Stored for LedgerBase {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::LedgerBase(record) if self.record == *record && self.well_formed() => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for OwedEnd {}
 
 /// An own crossing end owed while sends were held: of the Allowance record its key names,
@@ -1294,6 +1309,12 @@ pub(crate) mod key {
 
     pub(crate) fn empty_ledger(record_key: &[u8; 32]) -> String {
         format!("el/{}", b64(record_key))
+    }
+
+    /// The ledger write the executor of the Allowance whose record is `record_key` waits to
+    /// build on.
+    pub(crate) fn ledger_base(record_key: &[u8; 32]) -> String {
+        format!("lb/{}", b64(record_key))
     }
 
     pub(crate) fn flag_confirmed(record_key: &[u8; 32]) -> String {
@@ -1603,6 +1624,8 @@ pub(crate) enum StateKey {
     KeptLedger([u8; 32]),
     /// `el/<record key>`: the first grant's empty ledger, not yet answered.
     EmptyLedger([u8; 32]),
+    /// `lb/<record key>`: the ledger write an executor waits to build on.
+    LedgerBase([u8; 32]),
     /// `fc/<record key>`: an ignored current write the user confirmed paying under.
     FlagConfirmed([u8; 32]),
     /// `la`: the rollback of an Allowance ledger this app found.
@@ -1715,6 +1738,7 @@ impl StateKey {
                     "en" => Self::NoticeTarget(msg_id(rest)?),
                     "lv" => Self::KeptLedger(b64_32(rest)?),
                     "el" => Self::EmptyLedger(b64_32(rest)?),
+                    "lb" => Self::LedgerBase(b64_32(rest)?),
                     "fc" => Self::FlagConfirmed(b64_32(rest)?),
                     "eo" => Self::OwedEnd(b64_32(rest)?),
                     "rs" => {
@@ -2395,6 +2419,7 @@ mod tests {
             (key::notice_target(id), StateKey::NoticeTarget(id.into())),
             (key::kept_ledger(&pubky), StateKey::KeptLedger(pubky)),
             (key::empty_ledger(&pubky), StateKey::EmptyLedger(pubky)),
+            (key::ledger_base(&pubky), StateKey::LedgerBase(pubky)),
             (key::flag_confirmed(&pubky), StateKey::FlagConfirmed(pubky)),
         ];
         for (built, family) in cases {

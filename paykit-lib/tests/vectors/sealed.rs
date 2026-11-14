@@ -2077,7 +2077,10 @@ response, a second acceptance or rejection from the proposal's recipient, referr
 proposal, with another hash than the record's response (spec 8.3). accepted are \
 records a reader binds; refused are those it refuses, the last two records whose stored \
 message check 10 drops: a rejection carrying executor_app_id, and a conflicting proposal \
-whose terms aren't valid. reason is paykit-lib's wording.";
+whose terms aren't valid. Among them, an Allowance handed on from alice's executor to her \
+wallet, its grant history with both grants, and the executor's ledger_handoff for the \
+wallet's grant, which a reader binds, and the same ledger_handoff naming a ledger version no \
+write gives, which it refuses. reason is paykit-lib's wording.";
 
 /// A case of `allowance_records`: its name and the record.
 type AllowanceCase = (&'static str, AllowanceRecord);
@@ -2250,6 +2253,19 @@ fn allowance_cases(keys: &Keys) -> (Vec<AllowanceCase>, Vec<AllowanceCase>) {
     let (more_accepted, more_refused) = conflicting_response_cases(keys, &base, rejection);
     accepted.extend(more_accepted);
     refused.extend(more_refused);
+    let handed = handed_on(keys, &base);
+    let mut no_write = handed.clone();
+    if let Some(handoff) = no_write.ledger_handoff.as_mut() {
+        handoff.ledger.version = 0;
+    }
+    accepted.push((
+        "an Allowance handed on from the executor to the wallet, with the executor's ledger_handoff",
+        handed,
+    ));
+    refused.push((
+        "a ledger_handoff naming a ledger version no write gives",
+        no_write,
+    ));
     (accepted, refused)
 }
 
@@ -2458,6 +2474,192 @@ fn record_with_unstorable(
 
 fn signed_json_doc(doc: &pubky_switch_core::sig::SignedDoc) -> Value {
     serde_json::json!({ "body": doc.body, "sig": doc.sig })
+}
+
+/// The certificate of alice's wallet holding the executor's scopes, signed again by her
+/// identity key, so the wallet may take a grant.
+fn wallet_executor_cert(keys: &Keys) -> AppCert {
+    let scopes = crate::common::paykit_signed_scopes("executor").unwrap();
+    let names: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
+    crate::common::reissued(
+        keys,
+        "wallet",
+        scopes,
+        &paykit_lib::scopes::permissions_for(&names),
+    )
+}
+
+/// `base` with its grant history: alice's executor's grant on the record at `{1, 1}`, then
+/// her wallet's at `{1, 3}`, which hands the Allowance on; and the executor's
+/// `ledger_handoff` for the wallet's grant, naming the ledger write at `{1, 2}` (Paykit wire
+/// 5.4, "Ledger handoff").
+fn handed_on(keys: &Keys, base: &AllowanceRecord) -> AllowanceRecord {
+    use paykit_lib::grant::{ExecutorGrant, LedgerHandoff};
+    use paykit_lib::records::GrantEntry;
+    use pubky_switch_core::ops::RecordVersion;
+    let alice = pubky(ALICE);
+    let terms = base.terms_hash().unwrap();
+    let at = |version| RecordVersion {
+        generation: 1,
+        version,
+    };
+    let entry = |app: &str, cert: AppCert, version| {
+        let grant = ExecutorGrant::sign(
+            &keys.app(app).keys,
+            cert.signed().clone(),
+            &alice,
+            &base.counterparty,
+            &base.allowance_id,
+            terms,
+            1,
+            at(version),
+        );
+        GrantEntry {
+            built_on: at(version),
+            grant,
+            origin: Default::default(),
+        }
+    };
+    let grants = vec![
+        entry("executor", crate::common::executor_cert(keys), 1),
+        entry("wallet", wallet_executor_cert(keys), 3),
+    ];
+    let handoff = LedgerHandoff::sign(
+        &keys.app("executor").keys,
+        crate::common::executor_cert(keys).signed().clone(),
+        &alice,
+        &base.counterparty,
+        &base.allowance_id,
+        at(3),
+        at(2),
+        [9; 32],
+    );
+    AllowanceRecord {
+        grant: grants.last().map(|entry| entry.grant.clone()),
+        grants,
+        ledger_handoff: Some(handoff),
+        ..base.clone()
+    }
+}
+
+#[test]
+fn test_ledger_handoff_binds_and_writes_back() {
+    // A record with a ledger_handoff binds at its key and writes it back as read, an unknown
+    // member in it included; one whose ledger_handoff isn't of its shape doesn't bind.
+    let keys = Keys::from_seeds();
+    let alice = pubky(ALICE);
+    let nk = keys.identity(&alice).naming_key();
+    let base = AllowanceRecord::read(&allowance_record_value(&keys), &alice).unwrap();
+    let handed = handed_on(&keys, &base);
+    let key = handed.record_key(&nk).unwrap();
+    let json = handed.to_json().unwrap();
+    let read = AllowanceRecord::bind(&json, &alice, &nk, &key).unwrap();
+    assert_eq!(read.ledger_handoff, handed.ledger_handoff);
+    assert_eq!(read.to_json().unwrap(), json);
+    let mut value: Value = serde_json::from_slice(&json).unwrap();
+    value["ledger_handoff"]["note"] = serde_json::json!({ "by": "a later version" });
+    let with_unknown = serde_json::to_vec(&value).unwrap();
+    let read = AllowanceRecord::bind(&with_unknown, &alice, &nk, &key).unwrap();
+    let written: Value = serde_json::from_slice(&read.to_json().unwrap()).unwrap();
+    assert_eq!(written["ledger_handoff"]["note"]["by"], "a later version");
+    // A later handoff's replaces it: the replacement gets none of its members.
+    let mut replaced = read.clone();
+    if let Some(handoff) = replaced.ledger_handoff.as_mut() {
+        *handoff = paykit_lib::grant::LedgerHandoff {
+            origin: Default::default(),
+            ..handoff.clone()
+        };
+    }
+    let written: Value = serde_json::from_slice(&replaced.to_json().unwrap()).unwrap();
+    assert!(written["ledger_handoff"].get("note").is_none());
+    value["ledger_handoff"]["item_hash"] = serde_json::json!(b64(&[9; 31]));
+    let bad = serde_json::to_vec(&value).unwrap();
+    assert!(AllowanceRecord::bind(&bad, &alice, &nk, &key).is_err());
+}
+
+#[test]
+fn test_ledger_handoff_counts_only_signed_by_the_previous_executor() {
+    // The executor's handoff to the wallet counts; the same handoff signed by the wallet, or
+    // altered after it was signed, or naming the first grant, doesn't verify and is flagged by
+    // a reader holding the record without it; once another grant of the executor follows,
+    // the handoff to the wallet counts for nothing.
+    use paykit_lib::grant::LedgerHandoff;
+    use pubky_switch_core::ops::RecordVersion;
+    let keys = Keys::from_seeds();
+    let alice = pubky(ALICE);
+    let base = AllowanceRecord::read(&allowance_record_value(&keys), &alice).unwrap();
+    let handed = handed_on(&keys, &base);
+    let handoff = handed.ledger_handoff.clone().unwrap();
+    assert_eq!(
+        handed.ledger_handoff_counts(&alice).unwrap(),
+        Some(&handoff)
+    );
+    let held = AllowanceRecord {
+        ledger_handoff: None,
+        ..handed.clone()
+    };
+    held.check_later_handoff(&handed, &alice).unwrap();
+    let at = |version| RecordVersion {
+        generation: 1,
+        version,
+    };
+    let by_wallet = LedgerHandoff::sign(
+        &keys.app("wallet").keys,
+        wallet_executor_cert(&keys).signed().clone(),
+        &alice,
+        &base.counterparty,
+        &base.allowance_id,
+        at(3),
+        at(2),
+        [9; 32],
+    );
+    let altered = LedgerHandoff {
+        item_hash: [8; 32],
+        ..handoff.clone()
+    };
+    let first = LedgerHandoff::sign(
+        &keys.app("executor").keys,
+        crate::common::executor_cert(&keys).signed().clone(),
+        &alice,
+        &base.counterparty,
+        &base.allowance_id,
+        at(1),
+        at(2),
+        [9; 32],
+    );
+    for (name, wrong) in [
+        ("by the wallet", by_wallet),
+        ("altered", altered),
+        ("the first grant", first),
+    ] {
+        let later = AllowanceRecord {
+            ledger_handoff: Some(wrong),
+            ..handed.clone()
+        };
+        assert!(later.ledger_handoff_counts(&alice).is_err(), "{name}");
+        assert!(held.check_later_handoff(&later, &alice).is_err(), "{name}");
+        // A write keeping the one it holds isn't flagged.
+        later.check_later_handoff(&later, &alice).unwrap();
+    }
+    // Handed back to the executor: the handoff to the wallet is of an earlier handoff.
+    let mut back = handed.clone();
+    let grant = paykit_lib::grant::ExecutorGrant::sign(
+        &keys.app("executor").keys,
+        crate::common::executor_cert(&keys).signed().clone(),
+        &alice,
+        &base.counterparty,
+        &base.allowance_id,
+        base.terms_hash().unwrap(),
+        1,
+        at(5),
+    );
+    back.grants.push(paykit_lib::records::GrantEntry {
+        built_on: at(5),
+        grant: grant.clone(),
+        origin: Default::default(),
+    });
+    back.grant = Some(grant);
+    assert_eq!(back.ledger_handoff_counts(&alice).unwrap(), None);
 }
 
 /// `allowance_records`, as paykit-lib generates it.

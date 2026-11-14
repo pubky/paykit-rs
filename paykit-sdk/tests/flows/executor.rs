@@ -120,7 +120,7 @@ pub(crate) async fn request(
 /// pay it: dated after the block floor the restore owes plus the clock tolerance, and, as
 /// every request open while the restore's hold lasts, confirmed by the user as possibly
 /// cancelled (Paykit spec 7.2, "What a restore loses"; 8.1, "Blocked counterparties").
-async fn request_after_restore(
+pub(crate) async fn request_after_restore(
     w: &World,
     shop: &mut Paykit,
     wallet: &mut Paykit,
@@ -982,7 +982,7 @@ async fn test_executor_journal_entry_naming_another_allowance_is_corrupt_at_the_
 
 /// `wallet` backed up and restored, reconciled, read, and its user's confirmations after
 /// the restore given for `record` and `request`.
-async fn restored_confirmed(w: &World, wallet: Paykit, record: &[u8; 32]) -> Paykit {
+pub(crate) async fn restored_confirmed(w: &World, wallet: Paykit, record: &[u8; 32]) -> Paykit {
     let mut wallet = wallet;
     let backup = wallet.backup().await.unwrap();
     drop(wallet);
