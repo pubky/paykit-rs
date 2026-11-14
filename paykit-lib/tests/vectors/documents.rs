@@ -204,20 +204,20 @@ fn check_labelled_scope_rejections(keys: &Keys, d: &Value) {
 /// The top-level description, which names every member.
 const DESCRIPTION: &str = "Paykit's signed documents and Paykit's checks of the Switch's \
 certificates and app records (wire 3): the executor grant, alone and as the Allowance \
-record's grant history holds it, with Paykit's own executor certificate, and the Switch \
-set's, which Paykit's verifiers refuse; Paykit's own phone certificate, and certificates \
+record's grant history holds it, with Paykit's own executor certificate, and the executor's \
+certificate without paykit_contacts, which Paykit's verifiers refuse; Paykit's own phone certificate, and certificates \
 holding paykit_pay without paykit_contacts, which they refuse; certificates that Paykit's verifiers refuse for their \
 scopes or their permissions, certificates that hold another protocol's scopes beside \
 Paykit's or instead of them, and app records as a Paykit reader reads their Paykit member. \
-The certificates are the Switch set's documents.json certificates with scopes or \
-permissions changed, and the app records its shop app record with its Paykit member changed.";
+The certificates are this file's certificates with scopes or permissions changed, and the \
+app records the shop's app record with its Paykit member changed.";
 
 const MULTI_PROTOCOL_DESCRIPTION: &str = "Wire 3.1, spec 3.2, Switch wire 3.1 \"Several \
 protocols\" and \"Scope roots\": certificates that hold another protocol's scopes beside \
 Paykit's or instead of them, and one whose extension prefix doesn't start with paykit-, as \
 Paykit's \
-verifiers check them. Each is the shop certificate of the Switch set's documents.json (the \
-last, the cap certificate) with scopes and permissions changed, signed again by bob's \
+verifiers check them. Each is the shop's certificate of this file's certificates (the \
+last, the cap's) with scopes and permissions changed, signed again by bob's \
 identity key; the switch takes every one (switch_accepts). A scope whose root, the part \
 before any :, isn't Paykit's (paykit, or paykit followed by _ or - and more characters) is \
 another protocol's, such as chat. \
@@ -234,8 +234,8 @@ paykit-. reason is paykit-lib's wording at a \
 Paykit verifier, of the first check that refuses it.";
 
 const APP_RECORDS_DESCRIPTION: &str = "Wire 3.2: Paykit's member of an app record, \
-protocols.paykit, as a Paykit reader reads it. Each record is the shop app record of the \
-Switch set's documents.json with its paykit member changed or removed (and, for public \
+protocols.paykit, as a Paykit reader reads it. Each record is the shop's app record, which \
+carries the shop's certificate of this file's certificates, with its paykit member changed or removed (and, for public \
 endpoints with expires_at null, expires_at null too), signed again with the shop's signing \
 key; the signatures verify. The switch takes every one, since it checks only the form of \
 protocols (Switch wire 3.2). accepted are records a Paykit reader takes, the first the \
@@ -397,10 +397,10 @@ fn app_record_case(keys: &Keys, name: &str, member: &Value) -> Value {
 const EXECUTOR_CERTIFICATES_DESCRIPTION: &str = "Spec 3.1, wire 3.1 and 3.3: the executor's \
 certificate. paykit_allowance_execute requires paykit_allowance, paykit_pay and \
 paykit_contacts, so that every executor reads the deny list. accepted is Paykit's own executor certificate, which the executor grant \
-of this file carries: the Switch set's documents.json executor certificate with paykit_contacts \
-added to its scopes and the permissions its scopes need, signed again by alice's identity \
-key. refused is the Switch set's executor certificate as it is, which holds \
-paykit_allowance_execute without paykit_contacts: the switch takes it (switch_accepts), and Paykit's \
+of this file carries: the executor's certificate of this file's certificates, which holds \
+paykit_contacts. refused is that certificate with paykit_contacts removed from its scopes, \
+so that it holds paykit_allowance_execute without paykit_contacts, and the permissions its \
+scopes need, signed again by alice's identity key: the switch takes it (switch_accepts), and Paykit's \
 verifiers refuse it. reason is paykit-lib's wording at a Paykit verifier.";
 
 /// `executor_certificates` (Paykit spec 3.1): Paykit's own executor certificate, which the
@@ -459,11 +459,11 @@ fn check_executor_certificates(keys: &Keys, d: &Value) {
 const PAYER_CERTIFICATES_DESCRIPTION: &str = "Spec 3.1, wire 3.1: a paying app's \
 certificate. paykit_pay requires paykit_contacts, so that every paying app reads the deny list and pays \
 no counterparty the user blocked. accepted is Paykit's own phone certificate, which the \
-phone's messages stored in sealed.json carry: the Switch set's documents.json phone \
-certificate with paykit_contacts added to its scopes and the permissions its scopes need, \
-signed again by alice's identity key. refused are the Switch set's phone certificate as it is, \
-which holds paykit_pay and paykit_allowance without paykit_contacts, and the Switch set's wallet certificate \
-with paykit_pay alone and the permissions paykit_pay needs, signed again by alice's identity key: the \
+phone's messages stored in sealed.json carry: the phone's certificate of this file's \
+certificates, which holds paykit_contacts. refused are that certificate with paykit_contacts \
+removed from its scopes, so that it holds paykit_pay and paykit_allowance without \
+paykit_contacts, and the permissions its scopes need, signed again by alice's identity key, \
+and the wallet's certificate of this file's certificates with paykit_pay alone and the permissions paykit_pay needs, signed again by alice's identity key: the \
 switch takes each (switch_accepts), and Paykit's verifiers refuse each. reason is \
 paykit-lib's wording at a Paykit verifier.";
 

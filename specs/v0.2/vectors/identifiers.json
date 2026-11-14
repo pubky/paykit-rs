@@ -1,5 +1,5 @@
 {
-  "description": "Paykit's derived identifiers (wire 1.5): request hashes, obligation IDs with their blinded inputs, and the terms hash. Obligations are blinded with the naming key of the identity whose switch holds them (the Switch set's keys.json). Inputs refer to the Switch set's keys.json and this set's messages.json. The Switch's identifiers (kid, App ID, blinded inputs, policy hashes, collection IDs, record keys, invite codes) are the Switch set's identifiers.json, with Paykit's collections and natural keys as their inputs.",
+  "description": "Paykit's derived identifiers (wire 1.5): request hashes, obligation IDs with their blinded inputs, and the terms hash. Obligations are blinded with the naming key of the identity whose switch holds them (this set's keys.json). Inputs refer to this set's keys.json and messages.json. The Switch's identifiers that Paykit's collections and natural keys give are this set's policies, with their policy hashes, and record_keys, with their blinded natural keys and record keys; the App IDs are keys.json's.",
   "obligations": [
     {
       "blinded_payee": "iTW8RMi4eifA4aUAPeeZHP9QmSJkSo3FiiO_wPnx9SQ",

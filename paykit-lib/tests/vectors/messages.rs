@@ -412,7 +412,8 @@ const MULTI_PROTOCOL_DESCRIPTION: &str = "Wire 4.1 check 8, spec 3.2, 3.3, Switc
 \"Several protocols\": messages.json's payment_request and resend_request_ids, as the shop \
 signs them, each presented with a certificate of the shop's keys that holds another \
 protocol's scope, chat (sender_cert, documents.json multi_protocol_certificates), at alice's \
-wallet (recipient_app), whose certificate is the Switch set's. Another protocol's scopes, \
+wallet (recipient_app), whose certificate is its certificate of documents.json \
+certificates. Another protocol's scopes, \
 and the switch permissions they bring, authorize no Paykit message: each kind still needs \
 its Paykit scope, and a resend_request needs a Paykit App, one holding at least one Paykit \
 scope. accepted are messages the wallet takes at check 8, from the shop holding paykit_request \

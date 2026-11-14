@@ -685,7 +685,7 @@ fn side_collection(side: ActivitySide) -> &'static str {
 /// The top-level description, which names every member.
 const DESCRIPTION: &str =
     "Paykit's sealed record values (wire 5), sealed as the Switch's sealed values are (the \
-Switch set's sealed.json) under alice's scope_key(2, \"paykit_pay\") from the Switch set's \
+Switch set's sealed.json) under alice's scope_key(2, \"paykit_pay\") from this set's \
 keys.json, with record keys blinded with alice's naming key. binding_accepted holds record \
 values, as they are sealed, that a reader binds to their record keys, recomputed with \
 alice's naming key (wire 5.4, 5.5): a payment_lists record, an allowances record and its \
