@@ -77,8 +77,12 @@
 //!
 //! **Backups** carry the marks whole, their times and when they were last asked, so a
 //! restore neither loses nor resets them; a restore takes each mark bound to its key's
-//! sender. They carry the notices owed too ([`LostOwed`]): the restored outbox doesn't know
-//! the request one names, so it is told.
+//! sender. They carry the notices owed too ([`LostOwed`]), and the client's backup carries
+//! the outbox's records under their `msg_id`s, not its sent messages: the restored outbox
+//! holds the request a notice names as the backup's outbox did, and the pass after the read
+//! settles the notice from its answer. A request delivered within the window after the
+//! restore tells nothing; one still queued, refused, or delivered before the backup and gone
+//! from the outbox then tells the window lost.
 
 use pubky_switch_client::app::Delivery;
 use pubky_switch_client::app::Protocol as _;
@@ -1037,9 +1041,14 @@ impl Paykit {
     /// Settle every notice owed on a block's mark the receive step dropped for the bound
     /// (`bl/`, [`LostOwed`]), each in its own commit: a request the outbox shows delivered
     /// before the mark's expiry tells nothing; one still queued, refused, kept in a batch, or
-    /// not known to the outbox (one queued before a restore included) tells the window lost.
-    /// Either way the owed notice goes in the commit that settles it. A failed read returns
-    /// its error, leaving that notice and the ones after it owed for the next pass.
+    /// not known to the outbox tells the window lost. Either way the owed notice goes in the
+    /// commit that settles it. A failed read returns its error, leaving that notice and the
+    /// ones after it owed for the next pass.
+    ///
+    /// After a restore the outbox holds the records the backup carried, under the same
+    /// `msg_id`s, and none of the sent messages: a request still queued at the backup is
+    /// queued again, and settles as it is delivered or not; one delivered before the backup
+    /// whose record had left the outbox isn't known, and tells the window lost.
     ///
     /// Each notice is told at most once: the notice and the deletion of what owed it are one
     /// commit, and a crash before that commit leaves the owed notice as it was, settled anew

@@ -526,9 +526,11 @@ pub(crate) fn restore_paykit_layer(
             }
             // A notice of lost messages owed is carried as the marks and the notices are: the
             // mark it stands for is gone, so a backup without it would lose the notice. The
-            // restored outbox doesn't know a request queued before the restore, so it settles
-            // as one not delivered, and is told. Its times aren't bounded as a mark's are: it
-            // asks nothing, and its latest time is already in the raise owed, which is.
+            // restore writes back the outbox's records the backup carries, under the same
+            // `msg_id`s, and no sent messages: the pass after the read settles the notice from
+            // the restored outbox's answer on its request (`Paykit::settle_lost_owed`). Its
+            // times aren't bounded as a mark's are: it asks nothing, and its latest time is
+            // already in the raise owed, which is.
             StateKey::LostOwed { .. } => {
                 state::restored::<crate::marks::LostOwed>(&key, &value, &binder)
                     .map_err(|_| unread())?;

@@ -765,6 +765,12 @@ async fn bound_drops_bob_at_the_next_receive_step(
             .await
             .unwrap();
     }
+    Box::pin(bound_filled_and_carol_sends(w, wallet)).await;
+}
+
+/// The bound on marks filled, and carol, whom alice blocks, sends a request: the next
+/// receive step counts it in a new mark, and the bound drops the speculative one.
+async fn bound_filled_and_carol_sends(w: &World, wallet: &mut Paykit) {
     let now = w.clock.now_ms();
     crate::common::seed_marks(wallet, "bd/", paykit_sdk::MAX_DROPPED_MARKS - 1, now).await;
     wallet.app_mut().invite(&w.carol_id()).await.unwrap();
@@ -893,6 +899,121 @@ async fn test_blocked_return_delivery_read_failed_at_the_first_pass_undelivered_
     w.clock.advance_ms(11 * MINUTE_MS);
     Box::pin(wallet.receive(None)).await.unwrap();
     assert_eq!(lost_for(&wallet, &w.bob_id()).await, 1);
+}
+
+/// [`bound_drops_bob_at_the_next_receive_step`] naming `undelivered` as queued, on a store
+/// whose read of its delivery fails at the receive that drops bob's mark: the notice stays
+/// owed, and the backup taken then carries it. Returns the backup.
+async fn backup_owing_a_lost_notice(w: &World, undelivered: &str) -> paykit_sdk::PaykitBackup {
+    let failing = Arc::new(FailingDeliveryReads::default());
+    let mut wallet = contacts_wallet(w, Arc::clone(&failing) as Arc<dyn StateStore>).await;
+    let mut shop = w.shop().await;
+    Box::pin(bound_drops_bob_at_the_next_receive_step(
+        w,
+        &mut wallet,
+        &mut shop,
+        Some(undelivered),
+    ))
+    .await;
+    failing.fail(Some(undelivered));
+    assert!(Box::pin(wallet.receive(None)).await.is_err());
+    failing.fail(None);
+    bob_dropped_for_carol(w, &wallet).await;
+    assert_eq!(lost_for(&wallet, &w.bob_id()).await, 0);
+    assert_eq!(lost_owed(&wallet).await, 1);
+    wallet.backup().await.unwrap()
+}
+
+#[tokio::test]
+async fn test_blocked_return_restore_owed_lost_notice_settled_once_after_the_restore() {
+    // A backup carries the notice owed on bob's dropped mark, whose request the outbox
+    // holds nothing of. The restored outbox holds what the backup's did, nothing under that
+    // `msg_id`: the first receive tells bob's window lost and keeps nothing owed, and the
+    // next doesn't tell it again.
+    let w = World::new();
+    let backup = Box::pin(backup_owing_a_lost_notice(&w, UNDELIVERED)).await;
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(lost_owed(&restored).await, 1);
+    w.clock.advance_ms(11 * MINUTE_MS);
+    Box::pin(restored.receive(None)).await.unwrap();
+    assert_eq!(lost_for(&restored, &w.bob_id()).await, 1);
+    assert_eq!(lost_owed(&restored).await, 0);
+    w.clock.advance_ms(11 * MINUTE_MS);
+    Box::pin(restored.receive(None)).await.unwrap();
+    assert_eq!(lost_for(&restored, &w.bob_id()).await, 1);
+}
+
+#[tokio::test]
+async fn test_blocked_return_restore_owed_lost_notice_delivered_after_the_restore_not_told() {
+    // The request bob's mark names is still queued when the bound drops the mark, its
+    // delivery held, and the backup taken then carries the owed notice and the outbox. The
+    // restore puts the request back under the same `msg_id`; once it is delivered, the
+    // receive after finds it delivered within the window: nothing is told, nothing owed.
+    let w = World::new();
+    let failing = Arc::new(FailingDeliveryReads::default());
+    let mut wallet = contacts_wallet(&w, Arc::clone(&failing) as Arc<dyn StateStore>).await;
+    let mut shop = w.shop().await;
+    dropped_for_the_block(&w, &mut wallet, &mut shop).await;
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet.app_mut().hold_queued(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    let key = format!("bd/{}", pubky_switch_core::enc::b64(&w.bob_id()));
+    let marks = wallet.app().protocol_scan(key.as_bytes()).await.unwrap();
+    let mut mark: serde_json::Value = serde_json::from_slice(&marks[0].1).unwrap();
+    let msg_id = mark["d"]["queued"]["msg_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{mark}"))
+        .to_owned();
+    mark["d"]["speculative"] = serde_json::Value::Bool(true);
+    wallet
+        .app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: key.into_bytes(),
+            value: serde_json::to_vec(&mark).unwrap(),
+        }])
+        .await
+        .unwrap();
+    Box::pin(bound_filled_and_carol_sends(&w, &mut wallet)).await;
+    failing.fail(Some(&msg_id));
+    assert!(Box::pin(wallet.receive(None)).await.is_err());
+    failing.fail(None);
+    bob_dropped_for_carol(&w, &wallet).await;
+    assert_eq!(lost_owed(&wallet).await, 1);
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(lost_owed(&restored).await, 1);
+    restored
+        .app_mut()
+        .release_queued(&w.bob_id())
+        .await
+        .unwrap();
+    Box::pin(restored.flush()).await.unwrap();
+    assert!(matches!(
+        restored.app().delivery(&msg_id).await.unwrap(),
+        Some(pubky_switch_client::app::Delivery::Accepted { .. })
+    ));
+    w.clock.advance_ms(11 * MINUTE_MS);
+    Box::pin(restored.receive(None)).await.unwrap();
+    assert_eq!(lost_for(&restored, &w.bob_id()).await, 0);
+    assert_eq!(lost_owed(&restored).await, 0);
 }
 
 #[tokio::test]
