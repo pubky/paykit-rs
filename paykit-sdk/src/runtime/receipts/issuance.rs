@@ -240,6 +240,36 @@ where
         self.receipt_issuance_records(counterparty).await
     }
 
+    /// Return the decrypted Receipt of one local issuance record.
+    ///
+    /// Reads only local SDK state. Any App sharing the identity can read a
+    /// Receipt another App issued, including its Receipt Metadata, which
+    /// [`ReceiptIssuanceView`] omits. The Receipt Decryption Key comes from the
+    /// stored Receipt Access, so this works before Receipt Access is delivered.
+    /// Returns `NotFound` when no issuance record matches and `Policy` while
+    /// the counterparty is `Blocked`.
+    pub async fn issued_receipt(
+        &self,
+        counterparty: &PubkyPublicKey,
+        receipt_id: &str,
+    ) -> Result<paykit_lib::Receipt> {
+        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
+        if identity.public_key.is_none() {
+            return Err(PaykitSdkError::Identity {
+                context: "no local Pubky identity available for receipt lookup".into(),
+                source: None,
+            });
+        }
+        self.ensure_peer_not_blocked(counterparty).await?;
+        let record = load_receipt_issuance_record(&self.storage, counterparty, receipt_id)
+            .await?
+            .ok_or_else(|| PaykitSdkError::NotFound {
+                context: format!("Receipt issuance {receipt_id} was not found"),
+                source: None,
+            })?;
+        decrypt_issued_receipt(&record)
+    }
+
     /// List issued receipts across non-blocked counterparties, newest first.
     pub async fn issued_receipts(&self) -> Result<Vec<ReceiptIssuanceView>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;

@@ -296,6 +296,81 @@ async fn test_receipt_issuance_cannot_be_reused_or_processed_by_another_app() {
 }
 
 #[tokio::test]
+async fn test_issued_receipt_is_readable_by_another_app_on_the_identity() {
+    let storage = registered_test_storage();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .save_identity_state(IdentityState {
+            public_key: Some(local_public_key),
+            initialized_at: FixedClock.now(),
+        })
+        .await
+        .unwrap();
+    let wallet = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("first-app").unwrap(),
+        FixedClock,
+    );
+    let merchant = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("other-app").unwrap(),
+        FixedClock,
+    );
+    let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
+    wallet
+        .prepare_receipt_issuance(counterparty.clone(), receipt_draft(receipt_id))
+        .await
+        .unwrap();
+
+    let receipt = merchant
+        .issued_receipt(&counterparty, receipt_id)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        receipt,
+        wallet
+            .issued_receipt(&counterparty, receipt_id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(receipt.receipt_id.as_str(), receipt_id);
+    assert_eq!(receipt.metadata, receipt_draft(receipt_id).metadata);
+}
+
+#[tokio::test]
+async fn test_issued_receipt_reports_unknown_receipt_as_not_found() {
+    let storage = registered_test_storage();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .save_identity_state(IdentityState {
+            public_key: Some(local_public_key),
+            initialized_at: FixedClock.now(),
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+
+    let missing = sdk
+        .issued_receipt(&counterparty, "550e8400-e29b-41d4-a716-446655440000")
+        .await;
+
+    assert!(matches!(missing, Err(PaykitSdkError::NotFound { .. })));
+}
+
+#[tokio::test]
 async fn test_prepare_receipt_issuance_rejects_reused_receipt_id_for_other_counterparty() {
     let storage = registered_test_storage();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());

@@ -1,5 +1,6 @@
 use std::{
     any::Any,
+    collections::HashMap,
     future::pending,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -12,8 +13,9 @@ use std::{
 use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use paykit_lib::{
-    BillingPeriod, PaymentAmount, PaymentEndpointIdentifier, PaymentReference, PaymentRequestId,
-    PaymentRequestTerms, PaymentRequestTermsBuilder, Recurrence, RecurrenceConfig, RecurrenceUnit,
+    BillingPeriod, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
+    PaymentReference, PaymentRequestId, PaymentRequestTerms, PaymentRequestTermsBuilder, ReceiptId,
+    Recurrence, RecurrenceConfig, RecurrenceUnit,
 };
 use paykit_sdk::{
     storage::{StorageOperation, StorageTransactionCallback},
@@ -4564,6 +4566,156 @@ async fn test_homeserver_backed_apps_complete_private_payment_flow() {
         Some(payment_request_id.as_str())
     );
     assert_eq!(retrieved.app_id, pair.server.app_id);
+}
+
+/// A merchant App proposes a request for the shared identity and the wallet
+/// App that received the money issues the Receipt for it.
+#[tokio::test]
+async fn test_wallet_app_issues_receipt_for_request_another_app_proposed() {
+    let pair = linked_homeserver_shared_pair().await;
+    pair.server
+        .sdk
+        .publish_paykit_app(
+            PaykitApp::new(
+                "Paykit Server",
+                PaykitAppCapabilities {
+                    private_payments: true,
+                    payment_requests: true,
+                    receipts: false,
+                    outgoing_payments: false,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .expect("Paykit Server should publish its App without receipts");
+
+    let address = "bcrt1qmarketinvoiceaddress0000000000000000000";
+    let endpoint = PaymentEndpointIdentifier::new("btc-onchain").unwrap();
+    let terms = PaymentRequestTerms::builder(
+        PaymentAmount::new("0.0005", "btc").unwrap(),
+        PaymentReference::new("market-order-1").unwrap(),
+        vec![endpoint.clone()],
+    )
+    .required_app_id(Some(pair.server.app_id.clone()))
+    .payment_endpoints(Some(HashMap::from([(
+        endpoint.clone(),
+        PaymentEndpointPayload::new(address),
+    )])))
+    .build()
+    .unwrap();
+    let payment_request_id = PaymentRequestId::new_v4();
+    pair.server
+        .sdk
+        .propose_payment_request_with_id(
+            pair.bob.public_key.clone(),
+            payment_request_id.clone(),
+            terms,
+        )
+        .await
+        .expect("Paykit Server should propose the Market request");
+    pair.server
+        .sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .expect("Paykit Server should deliver the Market request");
+    pair.bob
+        .sdk
+        .receive_private_messages(pair.bitkit.public_key.clone())
+        .await
+        .expect("the buyer should receive the Market request");
+
+    let seen_by_wallet = request_with_id(
+        pair.bitkit
+            .sdk
+            .payment_requests()
+            .await
+            .expect("Bitkit should list the shared Payment Requests"),
+        payment_request_id.as_str(),
+    );
+    assert_eq!(
+        seen_by_wallet.local_role,
+        Some(paykit_sdk::PaymentRequestLocalRole::Payee)
+    );
+    assert_eq!(
+        seen_by_wallet.proposal_app_id.as_ref(),
+        Some(&pair.server.app_id)
+    );
+
+    let draft = || {
+        ReceiptDraftBuilder::from_payment_reference(
+            PaymentReference::new("market-order-1").unwrap(),
+        )
+        .with_receipt_id(ReceiptId::new_v4())
+        .with_payment_request_id(payment_request_id.clone())
+        .with_payment_endpoint_identifier(endpoint.clone())
+        .with_amount(PaymentAmount::new("0.0005", "btc").unwrap())
+        .with_metadata(JsonMap::from_iter([(
+            "txid".into(),
+            serde_json::Value::String("ab".repeat(32)),
+        )]))
+        .build()
+        .unwrap()
+    };
+    let refused = pair
+        .server
+        .sdk
+        .issue_receipt(pair.bob.public_key.clone(), draft())
+        .await
+        .expect_err("an App registered without receipts must not issue one");
+    assert!(matches!(refused, PaykitSdkError::Policy { .. }));
+
+    let issuance = pair
+        .bitkit
+        .sdk
+        .issue_receipt(pair.bob.public_key.clone(), draft())
+        .await
+        .expect("Bitkit should issue the Receipt for the server-proposed request");
+    assert_eq!(issuance.status, ReceiptIssuanceStatus::AccessQueued);
+    pair.bitkit
+        .sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .expect("Bitkit should deliver Receipt Access over the shared link");
+    pair.bob
+        .sdk
+        .receive_private_messages(pair.bitkit.public_key.clone())
+        .await
+        .expect("the buyer should receive Receipt Access");
+    let retrieved = pair
+        .bob
+        .sdk
+        .retrieve_receipt(pair.bitkit.public_key.clone(), &issuance.receipt_id)
+        .await
+        .expect("the buyer should fetch and decrypt the Receipt");
+    assert_eq!(retrieved.app_id, pair.bitkit.app_id);
+    assert_eq!(
+        retrieved.payment_request_id.as_deref(),
+        Some(payment_request_id.as_str())
+    );
+
+    let issued = pair
+        .server
+        .sdk
+        .issued_receipts()
+        .await
+        .expect("Paykit Server should read the identity's issued Receipts");
+    let issued = issued
+        .iter()
+        .find(|record| record.payment_request_id.as_deref() == Some(payment_request_id.as_str()))
+        .expect("Paykit Server should see the wallet's Receipt for its request");
+    assert_eq!(issued.app_id, pair.bitkit.app_id);
+    assert_eq!(issued.counterparty, pair.bob.public_key);
+    let receipt = pair
+        .server
+        .sdk
+        .issued_receipt(&pair.bob.public_key, &issued.receipt_id)
+        .await
+        .expect("Paykit Server should decrypt the wallet's Receipt");
+    assert_eq!(
+        receipt.metadata.get("txid"),
+        Some(&serde_json::Value::String("ab".repeat(32)))
+    );
 }
 
 type SharedStateSdk =

@@ -9,6 +9,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Added
 
+- `issued_receipt` in Rust returns the decrypted Receipt of a local issuance record, Receipt Metadata included, so an App can read a Receipt another App on the identity issued, such as a wallet's Receipt for a request a merchant App proposed.
 - Pubky app profile writes: `fetch_pubky_profile_with_revision`, `publish_pubky_profile`, `upload_pubky_app_avatar`, `delete_pubky_profile` and `pubky_app_profile_session_capabilities` let an app edit the shared `/pub/pubky.app/profile.json` and its avatar.
 - React Native package `@synonymdev/react-native-paykit` in
   `paykit-react-native/`, generated from the `paykit-ffi` UniFFI metadata with

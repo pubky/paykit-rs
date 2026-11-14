@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use paykit_lib::{PrivateMessageKind, ReceiptDraft};
+use paykit_lib::{PrivateMessageKind, Receipt, ReceiptDraft};
 
 use super::records::ReceiptIssuanceRecord;
 use crate::{
@@ -34,13 +34,24 @@ pub(super) fn store_encrypted_receipt_error(
     }
 }
 
+/// Decrypt the Receipt held by a local issuance record.
+///
+/// The key and Receipt Location come from the record's own Receipt Access JSON,
+/// so no network read is needed.
+pub(crate) fn decrypt_issued_receipt(record: &ReceiptIssuanceRecord) -> Result<Receipt> {
+    let access = paykit_lib::parse_receipt_access_json(&record.access_json)?;
+    Ok(paykit_lib::decrypt_receipt(
+        &record.encrypted_receipt,
+        &access.key,
+        &access.location,
+    )?)
+}
+
 pub(crate) fn receipt_issuance_record_matches_draft(
     record: &ReceiptIssuanceRecord,
     draft: &ReceiptDraft,
 ) -> Result<bool> {
-    let access = paykit_lib::parse_receipt_access_json(&record.access_json)?;
-    let receipt =
-        paykit_lib::decrypt_receipt(&record.encrypted_receipt, &access.key, &access.location)?;
+    let receipt = decrypt_issued_receipt(record)?;
     let expected_receipt_id = draft.receipt_id.as_ref().map(|id| id.as_str());
     let expected_recipient = record.counterparty.to_public_key()?;
     Ok(Some(receipt.receipt_id.as_str()) == expected_receipt_id

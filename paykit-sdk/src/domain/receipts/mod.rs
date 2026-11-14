@@ -20,7 +20,7 @@ pub(crate) use access::{
     missing_encrypted_receipt_error, receipt_access_key_hash, receipt_record_matches_access,
 };
 pub(crate) use issuance::{
-    enqueue_receipt_access_for_issuance, receipt_issuance_record,
+    decrypt_issued_receipt, enqueue_receipt_access_for_issuance, receipt_issuance_record,
     receipt_issuance_record_by_receipt_id, receipt_issuance_record_matches_draft,
     receipt_issuance_records, store_encrypted_receipt_json,
 };
