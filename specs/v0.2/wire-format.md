@@ -142,7 +142,7 @@ Only valid names count in this table: a name that starts with `paykit_request:` 
 - Paykit's scope rules apply in full to Paykit's scopes, and the bounds of 8 extension scopes and 8 labelled selling scopes count only them.
 - Another protocol's scopes, and the permissions they bring, authorize nothing in Paykit: check 8 (4.1) still needs the Paykit scope of each kind, and a certificate that holds no Paykit scope sends and receives no Paykit kind, though Paykit's verifiers take it.
 
-Vectors: `documents.json` `multi_protocol_certificates` (`paykit_request` beside `chat` with `lists.read` and `conversation.add`, taken; without `conversation.add`, refused; `paykit_request` alone with `lists.read` beside `conversation.add`, refused; `chat` alone, taken; `paykit_request` beside `paykit_ext:cap`, refused), and `messages.json` `multi_protocol_senders`.
+Vectors: `documents.json` `multi_protocol_certificates` (`paykit_request` beside `chat` with `lists.read` and `conversation.add`, taken; without `conversation.add`, refused; `paykit_request` with `paykit_settlements` but without `paykit_contacts`, refused; `chat` alone, taken; `paykit_request` beside `paykit_ext:cap`, refused), and `messages.json` `multi_protocol_senders`.
 
 **Labelled selling scopes** (spec 3.1). `paykit_request:<label>` has the switch permissions of `paykit_request` (above) and sends and receives the kinds of `paykit_request` (4.3), for the requests sent under its label. It is one use of the scope rule (Switch wire 3.1, "Scope names"): plain `paykit_request` covers every `paykit_request:<label>`, a certificate holding `paykit_request` holds every label, and one holding `paykit_request:<label>` holds only that label. So a certificate holds plain `paykit_request` or labelled scopes, never both: every verifier refuses such a certificate, the switch included, the signer never issues one, and it refuses an app request naming both (Switch wire 3.9). Vectors: `documents.json` `certificates`, among them the certificate of bob's hosted app `hosted`, holding `paykit_request:shop1` and `paykit_settlements`, and `labelled_scope_rejections` (a label of 33 characters, one in upper case, an empty one, nine labels, `paykit_request` beside a label; only the nine labels pass the switch's rule).
 
@@ -828,7 +828,7 @@ Example (alice's `payer_activity` record of bob's request, certificate and plain
     "sender": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
     "cert": {
       "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFw...",
-      "sig": "Se1j4Odl8vAxIDDGWWJJfRErL1caE7-LLHqIKHppu2jz0L37si7gp5wVD0H3h39SfZYPoEnznKLKwkgPaZKVBg"
+      "sig": "OdYDmXFx2cbCLRzX8QiurAifD9ziPQzibb0a9-t1vvdn9QFFqarfX_7qR6RbqL1X6RWGBrpvLU4Gz-aBV9eSDQ"
     },
     "plaintext": {
       "sender_app": "CQl8r8bZGV9VwrqRrTtDSw",
@@ -1028,7 +1028,7 @@ Example (a bucket holding two marks, a one-time request's and a Billing Period's
 }
 ```
 
-Vectors: `sealed.json` `settlement_marks`: buckets holding marks of each kind, sealed under `paykit_settlements`, and the rejections (marks out of order, a settlement twice, a length that isn't a whole number of marks, kinds `0` and `4`, 9,001 marks, a value under another policy); `identifiers.json` `policies` (`settlements`) and `record_keys` (the tag, bucket and bucket record key of the vectors' `bitcoin-txid` settlement, and an occurrence's tag); `keys.json` `scope_keys` (`paykit_settlements`). `paykit-lib` checks the seen marks (spec 18).
+Vectors: `sealed.json` `settlement_marks`: buckets holding marks of each kind, sealed under `paykit_settlements`, and the rejections (marks out of order, a settlement twice, a length that isn't a whole number of marks, kinds `0` and `4`, 9,001 marks, a bucket with no mark, a value under another policy); `identifiers.json` `policies` (`settlements`) and `record_keys` (the tag, bucket and bucket record key of the vectors' `bitcoin-txid` settlement, and an occurrence's tag); `keys.json` `scope_keys` (`paykit_settlements`). `paykit-lib` checks the seen marks (spec 18).
 
 ## Appendix A. Choices this document made
 
