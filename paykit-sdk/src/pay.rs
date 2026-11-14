@@ -3861,6 +3861,7 @@ impl Paykit {
     /// `Err` inside holds the first refusal, as [`Held::OwnIdentity`] for 4, and
     /// [`Refusal::NotCurrent`] for 5 and 6. Under an Allowance, a first dispatch (`repeat`
     /// false) checks it in force, and a repeat only what holds while unknown.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn pay_gate(
         &mut self,
         entry: &JournalEntry,
