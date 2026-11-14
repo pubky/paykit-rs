@@ -1434,7 +1434,8 @@ async fn test_blocked_return_dispatch_of_a_request_dated_before_the_floor_not_re
 /// Alice's wallet and phone, carol's request opened on the phone, and bob's request on its
 /// way to being dropped for the block: the setup of the floor's two windows at a dispatch.
 async fn phone_paying_carol(w: &World) -> (Paykit, Paykit, Paykit, paykit_sdk::RequestRef) {
-    phone_paying_carol_on(w, store()).await
+    // On the heap: the setup nests deep.
+    Box::pin(phone_paying_carol_on(w, store())).await
 }
 
 /// [`phone_paying_carol`], the phone on `phone_store`.
@@ -1542,9 +1543,13 @@ async fn automatic_first_dispatch(
     during: impl FnOnce(&World, Paykit, Paykit) + Send + 'static,
 ) -> (Paykit, paykit_lib::AttemptId) {
     let phone_store = Arc::new(PayingStore::default());
-    let (mut wallet, mut phone, mut shop, carols) =
-        phone_paying_carol_on(w, Arc::clone(&phone_store) as Arc<dyn StateStore>).await;
-    wallet_about_to_raise_the_floor(w, &mut wallet, &mut shop).await;
+    // On the heap: the setup nests deep.
+    let (mut wallet, mut phone, mut shop, carols) = Box::pin(phone_paying_carol_on(
+        w,
+        Arc::clone(&phone_store) as Arc<dyn StateStore>,
+    ))
+    .await;
+    Box::pin(wallet_about_to_raise_the_floor(w, &mut wallet, &mut shop)).await;
     assert_eq!(shared_floor(&wallet).await, None);
     let world = Arc::clone(w);
     phone_store.on_paying(move || during(&world, wallet, shop));

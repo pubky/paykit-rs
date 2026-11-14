@@ -3327,9 +3327,9 @@ impl Paykit {
     /// Checks 2 to 6 run on the clock after the one await ([`Paykit::final_gates`]). A
     /// repeat's call follows them with no await; a first dispatch's follows the journal
     /// write of `Paying`, after which an automatic one reads the block floor again and the
-    /// fence ([`Paykit::payment_fence`]) runs them all again. Anything but [`FinalCheck::Pay`]: nothing is paid; a copy past its age is
-    /// looked up again by the next check, at a resume. Returns the payee's copy the checks
-    /// judged, for the fence.
+    /// fence ([`Paykit::payment_fence`]) runs them all again. Anything but
+    /// [`FinalCheck::Pay`]: nothing is paid; a copy past its age is looked up again by the
+    /// next check, at a resume. Returns the payee's copy the checks judged, for the fence.
     pub(crate) async fn final_payment_check(
         &mut self,
         entry: &JournalEntry,
