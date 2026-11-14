@@ -419,6 +419,9 @@ impl Paykit {
                 )
                 .await?
                 .map(|allowance_id| allowance_id.as_str().to_owned()),
+            // Who started it isn't known from the claim: taken as automatic, so what holds an
+            // automatic attempt, the request record's `manual_only` mark included, holds it.
+            initiator: crate::journal::StartedBy::Automatic,
         };
         entry.keep_carrier(&carrier);
         Ok(Some(entry))

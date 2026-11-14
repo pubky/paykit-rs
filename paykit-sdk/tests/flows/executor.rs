@@ -3475,3 +3475,47 @@ async fn test_executor_repeat_withheld_over_a_mark_written_since() {
     let payment = wallet.payments().await.unwrap().remove(0);
     assert_eq!(payment.stage, paykit_sdk::Stage::Paying);
 }
+
+#[tokio::test]
+async fn test_executor_entry_rebuilt_after_a_restore_kept_as_automatic() {
+    // The user pays bob's request by hand after the backup and the device is lost once the
+    // method has paid it. The restored app's reconcile rebuilds the entry from the claim and
+    // the request record, which don't tell who started the attempt: it is kept as automatic,
+    // so what holds an automatic attempt, the mark the payment's batch wrote included, holds
+    // it. A rebuilt entry is never dispatched again anyway; its outcome is the method's.
+    let w = World::new();
+    let (mut shop, mut wallet, _record) = set_up(&w, terms_with(json!({}))).await;
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    let backup = wallet.backup().await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("in flight");
+    };
+    w.rail.settle(&attempt_id, true);
+    drop(wallet);
+    let mut wallet = Box::pin(Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    let report = Box::pin(wallet.reconcile()).await.unwrap();
+    assert!(
+        matches!(report.resolved.as_slice(), [PayOutcome::Paid { .. }]),
+        "{report:?}"
+    );
+    let journal = wallet.app().protocol_scan(b"j/").await.unwrap();
+    assert_eq!(journal.len(), 1);
+    let kept: Value = serde_json::from_slice(&journal[0].1).unwrap();
+    assert_eq!(kept["d"]["initiator"], "automatic", "{kept}");
+    assert_eq!(kept["d"]["restored"], true, "{kept}");
+    assert!(wallet.request(&request).await.unwrap().manual_only);
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}

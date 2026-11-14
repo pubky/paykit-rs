@@ -49,7 +49,9 @@ use pubky_switch_core::records::{CLOCK_TOLERANCE_MS, DAY_MS};
 use crate::activity::{self, ActivityTarget, Role};
 use crate::destination::{Carrier, Need};
 use crate::error::{PaykitError, Refusal, Result};
-use crate::journal::{Destination, JournalEntry, KeptAmount, PaymentView, Stage, TransferBound};
+use crate::journal::{
+    Destination, JournalEntry, KeptAmount, PaymentView, Stage, StartedBy, TransferBound,
+};
 use crate::notices::NoticeKind;
 use crate::paykit::Paykit;
 use crate::rail::{
@@ -714,9 +716,7 @@ impl Paykit {
     /// tests only (feature `test-support`): the checks an automatic first dispatch passes once
     /// its attempt is journaled are tested through this one, without an Allowance. It makes
     /// none of the checks an executor makes before it starts a payment
-    /// ([`Paykit::pay_under_allowance`]) and writes no `manual_only` mark. Its entry names no
-    /// Allowance, so a repeat of its dispatch at a resume is judged as one of an attempt the
-    /// user started.
+    /// ([`Paykit::pay_under_allowance`]) and writes no `manual_only` mark.
     ///
     /// # Errors
     ///
@@ -969,6 +969,7 @@ impl Paykit {
             allowance_id: under
                 .as_ref()
                 .map(|u| u.allowance.allowance_id.as_str().to_owned()),
+            initiator: StartedBy::of(by),
         };
         self.execute(Plan {
             entry,
@@ -1088,6 +1089,7 @@ impl Paykit {
             transfer_bound: Some(bound),
             failed_on_claim: false,
             allowance_id: None,
+            initiator: StartedBy::User,
         };
         self.execute(Plan {
             entry,
@@ -3405,7 +3407,7 @@ impl Paykit {
     /// included, whatever copy this app keeps) or doesn't read as the request, a newer write
     /// this app refused included, so nothing shows it still open; or the request is held
     /// after a restore or a `missed` item until the user confirms it (Paykit spec 7.2,
-    /// [`Paykit::confirm_possibly_cancelled`]); or, for an attempt an executor started, the
+    /// [`Paykit::confirm_possibly_cancelled`]); or, for an attempt started automatically, the
     /// record holds `manual_only`; or the request is a one-time one dated before the block
     /// floor, or the floor can't be read (`crate::floor`, whatever the record holds: another
     /// app may have opened it before it held the floor): the request is paid only by hand,
@@ -4100,10 +4102,10 @@ impl Paykit {
     }
 }
 
-/// Whether `entry`'s attempt was started automatically: by an executor, under the Allowance
-/// its entry names (Paykit spec 8.3). Every other attempt is one the user started by hand.
+/// Whether `entry`'s attempt was started automatically, as its entry keeps who started it
+/// (`StartedBy`): an executor's, the app's own, or one a reconcile rebuilt without knowing.
 fn started_automatically(entry: &JournalEntry) -> Result<bool> {
-    Ok(entry.allowance()?.is_some())
+    Ok(entry.initiator == StartedBy::Automatic)
 }
 
 /// Whether `error` says the own switch doesn't answer now: the request or its answer was
