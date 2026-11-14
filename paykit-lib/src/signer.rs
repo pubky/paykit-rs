@@ -13,7 +13,7 @@
 //! use pubky_switch_signer::Protocols;
 //!
 //! let protocols = Protocols::new(vec![Arc::new(PaykitProtocol)]).unwrap();
-//! let terms = protocols.terms(&["pay".into(), "contacts".into()]).unwrap();
+//! let terms = protocols.terms(&["paykit_pay".into(), "paykit_contacts".into()]).unwrap();
 //! assert_eq!(
 //!     terms.permission_names(),
 //!     ["claims.read", "claims.write", "lists.read", "conversation.add"]
@@ -36,9 +36,9 @@ use crate::scopes::{
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PaykitProtocol;
 
-/// The one of Paykit's scope roots without keys (Paykit spec 3.5): `ext`, whose extension
-/// scopes `ext:<prefix>` have none.
-const UNKEYED_ROOT: &str = "ext";
+/// The one of Paykit's scope names without keys (Paykit spec 3.5): `paykit_ext`, whose
+/// extension scopes `paykit_ext:<prefix>` have none.
+const UNKEYED_ROOT: &str = crate::scopes::EXTENSION;
 
 /// What the host shows the user for the Paykit Profile's grant path.
 const PROFILE_PURPOSE: &str = "Edit the Paykit Profile, the identity's public payment profile";
@@ -51,16 +51,17 @@ fn owned(scopes: &[&str]) -> Vec<String> {
 }
 
 impl Protocol for PaykitProtocol {
-    /// `paykit`, the root Paykit's reserved scope roots are listed with (Switch wire 3.1
-    /// "Scope roots").
+    /// `paykit`, Paykit's protocol name: the signer takes it to own the roots `paykit` and
+    /// `paykit` followed by `_` or `-` and more characters (Switch wire 3.1 "Scope roots").
     fn name(&self) -> &str {
         PAYKIT_PREFIX
     }
 
-    /// Paykit's seven scope roots (Paykit spec 3.1, 3.2). Every one but `ext` has keys, and so
-    /// do its sub-scopes, the labels of `request` (Paykit spec 3.5). The signer then owns
-    /// every sub-scope of a root for Paykit, also one Paykit gives no meaning, such as `pay:x`,
-    /// which [`Protocol::check_scopes`] refuses.
+    /// The seven names of Paykit's scopes (Paykit spec 3.1, 3.2), each a root of Paykit's.
+    /// Every one but `paykit_ext` has keys, and so do its sub-scopes, the labels of
+    /// `paykit_request` (Paykit spec 3.5). The signer then owns every sub-scope of a root for
+    /// Paykit, also one Paykit gives no meaning, such as `paykit_pay:x`, which
+    /// [`Protocol::check_scopes`] refuses.
     fn scopes(&self) -> Vec<ScopeDef> {
         PAYKIT_SCOPE_NAMES
             .iter()
@@ -76,8 +77,9 @@ impl Protocol for PaykitProtocol {
 
     /// Paykit's rules on an app request (Paykit spec 3.1): no malformed extension or labelled
     /// selling scope, at most 8 of each, every scope with the scopes it requires, and no name
-    /// Paykit gives no meaning, such as `pay:x` or a plain `ext`. The Switch's scope rule,
-    /// which refuses `request` beside a label, has already held for the whole request.
+    /// Paykit gives no meaning, such as `paykit_pay:x` or a plain `paykit_ext`. The Switch's scope
+    /// rule, which refuses `paykit_request` beside a label, has already held for the whole
+    /// request.
     ///
     /// # Errors
     ///
@@ -186,14 +188,14 @@ mod tests {
         let protocols = paykit();
         assert_eq!(protocols.names(), ["paykit"]);
         for scope in [
-            "pay",
-            "request",
-            "request:shop1",
-            "allowance",
-            "allowance_execute",
-            "contacts",
-            "manage_contacts",
-            "ext:paykit-cap",
+            "paykit_pay",
+            "paykit_request",
+            "paykit_request:shop1",
+            "paykit_allowance",
+            "paykit_allowance_execute",
+            "paykit_contacts",
+            "paykit_manage_contacts",
+            "paykit_ext:paykit-cap",
         ] {
             assert!(protocols.knows_scope(scope), "{scope}");
         }
@@ -204,18 +206,23 @@ mod tests {
     fn test_signer_protocol_keys_follow_paykit_spec_3_5() {
         let protocols = paykit();
         for scope in [
-            "pay",
-            "request",
-            "request:shop1",
-            "allowance",
-            "allowance_execute",
-            "contacts",
-            "manage_contacts",
+            "paykit_pay",
+            "paykit_request",
+            "paykit_request:shop1",
+            "paykit_allowance",
+            "paykit_allowance_execute",
+            "paykit_contacts",
+            "paykit_manage_contacts",
         ] {
             assert!(protocols.has_keys(scope), "{scope}");
         }
-        assert!(!protocols.has_keys("ext:paykit-cap"));
-        let scopes = ["pay", "request", "contacts", "ext:paykit-cap"];
+        assert!(!protocols.has_keys("paykit_ext:paykit-cap"));
+        let scopes = [
+            "paykit_pay",
+            "paykit_request",
+            "paykit_contacts",
+            "paykit_ext:paykit-cap",
+        ];
         assert_eq!(
             terms(&protocols, &scopes).keyed,
             keyed_scopes(&names(&scopes))
@@ -226,13 +233,23 @@ mod tests {
     fn test_signer_protocol_certificates_pass_paykits_verifiers() {
         let protocols = paykit();
         for scopes in [
-            &["pay", "request", "contacts", "manage_contacts"][..],
-            &["pay", "allowance", "allowance_execute", "contacts"],
-            &["pay", "allowance", "contacts"],
-            &["pay", "contacts"],
-            &["request:shop1", "request:shop2"],
-            &["contacts"],
-            &["ext:paykit-cap", "request"],
+            &[
+                "paykit_pay",
+                "paykit_request",
+                "paykit_contacts",
+                "paykit_manage_contacts",
+            ][..],
+            &[
+                "paykit_pay",
+                "paykit_allowance",
+                "paykit_allowance_execute",
+                "paykit_contacts",
+            ],
+            &["paykit_pay", "paykit_allowance", "paykit_contacts"],
+            &["paykit_pay", "paykit_contacts"],
+            &["paykit_request:shop1", "paykit_request:shop2"],
+            &["paykit_contacts"],
+            &["paykit_ext:paykit-cap", "paykit_request"],
         ] {
             let terms = terms(&protocols, scopes);
             assert_eq!(
@@ -247,7 +264,7 @@ mod tests {
     #[test]
     fn test_signer_protocol_beside_another_protocol_passes_paykits_verifiers() {
         let protocols = Protocols::new(vec![Arc::new(PaykitProtocol), Arc::new(Chat)]).unwrap();
-        let scopes = ["contacts", "chat"];
+        let scopes = ["paykit_contacts", "chat"];
         let terms = terms(&protocols, &scopes);
         assert_eq!(terms.permission_names(), ["lists.read", "conversation.add"]);
         assert_eq!(terms.keyed, names(&scopes));
@@ -258,19 +275,19 @@ mod tests {
     fn test_signer_protocol_refuses_requests_paykits_rules_refuse() {
         let protocols = paykit();
         let nine = |root: &str| -> Vec<String> { (1..=9).map(|n| format!("{root}{n}")).collect() };
-        let extensions = nine("ext:paykit-x");
-        let labels = nine("request:shop");
+        let extensions = nine("paykit_ext:paykit-x");
+        let labels = nine("paykit_request:shop");
         for scopes in [
-            names(&["allowance_execute", "allowance"]),
-            names(&["allowance_execute", "pay"]),
-            names(&["allowance_execute", "allowance", "pay"]),
-            names(&["pay"]),
-            names(&["pay", "allowance"]),
-            names(&["manage_contacts"]),
-            names(&["ext:cap"]),
-            names(&["ext:paykit"]),
-            names(&["pay:x"]),
-            names(&["pay", "contacts", "ext"]),
+            names(&["paykit_allowance_execute", "paykit_allowance"]),
+            names(&["paykit_allowance_execute", "paykit_pay"]),
+            names(&["paykit_allowance_execute", "paykit_allowance", "paykit_pay"]),
+            names(&["paykit_pay"]),
+            names(&["paykit_pay", "paykit_allowance"]),
+            names(&["paykit_manage_contacts"]),
+            names(&["paykit_ext:cap"]),
+            names(&["paykit_ext:paykit"]),
+            names(&["paykit_pay:x"]),
+            names(&["paykit_pay", "paykit_contacts", "paykit_ext"]),
             extensions,
             labels,
         ] {
@@ -291,7 +308,7 @@ mod tests {
     #[test]
     fn test_signer_protocol_request_beside_a_label_refused_by_the_scope_rule() {
         assert!(matches!(
-            refusal(&paykit(), &["request", "request:shop1"]),
+            refusal(&paykit(), &["paykit_request", "paykit_request:shop1"]),
             Refusal::Scopes(_)
         ));
     }
@@ -299,7 +316,7 @@ mod tests {
     #[test]
     fn test_signer_protocol_another_protocols_scope_unknown_without_it() {
         assert!(matches!(
-            refusal(&paykit(), &["pay", "contacts", "chat"]),
+            refusal(&paykit(), &["paykit_pay", "paykit_contacts", "chat"]),
             Refusal::UnknownScopes { scopes } if scopes == ["chat"]
         ));
     }
@@ -308,7 +325,7 @@ mod tests {
     fn test_signer_protocol_offers_the_paykit_profile_and_its_files() {
         let protocols = Protocols::new(vec![Arc::new(PaykitProtocol), Arc::new(Chat)]).unwrap();
         let paths = protocols
-            .grant_paths(&[3; 16], &names(&["request:shop1", "chat"]))
+            .grant_paths(&[3; 16], &names(&["paykit_request:shop1", "chat"]))
             .unwrap();
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[0].path, "/pub/paykit/profile.json");
@@ -317,9 +334,9 @@ mod tests {
             .grant_paths(&[3; 16], &names(&["chat"]))
             .unwrap()
             .is_empty());
-        // A paying app's request holds the `contacts` that `pay` requires, and is offered
-        // the Paykit Profile too.
-        let wallet = names(&["pay", "contacts"]);
+        // A paying app's request holds the `paykit_contacts` that `paykit_pay` requires, and is
+        // offered the Paykit Profile too.
+        let wallet = names(&["paykit_pay", "paykit_contacts"]);
         protocols.terms(&wallet).unwrap();
         let paths = protocols.grant_paths(&[3; 16], &wallet).unwrap();
         assert_eq!(paths.len(), 2);
@@ -329,11 +346,18 @@ mod tests {
     #[test]
     fn test_signer_protocol_pay_request_without_contacts_refused() {
         let protocols = paykit();
-        for scopes in [&["pay"][..], &["pay", "allowance"], &["pay", "request"]] {
+        for scopes in [
+            &["paykit_pay"][..],
+            &["paykit_pay", "paykit_allowance"],
+            &["paykit_pay", "paykit_request"],
+        ] {
             match refusal(&protocols, scopes) {
                 Refusal::ProtocolRule { protocol, reason } => {
                     assert_eq!(protocol, "paykit");
-                    assert!(reason.contains("pay requires contacts"), "{reason}");
+                    assert!(
+                        reason.contains("paykit_pay requires paykit_contacts"),
+                        "{reason}"
+                    );
                 }
                 other => panic!("{scopes:?}: {other:?}"),
             }
@@ -343,7 +367,10 @@ mod tests {
     #[test]
     fn test_signer_protocol_pay_request_with_contacts_reads_the_lists() {
         let protocols = paykit();
-        for scopes in [&["pay", "contacts"][..], &["pay", "allowance", "contacts"]] {
+        for scopes in [
+            &["paykit_pay", "paykit_contacts"][..],
+            &["paykit_pay", "paykit_allowance", "paykit_contacts"],
+        ] {
             let terms = terms(&protocols, scopes);
             assert!(
                 terms.permissions.contains(&Permission::ListsRead),
@@ -354,13 +381,18 @@ mod tests {
     }
 
     /// An Allowance executor's scopes (Paykit spec 3.1).
-    const EXECUTOR: [&str; 4] = ["pay", "allowance", "allowance_execute", "contacts"];
+    const EXECUTOR: [&str; 4] = [
+        "paykit_pay",
+        "paykit_allowance",
+        "paykit_allowance_execute",
+        "paykit_contacts",
+    ];
 
     #[test]
     fn test_signer_protocol_executor_renewal_keeps_its_terms() {
         // An automatic renewal keeps the certificate's scopes, and the signer renews it only
         // while the terms those scopes get now are the ones it holds (Switch spec 3.2):
-        // an executor's are, so it is renewed with `allowance_execute` and every scope it
+        // an executor's are, so it is renewed with `paykit_allowance_execute` and every scope it
         // requires.
         let protocols = paykit();
         let held = certificate(&EXECUTOR, &terms(&protocols, &EXECUTOR));
@@ -386,21 +418,25 @@ mod tests {
     #[test]
     fn test_signer_protocol_dropping_allowance_execute_rotates_the_epoch() {
         // A reduction that removes a scope with keys rotates the data epoch (Paykit spec 3.2,
-        // 3.5): `allowance_execute` has keys, and the scopes left still pass Paykit's rules.
+        // 3.5): `paykit_allowance_execute` has keys, and the scopes left still pass Paykit's rules.
         let protocols = paykit();
-        assert!(protocols.has_keys("allowance_execute"));
-        let reduced = ["pay", "allowance", "contacts"];
+        assert!(protocols.has_keys("paykit_allowance_execute"));
+        let reduced = ["paykit_pay", "paykit_allowance", "paykit_contacts"];
         check_certificate(&certificate(&reduced, &terms(&protocols, &reduced))).unwrap();
     }
 
     #[test]
     fn test_signer_protocol_executor_without_a_scope_it_requires_refused() {
-        // A reduction that drops a scope `allowance_execute` requires, but keeps it, is
+        // A reduction that drops a scope `paykit_allowance_execute` requires, but keeps it, is
         // refused (Paykit spec 3.1).
         let protocols = paykit();
         for scopes in [
-            &["allowance", "allowance_execute", "contacts"][..],
-            &["pay", "allowance_execute", "contacts"],
+            &[
+                "paykit_allowance",
+                "paykit_allowance_execute",
+                "paykit_contacts",
+            ][..],
+            &["paykit_pay", "paykit_allowance_execute", "paykit_contacts"],
         ] {
             assert!(
                 matches!(refusal(&protocols, scopes), Refusal::ProtocolRule { .. }),

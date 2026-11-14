@@ -1507,7 +1507,7 @@ async fn test_replies_proof_over_an_unread_settlement_record_writes_nothing() {
 
 #[tokio::test]
 async fn test_replies_proof_over_an_unread_settlement_record_from_a_blocked_sender_only_counted() {
-    // Bob's shop, holding `contacts`, holds its record of alice's payment t1 as a value that
+    // Bob's shop, holding `paykit_contacts`, holds its record of alice's payment t1 as a value that
     // doesn't read. Carol, blocked, sends proofs of t1. The spam rule: a blocked sender only
     // counts and keeps nothing, the client's stored entries included, then or 31 days on.
     // The feed goes on: alice's later proof of t2 is credited meanwhile.

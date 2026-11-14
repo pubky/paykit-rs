@@ -7,7 +7,7 @@
 //! adds, through the client's
 //! [`ReceiveContext`], the writes the message causes:
 //!
-//! - **payer side** (`pay`): a request opens its request record; a payee's cancellation, a
+//! - **payer side** (`paykit_pay`): a request opens its request record; a payee's cancellation, a
 //!   receipt and a Private Payment List go into theirs. A payee's cancellation is kept,
 //!   never written in the receive step: the app places it in the request record afterwards
 //!   (the kept-copy stop, Paykit spec 8.1). Period details go into the period record of
@@ -15,7 +15,7 @@
 //!   kept until it does (`p/pr/`). A receipt also settles the attempt
 //!   it names, by evidence (Switch spec 10.2 row 3), in the same batch: only the payee's yes
 //!   counts (Paykit spec 7.3).
-//! - **payee side** (`request` or a label): the payer's acceptance, rejection, cancellation
+//! - **payee side** (`paykit_request` or a label): the payer's acceptance, rejection, cancellation
 //!   and proof go into the request record under the request's label, or, for a request
 //!   whose record the app doesn't hold yet, are kept until it does (`p/pr/`); a Billing
 //!   Period's proof into the period record, never the request record; a proof of a
@@ -25,12 +25,12 @@
 //!   answer (Paykit spec 9): answering sends messages, which no batch carries.
 //!
 //! The spam rule (Paykit wire 4.1, Switch spec 7) gates every message that would create
-//! state, at an app holding `contacts`: a request, a list, a cancellation or a proof that no
+//! state, at an app holding `paykit_contacts`: a request, a list, a cancellation or a proof that no
 //! held record matches, and a `resend_request`. From a sender the user blocked or the
 //! service flagged it is only counted; while the app's copy of the lists isn't known to be
 //! complete, it waits on the feed until the lists are read. A message that updates a record
 //! the app holds, such as a receipt for a payment in progress, is applied whoever sent it.
-//! An app without `contacts` can't read the lists, and gates nothing.
+//! An app without `paykit_contacts` can't read the lists, and gates nothing.
 //!
 //! Every write builds on the record the app holds. A record that already reflects a message
 //! was written by another own app: nothing more is written, and only the cursor moves. When
@@ -155,7 +155,7 @@ pub(crate) fn effect(
     }
     let sender = stored.sender();
     let scopes = cx.cert().scopes().to_vec();
-    let pay = scopes.iter().any(|s| s == "pay");
+    let pay = scopes.iter().any(|s| s == "paykit_pay");
     let payee = paykit_lib::scopes::acts_as_payee(&scopes);
     note_cursor_time(cx, stored)?;
     match stored.body() {
@@ -208,13 +208,13 @@ pub(crate) fn effect(
             if pay && held_request(cx, &payer_target)? {
                 return keep_cancellation(cx, &payer_target, stored, seq, true);
             }
-            // A payer's cancellation of a request this app holds goes into its record. One
-            // naming a request held on neither side is new state, which the spam rule gates
-            // once: at an app holding `pay`, it is kept as the stop, which no payment passes;
-            // at one taking payments, as a payer's reply until the record comes (Paykit spec
-            // 8.1, "Replies before their record"). An app holding both keeps both, each
-            // counted only in its own bounds: the message may be a payee's cancellation of a
-            // request to this identity, or a payer's of one another own app sent.
+            // A payer's cancellation of a request this app holds goes into its record. One naming a
+            // request held on neither side is new state, which the spam rule gates once: at an app
+            // holding `paykit_pay`, it is kept as the stop, which no payment passes; at one taking
+            // payments, as a payer's reply until the record comes (Paykit spec 8.1, "Replies before
+            // their record"). An app holding both keeps both, each counted only in its own bounds:
+            // the message may be a payee's cancellation of a request to this identity, or a payer's
+            // of one another own app sent.
             let label = stored.body().label().cloned();
             let payee_target = ActivityTarget::payee(
                 natural_key::request_record(&cx.identity(), &request),
@@ -286,11 +286,11 @@ pub(crate) fn effect(
         | Body::AllowanceAcceptance(_)
         | Body::AllowanceRejection(_)
         | Body::AllowanceEnd(_)
-            if scopes.iter().any(|s| s == "allowance") =>
+            if scopes.iter().any(|s| s == "paykit_allowance") =>
         {
             crate::allowances::receive_effect(cx, stored, seq, &scopes)?;
         }
-        Body::ExecutorNotice(notice) if scopes.iter().any(|s| s == "allowance_execute") => {
+        Body::ExecutorNotice(notice) if scopes.iter().any(|s| s == "paykit_allowance_execute") => {
             crate::allowances::notice_effect(cx, notice)?;
         }
         // A publishing app answers a request naming a used version with its current list
@@ -335,7 +335,7 @@ fn note_cursor_time(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Resu
 }
 
 /// Whether the spam rule (Paykit wire 4.1, Switch spec 7) lets a message from `sender`
-/// create state, asked only of a message no held record matches. An app without `contacts`
+/// create state, asked only of a message no held record matches. An app without `paykit_contacts`
 /// can't read the lists, and gates nothing. At one holding it, a message from a sender the
 /// user blocked or the service flagged is only counted, in the effect's batch; while the
 /// app's copy of the lists isn't known to be complete, the message waits on the feed
@@ -532,9 +532,9 @@ fn put_flagged(
     Ok(())
 }
 
-/// Whether an app with `scopes` reads the lists: `contacts` gives `lists.read`.
+/// Whether an app with `scopes` reads the lists: `paykit_contacts` gives `lists.read`.
 pub(crate) fn reads_lists(scopes: &[String]) -> bool {
-    scopes.iter().any(|s| s == "contacts")
+    scopes.iter().any(|s| s == "paykit_contacts")
 }
 
 /// Note a counterparty with Paykit activity, for re-sends after a `missed` item or a
@@ -1534,8 +1534,8 @@ fn receipt_effect(
         &claim,
     )
     .map_err(|_| Fail::corrupt())?;
-    // A receipt reaches only an app holding `pay`, which carries `claims.write`, and an entry
-    // that comes under a certificate without it is held unprocessed: this returns only for a
+    // A receipt reaches only an app holding `paykit_pay`, which carries `claims.write`, and an
+    // entry that comes under a certificate without it is held unprocessed: this returns only for a
     // certificate Paykit's checks would refuse.
     if !cx.cert().has_permission(Permission::ClaimsWrite) {
         return Ok(());
@@ -2174,7 +2174,7 @@ fn mark_dropped(
 /// the copy of its side may lack records (Paykit spec 8.1, "Records not listed yet").
 pub const KEPT_MESSAGE_MS: u64 = 30 * pubky_switch_core::records::DAY_MS;
 
-/// How long an app holding `contacts` goes between its reads of the lists, the flagged
+/// How long an app holding `paykit_contacts` goes between its reads of the lists, the flagged
 /// senders among them (Paykit wire 4.1: at most every 10 minutes).
 pub const LISTS_REFRESH_MS: u64 = 10 * 60_000;
 
@@ -2557,10 +2557,10 @@ impl Paykit {
             .unwrap_or(0))
     }
 
-    /// Read the lists again (`GET /allow`, [`pubky_switch_client::app::App::allow_list`])
-    /// when the last read is [`LISTS_REFRESH_MS`] old or more on the host's clock, or none
-    /// is kept, at an app holding `contacts`, so the flagged senders the spam rule reads stay
-    /// fresh (Paykit wire 4.1). A clock that went back reads as due.
+    /// Read the lists again (`GET /allow`, [`pubky_switch_client::app::App::allow_list`]) when the
+    /// last read is [`LISTS_REFRESH_MS`] old or more on the host's clock, or none is kept, at an
+    /// app holding `paykit_contacts`, so the flagged senders the spam rule reads stay fresh (Paykit
+    /// wire 4.1). A clock that went back reads as due.
     ///
     /// It fails closed: a refused or failed read drops the time of the last one
     /// ([`key::LISTS_READ`]), so the copy of the lists isn't known to be complete, and the
@@ -2626,7 +2626,7 @@ impl Paykit {
 
     /// Whether the identity's deny list holds `pubky` (Paykit spec 8.1, "Blocked
     /// counterparties"), read from the switch now (`GET /allow`); the copy kept for the views
-    /// is replaced with it. Every paying app holds `contacts`, which reads the lists (Paykit
+    /// is replaced with it. Every paying app holds `paykit_contacts`, which reads the lists (Paykit
     /// spec 3.1).
     ///
     /// # Errors
@@ -2770,7 +2770,7 @@ impl Paykit {
     /// # Errors
     ///
     /// The client's errors but a kept batch. On an answer that shows the block was neither
-    /// applied nor kept, such as without `manage_contacts` or the switch's refusal for
+    /// applied nor kept, such as without `paykit_manage_contacts` or the switch's refusal for
     /// good, the copy is then as it was; on any other, such as a store failure or an alarm,
     /// whose fate is unknown, the block stays counted and is written again at a later
     /// receive.
@@ -2951,7 +2951,7 @@ impl Paykit {
     /// Whether every send to `pubky` is held back now (Paykit spec 8.1, "Blocked
     /// counterparties"): no list, renewal, answer or re-send request goes to it while the
     /// copy of the deny list holds it, nor while the copy isn't known, at an app holding
-    /// `contacts`: no read of the lists succeeded since the last that failed, or since a
+    /// `paykit_contacts`: no read of the lists succeeded since the last that failed, or since a
     /// restore (`lr` absent). An unknown copy decides nothing, so what is owed to that
     /// counterparty is kept, never dropped, and goes once a read shows it not blocked.
     pub(crate) async fn sends_held(&self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
@@ -2990,7 +2990,7 @@ impl Paykit {
     }
 
     /// Whether the copy of the deny list kept from the last read holds `pubky`, at an app
-    /// holding `contacts`, for the views, which read nothing from the switch, and for the
+    /// holding `paykit_contacts`, for the views, which read nothing from the switch, and for the
     /// re-sends, which send a blocked counterparty nothing ([`Paykit::sends_held`]). The copy
     /// holds this app's own blocks and unblocks at once, kept unanswered included
     /// ([`Paykit::block`]), and a receive reads it again first once it is
@@ -3193,7 +3193,7 @@ pub(crate) fn unrequested_of(
         source: destination.source()?,
         list_version: destination.list_version,
         single_use: destination.single_use,
-        amount: Some(amount.clone()),
+        amount: amount.clone(),
     })
 }
 

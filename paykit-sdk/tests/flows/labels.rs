@@ -1,6 +1,6 @@
 //! Labelled selling scopes (Paykit spec 3.1, 3.4, 6, 8.1): a hosted app holding
-//! `request:<label>` sends every request under its label and gets the payer's replies only
-//! about its label's requests; the identity's apps holding `request` see them too.
+//! `paykit_request:<label>` sends every request under its label and gets the payer's replies only
+//! about its label's requests; the identity's apps holding `paykit_request` see them too.
 
 use paykit_lib::Label;
 use paykit_sdk::{AppScopes, PayOptions, PayOutcome, PayeeStatus, PaykitConfig, Refusal};
@@ -14,7 +14,7 @@ async fn test_labels_reply_reaches_only_the_labelled_app_and_request() {
     let mut wallet = w.wallet("wallet").await;
     let mut shop1 = w.labelled_shop("shop1", "shop1").await;
     let mut shop2 = w.labelled_shop("shop2", "shop2").await;
-    // The identity's own app holding `request` reads every label's records, with no list of
+    // The identity's own app holding `paykit_request` reads every label's records, with no list of
     // labels to follow.
     let mut owner = w
         .join(&w.bob, "owner", AppScopes::new().request().build().unwrap())
@@ -29,7 +29,7 @@ async fn test_labels_reply_reaches_only_the_labelled_app_and_request() {
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 
-    // The labelled app and the identity's own `request` app get the replies; another
+    // The labelled app and the identity's own `paykit_request` app get the replies; another
     // label's app gets none.
     shop1.receive(None).await.unwrap();
     let sales = shop1.payee_activity().await.unwrap();
@@ -77,8 +77,12 @@ async fn test_labels_payer_cannot_send_requests() {
         .send_request(w.bob_id(), draft("1", w.clock.now_ms()))
         .await
         .unwrap_err();
-    assert!(
-        matches!(refused.refusal(), Some(Refusal::ScopeMissing(_))),
-        "{refused:?}"
+    let Some(refusal @ Refusal::ScopeMissing(scope)) = refused.refusal() else {
+        panic!("{refused:?}")
+    };
+    assert_eq!(scope, "paykit_request or paykit_request:<label>");
+    assert_eq!(
+        refusal.to_string(),
+        "Paykit spec 3.1: the certificate doesn't hold paykit_request or paykit_request:<label>"
     );
 }

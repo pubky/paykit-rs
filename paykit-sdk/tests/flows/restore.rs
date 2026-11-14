@@ -676,7 +676,7 @@ async fn test_restore_certificate_paykit_refuses_writes_nothing() {
     use pubky_switch_client::store::{Fault, FaultStore, StateStore};
     let w = World::new();
     let (good, app_id) = backup_with_a_payment(&w).await;
-    // `pay` with a switch permission its scopes don't derive: the Switch takes the
+    // `paykit_pay` with a switch permission its scopes don't derive: the Switch takes the
     // certificate, and Paykit refuses it (Paykit wire 3.1).
     let mut scopes = AppScopes::new().pay().build().unwrap();
     let extra = pubky_switch_core::scopes::Permission::ALL
@@ -2034,7 +2034,7 @@ fn app_spec(scopes: &paykit_sdk::RequestedScopes) -> pubky_switch_client::testin
 
 #[tokio::test]
 async fn test_restore_acceptance_under_a_certificate_without_pay_refused() {
-    // A certificate holding only `contacts`, with that scope's own permissions, so it
+    // A certificate holding only `paykit_contacts`, with that scope's own permissions, so it
     // verifies and only the check of the sender's scopes can refuse it.
     let w = World::new();
     let (good, app_id) = backup_with_a_payment(&w).await;
@@ -2059,7 +2059,7 @@ async fn test_restore_acceptance_under_a_certificate_without_pay_refused() {
 #[tokio::test]
 async fn test_restore_acceptance_of_another_own_app_refused() {
     // Both the plaintext and the kept certificate replaced by another own app's ("phone",
-    // `pay`): a genuine acceptance of the same request, signed by the phone. Only the
+    // `paykit_pay`): a genuine acceptance of the same request, signed by the phone. Only the
     // App ID check refuses it.
     use pubky_switch_core::message::{Message, MessagePlaintext, Sender};
     let w = World::new();

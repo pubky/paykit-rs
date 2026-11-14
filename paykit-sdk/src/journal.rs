@@ -242,7 +242,7 @@ pub(crate) struct JournalEntry {
     pub(crate) acceptance_plaintext: Option<Vec<u8>>,
     /// The app's own certificate the acceptance was signed under, kept with it: the
     /// acceptance is checked and placed under it, never under a later renewal, which may no
-    /// longer hold `pay` (Paykit spec 3.2, Switch wire 3.8). `None` for an entry written
+    /// longer hold `paykit_pay` (Paykit spec 3.2, Switch wire 3.8). `None` for an entry written
     /// before it was kept, checked under the current certificate as then.
     #[serde(default)]
     pub(crate) acceptance_cert: Option<SignedDoc>,

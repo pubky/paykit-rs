@@ -134,11 +134,10 @@ pub(crate) fn switch_collection(collection: Collection, label: Option<&Label>) -
     SwitchCollection::new(collection.name(), collection.policy(label))
 }
 
-/// The client's collection of one of Paykit's collections with every policy it allows
-/// (Paykit spec 6, Paykit wire 5.1): `payee_activity` is a sub-scope family, the fixed
-/// `request` policy and one per label, so an app holding `request` lists and takes every
-/// label's records, and one holding only `request:<label>` its label's; the others have
-/// their fixed policy alone.
+/// The client's collection of one of Paykit's collections with every policy it allows (Paykit spec
+/// 6, Paykit wire 5.1): `payee_activity` is a sub-scope family, the fixed `paykit_request` policy
+/// and one per label, so an app holding `paykit_request` lists and takes every label's records, and
+/// one holding only `paykit_request:<label>` its label's; the others have their fixed policy alone.
 pub(crate) fn family(collection: Collection) -> SwitchCollection {
     match collection {
         Collection::PayeeActivity => {
@@ -365,9 +364,12 @@ mod tests {
     fn test_activity_target_payee_label_takes_its_policy() {
         let label = Label::parse("shop1").unwrap();
         let labelled = ActivityTarget::payee(vec![1], Some(&label)).record_target();
-        assert_eq!(labelled.collection.policy.read_scope, "request:shop1");
+        assert_eq!(
+            labelled.collection.policy.read_scope,
+            "paykit_request:shop1"
+        );
         let fixed = ActivityTarget::payee(vec![1], None).record_target();
-        assert_eq!(fixed.collection.policy.read_scope, "request");
+        assert_eq!(fixed.collection.policy.read_scope, "paykit_request");
         let payer = ActivityTarget::payer(natural_key::request_record(&[1; 32], &[2; 32]));
         assert_eq!(payer.record_target().collection.name, "payer_activity");
     }
@@ -416,8 +418,8 @@ mod place_tests {
 
     #[test]
     fn test_activity_place_stores_one_message_per_role() {
-        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
         let mut record = empty(ActivitySide::Payer, bob.id());
         let first = request(&bob, &alice, "order-1");
         assert!(place(&mut record, Role::Request, first.clone()));
@@ -438,8 +440,8 @@ mod place_tests {
 
     #[test]
     fn test_activity_place_keeps_the_newest_sixteen_others() {
-        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
         let mut record = empty(ActivitySide::Payer, bob.id());
         assert!(place(
             &mut record,
@@ -458,8 +460,8 @@ mod place_tests {
 
     #[test]
     fn test_activity_place_again_changes_no_role_however_long_ago() {
-        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
         let mut record = empty(ActivitySide::Payer, bob.id());
         let first = request(&bob, &alice, "r0");
         let second = request(&bob, &alice, "r1");
