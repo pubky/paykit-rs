@@ -65,7 +65,7 @@
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, with the entry's ID and message hash and the feed `seq` it was read at, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
 //! | `ae/<record key>/<msg_id>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection; every distinct end is kept, each under its `msg_id` and with the feed `seq` that orders it, until the record shows which one names what it holds (`allowances.rs`, Paykit spec 8.3) | |
 //! | `ac/<record key>` | the consent list: an Allowance this app may pay under, or removed from it for good (`allowances.rs`, Paykit spec 8.3); a restore marks every entry to confirm again | |
-//! | `cf/<record key>` | a second, different proposal or response of an Allowance, kept as the stop until the Allowance record holds `conflicted` (`allowances.rs`, Paykit spec 8.3) | |
+//! | `cf/<record key>` | a second, different proposal or response of an Allowance, with the feed `seq` its entry was read at, kept as the stop until the Allowance record holds `conflicted` (`allowances.rs`, Paykit spec 8.3) | |
 //! | `mc` | set by a `missed` item: every entry of the consent list is to be confirmed again, as after a restore; nothing is consented while it is set, and the next receive marks each entry so and clears it (`allowances.rs`); never restored | |
 //! | `en/<msg_id>` | the executor app an `executor_notice` is wrapped to, kept with the batch that queues it | |
 //! | `eo/<record key>` | this app's own crossing end of an Allowance, recorded while sends to its counterparty were held, whose message is sent from the record once they aren't (`allowances.rs`, `Paykit::send_owed_ends`); never restored | |
@@ -626,9 +626,9 @@ impl sealed::Sealed for KeptMessage {}
 ///   the Allowance record of its sender and the Allowance it names (Paykit spec 8.3, "Ends
 ///   reach the executor").
 /// - At `cf/<record key>`, a second, different proposal, acceptance or rejection its inbox
-///   accepted, with its acceptance time, kept as the stop under the record key of the
-///   Allowance record of its sender and the Allowance it names (Paykit spec 8.3,
-///   "Conflicted").
+///   accepted, with its acceptance time and its feed `seq`, kept as the stop under the
+///   record key of the Allowance record of its sender and the Allowance it names (Paykit
+///   spec 8.3, "Conflicted").
 impl Stored for KeptMessage {
     fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
         let message = self.stored(&binder.own)?;
@@ -751,14 +751,16 @@ impl Stored for KeptMessage {
         // A member of a bounded pool, the kept replies or the kept stops, is ordered by when
         // its inbox accepted it, by the feed `seq` its entry was read at within one
         // millisecond (`records::KeptOrder`): which one the bounds drop, which of an
-        // Allowance's ends stops it and which of its answers is the record's response. One
-        // without its `seq` can't be ordered; a held list and a conflict are ordered by
-        // nothing, and no writer gives them one.
+        // Allowance's ends stops it and which of its answers is the record's response. A
+        // conflict's stop is ordered the same way among its record's answers: an answer
+        // accepted after it never takes the response. One without its `seq` can't be
+        // ordered; a held list is ordered by nothing, and no writer gives it one.
         let pooled = matches!(
             family,
             StateKey::KeptCancellation(_)
                 | StateKey::KeptReply { .. }
                 | StateKey::AllowanceEnd { .. }
+                | StateKey::Conflict(_)
         );
         if pooled != self.seq().is_some() {
             return corrupt();

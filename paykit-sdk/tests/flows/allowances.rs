@@ -6608,3 +6608,88 @@ async fn test_allowances_rejection_kept_to_write_stops_the_consent_at_once() {
         AllowanceStatus::Rejected
     );
 }
+
+#[tokio::test]
+async fn test_allowances_answer_after_a_given_up_earlier_answer_never_takes_the_response() {
+    // Bob's acceptance waits over alice's record, seen divergent and unconfirmed, kept to
+    // write. His rejection, accepted later, conflicts with it and is kept as the stop. Past 30
+    // days the acceptance is given up, and the stop stays kept. A third different answer from
+    // bob, accepted after the stop, meets it: it is dropped as a conflict too, and never takes
+    // the record's response (Paykit spec 8.1, 8.3).
+    const SENT_THIRD: &str = "7b3e9a1c-5d2f-4a8e-b6c4-1e9f3d7a2b58";
+    let w = World::new();
+    let base = crate::common::store();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(alice_on(
+        &w,
+        "wallet",
+        AppScopes::new().pay().allowance().build().unwrap(),
+        std::sync::Arc::clone(&base),
+    ))
+    .await;
+    let (mine, proposal, id) = Box::pin(recorded_proposal_of(&w, &mut shop, &mut wallet)).await;
+    crate::divergent::set_divergent(&base, &wallet, &mine, true);
+    answers_with_id(
+        &w,
+        &wallet,
+        "paykit.allowance_acceptance",
+        &proposal,
+        &id,
+        SENT_FIRST,
+    );
+    wallet.receive(None).await.unwrap();
+    assert!(Box::pin(keeps(&wallet, b"pr/", SENT_FIRST)).await);
+    w.clock.advance_ms(1);
+    answers_with_id(
+        &w,
+        &wallet,
+        "paykit.allowance_rejection",
+        &proposal,
+        &id,
+        SENT_SECOND,
+    );
+    wallet.receive(None).await.unwrap();
+    assert_eq!(Box::pin(kept_under(&wallet, b"cf/")).await, 1);
+    assert!(Box::pin(keeps(&wallet, b"cf/", &b64_of(&mine))).await);
+    let stop = wallet.app().protocol_scan(b"cf/").await.unwrap();
+    assert_eq!(
+        Box::pin(response_and_conflicted(&w, &wallet, &mine)).await,
+        (None, None)
+    );
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
+    wallet.app_mut().rotate().await.unwrap();
+    wallet.app_mut().flush_cursor().await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(Box::pin(kept_under(&wallet, b"pr/")).await, 0);
+    let notices = wallet.notices().await.unwrap();
+    assert!(
+        notices
+            .iter()
+            .any(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp),
+        "{notices:?}"
+    );
+    assert_eq!(Box::pin(kept_under(&wallet, b"cf/")).await, 1);
+    answers_with_id(
+        &w,
+        &wallet,
+        "paykit.allowance_rejection",
+        &proposal,
+        &id,
+        SENT_THIRD,
+    );
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(
+        Box::pin(response_and_conflicted(&w, &wallet, &mine)).await,
+        (None, None)
+    );
+    assert_eq!(Box::pin(kept_under(&wallet, b"cf/")).await, 1);
+    assert_eq!(wallet.app().protocol_scan(b"cf/").await.unwrap(), stop);
+    assert_eq!(Box::pin(kept_under(&wallet, b"pr/")).await, 0);
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Conflicted
+    );
+}

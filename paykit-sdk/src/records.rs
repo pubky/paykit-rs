@@ -51,14 +51,15 @@ pub(crate) struct KeptMessage {
     accepted_at: Option<u64>,
     /// The feed `seq` its entry was read at, for the members of the bounded pools, the kept
     /// replies (`pr/`, every kind) and the kept stops (`kc/` and `ae/`, counted together),
-    /// and for the messages of the stored entries (`se/`) and of the writes kept over a
-    /// divergent record (`dw/`): the inbox's position for the entry, which orders it within
-    /// one millisecond ([`KeptMessage::order`]). The receive step takes it from the entry it
-    /// is handed, a stored entry's note from the entry the client stored, which keeps the
-    /// `seq` it was read at; so every one of them is ordered by the same token, whichever
-    /// store keeps it. The binding refuses a member of those families without it, and one
-    /// of any other family with it (`state::Stored`): a held list (`lh/`) and a conflict
-    /// (`cf/`) are ordered by nothing and carry none.
+    /// for an Allowance's conflict stop (`cf/`), ordered among its record's answers, and for
+    /// the messages of the stored entries (`se/`) and of the writes kept over a divergent
+    /// record (`dw/`): the inbox's position for the entry, which orders it within one
+    /// millisecond ([`KeptMessage::order`]). The receive step takes it from the entry it is
+    /// handed, a stored entry's note from the entry the client stored, which keeps the `seq`
+    /// it was read at; so every one of them is ordered by the same token, whichever store
+    /// keeps it. The binding refuses a member of those families without it, and one of any
+    /// other family with it (`state::Stored`): a held list (`lh/`) is ordered by nothing and
+    /// carries none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     seq: Option<u64>,
 }

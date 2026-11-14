@@ -576,7 +576,7 @@ pub(crate) fn receive_effect(
             // none. Dropping it loses nothing: nothing is paid under a deleted record.
             Held::None if deleted => {
                 if receive::admits_new_state(cx, &sender, scopes, stored)? {
-                    keep_conflict(cx, &target, stored, scopes)?;
+                    keep_conflict(cx, &target, stored, seq, scopes)?;
                 }
                 Ok(())
             }
@@ -719,7 +719,7 @@ fn put_placed(
         && !reflects(&record, &stored.message().msg_id)
         && conflicts(&record, stored)
     {
-        return keep_conflict(cx, target, stored, scopes);
+        return keep_conflict(cx, target, stored, seq, scopes);
     }
     // An answer never takes the response while a different one its inbox accepted earlier
     // is still kept to write: it conflicts with that one, so it is kept as the stop at once,
@@ -733,16 +733,18 @@ fn put_placed(
             &step_answers_kept(cx, target, stored)?,
         )
     {
-        return keep_conflict(cx, target, stored, scopes);
+        return keep_conflict(cx, target, stored, seq, scopes);
     }
     // The step never writes an answer into the record's empty response. The answer is kept
     // with the replies kept to place (`pr/`), with its place in the inbox's order, and
     // written by the placement after the read, once that read's stored entries are noted
     // (`se/`), in that order ([`Paykit::place_kept_allowance_responses`]): an earlier answer
-    // kept or stored, one of the same read whose entry the client stored included, takes the
-    // response first, and a later one conflicts with it ([`answered_before`]). A rejection's stop acts at once: an
-    // app holding `allowance_execute` removes the Allowance from its consent list for good
-    // in this commit, and [`Paykit::consents`] refuses payment while the rejection is kept.
+    // kept, or stored and noted (`se/`), or tried again by the client before the feed, takes
+    // the response first, and a later one conflicts with it ([`answered_before`]). An entry
+    // the client stores without a duty event leaves no note, so it is not among them. A
+    // rejection's stop acts at once: an app holding `allowance_execute` removes the
+    // Allowance from its consent list for good in this commit, and [`Paykit::consents`]
+    // refuses payment while the rejection is kept.
     if is_allowance_response(stored.body())
         && stored.sender() == record.proposal.message().to
         && record.response.is_none()
@@ -800,19 +802,32 @@ fn step_answers_kept(
         .map(|(_, kept)| kept)
         .collect();
     let notes = state::cx_scan::<StoredNote>(cx, &key::stored_notes_of(&sender))?;
-    answers_kept(&own, named_allowance(stored.body()), before, notes).map_err(|_| Fail::corrupt())
+    let stop = state::cx_get::<KeptMessage>(cx, &key::conflict(&record))?;
+    answers_kept(&own, named_allowance(stored.body()), before, notes, stop)
+        .map_err(|_| Fail::corrupt())
 }
 
 /// The answers among `before`, the messages kept before one Allowance record, and `notes`,
 /// the stored entries' notes of its counterparty with their keys, that are still to write
-/// into the record of `allowance_id`, each with its order.
+/// into the record of `allowance_id`, each with its order; and `stop`, the conflict's stop
+/// kept for that record (`cf/`), when it is an answer. The stop is an answer the inbox
+/// accepted too, at its own place in that order: it stays kept after the earlier answer it
+/// conflicted with is given up, so a different answer accepted after it still meets it
+/// ([`answered_before`]) and never takes the response.
 fn answers_kept(
     own: &[u8; 32],
     allowance_id: Option<&AllowanceId>,
     before: Vec<KeptMessage>,
     notes: Vec<(String, StoredNote)>,
+    stop: Option<KeptMessage>,
 ) -> Result<Vec<(StoredMessage, AnswerOrder)>> {
     let mut kept = Vec::new();
+    if let Some(stop) = stop {
+        let answer = stop.stored(own)?;
+        if is_allowance_response(answer.body()) {
+            kept.push((answer, stop.order()?));
+        }
+    }
     for message in before {
         let answer = message.stored(own)?;
         if is_allowance_response(answer.body()) {
@@ -845,13 +860,14 @@ fn keep_conflict(
     cx: &mut ReceiveContext<'_>,
     target: &RecordTarget,
     stored: &StoredMessage,
+    seq: u64,
     scopes: &[String],
 ) -> std::result::Result<(), Fail> {
     let record_key = cx.record_key(target)?;
     let kept = state::cx_get::<KeptMessage>(cx, &key::conflict(&record_key))?.is_some();
     let consent = state::cx_get::<ConsentEntry>(cx, &key::consent(&record_key))?;
     let executes = scopes.iter().any(|s| s == "allowance_execute");
-    for write in conflict_writes(&record_key, stored, kept, consent.as_ref(), executes)
+    for write in conflict_writes(&record_key, stored, seq, kept, consent.as_ref(), executes)
         .map_err(|_| Fail::corrupt())?
     {
         receive::keep_local(cx, write);
@@ -866,6 +882,7 @@ fn keep_conflict(
 fn conflict_writes(
     record_key: &[u8; 32],
     stored: &StoredMessage,
+    seq: u64,
     kept: bool,
     consent: Option<&ConsentEntry>,
     executes: bool,
@@ -874,7 +891,7 @@ fn conflict_writes(
     if !kept {
         writes.push(state::local_put(
             &key::conflict(record_key),
-            &KeptMessage::of(stored),
+            &KeptMessage::taken(stored, seq),
         )?);
     }
     let removed = matches!(
@@ -2272,6 +2289,7 @@ impl Paykit {
         &mut self,
         record: &[u8; 32],
         stored: &StoredMessage,
+        order: AnswerOrder,
         mut locals: Vec<LocalWrite>,
     ) -> Result<()> {
         let kept = Box::pin(self.conflict_kept(record)).await?;
@@ -2281,6 +2299,7 @@ impl Paykit {
         locals.extend(conflict_writes(
             record,
             stored,
+            order.1,
             kept,
             consent.as_ref(),
             self.holds("allowance_execute"),
@@ -2320,7 +2339,8 @@ impl Paykit {
             .into_iter()
             .map(|(rest, note)| (format!("{prefix}{rest}"), note))
             .collect();
-        answers_kept(&own, named_allowance(stored.body()), before, notes)
+        let stop = Box::pin(self.local_get::<KeptMessage>(&key::conflict(record))).await?;
+        answers_kept(&own, named_allowance(stored.body()), before, notes, stop)
     }
 
     /// The later write of an Allowance's proposal, acceptance or rejection kept to write, a
@@ -2384,7 +2404,7 @@ impl Paykit {
             // for a record.
             Some(RecordContent::Deleted) => match stored.body() {
                 Body::AllowanceProposal(_) => {
-                    Box::pin(self.keep_conflict_later(&record, &stored, locals)).await?;
+                    Box::pin(self.keep_conflict_later(&record, &stored, order, locals)).await?;
                     return Ok(Placed::Done);
                 }
                 _ => None,
@@ -2400,7 +2420,7 @@ impl Paykit {
                     return Ok(Placed::Done);
                 }
                 Some(held) if held.conflicted.is_none() && conflicts(&held, &stored) => {
-                    Box::pin(self.keep_conflict_later(&record, &stored, locals)).await?;
+                    Box::pin(self.keep_conflict_later(&record, &stored, order, locals)).await?;
                     return Ok(Placed::Done);
                 }
                 // An answer never takes the response while a different one its inbox
@@ -2416,7 +2436,7 @@ impl Paykit {
                             &Box::pin(self.answers_kept(&record, &stored)).await?,
                         ) =>
                 {
-                    Box::pin(self.keep_conflict_later(&record, &stored, locals)).await?;
+                    Box::pin(self.keep_conflict_later(&record, &stored, order, locals)).await?;
                     return Ok(Placed::Done);
                 }
                 // A proposal or an acceptance waits over a divergent record until the user

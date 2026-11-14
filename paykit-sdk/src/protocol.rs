@@ -1534,12 +1534,12 @@ mod receive_tests {
         };
         let record = fake_key(&allowance_target(&bob.id(), &body.allowance_id));
         let at = key::conflict(&record);
-        let kept = state::encode(&KeptMessage::of(&proposal)).unwrap();
+        let kept = state::encode(&KeptMessage::taken(&proposal, 1)).unwrap();
         assert!(restores::<KeptMessage>(&alice, at.as_bytes(), &kept));
         // Under another record's key, or an end under a conflict's key: refused.
         let other = key::conflict(&[9; 32]);
         assert!(!restores::<KeptMessage>(&alice, other.as_bytes(), &kept));
-        let end = state::encode(&KeptMessage::of(&end)).unwrap();
+        let end = state::encode(&KeptMessage::taken(&end, 1)).unwrap();
         assert!(!restores::<KeptMessage>(&alice, at.as_bytes(), &end));
     }
 
@@ -1783,7 +1783,7 @@ mod receive_tests {
             object(json!({ "allowance_id": body.allowance_id.as_str() })),
         );
         for conflict in [&proposal, &response] {
-            let value = state::encode(&KeptMessage::of(conflict)).unwrap();
+            let value = state::encode(&KeptMessage::taken(conflict, 1)).unwrap();
             assert!(restores::<KeptMessage>(&alice, at.as_bytes(), &value));
             assert!(!restores::<KeptMessage>(
                 &alice,
@@ -1823,15 +1823,16 @@ mod receive_tests {
     }
 
     #[test]
-    fn test_protocol_restore_refuses_a_kept_conflict_with_a_feed_seq() {
-        // A conflict is ordered by nothing, and no writer gives it the feed `seq` a pooled
-        // message carries: a restore refuses one that has it.
+    fn test_protocol_restore_refuses_a_kept_conflict_it_cannot_order() {
+        // A conflict's stop is ordered among its record's answers by when its inbox accepted
+        // it: an answer accepted after it never takes the response. Every writer keeps it
+        // with the feed `seq` its entry was read at, so a restore refuses one without it.
         let (alice, bob, proposal, _) = allowance_end();
         let Body::AllowanceProposal(body) = proposal.body() else {
             panic!("a proposal");
         };
         let at = key::conflict(&fake_key(&allowance_target(&bob.id(), &body.allowance_id)));
-        let value = state::encode(&KeptMessage::taken(&proposal, 1)).unwrap();
+        let value = state::encode(&KeptMessage::of(&proposal)).unwrap();
         assert!(!restores::<KeptMessage>(&alice, at.as_bytes(), &value));
     }
 
