@@ -20721,7 +20721,10 @@ public struct ReceiptIssuanceView {
      */
     public var createdAt: String
     /**
-     * Last status update time as RFC3339 text.
+     * Last change to the issuance or its Receipt Access delivery as RFC3339
+     * text. Until `AccessSent`, each delivery attempt, failure or recovery
+     * requeue moves it; once sent, it stays at the first publication, or at
+     * the peer's confirmation when the publication time is unknown.
      */
     public var updatedAt: String
     /**
@@ -20784,7 +20787,10 @@ public struct ReceiptIssuanceView {
          * Creation time as RFC3339 text.
          */createdAt: String,
         /**
-         * Last status update time as RFC3339 text.
+         * Last change to the issuance or its Receipt Access delivery as RFC3339
+         * text. Until `AccessSent`, each delivery attempt, failure or recovery
+         * requeue moves it; once sent, it stays at the first publication, or at
+         * the peer's confirmation when the publication time is unknown.
          */updatedAt: String,
         /**
          * Time the Encrypted Receipt was stored as RFC3339 text.

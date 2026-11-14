@@ -125,7 +125,10 @@ pub struct FfiReceiptIssuanceView {
     pub outbound_message_id: Option<u64>,
     /// Creation time as RFC3339 text.
     pub created_at: String,
-    /// Last status update time as RFC3339 text.
+    /// Last change to the issuance or its Receipt Access delivery as RFC3339
+    /// text. Until `AccessSent`, each delivery attempt, failure or recovery
+    /// requeue moves it; once sent, it stays at the first publication, or at
+    /// the peer's confirmation when the publication time is unknown.
     pub updated_at: String,
     /// Time the Encrypted Receipt was stored as RFC3339 text.
     pub stored_at: Option<String>,

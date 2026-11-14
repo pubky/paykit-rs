@@ -781,8 +781,24 @@ async fn test_issued_receipts_report_receipt_access_delivery() {
     assert_eq!(view.updated_at, queued_at);
     assert!(view.access_sent_at.is_none() && view.last_error.is_none());
 
-    // A failed attempt is retried, so the receipt stays queued with the error
-    // and its status time does not move.
+    let recover = |now| {
+        let storage = storage.clone();
+        let counterparty = counterparty.clone();
+        async move {
+            storage
+                .transaction(move |tx| {
+                    crate::domain::linked_peers::requeue_recovery_required_outbound_messages(
+                        tx,
+                        &counterparty,
+                        now,
+                    )
+                })
+                .await
+                .unwrap();
+        }
+    };
+
+    // A failed attempt is retried, so the receipt stays queued with the error.
     set_outbound(Box::new(move |message| {
         mark_outbound_failed(message, "timeout".into(), at(1))
     }))
@@ -790,7 +806,7 @@ async fn test_issued_receipts_report_receipt_access_delivery() {
     let view = views().await;
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessQueued);
     assert_eq!(view.last_error.as_deref(), Some("timeout"));
-    assert_eq!(view.updated_at, queued_at);
+    assert_eq!(view.updated_at, at(1));
 
     set_outbound(Box::new(move |message| {
         mark_outbound_invalid(message, "bad payload".into(), at(2))
@@ -810,40 +826,60 @@ async fn test_issued_receipts_report_receipt_access_delivery() {
     assert_eq!(view.last_error.as_deref(), Some("link lost"));
     assert_eq!(view.updated_at, at(3));
 
+    // Encrypted Link recovery queues the access again, at a later time.
+    recover(at(4)).await;
+    let view = views().await;
+    assert_eq!(view.status, ReceiptIssuanceStatus::AccessQueued);
+    assert!(view.last_error.is_none());
+    assert_eq!(view.updated_at, at(4));
+
     // A Delivery Confirmation after an ambiguous publication proves delivery
     // without a known first publication time.
     set_outbound(Box::new(move |mut message| {
         message.status = OutboundPrivateMessageStatus::Failed;
-        message.confirmed_at = Some(at(4));
+        message.confirmed_at = Some(at(5));
         message
     }))
     .await;
     let view = views().await;
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
     assert!(view.access_sent_at.is_none());
-    assert_eq!(view.updated_at, at(4));
+    assert_eq!(view.updated_at, at(5));
+
+    // Recovery completes the confirmed message and records `sent_at` at
+    // recovery time; that is not a publication time.
+    set_outbound(Box::new(move |message| {
+        mark_outbound_recovery_required(message, "rotated".into(), at(6))
+    }))
+    .await;
+    recover(at(7)).await;
+    let view = views().await;
+    assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
+    assert!(view.access_sent_at.is_none());
+    assert_eq!(view.updated_at, at(5));
 
     set_outbound(Box::new(move |mut message| {
         message.confirmed_at = None;
-        mark_outbound_sent(message, at(5))
+        message.sent_at = None;
+        mark_outbound_sent(message, at(8))
     }))
     .await;
     let view = views().await;
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
-    assert_eq!(view.access_sent_at, Some(at(5)));
-    assert_eq!(view.updated_at, at(5));
+    assert_eq!(view.access_sent_at, Some(at(8)));
+    assert_eq!(view.updated_at, at(8));
     assert!(view.last_error.is_none());
 
     // A failed retry of the unconfirmed event does not undo the publication
     // or move its time.
     set_outbound(Box::new(move |message| {
-        mark_outbound_failed(message, "retry".into(), at(6))
+        mark_outbound_failed(message, "retry".into(), at(9))
     }))
     .await;
     let view = views().await;
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
-    assert_eq!(view.access_sent_at, Some(at(5)));
-    assert_eq!(view.updated_at, at(5));
+    assert_eq!(view.access_sent_at, Some(at(8)));
+    assert_eq!(view.updated_at, at(8));
     assert!(view.last_error.is_none());
 
     // Repeating issuance returns the same delivery status.

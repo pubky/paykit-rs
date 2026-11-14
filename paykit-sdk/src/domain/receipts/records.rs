@@ -248,7 +248,12 @@ pub struct ReceiptIssuanceView {
     pub outbound_message_id: Option<u64>,
     /// Creation time.
     pub created_at: DateTime<Utc>,
-    /// Last status update time.
+    /// Last change to the issuance or its Receipt Access delivery.
+    ///
+    /// Until Receipt Access is published, each delivery attempt, failure or
+    /// recovery requeue moves it. Once `AccessSent`, it stays at the first
+    /// publication, or at the peer's confirmation when the publication time
+    /// is unknown; later retries of the unconfirmed event do not move it.
     pub updated_at: DateTime<Utc>,
     /// Time the Encrypted Receipt was stored.
     pub stored_at: Option<DateTime<Utc>>,
@@ -326,11 +331,21 @@ impl ReceiptIssuanceView {
             return view;
         };
         // `sent_at` survives a later failed retry of an unconfirmed event, so
-        // it, not `status`, tells whether Receipt Access was published. A
-        // Delivery Confirmation can arrive after an ambiguous publication
-        // left `sent_at` empty: the access was delivered, but its first
-        // publication time is unknown, so only `updated_at` takes that time.
-        if let Some(sent_at) = message.sent_at {
+        // it, not `status`, tells whether Receipt Access was published.
+        //
+        // A Delivery Confirmation can arrive after an ambiguous publication
+        // left `sent_at` empty, and completing that confirmed message later
+        // (for example on Encrypted Link recovery) records `sent_at` at
+        // completion time without publishing. The peer can only confirm what
+        // was already published, so a `sent_at` after `confirmed_at` is not
+        // the first publication: its time stays unknown and only
+        // `updated_at` takes the confirmation time.
+        let first_publication = message.sent_at.filter(|sent_at| {
+            message
+                .confirmed_at
+                .is_none_or(|confirmed| *sent_at <= confirmed)
+        });
+        if let Some(sent_at) = first_publication {
             view.status = ReceiptIssuanceStatus::AccessSent;
             view.access_sent_at = Some(sent_at);
             view.updated_at = view.updated_at.max(sent_at);
@@ -341,13 +356,15 @@ impl ReceiptIssuanceView {
             view.updated_at = view.updated_at.max(confirmed_at);
             return view;
         }
+        // Until publication, every delivery change (an attempt, a failure, a
+        // recovery requeue) moves `updated_at`, so it never runs backwards.
+        view.updated_at = view.updated_at.max(message.updated_at);
         view.last_error = message.last_error.clone();
         if matches!(
             message.status,
             OutboundPrivateMessageStatus::Invalid | OutboundPrivateMessageStatus::RecoveryRequired
         ) {
             view.status = ReceiptIssuanceStatus::AccessFailed;
-            view.updated_at = view.updated_at.max(message.updated_at);
         }
         view
     }
