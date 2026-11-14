@@ -1204,19 +1204,29 @@ impl Paykit {
     /// [`Refusal::AllowanceConflicted`] for a conflicted one, for good; [`Refusal::NotNow`]
     /// while the shared records aren't listed, the record waits for its scope key, or sends
     /// to the counterparty are held, as [`Paykit::propose_allowance`] says, with nothing
-    /// changed; [`Refusal::Usage`] for a proposal this identity sent or one answered already;
-    /// as [`Paykit::propose_allowance`].
+    /// changed; [`Refusal::Divergent`] while the record was seen divergent and the user
+    /// hasn't confirmed it, or messages kept over it wait to be written, naming it, with
+    /// nothing signed, written or sent: an acceptance adds no stop (Paykit spec 6);
+    /// [`Refusal::Usage`] for a proposal this identity sent or one answered already; as
+    /// [`Paykit::propose_allowance`].
     pub async fn accept_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
         Box::pin(self.answer_allowance(record, Kind::AllowanceAcceptance)).await
     }
 
     /// Reject the Allowance proposed to this identity at `record` (Paykit spec 8.3, Paykit
     /// wire 4.16), as [`Paykit::accept_allowance`] accepts it. A rejected Allowance has no
-    /// end.
+    /// end. A rejection is a stop: it goes over a record seen divergent as over any other
+    /// (Paykit spec 6).
     ///
     /// # Errors
     ///
-    /// As [`Paykit::accept_allowance`].
+    /// [`Refusal::NotFound`], also for a record held as deleted; [`Refusal::AllowanceEnded`]
+    /// once it ended, or while this app keeps the counterparty's end;
+    /// [`Refusal::AllowanceConflicted`] for a conflicted one, for good; [`Refusal::NotNow`]
+    /// while the shared records aren't listed, the record waits for its scope key, or sends
+    /// to the counterparty are held, as [`Paykit::propose_allowance`] says, with nothing
+    /// changed; [`Refusal::Usage`] for a proposal this identity sent or one answered already;
+    /// as [`Paykit::propose_allowance`]. Never [`Refusal::Divergent`].
     pub async fn reject_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
         Box::pin(self.answer_allowance(record, Kind::AllowanceRejection)).await
     }
