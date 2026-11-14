@@ -3539,7 +3539,9 @@ impl Paykit {
     /// (`crate::floor`, whatever the record holds: another app may have opened it before it
     /// held the floor): the request is paid only by hand, and a repeat is an automatic
     /// payment (Paykit spec 8.1, 8.3), so the attempt stays open and the user's payment
-    /// method's history or a receipt settles it. A payment without a request has nothing a payee cancels.
+    /// method's history or a receipt settles it. For a Billing Period, its period record is
+    /// read again too, and withholds it as [`Paykit::period_record_now`] says. A payment
+    /// without a request has nothing a payee cancels.
     async fn repeat_withheld(&mut self, entry: &JournalEntry) -> Result<bool> {
         // A repeat is an automatic payment: none while its request record or its list's
         // record is divergent, or paused since it was seen so (Paykit spec 6). The view held
@@ -3554,7 +3556,7 @@ impl Paykit {
         if self.kept_stop(&target).await? {
             return Ok(true);
         }
-        Ok(match self.fresh_request(&target).await? {
+        let withheld = match self.fresh_request(&target).await? {
             Fresh::Held(fresh) => {
                 self.fresh_record_withholds(entry, &target, &fresh).await?
                     || match crate::requests::request_of(&fresh) {
@@ -3563,7 +3565,37 @@ impl Paykit {
                     }
             }
             Fresh::Missing | Fresh::Unreadable => true,
-        })
+        };
+        Ok(withheld
+            || matches!(
+                self.period_record_now(entry).await,
+                PeriodRecordNow::Withholds
+            ))
+    }
+
+    /// The period record of `entry`'s Billing Period as the switch holds it now, read again
+    /// as its request record is ([`Paykit::fresh_request_stamped`]), for an automatic payment
+    /// of the period, a repeat at a resume or a first dispatch by the app's own policy
+    /// (Paykit spec 8.1, 8.3, "Manual only"): another own app may have marked the period
+    /// `manual_only` since the attempt's batch, and no repeat or dispatch by policy is made
+    /// of a period whose record holds the mark. It withholds the payment when it holds the
+    /// mark, when the read fails, and when the switch holds a write that doesn't read or
+    /// bind, a newer one this app refused included: nothing then shows the period unmarked.
+    /// No period record holds no mark. An entry of no period is never withheld here.
+    async fn period_record_now(&mut self, entry: &JournalEntry) -> PeriodRecordNow {
+        match entry.period() {
+            Ok(Some(_)) => {}
+            Ok(None) => return PeriodRecordNow::Clear(None),
+            Err(_) => return PeriodRecordNow::Withholds,
+        }
+        let target = ActivityTarget::payer(entry.natural_key.clone());
+        match self.fresh_request_stamped(&target).await {
+            Ok((Fresh::Held(record), Some(stamp))) if !record.manual_only => {
+                PeriodRecordNow::Clear(Some(stamp))
+            }
+            Ok((Fresh::Missing, _)) => PeriodRecordNow::Clear(None),
+            _ => PeriodRecordNow::Withholds,
+        }
     }
 
     /// Whether `fresh`, `entry`'s request record as the switch holds it now, read again
@@ -3691,13 +3723,15 @@ impl Paykit {
     /// and after it only the fence runs ([`Paykit::payment_fence`], with no await) before the
     /// payment method's call ([`Paykit::dispatch`]).
     ///
-    /// It reads three things from the switch, one after the other ([`Paykit::shared_collect`]):
-    /// the deny list, the request record ([`Paykit::fresh_request_stamped`]) and the block
-    /// floor ([`Paykit::floor_read_now`], for a one-time request only), and judges them: the
-    /// deny list holds the payee (Paykit spec 8.1); the record withholds the request
-    /// ([`Paykit::fresh_record_withholds`]: cancelled, rejected, `manual_only`, held after a
-    /// restore, divergent), or isn't there, doesn't read as the request or holds none; or the
-    /// floor holds the request ([`Paykit::floor_holds_read`]). Then it reads the three again,
+    /// It reads these from the switch, one after the other ([`Paykit::shared_collect`]): the
+    /// deny list, the request record ([`Paykit::fresh_request_stamped`]), for a Billing
+    /// Period its period record, and the block floor ([`Paykit::floor_read_now`], for a
+    /// one-time request only), and judges them: the deny list holds the payee (Paykit spec
+    /// 8.1); the record withholds the request ([`Paykit::fresh_record_withholds`]: cancelled,
+    /// rejected, `manual_only`, held after a restore, divergent), or isn't there, doesn't
+    /// read as the request or holds none; the period record holds `manual_only` or doesn't
+    /// read ([`Paykit::period_record_now`]); or the floor holds the request
+    /// ([`Paykit::floor_holds_read`]). Then it reads them again,
     /// in the same order, and holds unless each shows what its first read did (the deny list
     /// the same entries, each record the same write, [`WriteStamp`]), or the deny list now
     /// holds the payee, or the record isn't there, doesn't read or holds no request. Each read
@@ -3733,10 +3767,12 @@ impl Paykit {
     }
 
     /// One read of the identity's state an automatic dispatch of `entry` is judged by
-    /// ([`Paykit::automatic_dispatch_held`]): the deny list, then the request record, then the
-    /// block floor for a one-time request, each from the switch now. `None` when a read fails,
-    /// the deny list holds the payee, the record isn't there, doesn't read or holds no
-    /// request, or, when `judge`, the record withholds the request or the floor holds it.
+    /// ([`Paykit::automatic_dispatch_held`]): the deny list, then the request record, then a
+    /// Billing Period's period record, then the block floor for a one-time request, each from
+    /// the switch now. `None` when a read fails, the deny list holds the payee, the record
+    /// isn't there, doesn't read or holds no request, the period record withholds the period
+    /// ([`Paykit::period_record_now`]), or, when `judge`, the record withholds the request or
+    /// the floor holds it.
     /// Without `judge`, nothing more is read from the switch after the last read; only the
     /// app's own store is.
     async fn shared_collect(
@@ -3755,6 +3791,7 @@ impl Paykit {
             return Ok(Some(SharedState {
                 deny,
                 record: None,
+                period: None,
                 floor: None,
             }));
         };
@@ -3766,6 +3803,11 @@ impl Paykit {
         if judge && self.fresh_record_withholds(entry, &target, &record).await? {
             return Ok(None);
         }
+        // A Billing Period's period record, which another own app may have marked
+        // `manual_only` since the attempt's batch (Paykit spec 8.3, "Manual only").
+        let PeriodRecordNow::Clear(period) = self.period_record_now(entry).await else {
+            return Ok(None);
+        };
         let Some((stored, _)) = crate::requests::request_of(&record) else {
             return Ok(None);
         };
@@ -3773,6 +3815,7 @@ impl Paykit {
             return Ok(Some(SharedState {
                 deny,
                 record: Some(stamp),
+                period,
                 floor: None,
             }));
         }
@@ -3786,6 +3829,7 @@ impl Paykit {
         Ok(Some(SharedState {
             deny,
             record: Some(stamp),
+            period,
             floor: Some(floor.as_ref().map(WriteStamp::of)),
         }))
     }
@@ -4225,13 +4269,25 @@ impl WriteStamp {
 }
 
 /// What one read of the identity's state for an automatic dispatch showed
-/// ([`Paykit::shared_collect`]): the deny list, the request record's write, and the floor
-/// record's (`None` inside for no record), each `None` when not read.
+/// ([`Paykit::shared_collect`]): the deny list, the request record's write, a Billing
+/// Period's period record's (`None` for no record, or no period), and the floor record's
+/// (`None` inside for no record), each `None` when not read.
 #[derive(Debug, PartialEq, Eq)]
 struct SharedState {
     deny: Vec<[u8; 32]>,
     record: Option<WriteStamp>,
+    period: Option<WriteStamp>,
     floor: Option<Option<WriteStamp>>,
+}
+
+/// The period record of an automatic payment's Billing Period, read again from the switch
+/// ([`Paykit::period_record_now`]).
+enum PeriodRecordNow {
+    /// It withholds the payment.
+    Withholds,
+    /// It doesn't: the stamp of the write the read shows current, `None` for no period
+    /// record, or for a payment of no period.
+    Clear(Option<WriteStamp>),
 }
 
 #[cfg(test)]

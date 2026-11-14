@@ -1243,9 +1243,13 @@ async fn test_period_payments_reconcile_leaves_a_period_paid_by_details_doubtful
 }
 
 /// A wallet on an idempotent rail without history pays January of bob's subscription, the
-/// dispatch left in flight; then `between` runs with the shop's record of the sale, and the
-/// wallet resumes a minute later. Returns how many times the rail was called.
-async fn resumed_period_repeat(w: &World, between: impl AsyncFnOnce(&mut Paykit, [u8; 32])) -> u64 {
+/// dispatch left in flight; then `between` runs with the shop, the wallet, the shop's record
+/// of the sale and the request, and the wallet resumes a minute later. Returns how many
+/// times the rail was called, and the resume's outcome of the payment.
+async fn resumed_period_repeat(
+    w: &World,
+    between: impl AsyncFnOnce(&mut Paykit, &mut Paykit, [u8; 32], RequestRef),
+) -> (u64, PayOutcome) {
     w.rail.set_declaration(
         paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
             .with_idempotent(true),
@@ -1260,17 +1264,23 @@ async fn resumed_period_repeat(w: &World, between: impl AsyncFnOnce(&mut Paykit,
         .await
         .unwrap();
     assert!(matches!(pending, PayOutcome::Pending { .. }), "{pending:?}");
-    between(&mut shop, sale).await;
+    between(&mut shop, &mut wallet, sale, request).await;
     wallet.receive(None).await.unwrap();
     w.clock.advance_ms(60_000);
-    wallet.resume_payments().await.unwrap();
-    w.rail.pay_calls(&pending.attempt_id())
+    let resumed = wallet
+        .resume_payments()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|o| o.attempt_id() == pending.attempt_id())
+        .unwrap();
+    (w.rail.pay_calls(&pending.attempt_id()), resumed)
 }
 
 #[tokio::test]
 async fn test_period_payments_resume_repeats_an_idempotent_dispatch_of_a_period() {
     let w = World::new();
-    assert_eq!(resumed_period_repeat(&w, async |_, _| {}).await, 2);
+    assert_eq!(resumed_period_repeat(&w, async |_, _, _, _| {}).await.0, 2);
 }
 
 #[tokio::test]
@@ -1278,11 +1288,32 @@ async fn test_period_payments_resume_repeats_no_dispatch_the_payee_cancelled_sin
     // The payee cancels the subscription while January's dispatch is in flight: the repeat
     // isn't made, the attempt staying "may be paid" (Paykit spec 7.2, 8.2).
     let w = World::new();
-    let calls = resumed_period_repeat(&w, async |shop, sale| {
+    let (calls, _) = resumed_period_repeat(&w, async |shop, _, sale, _| {
         shop.cancel_sent_request(&sale, None).await.unwrap();
     })
     .await;
     assert_eq!(calls, 1);
+}
+
+#[tokio::test]
+async fn test_period_payments_resume_repeats_no_dispatch_of_a_period_marked_since() {
+    // January, paid by hand, is marked manual-only while its dispatch is in flight: a repeat
+    // is an automatic payment, and none is made of a period whose record, read again, holds
+    // the mark; the attempt stays "may be paid", withheld before any dispatch check (Paykit
+    // spec 8.1, 8.3, "Manual only").
+    let w = World::new();
+    let (calls, resumed) = resumed_period_repeat(&w, async |_, wallet, _, request| {
+        wallet
+            .mark_period_manual_only(&request, &january())
+            .await
+            .unwrap();
+    })
+    .await;
+    assert_eq!(calls, 1);
+    assert!(
+        matches!(resumed, PayOutcome::Uncertain { .. }),
+        "{resumed:?}"
+    );
 }
 
 /// `app` writes `record` at the payer's `natural` key, built on the version it holds.
@@ -2585,4 +2616,42 @@ async fn test_period_payments_reconcile_leaves_a_period_paid_by_unrequired_detai
     );
     let record = period_record(&w, &app, &request, february()).await.unwrap();
     assert!(record.proof.is_none());
+}
+
+#[tokio::test]
+async fn test_period_payments_period_marked_after_the_paying_commit_holds_the_dispatch() {
+    // Right after the wallet journals January's `Paying` by policy, the phone marks January
+    // manual-only: the period record, read again from the switch before the dispatch,
+    // holds it, and nothing is paid (Paykit spec 8.3, "Manual only").
+    let w = World::new();
+    let base = Arc::new(StageStore::default());
+    let mut shop = w.shop().await;
+    let mut wallet = w
+        .wallet_on("wallet", Arc::clone(&base) as Arc<dyn StateStore>)
+        .await;
+    let mut phone = w.wallet("phone").await;
+    let (request, _) = subscribed(&w, &mut shop, &mut wallet).await;
+    phone.receive(None).await.unwrap();
+    base.on_stage("paying", move || {
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    phone
+                        .mark_period_manual_only(&request, &january())
+                        .await
+                        .unwrap();
+                })
+        })
+        .join()
+        .unwrap();
+    });
+    let outcome = Box::pin(by_policy(&mut wallet, &request, january()))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
+    assert!(w.rail.all_executions().is_empty());
+    let payment = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Attempted);
 }
