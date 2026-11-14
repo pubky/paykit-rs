@@ -1152,6 +1152,16 @@ impl Paykit {
         amount: &PaymentAmount,
         destination: &Destination,
     ) -> Result<ExecutorOps> {
+        // Doubtful obligations (Paykit spec 8.3): the claim is read first, before the owed
+        // empty ledger is written or the ledger read is kept, so a read that fails writes
+        // nothing and is the error, never taken as a claim without attempts. The batch's
+        // `attempt` builds on the claim's step read before, so an attempt added since makes
+        // it fail.
+        let attempts: Option<Vec<[u8; 16]>> = self
+            .app
+            .read_claim(&obligation)
+            .await?
+            .map(|read| read.view.attempts.iter().map(|a| a.attempt_id).collect());
         // The first grant's empty ledger, while owed, goes before the first payment.
         self.write_owed_empty_ledger(under).await?;
         let base = self.ledger_base(under).await?;
@@ -1164,20 +1174,19 @@ impl Paykit {
                 under.allowance.allowance_id.clone(),
             )
         });
-        // Doubtful obligations (Paykit spec 8.3): an occurrence whose claim holds an attempt
-        // the ledger names neither in an entry nor in `totals.failed`, one made by hand or
-        // under another Allowance, whatever its outcome, even one that never reached the
-        // payment method, is paid again only by hand. Read before anything is written; a
-        // read that fails is the error, never taken as a claim without attempts. The batch's
-        // `attempt` builds on the claim's step read before, so an attempt added since makes
-        // it fail.
-        if let Some(read) = self.app.read_claim(&obligation).await? {
-            let attempts: Vec<[u8; 16]> = read.view.attempts.iter().map(|a| a.attempt_id).collect();
-            if attempted_elsewhere(&obligation, &attempts, &ledger) {
-                return Err(not_automatic(
-                    "the occurrence was attempted by hand or under another Allowance: it is paid only by hand",
-                ));
-            }
+        // An occurrence whose claim holds an attempt the ledger names neither in an entry nor
+        // in `totals.failed`, one made by hand or under another Allowance, whatever its
+        // outcome, even one that never reached the payment method, is paid again only by
+        // hand. Judged against the ledger built on, so after the owed empty ledger's write
+        // and the ledger read's keep, which are the Allowance's, not the occurrence's:
+        // nothing of the occurrence is written.
+        if attempts
+            .as_deref()
+            .is_some_and(|attempts| attempted_elsewhere(&obligation, attempts, &ledger))
+        {
+            return Err(not_automatic(
+                "the occurrence was attempted by hand or under another Allowance: it is paid only by hand",
+            ));
         }
         let mut claims = HashMap::new();
         let open: Vec<([u8; 32], AttemptId)> = ledger

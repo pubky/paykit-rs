@@ -1269,6 +1269,45 @@ async fn test_executor_empty_ledger_owed_after_a_kept_grant_written_before_the_f
 }
 
 #[tokio::test]
+async fn test_executor_claim_read_failing_writes_nothing() {
+    // The empty ledger is still owed when the executor's read of the occurrence's claim,
+    // for the attempts it holds, fails: the read is the error, and it comes before anything
+    // is written, so the empty ledger stays owed and nothing is paid. The next payment
+    // writes it, then pays on it (Paykit spec 8.3, "Doubtful obligations", "A grant implies
+    // a ledger").
+    let w = World::new();
+    let mut shop = allowance_shop(&w).await;
+    let mut wallet = executor_wallet(&w, "wallet").await;
+    let record = accepted(&w, &mut shop, &mut wallet, terms_with(json!({}))).await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    wallet
+        .grant_executor(&record, UserConfirmed::new())
+        .await
+        .unwrap();
+    let first = request(&w, &mut shop, &mut wallet, "0.5").await;
+    let key = ledger_key(&wallet, &record).await;
+    assert_eq!(w.record_writes(&w.alice, &key), 0);
+    // The claim is read once for the attempt's step, then once for its attempts.
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/claims/".into(),
+            after: 1,
+        });
+    assert!(wallet.pay_under_allowance(&first, &record).await.is_err());
+    assert_eq!(w.record_writes(&w.alice, &key), 0);
+    assert!(w.rail.all_executions().is_empty());
+    let paid = wallet.pay_under_allowance(&first, &record).await.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(w.record_writes(&w.alice, &key), 2);
+}
+
+#[tokio::test]
 async fn test_executor_pays_inside_its_limits_until_ended_through_a_restore() {
     // One Allowance from acceptance to end. Bob proposes under a lifetime limit of 1 btc and
     // the wallet accepts it and becomes its executor. It pays a request inside the limit, and
