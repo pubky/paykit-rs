@@ -2762,3 +2762,99 @@ async fn test_period_payments_paused_period_paid_by_a_current_apps_details_waits
         .unwrap();
     assert_eq!(proof_of(&record).1.billing_period, Some(february()));
 }
+
+#[tokio::test]
+async fn test_period_payments_restore_refuses_a_period_entry_not_of_its_request() {
+    // A period's journal entry whose period isn't one of its request's Billing Periods,
+    // within the same second as one so its claim and record keys still agree, whose
+    // deadline isn't that period's attempt deadline, or that names no period: no run writes
+    // one, and the restore refuses the backup; the entry as written restores.
+    let w = World::new();
+    let (backup, _) = backup_paying_january(&w).await;
+    assert!(restore_takes(&w, &backup, b"j/", |_, _| {}).await);
+    let shifted = |e: &mut serde_json::Value, member: &str, by: u64| {
+        let at = e["billing_period"][member].as_u64().unwrap();
+        e["billing_period"][member] = serde_json::json!(at + by);
+    };
+    let refused: [Box<Tamper>; 3] = [
+        Box::new(move |_, e| shifted(e, "starts_at", 1)),
+        Box::new(move |_, e| shifted(e, "ends_at", 1000)),
+        Box::new(|_, e| e["deadline"] = serde_json::json!(START_MS + DAY_MS)),
+    ];
+    for tamper in refused {
+        assert!(!restore_takes(&w, &backup, b"j/", tamper).await);
+    }
+    // Naming no period, at the request record's key and on Billing Period 0's claim, as a
+    // one-time request's entry is: a recurring request's payment pays one of its periods.
+    let naming = w.wallet("other").await.app().naming_key().clone();
+    let unperiodic = move |_: &mut Vec<u8>, e: &mut serde_json::Value| {
+        let payee =
+            pubky_switch_core::enc::unb64_array::<32>(e["payee"].as_str().unwrap()).unwrap();
+        let hash =
+            pubky_switch_core::enc::unb64_array::<32>(e["request_hash"].as_str().unwrap()).unwrap();
+        e["billing_period"] = serde_json::Value::Null;
+        e["natural_key"] = serde_json::json!(pubky_switch_core::enc::b64(
+            &natural_key::request_record(&payee, &hash)
+        ));
+        let obligation = paykit_lib::derive::request_obligation(&naming, &payee, &hash, 0);
+        e["obligation"] = serde_json::json!(pubky_switch_core::enc::b64(&obligation));
+    };
+    assert!(!restore_takes(&w, &backup, b"j/", unperiodic).await);
+}
+
+#[tokio::test]
+async fn test_period_payments_restore_refuses_a_one_time_entry_naming_a_period() {
+    // A one-time request's journal entry naming a Billing Period, at the period record's key
+    // whose start in seconds is the one-time request's own, 0: a one-time request has no
+    // periods, and the restore refuses the backup.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let request =
+        crate::common::request_from(&mut shop, w.alice_id(), crate::common::draft("1", START_MS))
+            .await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    let bytes = wallet.backup().await.unwrap().to_bytes().unwrap();
+    let backup: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let as_period = |e: &mut serde_json::Value| {
+        let payee =
+            pubky_switch_core::enc::unb64_array::<32>(e["payee"].as_str().unwrap()).unwrap();
+        let hash =
+            pubky_switch_core::enc::unb64_array::<32>(e["request_hash"].as_str().unwrap()).unwrap();
+        e["natural_key"] = serde_json::json!(pubky_switch_core::enc::b64(
+            &natural_key::period_record(&payee, &hash, 0)
+        ));
+        e["billing_period"] = serde_json::json!({ "starts_at": 0, "ends_at": 1000 });
+        for member in [
+            "acceptance_msg_id",
+            "acceptance_plaintext",
+            "acceptance_cert",
+        ] {
+            e[member] = serde_json::Value::Null;
+        }
+        e["acceptance_owed"] = serde_json::json!(false);
+        e["acceptance_released"] = serde_json::json!(false);
+    };
+    // The same entry naming no period, its acceptance dropped, restores: only the period
+    // refuses it.
+    assert!(
+        restore_takes(&w, &backup, b"j/", |_, e| {
+            for member in [
+                "acceptance_msg_id",
+                "acceptance_plaintext",
+                "acceptance_cert",
+            ] {
+                e[member] = serde_json::Value::Null;
+            }
+            e["acceptance_owed"] = serde_json::json!(false);
+            e["acceptance_released"] = serde_json::json!(false);
+        })
+        .await
+    );
+    assert!(!restore_takes(&w, &backup, b"j/", |_, e| as_period(e)).await);
+}

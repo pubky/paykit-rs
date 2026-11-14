@@ -545,6 +545,10 @@ impl JournalEntry {
     /// - The request another party signed: its certificate, signature and recipient, its
     ///   sender the payee, its hash the request hash the entry pays, a `payment_request`,
     ///   and its amount, payment reference and label the entry's.
+    /// - The Billing Period paid: for a recurring request, one of the request's own Billing
+    ///   Periods, its start and end as the request's recurrence computes them, and the
+    ///   entry's deadline that period's attempt deadline; a one-time request's entry names
+    ///   no period.
     /// - The destination's carrier: the list message or app record, verified again.
     /// - The acceptance this app signed: read as its own message to the payee, under the
     ///   certificate it was signed under ([`JournalEntry::acceptance_message`]), an
@@ -581,6 +585,24 @@ impl JournalEntry {
                 || self.label()? != body.label
             {
                 return corrupt();
+            }
+            // A payment of a recurring request pays one of its Billing Periods, the attempt
+            // carrying that period's deadline; a payment of a one-time request pays none
+            // (Paykit spec 7.1, 8.2; Paykit wire 4.4).
+            match self.period()? {
+                Some(period) => {
+                    let Ok(billing) = body.named_period(&period) else {
+                        return corrupt();
+                    };
+                    let deadline = body
+                        .attempt_deadline(Some(&billing))
+                        .map_err(|_| PaykitError::corrupt())?;
+                    if self.deadline != deadline {
+                        return corrupt();
+                    }
+                }
+                None if body.is_recurring() => return corrupt(),
+                None => {}
             }
         }
         self.kept_carrier(own)?;
