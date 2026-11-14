@@ -308,6 +308,48 @@ pub(crate) fn automatic_window_end(period: &PeriodRef, deadline: Option<u64>) ->
     deadline.map_or(period.ends_at, |deadline| deadline.min(period.ends_at))
 }
 
+/// Whether a Billing Period's automatic window ([`automatic_window_end`]) has ended on `t`,
+/// the highest service time verified (Paykit spec 8.2, "Paying periods"). With no time
+/// verified, nothing shows it hasn't: it counts as ended, so nothing is dispatched by an
+/// app's own policy on a time the SDK hasn't verified.
+pub(crate) fn automatic_window_ended(
+    period: &PeriodRef,
+    deadline: Option<u64>,
+    t: Option<u64>,
+) -> bool {
+    t.is_none_or(|t| t >= automatic_window_end(period, deadline))
+}
+
+/// Why `period` of the recurring `request` isn't paid by an app's own policy now (Paykit
+/// spec 8.2, "Paying periods"), as [`not_automatic_now`] judges it, `held` the request
+/// record's write the app holds, as whether a proof or a verified stub gave its version and
+/// the service time it dates it at, and `t` the highest service time verified. The
+/// acceptance's recorded time is that write's time, only when it is authenticated and
+/// dated: a write nothing dates, or none held, pays no period automatically. `t` is taken
+/// as at least that time.
+///
+/// # Errors
+///
+/// As [`not_automatic_now`].
+pub(crate) fn not_automatic_for(
+    request: &PaymentRequest,
+    period: &BillingPeriod,
+    held: Option<(bool, Option<u64>)>,
+    t: Option<u64>,
+) -> std::result::Result<Option<&'static str>, paykit_lib::Error> {
+    let written =
+        held.and_then(|(authenticated, written_at_ms)| written_at_ms.filter(|_| authenticated));
+    let Some(accepted_at) = written else {
+        return Ok(Some("no proof dates the request record's write"));
+    };
+    not_automatic_now(
+        request,
+        period,
+        accepted_at,
+        t.unwrap_or(0).max(accepted_at),
+    )
+}
+
 /// Why `period` of the recurring `request` isn't paid by an app's own policy now (Paykit
 /// spec 8.2, "Paying periods"), the payer's acceptance recorded at `accepted_at` and `t` the
 /// highest service time verified, at least `accepted_at`; `None` when it may be:
@@ -894,7 +936,7 @@ impl Paykit {
 
     /// A payment of Billing Period `billing` of the recurring request `body` by the app's own
     /// policy is made only from one period on and within the period's automatic window
-    /// ([`not_automatic_now`], Paykit spec 8.2, "Paying periods"), judged on the time the
+    /// ([`not_automatic_for`], Paykit spec 8.2, "Paying periods"), judged on the time the
     /// payer's acceptance was recorded and the highest service time verified, at least that
     /// time. The acceptance's recorded time is the service time of the write of the request
     /// record, at `record_key`, that the app holds, as a proof or a verified stub dates it:
@@ -914,19 +956,12 @@ impl Paykit {
         // the acceptance is at or after it, and every period that ended before that write's
         // time has a window that ended too, so the periods payable automatically are the
         // same as from the acceptance's own time.
-        let written = self
+        let held = self
             .app
             .shared_record(record_key)
             .await?
-            .filter(|held| held.authenticated)
-            .and_then(|held| held.written_at_ms);
-        let Some(accepted_at) = written else {
-            return Err(
-                Refusal::NotAutomatic("no proof dates the request record's write".into()).into(),
-            );
-        };
-        let t = self.service_time().unwrap_or(0).max(accepted_at);
-        match not_automatic_now(body, billing, accepted_at, t)? {
+            .map(|held| (held.authenticated, held.written_at_ms));
+        match not_automatic_for(body, billing, held, self.service_time())? {
             Some(why) => Err(Refusal::NotAutomatic(why.into()).into()),
             None => Ok(()),
         }
@@ -2046,5 +2081,48 @@ mod tests {
         assert!(not_automatic_now(&request, &february, MAR_1, MAR_1)
             .unwrap()
             .is_some_and(|why| why.contains("last Billing Period")));
+    }
+
+    #[test]
+    fn test_periods_automatic_only_on_an_authenticated_dated_write() {
+        // The acceptance counts as recorded at the request record's write only when a proof or
+        // a verified stub dates it: an unauthenticated write, an undated one, or none held,
+        // pays no period automatically (Paykit spec 8.2, "Paying periods").
+        let request = monthly_body(json!({}));
+        let january = period_at(&request, JAN_1);
+        let t = Some(JAN_1 + DAY);
+        assert_eq!(
+            not_automatic_for(&request, &january, Some((true, Some(DEC_15))), t).unwrap(),
+            None
+        );
+        for held in [Some((false, Some(DEC_15))), Some((true, None)), None] {
+            assert!(
+                not_automatic_for(&request, &january, held, t)
+                    .unwrap()
+                    .is_some_and(|why| why.contains("no proof dates")),
+                "{held:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_periods_automatic_window_ended_without_a_verified_time() {
+        // With no service time verified, nothing shows the window hasn't ended: no dispatch by
+        // policy goes on (Paykit spec 8.2, "Paying periods").
+        let request = monthly_body(json!({}));
+        let january = PeriodRef::from(period_at(&request, JAN_1));
+        assert!(automatic_window_ended(&january, None, None));
+        assert!(!automatic_window_ended(&january, None, Some(FEB_1 - 1)));
+        assert!(automatic_window_ended(&january, None, Some(FEB_1)));
+        assert!(!automatic_window_ended(
+            &january,
+            Some(JAN_1 + DAY),
+            Some(JAN_1 + DAY - 1)
+        ));
+        assert!(automatic_window_ended(
+            &january,
+            Some(JAN_1 + DAY),
+            Some(JAN_1 + DAY)
+        ));
     }
 }

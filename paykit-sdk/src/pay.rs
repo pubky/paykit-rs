@@ -4025,14 +4025,16 @@ impl Paykit {
     /// period's automatic window has ended on the highest service time verified
     /// ([`crate::periods::automatic_window_end`], Paykit spec 8.2, "Paying periods"): the
     /// attempt is written `failed`, nothing dispatched, and the period stays payable by hand.
-    /// `None` for an entry of no period, or within its window. A repeat, which completes a
+    /// With no service time verified, the window counts as ended. `None` for an entry of no
+    /// period, or within its window. A repeat, which completes a
     /// dispatch already made, isn't judged by it.
     fn automatic_window_ended(&self, entry: &JournalEntry) -> Result<Option<Refusal>> {
         let Some(period) = entry.period()? else {
             return Ok(None);
         };
-        let end = crate::periods::automatic_window_end(&period, entry.deadline);
-        Ok(self.service_time().is_some_and(|t| t >= end).then(|| {
+        let ended =
+            crate::periods::automatic_window_ended(&period, entry.deadline, self.service_time());
+        Ok(ended.then(|| {
             Refusal::NotAutomatic(
                 "the Billing Period's automatic window ended before its dispatch".into(),
             )
