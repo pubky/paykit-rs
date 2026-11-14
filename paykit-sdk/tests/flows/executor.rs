@@ -1277,6 +1277,46 @@ async fn test_executor_empty_ledger_owed_after_a_kept_grant_written_before_the_f
 }
 
 #[tokio::test]
+async fn test_executor_claim_read_failing_writes_nothing() {
+    // The empty ledger is still owed when the executor's read of the occurrence's claim,
+    // for the attempts it holds, fails: the read is the error, and it comes before anything
+    // is written, so the empty ledger stays owed and nothing is paid. The next payment
+    // writes it, then pays on it (Paykit spec 8.3, "Doubtful obligations", "A grant implies
+    // a ledger").
+    let w = World::new();
+    let mut shop = allowance_shop(&w).await;
+    let mut wallet = executor_wallet(&w, "wallet").await;
+    let record = accepted(&w, &mut shop, &mut wallet, terms_with(json!({}))).await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    wallet
+        .grant_executor(&record, UserConfirmed::new())
+        .await
+        .unwrap();
+    let first = request(&w, &mut shop, &mut wallet, "0.5").await;
+    let key = ledger_key(&wallet, &record).await;
+    assert_eq!(w.record_writes(&w.alice, &key), 0);
+    // The claim is read once for the attempt's step, then once for its attempts.
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/claims/".into(),
+            after: 1,
+        });
+    assert!(wallet.pay_under_allowance(&first, &record).await.is_err());
+    assert_eq!(w.record_writes(&w.alice, &key), 0);
+    assert!(w.rail.all_executions().is_empty());
+    let paid = wallet.pay_under_allowance(&first, &record).await.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    // The empty ledger, the payment's entry, then its outcome.
+    assert_eq!(w.record_writes(&w.alice, &key), 3);
+}
+
+#[tokio::test]
 async fn test_executor_pays_inside_its_limits_until_ended_through_a_restore() {
     // One Allowance from acceptance to end. Bob proposes under a lifetime limit of 1 btc and
     // the wallet accepts it and becomes its executor. It pays a request inside the limit, and
@@ -1411,17 +1451,19 @@ async fn test_executor_repeat_goes_under_an_allowance_still_in_force() {
 }
 
 #[tokio::test]
-async fn test_executor_repeat_finishes_a_dispatch_under_an_allowance_ended_since() {
-    // Bob ends the Allowance while the dispatch is in flight. An end cancels no payment
-    // already started: the resume repeats it with the same idempotency key, and nothing
-    // new is paid under the ended Allowance (Paykit spec 8.3, "Ending", "Conflicted").
+async fn test_executor_repeat_held_under_an_allowance_ended_since() {
+    // Bob ends the Allowance while the dispatch is in flight. The resume can't tell a
+    // dispatch that reached the method from one stopped before its call, so the repeat
+    // holds on the end the Allowance record shows: the method isn't called again, the
+    // attempt stays open, and nothing new is paid under the ended Allowance (Paykit spec 7.2,
+    // 8.3, "Ending").
     let w = World::new();
     let (mut shop, mut wallet, record, attempt) = executor_in_flight(&w).await;
     shop.receive(None).await.unwrap();
     let theirs = shop.allowances().await.unwrap()[0].record;
     shop.end_allowance(&theirs).await.unwrap();
     wallet.receive(None).await.unwrap();
-    assert_eq!(calls_after_resume(&w, &mut wallet, &attempt).await, 2);
+    assert_eq!(calls_after_resume(&w, &mut wallet, &attempt).await, 1);
     let next = request(&w, &mut shop, &mut wallet, "0.1").await;
     let refused = wallet
         .pay_under_allowance(&next, &record)
@@ -2244,7 +2286,7 @@ async fn set_up_through(
 }
 
 /// [`set_up_through`], the wallet on `store`.
-async fn set_up_on(w: &World, store: Arc<dyn StateStore>) -> (Paykit, Paykit, [u8; 32]) {
+pub(crate) async fn set_up_on(w: &World, store: Arc<dyn StateStore>) -> (Paykit, Paykit, [u8; 32]) {
     let router = Arc::clone(&w.router) as Arc<dyn Transport>;
     Box::pin(set_up_through(w, store, router)).await
 }
@@ -2467,13 +2509,16 @@ const MINUTE_MS: u64 = 60_000;
 /// A store that notes the commit that journals an attempt's `Paying`, and runs a hook once,
 /// during it: after the checks before the commit and before the payment method's call. A
 /// second hook runs once during the first commit that journals an attempt `Attempted`: after
-/// the attempt's batch is applied and before the final payment check.
+/// the attempt's batch is applied and before the final payment check. Set to, it fails the
+/// first commit that journals an attempt `Attempted` after its `Paying`, applying nothing, as
+/// a process stopping before it would.
 #[derive(Default)]
 struct PayingStore {
     inner: pubky_switch_client::store::MemoryStore,
     paying: std::sync::atomic::AtomicBool,
     hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     attempted_hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    fail_write_back: std::sync::atomic::AtomicBool,
 }
 
 impl PayingStore {
@@ -2483,6 +2528,12 @@ impl PayingStore {
 
     fn on_attempted(&self, hook: impl FnOnce() + Send + 'static) {
         *self.attempted_hook.lock().unwrap() = Some(Box::new(hook));
+    }
+
+    /// Fail the write back to `Attempted` after the attempt's `Paying` commit, once.
+    fn fail_the_write_back(&self) {
+        self.fail_write_back
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Whether an attempt's `Paying` was committed.
@@ -2524,6 +2575,14 @@ impl StateStore for PayingStore {
             })
         };
         let (paying, attempted) = (journals(PAYING), journals(ATTEMPTED));
+        if attempted
+            && self.paying_seen()
+            && self
+                .fail_write_back
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(pubky_switch_client::error::StoreError::Unavailable);
+        }
         self.inner.commit(batch)?;
         if attempted {
             if let Some(hook) = self.attempted_hook.lock().unwrap().take() {
@@ -2776,6 +2835,58 @@ async fn test_executor_allowance_ended_after_the_paying_commit_holds_the_dispatc
     wallet_store.on_paying(move || end_from(other, record));
     Box::pin(held_at_the_dispatch(&w, &mut wallet, &request, &record)).await;
     assert!(wallet_store.paying_seen());
+}
+
+#[tokio::test]
+async fn test_executor_repeat_held_under_an_allowance_ended_before_any_call() {
+    // While the attempt's `Paying` commit runs, another own app ends the Allowance. The
+    // final payment check holds the dispatch, and the process stops before the attempt is
+    // written back to `Attempted`, so `Paying` stays journaled with nothing dispatched. The
+    // resume's repeat on the idempotent method reads the Allowance record from the switch,
+    // finds it ended and holds: the method is never called, and the attempt stays reserved
+    // in the ledger (Paykit spec 7.2, 8.3, "Executor").
+    let w = Arc::new(World::new());
+    w.rail.set_declaration(
+        paykit_sdk::rail::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true),
+    );
+    let wallet_store = Arc::new(PayingStore::default());
+    let (mut shop, mut wallet, record) = Box::pin(set_up_on(
+        &w,
+        Arc::clone(&wallet_store) as Arc<dyn StateStore>,
+    ))
+    .await;
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    let other = Box::pin(own_app_holding(&w)).await;
+    wallet_store.on_paying(move || end_from(other, record));
+    wallet_store.fail_the_write_back();
+    assert!(Box::pin(wallet.pay_under_allowance(&request, &record))
+        .await
+        .is_err());
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let mut wallet = Paykit::load(
+        w.env(&w.alice, Arc::clone(&wallet_store) as Arc<dyn StateStore>),
+        paykit_sdk::PaykitConfig::default(),
+        app_id,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Paying
+    );
+    w.clock.advance_ms(MINUTE_MS);
+    Box::pin(wallet.resume_payments()).await.unwrap();
+    assert!(w.rail.all_executions().is_empty());
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Paying
+    );
+    let (_, ledger) = held(&wallet, &record).await;
+    assert_eq!(ledger.unwrap().entries.len(), 1);
 }
 
 #[tokio::test]

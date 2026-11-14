@@ -367,7 +367,10 @@ pub const BACKUP_NAME: &str = "paykit";
 /// most [`crate::marks::MAX_DROPPED_MARKS`] each). No run leaves more, and the runtime
 /// checks the bound only as it adds one, so a restored layer over it would stay over it. A
 /// kept ledger version (`lv/`) longer than a shared record value is refused too: no write or
-/// read the executor keeps is longer (`executor::check_kept_ledger`).
+/// read the executor keeps is longer (`executor::check_kept_ledger`); so is one that carries
+/// as dropped an attempt no restored journal entry naming its Allowance holds, since a write
+/// carries only those and a prune takes its entries' attempts out
+/// (`executor::KeptLedger`).
 pub(crate) fn restore_paykit_layer(
     layer: Option<&ProtocolLayer>,
     own: [u8; 32],
@@ -389,6 +392,10 @@ pub(crate) fn restore_paykit_layer(
     let mut writes = Vec::with_capacity(state.len());
     let mut cursor_time_ms = 0;
     let mut bounded = BoundedFamilies::default();
+    // The attempts each kept ledger version carries as dropped, by its Allowance record, and
+    // the Allowance record each journal entry names, by its attempt.
+    let mut dropped = Vec::new();
+    let mut journaled_under = std::collections::BTreeMap::new();
     for (key, value) in state {
         // The schema is closed: a key no builder of the SDK writes is refused, and every
         // value is read as its family's, bound to what its key names (`state::StateKey`).
@@ -562,12 +569,16 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::KeptLedger(_) => {
+            StateKey::KeptLedger(record) => {
                 // The same check a runtime read makes: bound to its key's Allowance record,
                 // at a version a write gives, its content a ledger no longer than a shared
-                // record value (`state::Stored`).
-                state::restored::<crate::executor::KeptLedger>(&key, &value, &binder)
+                // record value (`state::Stored`). Its attempts kept as dropped are checked
+                // against the journal once every entry is read.
+                let kept = state::restored::<crate::executor::KeptLedger>(&key, &value, &binder)
                     .map_err(|_| unread())?;
+                for attempt in kept.dropped().map_err(|_| unread())? {
+                    dropped.push((record, attempt));
+                }
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -675,6 +686,15 @@ pub(crate) fn restore_paykit_layer(
             return Err("Paykit spec 7.2: two open journal entries for one obligation".into());
         }
         journaled.insert(attempt);
+        if let Some(allowance_id) = entry.allowance().map_err(|_| bad())? {
+            let record = binder
+                .record_key(&crate::allowances::allowance_target(
+                    &entry.payee,
+                    &allowance_id,
+                ))
+                .map_err(|_| bad())?;
+            journaled_under.insert(attempt, record);
+        }
         entry.restored = true;
         let value = state::encode(&entry).map_err(|_| bad())?;
         writes.push(LocalWrite::Put { key, value });
@@ -684,6 +704,18 @@ pub(crate) fn restore_paykit_layer(
         .any(|attempt| !journaled.contains(attempt))
     {
         return Err("Paykit's local state in the backup doesn't read".into());
+    }
+    // A kept ledger version carries as dropped only attempts of journal entries naming its
+    // Allowance, and a prune takes a pruned entry's attempt out in its own commit
+    // (`executor::KeptLedger`): any other is past that bound, a state no run leaves.
+    if dropped
+        .iter()
+        .any(|(record, attempt)| journaled_under.get(attempt) != Some(record))
+    {
+        return Err(
+            "Paykit spec 8.3: a kept ledger version in the backup carries an attempt no journal entry under its Allowance holds"
+                .into(),
+        );
     }
     // Every open request is held after a restore, set in the restore's own commit (Paykit
     // spec 7.2, "What a restore loses"; `hold.rs`).

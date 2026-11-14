@@ -72,7 +72,7 @@
 //! | `cf/<record key>` | a second, different proposal or response of an Allowance, with the feed `seq` its entry was read at, kept as the stop until the Allowance record holds `conflicted` (`allowances.rs`, Paykit spec 8.3) | |
 //! | `mc` | set by a `missed` item: every entry of the consent list is to be confirmed again, as after a restore; nothing is consented while it is set, and the next receive marks each entry so and clears it (`allowances.rs`); never restored | |
 //! | `en/<msg_id>` | the executor app an `executor_notice` is wrapped to, kept with the batch that queues it | |
-//! | `lv/<record key>` | the last ledger version the executor accepted, with its content and the attempts of its journal entries under the Allowance that an earlier kept version listed and this one doesn't (`executor.rs`, Paykit spec 8.3); its content at most the 256 KiB less 4 bytes a shared record holds (`MAX_LEDGER_VALUE`), and a restore refuses a backup holding a longer one | |
+//! | `lv/<record key>` | the last ledger version the executor accepted, with its content and the attempts of its journal entries under the Allowance that this version doesn't list (`dropped`, `executor.rs`, Paykit spec 8.3); its content at most the 256 KiB less 4 bytes a shared record holds (`MAX_LEDGER_VALUE`), `dropped` only attempts of journal entries this app holds naming the Allowance, a pruned entry's attempt leaving it in the prune's commit, and a restore refuses a backup holding a longer content, or an attempt in `dropped` no restored journal entry naming the Allowance holds | |
 //! | `la` | the first rollback of an Allowance ledger this app found, the record, the generation of the own `identity.json` it was found at and the rule its ledger broke; while that generation stands the app makes no new attempt (`executor.rs`, Paykit spec 8.3); one key, so at most one; restored | |
 //! | `el/<record key>` | the first grant's empty ledger, not yet sent or sent without a verified answer (`executor.rs`); never restored, so a restored executor takes a missing ledger as usage history lost | |
 //! | `fc/<record key>` | the version of the ignored current write of an Allowance record its user confirmed the executor may pay under (`executor.rs`); never restored | |
@@ -277,7 +277,7 @@ impl<'a> Binder<'a> {
     }
 
     /// The record key of `target`, as the client derives it (Switch spec 13.3).
-    fn record_key(&self, target: &RecordTarget) -> Result<[u8; 32]> {
+    pub(crate) fn record_key(&self, target: &RecordTarget) -> Result<[u8; 32]> {
         let policy = target
             .collection
             .policy
