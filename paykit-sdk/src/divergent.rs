@@ -2259,8 +2259,9 @@ mod tests {
 
     #[test]
     fn test_divergent_kept_proof_of_another_settlement_than_the_rails_points_elsewhere() {
-        let alice = crate::testkit::Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = crate::testkit::Party::new("bob", "shop", &["request"]);
+        let alice =
+            crate::testkit::Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = crate::testkit::Party::new("bob", "shop", &["paykit_request"]);
         let proof = alice.message(
             &bob,
             "paykit.payment_proof",
@@ -2309,8 +2310,9 @@ mod tests {
 
     #[test]
     fn test_divergent_kept_after_keeps_the_first_and_the_newest_others_in_acceptance_order() {
-        let alice = crate::testkit::Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = crate::testkit::Party::new("bob", "shop", &["request"]);
+        let alice =
+            crate::testkit::Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = crate::testkit::Party::new("bob", "shop", &["paykit_request"]);
         let reply = || {
             alice.message(
                 &bob,
@@ -2359,8 +2361,9 @@ mod tests {
     fn test_divergent_write_without_its_seq_is_corrupt_at_a_restore() {
         // Every writer of `dw/` keeps the feed `seq` its message was read at: a value without
         // it can't be ordered, and a restore refuses it.
-        let alice = crate::testkit::Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = crate::testkit::Party::new("bob", "shop", &["request"]);
+        let alice =
+            crate::testkit::Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = crate::testkit::Party::new("bob", "shop", &["paykit_request"]);
         let reply = alice.message(
             &bob,
             "paykit.payment_request_acceptance",
@@ -2414,9 +2417,11 @@ mod tests {
         // The bound is full of alice's messages; carol's come. None of alice's goes for them:
         // what goes past the bound is carol's own, the one a step takes kept over the bound
         // until a later message of carol's drops it.
-        let alice = crate::testkit::Party::new("alice", "wallet", &["pay", "contacts"]);
-        let carol = crate::testkit::Party::new("carol", "wallet", &["pay", "contacts"]);
-        let bob = crate::testkit::Party::new("bob", "shop", &["request"]);
+        let alice =
+            crate::testkit::Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let carol =
+            crate::testkit::Party::new("carol", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = crate::testkit::Party::new("bob", "shop", &["paykit_request"]);
         let reply = |from: &crate::testkit::Party| {
             from.message(
                 &bob,
@@ -2440,7 +2445,7 @@ mod tests {
 
     #[test]
     fn test_divergent_kept_after_caps_all_senders_together() {
-        let bob = crate::testkit::Party::new("bob", "shop", &["request"]);
+        let bob = crate::testkit::Party::new("bob", "shop", &["paykit_request"]);
         let reply = |from: &crate::testkit::Party| {
             from.message(
                 &bob,
@@ -2449,10 +2454,15 @@ mod tests {
                 crate::testkit::object(serde_json::json!({ "label": null })),
             )
         };
-        let alice = crate::testkit::Party::new("alice", "wallet", &["pay", "contacts"]);
+        let alice =
+            crate::testkit::Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
         let others: Vec<crate::testkit::Party> = (0..32)
             .map(|i| {
-                crate::testkit::Party::new(&format!("other{i}"), "wallet", &["pay", "contacts"])
+                crate::testkit::Party::new(
+                    &format!("other{i}"),
+                    "wallet",
+                    &["paykit_pay", "paykit_contacts"],
+                )
             })
             .collect();
         let in_order = |from: Vec<StoredMessage>| -> Vec<(StoredMessage, Order)> {
@@ -2494,8 +2504,9 @@ mod tests {
             ("paykit.payment_request_cancellation", None),
             ("paykit.payment_request_rejection", None),
         ] {
-            let alice = crate::testkit::Party::new("alice", "wallet", &["pay", "contacts"]);
-            let bob = crate::testkit::Party::new("bob", "shop", &["request"]);
+            let alice =
+                crate::testkit::Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+            let bob = crate::testkit::Party::new("bob", "shop", &["paykit_request"]);
             let stop = alice.message(
                 &bob,
                 kind,

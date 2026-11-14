@@ -73,7 +73,7 @@ impl StateStore for NoSeenMarks {
 }
 
 /// Bob's request, paid by alice's wallet on `store` with the payment left in flight; her
-/// phone, another own app holding `pay`, holds the request record too. Returns both apps,
+/// phone, another own app holding `paykit_pay`, holds the request record too. Returns both apps,
 /// the request and the attempt.
 async fn in_flight_on(
     w: &World,
@@ -435,7 +435,7 @@ async fn outcome_refused_when_sent_again(
     );
 }
 
-/// The entry is where the refused batch left it, and a resume under `pay` writes the outcome
+/// The entry is where the refused batch left it, and a resume under `paykit_pay` writes the outcome
 /// once: `done`, the acceptance and the proof, paying nothing again.
 async fn outcome_written_again(
     w: &World,

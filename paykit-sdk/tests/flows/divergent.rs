@@ -2433,13 +2433,13 @@ async fn test_divergent_receipt_from_another_identity_never_kept_over_a_paused_r
     );
 }
 
-/// The shop holds bob's request record as a value that doesn't read, paused as divergent,
-/// and carol, who isn't the request's counterparty, sends it an acceptance naming the
-/// request. The shop can't tell the record's counterparty, so the acceptance is kept as a
-/// reply before its record, under the spam rule, never over the divergent record: with
-/// `contacts` and carol blocked, it is only counted and nothing is kept. Without `contacts`,
-/// which gates nothing, it is kept there; once the record reads again, naming alice, carol's
-/// reply is never written, holds none of the record's gates, and leaves the pause as it was.
+/// The shop holds bob's request record as a value that doesn't read, paused as divergent, and
+/// carol, who isn't the request's counterparty, sends it an acceptance naming the request. The shop
+/// can't tell the record's counterparty, so the acceptance is kept as a reply before its record,
+/// under the spam rule, never over the divergent record: with `paykit_contacts` and carol blocked,
+/// it is only counted and nothing is kept. Without `paykit_contacts`, which gates nothing, it is
+/// kept there; once the record reads again, naming alice, carol's reply is never written, holds
+/// none of the record's gates, and leaves the pause as it was.
 async fn acceptance_over_unread_paused(blocked: bool) {
     let w = World::new();
     let seen = Arc::new(crate::outcome_record::NoSeenMarks::default());

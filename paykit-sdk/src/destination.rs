@@ -12,7 +12,7 @@
 //!   paid);
 //! - it carries the destination, and hasn't expired: a Private Payment List is used until the
 //!   earlier of its `expires_at` and 30 days after its inbox accepted it (Paykit spec 5);
-//! - the sending app's certificate allows `request` (a labelled selling scope counts), a
+//! - the sending app's certificate allows `paykit_request` (a labelled selling scope counts), a
 //!   listed certificate hasn't expired, and the app is current in the payee's
 //!   `identity.json`, its certificate counting at the time the message was accepted.
 //!
@@ -581,7 +581,7 @@ fn record_carries(
 /// The app `app_id` that sent the carrier, or whose record it is, is current in the payee's
 /// `identity.json`, with a certificate that passes Paykit's verifiers' checks (Paykit wire
 /// 3.1: its scope rules, and permissions with none missing and, without another protocol's
-/// scope, no other), allows `request` and, when listed, hasn't expired; a record is also
+/// scope, no other), allows `paykit_request` and, when listed, hasn't expired; a record is also
 /// within the identity's record age limit (Paykit spec 4). The Switch takes a certificate
 /// Paykit's verifiers refuse, so a record's, which nothing else checks, is checked here.
 pub(crate) fn current(
@@ -654,8 +654,8 @@ mod tests {
 
     fn parties() -> (Party, Party) {
         (
-            Party::new("alice", "wallet", &["pay", "contacts"]),
-            Party::new("bob", "shop", &["request"]),
+            Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]),
+            Party::new("bob", "shop", &["paykit_request"]),
         )
     }
 
@@ -684,7 +684,7 @@ mod tests {
     #[test]
     fn test_destination_refuses_another_identity_app_payload_or_request() {
         let (alice, bob) = parties();
-        let carol = Party::new("carol", "shop", &["request"]);
+        let carol = Party::new("carol", "shop", &["paykit_request"]);
         let request = bob.message(&alice, "paykit.payment_request", vec![], request_body());
         let dest = destination(
             &bob,
@@ -811,12 +811,12 @@ mod tests {
     fn test_destination_record_carrier_with_wrong_permissions_refused() {
         use pubky_switch_core::scopes::Permission;
         // A public record's certificate is checked in full before it carries a destination
-        // (Paykit wire 3.1): permissions missing one `request` needs, or holding another.
-        let missing = Party::with_permissions("bob", "shop", &["request"], &[]);
+        // (Paykit wire 3.1): permissions missing one `paykit_request` needs, or holding another.
+        let missing = Party::with_permissions("bob", "shop", &["paykit_request"], &[]);
         let extra = Party::with_permissions(
             "bob",
             "shop",
-            &["request"],
+            &["paykit_request"],
             &[Permission::ListsRead, Permission::ConversationAdd],
         );
         for app in [&missing, &extra] {
@@ -824,7 +824,7 @@ mod tests {
             let refused = current(&app.doc(&[app]), &app.app_id(), &carrier, NOW).unwrap_err();
             assert!(refused.contains("permissions"), "{refused}");
         }
-        let valid = Party::new("bob", "shop", &["request"]);
+        let valid = Party::new("bob", "shop", &["paykit_request"]);
         let carrier = Carrier::Record(Box::new(valid.record(&["paykit.payment_request"])));
         assert_eq!(
             current(&valid.doc(&[&valid]), &valid.app_id(), &carrier, NOW),
@@ -858,9 +858,9 @@ mod tests {
             NOW
         )
         .is_err());
-        // A request from an app without `request` carries no destination: the reader refuses
+        // A request from an app without `paykit_request` carries no destination: the reader refuses
         // to store it at all (Paykit wire 5.2, the sender's side of check 8).
-        let payer_app = Party::new("bob", "wallet", &["pay", "contacts"]);
+        let payer_app = Party::new("bob", "wallet", &["paykit_pay", "paykit_contacts"]);
         assert!(payer_app
             .try_message(&alice, "paykit.payment_request", vec![], request_body())
             .is_err());

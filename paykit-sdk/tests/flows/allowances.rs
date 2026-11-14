@@ -34,7 +34,7 @@ async fn alice_app(w: &World, name: &str, scopes: RequestedScopes) -> Paykit {
     app
 }
 
-/// Alice's wallet, holding `pay` and `allowance`.
+/// Alice's wallet, holding `paykit_pay` and `paykit_allowance`.
 async fn wallet(w: &World) -> Paykit {
     Box::pin(alice_app(
         w,
@@ -44,7 +44,7 @@ async fn wallet(w: &World) -> Paykit {
     .await
 }
 
-/// Bob's shop, holding `request` and `allowance`; he admits alice.
+/// Bob's shop, holding `paykit_request` and `paykit_allowance`; he admits alice.
 async fn shop(w: &World) -> Paykit {
     let mut shop = w
         .join(
@@ -137,7 +137,7 @@ async fn test_allowances_answer_refused_to_the_proposer_and_once_answered() {
         matches!(refusal(&error), Some(Refusal::Usage(_))),
         "{error:?}"
     );
-    // An app without `allowance` proposes nothing.
+    // An app without `paykit_allowance` proposes nothing.
     let mut plain = w.wallet("plain").await;
     let error = plain
         .propose_allowance(w.bob_id(), AllowanceRole::Allower, terms())
@@ -290,8 +290,8 @@ async fn test_allowances_withdrawal_crossing_the_acceptance_ends_it_on_both_side
 
 #[tokio::test]
 async fn test_allowances_end_for_a_record_not_listed_yet_is_held_until_listed() {
-    // Alice's phone accepts bob's proposal; the wallet, holding `pay` only, can't read the
-    // record. The wallet is renewed to read `allowance` too, with no bundle, and bob ends
+    // Alice's phone accepts bob's proposal; the wallet, holding `paykit_pay` only, can't read the
+    // record. The wallet is renewed to read `paykit_allowance` too, with no bundle, and bob ends
     // the Allowance. The record's absence from the wallet's copy decides nothing: the end's
     // entry is held, the cursor before it, and no stop is kept from it as new state. Once
     // the keys come and the records are listed, the end is taken once and recorded.
@@ -385,7 +385,7 @@ async fn test_allowances_answer_before_its_record_kept_then_given_up() {
     assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
 }
 
-/// Alice's executor app, holding `allowance_execute`, writes its grant into the accepted
+/// Alice's executor app, holding `paykit_allowance_execute`, writes its grant into the accepted
 /// Allowance at `record` and puts it on its consent list, as the executor does at
 /// acceptance.
 async fn grant(w: &World, exec: &mut Paykit, record: &[u8; 32]) {
@@ -583,7 +583,7 @@ async fn test_allowances_restore_asks_consent_again_and_keeps_removals() {
 
 #[tokio::test]
 async fn test_allowances_app_without_allowance_takes_none_of_the_messages() {
-    // An app whose certificate lacks `allowance` lists none of the kinds, so bob's proposal
+    // An app whose certificate lacks `paykit_allowance` lists none of the kinds, so bob's proposal
     // goes only to the app that takes it, and the other writes no Allowance record.
     let w = World::new();
     let mut plain = w.wallet("plain").await;
@@ -811,7 +811,8 @@ async fn sealed_allowance(
     (theirs, mine, cert)
 }
 
-/// A wallet and a phone of alice's, both holding `pay` and `allowance`, and bob's shop.
+/// A wallet and a phone of alice's, both holding `paykit_pay` and `paykit_allowance`, and bob's
+/// shop.
 async fn two_wallets(w: &World) -> (Paykit, Paykit, Paykit) {
     let shop = Box::pin(shop(w)).await;
     let wallet = Box::pin(wallet(w)).await;
@@ -1935,12 +1936,12 @@ fn missed_and_listing_fails(w: &World) {
     fail_paykit_listing(&w.alice, WALLET_COLLECTIONS);
 }
 
-/// How many collections the client lists for an app of alice's holding `pay` and
-/// `allowance`: the payer's side, `payment_lists`, `block_floor` and `allowances`.
+/// How many collections the client lists for an app of alice's holding `paykit_pay` and
+/// `paykit_allowance`: the payer's side, `payment_lists`, `block_floor` and `allowances`.
 const WALLET_COLLECTIONS: usize = 4;
 
-/// How many collections the client lists for bob's shop, holding `request` and `allowance`:
-/// the payee's side and `allowances`.
+/// How many collections the client lists for bob's shop, holding `paykit_request` and
+/// `paykit_allowance`: the payee's side and `allowances`.
 const SHOP_COLLECTIONS: usize = 2;
 
 /// Fail Paykit's own listing at the end of the next receive of `party`'s app after a
@@ -2985,8 +2986,8 @@ async fn test_allowances_conflict_by_a_response_over_a_record_deleted_since_stil
     assert!(!view.consented);
 }
 
-/// Alice's keeper app, holding `pay`, `allowance` and `manage_contacts`: it reads the lists
-/// and blocks.
+/// Alice's keeper app, holding `paykit_pay`, `paykit_allowance` and `paykit_manage_contacts`: it
+/// reads the lists and blocks.
 async fn keeper(w: &World) -> Paykit {
     Box::pin(alice_app(
         w,
@@ -3495,18 +3496,12 @@ async fn backed_up_with_its_answer_unqueued(
         wallet.accept_allowance(&mine).await.unwrap();
         shop.receive(None).await.unwrap();
     }
-    // The switch applies the batch and its answer is lost; the client's try to send the
-    // batch again within the call doesn't reach the switch, so the batch stays kept.
+    // The switch applies the batch and its answer is lost, so the batch stays kept: the
+    // client sends it again only at a later call.
     w.alice
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
             path: "/ops".into(),
-        });
-    w.alice
-        .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
-            path: "/ops".into(),
-            after: 0,
         });
     let answered = Box::pin(answer(wallet, kind, &mine)).await;
     assert_eq!(Box::pin(taken(shop, kind)).await, 0, "{answered:?}");
@@ -4014,8 +4009,8 @@ async fn wallet_answer_dropped_then_recorded(
 
 #[tokio::test]
 async fn test_allowances_answer_dropped_at_a_payer_app_proposer_asked_again_once_and_placed() {
-    // The other side of the dropped-answer test: alice's wallet, holding `pay` and not
-    // `request`, proposed as allower. Once it holds the Allowance record, bob's mark is due
+    // The other side of the dropped-answer test: alice's wallet, holding `paykit_pay` and not
+    // `paykit_request`, proposed as allower. Once it holds the Allowance record, bob's mark is due
     // from that record alone and asks him once; the same acceptance comes again, is taken as
     // never processed, and is placed (Paykit spec 8.1, "Replies before their record").
     let w = World::new();
@@ -4230,8 +4225,8 @@ async fn test_allowances_answer_dropped_mark_not_due_from_a_payment_without_a_re
 
 #[tokio::test]
 async fn test_allowances_kept_answer_waits_through_a_renewal_without_keys_then_placed() {
-    // Alice's wallet, holding `allowance` only, sent a proposal its record doesn't hold yet,
-    // and keeps bob's acceptance before the record. The wallet is renewed to hold `pay` too,
+    // Alice's wallet, holding `paykit_allowance` only, sent a proposal its record doesn't hold yet,
+    // and keeps bob's acceptance before the record. The wallet is renewed to hold `paykit_pay` too,
     // with no bundle: the payer's side waits for its keys, so the kept replies aren't placed,
     // and the Allowances side isn't listed under the new certificate either. The record comes
     // meanwhile: the acceptance stays kept, neither placed nor given up. Once the keys come
@@ -4679,7 +4674,8 @@ fn inject_with_id(
         .unwrap();
 }
 
-/// Carol's app `shop`, holding `request` and `allowance`, which alice's `wallet` admits.
+/// Carol's app `shop`, holding `paykit_request` and `paykit_allowance`, which alice's `wallet`
+/// admits.
 async fn carol_admitted(w: &World, wallet: &mut Paykit) -> Paykit {
     wallet.app_mut().invite(&w.carol_id()).await.unwrap();
     let mut carol = w

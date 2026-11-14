@@ -530,7 +530,7 @@ impl Paykit {
         let own = self.identity();
         let sender = stored.sender();
         let scopes = self.scopes();
-        let pay = self.holds("pay");
+        let pay = self.holds("paykit_pay");
         let first = stored.message().refs.first().copied();
         let record = |target, role, creates| {
             Some(Place::Record {
@@ -603,7 +603,7 @@ impl Paykit {
             Body::AllowanceProposal(_)
             | Body::AllowanceAcceptance(_)
             | Body::AllowanceRejection(_)
-                if self.holds("allowance") =>
+                if self.holds("paykit_allowance") =>
             {
                 Some(Place::Allowance)
             }
@@ -613,7 +613,7 @@ impl Paykit {
             // entry runs again: it is no message any record of this app's holds here, so the
             // event stays for the host, which can release the entry, as for a payee's
             // cancellation of a request not held.
-            Body::AllowanceEnd(reply) if self.holds("allowance") => {
+            Body::AllowanceEnd(reply) if self.holds("paykit_allowance") => {
                 let target = crate::allowances::allowance_target(&sender, &reply.allowance_id);
                 let record = self.app.record_key(&target)?;
                 let content = self
@@ -1188,8 +1188,8 @@ mod tests {
     use crate::testkit::{object, Party};
 
     fn note(placed: bool) -> StoredNote {
-        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
         let stored = bob.message(
             &alice,
             "paykit.payment_request",

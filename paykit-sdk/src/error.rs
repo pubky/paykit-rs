@@ -17,8 +17,8 @@ pub enum Refusal {
     /// The app holds no such request, record or payment.
     #[error("no such request, record or payment")]
     NotFound,
-    /// The call needs a scope the app's certificate doesn't hold, such as `pay` to pay or
-    /// `request` to send a request (Paykit spec 3.1).
+    /// The call needs a scope the app's certificate doesn't hold, such as `paykit_pay` to pay or
+    /// `paykit_request` to send a request (Paykit spec 3.1).
     #[error("Paykit spec 3.1: the certificate doesn't hold {0}")]
     ScopeMissing(String),
     /// A labelled selling app sends every request under one of its labels, and only under a

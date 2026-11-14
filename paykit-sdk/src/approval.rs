@@ -2,8 +2,9 @@
 //! switch permissions `paykit-lib` derives for them, which the signer signs.
 //!
 //! A certificate lists every scope explicitly, including those another requires: asking for
-//! `pay` also asks for `contacts`, `allowance_execute` for `allowance`, `pay` and `contacts`,
-//! and `manage_contacts` for `contacts`. A certificate holds `request` or labelled selling scopes, never both.
+//! `paykit_pay` also asks for `paykit_contacts`, `paykit_allowance_execute` for `paykit_allowance`,
+//! `paykit_pay` and `paykit_contacts`, and `paykit_manage_contacts` for `paykit_contacts`. A
+//! certificate holds `paykit_request` or labelled selling scopes, never both.
 
 use paykit_lib::scopes::{check_requested_scopes, permissions_for, ExtensionPrefix};
 use paykit_lib::Label;
@@ -52,61 +53,61 @@ impl AppScopes {
         self
     }
 
-    /// `pay`, with the `contacts` it requires: every paying app reads the deny list
+    /// `paykit_pay`, with the `paykit_contacts` it requires: every paying app reads the deny list
     /// (Paykit spec 3.1).
     #[must_use]
     pub fn pay(self) -> Self {
-        self.with("pay").with("contacts")
+        self.with("paykit_pay").with("paykit_contacts")
     }
 
-    /// `request`: act as payee, for every label.
+    /// `paykit_request`: act as payee, for every label.
     #[must_use]
     pub fn request(self) -> Self {
-        self.with("request")
+        self.with("paykit_request")
     }
 
-    /// `request:<label>`: act as payee under one label only (Paykit spec 3.1).
+    /// `paykit_request:<label>`: act as payee under one label only (Paykit spec 3.1).
     #[must_use]
     pub fn request_label(self, label: &Label) -> Self {
         self.with(&label.scope())
     }
 
-    /// `allowance`: Allowances.
+    /// `paykit_allowance`: Allowances.
     #[must_use]
     pub fn allowance(self) -> Self {
-        self.with("allowance")
+        self.with("paykit_allowance")
     }
 
-    /// `allowance_execute`, with the `allowance`, `pay` and `contacts` it requires: every
-    /// executor reads the deny list (Paykit spec 3.1).
+    /// `paykit_allowance_execute`, with the `paykit_allowance`, `paykit_pay` and `paykit_contacts`
+    /// it requires: every executor reads the deny list (Paykit spec 3.1).
     #[must_use]
     pub fn allowance_execute(self) -> Self {
-        self.with("allowance")
-            .with("pay")
-            .with("contacts")
-            .with("allowance_execute")
+        self.with("paykit_allowance")
+            .with("paykit_pay")
+            .with("paykit_contacts")
+            .with("paykit_allowance_execute")
     }
 
-    /// `contacts`: read the contacts.
+    /// `paykit_contacts`: read the contacts.
     #[must_use]
     pub fn contacts(self) -> Self {
-        self.with("contacts")
+        self.with("paykit_contacts")
     }
 
-    /// `manage_contacts`, with the `contacts` it requires.
+    /// `paykit_manage_contacts`, with the `paykit_contacts` it requires.
     #[must_use]
     pub fn manage_contacts(self) -> Self {
-        self.with("contacts").with("manage_contacts")
+        self.with("paykit_contacts").with("paykit_manage_contacts")
     }
 
-    /// `ext:<prefix>`: an extension's kinds.
+    /// `paykit_ext:<prefix>`: an extension's kinds.
     #[must_use]
     pub fn extension(self, prefix: &ExtensionPrefix) -> Self {
         self.with(&prefix.scope())
     }
 
     /// The scopes and their permissions, checked as the signer checks an app request (Paykit
-    /// wire 3.1): no unknown or malformed name, `request` and labels never together, at most
+    /// wire 3.1): no unknown or malformed name, `paykit_request` and labels never together, at most
     /// 8 labels and 8 extension scopes.
     ///
     /// # Errors
@@ -128,7 +129,10 @@ mod tests {
     #[test]
     fn test_approval_wallet_scopes_and_permissions() {
         let wallet = AppScopes::new().pay().request().build().unwrap();
-        assert_eq!(wallet.scopes, vec!["pay", "contacts", "request"]);
+        assert_eq!(
+            wallet.scopes,
+            vec!["paykit_pay", "paykit_contacts", "paykit_request"]
+        );
         assert_eq!(
             wallet.permissions,
             vec![
@@ -142,34 +146,40 @@ mod tests {
 
     #[test]
     fn test_approval_pay_asks_for_contacts() {
-        // A paying app reads the deny list, so `pay` brings the `contacts` it requires and
-        // its `lists.read` (Paykit spec 3.1, 3.2).
+        // A paying app reads the deny list, so `paykit_pay` brings the `paykit_contacts` it
+        // requires and its `lists.read` (Paykit spec 3.1, 3.2).
         let payer = AppScopes::new().pay().build().unwrap();
-        assert_eq!(payer.scopes, vec!["pay", "contacts"]);
+        assert_eq!(payer.scopes, vec!["paykit_pay", "paykit_contacts"]);
         assert!(payer.permissions.contains(&Permission::ListsRead));
-        // Asked for again, or after `contacts`, each scope is listed once.
+        // Asked for again, or after `paykit_contacts`, each scope is listed once.
         let again = AppScopes::new().contacts().pay().pay().build().unwrap();
-        assert_eq!(again.scopes, vec!["contacts", "pay"]);
+        assert_eq!(again.scopes, vec!["paykit_contacts", "paykit_pay"]);
         let phone = AppScopes::new().pay().allowance().build().unwrap();
-        assert_eq!(phone.scopes, vec!["pay", "contacts", "allowance"]);
+        assert_eq!(
+            phone.scopes,
+            vec!["paykit_pay", "paykit_contacts", "paykit_allowance"]
+        );
     }
 
     #[test]
     fn test_approval_adds_required_scopes() {
         let executor = AppScopes::new().allowance_execute().build().unwrap();
-        assert!(executor.scopes.contains(&"pay".to_owned()));
-        assert!(executor.scopes.contains(&"allowance".to_owned()));
-        assert!(executor.scopes.contains(&"contacts".to_owned()));
+        assert!(executor.scopes.contains(&"paykit_pay".to_owned()));
+        assert!(executor.scopes.contains(&"paykit_allowance".to_owned()));
+        assert!(executor.scopes.contains(&"paykit_contacts".to_owned()));
         assert!(executor.permissions.contains(&Permission::ListsRead));
         let contacts = AppScopes::new().manage_contacts().build().unwrap();
-        assert_eq!(contacts.scopes, vec!["contacts", "manage_contacts"]);
+        assert_eq!(
+            contacts.scopes,
+            vec!["paykit_contacts", "paykit_manage_contacts"]
+        );
     }
 
     #[test]
     fn test_approval_labelled_seller_gets_request_permissions() {
         let label = Label::parse("shop1").unwrap();
         let shop = AppScopes::new().request_label(&label).build().unwrap();
-        assert_eq!(shop.scopes, vec!["request:shop1"]);
+        assert_eq!(shop.scopes, vec!["paykit_request:shop1"]);
         assert_eq!(shop.permissions, vec![Permission::ConversationAdd]);
     }
 

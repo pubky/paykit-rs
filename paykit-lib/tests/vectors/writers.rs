@@ -281,7 +281,7 @@ fn test_writers_terms_and_ledgers_write_only_what_their_readers_take() {
 #[test]
 fn test_writers_records_write_only_what_their_readers_take() {
     let alice = pubky(ALICE);
-    let s = paykit("sealed.json");
+    let s = crate::sealed::bound_sealed();
     let accepted = arr(&s, "binding_accepted");
     let list = PaymentListRecord::read(st(&accepted[0], "value").as_bytes(), &alice).unwrap();
     let allowance = AllowanceRecord::read(st(&accepted[1], "value").as_bytes(), &alice).unwrap();
@@ -347,7 +347,7 @@ fn test_writers_records_write_only_what_their_readers_take() {
 /// derivation already rules it out.
 #[test]
 fn test_writers_refuse_every_rejection_case() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     let alice = pubky(ALICE);
     let m = paykit("messages.json");
     // conversion_terms: requests and period details a payer drops.
@@ -443,7 +443,7 @@ fn test_writers_refuse_every_rejection_case() {
         let name = st(case, "name");
         let sender = verify_certificate(&signed(&case["sender_cert"]), &pubky(BOB)).unwrap();
         let recipient = verify_certificate(&signed(&case["recipient_cert"]), &alice).unwrap();
-        let side = if sender.scopes().iter().any(|s| s == "pay") {
+        let side = if sender.scopes().iter().any(|s| s == "paykit_pay") {
             Side::Payer
         } else {
             Side::Payee
@@ -470,7 +470,7 @@ fn test_writers_refuse_every_rejection_case() {
     }
     // sealed.json activity_records: the records are refused by ActivityRecord::to_json in the
     // generator; the stored messages a sender's certificate doesn't allow aren't stored.
-    let s = paykit("sealed.json");
+    let s = crate::sealed::bound_sealed();
     for case in arr(&s["activity_records"], "refused") {
         let record: Value = serde_json::from_str(st(case, "value")).unwrap();
         if let Some(request) = record.get("request").filter(|r| !r.is_null()) {

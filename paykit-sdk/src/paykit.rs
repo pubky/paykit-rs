@@ -576,10 +576,10 @@ impl Paykit {
     }
 
     pub(crate) fn require_pay(&self) -> Result<()> {
-        if self.holds("pay") {
+        if self.holds("paykit_pay") {
             Ok(())
         } else {
-            Err(Refusal::ScopeMissing("pay".into()).into())
+            Err(Refusal::ScopeMissing("paykit_pay".into()).into())
         }
     }
 
@@ -674,7 +674,7 @@ impl Paykit {
         if self.certificate_refused().is_none() {
             Box::pin(self.drop_unblocks_not_kept()).await?;
         }
-        // An app holding `contacts` reads the flagged senders again first, at most every 10
+        // An app holding `paykit_contacts` reads the flagged senders again first, at most every 10
         // minutes, for the spam rule (Paykit wire 4.1).
         Box::pin(self.refresh_lists_when_due()).await?;
         // This app's blocks that may not reach the switch otherwise are written again: one
