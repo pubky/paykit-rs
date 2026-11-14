@@ -145,6 +145,11 @@ pub mod natural_key {
         lp(&[payee, app_id])
     }
 
+    /// The `block_floor` record: `lp(own identity)`, the one record of the collection.
+    pub fn block_floor(own: &[u8; 32]) -> Vec<u8> {
+        lp(&[own])
+    }
+
     /// An `allowances` or `allowance_ledgers` record: `lp(counterparty identity, allowance_id
     /// text)`.
     pub fn allowance(counterparty: &[u8; 32], allowance_id: &AllowanceId) -> Vec<u8> {

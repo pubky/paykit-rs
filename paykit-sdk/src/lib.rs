@@ -28,6 +28,8 @@
 //! - [`AppScopes`]: Paykit's side of approval.
 //! - [`app_records`]: Paykit's member of app records, and reading a payee's public
 //!   endpoints from them ([`Paykit::public_endpoints`]).
+//! - Divergent records after a provider loss: paused until the user confirms
+//!   ([`Paykit::divergent_records`], [`Paykit::confirm_divergent`], [`DivergentRecord`]).
 //!
 //! Paying recurring requests' periods, the Allowance executor with its grant and ledger, and
 //! publishing Private Payment Lists build on the same parts, in their own modules.
@@ -44,8 +46,10 @@ mod allowances;
 pub mod app_records;
 mod approval;
 mod destination;
+mod divergent;
 mod error;
 mod executor;
+mod floor;
 mod hold;
 mod journal;
 mod marks;
@@ -71,6 +75,7 @@ pub use activity::Role;
 pub use allowances::{AllowanceRole, AllowanceStatus, AllowanceView, SentAllowance};
 pub use approval::{AppScopes, RequestedScopes};
 pub use destination::IDENTITY_GRACE_MS;
+pub use divergent::DivergentRecord;
 pub use error::{PaykitError, Refusal, Result};
 pub use journal::{PaymentView, Stage};
 pub use marks::MAX_DROPPED_MARKS;
@@ -213,6 +218,7 @@ mod tests {
                     recurring: false,
                     recurrence: None,
                     status: RequestStatus::Open,
+                    divergent: false,
                     receipt: Some(ReceivedReceipt {
                         record: [5; 32],
                         payee: [1; 32],
@@ -224,6 +230,7 @@ mod tests {
                         metadata: Some(proof()),
                         payment_reference: Some(SECRET.into()),
                     }),
+                    manual_only: false,
                     periods: Vec::new(),
                 }
             ),

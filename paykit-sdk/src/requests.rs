@@ -38,7 +38,7 @@ use serde_json::{Map, Value};
 
 use crate::activity::{self, ActivityTarget, KeptSide, Role, SideTag};
 use crate::error::{PaykitError, Refusal, Result};
-use crate::pay::BlockedPayment;
+use crate::pay::{BlockedPayment, WriteStamp};
 use crate::paykit::Paykit;
 use crate::periods::PeriodView;
 use crate::rail::ProofCheck;
@@ -389,6 +389,10 @@ pub enum RequestStatus {
     /// From a payee the identity's deny list holds, as the app last read it: paused, and
     /// paid only once the user confirms (Paykit spec 8.1, [`Refusal::Blocked`]).
     Blocked,
+    /// Its request record is divergent after a provider loss, or was seen so, and the user
+    /// hasn't confirmed it: the payee may have cancelled it. Paid only once the user has
+    /// seen that ([`Paykit::confirm_divergent`], Paykit spec 6).
+    Divergent,
     /// A recurring request this identity accepted, the subscription running: each Billing
     /// Period is paid on its own (Paykit spec 8.2). The payee may cancel it; the SDK refuses
     /// the payer's cancellation of it ([`Refusal::Recurring`]).
@@ -421,11 +425,22 @@ pub struct RequestView {
     pub recurrence: Option<Recurrence>,
     /// What the user sees.
     pub status: RequestStatus,
+    /// Its request record is paused after a view showed it divergent, or its latest view
+    /// shows it divergent (Paykit spec 6): shown whatever the status
+    /// ([`Paykit::divergent_records`]).
+    pub divergent: bool,
     /// The payee's receipt the record holds, if any (Paykit wire 4.11), as this app's copy
     /// shows it: for display. While the records aren't listed, after a restore or a
     /// certificate that reads more, the copy may lack a receipt the switch holds;
     /// [`Paykit::receipts`] is refused as not now meanwhile.
     pub receipt: Option<ReceivedReceipt>,
+    /// The request is paid only by hand: its record holds `manual_only` (Paykit wire 5.3),
+    /// which is never lifted (Paykit spec 8.3, "Manual only"). A one-time request that came
+    /// back after the user's block is opened so (Paykit spec 8.1, "Blocked counterparties"):
+    /// the host shows that it came from a sender the user had blocked. No app pays it
+    /// automatically, a resume's repeat of a payment the user started included; the user
+    /// pays it with [`Paykit::pay_request`].
+    pub manual_only: bool,
     /// A recurring request's period records this app holds, in period order, as its copy
     /// shows them: for display.
     pub periods: Vec<PeriodView>,
@@ -446,7 +461,9 @@ impl std::fmt::Debug for RequestView {
             .field("recurring", &self.recurring)
             .field("recurrence", &self.recurrence)
             .field("status", &self.status)
+            .field("divergent", &self.divergent)
             .field("receipt", &self.receipt)
+            .field("manual_only", &self.manual_only)
             .field("periods", &self.periods)
             .finish()
     }
@@ -490,6 +507,10 @@ pub struct PayeeActivity {
     pub attempt_id: Option<AttemptId>,
     /// Where it stands.
     pub status: PayeeStatus,
+    /// Its record is paused after a view showed it divergent, or its latest view shows it
+    /// divergent (Paykit spec 6): a proof is credited only once the user confirms it
+    /// ([`Paykit::confirm_divergent`]).
+    pub divergent: bool,
     /// Whether the request is recurring.
     pub recurring: bool,
     /// A recurring request's period records this app holds, in period order, each with
@@ -772,6 +793,16 @@ impl Paykit {
                     if let Some(hash) = view.request_hash {
                         view.periods = periods.remove(&hash).unwrap_or_default();
                     }
+                    // Shown divergent when its record, or one of its period records, is
+                    // paused or its latest view divergent (Paykit spec 6).
+                    let mut divergent = false;
+                    for key in
+                        std::iter::once(held.key).chain(view.periods.iter().map(|p| p.record))
+                    {
+                        let pause = Box::pin(self.pause_seen(&key)).await?;
+                        divergent |= pause.paused || pause.divergent;
+                    }
+                    view.divergent = divergent;
                     out.push(view);
                 }
                 // A record that doesn't bind, or isn't held under a Paykit policy, isn't acted
@@ -976,7 +1007,11 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// As [`Paykit::verify_payment`]; the client's errors.
+    /// As [`Paykit::verify_payment`]; the client's errors; [`crate::Refusal::Divergent`] while the
+    /// record, or another of the same payer, was seen divergent and its user hasn't
+    /// confirmed it as the refusal shows it, that it may hold a credit
+    /// ([`crate::DivergentRecord::may_hold_credit`]), or the messages kept over it wait to
+    /// be written.
     pub async fn confirm_payment(&mut self, record: &[u8; 32]) -> Result<Option<String>> {
         self.confirm_payment_with(record, ReceiptDetails::new())
             .await
@@ -1019,6 +1054,10 @@ impl Paykit {
             if let Some(receipt) = &bound.receipt {
                 return Ok(Some(receipt.message().msg_id.clone()));
             }
+            // A credit waits for the user while this record, or another of the same
+            // counterparty, is divergent or was seen so: its upload may hold a receipt of the
+            // same settlement (Paykit spec 6, 8.1 step 4).
+            Box::pin(self.refuse_credit_while_paused(record, &bound.counterparty)).await?;
             let proof_stored = bound.proof.as_ref().ok_or(Refusal::NotFound)?;
             let Body::PaymentProof(proof) = proof_stored.body() else {
                 return Err(Refusal::NotFound.into());
@@ -1446,11 +1485,26 @@ impl Paykit {
         if live(&status) && stopped {
             status = RequestStatus::Cancelled;
         }
+        // Whether the request is still open, taken before the status is overlaid for display
+        // with a restore's hold, a block or a divergent record: none of them ends the request,
+        // and the block floor holds an open one whatever its status shows.
+        let open = live(&status);
         if live(&status) && self.held(&record_key, record).await? {
             status = RequestStatus::Held;
         }
         if live(&status) && self.denied_as_last_read(&payee).await? {
             status = RequestStatus::Blocked;
+        }
+        // The record's mark, or, for a request still open, the block floor (`crate::floor`):
+        // no automatic attempt is made on it either way.
+        let manual_only = record.manual_only || (open && self.floor_holds(stored).await?);
+        // Divergent shows on its own field whatever the status, so a request held after a
+        // restore or blocked shows that too; the status says so only when nothing else holds
+        // the request.
+        let pause = Box::pin(self.pause_seen(&record_key)).await?;
+        let divergent = pause.paused || pause.divergent;
+        if status == RequestStatus::Open && pause.paused {
+            status = RequestStatus::Divergent;
         }
         Ok(Some(RequestView {
             request: RequestRef {
@@ -1465,7 +1519,9 @@ impl Paykit {
             recurring: request.is_recurring(),
             recurrence: request.recurrence,
             status,
+            divergent,
             receipt: received_receipt(record_key, record, Some(request)),
+            manual_only,
             periods,
         }))
     }
@@ -1530,19 +1586,34 @@ impl Paykit {
     /// A read that fails: [`Refusal::SwitchUnavailable`] for a switch that couldn't be read
     /// now, the switch's refusal for one it refused; never taken as the record unchanged.
     pub(crate) async fn fresh_request(&mut self, target: &ActivityTarget) -> Result<Fresh> {
+        Ok(self.fresh_request_stamped(target).await?.0)
+    }
+
+    /// [`Paykit::fresh_request`], with the stamp of the write the read shows current
+    /// ([`WriteStamp`]) when it is [`Fresh::Held`], for a check that reads the record again
+    /// and fails closed when the write changed ([`Paykit::automatic_dispatch_held`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::fresh_request`].
+    pub(crate) async fn fresh_request_stamped(
+        &mut self,
+        target: &ActivityTarget,
+    ) -> Result<(Fresh, Option<WriteStamp>)> {
         let record = match self.app.read_record_fresh(&target.record_target()).await? {
             RecordRead::Fresh(record) => record,
-            RecordRead::Kept { reason, .. } => return fresh_kept(reason),
+            RecordRead::Kept { reason, .. } => return Ok((fresh_kept(reason)?, None)),
             // A read a later client names: nothing shows the switch's write held now.
-            _ => return Ok(Fresh::Unreadable),
+            _ => return Ok((Fresh::Unreadable, None)),
         };
+        let stamp = WriteStamp::of(&record);
         Ok(match record.content {
-            RecordContent::Deleted => Fresh::Missing,
+            RecordContent::Deleted => (Fresh::Missing, None),
             RecordContent::Value(_) => match self.held_activity(target).await? {
-                Some(record) => Fresh::Held(Box::new(record)),
-                None => Fresh::Unreadable,
+                Some(record) => (Fresh::Held(Box::new(record)), Some(stamp)),
+                None => (Fresh::Unreadable, None),
             },
-            _ => Fresh::Unreadable,
+            _ => (Fresh::Unreadable, None),
         })
     }
 
@@ -1839,6 +1910,10 @@ impl Paykit {
         let mut end_hold = None;
         if answer == Answer::Accept {
             let record_key = self.activity_key(&target)?;
+            // An acceptance by hand of a request whose record is paused as divergent, or whose
+            // kept messages wait, waits for the user's confirmation: the payee may have
+            // cancelled it (Paykit spec 6). Refused naming the record, nothing recorded.
+            Box::pin(self.refuse_while_paused(&[record_key])).await?;
             if self.held(&record_key, &record).await? {
                 if options.possibly_cancelled_confirmed.is_none() {
                     return Err(Refusal::HeldAfterRestore.into());
@@ -2116,6 +2191,7 @@ fn payee_view(
         label: request.and_then(|(_, r)| r.label.as_ref().map(|l| l.as_str().to_owned())),
         attempt_id: proof.map(|p| p.attempt_id),
         status,
+        divergent: false,
         recurring: request.is_some_and(|(_, r)| r.is_recurring()),
         periods: Vec::new(),
     }

@@ -1731,6 +1731,43 @@ async fn test_acceptance_sent_earlier_is_placed_when_another_app_resolves_the_pa
 }
 
 #[tokio::test]
+async fn test_acceptance_owed_sent_once_confirmed_over_a_divergent_view() {
+    // The outcome is written while the acceptance can't be queued: the entry stays owed.
+    // The request record then shows divergent: the resume holds the owed acceptance while
+    // the record is paused, and sends it once the user confirms, the view still divergent,
+    // as the outcome's own gate does: it records the payment made.
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    let mut wallet = reload(&w, &store, app_id).await;
+    store.refuse_acceptances(true);
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    store.refuse_acceptances(false);
+    let record = wallet.request(&request).await.unwrap().record;
+    let base = Arc::clone(&store) as Arc<dyn StateStore>;
+    crate::divergent::set_divergent(&base, &wallet, &record, true);
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::AcceptanceOwed
+    );
+    assert_eq!(queued_acceptances(&store, &wallet).await, 0);
+    crate::divergent::confirm(&mut wallet, &record)
+        .await
+        .unwrap();
+    assert!(wallet.divergent_records().await.unwrap()[0].divergent);
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
+    assert_eq!(queued_acceptances(&store, &wallet).await, 1);
+}
+
+#[tokio::test]
 async fn test_acceptance_owed_queued_then_unplaced_finishes_after_a_restart() {
     // The acceptance is queued and the entry saved released, still owed; then the record's
     // batch fails, as a crash there would leave it. After a restart the journal still reads,

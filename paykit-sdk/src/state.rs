@@ -49,14 +49,21 @@
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
+//! | `fg` | the flagged senders as the app last read them, at most `MAX_FLAGGED_COPY`; absent while not known, which holds the asks of block marks (`marks.rs`); never restored | |
+//! | `bf` | the raise of the identity's block floor this app owes: the latest of the latest times of the block marks gone for the bound or their own expiry, and of a restore's first read of the lists; written to the shared `block_floor` record before the block marks ask and with any ask, and deleted in that batch; applied as a floor meanwhile (`crate::floor`) | yes |
+//! | `fo/<record key>` | a request record a read opened without `manual_only`, checked against the block floor once the read is done and marked if dated before it (`crate::floor`); never restored | |
 //! | `bk/<pubky>` | this app's block or unblock of `pubky` not yet shown by the list (`OwnBlockMark`): a block from before the switch is asked, an unblock only with the batch the client keeps; a block counts until a read of the list shows it, and is written again at a receive while the client neither keeps nor applied its batch, a restored one too, since the kept batch stays with the device that kept it; an unblock counts for payments and held sends only while the client still keeps its batch, never for the spam rule, and isn't restored (Paykit spec 8.1) | |
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
+//! | `bd/<sender>` | a mark of a sender's messages dropped for the user's block, each as one never processed (its pair forgotten), as `pd/` holds; it asks that sender once it is neither blocked nor flagged (`marks.rs`, Paykit spec 8.1) | |
+//! | `bw/<from_ms>` | a widening of the block marks, from `from_ms` to the time it holds, owed to every counterparty the deny list holds at the next read of the lists: written by a restore and by a `missed` item (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `kw/<sender>` | a mark of a sender's entries the client dropped while they waited for a scope key, as `pd/` holds, with the data epochs they waited for; it asks only while the app holds every key of those epochs (`marks.rs`) | |
-//! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply, or a payee's period details, for a request the app holds no record of yet, kept until it does, or a receipt for a payer record the app holds but can't read, kept until it reads (`receive.rs`), or a counterparty's Allowance answer before the app holds its Allowance record (`allowances.rs`) | |
+//! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply, or a payee's period details, for a request the app holds no record of yet, or whose record it holds but can't open, read or bind, kept until it does, placed only once the record names its sender, a proof of a payment without a request for the payee's record of its settlement that the app holds but can't read, placed once it reads naming its sender and removed if it names another, or a receipt for a payer record the app holds but can't read and that isn't paused as divergent, kept until it reads, and moved to `dw/` if it reads paused (`receive.rs`), or a counterparty's Allowance answer the receive step took, which it never writes into the record's response itself, placed after the read, or kept before the app holds its Allowance record, or waiting over a record seen divergent for the user's confirmation (`allowances.rs`); each with the feed `seq` its entry was read at, which orders it (`records::KeptOrder`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing, since a dropped entry's time is already in its sender's mark | |
-//! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, with the entry's ID and message hash, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
-//! | `ae/<record key>/<msg_id>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection; every distinct end is kept, each under its `msg_id`, until the record shows which one names what it holds (`allowances.rs`, Paykit spec 8.3) | |
+//! | `dv/<record key>` | the pause mark of a record the app has seen divergent: paused until the user confirms, or the write the user confirmed over, with the write a credit's refusal showed it at and the write a credit's confirmation was given over, which is always the write that showing names, at or before the plain confirmation: any other stored state reads as a corrupt store (`divergent.rs`); a restore installs it paused, neither shown nor confirmed for a credit | |
+//! | `dw/<record key>/<role>/<sender>/<msg_id>` | a received message, by its sender and `msg_id`, whose write over a divergent record waits for the user's confirmation, or for the messages kept over the record before it, to write into its record later, in the order its inbox accepted them (by acceptance time, then the feed `seq` its entry was read at, as the kept replies are, never by `msg_id`), a receipt over a payer record that doesn't read included, written once the record also reads, and one kept in `pr/` whose record read paused; never one from anyone but the counterparty of a record that reads; given up at its 30 days, also one that no longer points to its record (`divergent.rs`) | |
+//! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, with the entry's ID and message hash and the feed `seq` it was read at, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
+//! | `ae/<record key>/<msg_id>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection; every distinct end is kept, each under its `msg_id` and with the feed `seq` that orders it, until the record shows which one names what it holds (`allowances.rs`, Paykit spec 8.3) | |
 //! | `ac/<record key>` | the consent list: an Allowance this app may pay under, or removed from it for good (`allowances.rs`, Paykit spec 8.3); a restore marks every entry to confirm again | |
 //! | `cf/<record key>` | a second, different proposal or response of an Allowance, kept as the stop until the Allowance record holds `conflicted` (`allowances.rs`, Paykit spec 8.3) | |
 //! | `mc` | set by a `missed` item: every entry of the consent list is to be confirmed again, as after a restore; nothing is consented while it is set, and the next receive marks each entry so and clears it (`allowances.rs`); never restored | |
@@ -383,7 +390,8 @@ impl Stored for u64 {
             | StateKey::Spam(_)
             | StateKey::Resent { .. }
             | StateKey::ResentDay { .. }
-            | StateKey::ListsRead => Ok(()),
+            | StateKey::ListsRead
+            | StateKey::BlockFloor => Ok(()),
             _ => corrupt(),
         }
     }
@@ -480,6 +488,7 @@ impl Stored for bool {
             | StateKey::MissedConsents
             | StateKey::PayerPassOwed
             | StateKey::HoldConfirmed(_)
+            | StateKey::FloorOpened(_)
             | StateKey::Taken(_)
                 if *self =>
             {
@@ -605,17 +614,21 @@ impl sealed::Sealed for KeptMessage {}
 ///   it names first: this app's payee record, under its label, for a reply; the payer's
 ///   record of the sender's request for details (Switch spec 8.2, Paykit spec 8.1, 8.2); or
 ///   a `paykit.payment_receipt`, kept under the record key of the payer's record it names
-///   ([`crate::receive::receipt_target`]).
+///   ([`crate::receive::receipt_target`]); or a proof of a payment without a request, from
+///   that sender and of that `msg_id`, whose record, the payee's of its settlement, is
+///   proven against the rail before it is placed.
 /// - At `lh/<record key>`, a `paykit.private_payment_list`, kept under the record key of its
 ///   payee app's `payment_lists` record, from its sender and App ID (Paykit wire 5.4).
-/// - At `pr/<sender>/<record key>/<msg_id>` too, an Allowance's acceptance or rejection its
-///   inbox accepted before this app held the proposal's record, from that sender and of that
-///   `msg_id`, kept under the record key of the Allowance record it names (Paykit spec 8.1,
-///   8.3).
+/// - At `pr/<sender>/<record key>/<msg_id>` too, an Allowance's acceptance or rejection the
+///   receive step took, to write into the proposal's record after the read, or one its
+///   inbox accepted before this app held that record, or an acceptance that waits over that
+///   record for the user's confirmation, from that sender and of that `msg_id`,
+///   kept under the record key of the Allowance record it names, with its feed `seq` (Paykit
+///   spec 6, 8.1, 8.3).
 /// - At `ae/<record key>/<msg_id>`, a counterparty's `paykit.allowance_end` its inbox
-///   accepted, of that `msg_id`, kept as the stop under the record key of the Allowance
-///   record of its sender and the Allowance it names (Paykit spec 8.3, "Ends reach the
-///   executor").
+///   accepted, of that `msg_id`, with its feed `seq`, kept as the stop under the record key of
+///   the Allowance record of its sender and the Allowance it names (Paykit spec 8.3, "Ends
+///   reach the executor").
 /// - At `cf/<record key>`, a second, different proposal, acceptance or rejection its inbox
 ///   accepted, with its acceptance time, kept as the stop under the record key of the
 ///   Allowance record of its sender and the Allowance it names (Paykit spec 8.3,
@@ -632,6 +645,19 @@ impl Stored for KeptMessage {
                 .ok_or_else(PaykitError::corrupt)
         };
         let (target, record_key) = match (family, message.body()) {
+            // A proof of a payment without a request kept for the payee's record of its
+            // settlement, which didn't read: the record is the one the rail's settlement of
+            // the proof names, which no binder can read, so it is proven before the proof is
+            // placed (`Paykit::place_kept_replies`): one kept for another record is never
+            // written, and is given up at its 30 days.
+            (StateKey::KeptReply { sender, msg_id, .. }, Body::PaymentProof(_))
+                if message.message().refs.is_empty()
+                    && message.sender() == *sender
+                    && message.message().msg_id == *msg_id
+                    && message.accepted_at().is_some() =>
+            {
+                return Ok(());
+            }
             (StateKey::KeptCancellation(record_key), Body::PaymentRequestCancellation(_))
                 if message.accepted_at().is_some() =>
             {
@@ -675,10 +701,14 @@ impl Stored for KeptMessage {
                     crate::receive::receipt_target(&message, &binder.own, &receipt.attempt_id);
                 (target.record_target(), record)
             }
-            (StateKey::HeldList(record_key), Body::PrivatePaymentList(_)) => (
-                list_target(&message.sender(), &message.message().from.app_id),
-                record_key,
-            ),
+            (StateKey::HeldList(record_key), Body::PrivatePaymentList(_))
+                if message.accepted_at().is_some() =>
+            {
+                (
+                    list_target(&message.sender(), &message.message().from.app_id),
+                    record_key,
+                )
+            }
             (
                 StateKey::KeptReply {
                     sender,
@@ -720,6 +750,21 @@ impl Stored for KeptMessage {
             _ => return corrupt(),
         };
         if binder.record_key(&target)? != *record_key {
+            return corrupt();
+        }
+        // A member of a bounded pool, the kept replies or the kept stops, is ordered by when
+        // its inbox accepted it, by the feed `seq` its entry was read at within one
+        // millisecond (`records::KeptOrder`): which one the bounds drop, which of an
+        // Allowance's ends stops it and which of its answers is the record's response. One
+        // without its `seq` can't be ordered; a held list and a conflict are ordered by
+        // nothing, and no writer gives them one.
+        let pooled = matches!(
+            family,
+            StateKey::KeptCancellation(_)
+                | StateKey::KeptReply { .. }
+                | StateKey::AllowanceEnd { .. }
+        );
+        if pooled != self.seq().is_some() {
             return corrupt();
         }
         Ok(())
@@ -851,6 +896,7 @@ impl Stored for Vec<[u8; 32]> {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
             StateKey::Denied => Ok(()),
+            StateKey::Flagged if self.len() <= crate::marks::MAX_FLAGGED_COPY => Ok(()),
             _ => corrupt(),
         }
     }
@@ -865,7 +911,47 @@ impl Stored for DropMark {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
             StateKey::DroppedReplies { sender } | StateKey::DroppedUnverified { sender }
-                if self.sender == *sender && self.earliest_ms <= self.latest_ms =>
+                if self.sender == *sender
+                    && self.earliest_ms <= self.latest_ms
+                    && self.pending_forget.is_empty()
+                    && !self.speculative
+                    && !self.late_told =>
+            {
+                Ok(())
+            }
+            // A block's mark: its pairs still to forget are message IDs as the client gives
+            // them, each once, within the bound.
+            StateKey::DroppedBlocked { sender }
+                if self.sender == *sender
+                    && self.earliest_ms <= self.latest_ms
+                    && self.pending_forget.len() <= crate::marks::MAX_PENDING_FORGETS
+                    && self
+                        .pending_forget
+                        .iter()
+                        .all(|id| pubky_switch_core::json::check_uuid_v4(id).is_ok())
+                    && self
+                        .pending_forget
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        == self.pending_forget.len() =>
+            {
+                Ok(())
+            }
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for crate::marks::BlockedWindow {}
+
+/// A widening of the block marks owed (`bw/<from_ms>`): from the time its key names, its
+/// times not crossed.
+impl Stored for crate::marks::BlockedWindow {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::BlockedWidening { from_ms }
+                if self.from_ms == *from_ms && self.from_ms <= self.until_ms =>
             {
                 Ok(())
             }
@@ -888,6 +974,9 @@ impl Stored for KeyWaitMark {
                 if mark.sender == *sender
                     && mark.earliest_ms <= mark.latest_ms
                     && !mark.due
+                    && mark.pending_forget.is_empty()
+                    && !mark.speculative
+                    && !mark.late_told
                     && !self.epochs.is_empty()
                     && self.epochs.windows(2).all(|pair| pair[0] < pair[1]) =>
             {
@@ -895,6 +984,42 @@ impl Stored for KeyWaitMark {
             }
             _ => corrupt(),
         }
+    }
+}
+
+impl sealed::Sealed for crate::divergent::DivergentMark {}
+
+/// A divergent record's pause mark: of the record its key names, of one of Paykit's
+/// collections ([`crate::divergent::DivergentMark::bind_to`]).
+impl Stored for crate::divergent::DivergentMark {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        let StateKey::Divergent(record) = family else {
+            return corrupt();
+        };
+        self.bind_to(record)
+    }
+}
+
+impl sealed::Sealed for crate::divergent::DivergentWrite {}
+
+/// A message kept over a divergent record: of the record, role, sender and `msg_id` its key
+/// names,
+/// its message verified for this app and naming that record
+/// ([`crate::divergent::DivergentWrite::bind_to`]).
+impl Stored for crate::divergent::DivergentWrite {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::DivergentWrite {
+            record,
+            role,
+            sender,
+            msg_id,
+        } = family
+        else {
+            return corrupt();
+        };
+        self.bind_to(record, *role, sender, msg_id, &binder.own, &|target| {
+            binder.record_key(target)
+        })
     }
 }
 
@@ -1043,7 +1168,52 @@ pub(crate) mod key {
     pub(crate) const KEPT_REPLIES: &str = "pr/";
     pub(crate) const DROPPED_REPLIES: &str = "pd/";
     pub(crate) const DROPPED_UNVERIFIED: &str = "ud/";
+    pub(crate) const DROPPED_BLOCKED: &str = "bd/";
+    pub(crate) const BLOCKED_WIDENINGS: &str = "bw/";
+    pub(crate) const FLAGGED: &str = "fg";
+    /// The raise of the block floor this app owes (`crate::floor`).
+    pub(crate) const BLOCK_FLOOR: &str = "bf";
+    /// The request records this read opened without `manual_only`, to check against the
+    /// block floor once it is done (`crate::floor`).
+    pub(crate) const FLOOR_OPENED: &str = "fo/";
     pub(crate) const KEY_WAITS: &str = "kw/";
+    pub(crate) const DIVERGENT: &str = "dv/";
+    pub(crate) const DIVERGENT_WRITES: &str = "dw/";
+
+    /// The pause mark of the divergent record `record_key`.
+    pub(crate) fn divergent(record_key: &[u8; 32]) -> String {
+        format!("{DIVERGENT}{}", b64(record_key))
+    }
+
+    /// The prefix of every message kept to write over the divergent record `record_key`.
+    pub(crate) fn divergent_writes_at(record_key: &[u8; 32]) -> String {
+        format!("{DIVERGENT_WRITES}{}/", b64(record_key))
+    }
+
+    /// The prefix of the messages of `role` kept to write over the divergent record
+    /// `record_key`.
+    pub(crate) fn divergent_writes_of(
+        record_key: &[u8; 32],
+        role: crate::divergent::WriteRole,
+    ) -> String {
+        format!("{DIVERGENT_WRITES}{}/{}/", b64(record_key), role.tag())
+    }
+
+    /// The message `msg_id` from `sender` of `role` kept to write over the divergent record
+    /// `record_key`: a `msg_id` is the sender's own, so the key names both.
+    pub(crate) fn divergent_write(
+        record_key: &[u8; 32],
+        role: crate::divergent::WriteRole,
+        sender: &[u8; 32],
+        msg_id: &str,
+    ) -> String {
+        format!(
+            "{}{}/{msg_id}",
+            divergent_writes_of(record_key, role),
+            b64(sender)
+        )
+    }
+
     pub(crate) const ALLOWANCE_ENDS: &str = "ae/";
     pub(crate) const CONFLICTS: &str = "cf/";
     pub(crate) const CONSENTS: &str = "ac/";
@@ -1107,6 +1277,23 @@ pub(crate) mod key {
     /// The mark of entries from `sender` dropped unverified.
     pub(crate) fn dropped_unverified(sender: &[u8; 32]) -> String {
         format!("{DROPPED_UNVERIFIED}{}", b64(sender))
+    }
+
+    /// The mark of messages from `sender` dropped for the user's block.
+    pub(crate) fn dropped_blocked(sender: &[u8; 32]) -> String {
+        format!("{DROPPED_BLOCKED}{}", b64(sender))
+    }
+
+    /// A widening of the block marks from `from_ms`, owed to every counterparty the deny
+    /// list holds at the next read of the lists.
+    pub(crate) fn blocked_widening(from_ms: u64) -> String {
+        format!("{BLOCKED_WIDENINGS}{from_ms:020}")
+    }
+
+    /// The notice that what `counterparty`'s inbox accepted from `from_ms`, dropped for the
+    /// user's block, can no longer come back.
+    pub(crate) fn blocked_lost(counterparty: &[u8; 32], from_ms: u64) -> String {
+        format!("{NOTICES}{}/lost-{from_ms:020}", b64(counterparty))
     }
 
     /// The mark of `sender`'s entries dropped while they waited for a scope key.
@@ -1184,6 +1371,10 @@ pub(crate) mod key {
 
     pub(crate) fn seen_records(payee: &[u8; 32], app_id: &[u8; 16]) -> String {
         format!("ar/{}/{}", b64(payee), b64(app_id))
+    }
+
+    pub(crate) fn floor_opened(record_key: &[u8; 32]) -> String {
+        format!("{FLOOR_OPENED}{}", b64(record_key))
     }
 
     pub(crate) fn hold_confirmed(record_key: &[u8; 32]) -> String {
@@ -1304,6 +1495,23 @@ pub(crate) enum StateKey {
     DroppedReplies { sender: [u8; 32] },
     /// `ud/<sender>`: the mark of a sender's entries dropped unverified.
     DroppedUnverified { sender: [u8; 32] },
+    /// `bd/<sender>`: the mark of a sender's messages dropped for the user's block.
+    DroppedBlocked { sender: [u8; 32] },
+    /// `bw/<from_ms>`: a widening of the block marks owed at the next read of the lists.
+    BlockedWidening { from_ms: u64 },
+    /// `fg`: the flagged senders as the app last read them.
+    Flagged,
+    /// `bf`: the raise of the block floor this app owes.
+    BlockFloor,
+    /// `fo/<record key>`: a request record a read opened without `manual_only`, to check
+    /// against the block floor once the read is done.
+    FloorOpened([u8; 32]),
+    /// `nt/<counterparty>/lost-<from_ms>`: the notice that messages dropped for a block
+    /// can no longer come back.
+    BlockedLost {
+        counterparty: [u8; 32],
+        from_ms: u64,
+    },
     /// `kw/<sender>`: the mark of a sender's entries dropped while they waited for a key.
     KeyWaits { sender: [u8; 32] },
     /// `pr/<sender>/<record key>/<msg_id>`: a payer's reply kept for its record.
@@ -1316,6 +1524,16 @@ pub(crate) enum StateKey {
     StoredNote { sender: [u8; 32], msg_id: String },
     /// `nt/<sender>/<msg_id>`: a notice for the host about a message given up.
     MessageNotice { sender: [u8; 32], msg_id: String },
+    /// `dv/<record key>`: the pause mark of a divergent record.
+    Divergent([u8; 32]),
+    /// `dw/<record key>/<role>/<sender>/<msg_id>`: a message kept to write over a divergent
+    /// record.
+    DivergentWrite {
+        record: [u8; 32],
+        role: crate::divergent::WriteRole,
+        sender: [u8; 32],
+        msg_id: String,
+    },
     /// `nt/<attempt_id>/<kind>`: a notice for the host.
     Notice {
         attempt: AttemptId,
@@ -1378,6 +1596,8 @@ impl StateKey {
             "lc" => Self::ListedCert,
             "lr" => Self::ListsRead,
             "dl" => Self::Denied,
+            "fg" => Self::Flagged,
+            "bf" => Self::BlockFloor,
             _ => {
                 let (family, rest) = text.split_once('/')?;
                 match family {
@@ -1409,6 +1629,7 @@ impl StateKey {
                     "kc" => Self::KeptCancellation(b64_32(rest)?),
                     "bk" => Self::OwnBlock(b64_32(rest)?),
                     "hc" => Self::HoldConfirmed(b64_32(rest)?),
+                    "fo" => Self::FloorOpened(b64_32(rest)?),
                     "lh" => Self::HeldList(b64_32(rest)?),
                     "side" => Self::Side(msg_id(rest)?),
                     "ha" => {
@@ -1474,6 +1695,12 @@ impl StateKey {
                     "ud" => Self::DroppedUnverified {
                         sender: b64_32(rest)?,
                     },
+                    "bd" => Self::DroppedBlocked {
+                        sender: b64_32(rest)?,
+                    },
+                    "bw" => Self::BlockedWidening {
+                        from_ms: number(rest)?,
+                    },
                     "kw" => Self::KeyWaits {
                         sender: b64_32(rest)?,
                     },
@@ -1486,6 +1713,18 @@ impl StateKey {
                             msg_id: msg_id(id)?,
                         }
                     }
+                    "dv" => Self::Divergent(b64_32(rest)?),
+                    "dw" => {
+                        let (record, rest) = rest.split_once('/')?;
+                        let (role, rest) = rest.split_once('/')?;
+                        let (sender, id) = rest.split_once('/')?;
+                        Self::DivergentWrite {
+                            record: b64_32(record)?,
+                            role: crate::divergent::WriteRole::from_tag(role)?,
+                            sender: b64_32(sender)?,
+                            msg_id: msg_id(id)?,
+                        }
+                    }
                     "se" => {
                         let (sender, id) = rest.split_once('/')?;
                         Self::StoredNote {
@@ -1495,6 +1734,14 @@ impl StateKey {
                     }
                     "nt" => {
                         let (attempt, tag) = rest.split_once('/')?;
+                        if let (Some(counterparty), Some(from)) =
+                            (b64_32(attempt), tag.strip_prefix("lost-"))
+                        {
+                            return Some(Self::BlockedLost {
+                                counterparty,
+                                from_ms: number(from)?,
+                            });
+                        }
                         if let Some(sender) = b64_32(attempt) {
                             return Some(Self::MessageNotice {
                                 sender,
@@ -2012,6 +2259,24 @@ mod tests {
             ),
             (key::key_waits(&pubky), StateKey::KeyWaits { sender: pubky }),
             (
+                key::dropped_blocked(&pubky),
+                StateKey::DroppedBlocked { sender: pubky },
+            ),
+            (
+                key::blocked_widening(7),
+                StateKey::BlockedWidening { from_ms: 7 },
+            ),
+            (key::FLAGGED.into(), StateKey::Flagged),
+            (key::BLOCK_FLOOR.into(), StateKey::BlockFloor),
+            (key::floor_opened(&pubky), StateKey::FloorOpened(pubky)),
+            (
+                key::blocked_lost(&pubky, 9),
+                StateKey::BlockedLost {
+                    counterparty: pubky,
+                    from_ms: 9,
+                },
+            ),
+            (
                 key::stored_note(&pubky, id),
                 StateKey::StoredNote {
                     sender: pubky,
@@ -2028,6 +2293,16 @@ mod tests {
             (
                 key::message_notice(&pubky, id),
                 StateKey::MessageNotice {
+                    sender: pubky,
+                    msg_id: id.into(),
+                },
+            ),
+            (key::divergent(&pubky), StateKey::Divergent(pubky)),
+            (
+                key::divergent_write(&pubky, crate::divergent::WriteRole::List, &pubky, id),
+                StateKey::DivergentWrite {
+                    record: pubky,
+                    role: crate::divergent::WriteRole::List,
                     sender: pubky,
                     msg_id: id.into(),
                 },
@@ -2076,6 +2351,10 @@ mod tests {
             "nt/BQUFBQUFBQUFBQUFBQUFBQ/paid",
             "dt/05-7",
             "nt/BQUFBQUFBQUFBQUFBQUFBQ",
+            "dv/not-base64",
+            "dw/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM/cancellation/123e4567-e89b-42d3-a456-426614174000",
+            "dw/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM/proof",
+            "dw/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
             "ae/not-base64",
             "ac/",
             "cf/not-base64",

@@ -1801,6 +1801,153 @@ async fn test_stored_receipt_over_a_record_that_doesnt_open_kept_until_it_reads(
     receipt_over_unread_record(Unread::Sealed, true).await;
 }
 
+#[tokio::test]
+async fn test_stored_proof_from_another_identity_never_written_into_a_settlement_record() {
+    // Carol's proof of a payment without a request reaches bob's shop first; the service
+    // refuses its write, so it is kept to write later. Alice's proof of the same settlement
+    // then opens the shop's record of it, naming alice. Carol's kept proof is never written
+    // there, not even reflected: the record names its counterparty.
+    let w = World::new();
+    let _wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let _carol = w
+        .join(&w.carol, "wallet", AppScopes::new().pay().build().unwrap())
+        .await;
+    let proof = |from: &pubky_switch_client::testing::TestSigner| {
+        let body = paykit_lib::bodies::PaymentProof {
+            attempt_id: paykit_lib::AttemptId::generate().unwrap(),
+            billing_period: None,
+            payment_endpoint_identifier: crate::common::endpoint("btc-lightning-bolt12"),
+            payment_app_id: shop.app_id(),
+            list_version: None,
+            amount: Some(crate::common::btc("0.0015")),
+            allowance_id: None,
+            label: None,
+            payment_reference: None,
+            proof: serde_json::json!({ "rail": "fake", "tx": "t1" })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        }
+        .to_body(0)
+        .unwrap();
+        w.inject(
+            from,
+            "wallet",
+            &w.bob,
+            &[shop.app_id()],
+            "paykit.payment_proof",
+            Vec::new(),
+            body,
+        )
+    };
+    let from_carol = proof(&w.carol);
+    w.clock.advance_ms(1);
+    proof(&w.alice);
+    crate::common::refuse_writes(&w.bob, 1);
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(kept(&shop, "se/").await.is_empty());
+    let collection = paykit_lib::collections::Collection::PayeeActivity;
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(collection.name(), collection.policy(None)),
+        &paykit_lib::derive::natural_key::payee_payment_record(
+            &crate::common::endpoint("btc-lightning-bolt12"),
+            b"t1",
+        ),
+    );
+    let record = shop.app().record_key(&target).unwrap();
+    let held = shop.app().shared_record(&record).await.unwrap().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    assert_eq!(
+        value["counterparty"],
+        serde_json::json!(pubky_switch_core::enc::pubky_id(&w.alice_id())),
+        "{value}"
+    );
+    assert!(!value.to_string().contains(&from_carol), "{value}");
+}
+
+#[tokio::test]
+async fn test_stored_request_over_an_unread_record_held_then_given_up_at_30_days() {
+    // Alice's wallet records bob's request; her tablet then writes the request record as a
+    // value that doesn't read. Her phone, which keeps no mark of what it has seen, gets bob's
+    // request: the record's key binds bob, so the entry is held until the record reads,
+    // never written over the value; 30 days after its acceptance it is given up, the host
+    // told, and nothing stays stored.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut tablet = w.wallet("tablet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let seen = Arc::new(crate::outcome_record::NoSeenMarks::default());
+    seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut phone = w
+        .wallet_on(
+            "phone",
+            Arc::clone(&seen) as Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    phone.receive(None).await.unwrap();
+    tablet.receive(None).await.unwrap();
+    crate::outcome_record::phone_writes(
+        &mut tablet,
+        &request,
+        Some(crate::outcome_record::INVALID),
+    )
+    .await;
+    phone.receive(None).await.unwrap();
+    let record = phone
+        .app()
+        .record_key(&crate::outcome_record::payer_record(&request))
+        .unwrap();
+    async fn value_at(phone: &paykit_sdk::Paykit, record: &[u8; 32]) -> Option<Vec<u8>> {
+        phone
+            .app()
+            .shared_record(record)
+            .await
+            .unwrap()
+            .unwrap()
+            .content
+            .value()
+            .map(<[u8]>::to_vec)
+    }
+    assert_eq!(
+        value_at(&phone, &record).await.as_deref(),
+        Some(crate::outcome_record::INVALID)
+    );
+    let sent = shop
+        .app()
+        .sent_to(&w.alice_id(), 0, u64::MAX)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|sent| sent.kind == "paykit.payment_request")
+        .unwrap();
+    w.deliver(&w.bob, "shop", &w.alice, &[phone.app_id()], &sent.plaintext);
+    phone.receive(None).await.unwrap();
+    assert_eq!(
+        value_at(&phone, &record).await.as_deref(),
+        Some(crate::outcome_record::INVALID)
+    );
+    assert!(phone.notices().await.unwrap().is_empty());
+    w.clock.advance_ms(DAY_MS + 1);
+    phone.receive(None).await.unwrap();
+    w.clock.advance_ms(31 * DAY_MS);
+    phone.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    assert_eq!(
+        value_at(&phone, &record).await.as_deref(),
+        Some(crate::outcome_record::INVALID)
+    );
+    assert!(phone.app_mut().parked_entries().await.unwrap().is_empty());
+    let notices = phone.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
+    assert_eq!(notices[0].counterparty, w.bob_id());
+    assert_eq!(notices[0].msg_id.as_deref(), Some(sent.msg_id.as_str()));
+}
+
 /// The body of bob's receipt for `attempt_id`.
 fn receipt_body(attempt_id: paykit_lib::AttemptId) -> serde_json::Map<String, serde_json::Value> {
     paykit_lib::bodies::PaymentReceipt {
@@ -2218,4 +2365,117 @@ async fn test_stored_reply_dropped_mark_waits_at_the_payee_over_a_payment_withou
     request_from(&mut shop, alice, draft("1", w.clock.now_ms())).await;
     assert_eq!(shop.receive(None).await.unwrap().resends, 1);
     assert_eq!(asked(&shop, &alice).await, vec![(Some(at), None)]);
+}
+
+/// The `msg_id` of the response bob's shop holds in its record of `request`.
+async fn payee_response(
+    w: &World,
+    shop: &Paykit,
+    request: &paykit_sdk::RequestRef,
+) -> Option<String> {
+    let record = shop
+        .payee_activity()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|a| a.request_hash == Some(request.request_hash))
+        .unwrap()
+        .record;
+    let held = shop.app().shared_record(&record).await.unwrap().unwrap();
+    let read = paykit_lib::records::ActivityRecord::read(
+        held.content.value().unwrap(),
+        &w.bob_id(),
+        paykit_lib::records::ActivitySide::Payee,
+    )
+    .unwrap();
+    read.response.map(|m| m.message().msg_id.clone())
+}
+
+#[tokio::test]
+async fn test_stored_reply_takes_the_response_before_a_later_different_reply() {
+    // Alice's acceptance of bob's request is refused at the shop, its step and the shop's
+    // first later write: the entry is stored. A different acceptance of hers comes later
+    // and its write is admissible: it is only reflected while the earlier one is kept to
+    // write, and the earlier is the record's response once written (Paykit spec 6, 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let shop_id = shop.app_id();
+    let acceptance = || {
+        w.inject(
+            &w.alice,
+            "wallet",
+            &w.bob,
+            &[shop_id],
+            "paykit.payment_request_acceptance",
+            vec![request.request_hash],
+            serde_json::json!({ "label": null })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        )
+    };
+    let first = acceptance();
+    refuse_writes(&w.bob, 2);
+    shop.receive(None).await.unwrap();
+    assert_eq!(Box::pin(payee_response(&w, &shop, &request)).await, None);
+    w.clock.advance_ms(1_000);
+    let second = acceptance();
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        Box::pin(payee_response(&w, &shop, &request)).await,
+        Some(first)
+    );
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    let held = shop.app().shared_record(&record).await.unwrap().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    assert!(value["msg_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|id| id.as_str() == Some(second.as_str())));
+}
+
+#[tokio::test]
+async fn test_stored_later_reply_stored_too_never_takes_the_response_of_an_earlier_one() {
+    // Both of alice's acceptances are refused at their steps, a read apart, and so is the
+    // earlier one's later write each time, while the later one's later write is admissible:
+    // the later one is only reflected while the earlier is kept to write, and the earlier
+    // is the record's response once written (Paykit spec 6, 8.1).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let shop_id = shop.app_id();
+    let acceptance = || {
+        w.inject(
+            &w.alice,
+            "wallet",
+            &w.bob,
+            &[shop_id],
+            "paykit.payment_request_acceptance",
+            vec![request.request_hash],
+            serde_json::json!({ "label": null })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        )
+    };
+    let first = acceptance();
+    refuse_writes(&w.bob, 2);
+    shop.receive(None).await.unwrap();
+    w.clock.advance_ms(1_000);
+    acceptance();
+    // The later one's step, then the earlier one's later write.
+    refuse_writes(&w.bob, 2);
+    shop.receive(None).await.unwrap();
+    assert_eq!(Box::pin(payee_response(&w, &shop, &request)).await, None);
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        Box::pin(payee_response(&w, &shop, &request)).await,
+        Some(first)
+    );
 }

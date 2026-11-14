@@ -42,7 +42,7 @@ use paykit_lib::kinds::Kind;
 use paykit_lib::records::{ActivityRecord, AllowanceRecord, GrantEntry, Origin};
 use paykit_lib::{AllowanceId, AttemptId, PaymentAmount, PaymentEndpointIdentifier};
 use pubky_switch_client::app::{
-    OpBatch, RecordContent, RecordRead, RecordTarget, SharedRecord, UserConfirmed,
+    Initiator, OpBatch, RecordContent, RecordRead, RecordTarget, SharedRecord, UserConfirmed,
 };
 use pubky_switch_core::claims::Outcome;
 use pubky_switch_core::enc::{serde_b64, serde_b64_vec};
@@ -1039,8 +1039,13 @@ impl Paykit {
                 .may_attempt(true)
                 .map_err(|refusal| Refusal::NotNow(refusal.to_string()))?;
             let under = self.allowance_gate(allowance, true).await??;
-            self.pay_request_under(request, PayOptions::default(), Some(under))
-                .await
+            self.pay_request_under(
+                request,
+                PayOptions::default(),
+                Initiator::Automatic,
+                Some(under),
+            )
+            .await
         })
         .await
     }

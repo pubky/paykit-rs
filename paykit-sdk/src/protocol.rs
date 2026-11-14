@@ -28,7 +28,9 @@ use std::sync::{Arc, PoisonError, RwLock};
 use paykit_lib::bodies::check_body;
 use paykit_lib::collections::Collection;
 use paykit_lib::kinds::{targets_app, Kind, Role as KindRole, Side, OPAQUE_MEMBERS};
-use paykit_lib::records::{ActivitySide, AllowanceRecord, PaymentListRecord, StoredMessage};
+use paykit_lib::records::{
+    ActivitySide, AllowanceRecord, BlockFloorRecord, PaymentListRecord, StoredMessage,
+};
 use paykit_lib::scopes::{acts_as_payee, check_certificate, PaykitScope, ScopeName};
 use paykit_lib::{Label, PaykitKindRules};
 use pubky_switch_client::app::{
@@ -49,7 +51,7 @@ use crate::activity::{self, KeptSide, SideTag};
 use crate::allowances::ConsentEntry;
 use crate::hold::RestoreHold;
 use crate::journal::JournalEntry;
-use crate::marks::{DropMark, KeyWaitMark};
+use crate::marks::{DropMark, KeyWaitMark, QueuedRequest};
 use crate::notices::KeptNotice;
 use crate::pay::ListAsk;
 use crate::rail::Rail;
@@ -89,6 +91,11 @@ pub(crate) struct QueuedAsk {
     pub(crate) sender: [u8; 32],
     pub(crate) from_ms: u64,
     pub(crate) until_ms: Option<u64>,
+    /// The `resend_request` this app signed for the ask, kept before it is queued, and the
+    /// batch the client keeps with it when the write that queues it wasn't answered: the
+    /// next pass reads what became of it before it asks anew (`resend.rs`). `None` while
+    /// none was signed for the ask as it stands.
+    pub(crate) queued: Option<QueuedRequest>,
 }
 
 /// A `missed` item's mark (`p/mi/<from>`): the time its re-sends ask from, and the
@@ -352,6 +359,7 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::PayerPassOwed
             | StateKey::OwnResendOwed
             | StateKey::ListedCert
+            | StateKey::Flagged
             | StateKey::StoredNote { .. }
             | StateKey::Taken(_) => continue,
             // An executor's empty-ledger mark is its own journal's, which a restore doesn't
@@ -367,6 +375,9 @@ pub(crate) fn restore_paykit_layer(
             // list the backup holds may be stale by any time, so the list is read again before
             // any payment (Paykit spec 8.1).
             StateKey::ListsRead => continue,
+            // A read's records to check against the block floor belong to the read: the
+            // restore holds every open request (`hold.rs`).
+            StateKey::FloorOpened(_) => continue,
             // This app's blocks not yet shown by the list are: the client's kept batches
             // belong to the device that kept them, so the restored app keeps counting each
             // and writes it again (`Paykit::send_own_blocks_again`). Its unblocks aren't: an unblock counts
@@ -391,7 +402,8 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::Peer(_)
             | StateKey::Spam(_)
             | StateKey::Resent { .. }
-            | StateKey::ResentDay { .. } => {
+            | StateKey::ResentDay { .. }
+            | StateKey::BlockFloor => {
                 state::restored::<u64>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
@@ -415,7 +427,9 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::DroppedReplies { .. } | StateKey::DroppedUnverified { .. } => {
+            StateKey::DroppedReplies { .. }
+            | StateKey::DroppedUnverified { .. }
+            | StateKey::DroppedBlocked { .. } => {
                 // A mark is restored whole, its times and when it was last asked, so a restore
                 // neither loses nor resets it (Paykit spec 8.1), bound to its key's sender.
                 state::restored::<DropMark>(&key, &value, &binder).map_err(|_| unread())?;
@@ -523,7 +537,33 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::MessageNotice { .. } | StateKey::Notice { .. } => {
+            StateKey::BlockedWidening { .. } => {
+                state::restored::<crate::marks::BlockedWindow>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            // A divergent record's mark comes back paused, a confirmation given before the
+            // restore included; a message kept over a divergent record is bound to its
+            // record as every runtime read binds it (`divergent.rs`).
+            StateKey::Divergent(_) => {
+                let mark =
+                    state::restored::<crate::divergent::DivergentMark>(&key, &value, &binder)
+                        .map_err(|_| unread())?
+                        .restored();
+                let value = state::encode(&mark).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::DivergentWrite { .. } => {
+                state::restored::<crate::divergent::DivergentWrite>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::MessageNotice { .. }
+            | StateKey::Notice { .. }
+            | StateKey::BlockedLost { .. } => {
                 let notice =
                     state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
                 // An acknowledged notice of an attempt is kept only while the journal holds
@@ -584,6 +624,19 @@ pub(crate) fn restore_paykit_layer(
     let resend = state::local_put(key::OWN_RESEND_OWED, &crate::hold::OwnResendOwed::default())
         .map_err(|_| String::from("the restore's re-send mark can't be written"))?;
     writes.push(resend);
+    // What a blocked counterparty's inbox accepted after the backup is gone with the
+    // restore: every counterparty the deny list holds at the next read of the lists is
+    // marked from the backup's cursor time, to ask once it is unblocked (`marks.rs`).
+    let from = cursor_time_ms.saturating_sub(pubky_switch_core::records::CLOCK_TOLERANCE_MS);
+    let widening = state::local_put(
+        &key::blocked_widening(from),
+        &crate::marks::BlockedWindow {
+            from_ms: from,
+            until_ms: crate::marks::BlockedWindow::TO_NOW,
+        },
+    )
+    .map_err(|_| String::from("the restore's block widening can't be written"))?;
+    writes.push(widening);
     Ok(writes)
 }
 
@@ -778,6 +831,7 @@ impl Protocol for PaykitProtocol {
             sender: needed.sender,
             from_ms: needed.accepted_from_ms,
             until_ms: Some(needed.accepted_until_ms),
+            queued: None,
         };
         Ok(vec![local_write(
             &key::ask(&needed.sender, needed.accepted_from_ms),
@@ -815,6 +869,16 @@ impl Protocol for PaykitProtocol {
                 &crate::hold::MissedHold::of_item(missed.accepted_until_ms),
             )?,
             local_write(key::MISSED_UNLISTED, &true)?,
+            // What a blocked counterparty's inbox accepted among the missed entries is asked
+            // for once it is unblocked: every counterparty the deny list holds at the next
+            // read of the lists is marked for the item's times (`marks.rs`).
+            local_write(
+                &key::blocked_widening(missed.accepted_from_ms),
+                &crate::marks::BlockedWindow {
+                    from_ms: missed.accepted_from_ms,
+                    until_ms: missed.accepted_until_ms,
+                },
+            )?,
             local_write(key::MISSED_CONSENTS, &true)?,
             LocalWrite::DeletePrefix {
                 prefix: key::HOLD_CONFIRMED.as_bytes().to_vec(),
@@ -894,6 +958,7 @@ impl Protocol for PaykitProtocol {
             (Collection::PaymentLists, Some(v)) => {
                 PaymentListRecord::read(v, &own.identity).is_ok()
             }
+            (Collection::BlockFloor, Some(v)) => BlockFloorRecord::read(v).is_ok(),
             (Collection::Allowances, Some(v)) => AllowanceRecord::read(v, &own.identity).is_ok(),
             _ => false,
         };
@@ -906,7 +971,8 @@ impl Protocol for PaykitProtocol {
     /// Whether a newer write goes back on what the app saw (Paykit wire 5.3, 5.4): drops or
     /// replaces a message in a role seen, or changes the Allowance seen; for a
     /// `payment_lists` record, holds an older list or drops a single-use endpoint marked
-    /// used. A value that doesn't read is refused too. A delete isn't such a write. Judged
+    /// used; for the `block_floor` record, lowers the floor. A value that doesn't read is
+    /// refused too. A delete isn't such a write. Judged
     /// as a reader that doesn't hold the version the write builds on
     /// ([`Protocol::record_regression_on`] is told).
     fn record_regression(
@@ -982,6 +1048,14 @@ impl PaykitProtocol {
                 };
                 // Wire 5.4 "Seen lists": a later list of a greater version, or the same list,
                 // and never a single-use mark dropped, at any version.
+                held.check_later_write(&later).err().map(|e| e.to_string())
+            }
+            Collection::BlockFloor => {
+                let held = BlockFloorRecord::read(seen).ok()?;
+                let Ok(later) = BlockFloorRecord::read(value) else {
+                    return Some("Paykit wire 5.6: a block_floor record that doesn't read".into());
+                };
+                // Wire 5.6: the floor only rises.
                 held.check_later_write(&later).err().map(|e| e.to_string())
             }
             Collection::Allowances => {
@@ -1091,6 +1165,31 @@ mod receive_tests {
             released: false,
             conflict: None,
         }
+    }
+
+    /// The block widening a `missed` item owes, from `missed()`'s writes.
+    fn widening(missed: &MissedEntries) -> serde_json::Value {
+        let writes = PaykitProtocol::new().missed(missed).unwrap();
+        let value = writes
+            .iter()
+            .find_map(|write| match write {
+                LocalWrite::Put { key, value } if key.starts_with(b"bw/") => Some(value.clone()),
+                _ => None,
+            })
+            .unwrap();
+        serde_json::from_slice(&value).unwrap()
+    }
+
+    #[test]
+    fn test_missed_widening_keeps_the_items_times() {
+        let missed = MissedEntries {
+            seq: 1,
+            entries: 1,
+            accepted_from_ms: 10,
+            accepted_until_ms: 20,
+        };
+        assert_eq!(widening(&missed)["d"]["from_ms"], 10);
+        assert_eq!(widening(&missed)["d"]["until_ms"], 20);
     }
 
     fn protocol_of(own: &Party) -> PaykitProtocol {
@@ -1370,7 +1469,7 @@ mod receive_tests {
             vec![[4; 32]],
             object(json!({})),
         );
-        let value = state::encode(&KeptMessage::of(&reply)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&reply, 0)).unwrap();
         let target = ActivityTarget::payee(natural_key::request_record(&bob.id(), &[4; 32]), None);
         (reply, value, fake_key(&target.record_target()))
     }
@@ -1417,7 +1516,7 @@ mod receive_tests {
         };
         let target = allowance_target(&bob.id(), &reply.allowance_id);
         let key = key::allowance_end(&fake_key(&target), &end.message().msg_id);
-        let value = state::encode(&KeptMessage::of(&end)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&end, 0)).unwrap();
         assert!(restores::<KeptMessage>(&alice, key.as_bytes(), &value));
         // Under another `msg_id` of the same record: refused.
         let other = key::allowance_end(&fake_key(&target), "0d6f5b9e-3c1a-4e8b-9f2d-7a4c1e5b8d30");
@@ -1427,7 +1526,7 @@ mod receive_tests {
     #[test]
     fn test_protocol_restore_refuses_a_kept_end_at_another_key_or_of_another_kind() {
         let (alice, bob, proposal, end) = allowance_end();
-        let value = state::encode(&KeptMessage::of(&end)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&end, 0)).unwrap();
         let other = key::allowance_end(&[9; 32], &end.message().msg_id);
         assert!(!restores::<KeptMessage>(&alice, other.as_bytes(), &value));
         // The proposal under the end's key isn't an end.
@@ -1521,7 +1620,7 @@ mod receive_tests {
             vec![[4; 32], [5; 32]],
             object(json!({ "attempt_id": "DgCVYQKL1eyDacZvG6YhZg" })),
         );
-        let value = state::encode(&KeptMessage::of(&receipt)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&receipt, 0)).unwrap();
         let at = key::kept_reply(&carol.id(), &record, &receipt.message().msg_id);
         assert!(!restores::<KeptMessage>(&bob, at.as_bytes(), &value));
     }
@@ -1540,7 +1639,7 @@ mod receive_tests {
             panic!("an acceptance");
         };
         let record = fake_key(&allowance_target(&alice.id(), &body.allowance_id));
-        let value = state::encode(&KeptMessage::of(&answer)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&answer, 0)).unwrap();
         (answer, value, record)
     }
 
@@ -1571,6 +1670,49 @@ mod receive_tests {
     }
 
     #[test]
+    fn test_protocol_restore_refuses_a_pooled_kept_message_it_cannot_order() {
+        // The kept replies and the kept stops are bounded pools ordered by when their inbox
+        // accepted each member, which decides what the bounds drop, which of an Allowance's
+        // ends stops it and which of its answers is the record's response: a member without
+        // the feed `seq` its entry was read at can't be ordered, so a restore refuses it, of
+        // every family of a pool.
+        let (alice, bob, _, end) = allowance_end();
+        let Body::AllowanceEnd(reply) = end.body() else {
+            panic!("an end");
+        };
+        let target = allowance_target(&bob.id(), &reply.allowance_id);
+        let key = key::allowance_end(&fake_key(&target), &end.message().msg_id);
+        let unordered = state::encode(&KeptMessage::of(&end)).unwrap();
+        assert!(!restores::<KeptMessage>(&alice, key.as_bytes(), &unordered));
+        let alice = Party::new("alice", "wallet", &["pay", "allowance", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request", "allowance"]);
+        let (answer, _, record) = kept_allowance_answer(&alice, &bob);
+        let at = key::kept_reply(&alice.id(), &record, &answer.message().msg_id);
+        let unordered = state::encode(&KeptMessage::of(&answer)).unwrap();
+        assert!(!restores::<KeptMessage>(&bob, at.as_bytes(), &unordered));
+        let (reply, _, record) = kept_reply(&alice, &bob);
+        let at = key::kept_reply(&alice.id(), &record, &reply.message().msg_id);
+        let unordered = state::encode(&KeptMessage::of(&reply)).unwrap();
+        assert!(!restores::<KeptMessage>(&bob, at.as_bytes(), &unordered));
+        let wallet = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let shop = Party::new("bob", "shop", &["request"]);
+        let cancellation = shop.message(
+            &wallet,
+            "paykit.payment_request_cancellation",
+            vec![[4; 32]],
+            object(json!({})),
+        );
+        let target = ActivityTarget::payer(natural_key::request_record(&shop.id(), &[4; 32]));
+        let key = key::kept_cancellation(&fake_key(&target.record_target()));
+        let unordered = state::encode(&KeptMessage::of(&cancellation)).unwrap();
+        assert!(!restores::<KeptMessage>(
+            &wallet,
+            key.as_bytes(),
+            &unordered
+        ));
+    }
+
+    #[test]
     fn test_protocol_restore_refuses_a_kept_end_without_its_acceptance_time() {
         let (alice, bob, _, end) = allowance_end();
         let Body::AllowanceEnd(reply) = end.body() else {
@@ -1580,7 +1722,7 @@ mod receive_tests {
             &fake_key(&allowance_target(&bob.id(), &reply.allowance_id)),
             &end.message().msg_id,
         );
-        let value = state::encode(&KeptMessage::of(&end)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&end, 0)).unwrap();
         assert!(!restores::<KeptMessage>(
             &alice,
             key.as_bytes(),
@@ -1665,6 +1807,48 @@ mod receive_tests {
     }
 
     #[test]
+    fn test_protocol_restore_refuses_a_held_list_without_its_acceptance_time() {
+        // Every writer of `lh/` keeps a list its inbox accepted, with the time, which orders
+        // it behind the writes kept over its record: a restore refuses one without it.
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let list = bob.message(
+            &alice,
+            "paykit.private_payment_list",
+            vec![],
+            object(json!({
+                "version": 7,
+                "expires_at": pubky_switch_core::time::rfc3339(NOW + 3_600_000),
+                "payment_endpoints": {
+                    "btc-bitcoin-p2wpkh": { "payload": "bc1q", "single_use": true }
+                }
+            })),
+        );
+        let target = crate::records::list_target(&bob.id(), &list.message().from.app_id);
+        let at = key::held_list(&fake_key(&target));
+        let value = state::encode(&KeptMessage::of(&list)).unwrap();
+        assert!(restores::<KeptMessage>(&alice, at.as_bytes(), &value));
+        assert!(!restores::<KeptMessage>(
+            &alice,
+            at.as_bytes(),
+            &without_acceptance(&value)
+        ));
+    }
+
+    #[test]
+    fn test_protocol_restore_refuses_a_kept_conflict_with_a_feed_seq() {
+        // A conflict is ordered by nothing, and no writer gives it the feed `seq` a pooled
+        // message carries: a restore refuses one that has it.
+        let (alice, bob, proposal, _) = allowance_end();
+        let Body::AllowanceProposal(body) = proposal.body() else {
+            panic!("a proposal");
+        };
+        let at = key::conflict(&fake_key(&allowance_target(&bob.id(), &body.allowance_id)));
+        let value = state::encode(&KeptMessage::taken(&proposal, 1)).unwrap();
+        assert!(!restores::<KeptMessage>(&alice, at.as_bytes(), &value));
+    }
+
+    #[test]
     fn test_protocol_restore_refuses_a_kept_reply_without_its_acceptance_time() {
         // A reply is kept only as its inbox accepted it: one without the time can't come
         // from a valid run.
@@ -1688,7 +1872,7 @@ mod receive_tests {
             vec![[4; 32]],
             object(json!({})),
         );
-        let value = state::encode(&KeptMessage::of(&cancellation)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&cancellation, 0)).unwrap();
         let target = ActivityTarget::payer(natural_key::request_record(&bob.id(), &[4; 32]));
         let record = fake_key(&target.record_target());
         (key::kept_cancellation(&record).into_bytes(), value)
@@ -1761,7 +1945,7 @@ mod receive_tests {
             hash: request.hash(),
             sender: bob.id(),
             msg_id: msg_id.clone(),
-            message: KeptMessage::of(&request),
+            message: KeptMessage::taken(&request, 1),
             placed: false,
         };
         let value = state::encode(&note).unwrap();

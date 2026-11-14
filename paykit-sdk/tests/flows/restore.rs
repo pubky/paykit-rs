@@ -1458,6 +1458,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
                 "sender": pubky_switch_core::enc::b64(&w.bob_id()),
                 "from_ms": 5,
                 "until_ms": null,
+                "queued": null,
             })),
         ),
         (
@@ -2339,10 +2340,21 @@ async fn test_restore_own_rejection_to_a_blocked_payee_waits_until_unblocked() {
     assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_some());
     wallet.unblock(&w.bob_id()).await.unwrap();
     wallet.receive(None).await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+    // The rejection goes, once. So does the ask of the restore's block mark of bob, once:
+    // the ask reads the lists itself, and they show the unblock landed (Paykit spec 8.1,
+    // "Blocked counterparties").
+    let asks = crate::common::asked(&wallet, &w.bob_id()).await.len();
+    assert_eq!(asks, 1);
+    assert_eq!(
+        w.bob.switch().entries_from(&w.alice_id()),
+        before + 1 + asks
+    );
     assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
     wallet.receive(None).await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+    assert_eq!(
+        w.bob.switch().entries_from(&w.alice_id()),
+        before + 1 + asks
+    );
     shop.receive(None).await.unwrap();
     assert_eq!(
         shop.payee_activity().await.unwrap()[0].status,
@@ -2631,11 +2643,19 @@ async fn test_restore_own_unread_record_and_a_blocked_counterparty_both_wait() {
     shop.unblock(&w.carol_id()).await.unwrap();
     shop.receive(None).await.unwrap();
     assert!(crate::periods::queued(&shop, &to_carol.msg_id).await);
-    assert_eq!(w.carol.switch().entries_from(&w.bob_id()), carol_before + 1);
+    // The restore's block mark of carol asks too, once, when its read shows her unblocked.
+    let asks = crate::common::asked(&shop, &w.carol_id()).await.len();
+    assert_eq!(
+        w.carol.switch().entries_from(&w.bob_id()),
+        carol_before + 1 + asks
+    );
     assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
     shop.receive(None).await.unwrap();
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), alices + 1);
-    assert_eq!(w.carol.switch().entries_from(&w.bob_id()), carol_before + 1);
+    assert_eq!(
+        w.carol.switch().entries_from(&w.bob_id()),
+        carol_before + 1 + asks
+    );
 }
 
 #[tokio::test]
@@ -2692,7 +2712,12 @@ async fn test_restore_own_record_found_unreadable_25_days_after_the_restore_wait
     shop.unblock(&w.carol_id()).await.unwrap();
     shop.receive(None).await.unwrap();
     assert!(crate::periods::queued(&shop, &to_carol.msg_id).await);
-    assert_eq!(w.carol.switch().entries_from(&w.bob_id()), before + 1);
+    // The restore's block mark of carol asks too, once, when its read shows her unblocked.
+    let asks = crate::common::asked(&shop, &w.carol_id()).await.len();
+    assert_eq!(
+        w.carol.switch().entries_from(&w.bob_id()),
+        before + 1 + asks
+    );
     assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
     w.clock.advance_ms(4 * pubky_switch_core::records::DAY_MS);
     shop.receive(None).await.unwrap();
@@ -2700,5 +2725,10 @@ async fn test_restore_own_record_found_unreadable_25_days_after_the_restore_wait
     w.clock.advance_ms(2 * pubky_switch_core::records::DAY_MS);
     shop.receive(None).await.unwrap();
     assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
-    assert_eq!(w.carol.switch().entries_from(&w.bob_id()), before + 1);
+    // The block mark asks again at most once a day while it lives.
+    let asks = crate::common::asked(&shop, &w.carol_id()).await.len();
+    assert_eq!(
+        w.carol.switch().entries_from(&w.bob_id()),
+        before + 1 + asks
+    );
 }

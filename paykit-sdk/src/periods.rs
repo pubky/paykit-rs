@@ -533,6 +533,12 @@ impl Paykit {
                 )
                 .into());
             }
+            // Period details are an own write of another kind than a stop: over a request
+            // record or period record paused as divergent, or whose kept messages wait, they
+            // wait for the user's confirmation, nothing signed, written or queued (Paykit spec
+            // 6): the upload may hold the payer's cancellation, or the period's credit.
+            let period_record = self.activity_key(&into)?;
+            Box::pin(self.refuse_while_paused(&[*record, period_record])).await?;
             let signed = self.sign(
                 bound.counterparty,
                 Kind::PaymentPeriodDetails,

@@ -1495,16 +1495,23 @@ async fn answer_held(held: Held, answer: Answer, between: Between) {
         wallet.unblock(&w.bob_id()).await.unwrap();
     }
     wallet.receive(None).await.unwrap();
+    // The held answer goes, once. After a restore while bob was blocked, the restore's block
+    // mark of him asks too, once, when its own read of the lists shows him unblocked.
+    let asks = crate::common::asked(&wallet, &w.bob_id()).await.len();
+    assert_eq!(
+        asks,
+        usize::from(matches!((held, between), (Held::Blocked, Between::Restore)))
+    );
     assert_eq!(
         w.bob.switch().entries_from(&w.alice_id()),
-        entries + 1,
+        entries + 1 + asks,
         "{held:?} {answer:?} {between:?}"
     );
     wallet.receive(None).await.unwrap();
     wallet.flush().await.unwrap();
     assert_eq!(
         w.bob.switch().entries_from(&w.alice_id()),
-        entries + 1,
+        entries + 1 + asks,
         "{held:?} {answer:?} {between:?}"
     );
     assert!(wallet.notices().await.unwrap().is_empty());

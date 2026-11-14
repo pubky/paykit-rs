@@ -28,7 +28,7 @@ use paykit_lib::bodies::{
 use paykit_lib::derive::{natural_key, payment_obligation};
 use paykit_lib::kinds::Kind;
 use paykit_lib::records::{
-    ActivityRecord, ActivitySide, DestinationSource, PaymentListRecord, UsedEndpoint,
+    ActivityRecord, ActivitySide, DestinationSource, PaymentListRecord, StoredMessage, UsedEndpoint,
 };
 use paykit_lib::{
     AttemptId, Body, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
@@ -36,14 +36,14 @@ use paykit_lib::{
 use pubky_switch_client::app::{
     claim_conflict, AppError, ClaimAttempt, ClaimOp, Initiator, KeptBatch, KeptBatchStatus,
     LocalWrite, ObligationDeadline, OpBatch, PeerIdentity, RecordContent, Refusal as ClientRefusal,
-    SignedMessage, UserConfirmed, REVALIDATION_MS,
+    SharedRecord, SignedMessage, UserConfirmed, REVALIDATION_MS,
 };
 use pubky_switch_core::chain::TransitionProof;
 use pubky_switch_core::claims::{
     Basis, ClaimStatus, ClaimView, Outcome, MAX_CLAIM_AGE_MS, RECONCILIATION_MS,
 };
 use pubky_switch_core::http::ErrorCode;
-use pubky_switch_core::ops::{Condition, OpKind};
+use pubky_switch_core::ops::{Condition, OpKind, RecordVersion};
 use pubky_switch_core::records::{CLOCK_TOLERANCE_MS, DAY_MS};
 
 use crate::activity::{self, ActivityTarget, Role};
@@ -342,6 +342,19 @@ pub enum PayOutcome {
         /// The attempt.
         attempt_id: AttemptId,
     },
+    /// Paid by the method, but the outcome waits: the payer's activity record is divergent
+    /// after a provider loss and the user hasn't confirmed it, and an own write over it
+    /// that adds no stop waits for that (Paykit spec 6). Nothing was written; the attempt
+    /// stays open, so nothing pays again, and the journal keeps the proof. Once the user
+    /// confirms `record` ([`Paykit::confirm_divergent`]), a resume writes the outcome and
+    /// sends the proof.
+    #[non_exhaustive]
+    RecordDivergent {
+        /// The attempt.
+        attempt_id: AttemptId,
+        /// The payer's activity record.
+        record: [u8; 32],
+    },
 }
 
 impl PayOutcome {
@@ -354,7 +367,8 @@ impl PayOutcome {
             | Self::Pending { attempt_id, .. }
             | Self::Uncertain { attempt_id, .. }
             | Self::PaidOutcomeUnwritten { attempt_id, .. }
-            | Self::RecordHeld { attempt_id, .. } => *attempt_id,
+            | Self::RecordHeld { attempt_id, .. }
+            | Self::RecordDivergent { attempt_id, .. } => *attempt_id,
         }
     }
 }
@@ -522,6 +536,9 @@ pub(crate) enum Written {
     /// The outcome waits for the payer's activity record, which doesn't read: nothing was
     /// written ([`JournalEntry::record_held`]).
     Held,
+    /// The outcome waits for the user's confirmation of the payer's activity record, which is
+    /// divergent (Paykit spec 6): nothing was written.
+    Divergent([u8; 32]),
 }
 
 /// The payer's activity record's part of an outcome's batch.
@@ -532,6 +549,8 @@ enum OutcomeRecord {
     Unchanged,
     /// The record can't be updated now: the outcome waits.
     Held,
+    /// The record is divergent and the user hasn't confirmed it: the outcome waits.
+    Divergent([u8; 32]),
 }
 
 /// When a first dispatch's attempt was answered: its service time, and the device's wall
@@ -669,22 +688,48 @@ impl Paykit {
     /// error: it is [`PayOutcome::Pending`] or [`PayOutcome::Uncertain`]. At an app holding
     /// `contacts`, the deny list as read at most 10 minutes ago, or read first, decides: a
     /// request from a blocked payee is [`Refusal::Blocked`] until the user confirms paying
-    /// it.
+    /// it. A request whose record is divergent, or was seen so, is [`Refusal::Divergent`]
+    /// until the user confirms it ([`Paykit::confirm_divergent`]), except in three cases
+    /// that can't be paid anyway: one past its deadline goes on to the checks after the
+    /// pause, its deadline refusing it at the latest; one carrying endpoints whose app the
+    /// payee's `identity.json` no longer lists as current, and one requiring an app that
+    /// copy lists as removed, are [`Refusal::Destination`], that copy read fresh, a read
+    /// that fails being the refusal.
     pub async fn pay_request(
         &mut self,
         request: &RequestRef,
         options: PayOptions,
     ) -> Result<PayOutcome> {
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(self.pay_request_inner(request, options)).await
+        Box::pin(self.pay_request_inner(request, options, Initiator::User)).await
+    }
+
+    /// [`Paykit::pay_request`] started as an automatic payment ([`Initiator::Automatic`]), for
+    /// tests only (feature `test-support`): the checks an automatic first dispatch passes once
+    /// its attempt is journaled are tested through this one, without an Allowance. It makes
+    /// none of the checks an executor makes before it starts a payment
+    /// ([`Paykit::pay_under_allowance`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::pay_request`].
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn pay_request_automatically(
+        &mut self,
+        request: &RequestRef,
+        options: PayOptions,
+    ) -> Result<PayOutcome> {
+        Box::pin(self.pay_request_inner(request, options, Initiator::Automatic)).await
     }
 
     async fn pay_request_inner(
         &mut self,
         request: &RequestRef,
         options: PayOptions,
+        by: Initiator,
     ) -> Result<PayOutcome> {
-        self.pay_request_under(request, options, None).await
+        self.pay_request_under(request, options, by, None).await
     }
 
     /// Pay a one-time request: by hand, or, `under` an Allowance, automatically as its
@@ -693,13 +738,14 @@ impl Paykit {
         &mut self,
         request: &RequestRef,
         options: PayOptions,
+        by: Initiator,
         under: Option<crate::executor::Under>,
     ) -> Result<PayOutcome> {
-        // An executor's payment looks its destination up as an automatic one.
-        let by = if under.is_some() {
-            Initiator::Automatic
+        // An executor's payment is an automatic one, and looks its destination up as one.
+        let (by, lookup) = if under.is_some() {
+            (Initiator::Automatic, Initiator::Automatic)
         } else {
-            Initiator::User
+            (by, Initiator::User)
         };
         self.refresh_own()?;
         self.records_known().await?;
@@ -730,6 +776,27 @@ impl Paykit {
         // Held after a restore: paid only once the user has seen the payee may have
         // cancelled it, which ends the hold (Paykit spec 7.2, "What a restore loses").
         let record_key = self.activity_key(&target)?;
+        // Divergent after a provider loss, or seen so: paid by hand only once the user has
+        // seen that the payee may have cancelled it (Paykit spec 6). Three requests that can't
+        // be paid anyway are refused for what stops them instead, as a list that couldn't be
+        // paid anyway pauses nothing (Paykit spec 8.4): one past its deadline goes on to the
+        // checks below, its deadline refusing it at the latest, which the service's time only
+        // moves further past; one whose endpoints' app is no longer current is refused as the
+        // destination check refuses it; and one requiring an app the payee removed is refused
+        // for that.
+        let deadline = body.attempt_deadline(None)?;
+        if Box::pin(self.pause_at(&record_key)).await?.blocks_by_hand()
+            && !self.deadline_passed(deadline)
+        {
+            Box::pin(self.refuse_unpayable_request(
+                &request.payee,
+                &stored,
+                &body.destination,
+                &options,
+            ))
+            .await?;
+            Box::pin(self.refuse_while_paused(&[record_key])).await?;
+        }
         let end_hold = if self.held(&record_key, &record).await? {
             // No automatic attempt on a request held (Paykit spec 8.3, "Executor").
             if under.is_some() {
@@ -758,7 +825,6 @@ impl Paykit {
         };
         refuse_blocked(blocked, shown, options.blocked_confirmed.as_ref())?;
         let obligation = self.obligation(&request.payee, &request.request_hash, 0);
-        let deadline = body.attempt_deadline(None)?;
         let restored = self.restored_attempts(&obligation).await?;
         let step = self
             .claim_step(&obligation, deadline, restored, &options)
@@ -817,7 +883,7 @@ impl Paykit {
                     accepted.as_deref(),
                     &body.amount,
                     &options,
-                    by,
+                    lookup,
                 )
                 .await?
             }
@@ -828,7 +894,7 @@ impl Paykit {
                     accepted.as_deref(),
                     &body.amount,
                     &options,
-                    by,
+                    lookup,
                 )
                 .await?
             }
@@ -892,11 +958,7 @@ impl Paykit {
             reserve,
             create: None,
             on_record: true,
-            by: if under.is_some() {
-                Initiator::Automatic
-            } else {
-                Initiator::User
-            },
+            by,
             unconfirmed: options.unconfirmed_identity_confirmed,
             end_hold,
             executor,
@@ -1089,6 +1151,12 @@ impl Paykit {
                     attempt_id: *attempt_id,
                 })
             }
+            Written::Divergent(record) => {
+                return Ok(PayOutcome::RecordDivergent {
+                    attempt_id: *attempt_id,
+                    record,
+                })
+            }
         }
         if let Some(msg_id) = entry.proof_msg_id.clone() {
             let _ = self.app.flush_message(&msg_id).await;
@@ -1232,6 +1300,56 @@ impl Paykit {
         Ok(view.map_or(0, |v| v.step))
     }
 
+    /// Refused when the app the destination of `request` must come from can't give one
+    /// whatever the user confirms (Paykit spec 4, 7.2, 8.1), judged on the payee's
+    /// `identity.json` read fresh, as for a request's endpoint: a request carrying
+    /// endpoints, as the destination check refuses it, when the app that sent it, whose
+    /// endpoints they are, isn't current; a request requiring an app, when the payee has
+    /// removed that app, which is never listed again (Switch spec 4.3). An app not listed yet
+    /// isn't removed. A request whose destination any current app may give is not judged,
+    /// and no copy is read for it. A read that fails is the refusal: no app is taken as
+    /// current nor as removed without it.
+    async fn refuse_unpayable_request(
+        &mut self,
+        payee: &[u8; 32],
+        request: &StoredMessage,
+        destination: &RequestDestination,
+        options: &PayOptions,
+    ) -> Result<()> {
+        if let RequestDestination::Any = destination {
+            return Ok(());
+        }
+        let identity = match self
+            .payee_identity(
+                payee,
+                Need::FreshCopy,
+                Initiator::User,
+                options.unconfirmed_identity_confirmed,
+            )
+            .await?
+        {
+            Ok(identity) => identity,
+            Err(refusal) => return Err(refusal.into()),
+        };
+        match destination {
+            RequestDestination::RequiredApp(app) if identity.doc.lists_removed(app) => {
+                Err(Refusal::Destination(
+                    "Paykit spec 8.1: the request's required app is removed from the payee's \
+                     identity.json"
+                        .into(),
+                )
+                .into())
+            }
+            RequestDestination::Endpoints(_) => {
+                let carrier = Carrier::Message(Box::new(request.clone()));
+                let app_id = request.message().from.app_id;
+                crate::destination::current(&identity.doc, &app_id, &carrier, self.now())
+                    .map_err(|why| Refusal::Destination(why).into())
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn refuse_claim(&self, view: &ClaimView) -> Result<()> {
         match view.status {
             ClaimStatus::Settled => Err(Refusal::AlreadyPaid.into()),
@@ -1254,7 +1372,11 @@ impl Paykit {
     /// ([`Paykit::ask_for_lists`]) and the refusal is [`Refusal::WaitingForList`]; a list in
     /// use that offers no endpoint the payment may use is [`Refusal::NoDestination`]; lists
     /// in use whose endpoints the method pays none of, and no expired list, are
-    /// [`Refusal::UnsupportedEndpoint`], without asking.
+    /// [`Refusal::UnsupportedEndpoint`], without asking. The list of an app the payee's
+    /// `identity.json` lists in `apps`, paused as divergent ([`Paykit::confirm_divergent`]),
+    /// with no other list to pay, is [`Refusal::Divergent`] naming its record, whatever
+    /// certificate it was signed under, and its app isn't asked; the list of an app that
+    /// copy doesn't list in `apps`, or lists as removed, plays no part, paused or not.
     #[allow(clippy::too_many_arguments)]
     async fn list_destination(
         &mut self,
@@ -1306,9 +1428,16 @@ impl Paykit {
         // Only a current app's list counts (Paykit spec 8.4, 7.2): a removed app's list, of
         // whatever version it chose, would shadow the current apps' and then be refused by
         // the destination check. The payee's `identity.json` is the copy that check takes,
-        // so a fresh one is read once here.
-        if !lists.is_empty() {
-            let identity = match self
+        // so a fresh one is read once here, before any list is judged paused: a list of an
+        // app that copy doesn't list in `apps`, or lists as removed, is never usable,
+        // whatever its upload holds,
+        // so it plays no part, paused or not, and only a list that would otherwise be usable
+        // pauses the payment (Paykit spec 8.4). A read that fails is the payment's refusal:
+        // without it, no list is taken as a current app's, nor as a removed app's.
+        let identity = if lists.is_empty() {
+            None
+        } else {
+            match self
                 .payee_identity(
                     payee,
                     Need::FreshCopy,
@@ -1317,9 +1446,39 @@ impl Paykit {
                 )
                 .await?
             {
-                Ok(identity) => identity,
+                Ok(identity) => Some(identity),
                 Err(refusal) => return Err(refusal.into()),
-            };
+            }
+        };
+        if let Some(identity) = &identity {
+            lists.retain(|l| {
+                identity.doc.listed_cert(&l.app_id).is_some()
+                    && !identity.doc.lists_removed(&l.app_id)
+            });
+        }
+        // A list whose record is divergent, or was seen so, may be stale: the upload may hold
+        // a newer one, withdrawing or replacing a destination. None of its endpoints,
+        // single-use or reusable, is paid until the user confirms it (Paykit spec 6); with no
+        // other list to pay, the payment is refused naming those records. The certificate the
+        // held list was signed under decides nothing here: the upload's list may be signed
+        // under the one its current app is listed with now.
+        let mut paused_lists = Vec::new();
+        let mut usable = Vec::with_capacity(lists.len());
+        for list in lists {
+            let record = self
+                .app
+                .record_key(&list_target(&list.payee, &list.app_id))?;
+            if Box::pin(self.pause_at(&record)).await?.blocks_by_hand() {
+                paused_lists.push(record);
+            } else {
+                usable.push(list);
+            }
+        }
+        let mut lists = usable;
+        // Of the lists not paused, only one the destination check takes counts: the
+        // certificate it was signed under passes, and counts in the same copy of the payee's
+        // `identity.json`.
+        if let Some(identity) = &identity {
             let now = self.now();
             lists.retain(|l| {
                 let carrier = Carrier::Message(Box::new(l.list.clone()));
@@ -1399,12 +1558,25 @@ impl Paykit {
         // Lists in use that offer only endpoints the method doesn't pay, and no app's list to
         // ask again: a newer list needn't differ, so the payee isn't asked. A single-use
         // endpoint used up that the method pays is one a newer list may offer again.
-        if offered && !expired && !self.pays_any(&used, amount)? {
-            return Err(unsupported("the payee's Private Payment List endpoints"));
-        }
+        let unsupported_only = offered && !expired && !self.pays_any(&used, amount)?;
         // A list still in use with no endpoint the payment may use isn't missing, expired or
         // used up: a newer one needn't differ, so the payee isn't asked.
-        if live && !offered {
+        let unusable = live && !offered;
+        // A paused list is neither missing, expired nor used up (Paykit spec 8.4): the payment
+        // waits for the user's confirmation of it, naming its record, and no app whose list
+        // is paused is asked for a newer one, since the upload may hold one. An app whose
+        // list isn't paused, and merely expired or is used up, is asked as without a paused
+        // list.
+        if !paused_lists.is_empty() {
+            if !held.is_empty() && !unsupported_only && !unusable {
+                self.ask_for_lists(payee, app, &held).await?;
+            }
+            Box::pin(self.refuse_while_paused(&paused_lists)).await?;
+        }
+        if unsupported_only {
+            return Err(unsupported("the payee's Private Payment List endpoints"));
+        }
+        if unusable {
             return Err(Refusal::NoDestination(
                 "Paykit spec 8.4: the payee's Private Payment List has no endpoint this payment \
                  may use"
@@ -2176,10 +2348,17 @@ impl Paykit {
     ///
     /// The acceptance's queueing, or the store: the entry stays owed.
     pub(crate) async fn finish_owed_acceptance(&mut self, entry: &mut JournalEntry) -> Result<()> {
-        self.release_acceptance(entry, None).await?;
         let target = ActivityTarget::payer(entry.natural_key.clone());
         let own = self.identity();
         let key = self.activity_key(&target)?;
+        // The acceptance of a payment already made records that payment: none goes, nor is
+        // placed, while the request record is paused, by the one gate of the outcome
+        // (Paykit spec 6); the entry stays owed, for a resume after the user's confirmation,
+        // which sends it also over a view still divergent.
+        if Box::pin(self.dispatched_write_waits(&key)).await? {
+            return Ok(());
+        }
+        self.release_acceptance(entry, None).await?;
         let held = self.app.shared_record(&key).await?;
         let write = match held.as_ref().map(|r| &r.content) {
             Some(RecordContent::Value(value)) => {
@@ -2262,16 +2441,30 @@ impl Paykit {
             }
         }
         // Starting to pay is journaled just before the payment begins (Paykit spec 7.2): from
-        // here on it may be paid. A repeat's entry is `Paying` already, and nothing awaits
-        // between its final check and its call.
+        // here on it may be paid. A repeat's entry is `Paying` already.
         if matches!(kind, Dispatch::First { .. }) {
             self.set_stage(&mut entry, Stage::Paying).await?;
-            // The commit was an await: the fence judges every gate again, and nothing awaits
-            // after it before the call.
-            match self.payment_fence(&entry, &payee, by, confirmed, kind)? {
-                FinalCheck::Pay => {}
-                stopped => return self.stopped_at_the_fence(entry, stopped).await,
-            }
+        }
+        // The commit and the checks were awaits, during which another payer app can block the
+        // payee, raise the block floor, or record a cancellation, a rejection or `manual_only`
+        // in the request record ([`Paykit::fresh_record_withholds`]): an automatic
+        // payment, a first dispatch or a repeat, reads the deny list, the record and the floor
+        // again now, from the switch, judges them, and reads them once more, holding unless
+        // the second reads show what the first did; a read that fails holds it too
+        // ([`Paykit::automatic_dispatch_held`], Paykit spec 8.1, 8.3, `crate::floor`). A first
+        // dispatch goes back to `Attempted`, known unsubmitted, as it does when the fence
+        // stops it; a repeat stays open.
+        if by == Initiator::Automatic && self.automatic_dispatch_held(&entry).await.unwrap_or(true)
+        {
+            return self
+                .stopped_before_the_call(entry, kind, FinalCheck::Hold)
+                .await;
+        }
+        // Those reads were awaits too: the fence judges every other gate again, and nothing
+        // awaits after the second reads and the fence before the call.
+        match self.payment_fence(&entry, &payee, by, confirmed, kind)? {
+            FinalCheck::Pay => {}
+            stopped => return self.stopped_before_the_call(entry, kind, stopped).await,
         }
         let outcome = self.rail.pay(payment).await;
         // The call was made and the payment may be running, its outcome not known yet: only
@@ -2308,6 +2501,24 @@ impl Paykit {
             // Any other error, once a payment may have been submitted, is nothing yet: the
             // attempt stays open (Paykit spec 7.2).
             Err(_) => Ok(PayOutcome::Pending { attempt_id }),
+        }
+    }
+
+    /// A dispatch stopped after its final payment check, before the payment method's call:
+    /// a first dispatch as [`Paykit::stopped_at_the_fence`] leaves it; a repeat stays open,
+    /// as the final payment check leaves it: [`PayOutcome::Pending`] for a hold, and
+    /// "may be paid" otherwise, as the dispatch before it may have paid.
+    async fn stopped_before_the_call(
+        &mut self,
+        entry: JournalEntry,
+        kind: Dispatch,
+        stopped: FinalCheck,
+    ) -> Result<PayOutcome> {
+        let attempt_id = entry.attempt()?;
+        match (kind, stopped) {
+            (Dispatch::First { .. }, stopped) => self.stopped_at_the_fence(entry, stopped).await,
+            (Dispatch::Repeat { .. }, FinalCheck::Hold) => Ok(PayOutcome::Pending { attempt_id }),
+            (Dispatch::Repeat { .. }, _) => Ok(PayOutcome::Uncertain { attempt_id }),
         }
     }
 
@@ -2384,6 +2595,9 @@ impl Paykit {
         match self.write_outcome(entry, paid, false).await {
             Ok(Written::Done) => {}
             Ok(Written::Held) => return Ok(PayOutcome::RecordHeld { attempt_id }),
+            Ok(Written::Divergent(record)) => {
+                return Ok(PayOutcome::RecordDivergent { attempt_id, record })
+            }
             // A batch the client kept, refused about the caller before it was sent, still goes
             // once the app is current again: the entry stays, as for any outcome unwritten,
             // so a refusal of that batch later leaves it for a resume to write again.
@@ -2440,6 +2654,13 @@ impl Paykit {
         overwrite: bool,
     ) -> Result<Written> {
         if paid {
+            // A payment made waits for the user's confirmation of a paused payer record,
+            // before its acceptance is released: nothing of it goes over that record until
+            // then, and then also over a view still divergent (Paykit spec 6).
+            let record = self.activity_key(&ActivityTarget::payer(entry.natural_key.clone()))?;
+            if Box::pin(self.dispatched_write_waits(&record)).await? {
+                return Ok(Written::Divergent(record));
+            }
             // Every path that writes a payment made goes through here: its acceptance is
             // sendable, if it isn't yet, before the batch places it in the record (Paykit
             // spec 7.2 steps 2, 3). It never holds back the outcome, nor is it dropped: one
@@ -2495,6 +2716,7 @@ impl Paykit {
                     }
                     return Ok(Written::Held);
                 }
+                OutcomeRecord::Divergent(record) => return Ok(Written::Divergent(record)),
             };
             let step = match entry.step {
                 Some(step) => Some(step),
@@ -2608,6 +2830,21 @@ impl Paykit {
             .is_some_and(|r| crate::hold::awaits_key(&r.content))
         {
             return Err(crate::hold::value_awaits_key());
+        }
+        // A payment made waits while the record is paused, by the one gate of the outcome
+        // ([`crate::divergent::Pause::dispatched_write_waits`]), `done` never going without
+        // the record's update; a divergent record the user hasn't confirmed, or one whose
+        // kept messages wait to be written, takes no other own write but a stop
+        // ([`crate::divergent::Pause::adds_no_stop_waits`]), so a failure's `failed` goes
+        // alone, its record left as it is (Paykit spec 6).
+        if let Some(current) = &held {
+            let pause = Box::pin(self.pause_of(current)).await?;
+            if paid && pause.dispatched_write_waits() {
+                return Ok(OutcomeRecord::Divergent(key));
+            }
+            if !paid && pause.adds_no_stop_waits() {
+                return Ok(OutcomeRecord::Unchanged);
+            }
         }
         let read = match held.as_ref().map(|r| &r.content) {
             None | Some(RecordContent::Deleted) => None,
@@ -3112,8 +3349,8 @@ impl Paykit {
                 Ok(doc) => doc,
                 Err(held) => return Ok(Some(held)),
             };
-            // The retention is judged again by the final payment check, after its await and
-            // just before the call: the checks awaited the network meanwhile.
+            // The retention is judged again by the final payment check and the fence, after
+            // the last await and just before the call: the checks awaited the network meanwhile.
             let repeat = Dispatch::Repeat {
                 idempotency_retention_ms: declaration.idempotency_retention_ms,
                 opened_at_ms,
@@ -3135,9 +3372,19 @@ impl Paykit {
     /// included, whatever copy this app keeps) or doesn't read as the request, a newer write
     /// this app refused included, so nothing shows it still open; or the request is held
     /// after a restore or a `missed` item until the user confirms it (Paykit spec 7.2,
-    /// [`Paykit::confirm_possibly_cancelled`]). A payment without a request has nothing a
-    /// payee cancels.
+    /// [`Paykit::confirm_possibly_cancelled`]); or the record holds `manual_only`, or the
+    /// request is a one-time one dated before the block floor, or the floor can't be read
+    /// (`crate::floor`, whatever the record holds: another app may have opened it before it
+    /// held the floor): the request is paid only by hand, and a repeat is an automatic
+    /// payment (Paykit spec 8.1, 8.3), so the attempt stays open and the user's payment
+    /// method's history or a receipt settles it. A payment without a request has nothing a payee cancels.
     async fn repeat_withheld(&mut self, entry: &JournalEntry) -> Result<bool> {
+        // A repeat is an automatic payment: none while its request record or its list's
+        // record is divergent, or paused since it was seen so (Paykit spec 6). The view held
+        // is taken before the record is read again, and the one read after it.
+        if Box::pin(self.divergent_withholds(entry)).await? {
+            return Ok(true);
+        }
         if entry.request_hash()?.is_none() {
             return Ok(false);
         }
@@ -3147,20 +3394,70 @@ impl Paykit {
         }
         Ok(match self.fresh_request(&target).await? {
             Fresh::Held(fresh) => {
-                cancelled(&fresh)
-                    || rejected(&fresh)
-                    || self.held(&self.activity_key(&target)?, &fresh).await?
+                self.fresh_record_withholds(entry, &target, &fresh).await?
+                    || match crate::requests::request_of(&fresh) {
+                        Some((stored, _)) => self.floor_holds(stored).await?,
+                        None => false,
+                    }
             }
             Fresh::Missing | Fresh::Unreadable => true,
         })
     }
 
-    /// The final payment check, the last thing before the payment method's call on every
-    /// path that reaches it, a first dispatch and a repeat at a resume or a recovery (Paykit
-    /// spec 4, 7.2). In order:
+    /// Whether `fresh`, `entry`'s request record as the switch holds it now, read again
+    /// ([`Paykit::fresh_request`]), withholds an automatic payment of it, at a repeat's
+    /// withheld check and at the last check before any automatic call
+    /// ([`Paykit::automatic_dispatch_held`]): the record shows the request cancelled or
+    /// rejected, or holds `manual_only`; the request is held after a restore or a `missed`
+    /// item until the user confirms it (Paykit spec 7.2); or the record, or the list's
+    /// record, is divergent or paused since it was seen so, the view read after the record
+    /// (Paykit spec 6, 8.1, 8.3).
+    async fn fresh_record_withholds(
+        &mut self,
+        entry: &JournalEntry,
+        target: &ActivityTarget,
+        fresh: &ActivityRecord,
+    ) -> Result<bool> {
+        Ok(cancelled(fresh)
+            || rejected(fresh)
+            || fresh.manual_only
+            || self.held(&self.activity_key(target)?, fresh).await?
+            || Box::pin(self.divergent_withholds(entry)).await?)
+    }
+
+    /// Whether `entry`'s request record, or the `payment_lists` record of the list its
+    /// destination came from, blocks an automatic payment ([`crate::divergent::Pause`]).
+    async fn divergent_withholds(&mut self, entry: &JournalEntry) -> Result<bool> {
+        let mut records = Vec::new();
+        if entry.request_hash()?.is_some() {
+            records.push(self.activity_key(&ActivityTarget::payer(entry.natural_key.clone()))?);
+        }
+        if entry.destination.source()? == DestinationSource::List {
+            records.push(
+                self.app
+                    .record_key(&list_target(&entry.payee, &entry.destination.app_id))?,
+            );
+        }
+        for record in records {
+            if Box::pin(self.pause_at(&record)).await?.blocks_automatic() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// The final payment check, on every path that reaches the payment method's call, a first
+    /// dispatch and a repeat at a resume or a recovery, judged again by the fence just before
+    /// the call (Paykit spec 4, 7.2). In order:
     ///
-    /// 0. for an automatic payment, the deny list, read again: a blocked payee, or a list
-    ///    that can't be read, holds it ([`FinalCheck::Hold`], Paykit spec 8.1);
+    /// 0. for an automatic first dispatch, the deny list, the request record and the block
+    ///    floor, each read again and confirmed by a second read
+    ///    ([`Paykit::automatic_dispatch_held`]): a blocked payee, a record that withholds it
+    ///    ([`Paykit::fresh_record_withholds`]: cancelled, rejected, `manual_only`, held after
+    ///    a restore, divergent), isn't there or can't be read, a one-time request dated before
+    ///    the floor, a read that fails, or a second read that shows another write, holds it
+    ///    ([`FinalCheck::Hold`], Paykit spec 8.1, 8.3, `crate::floor`); an automatic repeat
+    ///    makes that check after this one;
     /// 1. a switch lookup kept for the payee whose answer has come is taken, so a late
     ///    answer that removes the destination's app is acted on (Switch spec 4.3), and one
     ///    the client refuses, such as an equivocation, stops the payment
@@ -3181,12 +3478,13 @@ impl Paykit {
     ///    resume or a recovery included ([`FinalCheck::Hold`]: nothing is paid, the attempt
     ///    stays open for an app that holds it).
     ///
-    /// Checks 2 to 6 run on the clock after the one await ([`Paykit::final_gates`]). A
-    /// repeat's call follows them with no await; a first dispatch's follows the journal
-    /// write of `Paying`, after which the fence ([`Paykit::payment_fence`]) runs them all
-    /// again. Anything but [`FinalCheck::Pay`]: nothing is paid; a copy past its age is
-    /// looked up again by the next check, at a resume. Returns the payee's copy the checks
-    /// judged, for the fence.
+    /// Checks 2 to 6 run on the clock after the one await ([`Paykit::final_gates`]). A first
+    /// dispatch's call follows the journal write of `Paying`; after it, and for a repeat
+    /// after this check, an automatic payment makes the check of 0 again
+    /// ([`Paykit::automatic_dispatch_held`]), and the fence ([`Paykit::payment_fence`]) runs
+    /// 1 to 6 again, with no await after them before the call. Anything but
+    /// [`FinalCheck::Pay`]: nothing is paid; a copy past its age is looked up again by the
+    /// next check, at a resume. Returns the payee's copy the checks judged, for the fence.
     pub(crate) async fn final_payment_check(
         &mut self,
         entry: &JournalEntry,
@@ -3195,12 +3493,19 @@ impl Paykit {
         confirmed: Option<UserConfirmed>,
         kind: Dispatch,
     ) -> Result<(FinalCheck, PeerIdentity)> {
-        // No automatic payment to a blocked payee (Paykit spec 8.1), on any automatic path,
-        // a resume's repeat included: the user's confirmation was for the first dispatch. A
-        // deny list that can't be read holds it too. Judged before the await below, after
-        // which nothing time-bound is: the list changes only by the user's or the switch's
-        // write, which a later check reads again.
-        if by == Initiator::Automatic && self.denied(&entry.payee).await.unwrap_or(true) {
+        // No automatic payment to a blocked payee (Paykit spec 8.1), nor of a request its
+        // record withholds ([`Paykit::fresh_record_withholds`]: cancelled, rejected,
+        // `manual_only`, held after a restore, divergent; Paykit spec 8.1, 8.3), or a one-time
+        // request dated before the block floor (`crate::floor`), each read now and confirmed by
+        // a second read ([`Paykit::automatic_dispatch_held`]), a read that fails holding it
+        // too. A first dispatch judges them before its attempt's `Paying` commit,
+        // so that a held one is known unsubmitted, and again after it ([`Paykit::dispatch`]);
+        // a repeat, whose entry is `Paying` already, judges them once, after every other
+        // await before its call.
+        if by == Initiator::Automatic
+            && matches!(kind, Dispatch::First { .. })
+            && self.automatic_dispatch_held(entry).await?
+        {
             return Ok((FinalCheck::Hold, payee));
         }
         let payee = match self.take_kept_lookup(&entry.payee).await? {
@@ -3212,8 +3517,113 @@ impl Paykit {
         Ok((check, payee))
     }
 
-    /// The fence after the journal write of `Paying` (Paykit spec 7.2): that commit is an
-    /// await, during which a lookup's answer can come and a freshness limit pass, so every
+    /// Whether `entry` is held from an automatic dispatch, a first dispatch or a repeat, as
+    /// the switch holds the identity's state now. Every automatic dispatch makes this check,
+    /// and after it only the fence runs ([`Paykit::payment_fence`], with no await) before the
+    /// payment method's call ([`Paykit::dispatch`]).
+    ///
+    /// It reads three things from the switch, one after the other ([`Paykit::shared_collect`]):
+    /// the deny list, the request record ([`Paykit::fresh_request_stamped`]) and the block
+    /// floor ([`Paykit::floor_read_now`], for a one-time request only), and judges them: the
+    /// deny list holds the payee (Paykit spec 8.1); the record withholds the request
+    /// ([`Paykit::fresh_record_withholds`]: cancelled, rejected, `manual_only`, held after a
+    /// restore, divergent), or isn't there, doesn't read as the request or holds none; or the
+    /// floor holds the request ([`Paykit::floor_holds_read`]). Then it reads the three again,
+    /// in the same order, and holds unless each shows what its first read did (the deny list
+    /// the same entries, each record the same write, [`WriteStamp`]), or the deny list now
+    /// holds the payee, or the record isn't there, doesn't read or holds no request. Each read
+    /// shows the switch's current state, never a copy this app keeps: the deny list from
+    /// `GET /allow`, which the client always fetches, with this app's own block or unblock
+    /// that the list doesn't show yet counting at once (Paykit spec 8.1, `judged_deny`): an
+    /// unblock whose batch the client still keeps takes the payee out even while
+    /// `GET /allow` lists them; the record and the floor from
+    /// `read_record_fresh`, a read that shows anything but the switch's current write holding
+    /// the dispatch.
+    ///
+    /// Another own app can block the payee, record a cancellation or a rejection, mark the
+    /// record `manual_only` or raise the floor while this app awaits anything, between these
+    /// reads included. A record's version only grows, whoever writes, a delete included, so an
+    /// unchanged version is the same write; the deny list carries no version and is compared
+    /// whole. Both reads of the record and of the floor bracket the second read of the deny
+    /// list, so each value judged held at that instant. A read that fails, or a record not
+    /// there or not readable at either read, holds the dispatch. A write that lands after its
+    /// own second read is too late for this call: the payment method's call can't be made
+    /// conditional on the switch's state, so no read before it sees a write after that read.
+    /// After the second collect's last switch read, only this app's own store is awaited
+    /// (for a recurring request, the copy of the record just taken; for a payment without a
+    /// request, the commit of the deny list read and the widenings it applies), and then
+    /// only code with no await runs before the call.
+    async fn automatic_dispatch_held(&mut self, entry: &JournalEntry) -> Result<bool> {
+        let Some(judged) = Box::pin(self.shared_collect(entry, true)).await? else {
+            return Ok(true);
+        };
+        let Some(confirmed) = Box::pin(self.shared_collect(entry, false)).await? else {
+            return Ok(true);
+        };
+        Ok(judged != confirmed)
+    }
+
+    /// One read of the identity's state an automatic dispatch of `entry` is judged by
+    /// ([`Paykit::automatic_dispatch_held`]): the deny list, then the request record, then the
+    /// block floor for a one-time request, each from the switch now. `None` when a read fails,
+    /// the deny list holds the payee, the record isn't there, doesn't read or holds no
+    /// request, or, when `judge`, the record withholds the request or the floor holds it.
+    /// Without `judge`, nothing more is read from the switch after the last read; only the
+    /// app's own store is.
+    async fn shared_collect(
+        &mut self,
+        entry: &JournalEntry,
+        judge: bool,
+    ) -> Result<Option<SharedState>> {
+        let Ok(deny) = self.deny_list_now().await else {
+            return Ok(None);
+        };
+        if deny.contains(&entry.payee) {
+            return Ok(None);
+        }
+        if entry.request_hash()?.is_none() {
+            return Ok(Some(SharedState {
+                deny,
+                record: None,
+                floor: None,
+            }));
+        }
+        let target = ActivityTarget::payer(entry.natural_key.clone());
+        let (record, stamp) = match self.fresh_request_stamped(&target).await {
+            Ok((Fresh::Held(record), Some(stamp))) => (*record, stamp),
+            Ok(_) | Err(_) => return Ok(None),
+        };
+        if judge && self.fresh_record_withholds(entry, &target, &record).await? {
+            return Ok(None);
+        }
+        let Some((stored, _)) = crate::requests::request_of(&record) else {
+            return Ok(None);
+        };
+        if !crate::floor::floor_applies(stored) {
+            return Ok(Some(SharedState {
+                deny,
+                record: Some(stamp),
+                floor: None,
+            }));
+        }
+        let stored = stored.clone();
+        let Some(floor) = self.floor_read_now().await else {
+            return Ok(None);
+        };
+        if judge && self.floor_holds_read(&stored, floor.as_ref()).await? {
+            return Ok(None);
+        }
+        Ok(Some(SharedState {
+            deny,
+            record: Some(stamp),
+            floor: Some(floor.as_ref().map(WriteStamp::of)),
+        }))
+    }
+
+    /// The fence before the payment method's call, after a first dispatch's journal write of
+    /// `Paying` and an automatic payment's reads ([`Paykit::automatic_dispatch_held`]) (Paykit
+    /// spec 7.2): each is an await, during which a lookup's answer can come and a freshness
+    /// limit pass, so every
     /// gate of the final payment check is judged again here, with no await of its own and
     /// none after it before the payment method's call:
     ///
@@ -3224,7 +3634,11 @@ impl Paykit {
     ///
     /// The kept stop and the restore hold aren't judged again: Paykit's own state, which
     /// only this app's own calls change (a receive, a placement, a confirmation), and none
-    /// can run while the payment holds the app.
+    /// can run while the payment holds the app. The deny list, the block floor and the
+    /// request record are the identity's, which another payer app can change meanwhile: an
+    /// automatic payment reads them again, from the switch, twice, just before this fence,
+    /// and holds unless the second reads show what the first did
+    /// ([`Paykit::automatic_dispatch_held`]).
     fn payment_fence(
         &mut self,
         entry: &JournalEntry,
@@ -3249,9 +3663,8 @@ impl Paykit {
     /// confirmation (rows 5 and 6), while the repeat's payment could still run, so it isn't
     /// made, and the attempt stays "may be paid" as past the idempotency retention.
     ///
-    /// A repeat has no journal write between its final payment check and its call, so no
-    /// fence after it: this check, with the others, is the last before the call, and nothing
-    /// awaits between them.
+    /// The fence judges it again after a repeat's last await ([`Paykit::payment_fence`]): this
+    /// check, with the others, is the last before the call, and nothing awaits between them.
     fn repeat_completes_before_orphaned(
         &self,
         now: u64,
@@ -3594,6 +4007,40 @@ pub(crate) fn prune_bound(
         Some(deadline) => deadline.saturating_add(RECONCILIATION_MS),
         None => journaled_at_ms.saturating_add(MAX_CLAIM_AGE_MS),
     })
+}
+
+/// The write of a shared record a read showed: its version, which only grows across the
+/// account whoever writes, a delete included, and what the client marks on
+/// it without a new write: a write refused, a removed app's write nothing dates, a view that
+/// conflicts. Two reads that show the same stamp show the same write, as the client holds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WriteStamp {
+    version: RecordVersion,
+    flagged: bool,
+    doubtful: bool,
+    divergent: bool,
+}
+
+impl WriteStamp {
+    /// The stamp of `record` as read.
+    pub(crate) fn of(record: &SharedRecord) -> Self {
+        Self {
+            version: record.version,
+            flagged: record.flagged,
+            doubtful: record.doubtful,
+            divergent: record.divergent,
+        }
+    }
+}
+
+/// What one read of the identity's state for an automatic dispatch showed
+/// ([`Paykit::shared_collect`]): the deny list, the request record's write, and the floor
+/// record's (`None` inside for no record), each `None` when not read.
+#[derive(Debug, PartialEq, Eq)]
+struct SharedState {
+    deny: Vec<[u8; 32]>,
+    record: Option<WriteStamp>,
+    floor: Option<Option<WriteStamp>>,
 }
 
 #[cfg(test)]
