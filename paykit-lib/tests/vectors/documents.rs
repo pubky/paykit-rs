@@ -821,6 +821,30 @@ fn app_record_signatures(keys: &Keys, file: &Value) -> Vec<(Place<'static>, Valu
             let at = format!("/app_records/{list}/{i}");
             out.push((Place::At(format!("{at}/body")), json!(text)));
             out.push((Place::At(format!("{at}/signed")), signed_json(&doc)));
+            let record = AppRecord::verify(&doc, &pubky(BOB));
+            if list == "refused" {
+                out.push((
+                    Place::At(format!("{at}/switch_accepts")),
+                    json!(record.is_ok()),
+                ));
+                continue;
+            }
+            // What a Paykit reader takes from an accepted record's member.
+            let read = PaykitMember::read(&record.unwrap()).unwrap();
+            let endpoints: serde_json::Map<String, Value> = read
+                .public_endpoints
+                .iter()
+                .map(|(i, p)| (i.as_str().to_owned(), json!(p.as_str())))
+                .collect();
+            let ids: Vec<&str> = read
+                .endpoint_identifiers
+                .iter()
+                .map(|i| i.as_str())
+                .collect();
+            out.push((
+                Place::At(format!("{at}/reads")),
+                json!({ "endpoint_identifiers": ids, "public_endpoints": endpoints }),
+            ));
         }
     }
     out

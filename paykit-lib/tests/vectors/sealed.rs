@@ -1394,6 +1394,9 @@ fn binding_cases(keys: &Keys) -> Vec<(Place<'static>, Value)> {
     out
 }
 
+/// The seed label of the nonce `labelled` is sealed with.
+const LABELLED_NONCE_LABEL: &str = "sealed/labelled/nonce";
+
 /// The label of each `labelled` rejection, by its name: the policy it is read under.
 fn labelled_rejection_label(name: &str) -> Option<Label> {
     match name {
@@ -1431,7 +1434,10 @@ fn labelled_cases(keys: &Keys) -> Vec<(Place<'static>, Value)> {
         .record_key(&nk, &natural, Some(&shop1))
         .unwrap();
     let plaintext = recertified(keys, st(l, "plaintext"));
-    let nonce: [u8; 24] = crate::common::unhex(st(l, "nonce_hex")).try_into().unwrap();
+    // The nonce is the seed of its label, cut to the nonce's length (README "Seeds").
+    let nonce: [u8; 24] = crate::common::seed(LABELLED_NONCE_LABEL)[..24]
+        .try_into()
+        .unwrap();
     let sealed = SealedValue::seal_with_nonce(
         &label_key,
         &bob,
@@ -1443,6 +1449,7 @@ fn labelled_cases(keys: &Keys) -> Vec<(Place<'static>, Value)> {
     )
     .unwrap();
     let mut out = vec![
+        (Place::At("/labelled/nonce_hex".into()), json!(hex(&nonce))),
         (Place::At("/labelled/identity_hex".into()), json!(hex(&bob))),
         (
             Place::At("/labelled/label_key_hex".into()),
