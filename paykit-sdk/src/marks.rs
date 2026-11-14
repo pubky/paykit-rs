@@ -934,7 +934,11 @@ impl Paykit {
     /// # Errors
     ///
     /// A corrupt store when none is: the mark points to another message.
-    async fn delivered_request(&self, sender: &[u8; 32], queued: &QueuedRequest) -> Result<()> {
+    pub(crate) async fn delivered_request(
+        &self,
+        sender: &[u8; 32],
+        queued: &QueuedRequest,
+    ) -> Result<()> {
         let sent = self.app.sent_to(sender, 0, u64::MAX).await?;
         if sent.iter().any(|message| {
             message.msg_id == queued.msg_id

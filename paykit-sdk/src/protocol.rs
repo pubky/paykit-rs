@@ -51,7 +51,7 @@ use crate::activity::{self, KeptSide, SideTag};
 use crate::allowances::ConsentEntry;
 use crate::hold::RestoreHold;
 use crate::journal::JournalEntry;
-use crate::marks::{DropMark, KeyWaitMark};
+use crate::marks::{DropMark, KeyWaitMark, QueuedRequest};
 use crate::notices::KeptNotice;
 use crate::pay::ListAsk;
 use crate::rail::Rail;
@@ -91,6 +91,11 @@ pub(crate) struct QueuedAsk {
     pub(crate) sender: [u8; 32],
     pub(crate) from_ms: u64,
     pub(crate) until_ms: Option<u64>,
+    /// The `resend_request` this app signed for the ask, kept before it is queued, and the
+    /// batch the client keeps with it when the write that queues it wasn't answered: the
+    /// next pass reads what became of it before it asks anew (`resend.rs`). `None` while
+    /// none was signed for the ask as it stands.
+    pub(crate) queued: Option<QueuedRequest>,
 }
 
 /// A `missed` item's mark (`p/mi/<from>`): the time its re-sends ask from, and the
@@ -813,6 +818,7 @@ impl Protocol for PaykitProtocol {
             sender: needed.sender,
             from_ms: needed.accepted_from_ms,
             until_ms: Some(needed.accepted_until_ms),
+            queued: None,
         };
         Ok(vec![local_write(
             &key::ask(&needed.sender, needed.accepted_from_ms),

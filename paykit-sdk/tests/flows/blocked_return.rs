@@ -2273,6 +2273,113 @@ async fn test_blocked_return_floor_write_kept_at_a_receive_is_asked_once() {
     assert_eq!(block_marks(&wallet).await, 1);
 }
 
+/// Alice's wallet with bob's request dropped for the block and bob unblocked; whether he is
+/// flagged isn't known, so his mark asks nothing, while it still needs the floor raised
+/// before any ask of him goes. Returns the wallet's store.
+async fn wallet_with_a_quiet_mark(w: &World) -> (Paykit, Paykit, Arc<ListsStore>) {
+    let lists = Arc::new(ListsStore::default());
+    let mut wallet = contacts_wallet(w, Arc::clone(&lists) as Arc<dyn StateStore>).await;
+    let mut shop = w.shop().await;
+    Box::pin(dropped_for_the_block(w, &mut wallet, &mut shop)).await;
+    lists.flagged_unknown(true);
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(asked(&wallet, &w.bob_id()).await.is_empty());
+    assert_eq!(shared_floor(&wallet).await, None);
+    (wallet, shop, lists)
+}
+
+/// Keep an ask of `sender` from `from_ms` on (`ask/`), as entries the app couldn't read or
+/// a `missed` item queue one.
+async fn keep_ask(app: &mut Paykit, sender: &[u8; 32], from_ms: u64) {
+    let ask = serde_json::json!({
+        "v": 1,
+        "d": {
+            "sender": pubky_switch_core::enc::b64(sender),
+            "from_ms": from_ms,
+            "until_ms": null,
+            "queued": null,
+        }
+    });
+    app.app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: format!("ask/{}/{from_ms:020}", pubky_switch_core::enc::b64(sender)).into_bytes(),
+            value: serde_json::to_vec(&ask).unwrap(),
+        }])
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_blocked_return_ask_whose_answer_is_lost_asked_once_after_a_restart() {
+    // An ask of bob needs the floor raised first: the batch that raises it and queues the
+    // request is applied, but its answer is lost, and the client keeps the batch. The app
+    // restarts; the batch settles at the next read, and the ask is not asked anew: one
+    // request.
+    let w = World::new();
+    let (mut wallet, _shop, lists) = Box::pin(wallet_with_a_quiet_mark(&w)).await;
+    keep_ask(&mut wallet, &w.bob_id(), 5).await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    let _ = wallet.receive(None).await;
+    let wallet_id = wallet.app_id();
+    drop(wallet);
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&lists) as Arc<dyn StateStore>,
+            wallet_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    // Whatever the outbox still holds goes too.
+    wallet.flush().await.unwrap();
+    assert_eq!(asked(&wallet, &w.bob_id()).await, vec![(Some(5), None)]);
+    assert!(shared_floor(&wallet).await.is_some());
+    assert!(wallet
+        .app()
+        .protocol_scan(b"ask/")
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_blocked_return_ask_whose_raise_conflicts_leaves_the_others_going() {
+    // Two asks of bob, each needing the floor raised first. The first raise meets a
+    // `409 conflict`: the floor is read again, that ask waits for the next pass, and the
+    // pass goes on: the second ask raises the floor and goes. The next pass asks the first.
+    let w = World::new();
+    let (mut wallet, _shop, _lists) = Box::pin(wallet_with_a_quiet_mark(&w)).await;
+    keep_ask(&mut wallet, &w.bob_id(), 5).await;
+    keep_ask(&mut wallet, &w.bob_id(), 6).await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::Conflict,
+            current: serde_json::Value::Null,
+        });
+    wallet.receive(None).await.unwrap();
+    assert_eq!(asked(&wallet, &w.bob_id()).await, vec![(Some(6), None)]);
+    assert_eq!(wallet.app().protocol_scan(b"ask/").await.unwrap().len(), 1);
+    wallet.receive(None).await.unwrap();
+    let mut asks = asked(&wallet, &w.bob_id()).await;
+    asks.sort();
+    assert_eq!(asks, vec![(Some(5), None), (Some(6), None)]);
+    assert!(wallet
+        .app()
+        .protocol_scan(b"ask/")
+        .await
+        .unwrap()
+        .is_empty());
+}
+
 #[tokio::test]
 async fn test_blocked_return_floor_write_that_fails_keeps_the_ask_waiting() {
     // Bob is unblocked and his mark asks, but the batch that raises the floor and queues the

@@ -1458,6 +1458,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
                 "sender": pubky_switch_core::enc::b64(&w.bob_id()),
                 "from_ms": 5,
                 "until_ms": null,
+                "queued": null,
             })),
         ),
         (
