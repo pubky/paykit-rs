@@ -255,6 +255,10 @@ pub struct ReceiptIssuanceView {
     /// Time Receipt Access was queued for private delivery.
     pub access_queued_at: Option<DateTime<Utc>>,
     /// Time Receipt Access was first published, once `AccessSent`.
+    ///
+    /// Empty when the peer confirmed delivery of an access message whose
+    /// publication was never recorded; `updated_at` then holds the
+    /// confirmation time.
     pub access_sent_at: Option<DateTime<Utc>>,
     /// Last storage, queueing or Receipt Access delivery error.
     ///
@@ -322,19 +326,29 @@ impl ReceiptIssuanceView {
             return view;
         };
         // `sent_at` survives a later failed retry of an unconfirmed event, so
-        // it, not `status`, tells whether Receipt Access was published.
-        if let Some(sent_at) = message.sent_at.or(message.confirmed_at) {
+        // it, not `status`, tells whether Receipt Access was published. A
+        // Delivery Confirmation can arrive after an ambiguous publication
+        // left `sent_at` empty: the access was delivered, but its first
+        // publication time is unknown, so only `updated_at` takes that time.
+        if let Some(sent_at) = message.sent_at {
             view.status = ReceiptIssuanceStatus::AccessSent;
             view.access_sent_at = Some(sent_at);
+            view.updated_at = view.updated_at.max(sent_at);
             return view;
         }
+        if let Some(confirmed_at) = message.confirmed_at {
+            view.status = ReceiptIssuanceStatus::AccessSent;
+            view.updated_at = view.updated_at.max(confirmed_at);
+            return view;
+        }
+        view.last_error = message.last_error.clone();
         if matches!(
             message.status,
             OutboundPrivateMessageStatus::Invalid | OutboundPrivateMessageStatus::RecoveryRequired
         ) {
             view.status = ReceiptIssuanceStatus::AccessFailed;
+            view.updated_at = view.updated_at.max(message.updated_at);
         }
-        view.last_error = message.last_error.clone();
         view
     }
 }

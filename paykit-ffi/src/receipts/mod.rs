@@ -132,7 +132,8 @@ pub struct FfiReceiptIssuanceView {
     /// Time Receipt Access was queued for private delivery as RFC3339 text.
     pub access_queued_at: Option<String>,
     /// Time Receipt Access was first published as RFC3339 text, once
-    /// `AccessSent`.
+    /// `AccessSent`. Empty when the peer confirmed delivery of an access
+    /// message whose publication was never recorded.
     pub access_sent_at: Option<String>,
     /// Last storage, queueing or Receipt Access delivery error. While the
     /// status stays `AccessQueued`, the outbound queue retries delivery.

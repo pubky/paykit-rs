@@ -20734,7 +20734,8 @@ public struct ReceiptIssuanceView {
     public var accessQueuedAt: String?
     /**
      * Time Receipt Access was first published as RFC3339 text, once
-     * `AccessSent`.
+     * `AccessSent`. Empty when the peer confirmed delivery of an access
+     * message whose publication was never recorded.
      */
     public var accessSentAt: String?
     /**
@@ -20793,7 +20794,8 @@ public struct ReceiptIssuanceView {
          */accessQueuedAt: String?,
         /**
          * Time Receipt Access was first published as RFC3339 text, once
-         * `AccessSent`.
+         * `AccessSent`. Empty when the peer confirmed delivery of an access
+         * message whose publication was never recorded.
          */accessSentAt: String?,
         /**
          * Last storage, queueing or Receipt Access delivery error. While the

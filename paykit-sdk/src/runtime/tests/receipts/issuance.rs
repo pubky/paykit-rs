@@ -744,24 +744,26 @@ async fn test_issued_receipts_report_receipt_access_delivery() {
     .unwrap();
     let outbound_message_id = queued.outbound_message_id.unwrap();
 
-    let set_outbound =
-        |update: fn(OutboundPrivateMessageRecord) -> OutboundPrivateMessageRecord| {
-            let storage = storage.clone();
-            let counterparty = counterparty.clone();
-            async move {
-                storage
-                    .transaction(move |tx| {
-                        let message = tx
-                            .outbound_private_messages(&counterparty)
-                            .into_iter()
-                            .find(|message| message.outbound_message_id == outbound_message_id)
-                            .unwrap();
-                        tx.save_outbound_private_message(update(message))
-                    })
-                    .await
-                    .unwrap();
-            }
-        };
+    let set_outbound = |update: Box<
+        dyn FnOnce(OutboundPrivateMessageRecord) -> OutboundPrivateMessageRecord + Send,
+    >| {
+        let storage = storage.clone();
+        let counterparty = counterparty.clone();
+        async move {
+            storage
+                .transaction(move |tx| {
+                    let message = tx
+                        .outbound_private_messages(&counterparty)
+                        .into_iter()
+                        .find(|message| message.outbound_message_id == outbound_message_id)
+                        .unwrap();
+                    tx.save_outbound_private_message(update(message))
+                })
+                .await
+                .unwrap();
+        }
+    };
+    // Both list paths must agree on every derived field.
     let views = || async {
         let all = sdk.issued_receipts().await.unwrap();
         let to = sdk.issued_receipts_to(&counterparty).await.unwrap();
@@ -769,41 +771,80 @@ async fn test_issued_receipts_report_receipt_access_delivery() {
         assert_eq!(all.len(), 1);
         all.into_iter().next().unwrap()
     };
+    // Each outbound change happens at its own time after queueing.
+    let queued_at = FixedClock.now();
+    let at = |minutes| queued_at + chrono::Duration::minutes(minutes);
 
     let view = views().await;
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessQueued);
     assert_eq!(view.outbound_message_id, Some(outbound_message_id));
+    assert_eq!(view.updated_at, queued_at);
     assert!(view.access_sent_at.is_none() && view.last_error.is_none());
 
-    // A failed attempt is retried, so the receipt stays queued with the error.
-    set_outbound(|message| mark_outbound_failed(message, "timeout".into(), FixedClock.now())).await;
+    // A failed attempt is retried, so the receipt stays queued with the error
+    // and its status time does not move.
+    set_outbound(Box::new(move |message| {
+        mark_outbound_failed(message, "timeout".into(), at(1))
+    }))
+    .await;
     let view = views().await;
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessQueued);
     assert_eq!(view.last_error.as_deref(), Some("timeout"));
+    assert_eq!(view.updated_at, queued_at);
 
-    set_outbound(|message| mark_outbound_invalid(message, "bad payload".into(), FixedClock.now()))
-        .await;
+    set_outbound(Box::new(move |message| {
+        mark_outbound_invalid(message, "bad payload".into(), at(2))
+    }))
+    .await;
     let view = views().await;
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessFailed);
     assert_eq!(view.last_error.as_deref(), Some("bad payload"));
+    assert_eq!(view.updated_at, at(2));
 
-    set_outbound(|message| {
-        mark_outbound_recovery_required(message, "link lost".into(), FixedClock.now())
-    })
+    set_outbound(Box::new(move |message| {
+        mark_outbound_recovery_required(message, "link lost".into(), at(3))
+    }))
     .await;
     let view = views().await;
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessFailed);
     assert_eq!(view.last_error.as_deref(), Some("link lost"));
+    assert_eq!(view.updated_at, at(3));
 
-    set_outbound(|message| mark_outbound_sent(message, FixedClock.now())).await;
+    // A Delivery Confirmation after an ambiguous publication proves delivery
+    // without a known first publication time.
+    set_outbound(Box::new(move |mut message| {
+        message.status = OutboundPrivateMessageStatus::Failed;
+        message.confirmed_at = Some(at(4));
+        message
+    }))
+    .await;
     let view = views().await;
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
-    assert_eq!(view.access_sent_at, Some(FixedClock.now()));
+    assert!(view.access_sent_at.is_none());
+    assert_eq!(view.updated_at, at(4));
+
+    set_outbound(Box::new(move |mut message| {
+        message.confirmed_at = None;
+        mark_outbound_sent(message, at(5))
+    }))
+    .await;
+    let view = views().await;
+    assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
+    assert_eq!(view.access_sent_at, Some(at(5)));
+    assert_eq!(view.updated_at, at(5));
     assert!(view.last_error.is_none());
 
-    // A failed retry of the unconfirmed event does not undo the publication.
-    set_outbound(|message| mark_outbound_failed(message, "retry".into(), FixedClock.now())).await;
-    assert_eq!(views().await.status, ReceiptIssuanceStatus::AccessSent);
+    // A failed retry of the unconfirmed event does not undo the publication
+    // or move its time.
+    set_outbound(Box::new(move |message| {
+        mark_outbound_failed(message, "retry".into(), at(6))
+    }))
+    .await;
+    let view = views().await;
+    assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
+    assert_eq!(view.access_sent_at, Some(at(5)));
+    assert_eq!(view.updated_at, at(5));
+    assert!(view.last_error.is_none());
 
     // Repeating issuance returns the same delivery status.
     let repeated = sdk
