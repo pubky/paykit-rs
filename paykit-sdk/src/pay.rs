@@ -2192,11 +2192,12 @@ impl Paykit {
                 if let Some(view) = claim_conflict(error.unkept()) {
                     self.refuse_claim(&view)?;
                 }
-                // A batch by the app's own policy writes the period record at the version
-                // read (Paykit spec 8.2, "Paying periods"): one another own app wrote since
-                // fails it, and is read again, so the next attempt builds on that write, not
-                // on the same stale copy.
-                if by == Initiator::Automatic && entry.period()?.is_some() {
+                // A batch on a Billing Period writes its period record at the version read,
+                // by the app's own policy or, marking it `manual_only`, by hand, or is
+                // conditioned on it (Paykit spec 8.2, "Paying periods"; 8.3, "Manual only"):
+                // one another own app wrote since fails it, and is read again, so the next
+                // attempt builds on that write, not on the same stale copy.
+                if entry.period()?.is_some() {
                     let period = ActivityTarget::payer(entry.natural_key.clone());
                     self.app.read_record(&period.record_target()).await?;
                 }
@@ -3617,7 +3618,8 @@ impl Paykit {
     /// and a repeat is an automatic payment (Paykit spec 8.1, 8.3), so the attempt stays open
     /// and the user's payment method's history or a receipt settles it. A repeat of an
     /// attempt the user started by hand finishes that payment, whose own batch marked the
-    /// record `manual_only`: the mark doesn't withhold it. For a Billing Period, its period record is read again too, and withholds
+    /// record `manual_only` (for a Billing Period, its period record): the mark doesn't
+    /// withhold it. For a Billing Period, its period record is read again too, and withholds
     /// it as [`Paykit::period_record_now`] says. A payment without a request has nothing a
     /// payee cancels.
     async fn repeat_withheld(&mut self, entry: &JournalEntry) -> Result<bool> {
@@ -3634,9 +3636,9 @@ impl Paykit {
         if self.kept_stop(&target).await? {
             return Ok(true);
         }
+        let automatic = started_automatically(entry)?;
         let withheld = match self.fresh_request(&target).await? {
             Fresh::Held(fresh) => {
-                let automatic = started_automatically(entry)?;
                 self.fresh_record_withholds(entry, &target, &fresh, automatic)
                     .await?
                     || match crate::requests::request_of(&fresh) {
@@ -3648,7 +3650,7 @@ impl Paykit {
         };
         Ok(withheld
             || matches!(
-                self.period_record_now(entry).await,
+                self.period_record_now(entry, automatic).await,
                 PeriodRecordNow::Withholds
             ))
     }
@@ -3658,11 +3660,18 @@ impl Paykit {
     /// of the period, a repeat at a resume or a first dispatch by the app's own policy
     /// (Paykit spec 8.1, 8.3, "Manual only"): another own app may have marked the period
     /// `manual_only` since the attempt's batch, and no repeat or dispatch by policy is made
-    /// of a period whose record holds the mark. It withholds the payment when it holds the
-    /// mark, when the read fails, and when the switch holds a write that doesn't read or
-    /// bind, a newer one this app refused included: nothing then shows the period unmarked.
-    /// No period record holds no mark. An entry of no period is never withheld here.
-    async fn period_record_now(&mut self, entry: &JournalEntry) -> PeriodRecordNow {
+    /// of a period whose record holds the mark. It withholds the payment when, for an
+    /// `automatic` one, the record holds the mark, when the read fails, and when the switch
+    /// holds a write that doesn't read or bind, a newer one this app refused included:
+    /// nothing then shows the period unmarked. No period record holds no mark. An entry of
+    /// no period is never withheld here. `automatic` is false for the repeat of an attempt
+    /// the user started by hand ([`started_automatically`]), which finishes that payment:
+    /// its own batch marked the period record, and the mark doesn't withhold it.
+    async fn period_record_now(
+        &mut self,
+        entry: &JournalEntry,
+        automatic: bool,
+    ) -> PeriodRecordNow {
         match entry.period() {
             Ok(Some(_)) => {}
             Ok(None) => return PeriodRecordNow::Clear(None),
@@ -3670,7 +3679,7 @@ impl Paykit {
         }
         let target = ActivityTarget::payer(entry.natural_key.clone());
         match self.fresh_request_stamped(&target).await {
-            Ok((Fresh::Held(record), Some(stamp))) if !record.manual_only => {
+            Ok((Fresh::Held(record), Some(stamp))) if !(automatic && record.manual_only) => {
                 PeriodRecordNow::Clear(Some(stamp))
             }
             Ok((Fresh::Missing, _)) => PeriodRecordNow::Clear(None),
@@ -3902,7 +3911,8 @@ impl Paykit {
                 }
                 // A Billing Period's period record, which another own app may have marked
                 // `manual_only` since the attempt's batch (Paykit spec 8.3, "Manual only").
-                let PeriodRecordNow::Clear(period) = self.period_record_now(entry).await else {
+                let PeriodRecordNow::Clear(period) = self.period_record_now(entry, automatic).await
+                else {
                     return Ok(None);
                 };
                 let Some((stored, _)) = crate::requests::request_of(&record) else {

@@ -28,7 +28,8 @@
 //!   period and the details it was paid by. By its own policy the app pays a period only
 //!   within its automatic window ([`not_automatic_now`]), never one of a request or period
 //!   marked manual-only ([`Paykit::mark_period_manual_only`]), and its batch writes the
-//!   period record at the version it read.
+//!   period record at the version it read. A period the user pays by hand is marked
+//!   manual-only on its period record in the attempt's batch.
 
 use std::collections::HashMap;
 
@@ -628,7 +629,12 @@ impl Paykit {
     /// nothing: the host calls this for each period. `by` says who decided it:
     ///
     /// - [`Initiator::User`]: the user confirmed paying this period, as [`Paykit::pay_request`]
-    ///   pays a one-time request, with the same confirmations in `options`.
+    ///   pays a one-time request, with the same confirmations in `options`. Its batch
+    ///   marks the period `manual_only` on its period record at the version read, creating
+    ///   the record holding the mark when the period has none (Paykit spec 8.3, "Manual
+    ///   only"): no app pays that period by policy after it, whatever the attempt's outcome,
+    ///   while the request's other periods stay payable so. A repeat of the user's own
+    ///   attempt finishes that payment, which the mark doesn't withhold.
     /// - [`Initiator::Automatic`]: the app pays it by its own policy, without asking its user,
     ///   which spec 8.2 leaves to the app as v0.1 did, only for a request never accepted under
     ///   an Allowance, neither the period nor the request marked manual-only (Paykit spec
@@ -837,7 +843,7 @@ impl Paykit {
         if automatic {
             self.automatic_window(&record_key, &body, &billing).await?;
         }
-        let conditions = vec![self.not_before(&period, &options)?];
+        let mut conditions = vec![self.not_before(&period, &options)?];
         let mut record_writes = Vec::new();
         if let Some(write) = self
             .attempted_write(&target, &record, request, period.start_secs())
@@ -845,11 +851,27 @@ impl Paykit {
         {
             record_writes.push(write);
         }
+        // The period record is written once in the batch: by policy at the version read,
+        // so a mark another own app wrote since fails it; by hand, marked `manual_only`.
         if automatic {
             record_writes.push(
                 self.policy_period_write(&period_target, held_period.as_ref(), request, &period)
                     .await?,
             );
+        } else {
+            // A period the user pays by hand is marked `manual_only` on its period record in
+            // the attempt's batch (Paykit spec 8.3, "Manual only"): no app pays the period
+            // by policy after it, whatever the attempt's outcome, and the request's other
+            // periods stay payable so. In the same batch, at the version read, so no attempt
+            // by hand exists without its mark, and a batch refused or in conflict writes
+            // neither. A record holding the mark already is only conditioned on.
+            match self
+                .hand_period_mark(&period_target, held_period.as_ref(), request, &period)
+                .await?
+            {
+                Some(write) => record_writes.push(write),
+                None => conditions.push(self.app.record_condition(&period_record_key).await?),
+            }
         }
         let (destination, carrier, reserve, bound) = self
             .period_pay_destination(
@@ -912,6 +934,8 @@ impl Paykit {
             unconfirmed: options.unconfirmed_identity_confirmed,
             end_hold,
             executor: None,
+            // A period's mark goes on its period record, in `record_writes`: the request
+            // record isn't marked, so the request's later periods stay payable by policy.
             mark: None,
         })
         .await
@@ -987,31 +1011,77 @@ impl Paykit {
         request: &RequestRef,
         period: &PeriodRef,
     ) -> Result<(Vec<Condition>, OpKind)> {
-        let next = match held {
-            Some(record) => {
-                let mut next = record.clone();
-                // A record holding no message carries no status (Paykit wire 5.3).
-                if !next.stored().is_empty() {
-                    next.status = Some("paying".into());
-                }
-                next
-            }
-            None => {
-                let content = self
-                    .app
-                    .shared_record(&self.activity_key(target)?)
-                    .await?
-                    .map(|held| held.content);
-                if !matches!(content, None | Some(RecordContent::Deleted)) {
-                    return Err(period_record_unread());
-                }
-                bare_period_record(request, period)
-            }
-        };
+        let mut next = self
+            .period_record_base(target, held, request, period)
+            .await?;
+        // A record holding no message carries no status (Paykit wire 5.3).
+        if !next.stored().is_empty() {
+            next.status = Some("paying".into());
+        }
         Ok(self
             .app
             .record_op(&target.record_target(), Some(&next.to_json()?), Vec::new())
             .await?)
+    }
+
+    /// The period record's write in the batch of an attempt on `period` the user started by
+    /// hand (Paykit spec 8.3, "Manual only"; Paykit wire 5.3): the record `held` with
+    /// `manual_only`, every other member kept, at the version read, or, with none, created
+    /// holding the mark and no message, built on no version, as
+    /// [`Paykit::mark_period_manual_only`] writes it. `None` for a record holding the mark
+    /// already, which the attempt is only conditioned on.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::NotNow`] for a period record held whose value doesn't read, never written
+    /// over; the client's errors.
+    async fn hand_period_mark(
+        &mut self,
+        target: &ActivityTarget,
+        held: Option<&ActivityRecord>,
+        request: &RequestRef,
+        period: &PeriodRef,
+    ) -> Result<Option<(Vec<Condition>, OpKind)>> {
+        if held.is_some_and(|record| record.manual_only) {
+            return Ok(None);
+        }
+        let mut next = self
+            .period_record_base(target, held, request, period)
+            .await?;
+        next.manual_only = true;
+        Ok(Some(
+            self.app
+                .record_op(&target.record_target(), Some(&next.to_json()?), Vec::new())
+                .await?,
+        ))
+    }
+
+    /// The period record an attempt's batch writes over (Paykit wire 5.3): the record `held`,
+    /// or, with none, the bare record holding no message, created by the write.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::NotNow`] for no record read while the app holds a value for it that
+    /// doesn't read: never written over.
+    async fn period_record_base(
+        &self,
+        target: &ActivityTarget,
+        held: Option<&ActivityRecord>,
+        request: &RequestRef,
+        period: &PeriodRef,
+    ) -> Result<ActivityRecord> {
+        if let Some(record) = held {
+            return Ok(record.clone());
+        }
+        let content = self
+            .app
+            .shared_record(&self.activity_key(target)?)
+            .await?
+            .map(|held| held.content);
+        if !matches!(content, None | Some(RecordContent::Deleted)) {
+            return Err(period_record_unread());
+        }
+        Ok(bare_period_record(request, period))
     }
 
     /// Mark the Billing Period `period` of the recurring request `request` manual-only on
