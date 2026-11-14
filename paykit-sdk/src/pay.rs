@@ -3857,7 +3857,11 @@ impl Paykit {
                     if judge && self.floor_holds_read(&stored, floor.as_ref()).await? {
                         return Ok(None);
                     }
-                    (Some(stamp), period, Some(floor.as_ref().map(WriteStamp::of)))
+                    (
+                        Some(stamp),
+                        period,
+                        Some(floor.as_ref().map(WriteStamp::of)),
+                    )
                 } else {
                     (Some(stamp), period, None)
                 }
