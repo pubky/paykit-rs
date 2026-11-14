@@ -120,8 +120,9 @@ pub(crate) enum RecordSide {
     Payer,
     /// `payee_activity`, every label's.
     Payee,
-    /// `allowances`: the Allowance records, on their own side (Paykit spec 8.1, "Records
-    /// not listed yet"; Paykit spec 8.3).
+    /// `allowances` and `allowance_ledgers`: the Allowance records and their ledgers, on
+    /// their own side (Paykit spec 8.1, "Records not listed yet"; Paykit spec 8.3). Both are
+    /// read under `allowance`, so a certificate reads both or neither.
     Allowances,
     /// Every collection of Paykit's.
     All,
@@ -135,11 +136,12 @@ impl RecordSide {
         let lists = crate::activity::family(Collection::PaymentLists);
         let floor = crate::activity::family(Collection::BlockFloor);
         let allowances = crate::activity::family(Collection::Allowances);
+        let ledgers = crate::activity::family(Collection::AllowanceLedgers);
         match self {
             Self::Payer => vec![payer, lists, floor],
             Self::Payee => vec![payee],
-            Self::Allowances => vec![allowances],
-            Self::All => vec![payer, payee, lists, floor, allowances],
+            Self::Allowances => vec![allowances, ledgers],
+            Self::All => vec![payer, payee, lists, floor, allowances, ledgers],
         }
     }
 }
@@ -585,9 +587,12 @@ impl Paykit {
     /// listing was skipped, and the mark stays until a read that lists. The certificate
     /// listed under stays as it was, since the read may have taken another one after its
     /// listing ([`Unlisted::Certificate`]), and so does a `missed` item's mark: the client
-    /// listed before the feed, and the item came after ([`Unlisted::Missed`]).
+    /// listed before the feed, and the item came after ([`Unlisted::Missed`]). A listing
+    /// the client left unfinished, one that needs more pages than a read asks for, is still
+    /// owed (`App::listing_owed`): the read ended before any entry of the feed, the mark
+    /// stays, and the next read goes on with the listing.
     pub(crate) async fn records_listed(&mut self, keys_held_before: bool) -> Result<()> {
-        if !keys_held_before || !self.holds_scope_keys() {
+        if !keys_held_before || !self.holds_scope_keys() || self.app.listing_owed().await? {
             return Ok(());
         }
         if self

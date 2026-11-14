@@ -9,6 +9,7 @@ use paykit_sdk::{
 };
 use pubky_switch_client::app::UserConfirmed;
 use pubky_switch_client::clock::Clock;
+use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
 use serde_json::{json, Value};
 
 use crate::common::{draft, request_from, World};
@@ -103,6 +104,25 @@ async fn set_up(w: &World, terms: AllowanceTerms) -> (Paykit, Paykit, [u8; 32]) 
 async fn request(w: &World, shop: &mut Paykit, wallet: &mut Paykit, value: &str) -> RequestRef {
     let request = request_from(shop, w.alice_id(), draft(value, w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
+    request
+}
+
+/// A request of bob's for `value` btc made after the wallet's restore, as its executor may
+/// pay it: dated after the block floor the restore owes plus the clock tolerance, and, as
+/// every request open while the restore's hold lasts, confirmed by the user as possibly
+/// cancelled (Paykit spec 7.2, "What a restore loses"; 8.1, "Blocked counterparties").
+async fn request_after_restore(
+    w: &World,
+    shop: &mut Paykit,
+    wallet: &mut Paykit,
+    value: &str,
+) -> RequestRef {
+    w.clock.advance_ms(CLOCK_TOLERANCE_MS + 1);
+    let request = request(w, shop, wallet, value).await;
+    wallet
+        .confirm_possibly_cancelled(&request, UserConfirmed::new())
+        .await
+        .unwrap();
     request
 }
 
@@ -524,28 +544,58 @@ async fn test_executor_refuses_after_a_restore_until_confirmed_again() {
     wallet.reconcile().await.unwrap();
     wallet.end_reconcile(UserConfirmed::new()).await.unwrap();
     wallet.receive(None).await.unwrap();
-    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    let early = request(&w, &mut shop, &mut wallet, "0.5").await;
     let refused = wallet
-        .pay_under_allowance(&request, &record)
+        .pay_under_allowance(&early, &record)
         .await
         .unwrap_err();
     assert!(refused_for(&refused, "consent list"), "{refused:?}");
-    // The user confirms the Allowance again, and the request held since the restore.
+    // The user confirms the Allowance again: a request made after the restore is paid
+    // under it.
     wallet
         .confirm_allowance_again(&record, UserConfirmed::new())
         .await
         .unwrap();
-    let refused = wallet
-        .pay_under_allowance(&request, &record)
-        .await
-        .unwrap_err();
-    assert!(refused_for(&refused, "held"), "{refused:?}");
-    wallet
-        .confirm_possibly_cancelled(&request, UserConfirmed::new())
-        .await
-        .unwrap();
+    let request = request_after_restore(&w, &mut shop, &mut wallet, "0.5").await;
     let paid = wallet.pay_under_allowance(&request, &record).await.unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+}
+
+#[tokio::test]
+async fn test_executor_pays_no_request_dated_before_a_restore() {
+    // A restore loses the block marks, so it owes a raise of the block floor to its first
+    // read of the lists: a one-time request dated before that, plus the clock tolerance, is
+    // paid only by hand (Paykit spec 8.1, "Blocked counterparties"; 8.3, "Executor"). One
+    // whose record was opened before the restore is refused for the floor; one that comes
+    // after the restore, dated inside the tolerance, opens its record `manual_only`. Each is
+    // refused before anything is written.
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let before = request(&w, &mut shop, &mut wallet, "0.5").await;
+    let mut wallet = restored_confirmed(&w, wallet, &record).await;
+    wallet
+        .confirm_possibly_cancelled(&before, UserConfirmed::new())
+        .await
+        .unwrap();
+    let refused = wallet
+        .pay_under_allowance(&before, &record)
+        .await
+        .unwrap_err();
+    assert!(refused_for(&refused, "block floor"), "{refused:?}");
+    let inside = request(&w, &mut shop, &mut wallet, "0.5").await;
+    wallet
+        .confirm_possibly_cancelled(&inside, UserConfirmed::new())
+        .await
+        .unwrap();
+    let refused = wallet
+        .pay_under_allowance(&inside, &record)
+        .await
+        .unwrap_err();
+    assert!(refused_for(&refused, "manual-only"), "{refused:?}");
+    // Nothing was written for either: no attempt, no ledger entry, no payment.
+    let (_, ledger) = held(&wallet, &record).await;
+    assert!(ledger.unwrap().entries.is_empty());
+    assert!(w.rail.all_executions().is_empty());
 }
 
 #[tokio::test]
@@ -561,9 +611,10 @@ async fn test_executor_handoff_stops_the_previous_executor() {
         .unwrap();
     let (allowance, _) = held(&new, &record).await;
     assert_eq!(allowance.grants.len(), 2);
-    // The new executor holds no authenticated ledger version as a reader, so it keeps none
-    // at the handoff: it pays below as an executor that never held one.
-    assert!(new.app().protocol_scan(b"lv/").await.unwrap().is_empty());
+    // The new executor held the ledger as an app that reads it, with an authenticated
+    // version, so it keeps that one as its last ledger version at the handoff (Paykit spec
+    // 8.3, "Last ledger version").
+    assert_eq!(new.app().protocol_scan(b"lv/").await.unwrap().len(), 1);
     let second = request(&w, &mut shop, &mut old, "0.5").await;
     let refused = old.pay_under_allowance(&second, &record).await.unwrap_err();
     assert!(
@@ -573,9 +624,9 @@ async fn test_executor_handoff_stops_the_previous_executor() {
     // The notice takes the Allowance off the previous executor's consent list.
     old.receive(None).await.unwrap();
     assert!(!old.allowance(&record).await.unwrap().consented);
-    // The new executor never held a ledger version: it builds on the previous executor's
-    // ledger shown, once it passes every other check, and keeps it (Paykit spec 8.3, "Last
-    // ledger version").
+    // The new executor builds on the previous executor's ledger, the version it kept at
+    // the handoff, once it passes every other check (Paykit spec 8.3, "Last ledger
+    // version").
     new.receive(None).await.unwrap();
     let paid = new.pay_under_allowance(&second, &record).await.unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
@@ -922,12 +973,7 @@ async fn test_executor_journal_entry_naming_another_allowance_is_corrupt_at_the_
 
 /// `wallet` backed up and restored, reconciled, read, and its user's confirmations after
 /// the restore given for `record` and `request`.
-async fn restored_confirmed(
-    w: &World,
-    wallet: Paykit,
-    record: &[u8; 32],
-    request: Option<&RequestRef>,
-) -> Paykit {
+async fn restored_confirmed(w: &World, wallet: Paykit, record: &[u8; 32]) -> Paykit {
     let mut wallet = wallet;
     let backup = wallet.backup().await.unwrap();
     drop(wallet);
@@ -947,12 +993,6 @@ async fn restored_confirmed(
         .confirm_allowance_again(record, UserConfirmed::new())
         .await
         .unwrap();
-    if let Some(request) = request {
-        wallet
-            .confirm_possibly_cancelled(request, UserConfirmed::new())
-            .await
-            .unwrap();
-    }
     wallet
 }
 
@@ -966,7 +1006,6 @@ async fn test_executor_restored_before_its_empty_ledger_lands_takes_none_as_lost
     let mut shop = allowance_shop(&w).await;
     let mut wallet = executor_wallet(&w, "wallet").await;
     let record = accepted(&w, &mut shop, &mut wallet, terms_with(json!({}))).await;
-    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
     w.alice
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Unreachable {
@@ -980,7 +1019,8 @@ async fn test_executor_restored_before_its_empty_ledger_lands_takes_none_as_lost
     let (allowance, ledger) = held(&wallet, &record).await;
     assert_eq!(allowance.grants.len(), 1);
     assert!(ledger.is_none());
-    let mut wallet = restored_confirmed(&w, wallet, &record, Some(&request)).await;
+    let mut wallet = restored_confirmed(&w, wallet, &record).await;
+    let request = request_after_restore(&w, &mut shop, &mut wallet, "0.5").await;
     let refused = wallet
         .pay_under_allowance(&request, &record)
         .await
@@ -1244,7 +1284,7 @@ async fn test_executor_pays_inside_its_limits_until_ended_through_a_restore() {
         .unwrap_err();
     assert!(refused_for(&refused, "lifetime limit"), "{refused:?}");
     // A restore: nothing is paid until the user confirms the Allowance again.
-    let after = request(&w, &mut shop, &mut wallet, "0.3").await;
+    let held_back = request(&w, &mut shop, &mut wallet, "0.3").await;
     let backup = wallet.backup().await.unwrap();
     drop(wallet);
     let mut wallet = Paykit::restore(
@@ -1260,7 +1300,7 @@ async fn test_executor_pays_inside_its_limits_until_ended_through_a_restore() {
     wallet.end_reconcile(UserConfirmed::new()).await.unwrap();
     wallet.receive(None).await.unwrap();
     let refused = wallet
-        .pay_under_allowance(&after, &record)
+        .pay_under_allowance(&held_back, &record)
         .await
         .unwrap_err();
     assert!(refused_for(&refused, "consent list"), "{refused:?}");
@@ -1268,10 +1308,7 @@ async fn test_executor_pays_inside_its_limits_until_ended_through_a_restore() {
         .confirm_allowance_again(&record, UserConfirmed::new())
         .await
         .unwrap();
-    wallet
-        .confirm_possibly_cancelled(&after, UserConfirmed::new())
-        .await
-        .unwrap();
+    let after = request_after_restore(&w, &mut shop, &mut wallet, "0.3").await;
     let paid = wallet.pay_under_allowance(&after, &record).await.unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     assert_eq!(w.rail.all_executions().len(), 2);
@@ -1405,8 +1442,6 @@ async fn test_executor_restored_with_an_older_ledger_version_builds_on_the_newer
     let backup = wallet.backup().await.unwrap();
     let second = request(&w, &mut shop, &mut wallet, "0.4").await;
     wallet.pay_under_allowance(&second, &record).await.unwrap();
-    let third = request(&w, &mut shop, &mut wallet, "0.4").await;
-    let fourth = request(&w, &mut shop, &mut wallet, "0.1").await;
     drop(wallet);
     let mut wallet = Paykit::restore(
         w.env(&w.alice, crate::common::store()),
@@ -1424,12 +1459,8 @@ async fn test_executor_restored_with_an_older_ledger_version_builds_on_the_newer
         .confirm_allowance_again(&record, UserConfirmed::new())
         .await
         .unwrap();
-    for held in [&third, &fourth] {
-        wallet
-            .confirm_possibly_cancelled(held, UserConfirmed::new())
-            .await
-            .unwrap();
-    }
+    let third = request_after_restore(&w, &mut shop, &mut wallet, "0.4").await;
+    let fourth = request_after_restore(&w, &mut shop, &mut wallet, "0.1").await;
     let refused = wallet
         .pay_under_allowance(&third, &record)
         .await
@@ -1444,8 +1475,9 @@ async fn test_executor_restored_with_an_older_ledger_version_builds_on_the_newer
 #[tokio::test]
 async fn test_executor_missing_ledger_after_its_first_payment_write_is_usage_history_lost() {
     // The first grant's empty ledger is refused, so the first payment's own batch writes the
-    // ledger, and money moves; the read that would keep that version fails. The switch then
-    // answers `404` for the ledger: the executor pays nothing over the lifetime limit.
+    // ledger, and money moves; that write is kept as the last version from the copy its
+    // answer leaves, with no read. The switch then answers `404` for the ledger: the
+    // executor pays nothing over the lifetime limit.
     let w = World::new();
     let mut shop = allowance_shop(&w).await;
     let mut wallet = executor_wallet(&w, "wallet").await;
@@ -1476,15 +1508,10 @@ async fn test_executor_missing_ledger_after_its_first_payment_write_is_usage_his
             code: pubky_switch_core::http::ErrorCode::PermissionMissing,
             current: Value::Null,
         });
-    w.alice
-        .switch()
-        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
-            path: path.clone(),
-            after: 1,
-        });
     let paid = wallet.pay_under_allowance(&first, &record).await.unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     assert_eq!(w.record_writes(&w.alice, &key), 1);
+    assert_eq!(wallet.app().protocol_scan(b"lv/").await.unwrap().len(), 1);
     w.alice
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Error {
@@ -1709,18 +1736,26 @@ async fn test_executor_restored_over_a_ledger_it_did_not_accept_pays_nothing() {
         .grant_executor(&record, UserConfirmed::new())
         .await
         .unwrap();
-    let refused = {
-        let request = request(&w, &mut shop, &mut wallet, "0.5").await;
-        let refused = wallet
-            .pay_under_allowance(&request, &record)
-            .await
-            .unwrap_err();
-        assert!(not_automatic(&refused), "{refused:?}");
-        request
-    };
-    let mut wallet = restored_confirmed(&w, wallet, &record, Some(&refused)).await;
-    let after = wallet.pay_under_allowance(&refused, &record).await;
-    assert!(after.as_ref().is_err_and(not_automatic), "{after:?}");
+    let request = request(&w, &mut shop, &mut wallet, "0.5").await;
+    let refused = wallet
+        .pay_under_allowance(&request, &record)
+        .await
+        .unwrap_err();
+    assert!(
+        refused_for(&refused, "before the first grant"),
+        "{refused:?}"
+    );
+    let mut wallet = restored_confirmed(&w, wallet, &record).await;
+    let request = request_after_restore(&w, &mut shop, &mut wallet, "0.5").await;
+    let refused = wallet
+        .pay_under_allowance(&request, &record)
+        .await
+        .unwrap_err();
+    assert!(not_automatic(&refused), "{refused:?}");
+    assert!(
+        !refused_for(&refused, "block floor") && !refused_for(&refused, "held"),
+        "{refused:?}"
+    );
     assert!(w.rail.all_executions().is_empty());
 }
 

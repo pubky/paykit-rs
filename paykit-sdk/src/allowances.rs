@@ -1201,6 +1201,49 @@ impl Paykit {
         )
     }
 
+    /// Whether this app keeps an answer to the proposal of `allowance`, the Allowance at
+    /// `record`, that it hasn't written yet: one kept before the record, or for the placement
+    /// after the read (`pr/`), or a stored entry's not yet in the record (`se/`). While one
+    /// is kept, the record's response isn't settled: an earlier different answer among them
+    /// takes it, or makes the Allowance conflicted, once written (Paykit spec 8.1, "Replies
+    /// before their record"; 8.3, "Conflicted"), so an executor pays nothing meanwhile. Each
+    /// is read bound to its key, as a restore reads it: one that doesn't verify there is a
+    /// corrupt store, never no answer.
+    pub(crate) async fn answer_kept_to_write(
+        &self,
+        record: &[u8; 32],
+        allowance: &AllowanceRecord,
+    ) -> Result<bool> {
+        let own = self.identity();
+        let sender = allowance.counterparty;
+        let before =
+            Box::pin(self.local_scan::<KeptMessage>(&key::kept_reply(&sender, record, "")))
+                .await?
+                .into_iter()
+                .map(|(_, kept)| kept)
+                .collect();
+        let prefix = key::stored_notes_of(&sender);
+        let notes = Box::pin(self.local_scan::<StoredNote>(&prefix))
+            .await?
+            .into_iter()
+            .map(|(rest, note)| (format!("{prefix}{rest}"), note))
+            .collect();
+        Ok(!answers_kept(&own, Some(&allowance.allowance_id), before, notes)?.is_empty())
+    }
+
+    /// Whether `counterparty` owes this app a re-send of replies the bounds on kept replies
+    /// dropped (its `pd/` mark is kept, [`crate::marks::MarkFamily::Replies`]): an answer to
+    /// an Allowance's proposal may be among them, and until it comes back a later different
+    /// answer can stand as the record's response (Paykit spec 8.1, "Replies before their
+    /// record"), so an executor pays nothing under an Allowance of that counterparty
+    /// meanwhile. A mark that doesn't read is a corrupt store, never no mark.
+    pub(crate) async fn resend_owed_by(&self, counterparty: &[u8; 32]) -> Result<bool> {
+        let mark = crate::marks::MarkFamily::Replies.key(counterparty);
+        Ok(Box::pin(self.local_get::<crate::marks::DropMark>(&mark))
+            .await?
+            .is_some())
+    }
+
     /// Whether this app keeps a conflicting proposal or response of the Allowance at
     /// `record` as its stop (`cf/`), not yet in the record.
     pub(crate) async fn conflict_kept(&self, record: &[u8; 32]) -> Result<bool> {

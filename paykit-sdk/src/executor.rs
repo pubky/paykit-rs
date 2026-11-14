@@ -18,11 +18,28 @@
 //!   empty only by the executor of the first grant that kept none.
 //! - **Paying under an Allowance:** the executor's checks (the Allowance record read now,
 //!   its grant, the consent list, the stops, the holds, the deny list read now, the
-//!   occurrence's record, the terms and the limits at the service's time), then one batch:
+//!   occurrence's record, the block floor, the terms and the limits at the service's time),
+//!   then one batch:
 //!   the `attempt`, the ledger with the new entry under `record_version(Allowance record)`
 //!   and `server_time_in(at, end)`, and the request record naming the Allowance. The rest is
 //!   the paying order of Paykit spec 7.2, with the Allowance checked again before money
 //!   moves and the proof naming it.
+//!
+//! - **Nothing under a record seen divergent** (Paykit spec 6): while the view of the
+//!   Allowance's `allowances` or `allowance_ledgers` record shows it divergent, and after
+//!   that until the user confirms it ([`Paykit::confirm_divergent`]) and the messages kept
+//!   over it are written, the executor pays nothing under the Allowance. Both collections
+//!   are declared to the client, so both records are held, marked and listed
+//!   ([`Paykit::divergent_records`]).
+//! - **Nothing while the response isn't settled:** while an answer to the Allowance's
+//!   proposal is kept to write (`pr/`, `se/`), or its counterparty owes a re-send of replies
+//!   the bounds dropped (`pd/`), an earlier different answer may still take the response or
+//!   make the Allowance conflicted, so the executor pays nothing under it.
+//! - **Immediately before the dispatch** (Paykit spec 8.1, 8.3): the deny list, the request
+//!   record and the block floor are read from the switch again, twice, before the attempt's
+//!   `Paying` commit and after it, and the dispatch holds on a block, a stop, a raise of the
+//!   floor past the request's date, or a read that fails
+//!   (`Paykit::automatic_dispatch_held`); the batch doesn't condition on the floor's version.
 //!
 //! Security: every executor batch is conditioned on the Allowance record version read, so
 //! an end, a rejection or a handoff written since makes it fail; usage is counted from the
@@ -562,10 +579,13 @@ impl Paykit {
 
     /// The Allowance at `record` as an executor may pay under it now (Paykit spec 8.3,
     /// "Executor"), read from the switch when `fresh`, else as held: the record binds, isn't
-    /// divergent, flagged or written by a removed app; it holds the acceptance and no end or
+    /// divergent, flagged or written by a removed app, and wasn't seen divergent without
+    /// the user's confirmation since (Paykit spec 6); it holds the acceptance and no end or
     /// rejection, and this app keeps no stop for it; this identity is the allower; the
     /// current grant is this app's; the consent list holds it, confirmed since any restore
-    /// or `missed` item; the terms are valid; and no provider loss since the grant's
+    /// or `missed` item; its ledger record, as held, isn't divergent or paused; no answer
+    /// to its proposal is kept to write, and its counterparty owes no re-send of replies
+    /// dropped for the bounds; the terms are valid; and no provider loss since the grant's
     /// confirmation pauses it.
     pub(crate) async fn allowance_gate(
         &mut self,
@@ -608,6 +628,15 @@ impl Paykit {
         let refuse = |why: &str| Ok(Err(Refusal::NotAutomatic(why.into())));
         if shared.divergent || shared.doubtful {
             return refuse("the Allowance record is divergent or untrusted");
+        }
+        // Seen divergent and not confirmed since, also once a newer write has cleared the
+        // view, or messages kept over it still wait to be written (Paykit spec 6): the
+        // upload may hold an end, a rejection or a `conflicted` message the current write
+        // lacks. The view just read is taken, so a record divergent now is marked.
+        if self.pause_of(&shared).await?.blocks_automatic() {
+            return refuse(
+                "the Allowance record was seen divergent and the user hasn't confirmed it",
+            );
         }
         // No write of the Allowance record by a removed app after its `distrust_from`
         // (Paykit spec 8.3, "Building on a version accepts it"): no confirmation lifts it.
@@ -677,6 +706,29 @@ impl Paykit {
         if !self.consents(record).await? {
             return refuse("the consent list doesn't hold it, confirmed since any restore");
         }
+        // The ledger record, as held: divergent, or seen so and not confirmed since
+        // (Paykit spec 6): the upload may hold entries the current write lacks. The read
+        // from the switch before the batch judges its view then
+        // ([`Paykit::ledger_base`]).
+        let ledger = self.app.record_key(&ledger_target(
+            &allowance.counterparty,
+            &allowance.allowance_id,
+        ))?;
+        if self.pause_at(&ledger).await?.blocks_automatic() {
+            return refuse("the ledger is divergent, or was seen so and isn't confirmed");
+        }
+        // The record's response isn't settled while an answer to its proposal is still kept
+        // to write, or while the counterparty owes a re-send of replies the bounds dropped,
+        // an answer possibly among them: an earlier different answer takes the response, or
+        // makes the Allowance conflicted, once it is written (Paykit spec 8.1, "Replies
+        // before their record"; 8.3, "Conflicted"). A kept message or a mark that doesn't
+        // read is an error, and nothing is paid.
+        if self.answer_kept_to_write(record, &allowance).await? {
+            return refuse("an answer to the Allowance's proposal is kept, not yet written");
+        }
+        if self.resend_owed_by(&allowance.counterparty).await? {
+            return refuse("the counterparty owes a re-send of replies dropped for the bounds");
+        }
         let terms = proposal.terms.clone();
         if terms.to_json().is_err() {
             return refuse("the terms aren't valid");
@@ -713,6 +765,18 @@ impl Paykit {
         }
         if record.manual_only {
             return Err(not_automatic("the request is marked manual-only"));
+        }
+        // A one-time request dated before the block floor, shared or owed, as this app holds
+        // them, or while the floor can't be read, is paid only by hand (Paykit spec 8.1,
+        // "Blocked counterparties"): refused here, before anything is written. The floor is
+        // read from the switch again immediately before the dispatch
+        // (`Paykit::automatic_dispatch_held`), which is what a raise made since meets.
+        if let Some((stored, _)) = crate::requests::request_of(record) {
+            if self.floor_holds(stored).await? {
+                return Err(not_automatic(
+                    "the request is dated before the block floor, or the floor can't be read",
+                ));
+            }
         }
         if record
             .allowance_id
@@ -769,7 +833,15 @@ impl Paykit {
             return Err(not_automatic("usage history lost: the ledger is missing"));
         };
         if shared.divergent || shared.flagged || shared.doubtful {
+            // The view is taken first, so a ledger divergent now is marked, and stays paused
+            // until the user confirms it, also once a newer write clears the view.
+            self.pause_of(&shared).await?;
             return Err(not_automatic("the ledger is divergent or untrusted"));
+        }
+        if self.pause_of(&shared).await?.blocks_automatic() {
+            return Err(not_automatic(
+                "the ledger was seen divergent and the user hasn't confirmed it",
+            ));
         }
         if written_by_removed_app(self.app.own_identity(), &shared) {
             return Err(not_automatic(

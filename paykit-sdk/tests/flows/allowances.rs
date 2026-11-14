@@ -552,6 +552,9 @@ async fn test_allowances_restore_asks_consent_again_and_keeps_removals() {
         .await
         .unwrap();
         assert_eq!(restored.app_id(), id);
+        // The restore's listing takes a page for each collection the wallet reads, more
+        // than one read asks for: the second read ends it.
+        restored.receive(None).await.unwrap();
         restored.receive(None).await.unwrap();
         assert_eq!(
             Box::pin(consent_entry(&restored, &mine)).await,
@@ -1936,12 +1939,13 @@ fn missed_and_listing_fails(w: &World) {
 }
 
 /// How many collections the client lists for an app of alice's holding `pay` and
-/// `allowance`: the payer's side, `payment_lists`, `block_floor` and `allowances`.
-const WALLET_COLLECTIONS: usize = 4;
+/// `allowance`: the payer's side, `payment_lists`, `block_floor`, `allowances` and
+/// `allowance_ledgers`.
+const WALLET_COLLECTIONS: usize = 5;
 
 /// How many collections the client lists for bob's shop, holding `request` and `allowance`:
-/// the payee's side and `allowances`.
-const SHOP_COLLECTIONS: usize = 2;
+/// the payee's side, `allowances` and `allowance_ledgers`.
+const SHOP_COLLECTIONS: usize = 3;
 
 /// Fail Paykit's own listing at the end of the next receive of `party`'s app after a
 /// `missed` item: the client's listing after the item, of the app's `collections`, goes
@@ -3541,6 +3545,10 @@ async fn answer_queued_again(kind: &str, status: AllowanceStatus) {
     .await;
     drop(wallet);
     let mut wallet = Box::pin(restored_unreceived(&w, &backup)).await;
+    // The restore's listing takes a page for each collection the wallet reads, more than
+    // one read asks for: the re-send waits for the read that ends it.
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_some());
     wallet.receive(None).await.unwrap();
     assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
     assert_eq!(Box::pin(taken(&mut shop, kind)).await, 1);
