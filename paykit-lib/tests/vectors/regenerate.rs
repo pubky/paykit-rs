@@ -14,12 +14,15 @@ use serde_json::Value;
 
 use crate::common::{file_bytes, file_text, in_corpus, vectors_dir, writing, Keys, WRITE_VECTORS};
 
+/// A file's generator: it writes the file's cases with [`crate::common::generated`].
+type Generator = fn(&Keys);
+
 /// Each generated file with its generator, in the order they build on one another: the
 /// certificates and keys first; then the messages' JSON; the identifiers, whose request and
 /// terms hashes are of those messages; the documents, whose grant carries the terms hash;
 /// the signatures, of that grant; then the files that build only on their own authored
 /// members; and last the sealed records, which carry the messages, identifiers and grant.
-fn generators() -> [(&'static str, fn(&Keys)); 9] {
+fn generators() -> [(&'static str, Generator); 9] {
     [
         ("keys.json", crate::keys::generate),
         ("messages.json", crate::messages::generate),
