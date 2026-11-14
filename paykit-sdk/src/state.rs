@@ -34,6 +34,9 @@
 //! | `ct` | the acceptance time of the last Paykit entry the receive step passed | |
 //! | `rh` | the hold a restore set on the open requests (`hold.rs`); never backed up | |
 //! | `hc/<record key>` | the user confirmed a held request; never backed up | |
+//! | `mh` | the hold a `missed` item set on the open requests, bounded by a time: the item's last acceptance time, or, for an item whose end isn't known, a service time verified after the read that handed it (`hold.rs`); never restored | |
+//! | `mu` | set by a `missed` item whose end isn't known: every open request is held, as after a restore, until a read that completes bounds the hold by the service time verified then, into `mh`, and clears it (`hold.rs`); never restored | |
+//! | `ml` | set by a `missed` item: the shared records aren't listed by Paykit since, so a record's absence means nothing yet; cleared by Paykit's next listing (`hold.rs`); never restored | |
 //! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads | |
 //! | `kc/<record key>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
@@ -467,6 +470,7 @@ impl Stored for bool {
         match family {
             StateKey::RecordsUnlisted
             | StateKey::MissedUnlisted
+            | StateKey::MissedEndUnknown
             | StateKey::MissedConsents
             | StateKey::PayerPassOwed
             | StateKey::HoldConfirmed(_)
@@ -1102,6 +1106,8 @@ pub(crate) mod key {
     pub(crate) const CURSOR_TIME: &str = "ct";
     pub(crate) const RESTORE_HOLD: &str = "rh";
     pub(crate) const MISSED_HOLD: &str = "mh";
+    /// A `missed` item's hold whose end isn't known yet (`Paykit::bound_missed_hold`).
+    pub(crate) const MISSED_END_UNKNOWN: &str = "mu";
     pub(crate) const HOLD_CONFIRMED: &str = "hc/";
     pub(crate) const LISTS_READ: &str = "lr";
     pub(crate) const HELD_LISTS: &str = "lh/";
@@ -1393,6 +1399,8 @@ pub(crate) enum StateKey {
     RestoreHold,
     /// `mh`: the hold a `missed` item set.
     MissedHold,
+    /// `mu`: a `missed` item's hold whose end isn't known yet.
+    MissedEndUnknown,
     /// `nl`: the shared records aren't listed since a restore.
     RecordsUnlisted,
     /// `ml`: the shared records aren't listed by Paykit since a `missed` item.
@@ -1528,6 +1536,7 @@ impl StateKey {
             "ct" => Self::CursorTime,
             "rh" => Self::RestoreHold,
             "mh" => Self::MissedHold,
+            "mu" => Self::MissedEndUnknown,
             "nl" => Self::RecordsUnlisted,
             "ml" => Self::MissedUnlisted,
             "mc" => Self::MissedConsents,
@@ -1904,6 +1913,14 @@ mod tests {
             serde_json::json!([])
         ));
         assert!(reads::<bool>(key::MISSED_UNLISTED, serde_json::json!(true)));
+        assert!(reads::<bool>(
+            key::MISSED_END_UNKNOWN,
+            serde_json::json!(true)
+        ));
+        assert!(!reads::<bool>(
+            key::MISSED_END_UNKNOWN,
+            serde_json::json!(false)
+        ));
         assert!(reads::<MissedHold>(
             key::MISSED_HOLD,
             serde_json::json!({ "bound_ms": 9 })
@@ -2115,6 +2132,7 @@ mod tests {
             (key::CURSOR_TIME.into(), StateKey::CursorTime),
             (key::RESTORE_HOLD.into(), StateKey::RestoreHold),
             (key::MISSED_HOLD.into(), StateKey::MissedHold),
+            (key::MISSED_END_UNKNOWN.into(), StateKey::MissedEndUnknown),
             (key::RECORDS_UNLISTED.into(), StateKey::RecordsUnlisted),
             (key::MISSED_UNLISTED.into(), StateKey::MissedUnlisted),
             (key::MISSED_CONSENTS.into(), StateKey::MissedConsents),

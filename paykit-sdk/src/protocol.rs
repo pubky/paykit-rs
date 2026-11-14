@@ -352,6 +352,7 @@ pub(crate) fn restore_paykit_layer(
             // which asks on its own cadence (`marks.rs`).
             StateKey::RestoreHold
             | StateKey::MissedHold
+            | StateKey::MissedEndUnknown
             | StateKey::HoldConfirmed(_)
             | StateKey::RecordsUnlisted
             | StateKey::MissedUnlisted
@@ -844,9 +845,14 @@ impl Protocol for PaykitProtocol {
     /// (Paykit spec 7.2; `hold.rs`): a payee's cancellation may be among
     /// the entries the service deleted. Every request the app holds is held, and one first
     /// seen later only when created before the item's last acceptance time plus the clock
-    /// tolerance, the time the item carries (`MissedEntries::accepted_until_ms`). The
-    /// confirmations of an earlier hold go in the same commit, so none releases the new
-    /// one. The copy of the shared records counts as not listed from the item on (`ml`,
+    /// tolerance, the time the item carries (`MissedEntries::accepted_until_ms`). The client
+    /// hands `u64::MAX` there when no end is known: for a gap the cursor the service holds
+    /// shows ahead (Switch spec 8.3 "Ahead"), and for a call it kept owed without one. That
+    /// is no time: the item sets the hold's end as not known (`mu`), which holds every open
+    /// request, and leaves the bound an earlier item set in place, since this step can't
+    /// read it; the receive bounds the hold once its read completes, by the service time it
+    /// verified then (`Paykit::bound_missed_hold`). The confirmations of an earlier hold go
+    /// in the same commit, so none releases the new one. The copy of the shared records counts as not listed from the item on (`ml`,
     /// Paykit spec 8.1, "Records not listed yet"), until Paykit's own listing at the end of
     /// the receive (`Paykit::list_records`): the client lists them right after the item,
     /// inside its read, but Paykit judges the copy listed only from a listing of its own,
@@ -856,6 +862,14 @@ impl Protocol for PaykitProtocol {
     /// restore (Paykit spec 8.3; `mc`, which `Paykit::confirm_consents_again` turns into each
     /// entry's mark after the receive): an end may be among the deleted entries.
     fn missed(&self, missed: &MissedEntries) -> Result<Vec<LocalWrite>, StoreFailure> {
+        let hold = if missed.accepted_until_ms == u64::MAX {
+            local_write(key::MISSED_END_UNKNOWN, &true)?
+        } else {
+            local_write(
+                key::MISSED_HOLD,
+                &crate::hold::MissedHold::bounded_by(missed.accepted_until_ms),
+            )?
+        };
         Ok(vec![
             local_write(
                 &key::missed_item(missed.accepted_from_ms),
@@ -864,10 +878,7 @@ impl Protocol for PaykitProtocol {
                     asked: Vec::new(),
                 },
             )?,
-            local_write(
-                key::MISSED_HOLD,
-                &crate::hold::MissedHold::of_item(missed.accepted_until_ms),
-            )?,
+            hold,
             local_write(key::MISSED_UNLISTED, &true)?,
             // What a blocked counterparty's inbox accepted among the missed entries is asked
             // for once it is unblocked: every counterparty the deny list holds at the next
@@ -1196,6 +1207,55 @@ mod receive_tests {
         };
         assert_eq!(widening(&missed)["d"]["from_ms"], 10);
         assert_eq!(widening(&missed)["d"]["until_ms"], 20);
+    }
+
+    /// The keys `missed()` puts, with their values as JSON.
+    fn missed_puts(missed: &MissedEntries) -> Vec<(String, serde_json::Value)> {
+        PaykitProtocol::new()
+            .missed(missed)
+            .unwrap()
+            .into_iter()
+            .filter_map(|write| match write {
+                LocalWrite::Put { key, value } => Some((
+                    String::from_utf8(key).unwrap(),
+                    serde_json::from_slice(&value).unwrap(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_missed_with_no_end_sets_the_holds_end_not_known() {
+        // `u64::MAX` is the client's "no end known": the hold's end is set as not known,
+        // and no bound is written over an earlier item's.
+        let missed = MissedEntries {
+            seq: 1,
+            entries: 0,
+            accepted_from_ms: 10,
+            accepted_until_ms: u64::MAX,
+        };
+        let puts = missed_puts(&missed);
+        let value = |key: &str| {
+            puts.iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v["d"].clone())
+        };
+        assert_eq!(value(key::MISSED_END_UNKNOWN), Some(json!(true)));
+        assert_eq!(value(key::MISSED_HOLD), None);
+        // An item with an end is bounded by it, and sets no unknown end.
+        let missed = MissedEntries {
+            accepted_until_ms: 20,
+            ..missed
+        };
+        let puts = missed_puts(&missed);
+        let value = |key: &str| {
+            puts.iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v["d"].clone())
+        };
+        assert_eq!(value(key::MISSED_HOLD), Some(json!({ "bound_ms": 20 })));
+        assert_eq!(value(key::MISSED_END_UNKNOWN), None);
     }
 
     fn protocol_of(own: &Party) -> PaykitProtocol {
