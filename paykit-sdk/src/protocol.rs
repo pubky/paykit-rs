@@ -1456,7 +1456,7 @@ mod receive_tests {
             vec![[4; 32]],
             object(json!({})),
         );
-        let value = state::encode(&KeptMessage::of(&reply)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&reply, 0)).unwrap();
         let target = ActivityTarget::payee(natural_key::request_record(&bob.id(), &[4; 32]), None);
         (reply, value, fake_key(&target.record_target()))
     }
@@ -1503,7 +1503,7 @@ mod receive_tests {
         };
         let target = allowance_target(&bob.id(), &reply.allowance_id);
         let key = key::allowance_end(&fake_key(&target), &end.message().msg_id);
-        let value = state::encode(&KeptMessage::of(&end)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&end, 0)).unwrap();
         assert!(restores::<KeptMessage>(&alice, key.as_bytes(), &value));
         // Under another `msg_id` of the same record: refused.
         let other = key::allowance_end(&fake_key(&target), "0d6f5b9e-3c1a-4e8b-9f2d-7a4c1e5b8d30");
@@ -1513,7 +1513,7 @@ mod receive_tests {
     #[test]
     fn test_protocol_restore_refuses_a_kept_end_at_another_key_or_of_another_kind() {
         let (alice, bob, proposal, end) = allowance_end();
-        let value = state::encode(&KeptMessage::of(&end)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&end, 0)).unwrap();
         let other = key::allowance_end(&[9; 32], &end.message().msg_id);
         assert!(!restores::<KeptMessage>(&alice, other.as_bytes(), &value));
         // The proposal under the end's key isn't an end.
@@ -1534,12 +1534,12 @@ mod receive_tests {
         };
         let record = fake_key(&allowance_target(&bob.id(), &body.allowance_id));
         let at = key::conflict(&record);
-        let kept = state::encode(&KeptMessage::of(&proposal)).unwrap();
+        let kept = state::encode(&KeptMessage::taken(&proposal, 1)).unwrap();
         assert!(restores::<KeptMessage>(&alice, at.as_bytes(), &kept));
         // Under another record's key, or an end under a conflict's key: refused.
         let other = key::conflict(&[9; 32]);
         assert!(!restores::<KeptMessage>(&alice, other.as_bytes(), &kept));
-        let end = state::encode(&KeptMessage::of(&end)).unwrap();
+        let end = state::encode(&KeptMessage::taken(&end, 1)).unwrap();
         assert!(!restores::<KeptMessage>(&alice, at.as_bytes(), &end));
     }
 
@@ -1607,7 +1607,7 @@ mod receive_tests {
             vec![[4; 32], [5; 32]],
             object(json!({ "attempt_id": "DgCVYQKL1eyDacZvG6YhZg" })),
         );
-        let value = state::encode(&KeptMessage::of(&receipt)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&receipt, 0)).unwrap();
         let at = key::kept_reply(&carol.id(), &record, &receipt.message().msg_id);
         assert!(!restores::<KeptMessage>(&bob, at.as_bytes(), &value));
     }
@@ -1626,7 +1626,7 @@ mod receive_tests {
             panic!("an acceptance");
         };
         let record = fake_key(&allowance_target(&alice.id(), &body.allowance_id));
-        let value = state::encode(&KeptMessage::of(&answer)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&answer, 0)).unwrap();
         (answer, value, record)
     }
 
@@ -1657,6 +1657,49 @@ mod receive_tests {
     }
 
     #[test]
+    fn test_protocol_restore_refuses_a_pooled_kept_message_it_cannot_order() {
+        // The kept replies and the kept stops are bounded pools ordered by when their inbox
+        // accepted each member, which decides what the bounds drop, which of an Allowance's
+        // ends stops it and which of its answers is the record's response: a member without
+        // the feed `seq` its entry was read at can't be ordered, so a restore refuses it, of
+        // every family of a pool.
+        let (alice, bob, _, end) = allowance_end();
+        let Body::AllowanceEnd(reply) = end.body() else {
+            panic!("an end");
+        };
+        let target = allowance_target(&bob.id(), &reply.allowance_id);
+        let key = key::allowance_end(&fake_key(&target), &end.message().msg_id);
+        let unordered = state::encode(&KeptMessage::of(&end)).unwrap();
+        assert!(!restores::<KeptMessage>(&alice, key.as_bytes(), &unordered));
+        let alice = Party::new("alice", "wallet", &["pay", "allowance", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request", "allowance"]);
+        let (answer, _, record) = kept_allowance_answer(&alice, &bob);
+        let at = key::kept_reply(&alice.id(), &record, &answer.message().msg_id);
+        let unordered = state::encode(&KeptMessage::of(&answer)).unwrap();
+        assert!(!restores::<KeptMessage>(&bob, at.as_bytes(), &unordered));
+        let (reply, _, record) = kept_reply(&alice, &bob);
+        let at = key::kept_reply(&alice.id(), &record, &reply.message().msg_id);
+        let unordered = state::encode(&KeptMessage::of(&reply)).unwrap();
+        assert!(!restores::<KeptMessage>(&bob, at.as_bytes(), &unordered));
+        let wallet = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let shop = Party::new("bob", "shop", &["request"]);
+        let cancellation = shop.message(
+            &wallet,
+            "paykit.payment_request_cancellation",
+            vec![[4; 32]],
+            object(json!({})),
+        );
+        let target = ActivityTarget::payer(natural_key::request_record(&shop.id(), &[4; 32]));
+        let key = key::kept_cancellation(&fake_key(&target.record_target()));
+        let unordered = state::encode(&KeptMessage::of(&cancellation)).unwrap();
+        assert!(!restores::<KeptMessage>(
+            &wallet,
+            key.as_bytes(),
+            &unordered
+        ));
+    }
+
+    #[test]
     fn test_protocol_restore_refuses_a_kept_end_without_its_acceptance_time() {
         let (alice, bob, _, end) = allowance_end();
         let Body::AllowanceEnd(reply) = end.body() else {
@@ -1666,7 +1709,7 @@ mod receive_tests {
             &fake_key(&allowance_target(&bob.id(), &reply.allowance_id)),
             &end.message().msg_id,
         );
-        let value = state::encode(&KeptMessage::of(&end)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&end, 0)).unwrap();
         assert!(!restores::<KeptMessage>(
             &alice,
             key.as_bytes(),
@@ -1740,13 +1783,106 @@ mod receive_tests {
             object(json!({ "allowance_id": body.allowance_id.as_str() })),
         );
         for conflict in [&proposal, &response] {
-            let value = state::encode(&KeptMessage::of(conflict)).unwrap();
+            let value = state::encode(&KeptMessage::taken(conflict, 1)).unwrap();
             assert!(restores::<KeptMessage>(&alice, at.as_bytes(), &value));
             assert!(!restores::<KeptMessage>(
                 &alice,
                 at.as_bytes(),
                 &without_acceptance(&value)
             ));
+        }
+    }
+
+    #[test]
+    fn test_protocol_restore_refuses_a_held_list_without_its_acceptance_time() {
+        // Every writer of `lh/` keeps a list its inbox accepted, with the time, which orders
+        // it behind the writes kept over its record: a restore refuses one without it.
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let list = bob.message(
+            &alice,
+            "paykit.private_payment_list",
+            vec![],
+            object(json!({
+                "version": 7,
+                "expires_at": pubky_switch_core::time::rfc3339(NOW + 3_600_000),
+                "payment_endpoints": {
+                    "btc-bitcoin-p2wpkh": { "payload": "bc1q", "single_use": true }
+                }
+            })),
+        );
+        let target = crate::records::list_target(&bob.id(), &list.message().from.app_id);
+        let at = key::held_list(&fake_key(&target));
+        let value = state::encode(&KeptMessage::of(&list)).unwrap();
+        assert!(restores::<KeptMessage>(&alice, at.as_bytes(), &value));
+        assert!(!restores::<KeptMessage>(
+            &alice,
+            at.as_bytes(),
+            &without_acceptance(&value)
+        ));
+    }
+
+    #[test]
+    fn test_protocol_restore_refuses_a_kept_conflict_it_cannot_order() {
+        // A conflict's stop is ordered among its record's answers by when its inbox accepted
+        // it: an answer accepted after it never takes the response. Every writer keeps it
+        // with the feed `seq` its entry was read at, so a restore refuses one without it.
+        let (alice, bob, proposal, _) = allowance_end();
+        let Body::AllowanceProposal(body) = proposal.body() else {
+            panic!("a proposal");
+        };
+        let at = key::conflict(&fake_key(&allowance_target(&bob.id(), &body.allowance_id)));
+        let value = state::encode(&KeptMessage::of(&proposal)).unwrap();
+        assert!(!restores::<KeptMessage>(&alice, at.as_bytes(), &value));
+    }
+
+    /// `value`, a kept message's encoded bytes, with its feed `seq` set to `seq`, or removed
+    /// for `None`.
+    fn with_seq(value: &[u8], seq: Option<serde_json::Value>) -> Vec<u8> {
+        let mut json: serde_json::Value = serde_json::from_slice(value).unwrap();
+        let kept = json["d"].as_object_mut().unwrap();
+        match seq {
+            Some(seq) => kept.insert("seq".into(), seq),
+            None => kept.remove("seq"),
+        };
+        serde_json::to_vec(&json).unwrap()
+    }
+
+    #[test]
+    fn test_protocol_restore_refuses_a_kept_unrequested_proof_it_cannot_order() {
+        // A proof of a payment without a request is a kept reply (`pr/`) like any other, and
+        // is placed among them in the order its inbox accepted it: one kept without its feed
+        // `seq`, or with a null one, can't be ordered, so a restore refuses it, though its
+        // record, which only the rail names, isn't bound until it is placed.
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let proof = alice.message(
+            &bob,
+            "paykit.payment_proof",
+            Vec::new(),
+            object(json!({
+                "attempt_id": "mAFdg5_0tVNjmrgiTUZW4g",
+                "payment_app_id": "brrz3m6g5rci6iqnzke44q4djc",
+                "payment_endpoint_identifier": "btc-bitcoin-p2wpkh",
+                "amount": { "asset": "btc", "value": "0.1" },
+                "proof": { "rail": "fake", "tx": "t1" },
+            })),
+        );
+        let at = key::kept_reply(&alice.id(), &[9; 32], &proof.message().msg_id);
+        let value = state::encode(&KeptMessage::taken(&proof, 3)).unwrap();
+        assert!(restores::<KeptMessage>(&bob, at.as_bytes(), &value));
+        assert!(restores::<KeptMessage>(
+            &bob,
+            at.as_bytes(),
+            &with_seq(&value, Some(json!(0)))
+        ));
+        for unordered in [
+            with_seq(&value, None),
+            with_seq(&value, Some(serde_json::Value::Null)),
+            with_seq(&value, Some(json!("3"))),
+            without_acceptance(&value),
+        ] {
+            assert!(!restores::<KeptMessage>(&bob, at.as_bytes(), &unordered));
         }
     }
 
@@ -1774,7 +1910,7 @@ mod receive_tests {
             vec![[4; 32]],
             object(json!({})),
         );
-        let value = state::encode(&KeptMessage::of(&cancellation)).unwrap();
+        let value = state::encode(&KeptMessage::taken(&cancellation, 0)).unwrap();
         let target = ActivityTarget::payer(natural_key::request_record(&bob.id(), &[4; 32]));
         let record = fake_key(&target.record_target());
         (key::kept_cancellation(&record).into_bytes(), value)
@@ -1847,7 +1983,7 @@ mod receive_tests {
             hash: request.hash(),
             sender: bob.id(),
             msg_id: msg_id.clone(),
-            message: KeptMessage::of(&request),
+            message: KeptMessage::taken(&request, 1),
             placed: false,
         };
         let value = state::encode(&note).unwrap();
