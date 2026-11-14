@@ -556,6 +556,7 @@ async fn test_allowances_restore_asks_consent_again_and_keeps_removals() {
         .await
         .unwrap();
         assert_eq!(restored.app_id(), id);
+        crate::common::verdict_unknown(&mut restored).await;
         restored.receive(None).await.unwrap();
         assert_eq!(
             Box::pin(consent_entry(&restored, &mine)).await,

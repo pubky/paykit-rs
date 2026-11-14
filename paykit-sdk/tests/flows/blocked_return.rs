@@ -409,9 +409,16 @@ async fn test_blocked_return_restore_widening_applied_as_of_its_first_read() {
     let w = World::new();
     let (backup, _) = backed_up_blocking_bob(&w).await;
     let mut restored = restore_from(&w, &backup).await;
-    // The first read of the lists shows bob blocked, before any verdict: the identity isn't
-    // confirmed yet, so a page settles nothing. The widening waits, keeping that read.
-    restored.receive(None).await.unwrap();
+    // The first read of the lists shows bob blocked, before any verdict: the receive's read
+    // of the feed then fails, so no page settles one. The widening waits, keeping that read.
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/feed".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    assert!(restored.receive(None).await.is_err());
     assert_eq!(restored.app().restore_held_cursor(), None);
     assert_eq!(block_marks(&restored).await, 0);
     let first_read = w.clock.now_ms();
@@ -420,7 +427,6 @@ async fn test_blocked_return_restore_widening_applied_as_of_its_first_read() {
     // carrying the cursor before the first settling page. Bob is marked as of the first
     // read, though the lists no longer hold him.
     restored.app_mut().undeny(&w.bob_id()).await.unwrap();
-    restored.app_mut().refresh_identity().await.unwrap();
     restored.receive(None).await.unwrap();
     assert_eq!(
         restored.app().restore_held_cursor(),

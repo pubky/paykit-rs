@@ -536,9 +536,11 @@ impl Paykit {
     /// [`Paykit::reconcile`], [`Paykit::end_reconcile`], [`Paykit::flush`] and every call
     /// that writes at the switch or sends confirm the newest `identity.json` and make the
     /// first [`Paykit::receive`] themselves before anything else, once per load, and the
-    /// host's next `receive` hands that read's summary over with its own. A refresh or read
-    /// that fails fails the call, with nothing written. Only a write the host makes through
-    /// the client itself (`app_mut()`) can still go first, and leave the verdict unknown.
+    /// host's next `receive` hands that read's summary over with its own; a host's own
+    /// [`Paykit::receive`] confirms the newest `identity.json` before it reads too. A refresh
+    /// or read that fails fails the call, with nothing written. Only a write the host makes
+    /// through the client itself (`app_mut()`) can still go first, and leave the verdict
+    /// unknown.
     ///
     /// - **Clean**, the service reporting a cursor at or behind the backup's position: the
     ///   app resumes. No request reads [`crate::RequestStatus::Held`] for the restore, none
@@ -790,10 +792,14 @@ impl Paykit {
     /// handed over (Switch spec 8.2): a listing that fails there fails the read, and this
     /// call returns its error; the next receive lists first.
     ///
-    /// After a restore, a call that writes may have made the first receive itself, for the
-    /// client's verdict on the restore ([`Paykit::restore`]): the next call's summary holds
-    /// that receive's too, before its own ([`ReceiveSummary`] of both, in order), so the
-    /// host acknowledges the duty events of both. Kept in memory until a call returns it.
+    /// While a restore's verdict waits for a page, the call confirms the newest own
+    /// `identity.json` before it reads, so its first page settles the verdict; a refresh that
+    /// can't be made now fails the call, with nothing read, and one refused for good, as for
+    /// an app no longer listed, leaves the read to report it ([`Paykit::restore`]). After a
+    /// restore, a call that writes may have made the first receive itself, for the client's
+    /// verdict on the restore: the next call's summary holds that receive's too, before its
+    /// own ([`ReceiveSummary`] of both, in order), so the host acknowledges the duty events
+    /// of both. Kept in memory until a call returns it.
     pub async fn receive(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
         // The read's future goes on the heap: the client's read nests deep, and a host
         // polling it on a small stack, such as a test thread's 2 MiB, keeps room for it.
@@ -822,6 +828,17 @@ impl Paykit {
         // used. The steps never count an unblock: the client's copy decides there.
         if self.certificate_refused().is_none() {
             Box::pin(self.drop_unblocks_not_kept()).await?;
+        }
+        // While a restore's verdict waits for a page, the newest own `identity.json` is
+        // confirmed first, as before a write: only a page read once it is settles the verdict
+        // (`hold.rs`). A refresh that can't be made now fails the receive, with nothing read;
+        // one refused for good, such as for an app no longer listed, leaves the read to go on
+        // and report it, as the client's read does.
+        if self.certificate_refused().is_none() && Box::pin(self.restore_verdict_awaited()).await? {
+            match self.app.refresh_identity().await {
+                Ok(_) | Err(AppError::Refused(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
         // An app holding `paykit_contacts` reads the flagged senders again first, at most every 10
         // minutes, for the spam rule (Paykit wire 4.1).
