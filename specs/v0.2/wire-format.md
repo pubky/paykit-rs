@@ -134,7 +134,7 @@ A well-formed list with a permission missing, or, in a certificate that holds no
 
 Only valid names count in this table: a name that starts with `paykit_request:` or `paykit_ext:` but isn't a valid labelled selling scope or extension scope (above), such as `paykit_ext:paykit`, derives no permission. A certificate holding one is invalid at Paykit's verifiers anyway.
 
-`paykit_pay` requires `paykit_contacts`, `paykit_allowance_execute` requires `paykit_allowance`, `paykit_pay` and `paykit_contacts`, `paykit_manage_contacts` requires `paykit_contacts`, and `paykit_request` and every `paykit_request:<label>` require `paykit_settlements` (spec 3.1); a certificate that breaks this is invalid. `paykit_settlements` grants no switch permission: it reads and writes `settlements` (5.7). Vectors: `documents.json` `executor_certificates`, `payer_certificates` and `payee_certificates`.
+`paykit_pay` requires `paykit_contacts`, `paykit_allowance_execute` requires `paykit_allowance`, `paykit_pay` and `paykit_contacts`, `paykit_manage_contacts` requires `paykit_contacts`, and `paykit_request` and every `paykit_request:<label>` require `paykit_settlements` and `paykit_contacts` (spec 3.1); a certificate that breaks this is invalid. `paykit_settlements` grants no switch permission: it reads and writes `settlements` (5.7). Vectors: `documents.json` `executor_certificates`, `payer_certificates` and `payee_certificates`.
 
 **Several protocols** (spec 3.2, Switch wire 3.1 "Several protocols"). A certificate may hold other protocols' scopes beside Paykit's, or only theirs. Paykit's verifiers apply the Switch's rule with Paykit as the protocol they know:
 
