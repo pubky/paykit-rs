@@ -645,10 +645,11 @@ async fn test_blocked_return_window_delivered_before_a_crash_not_told_lost_at_ex
 
 #[tokio::test]
 async fn test_blocked_return_window_delivered_not_told_lost_when_a_widening_drops_it() {
-    // Bob's mark, a widening's, asked and its request was delivered by a flush the mark
-    // pass hasn't seen yet. With the bound on marks full, a `missed` item's widening marks
-    // carol, whom the deny list holds, and the bound drops bob's mark: the outbox shows his
-    // request delivered, so his window isn't told lost.
+    // Bob's mark asked and its request was delivered. The mark is then written back by hand
+    // as it stands before the delivery is written into it, and made speculative (a
+    // widening's) so the bound picks it. With the bound on marks full, a `missed` item's
+    // widening marks carol, whom the deny list holds, and the bound drops bob's mark: the
+    // outbox shows his request delivered, so his window isn't told lost.
     let w = World::new();
     let mut wallet = contacts_wallet(&w, store()).await;
     wallet.app_mut().invite(&w.carol_id()).await.unwrap();

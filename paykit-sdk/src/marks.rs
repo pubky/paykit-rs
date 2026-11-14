@@ -640,9 +640,11 @@ impl Paykit {
 
     /// Count a widening's window from `from` to `until` in `sender`'s block mark, in `tx`
     /// ([`count_blocked`]): a mark the bound drops before it asked raises the notice that
-    /// its window can no longer come back. Returns whether it was counted: `false` while no
-    /// mark may go for it, every one naming pairs still to forget, so the widening stays to
-    /// be applied again.
+    /// its window can no longer come back. A request the dropped mark still names as queued,
+    /// not yet delivered, is not cancelled: the host's next flush may still deliver it and
+    /// bring the window's messages back after that notice. Returns whether it was counted:
+    /// `false` while no mark may go for it, every one naming pairs still to forget, so the
+    /// widening stays to be applied again.
     pub(crate) async fn count_widened_blocked(
         &self,
         tx: &mut crate::state::Tx,

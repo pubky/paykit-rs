@@ -3424,7 +3424,10 @@ impl Paykit {
     /// the same entries, each record the same write, [`WriteStamp`]), or the deny list now
     /// holds the payee, or the record isn't there, doesn't read or holds no request. Each read
     /// shows the switch's current state, never a copy this app keeps: the deny list from
-    /// `GET /allow`, which the client always fetches; the record and the floor from
+    /// `GET /allow`, which the client always fetches, with this app's own block or unblock
+    /// that the list doesn't show yet counting at once (Paykit spec 8.1, `judged_deny`): an
+    /// unblock whose batch the client still keeps takes the payee out even while
+    /// `GET /allow` lists them; the record and the floor from
     /// `read_record_fresh`, a read that shows anything but the switch's current write holding
     /// the dispatch.
     ///

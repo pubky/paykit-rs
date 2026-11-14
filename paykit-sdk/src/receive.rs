@@ -395,7 +395,10 @@ pub(crate) fn admits_new_state(
 /// instead, so none is lost and no pair is left unforgotten: while the mark already names
 /// [`crate::marks::MAX_PENDING_FORGETS`] pairs, or while past the bound on marks every mark
 /// that could go still names pairs to forget. A mark the bound drops before it asked raises
-/// the notice that its window can no longer come back.
+/// the notice that its window can no longer come back. A request the dropped mark still
+/// names as queued isn't read here and isn't cancelled: it may already be delivered, or the
+/// host's next flush may still deliver it, and its window's messages then come back after
+/// that notice.
 fn mark_blocked(
     cx: &mut ReceiveContext<'_>,
     sender: &[u8; 32],
