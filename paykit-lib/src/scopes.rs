@@ -1069,6 +1069,9 @@ mod tests {
             "request:shop1",
             "ext:paykit-cap",
             "paykitx",
+            "paykit_",
+            "paykit-",
+            "paykit_:x",
             "chat",
         ] {
             assert_eq!(
