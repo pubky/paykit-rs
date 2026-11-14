@@ -156,6 +156,22 @@ impl Paykit {
         stored: StoredMessage,
         conditions: Vec<Condition>,
     ) -> Result<Option<(Vec<Condition>, OpKind)>> {
+        self.placed_write_with(target, counterparty, role, stored, conditions, false)
+            .await
+    }
+
+    /// [`Paykit::placed_write`], setting `manual_only` (Paykit wire 5.3) on a record it opens
+    /// when `manual_only`: a one-time request that came back after the user's block
+    /// (`receive.rs`).
+    pub(crate) async fn placed_write_with(
+        &mut self,
+        target: &ActivityTarget,
+        counterparty: [u8; 32],
+        role: Role,
+        stored: StoredMessage,
+        conditions: Vec<Condition>,
+        manual_only: bool,
+    ) -> Result<Option<(Vec<Condition>, OpKind)>> {
         let own = self.identity();
         let side = target.side.side();
         let key = self.activity_key(target)?;
@@ -166,10 +182,14 @@ impl Paykit {
             Box::pin(self.pause_of(seen)).await?;
         }
         let current = held.as_ref().and_then(|r| r.content.value());
-        let mut record = activity::read(current, &own, side)
-            .unwrap_or_else(|| activity::empty(side, counterparty));
+        let held_record = activity::read(current, &own, side);
+        let opens = held_record.is_none();
+        let mut record = held_record.unwrap_or_else(|| activity::empty(side, counterparty));
         if !activity::place(&mut record, role, stored) {
             return Ok(None);
+        }
+        if manual_only && opens {
+            record.manual_only = true;
         }
         let value = record.to_json()?;
         Ok(Some(

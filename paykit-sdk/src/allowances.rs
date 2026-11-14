@@ -531,13 +531,13 @@ pub(crate) fn receive_effect(
             // state, which the spam rule gates, so a blocked or flagged sender creates
             // none. Dropping it loses nothing: nothing is paid under a deleted record.
             Held::None if deleted => {
-                if receive::admits_new_state(cx, &sender, scopes)? {
+                if receive::admits_new_state(cx, &sender, scopes, stored)? {
                     keep_conflict(cx, &target, stored, scopes)?;
                 }
                 Ok(())
             }
             Held::None => {
-                if receive::admits_new_state(cx, &sender, scopes)? {
+                if receive::admits_new_state(cx, &sender, scopes, stored)? {
                     // Terms that aren't valid were dropped at check 10 (Paykit wire 4.15).
                     let record = opened(sender, stored.clone()).ok_or_else(|| {
                         Fail::Drop("Paykit wire 5.4: the proposal opens no valid record".into())
@@ -556,7 +556,7 @@ pub(crate) fn receive_effect(
             // as new state the spam rule gates, within the bounds on kept replies, and
             // placed once the record is held (Paykit spec 8.1).
             Held::None => {
-                if receive::admits_new_state(cx, &sender, scopes)? {
+                if receive::admits_new_state(cx, &sender, scopes, stored)? {
                     let record = cx.record_key(&target)?;
                     let kept = key::kept_reply(&sender, &record, &stored.message().msg_id);
                     if state::cx_get::<KeptMessage>(cx, &kept)?.is_none() {
@@ -792,7 +792,7 @@ fn keep_end(
     }
     if !held {
         receive::hold_while_unlisted(cx, RecordSide::Allowances)?;
-        if !receive::admits_new_state(cx, &sender, scopes)? {
+        if !receive::admits_new_state(cx, &sender, scopes, stored)? {
             return Ok(());
         }
     }

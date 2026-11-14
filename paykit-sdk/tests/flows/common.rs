@@ -163,9 +163,26 @@ impl World {
         config: PaykitConfig,
         store: Arc<dyn StateStore>,
     ) -> Paykit {
+        let router = Arc::clone(&self.router) as Arc<dyn Transport>;
+        self.join_through(signer, name, scopes, config, store, router)
+            .await
+    }
+
+    /// [`World::join_with`], the app's requests going through `transport`.
+    pub async fn join_through(
+        &self,
+        signer: &TestSigner,
+        name: &str,
+        scopes: RequestedScopes,
+        config: PaykitConfig,
+        store: Arc<dyn StateStore>,
+        transport: Arc<dyn Transport>,
+    ) -> Paykit {
         let request = self.approve(signer, name, &scopes);
+        let mut env = self.env(signer, store);
+        env.transport = transport;
         let mut app = Paykit::join(
-            self.env(signer, store),
+            env,
             config,
             request,
             Arc::clone(&self.rail) as Arc<dyn paykit_sdk::Rail>,
@@ -370,11 +387,15 @@ impl StateStore for FailingRecordReads {
 /// senders flagged, which the scripted switch never flags (its `FAKES.md`), a copy not
 /// known to be complete, as after a restore, and reads of the deny list that fail. It
 /// answers the client's own list keys (`lc/flag/<pubky>`, `lc/lists_at`, `lc/deny/<pubky>`)
-/// in place of the copy it holds; everything else is the inner store's.
+/// in place of the copy it holds, and a flagged sender in the copy of the flagged senders
+/// Paykit keeps from the same `GET /allow` (`fg`), once one is kept; everything else is the
+/// inner store's.
 #[derive(Default)]
 pub struct ListsStore {
     inner: MemoryStore,
     flagged: std::sync::Mutex<Vec<Vec<u8>>>,
+    flagged_senders: std::sync::Mutex<Vec<[u8; 32]>>,
+    flagged_unknown: std::sync::atomic::AtomicBool,
     unknown: std::sync::atomic::AtomicBool,
     deny_fails: std::sync::atomic::AtomicBool,
 }
@@ -384,6 +405,24 @@ impl ListsStore {
     pub fn flag(&self, pubky: &[u8; 32]) {
         let key = format!("lc/flag/{}", pubky_switch_core::enc::pubky_id(pubky));
         self.flagged.lock().unwrap().push(key.into_bytes());
+        self.flagged_senders.lock().unwrap().push(*pubky);
+    }
+
+    /// Show Paykit's copy of the flagged senders (`fg`) as not kept, as past its bound, or
+    /// stop.
+    pub fn flagged_unknown(&self, unknown: bool) {
+        self.flagged_unknown
+            .store(unknown, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Show `pubky` no longer flagged.
+    pub fn unflag(&self, pubky: &[u8; 32]) {
+        let key = format!("lc/flag/{}", pubky_switch_core::enc::pubky_id(pubky));
+        self.flagged
+            .lock()
+            .unwrap()
+            .retain(|k| *k != key.as_bytes());
+        self.flagged_senders.lock().unwrap().retain(|p| p != pubky);
     }
 
     /// Show the copy of the lists as never read (`lc/lists_at` absent), or stop.
@@ -414,6 +453,27 @@ impl StateStore for ListsStore {
         }
         if self.flagged.lock().unwrap().iter().any(|k| k == key) {
             return Ok(Some(Vec::new()));
+        }
+        // Paykit's own keys are under the client's protocol prefix, `p/`.
+        if key == b"p/fg" {
+            if self
+                .flagged_unknown
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Ok(None);
+            }
+            let Some(kept) = self.inner.get(ns, key)? else {
+                return Ok(None);
+            };
+            let mut copy: Value = serde_json::from_slice(&kept).unwrap();
+            let senders = copy["d"].as_array_mut().unwrap();
+            for pubky in self.flagged_senders.lock().unwrap().iter() {
+                let pubky = serde_json::to_value(pubky).unwrap();
+                if !senders.contains(&pubky) {
+                    senders.push(pubky);
+                }
+            }
+            return Ok(Some(serde_json::to_vec(&copy).unwrap()));
         }
         self.inner.get(ns, key)
     }
@@ -695,6 +755,72 @@ impl World {
         )
         .await
         .unwrap()
+    }
+}
+
+/// A hook [`ReadHook`] runs once.
+type Hook = Box<dyn FnOnce() + Send>;
+
+/// A transport that runs a hook once, when the next `GET` whose path holds a part it was
+/// given has its answer, before the app gets the answer: what the hook writes lands after
+/// that read. Every request goes through the world's router.
+pub struct ReadHook {
+    pub inner: Arc<Router>,
+    hook: std::sync::Mutex<Option<(String, Hook)>>,
+    fired: std::sync::atomic::AtomicBool,
+}
+
+impl ReadHook {
+    pub fn new(inner: Arc<Router>) -> Self {
+        Self {
+            inner,
+            hook: std::sync::Mutex::new(None),
+            fired: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Run `hook` once, right after the next `GET` whose path holds `part` is answered.
+    pub fn after_read(&self, part: &str, hook: impl FnOnce() + Send + 'static) {
+        *self.hook.lock().unwrap() = Some((part.to_owned(), Box::new(hook)));
+    }
+
+    /// Whether the hook ran.
+    pub fn fired(&self) -> bool {
+        self.fired.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Transport for ReadHook {
+    fn send(
+        &self,
+        request: pubky_switch_client::transport::Request,
+    ) -> pubky_switch_client::transport::BoxFuture<
+        '_,
+        Result<
+            pubky_switch_client::transport::Response,
+            pubky_switch_client::error::TransportError,
+        >,
+    > {
+        let hook = {
+            let mut armed = self.hook.lock().unwrap();
+            let due = request.method == "GET"
+                && armed
+                    .as_ref()
+                    .is_some_and(|(part, _)| request.path_and_query.contains(part.as_str()));
+            if due {
+                armed.take().map(|(_, hook)| hook)
+            } else {
+                None
+            }
+        };
+        Box::pin(async move {
+            let answer = self.inner.send(request).await;
+            if let Some(hook) = hook {
+                hook();
+                self.fired.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            answer
+        })
     }
 }
 

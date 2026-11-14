@@ -1936,8 +1936,8 @@ fn missed_and_listing_fails(w: &World) {
 }
 
 /// How many collections the client lists for an app of alice's holding `pay` and
-/// `allowance`: the payer's side, `payment_lists` and `allowances`.
-const WALLET_COLLECTIONS: usize = 3;
+/// `allowance`: the payer's side, `payment_lists`, `block_floor` and `allowances`.
+const WALLET_COLLECTIONS: usize = 4;
 
 /// How many collections the client lists for bob's shop, holding `request` and `allowance`:
 /// the payee's side and `allowances`.

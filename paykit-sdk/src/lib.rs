@@ -48,6 +48,7 @@ mod approval;
 mod destination;
 mod divergent;
 mod error;
+mod floor;
 mod hold;
 mod journal;
 mod marks;
@@ -228,6 +229,7 @@ mod tests {
                         metadata: Some(proof()),
                         payment_reference: Some(SECRET.into()),
                     }),
+                    manual_only: false,
                     periods: Vec::new(),
                 }
             ),

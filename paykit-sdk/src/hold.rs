@@ -116,7 +116,7 @@ pub(crate) enum KeysAwaited {
 /// A side of the shared records, by the collections it reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RecordSide {
-    /// `payer_activity` and `payment_lists`.
+    /// `payer_activity`, `payment_lists` and `block_floor`.
     Payer,
     /// `payee_activity`, every label's.
     Payee,
@@ -133,12 +133,13 @@ impl RecordSide {
         let payer = crate::activity::family(Collection::PayerActivity);
         let payee = crate::activity::family(Collection::PayeeActivity);
         let lists = crate::activity::family(Collection::PaymentLists);
+        let floor = crate::activity::family(Collection::BlockFloor);
         let allowances = crate::activity::family(Collection::Allowances);
         match self {
-            Self::Payer => vec![payer, lists],
+            Self::Payer => vec![payer, lists, floor],
             Self::Payee => vec![payee],
             Self::Allowances => vec![allowances],
-            Self::All => vec![payer, payee, lists, allowances],
+            Self::All => vec![payer, payee, lists, floor, allowances],
         }
     }
 }
@@ -461,6 +462,7 @@ impl Paykit {
         for family in [
             crate::marks::MarkFamily::Replies,
             crate::marks::MarkFamily::Unverified,
+            crate::marks::MarkFamily::Blocked,
         ] {
             for (rest, mut mark) in self
                 .local_scan::<crate::marks::DropMark>(family.prefix())
@@ -478,6 +480,35 @@ impl Paykit {
         {
             if held.mark.clamp(bound) {
                 tx.put(&format!("{}{rest}", family.prefix()), &held)?;
+            }
+        }
+        // So is the raise of the block floor owed (`crate::floor`).
+        if let Some(floor) = self.local_get::<u64>(key::BLOCK_FLOOR).await? {
+            if floor > bound {
+                tx.put(key::BLOCK_FLOOR, &bound)?;
+            }
+        }
+        // So is a widening of the block marks owed: one from the backup's cursor time, dated
+        // past the bound, starts at the bound, at its own key.
+        for (_, window) in self
+            .local_scan::<crate::marks::BlockedWindow>(key::BLOCKED_WIDENINGS)
+            .await?
+        {
+            if window.from_ms > bound {
+                tx.delete(&key::blocked_widening(window.from_ms));
+                // Its end was at or past its start, so past the bound too.
+                let until = if window.until_ms == crate::marks::BlockedWindow::TO_NOW {
+                    window.until_ms
+                } else {
+                    bound
+                };
+                tx.put(
+                    &key::blocked_widening(bound),
+                    &crate::marks::BlockedWindow {
+                        from_ms: bound,
+                        until_ms: until,
+                    },
+                )?;
             }
         }
         for prefix in [

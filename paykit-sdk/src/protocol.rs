@@ -28,7 +28,9 @@ use std::sync::{Arc, PoisonError, RwLock};
 use paykit_lib::bodies::check_body;
 use paykit_lib::collections::Collection;
 use paykit_lib::kinds::{targets_app, Kind, Role as KindRole, Side, OPAQUE_MEMBERS};
-use paykit_lib::records::{ActivitySide, AllowanceRecord, PaymentListRecord, StoredMessage};
+use paykit_lib::records::{
+    ActivitySide, AllowanceRecord, BlockFloorRecord, PaymentListRecord, StoredMessage,
+};
 use paykit_lib::scopes::{acts_as_payee, check_certificate, PaykitScope, ScopeName};
 use paykit_lib::{Label, PaykitKindRules};
 use pubky_switch_client::app::{
@@ -49,7 +51,7 @@ use crate::activity::{self, KeptSide, SideTag};
 use crate::allowances::ConsentEntry;
 use crate::hold::RestoreHold;
 use crate::journal::JournalEntry;
-use crate::marks::{DropMark, KeyWaitMark};
+use crate::marks::{DropMark, KeyWaitMark, QueuedRequest};
 use crate::notices::KeptNotice;
 use crate::pay::ListAsk;
 use crate::rail::Rail;
@@ -89,6 +91,11 @@ pub(crate) struct QueuedAsk {
     pub(crate) sender: [u8; 32],
     pub(crate) from_ms: u64,
     pub(crate) until_ms: Option<u64>,
+    /// The `resend_request` this app signed for the ask, kept before it is queued, and the
+    /// batch the client keeps with it when the write that queues it wasn't answered: the
+    /// next pass reads what became of it before it asks anew (`resend.rs`). `None` while
+    /// none was signed for the ask as it stands.
+    pub(crate) queued: Option<QueuedRequest>,
 }
 
 /// A `missed` item's mark (`p/mi/<from>`): the time its re-sends ask from, and the
@@ -352,6 +359,7 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::PayerPassOwed
             | StateKey::OwnResendOwed
             | StateKey::ListedCert
+            | StateKey::Flagged
             | StateKey::StoredNote { .. }
             | StateKey::Taken(_) => continue,
             // An own crossing end owed while sends were held isn't restored: the restore queues
@@ -362,6 +370,9 @@ pub(crate) fn restore_paykit_layer(
             // list the backup holds may be stale by any time, so the list is read again before
             // any payment (Paykit spec 8.1).
             StateKey::ListsRead => continue,
+            // A read's records to check against the block floor belong to the read: the
+            // restore holds every open request (`hold.rs`).
+            StateKey::FloorOpened(_) => continue,
             // This app's blocks not yet shown by the list are: the client's kept batches
             // belong to the device that kept them, so the restored app keeps counting each
             // and writes it again (`Paykit::send_own_blocks_again`). Its unblocks aren't: an unblock counts
@@ -386,7 +397,8 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::Peer(_)
             | StateKey::Spam(_)
             | StateKey::Resent { .. }
-            | StateKey::ResentDay { .. } => {
+            | StateKey::ResentDay { .. }
+            | StateKey::BlockFloor => {
                 state::restored::<u64>(&key, &value, &binder).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
@@ -410,7 +422,9 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::DroppedReplies { .. } | StateKey::DroppedUnverified { .. } => {
+            StateKey::DroppedReplies { .. }
+            | StateKey::DroppedUnverified { .. }
+            | StateKey::DroppedBlocked { .. } => {
                 // A mark is restored whole, its times and when it was last asked, so a restore
                 // neither loses nor resets it (Paykit spec 8.1), bound to its key's sender.
                 state::restored::<DropMark>(&key, &value, &binder).map_err(|_| unread())?;
@@ -510,6 +524,12 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            StateKey::BlockedWidening { .. } => {
+                state::restored::<crate::marks::BlockedWindow>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
             // A divergent record's mark comes back paused, a confirmation given before the
             // restore included; a message kept over a divergent record is bound to its
             // record as every runtime read binds it (`divergent.rs`).
@@ -528,7 +548,9 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::MessageNotice { .. } | StateKey::Notice { .. } => {
+            StateKey::MessageNotice { .. }
+            | StateKey::Notice { .. }
+            | StateKey::BlockedLost { .. } => {
                 let notice =
                     state::restored::<KeptNotice>(&key, &value, &binder).map_err(|_| unread())?;
                 // An acknowledged notice of an attempt is kept only while the journal holds
@@ -589,6 +611,19 @@ pub(crate) fn restore_paykit_layer(
     let resend = state::local_put(key::OWN_RESEND_OWED, &crate::hold::OwnResendOwed::default())
         .map_err(|_| String::from("the restore's re-send mark can't be written"))?;
     writes.push(resend);
+    // What a blocked counterparty's inbox accepted after the backup is gone with the
+    // restore: every counterparty the deny list holds at the next read of the lists is
+    // marked from the backup's cursor time, to ask once it is unblocked (`marks.rs`).
+    let from = cursor_time_ms.saturating_sub(pubky_switch_core::records::CLOCK_TOLERANCE_MS);
+    let widening = state::local_put(
+        &key::blocked_widening(from),
+        &crate::marks::BlockedWindow {
+            from_ms: from,
+            until_ms: crate::marks::BlockedWindow::TO_NOW,
+        },
+    )
+    .map_err(|_| String::from("the restore's block widening can't be written"))?;
+    writes.push(widening);
     Ok(writes)
 }
 
@@ -783,6 +818,7 @@ impl Protocol for PaykitProtocol {
             sender: needed.sender,
             from_ms: needed.accepted_from_ms,
             until_ms: Some(needed.accepted_until_ms),
+            queued: None,
         };
         Ok(vec![local_write(
             &key::ask(&needed.sender, needed.accepted_from_ms),
@@ -820,6 +856,16 @@ impl Protocol for PaykitProtocol {
                 &crate::hold::MissedHold::of_item(missed.accepted_until_ms),
             )?,
             local_write(key::MISSED_UNLISTED, &true)?,
+            // What a blocked counterparty's inbox accepted among the missed entries is asked
+            // for once it is unblocked: every counterparty the deny list holds at the next
+            // read of the lists is marked for the item's times (`marks.rs`).
+            local_write(
+                &key::blocked_widening(missed.accepted_from_ms),
+                &crate::marks::BlockedWindow {
+                    from_ms: missed.accepted_from_ms,
+                    until_ms: missed.accepted_until_ms,
+                },
+            )?,
             local_write(key::MISSED_CONSENTS, &true)?,
             LocalWrite::DeletePrefix {
                 prefix: key::HOLD_CONFIRMED.as_bytes().to_vec(),
@@ -899,6 +945,7 @@ impl Protocol for PaykitProtocol {
             (Collection::PaymentLists, Some(v)) => {
                 PaymentListRecord::read(v, &own.identity).is_ok()
             }
+            (Collection::BlockFloor, Some(v)) => BlockFloorRecord::read(v).is_ok(),
             (Collection::Allowances, Some(v)) => AllowanceRecord::read(v, &own.identity).is_ok(),
             _ => false,
         };
@@ -911,7 +958,8 @@ impl Protocol for PaykitProtocol {
     /// Whether a newer write goes back on what the app saw (Paykit wire 5.3, 5.4): drops or
     /// replaces a message in a role seen, or changes the Allowance seen; for a
     /// `payment_lists` record, holds an older list or drops a single-use endpoint marked
-    /// used. A value that doesn't read is refused too. A delete isn't such a write. Judged
+    /// used; for the `block_floor` record, lowers the floor. A value that doesn't read is
+    /// refused too. A delete isn't such a write. Judged
     /// as a reader that doesn't hold the version the write builds on
     /// ([`Protocol::record_regression_on`] is told).
     fn record_regression(
@@ -987,6 +1035,14 @@ impl PaykitProtocol {
                 };
                 // Wire 5.4 "Seen lists": a later list of a greater version, or the same list,
                 // and never a single-use mark dropped, at any version.
+                held.check_later_write(&later).err().map(|e| e.to_string())
+            }
+            Collection::BlockFloor => {
+                let held = BlockFloorRecord::read(seen).ok()?;
+                let Ok(later) = BlockFloorRecord::read(value) else {
+                    return Some("Paykit wire 5.6: a block_floor record that doesn't read".into());
+                };
+                // Wire 5.6: the floor only rises.
                 held.check_later_write(&later).err().map(|e| e.to_string())
             }
             Collection::Allowances => {
@@ -1096,6 +1152,31 @@ mod receive_tests {
             released: false,
             conflict: None,
         }
+    }
+
+    /// The block widening a `missed` item owes, from `missed()`'s writes.
+    fn widening(missed: &MissedEntries) -> serde_json::Value {
+        let writes = PaykitProtocol::new().missed(missed).unwrap();
+        let value = writes
+            .iter()
+            .find_map(|write| match write {
+                LocalWrite::Put { key, value } if key.starts_with(b"bw/") => Some(value.clone()),
+                _ => None,
+            })
+            .unwrap();
+        serde_json::from_slice(&value).unwrap()
+    }
+
+    #[test]
+    fn test_missed_widening_keeps_the_items_times() {
+        let missed = MissedEntries {
+            seq: 1,
+            entries: 1,
+            accepted_from_ms: 10,
+            accepted_until_ms: 20,
+        };
+        assert_eq!(widening(&missed)["d"]["from_ms"], 10);
+        assert_eq!(widening(&missed)["d"]["until_ms"], 20);
     }
 
     fn protocol_of(own: &Party) -> PaykitProtocol {
