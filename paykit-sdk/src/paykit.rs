@@ -19,8 +19,8 @@ use paykit_lib::scopes::{acts_as_payee, check_certificate};
 use paykit_lib::{Asset, Decimal, Label};
 use pubky_switch_client::app::Protocol as _;
 use pubky_switch_client::app::{
-    App, AppBackup, AppConfig, AppEnv, AppError, AppEvent, HomeserverReader, JoinRequest,
-    ReceiveReport,
+    App, AppBackup, AppConfig, AppEnv, AppError, AppEvent, HeldCursor, HomeserverReader,
+    JoinRequest, ReceiveReport,
 };
 use pubky_switch_client::clock::Clock;
 use pubky_switch_core::records::{AppCert, Approval};
@@ -305,6 +305,31 @@ fn key_epochs_awaited(events: &[AppEvent]) -> Vec<u64> {
     epochs
 }
 
+impl ReceiveSummary {
+    /// The summary of two receives, `earlier` and then `self`, as one: the events, messages,
+    /// re-sends, lists sent and records paused of both, in order; the held cursor the worse
+    /// of the two reads' (ahead over unknown over clean); what tells the state now, the
+    /// cursor and the lists not sent among it, the later one's.
+    fn after(mut self, earlier: Self) -> Self {
+        let report = &mut self.report;
+        report.events.splice(0..0, earlier.report.events);
+        report.held_cursor = match (earlier.report.held_cursor, report.held_cursor) {
+            (Some(ahead @ HeldCursor::Ahead { .. }), _)
+            | (_, Some(ahead @ HeldCursor::Ahead { .. })) => Some(ahead),
+            (Some(HeldCursor::Unknown), _) | (_, Some(HeldCursor::Unknown)) => {
+                Some(HeldCursor::Unknown)
+            }
+            (earlier, later) => later.or(earlier),
+        };
+        self.applied.splice(0..0, earlier.applied);
+        self.resends = self.resends.saturating_add(earlier.resends);
+        self.lists.sent.splice(0..0, earlier.lists.sent);
+        self.lists.resent.splice(0..0, earlier.lists.resent);
+        self.divergent.splice(0..0, earlier.divergent);
+        self
+    }
+}
+
 /// Whether `events` hold the client's `AccountGone` (Switch spec 12.7).
 fn account_gone(events: &[AppEvent]) -> bool {
     events
@@ -326,6 +351,24 @@ pub struct Paykit {
     /// before money moves is still used (Paykit spec 4).
     pub(crate) lookups: HashMap<[u8; 32], KeptLookup>,
     pub(crate) config: PaykitConfig,
+    /// The restore's first read, as Paykit made it before a call that writes
+    /// ([`Paykit::verdict_before_writing`]): `Owed` until it ran or wasn't needed, then the
+    /// summary handed over with the host's next [`Paykit::receive`].
+    pub(crate) restore_read: RestoreRead,
+}
+
+/// Whether Paykit still owes the first read after a restore before a call that writes
+/// ([`Paykit::verdict_before_writing`]), in memory: a load starts at `Owed`, and takes the
+/// verdict as the restore's hold and the client keep it.
+#[derive(Debug, Default)]
+pub(crate) enum RestoreRead {
+    /// Not looked at yet.
+    #[default]
+    Owed,
+    /// Made by Paykit: its summary, handed over with the host's next [`Paykit::receive`].
+    Made(Box<ReceiveSummary>),
+    /// Nothing owed: made and handed to the host, or no restore's verdict waits for it.
+    Done,
 }
 
 impl std::fmt::Debug for Paykit {
@@ -367,6 +410,7 @@ impl Paykit {
             timer,
             lookups: HashMap::new(),
             config,
+            restore_read: RestoreRead::Owed,
         })
     }
 
@@ -487,10 +531,14 @@ impl Paykit {
     /// list until the client's verdict on the restore is known
     /// (`App::restore_held_cursor`; Paykit spec 7.2, "What a restore loses"; Switch spec
     /// 12.4, "The held cursor"). The verdict settles at the first feed page read once the
-    /// app has confirmed its newest `identity.json`, and before any cursor move of its own:
-    /// the host calls `app_mut().refresh_identity()` and then [`Paykit::receive`] right
-    /// after the restore, before [`Paykit::reconcile`] or any write: a write sends the
-    /// restored cursor move and leaves the verdict unknown.
+    /// app has confirmed its newest `identity.json`, and before any cursor move of its own,
+    /// which every write carries. Paykit brings it in first: while the verdict isn't known,
+    /// [`Paykit::reconcile`], [`Paykit::end_reconcile`], [`Paykit::flush`] and every call
+    /// that writes at the switch or sends confirm the newest `identity.json` and make the
+    /// first [`Paykit::receive`] themselves before anything else, once per load, and the
+    /// host's next `receive` hands that read's summary over with its own. A refresh or read
+    /// that fails fails the call, with nothing written. Only a write the host makes through
+    /// the client itself (`app_mut()`) can still go first, and leave the verdict unknown.
     ///
     /// - **Clean**, the service reporting a cursor at or behind the backup's position: the
     ///   app resumes. No request reads [`crate::RequestStatus::Held`] for the restore, none
@@ -741,10 +789,28 @@ impl Paykit {
     /// A `missed` item's listing is made inside the client's read, before any later entry is
     /// handed over (Switch spec 8.2): a listing that fails there fails the read, and this
     /// call returns its error; the next receive lists first.
+    ///
+    /// After a restore, a call that writes may have made the first receive itself, for the
+    /// client's verdict on the restore ([`Paykit::restore`]): the next call's summary holds
+    /// that receive's too, before its own ([`ReceiveSummary`] of both, in order), so the
+    /// host acknowledges the duty events of both. Kept in memory until a call returns it.
     pub async fn receive(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
         // The read's future goes on the heap: the client's read nests deep, and a host
         // polling it on a small stack, such as a test thread's 2 MiB, keeps room for it.
-        Box::pin(self.receive_inner(wait)).await
+        let summary = Box::pin(self.receive_inner(wait)).await?;
+        // The restore's first read, made by a call that writes before the host read
+        // ([`Paykit::verdict_before_writing`]), is handed over with this one; kept on an
+        // error, for the next.
+        Ok(
+            match std::mem::replace(&mut self.restore_read, RestoreRead::Done) {
+                RestoreRead::Made(earlier) => summary.after(*earlier),
+                RestoreRead::Owed => {
+                    self.restore_read = RestoreRead::Owed;
+                    summary
+                }
+                RestoreRead::Done => summary,
+            },
+        )
     }
 
     async fn receive_inner(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
@@ -967,6 +1033,7 @@ impl Paykit {
     ///
     /// The client's errors.
     pub async fn flush(&mut self) -> Result<()> {
+        Box::pin(self.verdict_before_writing()).await?;
         self.refresh_own()?;
         self.app.flush_outbox().await?;
         Ok(())

@@ -659,6 +659,7 @@ impl Paykit {
         &mut self,
         endpoints: BTreeMap<PaymentEndpointIdentifier, OfferedEndpoint>,
     ) -> Result<ListsPublished> {
+        Box::pin(self.verdict_before_writing()).await?;
         self.refresh_own()?;
         self.require_payee()?;
         let list = KeptList {
@@ -742,6 +743,7 @@ impl Paykit {
     /// [`Refusal::NotNow`] while its copy isn't known and can't be read, with nothing sent to
     /// any; a store failure.
     pub async fn publish_list_to(&mut self, counterparties: &[[u8; 32]]) -> Result<ListsPublished> {
+        Box::pin(self.verdict_before_writing()).await?;
         self.refresh_own()?;
         self.require_payee()?;
         if self.kept_list().await?.is_none() {
@@ -789,6 +791,7 @@ impl Paykit {
     /// after a restore; [`Refusal::CertificateRefused`]; [`Refusal::ScopeMissing`] without
     /// `paykit_request` or a label; a store failure.
     pub async fn withdraw_list_from(&mut self, counterparty: &[u8; 32]) -> Result<ListsPublished> {
+        Box::pin(self.verdict_before_writing()).await?;
         self.refresh_own()?;
         self.require_payee()?;
         if counterparty == &self.identity() {

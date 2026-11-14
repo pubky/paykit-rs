@@ -10,16 +10,18 @@
 //! feed page read after the restore reporting a cursor at or behind the backup's position,
 //! lifts it with no question to the user and no re-send asked for it, since no entry after
 //! the backup's position was passed; ahead or unknown leaves it as below
-//! ([`Paykit::take_restore_verdict`]). The holds the backup held itself, of an earlier
-//! restore or a `missed` item, cover entries before its position and are carried whatever
-//! the verdict, with the user's confirmations of them (`hb/`), which never release this
-//! restore's own hold. A `missed` item (Switch spec 8.2) shows the service deleted
-//! entries before the app read them, a payee's cancellation possibly among them: the
-//! protocol's `missed` step sets the same hold (`mh`) and drops every confirmation of an
-//! earlier one, in the commit that passes the item. An item whose end isn't known (the
-//! client's `u64::MAX`) holds every open request (`mu`) until a read that completes bounds
-//! it by the service time verified then ([`Paykit::bound_missed_hold`]). While a request is
-//! held:
+//! ([`Paykit::take_restore_verdict`]). Every write carries the restored cursor move, which
+//! would leave the verdict unknown, so while it isn't known a call that writes or reconciles
+//! makes the first read itself first ([`Paykit::verdict_before_writing`]). The holds the
+//! backup held itself, of an earlier restore or a `missed` item, cover entries before its
+//! position and are carried whatever the verdict, with the user's confirmations of them
+//! (`hb/`), which never release this restore's own hold. A `missed` item (Switch spec 8.2)
+//! shows the service deleted entries before the app read them, a payee's cancellation
+//! possibly among them: the protocol's `missed` step sets the same hold (`mh`) and drops
+//! every confirmation of an earlier one, in the commit that passes the item. An item whose
+//! end isn't known (the client's `u64::MAX`) holds every open request (`mu`) until a read
+//! that completes bounds it by the service time verified then
+//! ([`Paykit::bound_missed_hold`]). While a request is held:
 //!
 //! - no automatic attempt is made on it, and a dispatch made before is not repeated at a
 //!   resume;
@@ -1350,6 +1352,47 @@ impl Paykit {
         }
         tx.put(key::RESTORE_HOLD, &hold)?;
         self.local_commit(tx).await
+    }
+
+    /// Bring the client's verdict on a restore in before a call that writes or reconciles
+    /// (Switch spec 12.4, "The held cursor"): the verdict settles only at the first feed
+    /// page read once the own `identity.json` is confirmed, before any cursor move of the
+    /// app's, and every write carries the restored cursor move, which would leave it unknown.
+    /// While the restore's verdict is open and the client has none, the first such call
+    /// confirms the newest `identity.json` and makes the first [`Paykit::receive`] itself
+    /// before it does anything else; that receive's summary goes to the host with its next
+    /// [`Paykit::receive`]. Made once per load: a page that settles nothing leaves the call
+    /// to go on, as a read the host made would.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::CertificateRefused`] for a certificate Paykit refuses; the errors of the
+    /// identity's refresh and of the receive: the calling call does nothing then, and the
+    /// next one tries again.
+    pub(crate) async fn verdict_before_writing(&mut self) -> Result<()> {
+        if !matches!(self.restore_read, crate::paykit::RestoreRead::Owed) {
+            return Ok(());
+        }
+        self.refresh_own()?;
+        let open = self
+            .local_get::<RestoreHold>(key::RESTORE_HOLD)
+            .await?
+            .is_some_and(|hold| hold.verdict == RestoreVerdict::Open);
+        if !open {
+            self.restore_read = crate::paykit::RestoreRead::Done;
+            return Ok(());
+        }
+        // A verdict the client settled at a read the host made through the client itself is
+        // taken as a receive takes it.
+        if self.app.restore_held_cursor().is_some() {
+            Box::pin(self.take_restore_verdict()).await?;
+            self.restore_read = crate::paykit::RestoreRead::Done;
+            return Ok(());
+        }
+        self.app.refresh_identity().await?;
+        let summary = Box::pin(self.receive(None)).await?;
+        self.restore_read = crate::paykit::RestoreRead::Made(Box::new(summary));
+        Ok(())
     }
 
     /// Whether a restore's widening of the block marks is kept, still to be applied.

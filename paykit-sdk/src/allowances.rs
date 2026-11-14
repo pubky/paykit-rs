@@ -1266,6 +1266,7 @@ impl Paykit {
         role: AllowanceRole,
         terms: AllowanceTerms,
     ) -> Result<SentAllowance> {
+        Box::pin(self.verdict_before_writing()).await?;
         Box::pin(self.propose_allowance_inner(to, role, terms)).await
     }
 
@@ -1402,6 +1403,7 @@ impl Paykit {
     /// [`Refusal::Usage`] for a proposal this identity sent or one answered already; as
     /// [`Paykit::propose_allowance`].
     pub async fn accept_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
+        Box::pin(self.verdict_before_writing()).await?;
         Box::pin(self.answer_allowance(record, Kind::AllowanceAcceptance)).await
     }
 
@@ -1420,6 +1422,7 @@ impl Paykit {
     /// changed; [`Refusal::Usage`] for a proposal this identity sent or one answered already;
     /// as [`Paykit::propose_allowance`]. Never [`Refusal::Divergent`].
     pub async fn reject_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
+        Box::pin(self.verdict_before_writing()).await?;
         Box::pin(self.answer_allowance(record, Kind::AllowanceRejection)).await
     }
 
@@ -1441,6 +1444,7 @@ impl Paykit {
     /// 8.1, "Blocked counterparties"); [`Refusal::Usage`] for a proposal to this identity not
     /// yet answered, which is rejected instead; as [`Paykit::propose_allowance`].
     pub async fn end_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
+        Box::pin(self.verdict_before_writing()).await?;
         Box::pin(self.answer_allowance(record, Kind::AllowanceEnd)).await
     }
 

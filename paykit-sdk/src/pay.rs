@@ -734,6 +734,7 @@ impl Paykit {
         request: &RequestRef,
         options: PayOptions,
     ) -> Result<PayOutcome> {
+        Box::pin(self.verdict_before_writing()).await?;
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.pay_request_inner(request, options, Initiator::User)).await
     }
@@ -754,6 +755,7 @@ impl Paykit {
         request: &RequestRef,
         options: PayOptions,
     ) -> Result<PayOutcome> {
+        Box::pin(self.verdict_before_writing()).await?;
         Box::pin(self.pay_request_inner(request, options, Initiator::Automatic)).await
     }
 
@@ -952,6 +954,7 @@ impl Paykit {
     /// As [`Paykit::pay_request`]; [`PaykitError::Conflict`] when the `payment_lists` record
     /// changed meanwhile, after which the caller pays to the next usable endpoint.
     pub async fn pay_without_request(&mut self, payment: UnrequestedPayment) -> Result<PayOutcome> {
+        Box::pin(self.verdict_before_writing()).await?;
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.pay_without_request_inner(payment)).await
     }
@@ -1100,6 +1103,7 @@ impl Paykit {
     /// the record's value is sealed under a key the app doesn't hold yet, which opens once
     /// it comes and is never replaced meanwhile; the client's errors.
     pub async fn repair_activity_record(&mut self, attempt_id: &AttemptId) -> Result<PayOutcome> {
+        Box::pin(self.verdict_before_writing()).await?;
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.repair_activity_record_inner(attempt_id)).await
     }
@@ -3037,6 +3041,7 @@ impl Paykit {
     /// [`Refusal::IdentityUnavailable`] when a repeat is due and the own `identity.json`
     /// isn't confirmed in the last 60 s; the client's errors; the rail's errors.
     pub async fn resume_payments(&mut self) -> Result<Vec<PayOutcome>> {
+        Box::pin(self.verdict_before_writing()).await?;
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.resume_payments_inner()).await
     }

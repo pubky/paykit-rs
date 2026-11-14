@@ -895,6 +895,7 @@ async fn test_periods_subscription_held_after_a_restore() {
     )
     .await
     .unwrap();
+    crate::common::verdict_unknown(&mut app).await;
     app.resume_payments().await.unwrap();
     assert_eq!(
         app.request(&request).await.unwrap().status,
@@ -1444,6 +1445,7 @@ async fn test_periods_accept_held_after_restore_waits_for_the_user() {
     )
     .await
     .unwrap();
+    crate::common::verdict_unknown(&mut app).await;
     app.resume_payments().await.unwrap();
     app.receive(None).await.unwrap();
     assert_eq!(
@@ -2959,7 +2961,9 @@ async fn test_periods_restore_own_details_wait_while_sends_to_the_payer_are_held
     let backup = till.backup().await.unwrap();
     drop(till);
     let mut till = bob_restored(&w, &backup).await;
-    till.block(&w.alice_id()).await.unwrap();
+    // Blocked through the client itself, before the restore's first read: a Paykit call
+    // that writes would make that read first.
+    till.app_mut().deny(&w.alice_id()).await.unwrap();
     let before = w.alice.switch().entries_from(&w.bob_id());
     for _ in 0..2 {
         till.receive(None).await.unwrap();

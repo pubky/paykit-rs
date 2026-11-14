@@ -1189,8 +1189,9 @@ async fn test_stored_refused_receipt_waiting_for_the_current_epochs_key_given_up
     assert!(!holds_receipt(&wallet, &request).await);
 }
 
-/// `app` backed up, dropped and restored onto a new store; the restore's reconcile run, and
-/// one receive, in which the client tells of the parked entries the backup carries again.
+/// `app` backed up, dropped and restored onto a new store as a restore that isn't clean
+/// ([`crate::common::verdict_unknown`]); the restore's reconcile run, and one receive, in
+/// which the client tells of the parked entries the backup carries again.
 pub(crate) async fn restored(w: &World, mut app: Paykit) -> Paykit {
     let backup = app.backup().await.unwrap();
     let backup = paykit_sdk::PaykitBackup::from_bytes(&backup.to_bytes().unwrap()).unwrap();
@@ -1204,6 +1205,7 @@ pub(crate) async fn restored(w: &World, mut app: Paykit) -> Paykit {
     )
     .await
     .unwrap();
+    crate::common::verdict_unknown(&mut app).await;
     app.reconcile().await.unwrap();
     app.end_reconcile(pubky_switch_client::app::UserConfirmed::new())
         .await

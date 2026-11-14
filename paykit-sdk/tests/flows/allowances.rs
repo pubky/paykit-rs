@@ -3588,8 +3588,10 @@ async fn acceptance_queued_again_once_sends_go(how: SendsHeld) {
     .await;
     drop(wallet);
     let mut wallet = Box::pin(restored_unreceived(&w, &backup)).await;
+    // Blocked through the client itself, before the restore's first read: a Paykit call
+    // that writes would make that read first.
     match how {
-        SendsHeld::Blocked => wallet.block(&w.bob_id()).await.unwrap(),
+        SendsHeld::Blocked => wallet.app_mut().deny(&w.bob_id()).await.unwrap(),
         SendsHeld::Unknown => fail_list_read(&w),
     }
     wallet.receive(None).await.unwrap();

@@ -601,6 +601,7 @@ async fn test_one_time_kept_stop_refuses_a_payment_after_a_restore() {
     )
     .await
     .unwrap();
+    crate::common::verdict_unknown(&mut app).await;
     refuse_batches(&w, 1);
     let _ = app.reconcile().await;
     app.end_reconcile(pubky_switch_client::app::UserConfirmed::new())
@@ -1814,6 +1815,7 @@ async fn test_one_time_restore_asks_wait_for_a_sealed_records_key() {
     )
     .await
     .unwrap();
+    crate::common::verdict_unknown(&mut restored).await;
     restored.reconcile().await.unwrap();
     restored
         .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
@@ -2089,6 +2091,7 @@ async fn test_one_time_restore_asks_the_readable_now_and_the_sealed_once_open() 
     )
     .await
     .unwrap();
+    crate::common::verdict_unknown(&mut restored).await;
     restored.reconcile().await.unwrap();
     restored
         .end_reconcile(pubky_switch_client::app::UserConfirmed::new())

@@ -114,6 +114,7 @@ impl Paykit {
         counterparty: [u8; 32],
         selection: ResendSelection,
     ) -> Result<String> {
+        Box::pin(self.verdict_before_writing()).await?;
         self.refresh_own()?;
         self.refuse_while_sends_held(&counterparty).await?;
         let signed = self.resend_request_message(counterparty, selection)?;

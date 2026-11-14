@@ -189,17 +189,21 @@ impl Paykit {
 
     /// Reconcile (Paykit spec 7.3, Switch spec 12.4): read the records again, finish the
     /// journal's payments, resolve the own open attempts the payment method's history can,
-    /// and report what stays doubtful. The app stays in reconcile mode until
-    /// [`Paykit::end_reconcile`].
+    /// and report what stays doubtful, the obligations a provider loss leaves in doubt
+    /// included ([`Doubtful::before_loss`]). The app stays in reconcile mode until
+    /// [`Paykit::end_reconcile`]. Right after a restore, its first read is made first, so
+    /// the client's verdict on the restore is known before anything is written
+    /// ([`Paykit::restore`]).
     ///
     /// # Errors
     ///
-    /// The client's errors; the rail's errors; [`crate::Refusal::NotNow`] while a wider
-    /// certificate's scope keys are still missing: its payer pass reads the obligations from
-    /// the records, and a listing before the keys can't open the records they add, so the
-    /// pass would miss them. [`Paykit::resume_payments`] still finishes the payments already
-    /// dispatched meanwhile.
+    /// The client's errors, the first read's after a restore included; the rail's errors;
+    /// [`crate::Refusal::NotNow`] while a wider certificate's scope keys are still missing:
+    /// its payer pass reads the obligations from the records, and a listing before the keys
+    /// can't open the records they add, so the pass would miss them.
+    /// [`Paykit::resume_payments`] still finishes the payments already dispatched meanwhile.
     pub async fn reconcile(&mut self) -> Result<ReconcileReport> {
+        Box::pin(self.verdict_before_writing()).await?;
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.reconcile_inner()).await
     }
@@ -502,6 +506,7 @@ impl Paykit {
         resolution: Resolution,
         _confirmed: UserConfirmed,
     ) -> Result<()> {
+        Box::pin(self.verdict_before_writing()).await?;
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.resolve_attempt_inner(obligation, attempt, resolution, _confirmed)).await
     }
@@ -710,8 +715,9 @@ impl Paykit {
     /// [`Paykit::reconcile`] didn't queue them (Paykit spec 7.2), reading the records for
     /// them: a host that ends reconcile mode without reconciling still asks once; after a
     /// clean one nothing is asked ([`Paykit::restore`]). A restore whose verdict isn't
-    /// known yet counts as not clean from here: the client may drop the verdict as the
-    /// restore ends. After a restore, payments still wait for a
+    /// known has its first read made first, as before any write ([`Paykit::restore`]); one
+    /// that read leaves unknown counts as not clean from here: the client may drop the
+    /// verdict as the restore ends. After a restore, payments still wait for a
     /// reconcile under `paykit_pay` that runs the payer pass, if none has yet; the payee's side
     /// works at once.
     ///
@@ -720,6 +726,7 @@ impl Paykit {
     /// The client's errors, such as the restore question still open; nothing ends while the
     /// asks can't be queued.
     pub async fn end_reconcile(&mut self, confirmed: UserConfirmed) -> Result<()> {
+        Box::pin(self.verdict_before_writing()).await?;
         self.refresh_own()?;
         // The verdict the client may drop as the restore ends is taken first. Still not
         // known then, it never may be: the restore counts as not clean, so its asks and its

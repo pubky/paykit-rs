@@ -299,6 +299,13 @@ pub fn store() -> Arc<dyn StateStore> {
     Arc::new(MemoryStore::new())
 }
 
+/// `app`, just restored, sends its cursor before any page settles the held cursor, as the
+/// client lets a host do through the client itself: the verdict on the restore is unknown,
+/// and the restore holds as one that isn't clean (Switch spec 12.4, "The held cursor").
+pub async fn verdict_unknown(app: &mut Paykit) {
+    app.app_mut().flush_cursor().await.unwrap();
+}
+
 /// A store whose reads of single shared records fail once armed, while its scans still
 /// answer: a collection listed, then a record of it that can't be read again.
 #[derive(Default)]

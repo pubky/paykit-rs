@@ -2802,6 +2802,7 @@ impl Paykit {
     /// whose fate is unknown, the block stays counted and is written again at a later
     /// receive.
     pub async fn block(&mut self, pubky: &[u8; 32]) -> crate::error::Result<()> {
+        Box::pin(self.verdict_before_writing()).await?;
         self.refresh_own()?;
         self.list_own(pubky, true).await
     }
@@ -2824,6 +2825,7 @@ impl Paykit {
     ///
     /// As [`Paykit::block`].
     pub async fn unblock(&mut self, pubky: &[u8; 32]) -> crate::error::Result<()> {
+        Box::pin(self.verdict_before_writing()).await?;
         self.refresh_own()?;
         self.list_own(pubky, false).await
     }
@@ -3061,6 +3063,7 @@ impl Paykit {
         app_id: &[u8; 16],
         _confirmed: pubky_switch_client::app::UserConfirmed,
     ) -> crate::error::Result<()> {
+        Box::pin(self.verdict_before_writing()).await?;
         self.refresh_own()?;
         self.records_known().await?;
         let own = self.identity();

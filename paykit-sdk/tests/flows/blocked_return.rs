@@ -416,10 +416,10 @@ async fn test_blocked_return_restore_widening_applied_as_of_its_first_read() {
     assert_eq!(block_marks(&restored).await, 0);
     let first_read = w.clock.now_ms();
     w.clock.advance_ms(MINUTE_MS);
-    restored.unblock(&w.bob_id()).await.unwrap();
-    // Then a verdict that isn't clean, the cursor moved before the first settling page:
-    // bob is marked as of the first read, though the lists no longer hold him.
-    restored.app_mut().flush_cursor().await.unwrap();
+    // Then a verdict that isn't clean: bob unblocked through the client itself, its batch
+    // carrying the cursor before the first settling page. Bob is marked as of the first
+    // read, though the lists no longer hold him.
+    restored.app_mut().undeny(&w.bob_id()).await.unwrap();
     restored.app_mut().refresh_identity().await.unwrap();
     restored.receive(None).await.unwrap();
     assert_eq!(
@@ -1222,7 +1222,9 @@ async fn test_blocked_return_restore_owed_lost_notice_delivered_after_the_restor
         .release_queued(&w.bob_id())
         .await
         .unwrap();
-    Box::pin(restored.flush()).await.unwrap();
+    // Delivered through the client itself, before the restore's first read: Paykit's flush
+    // would make that read first.
+    Box::pin(restored.app_mut().flush_outbox()).await.unwrap();
     assert!(matches!(
         restored.app().delivery(&msg_id).await.unwrap(),
         Some(pubky_switch_client::app::Delivery::Accepted { .. })

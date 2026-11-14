@@ -1157,6 +1157,7 @@ async fn test_divergent_held_request_shows_held_and_divergent() {
     )
     .await
     .unwrap();
+    crate::common::verdict_unknown(&mut restored).await;
     restored.reconcile().await.unwrap();
     restored.end_reconcile(UserConfirmed::new()).await.unwrap();
     restored.receive(None).await.unwrap();

@@ -2755,7 +2755,9 @@ async fn test_restore_own_unread_record_and_a_blocked_counterparty_both_wait() {
         cancellation_over_a_record_left_unreadable(&w, &mut shop).await;
     drop(shop);
     let mut shop = restored_unreceived(&w, &w.bob, &backup).await;
-    shop.block(&w.carol_id()).await.unwrap();
+    // Blocked through the client itself, before the restore's first read: a Paykit call
+    // that writes would make that read first.
+    shop.app_mut().deny(&w.carol_id()).await.unwrap();
     let alices = w.alice.switch().entries_from(&w.bob_id());
     let carol_before = w.carol.switch().entries_from(&w.bob_id());
     for _ in 0..2 {
@@ -2828,7 +2830,9 @@ async fn test_restore_own_record_found_unreadable_25_days_after_the_restore_wait
     let backup = shop.backup().await.unwrap();
     drop(shop);
     let mut shop = restored_unreceived(&w, &w.bob, &backup).await;
-    shop.block(&w.carol_id()).await.unwrap();
+    // Blocked through the client itself, before the restore's first read: a Paykit call
+    // that writes would make that read first.
+    shop.app_mut().deny(&w.carol_id()).await.unwrap();
     shop.receive(None).await.unwrap();
     assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
     let before = w.carol.switch().entries_from(&w.bob_id());

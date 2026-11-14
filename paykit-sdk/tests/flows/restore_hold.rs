@@ -12,9 +12,11 @@ use paykit_sdk::{
 use pubky_switch_client::app::UserConfirmed;
 use pubky_switch_client::clock::Clock;
 
-use crate::common::{draft, request_from, store, World, HOUR_MS};
+use crate::common::{draft, request_from, store, verdict_unknown, World, HOUR_MS};
 use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
 
+/// `backup` restored as one that isn't clean ([`verdict_unknown`]), reconciled, and out of
+/// reconcile mode.
 async fn restored(w: &World, backup: &PaykitBackup) -> Paykit {
     let mut app = Paykit::restore(
         w.env(&w.alice, store()),
@@ -25,6 +27,7 @@ async fn restored(w: &World, backup: &PaykitBackup) -> Paykit {
     )
     .await
     .unwrap();
+    verdict_unknown(&mut app).await;
     app.reconcile().await.unwrap();
     app.end_reconcile(UserConfirmed::new()).await.unwrap();
     app
@@ -104,6 +107,7 @@ async fn test_restore_hold_asks_sent_when_reconcile_mode_ends_without_reconcilin
     )
     .await
     .unwrap();
+    verdict_unknown(&mut app).await;
     // The host ends reconcile mode at once: the counterparty is still asked to re-send,
     // once (Paykit spec 7.2).
     app.end_reconcile(UserConfirmed::new()).await.unwrap();
@@ -343,7 +347,12 @@ async fn test_restore_hold_stop_kept_before_the_backup_stops_after_it() {
     refuse_writes(&w, 4);
     let _ = wallet.receive(None).await;
     assert_eq!(wallet.app().protocol_scan(b"kc/").await.unwrap().len(), 1);
-    let mut app = restored_from(&w, wallet).await;
+    // Clean or not, the stop goes with the backup: the restored app reads first and
+    // reconciles, as Paykit has it do at its first call.
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut app = restored_bare(&w, &backup).await;
+    reconciled(&mut app).await;
     let refused = app.pay_request(&request, confirmed()).await.unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
     app.receive(None).await.unwrap();
@@ -1570,25 +1579,26 @@ async fn test_restore_clean_keeps_the_hold_its_backup_held() {
 }
 
 #[tokio::test]
-async fn test_restore_held_cursor_asks_wait_for_the_verdict() {
-    // A host that reconciles before its first read asks nothing yet: the restore's asks wait
-    // for the verdict. The first page then shows the restore clean, and nothing is asked for
-    // it at all.
+async fn test_restore_held_cursor_reconcile_that_cannot_read_first_asks_nothing() {
+    // A reconcile right after the restore whose first read fails is refused before it
+    // writes or asks anything: the verdict stays open, and no re-send is asked. The next
+    // reconcile reads first, the held cursor shows the restore clean, and nothing is asked
+    // for it at all.
     let w = World::new();
     let (mut shop, [first, _], backup, ..) = backed_up_with_requests(&w).await;
-    let mut app = Paykit::restore(
-        w.env(&w.alice, store()),
-        PaykitConfig::default(),
-        &backup,
-        Arc::clone(&w.rail) as Arc<dyn Rail>,
-        w.timer(),
-    )
-    .await
-    .unwrap();
-    app.app_mut().refresh_identity().await.unwrap();
-    app.reconcile().await.unwrap();
+    let mut app = restored_bare(&w, &backup).await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/feed".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    assert!(app.reconcile().await.is_err());
+    assert_eq!(app.app().restore_held_cursor(), None);
+    assert_eq!(restore_verdict(&app).await, "open");
     assert_eq!(shop.receive(None).await.unwrap().resends, 0);
-    app.receive(None).await.unwrap();
+    app.reconcile().await.unwrap();
     assert_eq!(app.app().restore_held_cursor(), Some(HeldCursor::Clean));
     assert_eq!(restore_verdict(&app).await, "clean");
     app.end_reconcile(UserConfirmed::new()).await.unwrap();
@@ -1599,24 +1609,84 @@ async fn test_restore_held_cursor_asks_wait_for_the_verdict() {
     assert!(!view.manual_only, "{view:?}");
 }
 
-#[tokio::test]
-async fn test_restore_held_cursor_reconcile_ended_before_a_verdict_holds_as_before() {
-    // A host that ends reconcile mode before its first read: the client may keep no verdict
-    // after that, so the restore counts as not clean, and asks.
-    let w = World::new();
-    let (mut shop, [first, _], backup, ..) = backed_up_with_requests(&w).await;
-    let mut app = Paykit::restore(
+/// `backup` restored on a fresh store, the host making no other call first.
+async fn restored_bare(w: &World, backup: &PaykitBackup) -> Paykit {
+    Paykit::restore(
         w.env(&w.alice, store()),
         PaykitConfig::default(),
-        &backup,
+        backup,
         Arc::clone(&w.rail) as Arc<dyn Rail>,
         w.timer(),
     )
     .await
-    .unwrap();
-    app.app_mut().refresh_identity().await.unwrap();
-    reconciled(&mut app).await;
-    assert_eq!(restore_verdict(&app).await, "not_clean");
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_restore_clean_reconcile_right_after_the_restore_reads_first() {
+    // The host reconciles right after the restore, with no refresh or receive of its own:
+    // Paykit makes the first read first, so the held cursor judges the restore clean, and
+    // the host's next receive gets that read's summary.
+    let w = World::new();
+    let (mut shop, [first, second], backup, ..) = backed_up_with_requests(&w).await;
+    let mut app = restored_bare(&w, &backup).await;
+    app.reconcile().await.unwrap();
+    assert_eq!(app.app().restore_held_cursor(), Some(HeldCursor::Clean));
+    assert_eq!(restore_verdict(&app).await, "clean");
+    let handed = app.receive(None).await.unwrap();
+    assert_eq!(
+        handed.report.held_cursor,
+        Some(HeldCursor::Clean),
+        "{handed:?}"
+    );
+    app.end_reconcile(UserConfirmed::new()).await.unwrap();
+    for request in [&first, &second] {
+        let view = app.request(request).await.unwrap();
+        assert_eq!(view.status, RequestStatus::Open, "{view:?}");
+        assert!(!view.manual_only, "{view:?}");
+    }
     app.receive(None).await.unwrap();
+    assert_eq!(shop.receive(None).await.unwrap().resends, 0);
+}
+
+#[tokio::test]
+async fn test_restore_clean_write_right_after_the_restore_reads_first() {
+    // The host's first call after the restore writes: Paykit makes the first read before
+    // the write, so the write's cursor move comes after the page that judges the restore
+    // clean.
+    let w = World::new();
+    let (mut shop, [first, second], backup, ..) = backed_up_with_requests(&w).await;
+    let mut app = restored_bare(&w, &backup).await;
+    app.reject_request(&second, None).await.unwrap();
+    assert_eq!(app.app().restore_held_cursor(), Some(HeldCursor::Clean));
+    assert_eq!(restore_verdict(&app).await, "clean");
+    reconciled(&mut app).await;
+    let view = app.request(&first).await.unwrap();
+    assert_eq!(view.status, RequestStatus::Open, "{view:?}");
+    assert!(!view.manual_only, "{view:?}");
+    assert_eq!(
+        app.request(&second).await.unwrap().status,
+        RequestStatus::Rejected
+    );
+    app.receive(None).await.unwrap();
+    assert_eq!(shop.receive(None).await.unwrap().resends, 0);
+}
+
+#[tokio::test]
+async fn test_restore_held_cursor_ahead_reconcile_right_after_the_restore_holds() {
+    // The first read Paykit makes for a reconcile right after the restore shows the cursor
+    // ahead: the restore holds as one that isn't clean.
+    let w = World::new();
+    let (mut shop, [first, _], backup, id, position) = backed_up_with_requests(&w).await;
+    w.alice.switch().set_held_cursor(&id, position + 4);
+    let mut app = restored_bare(&w, &backup).await;
+    app.reconcile().await.unwrap();
+    assert!(matches!(
+        app.app().restore_held_cursor(),
+        Some(HeldCursor::Ahead { .. })
+    ));
+    app.end_reconcile(UserConfirmed::new()).await.unwrap();
+    assert_eq!(restore_verdict(&app).await, "not_clean");
     assert_held_as_before(&mut app, &mut shop, &first).await;
+    assert!(w.rail.all_executions().is_empty());
 }

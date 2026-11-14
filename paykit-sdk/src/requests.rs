@@ -612,6 +612,7 @@ impl Paykit {
     /// host that retries after one reads [`Paykit::payee_activity`] after its next write
     /// first.
     pub async fn send_request(&mut self, to: [u8; 32], draft: RequestDraft) -> Result<SentRequest> {
+        Box::pin(self.verdict_before_writing()).await?;
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.send_request_inner(to, draft)).await
     }
@@ -841,6 +842,7 @@ impl Paykit {
     /// Payment List, or an endpoint of it, that this app didn't offer the payer, while it
     /// keeps the offer; the rail's errors.
     pub async fn verify_payment(&mut self, record: &[u8; 32]) -> Result<Option<u64>> {
+        Box::pin(self.verdict_before_writing()).await?;
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.verify_payment_inner(record)).await
     }
@@ -1053,6 +1055,7 @@ impl Paykit {
         record: &[u8; 32],
         details: ReceiptDetails,
     ) -> Result<Option<String>> {
+        Box::pin(self.verdict_before_writing()).await?;
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.confirm_payment_with_inner(record, details)).await
     }
@@ -1129,6 +1132,7 @@ impl Paykit {
         record: &[u8; 32],
         reason: Option<String>,
     ) -> Result<String> {
+        Box::pin(self.verdict_before_writing()).await?;
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.cancel_sent_request_inner(record, reason)).await
     }
@@ -1805,6 +1809,7 @@ impl Paykit {
         request: &RequestRef,
         reason: Option<String>,
     ) -> Result<String> {
+        Box::pin(self.verdict_before_writing()).await?;
         self.refresh_own()?;
         self.records_known().await?;
         // The answer's future goes on the heap, as `receive`'s does: it nests deep.
@@ -1833,6 +1838,7 @@ impl Paykit {
         request: &RequestRef,
         reason: Option<String>,
     ) -> Result<String> {
+        Box::pin(self.verdict_before_writing()).await?;
         self.refresh_own()?;
         self.records_known().await?;
         // The answer's future goes on the heap, as `receive`'s does: it nests deep.
@@ -1890,6 +1896,7 @@ impl Paykit {
         request: &RequestRef,
         options: AcceptOptions,
     ) -> Result<SentMessage> {
+        Box::pin(self.verdict_before_writing()).await?;
         self.refresh_own()?;
         self.records_known().await?;
         // The answer's future goes on the heap, as `receive`'s does: it nests deep.

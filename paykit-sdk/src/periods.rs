@@ -413,6 +413,7 @@ impl Paykit {
         record: &[u8; 32],
         details: PeriodDetails,
     ) -> Result<SentMessage> {
+        Box::pin(self.verdict_before_writing()).await?;
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.send_period_details_inner(record, details)).await
     }

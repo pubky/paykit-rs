@@ -1466,7 +1466,7 @@ async fn answer_held(held: Held, answer: Answer, between: Between) {
         Between::Restore => {
             let backup = wallet.backup().await.unwrap();
             drop(wallet);
-            Paykit::restore(
+            let mut restored = Paykit::restore(
                 w.env(&w.alice, store()),
                 PaykitConfig::default(),
                 &backup,
@@ -1474,7 +1474,17 @@ async fn answer_held(held: Held, answer: Answer, between: Between) {
                 w.timer(),
             )
             .await
-            .unwrap()
+            .unwrap();
+            // Not clean, its first read settling that with the identity confirmed. That
+            // verdict brings two more reads of the lists in the same receive: while the copy
+            // isn't known, they fail too.
+            crate::common::verdict_unknown(&mut restored).await;
+            restored.app_mut().refresh_identity().await.unwrap();
+            if let Held::Unknown = held {
+                fail_list_read(&w);
+                fail_list_read(&w);
+            }
+            restored
         }
     };
     for _ in 0..2 {
