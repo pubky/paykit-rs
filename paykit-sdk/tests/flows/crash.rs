@@ -166,11 +166,11 @@ async fn test_crash_before_every_commit_pays_once() {
     assert!(n > 3, "the payment commits at several points: {n}");
 }
 
-/// Pay January of a subscription with the wallet's store stopping at `fault`, reload and
-/// resume. Returns whether the fault was hit. The period is paid once, its claim settled
-/// once, the request record lists it, and the payee credits the period (Paykit spec 7.2,
-/// 8.2).
-async fn crash_and_resume_a_period(fault: Fault) -> bool {
+/// Pay January of a subscription as `by` decided, with the wallet's store stopping at
+/// `fault`, reload, resume, and pay it again the same way if nothing did. Returns whether the
+/// fault was hit. The period is paid once, its claim settled once, the request record lists
+/// it, and the payee credits the period (Paykit spec 7.2, 8.2).
+async fn crash_and_resume_a_period(fault: Fault, by: Initiator) -> bool {
     let w = World::new();
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
@@ -188,7 +188,7 @@ async fn crash_and_resume_a_period(fault: Fault) -> bool {
     )
     .await;
     let first = crashing
-        .pay_period(&request, &january, Initiator::User, PayOptions::default())
+        .pay_period(&request, &january, by, PayOptions::default())
         .await;
     let hit = faulty.stopped();
     drop(crashing);
@@ -205,7 +205,7 @@ async fn crash_and_resume_a_period(fault: Fault) -> bool {
     let paid = |view: &paykit_sdk::RequestView| view.periods.first().is_some_and(|p| p.paid);
     if !paid(&wallet.request(&request).await.unwrap()) {
         let again = wallet
-            .pay_period(&request, &january, Initiator::User, PayOptions::default())
+            .pay_period(&request, &january, by, PayOptions::default())
             .await;
         assert!(
             matches!(again, Ok(PayOutcome::Paid { .. })),
@@ -246,10 +246,24 @@ async fn crash_and_resume_a_period(fault: Fault) -> bool {
 
 #[tokio::test]
 async fn test_crash_at_every_commit_of_a_periods_payment_pays_it_once() {
-    let points = every_commit(crash_and_resume_a_period).await;
+    let points = every_commit(|fault| crash_and_resume_a_period(fault, Initiator::User)).await;
     assert!(
         points > 3,
         "a period's payment commits at several points: {points}"
+    );
+}
+
+#[tokio::test]
+async fn test_crash_at_every_commit_of_a_periods_payment_by_policy_pays_it_once() {
+    // The batch of a payment by policy also creates the period record, beside the attempt
+    // and the request record's `attempted_periods` write (Paykit spec 8.2, "Paying
+    // periods"): a crash at any commit leaves the period paid once.
+    let points =
+        every_commit(|fault| Box::pin(crash_and_resume_a_period(fault, Initiator::Automatic)))
+            .await;
+    assert!(
+        points > 3,
+        "a period's payment by policy commits at several points: {points}"
     );
 }
 
