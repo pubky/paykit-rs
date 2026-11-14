@@ -541,7 +541,12 @@ async fn test_local_state_queued_ask_of_another_sender_sends_nothing() {
     let mut wallet = w.wallet("wallet").await;
     let _shop = w.shop().await;
     let key = format!("ask/{}/{:020}", b64(&[7u8; 32]), 5);
-    let ask = json!({ "sender": b64(&w.bob_id()), "from_ms": 5, "until_ms": null });
+    let ask = json!({
+        "sender": b64(&w.bob_id()),
+        "from_ms": 5,
+        "until_ms": null,
+        "queued": null,
+    });
     put(&mut wallet, &key, &kept(ask)).await;
     refused_keeping(&mut wallet, &key).await;
 }

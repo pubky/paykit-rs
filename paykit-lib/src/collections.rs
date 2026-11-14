@@ -26,16 +26,19 @@ pub enum Collection {
     Allowances,
     /// `allowance_ledgers`: one ledger per Allowance.
     AllowanceLedgers,
+    /// `block_floor`: one record, the identity's block floor (Paykit wire 5.6).
+    BlockFloor,
 }
 
 impl Collection {
     /// Every collection.
-    pub const ALL: [Collection; 5] = [
+    pub const ALL: [Collection; 6] = [
         Self::PayerActivity,
         Self::PayeeActivity,
         Self::PaymentLists,
         Self::Allowances,
         Self::AllowanceLedgers,
+        Self::BlockFloor,
     ];
 
     /// The collection's name.
@@ -46,6 +49,7 @@ impl Collection {
             Self::PaymentLists => "payment_lists",
             Self::Allowances => "allowances",
             Self::AllowanceLedgers => "allowance_ledgers",
+            Self::BlockFloor => "block_floor",
         }
     }
 
@@ -57,7 +61,9 @@ impl Collection {
     /// The collection's fixed policy (Paykit wire 5.1).
     pub fn fixed_policy(self) -> Policy {
         match self {
-            Self::PayerActivity | Self::PaymentLists => Policy::new("pay", &["pay"]),
+            Self::PayerActivity | Self::PaymentLists | Self::BlockFloor => {
+                Policy::new("pay", &["pay"])
+            }
             Self::PayeeActivity => Policy::new("request", &["request"]),
             Self::Allowances => Policy::new("allowance", &["allowance"]),
             Self::AllowanceLedgers => Policy::new("allowance", &["allowance_execute"]),
@@ -125,6 +131,10 @@ mod tests {
         assert_eq!(
             Collection::AllowanceLedgers.fixed_policy(),
             Policy::new("allowance", &["allowance_execute"])
+        );
+        assert_eq!(
+            Collection::BlockFloor.fixed_policy(),
+            Policy::new("pay", &["pay"])
         );
         for c in Collection::ALL {
             assert_eq!(Collection::from_name(c.name()), Some(c));

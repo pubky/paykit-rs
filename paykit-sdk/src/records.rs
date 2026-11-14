@@ -202,19 +202,23 @@ impl Paykit {
         stored: StoredMessage,
         conditions: Vec<Condition>,
     ) -> Result<Option<(Vec<Condition>, OpKind)>> {
-        self.placed_write_as(target, counterparty, role, stored, conditions, false)
+        self.placed_write_with(target, counterparty, role, stored, conditions, false, false)
             .await
     }
 
-    /// [`Paykit::placed_write`], or, when `reflect_only`, the write that reflects `stored`
-    /// by its `msg_id` alone, leaving every role as it is ([`activity::reflect`]).
-    pub(crate) async fn placed_write_as(
+    /// [`Paykit::placed_write`], setting `manual_only` (Paykit wire 5.3) on a record it opens
+    /// when `manual_only`: a one-time request that came back after the user's block
+    /// (`receive.rs`); and, when `reflect_only`, the write that reflects `stored` by its
+    /// `msg_id` alone, leaving every role as it is ([`activity::reflect`]).
+    #[allow(clippy::too_many_arguments)] // the write's target and message, and its two flags
+    pub(crate) async fn placed_write_with(
         &mut self,
         target: &ActivityTarget,
         counterparty: [u8; 32],
         role: Role,
         stored: StoredMessage,
         conditions: Vec<Condition>,
+        manual_only: bool,
         reflect_only: bool,
     ) -> Result<Option<(Vec<Condition>, OpKind)>> {
         let own = self.identity();
@@ -227,8 +231,9 @@ impl Paykit {
             Box::pin(self.pause_of(seen)).await?;
         }
         let current = held.as_ref().and_then(|r| r.content.value());
-        let mut record = activity::read(current, &own, side)
-            .unwrap_or_else(|| activity::empty(side, counterparty));
+        let held_record = activity::read(current, &own, side);
+        let opens = held_record.is_none();
+        let mut record = held_record.unwrap_or_else(|| activity::empty(side, counterparty));
         let placed = if reflect_only {
             activity::reflect(&mut record, &stored)
         } else {
@@ -236,6 +241,9 @@ impl Paykit {
         };
         if !placed {
             return Ok(None);
+        }
+        if manual_only && opens {
+            record.manual_only = true;
         }
         let value = record.to_json()?;
         Ok(Some(

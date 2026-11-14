@@ -4,7 +4,10 @@
 //!
 //! A notice is raised once per attempt and kind, or per message given up: raising it again,
 //! as a re-sent receipt or a
-//! later resume would, changes nothing, and an acknowledged one stays acknowledged.
+//! later resume would, changes nothing, and an acknowledged one stays acknowledged. A notice
+//! that messages a block dropped can no longer come back is kept per window: per
+//! counterparty and the window's earliest acceptance time, which its key names; it is
+//! deleted at its acknowledgement.
 
 use paykit_lib::AttemptId;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
@@ -58,6 +61,13 @@ pub enum NoticeKind {
     /// confirmed write lacks it: it was never sent, the request may be paid or accepted
     /// again, and the user may answer it again.
     MessageGivenUp,
+    /// Messages a blocked counterparty's inbox accepted from
+    /// [`Notice::lost_from_ms`] to [`Notice::lost_until_ms`], which the app dropped for the
+    /// user's block to ask for again once the counterparty is unblocked, can no longer come
+    /// back: its sender keeps them no longer, or the bound on marks dropped this one (Paykit
+    /// spec 8.1, "Blocked counterparties"). The app never kept them, so the notice holds no
+    /// content: a payment among them shows only in the payment method.
+    BlockedMessagesLost,
 }
 
 impl NoticeKind {
@@ -67,6 +77,7 @@ impl NoticeKind {
             Self::PaidAfterFailed => "paid_after_failed",
             Self::HeldWithoutPay => "held_without_pay",
             Self::MessageGivenUp => "given_up",
+            Self::BlockedMessagesLost => "blocked_lost",
         }
     }
 
@@ -76,6 +87,7 @@ impl NoticeKind {
             "paid_after_failed" => Some(Self::PaidAfterFailed),
             "held_without_pay" => Some(Self::HeldWithoutPay),
             "given_up" => Some(Self::MessageGivenUp),
+            "blocked_lost" => Some(Self::BlockedMessagesLost),
             _ => None,
         }
     }
@@ -101,10 +113,17 @@ pub struct Notice {
     /// When it was raised, in Unix milliseconds: the highest service time the app had
     /// verified then, 0 before any.
     pub raised_at_ms: u64,
+    /// For [`NoticeKind::BlockedMessagesLost`]: the earliest acceptance time of what can no
+    /// longer come back.
+    pub lost_from_ms: Option<u64>,
+    /// For [`NoticeKind::BlockedMessagesLost`]: the latest such time.
+    pub lost_until_ms: Option<u64>,
 }
 
-/// A notice as kept (`p/nt/<attempt_id>/<kind>`, or `p/nt/<sender>/<msg_id>` for a message
-/// given up): what its key names repeats in it, so a restore binds the value to its key.
+/// A notice as kept (`p/nt/<attempt_id>/<kind>`, `p/nt/<sender>/<msg_id>` for a message
+/// given up, or `p/nt/<counterparty>/lost-<from_ms>` for a window of messages a block
+/// dropped that can no longer come back, `from_ms` its earliest acceptance time, zero-padded
+/// to 20 digits): what its key names repeats in it, so a restore binds the value to its key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct KeptNotice {
     pub(crate) kind: NoticeKind,
@@ -123,6 +142,10 @@ pub(crate) struct KeptNotice {
     /// its entry's handle (`stored`), as every notice the stored entries raise is kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) origin: Option<GivenUpOrigin>,
+    /// For messages a blocked counterparty sent that can no longer come back: their window
+    /// of acceptance times, earliest and latest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) lost: Option<(u64, u64)>,
 }
 
 /// Where a message given up with no entry stored came from: no entry, so no handle.
@@ -182,6 +205,7 @@ impl KeptNotice {
             acknowledged: false,
             stored: None,
             origin: None,
+            lost: None,
         }
     }
 
@@ -203,6 +227,7 @@ impl KeptNotice {
             acknowledged: false,
             stored: None,
             origin: None,
+            lost: None,
         }
     }
 
@@ -229,6 +254,7 @@ impl KeptNotice {
             acknowledged: false,
             stored,
             origin,
+            lost: None,
         }
     }
 
@@ -248,10 +274,49 @@ impl KeptNotice {
             || self.msg_id.is_some()
             || self.stored.is_some()
             || self.origin.is_some()
+            || self.lost.is_some()
         {
             return Err(PaykitError::corrupt());
         }
         self.check_hash()
+    }
+
+    /// The notice that what `counterparty`'s inbox accepted from `from` to `until`, dropped
+    /// for the user's block, can no longer come back, raised at `at`.
+    pub(crate) fn blocked_lost(counterparty: [u8; 32], from: u64, until: u64, at: u64) -> Self {
+        Self {
+            kind: NoticeKind::BlockedMessagesLost,
+            attempt_id: None,
+            msg_id: None,
+            counterparty,
+            request_hash: None,
+            raised_at_ms: at,
+            acknowledged: false,
+            stored: None,
+            origin: None,
+            lost: Some((from, until.max(from))),
+        }
+    }
+
+    /// The notice of lost messages read whole, at the counterparty and start its key names:
+    /// one that doesn't is a corrupt store. It is deleted at its acknowledgement.
+    pub(crate) fn check_lost(&self, counterparty: &[u8; 32], from: u64) -> Result<()> {
+        let window_read = self
+            .lost
+            .is_some_and(|(start, end)| start == from && end >= start);
+        if self.kind != NoticeKind::BlockedMessagesLost
+            || self.attempt_id.is_some()
+            || self.msg_id.is_some()
+            || self.request_hash.is_some()
+            || self.counterparty != *counterparty
+            || self.stored.is_some()
+            || self.origin.is_some()
+            || !window_read
+            || self.acknowledged
+        {
+            return Err(PaykitError::corrupt());
+        }
+        Ok(())
     }
 
     /// The notice of a message given up read whole, at the sender and `msg_id` its key
@@ -266,6 +331,7 @@ impl KeptNotice {
             || self.msg_id.as_deref() != Some(msg_id)
             || self.counterparty != *sender
             || self.stored.is_some() == self.origin.is_some()
+            || self.lost.is_some()
             || self.acknowledged
         {
             return Err(PaykitError::corrupt());
@@ -302,6 +368,8 @@ impl KeptNotice {
             counterparty: self.counterparty,
             request_hash,
             raised_at_ms: self.raised_at_ms,
+            lost_from_ms: self.lost.map(|(from, _)| from),
+            lost_until_ms: self.lost.map(|(_, until)| until),
         })
     }
 }
@@ -312,6 +380,10 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
     match StateKey::parse(key.as_bytes()) {
         Some(StateKey::Notice { attempt, kind }) => notice.check(&attempt, kind),
         Some(StateKey::MessageNotice { sender, msg_id }) => notice.check_message(&sender, &msg_id),
+        Some(StateKey::BlockedLost {
+            counterparty,
+            from_ms,
+        }) => notice.check_lost(&counterparty, from_ms),
         _ => Err(PaykitError::corrupt()),
     }
 }
@@ -350,7 +422,11 @@ impl Paykit {
         let key = format!("{}{id}", key::NOTICES);
         if !matches!(
             StateKey::parse(key.as_bytes()),
-            Some(StateKey::Notice { .. } | StateKey::MessageNotice { .. })
+            Some(
+                StateKey::Notice { .. }
+                    | StateKey::MessageNotice { .. }
+                    | StateKey::BlockedLost { .. }
+            )
         ) {
             return Err(Refusal::NotFound.into());
         }
@@ -463,6 +539,7 @@ mod tests {
             acknowledged: false,
             stored: None,
             origin: None,
+            lost: None,
         }
     }
 

@@ -2372,6 +2372,132 @@ impl PaymentListRecord {
     }
 }
 
+/// A `block_floor` record value (Paykit wire 5.6): the identity's block floor, the time
+/// before which a one-time request, by its signed `created_at` less the clock tolerance, is
+/// paid only by hand (Paykit spec 8.1, "Blocked counterparties").
+///
+/// Security: the floor only rises. A reader that holds a floor ignores a later write of a
+/// lower one ([`BlockFloorRecord::check_later_write`]), so a writer that lost a raise, or a
+/// service that serves an older write, can't lower it; the highest floor an app has seen is
+/// the one it applies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockFloorRecord {
+    /// The floor, in Unix milliseconds.
+    pub floor_ms: u64,
+    /// The members the writer doesn't know, kept as read (Paykit wire 5).
+    pub unknown: UnknownMembers,
+}
+
+const FLOOR: &str = "Paykit wire 5.6: block_floor";
+
+/// A `block_floor` record value (Paykit wire 5.6).
+static FLOOR_SHAPE: Shape = Shape {
+    name: "block_floor",
+    id: &[],
+    carried: false,
+    members: &[("v", Member::Leaf), ("floor", Member::Leaf)],
+};
+
+#[derive(Serialize)]
+struct FloorOut {
+    v: u64,
+    floor: String,
+}
+
+impl BlockFloorRecord {
+    /// A record of `floor_ms`, built in code.
+    pub fn new(floor_ms: u64) -> Self {
+        Self {
+            floor_ms,
+            unknown: UnknownMembers::default(),
+        }
+    }
+
+    /// Read a `block_floor` value (Paykit wire 5.6).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] naming the rule.
+    pub fn read(json: &[u8]) -> Result<Self> {
+        let map = parse_object(json, FLOOR)?;
+        let obj = Obj::new(&map, FLOOR);
+        check_v1(&obj)?;
+        let floor_ms = obj.req_time("floor")?;
+        let (unknown, _) = UnknownMembers::read(&map, &FLOOR_SHAPE);
+        Ok(Self { floor_ms, unknown })
+    }
+
+    /// The held-to-later rule of the `block_floor` record (Paykit wire 5.6, Switch spec 8.2):
+    /// a reader that holds `self` ignores, and shows with its writer, a later write of a lower
+    /// floor. A later write of the same floor or a higher one is taken.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] naming the rule `later` breaks.
+    pub fn check_later_write(&self, later: &BlockFloorRecord) -> Result<()> {
+        ensure(
+            later.floor_ms >= self.floor_ms,
+            "Paykit wire 5.6: a later write lowers the block floor",
+        )
+    }
+
+    /// The record raised to `to_ms`: the higher of its floor and `to_ms`, the members it
+    /// doesn't know kept. `None` when its floor is already at least `to_ms`, so nothing is
+    /// written.
+    pub fn raised(&self, to_ms: u64) -> Option<Self> {
+        (to_ms > self.floor_ms).then(|| Self {
+            floor_ms: to_ms,
+            unknown: self.unknown.clone(),
+        })
+    }
+
+    /// The record key, with the reader's own naming key (Paykit wire 1.5): `lp(own identity)`
+    /// in `block_floor`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Switch`] if the policy hash can't be computed.
+    pub fn record_key(own: &[u8; 32], naming_key: &NamingKey) -> Result<[u8; 32]> {
+        Collection::BlockFloor.record_key(naming_key, &natural_key::block_floor(own), None)
+    }
+
+    /// The binding rule (Paykit wire 5.6, Switch spec 8.2): read the record at `key` and act
+    /// on it only if it is the key derived from the reader's own identity.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] or [`Error::Switch`]: the reader doesn't act on it and flags it.
+    pub fn bind(
+        json: &[u8],
+        own: &[u8; 32],
+        naming_key: &NamingKey,
+        key: &[u8; 32],
+    ) -> Result<Self> {
+        let record = Self::read(json)?;
+        ensure(
+            &Self::record_key(own, naming_key)? == key,
+            "Paykit wire 5.6: the record isn't at the key derived from the own identity",
+        )?;
+        Ok(record)
+    }
+
+    /// Write the record value, with the members it doesn't know as it read them (Paykit wire
+    /// 5, 5.6).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] if the value can't be written.
+    pub fn to_json(&self) -> Result<Vec<u8>> {
+        let out = FloorOut {
+            v: 1,
+            floor: rfc3339(self.floor_ms),
+        };
+        let json = serde_json::to_vec(&out)
+            .map_err(|_| Error::Invalid(format!("{FLOOR}: can't be written")))?;
+        self.unknown.write_into(json, &FLOOR_SHAPE, &[])
+    }
+}
+
 /// One entry of an Allowance record's grant history (Paykit wire 5.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GrantEntry {
@@ -2996,6 +3122,55 @@ pub fn bind_ledger(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_block_floor_round_trips_and_keeps_unknown_members() {
+        let record = BlockFloorRecord::new(1_700_000_000_123);
+        let json = record.to_json().unwrap();
+        assert_eq!(BlockFloorRecord::read(&json).unwrap(), record);
+        let later =
+            br#"{"v":1,"floor":"2023-11-14T22:13:20.123Z","note":{"by":"a later version"}}"#;
+        let read = BlockFloorRecord::read(later).unwrap();
+        assert_eq!(read.floor_ms, 1_700_000_000_123);
+        let raised = read.raised(1_700_000_000_124).unwrap();
+        let written: Value = serde_json::from_slice(&raised.to_json().unwrap()).unwrap();
+        assert_eq!(written["note"]["by"], "a later version");
+        assert_eq!(written["floor"], "2023-11-14T22:13:20.124Z");
+    }
+
+    #[test]
+    fn test_block_floor_refuses_a_lower_write_and_a_bad_value() {
+        let held = BlockFloorRecord::new(500);
+        assert!(held.check_later_write(&BlockFloorRecord::new(500)).is_ok());
+        assert!(held.check_later_write(&BlockFloorRecord::new(501)).is_ok());
+        assert!(held.check_later_write(&BlockFloorRecord::new(499)).is_err());
+        assert_eq!(held.raised(500), None);
+        assert_eq!(held.raised(400), None);
+        assert_eq!(held.raised(600).map(|r| r.floor_ms), Some(600));
+        for bad in [
+            &br#"{"v":2,"floor":"2023-11-14T22:13:20.123Z"}"#[..],
+            br#"{"v":1}"#,
+            br#"{"v":1,"floor":1700000000123}"#,
+            br#"[1]"#,
+        ] {
+            assert!(BlockFloorRecord::read(bad).is_err());
+        }
+    }
+
+    #[test]
+    fn test_block_floor_binds_only_at_the_own_key() {
+        let own = [3u8; 32];
+        let nk = NamingKey::from_bytes([7; 32]);
+        let json = BlockFloorRecord::new(9).to_json().unwrap();
+        let key = BlockFloorRecord::record_key(&own, &nk).unwrap();
+        assert!(BlockFloorRecord::bind(&json, &own, &nk, &key).is_ok());
+        let other = BlockFloorRecord::record_key(&[4u8; 32], &nk).unwrap();
+        assert!(BlockFloorRecord::bind(&json, &own, &nk, &other).is_err());
+        let lists = Collection::PaymentLists
+            .record_key(&nk, &natural_key::block_floor(&own), None)
+            .unwrap();
+        assert!(BlockFloorRecord::bind(&json, &own, &nk, &lists).is_err());
+    }
 
     /// A lower-case UUID v4 for `i`.
     fn uuid(i: u64) -> String {

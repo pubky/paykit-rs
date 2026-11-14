@@ -333,6 +333,7 @@ impl Paykit {
                 status: RequestStatus::Unrecorded,
                 divergent: false,
                 receipt: None,
+                manual_only: self.came_back_from_block(&stored).await?,
                 periods: Vec::new(),
             });
         }
@@ -1155,8 +1156,19 @@ impl Paykit {
         if let Some((peer, at)) = peer {
             tx.put(&peer, &at)?;
         }
+        // A one-time request that came back after the user's block opens its record paid only
+        // by hand, as at its first read (`receive.rs`).
+        let manual_only = role == Role::Request && self.came_back_from_block(&stored).await?;
         let Some(entry) = self
-            .placed_write_as(target, sender, role, stored, Vec::new(), reflect_only)
+            .placed_write_with(
+                target,
+                sender,
+                role,
+                stored,
+                Vec::new(),
+                manual_only,
+                reflect_only,
+            )
             .await?
         else {
             self.local_commit(tx).await?;

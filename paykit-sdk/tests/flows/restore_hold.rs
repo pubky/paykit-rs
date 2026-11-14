@@ -56,9 +56,10 @@ async fn test_restore_hold_cancellation_resent_after_the_restore_stops_for_good(
     wallet.receive(None).await.unwrap();
     let mut backup = wallet.backup().await.unwrap();
     // The payee cancels after the backup; the device that got it is lost before it could
-    // write it into the record: its placements are refused.
+    // write it into the record: its placement is refused, the one write its read makes, so
+    // no refusal is left for the restored app's writes.
     cancel(&mut shop, &request).await;
-    for _ in 0..4 {
+    for _ in 0..1 {
         w.alice
             .switch()
             .fail_next(pubky_switch_client::testing::Fault::Error {
@@ -477,14 +478,14 @@ fn missed(w: &World) {
 }
 
 /// Fail Paykit's own listing at the end of the next receive, after a `missed` item: the
-/// client's listing after the item, of the wallet's two collections, goes through first. A
+/// client's listing after the item, of the wallet's three collections, goes through first. A
 /// listing that fails inside the client's read fails the read.
 fn fail_paykit_listing(w: &World) {
     w.alice
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Unreachable {
             path: "records?collection".into(),
-            after: 2,
+            after: 3,
         });
 }
 
