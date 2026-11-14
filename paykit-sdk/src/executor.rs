@@ -65,8 +65,8 @@
 use std::collections::HashMap;
 
 use paykit_lib::allowances::{
-    check_limits, check_successor, compact, record_outcomes, usage, AllowanceTerms, ClaimState,
-    EntryOutcome, Ledger, LedgerEntry,
+    check_limits, check_successor_since, compact, record_outcomes, usage, AllowanceTerms,
+    ClaimState, EntryOutcome, Ledger, LedgerEntry,
 };
 use paykit_lib::bodies::{Body, ExecutorNotice, NoticeReason, PaymentRequest, ProposerRole};
 use paykit_lib::collections::Collection;
@@ -114,15 +114,20 @@ fn not_automatic(why: &str) -> PaykitError {
 
 /// The last ledger version the executor wrote or read with an authenticated version, and
 /// accepted (`lv/<Allowance record key>`, Paykit spec 8.3 "Last ledger version"): its
-/// version, the item hash of its write, and its content, the base the next version is
-/// checked against. The Allowance record it names repeats the key's, so a value read back
-/// is bound to its key.
+/// version, the item hash of its write, the service time it was written at, and its
+/// content, the base the next version is checked against. The Allowance record it names
+/// repeats the key's, so a value read back is bound to its key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct KeptLedger {
     #[serde(with = "serde_b64")]
     pub(crate) record: [u8; 32],
     pub(crate) generation: u64,
     pub(crate) version: u64,
+    /// The service time of the write, from its proof or verified stub, else the latest
+    /// service time verified when it was kept, which is no earlier: a newer version's
+    /// compacted entries are judged from it (Paykit spec 8.3, "From one version to the
+    /// next"), and a later time only judges them more strictly.
+    pub(crate) written_at: u64,
     #[serde(with = "serde_b64")]
     pub(crate) item_hash: [u8; 32],
     #[serde(with = "serde_b64_vec")]
@@ -246,6 +251,80 @@ pub(crate) fn next_ledger(
         return Err("the ledger can't take another entry, even after compaction");
     }
     Ok(ledger)
+}
+
+/// What a ledger's attempts show, as [`Paykit::ledger_claims`] reads them: for usage, and
+/// for the outcomes written into the ledger, which leave out what counts as `done` only
+/// because whether it was paid is unknown.
+#[derive(Default)]
+pub(crate) struct LedgerClaims {
+    /// What each attempt counts by in usage.
+    pub(crate) usage: HashMap<AttemptId, ClaimState>,
+    /// What each attempt's outcome is written from.
+    pub(crate) outcomes: HashMap<AttemptId, ClaimState>,
+}
+
+impl LedgerClaims {
+    fn both(&mut self, attempt: AttemptId, state: ClaimState) {
+        self.usage.insert(attempt, state);
+        self.outcomes.insert(attempt, state);
+    }
+}
+
+/// What a payer record shows of an attempt under an Allowance (Paykit spec 8.3, "`failed`
+/// isn't final").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Evidence {
+    /// The record holds a proof of the attempt naming the Allowance: it was paid.
+    Paid,
+    /// The record reads and holds no proof.
+    NotPaid,
+    /// No copy of the record that reads, or one whose proof is of another attempt.
+    Unknown,
+}
+
+/// What `record`, this app's copy of an attempt's payer record, shows of `attempt` under
+/// `allowance`: a proof is sent only for a payment made, whichever own app made it. The
+/// record holds one proof, so a proof of another attempt or Allowance, such as a retry's,
+/// shows nothing of this one: unknown, not unpaid.
+fn payer_evidence(
+    record: Option<&ActivityRecord>,
+    attempt: &AttemptId,
+    allowance: &AllowanceId,
+) -> Evidence {
+    let Some(record) = record else {
+        return Evidence::Unknown;
+    };
+    let Some(proof) = &record.proof else {
+        return Evidence::NotPaid;
+    };
+    match proof.body() {
+        Body::PaymentProof(proof)
+            if proof.attempt_id == *attempt && proof.allowance_id.as_ref() == Some(allowance) =>
+        {
+            Evidence::Paid
+        }
+        _ => Evidence::Unknown,
+    }
+}
+
+/// What an attempt counts by, for usage and for the outcome written, from what its payer
+/// record shows (`evidence`), for a `failed` entry (`failed`) or one without an outcome,
+/// with its claim gone or not (`claim_gone`) and with or without a journal entry of this
+/// app's (`journaled`) (Paykit spec 8.3, "`failed` isn't final"): paid is `done` for both;
+/// a `failed` entry whose claim is gone, that this app didn't journal, counts as `done`
+/// for usage alone while its record can't be read; anything else changes nothing.
+fn evidence_counts(
+    evidence: Evidence,
+    failed: bool,
+    claim_gone: bool,
+    journaled: bool,
+) -> (Option<ClaimState>, Option<ClaimState>) {
+    match evidence {
+        Evidence::Paid => (Some(ClaimState::Done), Some(ClaimState::Done)),
+        Evidence::Unknown if failed && claim_gone && !journaled => (Some(ClaimState::Done), None),
+        Evidence::Unknown | Evidence::NotPaid => (None, None),
+    }
 }
 
 /// Whether `error` is a failure of this app's own store: every other failure of a ledger
@@ -539,10 +618,17 @@ impl Paykit {
         let Some(op) = self.held_op(ledger_key).await? else {
             return Ok(());
         };
+        // Without any service time verified nothing is kept, as for a write not
+        // authenticated: an older version kept stays the base, which a write built on it or
+        // later still passes.
+        let Some(written_at) = held.written_at_ms.or(self.service_time()) else {
+            return Ok(());
+        };
         let kept = KeptLedger {
             record: *record,
             generation: held.version.generation,
             version: held.version.version,
+            written_at,
             item_hash: op.item_hash().map_err(|_| PaykitError::corrupt())?,
             value: value.to_vec(),
         };
@@ -1150,8 +1236,14 @@ impl Paykit {
                     .written_at_ms
                     .or(self.service_time())
                     .ok_or_else(|| not_automatic("no service time verified"))?;
-                check_successor(&under.terms, held, &ledger, at)
-                    .map_err(|_| not_automatic("the ledger counts less than the version kept"))?;
+                check_successor_since(&under.terms, held, kept.written_at, &ledger, at).map_err(
+                    |error| match error {
+                        paykit_lib::Error::Invalid(why) if why.contains("too many periods") => {
+                            not_automatic("too many periods since the version kept to judge it")
+                        }
+                        _ => not_automatic("the ledger counts less than the version kept"),
+                    },
+                )?;
             }
         }
         ledger
@@ -1203,7 +1295,7 @@ impl Paykit {
             .terms
             .check_payment(amount, &destination.endpoint_id()?, at)
             .map_err(|refused| not_automatic(&format!("the terms refuse it: {refused:?}")))?;
-        let used = usage(&under.terms, &ledger, &claims, at)
+        let used = usage(&under.terms, &ledger, &claims.usage, at)
             .map_err(|_| not_automatic("usage can't be counted"))?;
         check_limits(&under.terms, &used, &amount.value)
             .map_err(|limit| not_automatic(&format!("the {} limit has no room", limit.as_str())))?;
@@ -1217,7 +1309,7 @@ impl Paykit {
         let ledger = next_ledger(
             &under.terms,
             &ledger,
-            &claims,
+            &claims.outcomes,
             at,
             LedgerEntry {
                 obligation,
@@ -1290,38 +1382,111 @@ impl Paykit {
         self.keep_ledger(record, &ledger_key).await
     }
 
-    /// What the claims of `ledger`'s attempts show (Paykit wire 5.5, "Counting" and
-    /// "Outcomes written"), read again for every entry but a `done` one and for every
-    /// compacted failed attempt, so a later `done` over a `failed` is seen. An attempt this
-    /// app's own journal shows paid by its payment method counts as `done` whatever its claim
-    /// shows, as does one whose payee's receipt reached it: money moved, and the receipt may
-    /// come after the claim is gone (Paykit spec 8.3, "`failed` isn't final"). A read that fails is the error:
-    /// never taken as a claim gone, which counts as spent, or as one that releases.
-    async fn ledger_claims(&mut self, ledger: &Ledger) -> Result<HashMap<AttemptId, ClaimState>> {
-        let mut claims = HashMap::new();
-        let open: Vec<([u8; 32], AttemptId)> = ledger
+    /// What the claims, the own journal and the payer records show of `ledger`'s attempts
+    /// (Paykit spec 8.3, "Outcomes in the ledger", "`failed` isn't final"; Paykit wire 5.5,
+    /// "Counting" and "Outcomes written"), read again for every entry but a `done` one and
+    /// for every compacted failed attempt, so a later `done` over a `failed` is seen:
+    ///
+    /// - an attempt this app's own journal shows paid, by its payment method or by the
+    ///   payee's receipt, is `done` whatever its claim shows;
+    /// - otherwise its claim's state, as the claim shows it;
+    /// - a `failed` one, or one without an outcome whose claim shows `failed` or is gone, is
+    ///   `done` when this
+    ///   app's copy of the request's payer record holds a proof of that attempt naming the
+    ///   Allowance, whichever executor made it, also once the claim is gone;
+    /// - and a `failed` one whose claim is gone, with no journal entry of this app's, while
+    ///   that payer record can't be read, counts as `done` for usage alone: whether it was
+    ///   paid is unknown, so it isn't released, and no `done` is written for it.
+    ///
+    /// A read that fails is the error: never taken as a claim gone, which counts as spent,
+    /// or as one that releases.
+    async fn ledger_claims(&mut self, ledger: &Ledger) -> Result<LedgerClaims> {
+        let mut out = LedgerClaims::default();
+        let open: Vec<([u8; 32], AttemptId, Option<EntryOutcome>)> = ledger
             .entries
             .iter()
             .filter(|e| e.outcome != Some(EntryOutcome::Done))
-            .map(|e| (e.obligation, e.attempt_id))
-            .chain(ledger.failed.iter().map(|f| (f.obligation, f.attempt_id)))
+            .map(|e| (e.obligation, e.attempt_id, e.outcome))
+            .chain(
+                ledger
+                    .failed
+                    .iter()
+                    .map(|f| (f.obligation, f.attempt_id, Some(EntryOutcome::Failed))),
+            )
             .collect();
-        for (obligation, attempt_id) in open {
-            let paid = self
-                .journal_entry_on(&attempt_id, &obligation)
-                .await?
-                .is_some_and(|entry| entry.rail_proof.is_some() || entry.receipted);
-            if paid {
-                claims.insert(attempt_id, ClaimState::Done);
+        let mut records: Option<HashMap<[u8; 32], ActivityRecord>> = None;
+        for (obligation, attempt_id, outcome) in open {
+            let journaled = self.journal_entry_on(&attempt_id, &obligation).await?;
+            if journaled
+                .as_ref()
+                .is_some_and(|entry| entry.rail_proof.is_some() || entry.receipted)
+            {
+                out.both(attempt_id, ClaimState::Done);
                 continue;
             }
-            if let Some(read) = self.app.read_claim(&obligation).await? {
-                if let Some(state) = claim_state(&read.view, &attempt_id) {
-                    claims.insert(attempt_id, state);
-                }
+            let shown = match self.app.read_claim(&obligation).await? {
+                Some(read) => claim_state(&read.view, &attempt_id),
+                None => None,
+            };
+            if let Some(state) = shown {
+                out.both(attempt_id, state);
+            }
+            // A `failed` entry, or one without an outcome whose claim shows `failed` or is
+            // gone: its payer record may show it paid all the same.
+            let failed = match outcome {
+                Some(_) => shown != Some(ClaimState::Done),
+                None => matches!(shown, Some(ClaimState::Failed { .. })),
+            };
+            if !failed && !(outcome.is_none() && shown.is_none()) {
+                continue;
+            }
+            if records.is_none() {
+                records = Some(self.payer_records_of(&ledger.counterparty).await?);
+            }
+            let record = records.as_ref().and_then(|r| r.get(&obligation));
+            let evidence = payer_evidence(record, &attempt_id, &ledger.allowance_id);
+            let (counted, written) =
+                evidence_counts(evidence, failed, shown.is_none(), journaled.is_some());
+            if let Some(state) = counted {
+                out.usage.insert(attempt_id, state);
+            }
+            if let Some(state) = written {
+                out.outcomes.insert(attempt_id, state);
             }
         }
-        Ok(claims)
+        Ok(out)
+    }
+
+    /// This app's copies of its payer records of `counterparty`'s one-time requests that
+    /// read, by the obligation of their request: a record that doesn't read, or waits for
+    /// its scope key, isn't among them, so what it holds is unknown.
+    async fn payer_records_of(
+        &self,
+        counterparty: &[u8; 32],
+    ) -> Result<HashMap<[u8; 32], ActivityRecord>> {
+        let own = self.identity();
+        let mut records = HashMap::new();
+        for held in self
+            .app
+            .records_of(Collection::PayerActivity.name())
+            .await?
+        {
+            let Some(record) = crate::activity::read(
+                held.content.value(),
+                &own,
+                paykit_lib::records::ActivitySide::Payer,
+            ) else {
+                continue;
+            };
+            if record.counterparty != *counterparty {
+                continue;
+            }
+            let Some(request) = &record.request else {
+                continue;
+            };
+            records.insert(self.obligation(counterparty, &request.hash(), 0), record);
+        }
+        Ok(records)
     }
 
     /// Whether the journal entry `entry` still decides its ledger entry, so it isn't pruned:
@@ -1525,7 +1690,7 @@ impl Paykit {
             return Ok(());
         };
         let claims = self.ledger_claims(&ledger).await?;
-        let Some(next) = record_outcomes(&under.terms, &ledger, &claims)
+        let Some(next) = record_outcomes(&under.terms, &ledger, &claims.outcomes)
             .map_err(|_| not_automatic("usage can't be counted"))?
         else {
             return Ok(());
@@ -1578,7 +1743,7 @@ impl Paykit {
                 .iter()
                 .filter(|e| {
                     e.outcome.is_none()
-                        && claims.get(&e.attempt_id)
+                        && claims.usage.get(&e.attempt_id)
                             == Some(&ClaimState::Failed { by_owner: false })
                 })
                 .map(|e| ReservedByOtherApp {
@@ -1634,7 +1799,12 @@ impl Paykit {
                 failed: Vec::new(),
                 ..ledger.clone()
             };
-            let shown = self.ledger_claims(&alone).await?.get(&attempt_id).copied();
+            let shown = self
+                .ledger_claims(&alone)
+                .await?
+                .usage
+                .get(&attempt_id)
+                .copied();
             if shown != Some(ClaimState::Failed { by_owner: false }) {
                 return Err(Refusal::Usage(
                     "Paykit spec 8.3: only an attempt another app wrote failed is released".into(),
@@ -2251,6 +2421,7 @@ mod tests {
             record,
             generation: 1,
             version: 7,
+            written_at: 1,
             item_hash: [3; 32],
             value: ledger.to_json().unwrap(),
         }
@@ -2392,6 +2563,61 @@ mod tests {
         let refused =
             next_ledger(&terms(), &base, &claims, NOW, entry(u32::MAX, NOW, None)).unwrap_err();
         assert!(refused.contains("even after compaction"), "{refused}");
+    }
+
+    #[test]
+    fn test_executor_evidence_keeps_an_unknown_failed_attempt_counted() {
+        // Another executor's `failed`, its claim gone and its payer record unreadable: it
+        // stays counted, and nothing is written for it.
+        assert_eq!(
+            evidence_counts(Evidence::Unknown, true, true, false),
+            (Some(ClaimState::Done), None)
+        );
+        // Paid by the record's proof: `done`, written, whoever made it.
+        for (failed, gone, journaled) in [
+            (true, true, false),
+            (true, false, true),
+            (false, true, false),
+        ] {
+            assert_eq!(
+                evidence_counts(Evidence::Paid, failed, gone, journaled),
+                (Some(ClaimState::Done), Some(ClaimState::Done))
+            );
+        }
+        // A record that reads and holds no proof releases it; so does this app's own
+        // journal, which shows it unpaid; and a claim still held decides.
+        assert_eq!(
+            evidence_counts(Evidence::NotPaid, true, true, false),
+            (None, None)
+        );
+        assert_eq!(
+            evidence_counts(Evidence::Unknown, true, true, true),
+            (None, None)
+        );
+        assert_eq!(
+            evidence_counts(Evidence::Unknown, true, false, false),
+            (None, None)
+        );
+        // Without an outcome and its claim gone, the entry counts as spent already.
+        assert_eq!(
+            evidence_counts(Evidence::Unknown, false, true, false),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn test_executor_payer_evidence_needs_a_record_that_reads() {
+        let attempt = AttemptId::from_bytes([4; 16]);
+        let allowance = AllowanceId::parse(ID).unwrap();
+        assert_eq!(
+            payer_evidence(None, &attempt, &allowance),
+            Evidence::Unknown
+        );
+        let record = crate::activity::empty(paykit_lib::records::ActivitySide::Payer, [2; 32]);
+        assert_eq!(
+            payer_evidence(Some(&record), &attempt, &allowance),
+            Evidence::NotPaid
+        );
     }
 
     #[test]

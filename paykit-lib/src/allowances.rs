@@ -32,6 +32,10 @@ pub const ENTRY_WINDOW_MS: u64 = 60_000;
 
 const TERMS: &str = "Paykit wire 4.15: terms";
 
+/// The most anchored periods [`AllowanceTerms::longest_periods`] walks between two
+/// ledger versions: more than ten years of daily periods.
+pub const MAX_PERIODS_JUDGED: usize = 4_000;
+
 /// The per-payment range of Allowance terms (Paykit wire 4.15): inclusive, `minimum` not
 /// above `maximum`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -393,6 +397,46 @@ impl AllowanceTerms {
             longest = longest.max(len);
         }
         Ok(longest)
+    }
+
+    /// The longest period ([`AllowanceTerms::longest_period`]) at every time from `from` to
+    /// `to`, the two in either order, as spans `(first, last, longest)` in time order, each
+    /// from its `first` to its `last` millisecond inclusive (Paykit spec 8.3, "From one
+    /// version to the next"): a ledger version written at `to`, built through writes a
+    /// reader didn't see on one it holds from `from`, may have compacted an entry at any
+    /// time between, by the longest period then.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] for a period outside the times the grammar writes, or more
+    /// anchored periods between the two times than [`MAX_PERIODS_JUDGED`]: the check
+    /// fails closed.
+    pub fn longest_periods(&self, from: u64, to: u64) -> Result<Vec<(u64, u64, u64)>> {
+        let (mut t, to) = (from.min(to), from.max(to));
+        let mut spans = Vec::new();
+        for _ in 0..MAX_PERIODS_JUDGED {
+            let longest = self.longest_period(t)?;
+            let mut next: Option<u64> = None;
+            for limit in &self.period_limits {
+                if let LimitPeriod::Anchored(anchored) = &limit.period {
+                    let ends = anchored.rule().containing(t)?.ends_at;
+                    next = Some(next.map_or(ends, |n| n.min(ends)));
+                }
+            }
+            match next {
+                Some(next) if next <= to => {
+                    spans.push((t, next - 1, longest));
+                    t = next;
+                }
+                _ => {
+                    spans.push((t, to, longest));
+                    return Ok(spans);
+                }
+            }
+        }
+        Err(Error::Invalid(format!(
+            "{TERMS}: too many periods between two ledger versions to judge; it fails closed"
+        )))
     }
 
     /// The `end` of an executor batch's `server_time_in(at, end)` condition (Paykit spec 8.3,
@@ -1372,6 +1416,27 @@ pub fn check_successor(
     newer: &Ledger,
     newer_time: u64,
 ) -> Result<()> {
+    check_successor_since(terms, held, newer_time, newer, newer_time)
+}
+
+/// [`check_successor`] for a reader that holds `held` from service time `held_time`: an
+/// entry may have been compacted by a write the reader didn't see, so it is old enough if
+/// at some time from `held_time` to `newer_time` its `at + longest period + 60 s` was before
+/// that time, by the longest period then ([`AllowanceTerms::longest_periods`]): a monthly
+/// limit's entry compacted in February is accepted when checked in March, and one no write
+/// between could have compacted is refused (Paykit spec 8.3, "From one version to the
+/// next").
+///
+/// # Errors
+///
+/// As [`check_successor`].
+pub fn check_successor_since(
+    terms: &AllowanceTerms,
+    held: &Ledger,
+    held_time: u64,
+    newer: &Ledger,
+    newer_time: u64,
+) -> Result<()> {
     held.check_valid(terms)?;
     newer.check_valid(terms)?;
     let refuse = |why: &str| invalid(format!("Paykit wire 5.5: a newer ledger version {why}"));
@@ -1379,7 +1444,17 @@ pub fn check_successor(
     if newer.counterparty != held.counterparty || newer.allowance_id != held.allowance_id {
         return refuse("is another Allowance's ledger");
     }
-    let longest = terms.longest_period(newer_time)?;
+    // A held time later than the newer write's, such as a fallback time taken when it was
+    // kept, judges at the newer write's time alone.
+    let spans = terms.longest_periods(held_time.min(newer_time), newer_time)?;
+    let compactable = |at: u64| -> Result<bool> {
+        for &(_, last, longest) in &spans {
+            if old_enough(at, longest, last)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
     let (mut into_spent, mut into_count) = (0u128, 0u64);
     for entry in &held.entries {
         if let Some(n) = newer
@@ -1402,7 +1477,7 @@ pub fn check_successor(
             }
             continue;
         }
-        if !old_enough(entry.at, longest, newer_time)? {
+        if !compactable(entry.at)? {
             return refuse("drops an entry before it could be compacted");
         }
         match (
@@ -2187,6 +2262,149 @@ mod tests {
         assert!(compact(&terms, &before, now).unwrap().is_none());
         let used = usage(&terms, &before, &HashMap::new(), now).unwrap();
         assert_eq!(used.periods()[0].count(), 1);
+    }
+
+    /// Terms with a monthly anchored limit from 2026-01-01.
+    fn monthly_terms() -> AllowanceTerms {
+        AllowanceTerms::from_json(&with_limits(json!([{ "amount_limit": "0.05",
+            "payment_count_limit": null,
+            "period": { "anchor": "2026-01-01T00:00:00.000Z", "every": 1, "kind": "anchored",
+                "unit": "month" } }])))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_successor_accepts_a_compaction_by_a_write_between_in_a_shorter_month() {
+        // Held from 2026-02-01; compacted on 2026-02-28 by a write the reader didn't see, by
+        // February's 28 days; the newer write is checked on 2026-03-02, when the longest
+        // period is March's 31 days.
+        let terms = monthly_terms();
+        let held_time = t("2026-02-01T00:00:00.000Z");
+        let held = ledger(vec![entry(
+            1,
+            "0.01",
+            "2026-01-30T10:00:00.000Z",
+            Some(EntryOutcome::Done),
+        )]);
+        let compacted = compact(&terms, &held, t("2026-02-28T20:00:00.000Z"))
+            .unwrap()
+            .unwrap();
+        let newer_time = t("2026-03-02T00:00:00.000Z");
+        // Judged at the newer write's time alone, March's period reads as too early.
+        assert!(check_successor(&terms, &held, &compacted, newer_time).is_err());
+        check_successor_since(&terms, &held, held_time, &compacted, newer_time).unwrap();
+    }
+
+    #[test]
+    fn test_successor_since_refuses_an_entry_no_write_between_could_compact() {
+        // An entry of 2026-02-20 is inside every period from the held version's time to the
+        // newer write's: no honest compaction drops it, whatever month it was checked in.
+        let terms = monthly_terms();
+        let held = ledger(vec![entry(
+            1,
+            "0.01",
+            "2026-02-20T00:00:00.000Z",
+            Some(EntryOutcome::Done),
+        )]);
+        let mut dropped = held.clone();
+        dropped.entries.clear();
+        dropped.spent = Some(Decimal::parse("0.01").unwrap());
+        dropped.count = 1;
+        let error = check_successor_since(
+            &terms,
+            &held,
+            t("2026-02-21T00:00:00.000Z"),
+            &dropped,
+            t("2026-03-15T00:00:00.000Z"),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("before it could be compacted"),
+            "{error}"
+        );
+        // The spans cover every millisecond between, in order.
+        let spans = terms
+            .longest_periods(t("2026-02-21T00:00:00.000Z"), t("2026-03-15T00:00:00.000Z"))
+            .unwrap();
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].1 + 1, spans[1].0);
+        assert_eq!(spans[0].2, 28 * 86_400_000);
+        assert_eq!(spans[1].2, 31 * 86_400_000);
+    }
+
+    #[test]
+    fn test_successor_since_refuses_an_entry_a_longer_current_period_still_counts() {
+        // Held from February; checked on 31 March. February's 28 days are shorter, but an
+        // entry of 2 March was never old enough at any time from its own date: March's
+        // period still counts it.
+        let terms = monthly_terms();
+        let held = ledger(vec![entry(
+            1,
+            "0.01",
+            "2026-03-02T00:00:00.000Z",
+            Some(EntryOutcome::Done),
+        )]);
+        let mut dropped = held.clone();
+        dropped.entries.clear();
+        dropped.spent = Some(Decimal::parse("0.01").unwrap());
+        dropped.count = 1;
+        assert!(check_successor_since(
+            &terms,
+            &held,
+            t("2026-02-01T00:00:00.000Z"),
+            &dropped,
+            t("2026-03-31T00:00:00.000Z"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_successor_since_takes_a_span_up_to_its_last_millisecond() {
+        // February's span ends at 2026-02-28T23:59:59.999Z: an entry exactly old enough
+        // then, by 28 days and 60 s, is accepted; one a millisecond later isn't.
+        let terms = monthly_terms();
+        let last = t("2026-02-28T23:59:59.999Z");
+        let at = last - 28 * 86_400_000 - ENTRY_WINDOW_MS - 1;
+        for (at, accepted) in [(at, true), (at + 1, false)] {
+            let held = ledger(vec![LedgerEntry {
+                at,
+                ..entry(
+                    1,
+                    "0.01",
+                    "2026-01-01T00:00:00.000Z",
+                    Some(EntryOutcome::Done),
+                )
+            }]);
+            let mut dropped = held.clone();
+            dropped.entries.clear();
+            dropped.spent = Some(Decimal::parse("0.01").unwrap());
+            dropped.count = 1;
+            let checked = check_successor_since(
+                &terms,
+                &held,
+                t("2026-02-01T00:00:00.000Z"),
+                &dropped,
+                t("2026-03-02T00:00:00.000Z"),
+            );
+            assert_eq!(checked.is_ok(), accepted, "{at}");
+        }
+    }
+
+    #[test]
+    fn test_longest_periods_fail_closed_past_their_cap() {
+        let terms = AllowanceTerms::from_json(&with_limits(json!([{ "amount_limit": "0.05",
+            "payment_count_limit": null,
+            "period": { "anchor": "2026-01-01T00:00:00.000Z", "every": 1, "kind": "anchored",
+                "unit": "day" } }])))
+        .unwrap();
+        let from = t("2026-01-01T00:00:00.000Z");
+        let days = u64::try_from(MAX_PERIODS_JUDGED).unwrap();
+        assert!(terms
+            .longest_periods(from, from + (days - 2) * 86_400_000)
+            .is_ok());
+        assert!(terms
+            .longest_periods(from, from + (days + 2) * 86_400_000)
+            .is_err());
     }
 
     #[test]

@@ -552,3 +552,48 @@ async fn test_ledger_release_refused_for_an_attempt_its_journal_shows_paid() {
         "{refused:?}"
     );
 }
+
+#[tokio::test]
+async fn test_ledger_outcome_done_from_a_previous_executors_proof() {
+    // The executor's method reports a dispatch failed, so `failed` goes on the claim and
+    // into the entry. The user hands off to a new executor; the previous one's history
+    // then shows the payment made, and it records its proof in the payer record, the
+    // ledger no longer its to write. The new executor writes `done` over the `failed` from
+    // the proof naming the Allowance, and the lifetime limit of 2 counts it.
+    let w = World::new();
+    let (mut shop, mut old, record) = set_up(&w, terms_with(json!({}))).await;
+    let first = request(&w, &mut shop, &mut old, "1").await;
+    w.rail.next(paykit_sdk::rail::Behaviour::Fail);
+    let PayOutcome::Failed { attempt_id, .. } =
+        old.pay_under_allowance(&first, &record).await.unwrap()
+    else {
+        panic!("failed");
+    };
+    let mut new = crate::executor::executor_wallet(&w, "wallet2").await;
+    new.receive(None).await.unwrap();
+    new.grant_executor(&record, UserConfirmed::new())
+        .await
+        .unwrap();
+    old.receive(None).await.unwrap();
+    w.rail.complete_after_failure(&attempt_id);
+    let resumed = old.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Paid { .. }]),
+        "{resumed:?}"
+    );
+    // The previous executor wrote no ledger version.
+    assert_eq!(
+        fresh_ledger(&mut new, &record).await.entries[0].outcome,
+        Some(EntryOutcome::Failed)
+    );
+    new.receive(None).await.unwrap();
+    new.resume_payments().await.unwrap();
+    let copied = ledger(&new, &record).await;
+    assert_eq!(copied.entries[0].attempt_id, attempt_id);
+    assert_eq!(copied.entries[0].outcome, Some(EntryOutcome::Done));
+    let second = request(&w, &mut shop, &mut new, "1").await;
+    new.pay_under_allowance(&second, &record).await.unwrap();
+    let third = request(&w, &mut shop, &mut new, "0.1").await;
+    let refused = new.pay_under_allowance(&third, &record).await.unwrap_err();
+    assert!(refused_for(&refused, "lifetime limit"), "{refused:?}");
+}
