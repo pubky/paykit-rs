@@ -23,6 +23,9 @@
 //!   credited once (Paykit spec 8.4).
 //! - a `resend_request` is kept, with the cursor move, for [`crate::Paykit::receive`] to
 //!   answer (Paykit spec 9): answering sends messages, which no batch carries.
+//! - a `private_payment_list_request`, and a proof naming a single-use endpoint of a list
+//!   this app published, mark a newer list owed to the sender, with the cursor move; it is
+//!   sent after the read (`publish.rs`, Paykit spec 8.4).
 //!
 //! The spam rule (Paykit wire 4.1, Switch spec 7) gates every message that would create
 //! state, at an app holding `paykit_contacts`: a request, a list, a cancellation or a proof that no
@@ -190,6 +193,8 @@ pub(crate) fn effect(
             if payee =>
         {
             payer_reply(cx, stored, &scopes, settlement)?;
+            // A proof naming a single-use endpoint of a list this app sent consumes it.
+            crate::publish::note_proof(cx, stored)?;
         }
         Body::PaymentRequestCancellation(_) => {
             let Some(request) = stored.message().refs.first().copied() else {
@@ -293,10 +298,11 @@ pub(crate) fn effect(
         Body::ExecutorNotice(notice) if scopes.iter().any(|s| s == "paykit_allowance_execute") => {
             crate::allowances::notice_effect(cx, notice)?;
         }
-        // A publishing app answers a request naming a used version with its current list
-        // (Paykit spec 8.4, "Publishing"). This SDK publishes no list at all yet, so the
-        // request is taken with no effect; the answer comes with list publishing.
-        Body::PrivatePaymentListRequest(_) => {}
+        // A publishing app answers a request naming a used version, an expired one or none
+        // with a newer list (Paykit spec 8.4, "Publishing"): owed here, sent after the read.
+        Body::PrivatePaymentListRequest(request) if payee => {
+            crate::publish::note_list_request(cx, stored, request)?;
+        }
         _ => {}
     }
     Ok(())
@@ -2601,7 +2607,8 @@ impl Paykit {
 
     /// Block `pubky`: the identity's deny list takes it (`deny.put`, the client's
     /// [`pubky_switch_client::app::App::deny`]), and the copy of the list this app judges
-    /// payments by holds it at once, whatever its age (Paykit spec 8.1). A `deny.put` the
+    /// payments and the Private Payment Lists it sends by holds it at once, whatever its age
+    /// (Paykit spec 8.1, 8.4): `pubky` is sent no list until it is unblocked. A `deny.put` the
     /// client keeps unanswered ([`AppError::Kept`]) counts at once all the same: the copy
     /// holds it, and so does every fresh read of the list before an automatic payment until
     /// the list shows it (`bk/`). A block made through the client directly is seen at the

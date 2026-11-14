@@ -1,11 +1,15 @@
 //! Notices for the host (Paykit spec 7.2): "marked failed, was paid" for a receipt that
-//! arrives once the claim of a payment written `failed` is gone, listed until acknowledged
-//! and kept in backups.
+//! arrives once the claim of a payment written `failed` is gone, and a message a record holds
+//! that was given up undelivered, listed until acknowledged and kept in backups.
 
 use std::sync::Arc;
 
 use paykit_sdk::rail::Behaviour;
-use paykit_sdk::{NoticeKind, PayOptions, PayOutcome, Paykit, PaykitConfig, Rail};
+use paykit_sdk::{
+    AppScopes, NoticeKind, PayOptions, PayOutcome, Paykit, PaykitBackup, PaykitConfig, Rail,
+    ResendSelection,
+};
+use pubky_switch_client::app::{AppEvent, OutgoingMessage, MAX_CARRIED_OUTBOX_BYTES};
 use pubky_switch_client::clock::Clock;
 use pubky_switch_client::testing::Fault;
 use pubky_switch_core::claims::ClaimStatus;
@@ -840,4 +844,222 @@ async fn test_notices_receipt_waiting_for_its_key_never_shown_as_a_store_unavail
         })
         .collect();
     assert!(store_causes.is_empty(), "{store_causes:?}");
+}
+
+#[tokio::test]
+async fn test_notices_list_left_out_of_a_backup_keeps_its_payload() {
+    let w = World::new();
+    // Alice's wallet never admits bob: what he sends her stays queued.
+    w.join(&w.alice, "wallet", AppScopes::new().pay().build().unwrap())
+        .await;
+    let mut shop = w.shop().await;
+    queue_fillers(&w, &mut shop, 60_000, MAX_CARRIED_OUTBOX_BYTES).await;
+    w.clock.advance_ms(1);
+    queue_fillers(&w, &mut shop, 8_000, 100_000).await;
+    w.clock.advance_ms(1);
+    // Queued last and larger than the small ones, the list fits no room left.
+    let mut endpoints = std::collections::BTreeMap::new();
+    endpoints.insert(
+        crate::common::endpoint("btc-bitcoin-p2wpkh"),
+        paykit_sdk::OfferedEndpoint::SingleUse,
+    );
+    endpoints.insert(
+        crate::common::endpoint("btc-lightning-bolt12"),
+        paykit_sdk::OfferedEndpoint::Reusable(
+            paykit_lib::PaymentEndpointPayload::new(&format!("lno1{}", "x".repeat(15_000)))
+                .unwrap(),
+        ),
+    );
+    shop.set_list_endpoints(endpoints).await.unwrap();
+    let published = shop.publish_list_to(&[w.alice_id()]).await.unwrap();
+    let sent = published.sent[0].clone();
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let mut shop = restored_shop(&w, &backup).await;
+    let events = shop.app_mut().unacknowledged_events().await.unwrap();
+    assert!(undelivered(&events, &sent.msg_id), "{events:?}");
+    // The restore gave it up, never accepted by this store: the device the backup came from
+    // may have delivered it, so its single-use payload isn't given back.
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(w.rail.released().is_empty(), "{:?}", w.rail.released());
+}
+
+/// Whether `events` hold the client's word that `msg_id` was given up undelivered.
+fn undelivered(events: &[AppEvent], msg_id: &str) -> bool {
+    events.iter().any(|e| {
+        matches!(e, AppEvent::MessageUndelivered { msg_id: m, resend: false, .. } if m == msg_id)
+    })
+}
+
+/// Bob's shop restored from `backup`, on a store of its own, before any receive.
+async fn restored_shop(w: &World, backup: &PaykitBackup) -> Paykit {
+    Paykit::restore(
+        w.env(&w.bob, store()),
+        PaykitConfig::default(),
+        backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap()
+}
+
+/// Queue, from `shop` to alice, messages of `size` bytes of body each, `total` bytes at
+/// least: each keeps at least its plaintext in the outbox.
+async fn queue_fillers(w: &World, shop: &mut Paykit, size: usize, total: u64) {
+    let mut body = serde_json::Map::new();
+    body.insert("filler".into(), "x".repeat(size).into());
+    let mut queued = 0;
+    while queued <= total {
+        shop.app_mut()
+            .queue(OutgoingMessage::new(
+                w.alice_id(),
+                "test.filler",
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+        queued += size as u64;
+    }
+}
+
+#[tokio::test]
+async fn test_notices_request_left_out_of_a_backup_told_undelivered() {
+    let w = World::new();
+    // Alice's wallet never admits bob: what he sends her stays queued.
+    w.join(&w.alice, "wallet", AppScopes::new().pay().build().unwrap())
+        .await;
+    let mut shop = w.shop().await;
+    // Queued first, large messages fill the outbox past what a backup carries
+    // ([`MAX_CARRIED_OUTBOX_BYTES`]), and smaller ones the room they leave in it.
+    queue_fillers(&w, &mut shop, 60_000, MAX_CARRIED_OUTBOX_BYTES).await;
+    w.clock.advance_ms(1);
+    queue_fillers(&w, &mut shop, 8_000, 100_000).await;
+    w.clock.advance_ms(1);
+    // Queued last and larger than the small ones, the request fits no room left.
+    let mut endpoints = std::collections::BTreeMap::new();
+    endpoints.insert(
+        crate::common::endpoint("btc-lightning-bolt11"),
+        paykit_lib::PaymentEndpointPayload::new(&format!("lnbc1{}", "x".repeat(15_000))).unwrap(),
+    );
+    let large = paykit_sdk::RequestDraft::new(
+        crate::common::btc("1"),
+        paykit_lib::PaymentReference::new("order-1").unwrap(),
+        paykit_lib::bodies::RequestDestination::Endpoints(endpoints),
+    );
+    let sent = shop.send_request(w.alice_id(), large).await.unwrap();
+    let request = sent.request.unwrap();
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    // Queued last, the request is past the outbox the backup carries: the restore gives it
+    // up, never accepted, and tells the protocol.
+    let mut shop = restored_shop(&w, &backup).await;
+    let events = shop.app_mut().unacknowledged_events().await.unwrap();
+    assert!(undelivered(&events, &sent.msg_id), "{events:?}");
+    let got = shop.receive(None).await.unwrap();
+    assert!(got.records_unlisted.is_none(), "{got:?}");
+    // Its record holds it, so the host is told, naming alice and the request.
+    let notices = shop.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, NoticeKind::MessageUndelivered);
+    assert_eq!(notices[0].counterparty, w.alice_id());
+    assert_eq!(notices[0].request_hash, Some(request.request_hash));
+    assert_eq!(notices[0].msg_id.as_deref(), Some(sent.msg_id.as_str()));
+    assert_eq!(notices[0].attempt_id, None);
+    // Taken once: acknowledged, it isn't raised again.
+    shop.acknowledge_notice(&notices[0].id).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(shop.notices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_notices_undelivered_message_held_by_no_record_of_its_own_tells_nothing() {
+    // The wallet's own `resend_request` to bob, which no record holds, is given up
+    // undelivered. Bob's cancellation in the wallet's request record carries that same
+    // `msg_id`: it is bob's message, not the wallet's, so no notice names that record.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    // Bob blocks alice: his switch never admits what she sends.
+    let mut manager = w
+        .join(
+            &w.bob,
+            "manager",
+            AppScopes::new().manage_contacts().build().unwrap(),
+        )
+        .await;
+    manager.app_mut().deny(&w.alice_id()).await.unwrap();
+    let asked = wallet
+        .request_resend(
+            w.bob_id(),
+            ResendSelection::default().with_accepted_from_ms(1),
+        )
+        .await
+        .unwrap();
+    // Bob's cancellation of the request, signed under that `msg_id`.
+    let keys = w.bob.identity().app_keys("shop");
+    let mut cancellation = pubky_switch_core::message::Message::new(
+        "paykit.payment_request_cancellation",
+        pubky_switch_core::message::Sender::of_app(w.bob.identity().public(), &keys),
+        w.alice.identity().public(),
+        w.clock.now_ms(),
+        vec![request.request_hash],
+        serde_json::json!({ "reason": null })
+            .as_object()
+            .cloned()
+            .unwrap(),
+    )
+    .unwrap();
+    cancellation.msg_id = asked.clone();
+    let plaintext = cancellation.sign(&keys).unwrap();
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &plaintext);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        paykit_sdk::RequestStatus::Cancelled
+    );
+    w.clock
+        .advance_ms(pubky_switch_client::app::UNDELIVERABLE_MAX_MS);
+    wallet.flush().await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.notices().await.unwrap().is_empty());
+    let events = wallet.app_mut().unacknowledged_events().await.unwrap();
+    assert!(undelivered(&events, &asked), "{events:?}");
+}
+
+#[tokio::test]
+async fn test_notices_resend_request_undelivered_tells_nothing_and_stays_for_the_host() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    // Bob blocks alice: his switch never admits what she sends.
+    let mut manager = w
+        .join(
+            &w.bob,
+            "manager",
+            AppScopes::new().manage_contacts().build().unwrap(),
+        )
+        .await;
+    manager.app_mut().deny(&w.alice_id()).await.unwrap();
+    let asked = wallet
+        .request_resend(
+            w.bob_id(),
+            ResendSelection::default().with_accepted_from_ms(1),
+        )
+        .await
+        .unwrap();
+    // Given up however few tries confirmed it, past the longest wait (Switch spec 11).
+    w.clock
+        .advance_ms(pubky_switch_client::app::UNDELIVERABLE_MAX_MS);
+    wallet.flush().await.unwrap();
+    wallet.receive(None).await.unwrap();
+    // No record holds a `resend_request`: no notice, and its event stays for the host.
+    assert!(wallet.notices().await.unwrap().is_empty());
+    let events = wallet.app_mut().unacknowledged_events().await.unwrap();
+    assert!(undelivered(&events, &asked), "{events:?}");
+    wallet.receive(None).await.unwrap();
+    let events = wallet.app_mut().unacknowledged_events().await.unwrap();
+    assert!(undelivered(&events, &asked), "{events:?}");
 }

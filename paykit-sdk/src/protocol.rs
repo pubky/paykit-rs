@@ -60,12 +60,8 @@ use crate::records::KeptMessage;
 use crate::state::{self, key, StateKey};
 
 /// The kinds this SDK handles (Paykit wire 4.3): the one-time request flow, recurring
-/// requests' acceptance and period details, payments without a request, the payer's side of
+/// requests' acceptance and period details, payments without a request, both sides of
 /// Private Payment Lists, re-sends, and the Allowance messages with `executor_notice`.
-/// Publishing Private Payment Lists comes later. A `private_payment_list_request` this SDK
-/// receives is taken with no effect: it publishes no list at all yet, so the Publishing
-/// rule's answer to a request naming a used version (Paykit spec 8.4) comes with list
-/// publishing, with that rule's other triggers.
 pub const HANDLED_KINDS: [Kind; 15] = [
     Kind::PaymentRequest,
     Kind::PaymentRequestAcceptance,
@@ -305,7 +301,9 @@ pub const BACKUP_NAME: &str = "paykit";
 /// body, and the `seq` and `msg_id` its key names), and a payee app's records seen (`ar/`,
 /// bound to the payee and app its key names). The rest is the app's own data, read as its
 /// family's and bound to its key (`ask/`, times and counts, `side/`, `en/`, notices `nt/`
-/// and those owed `bl/`, the consent list `ac/`, each entry marked to be confirmed again): a
+/// and those owed `bl/`, the consent list `ac/`, each entry marked to be confirmed again,
+/// and the list published and what was sent each counterparty, `ll`, `lv`, `lp/` and
+/// `rl/`): a
 /// backup carries the app's signing keys, so whoever can write one can sign anything the
 /// app can, and a check of what the app signed guards against corruption only.
 pub(crate) fn restore_paykit_layer(
@@ -328,6 +326,12 @@ pub(crate) fn restore_paykit_layer(
     let mut acknowledged = Vec::new();
     let mut writes = Vec::with_capacity(state.len());
     let mut cursor_time_ms = 0;
+    // The last list version published, and the newest one sent any counterparty: a valid
+    // run keeps the one never below the other (`publish::check_last_version`).
+    let mut last_version = None;
+    let mut newest_sent = None;
+    // Whether the backup holds a list this app published (`ll`, `lv` or `lp/`).
+    let mut published = false;
     for (key, value) in state {
         // The schema is closed: a key no builder of the SDK writes is refused, and every
         // value is read as its family's, bound to what its key names (`state::StateKey`).
@@ -357,6 +361,7 @@ pub(crate) fn restore_paykit_layer(
             | StateKey::MissedUnlisted
             | StateKey::MissedConsents
             | StateKey::PayerPassOwed
+            | StateKey::ListsAwaitHost
             | StateKey::OwnResendOwed
             | StateKey::ListedCert
             | StateKey::Flagged
@@ -561,6 +566,31 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            StateKey::List
+            | StateKey::LastVersion
+            | StateKey::ListRecipient(_)
+            | StateKey::Releases { .. } => {
+                published |= !matches!(family, StateKey::Releases { .. });
+                let value = match crate::publish::check_restored(&key, &value, &binder)
+                    .map_err(|_| unread())?
+                {
+                    crate::publish::Restored::LastVersion(last) => {
+                        last_version = Some(last);
+                        value
+                    }
+                    // Its versions not seen delivered are marked restored: the device the
+                    // backup came from may have delivered them (`publish.rs`, `Fate::Doubtful`).
+                    crate::publish::Restored::Newest { newest, marked } => {
+                        newest_sent = newest_sent.max(Some(newest));
+                        marked
+                    }
+                    crate::publish::Restored::Other => value,
+                };
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            // The notice that lists wait for the host is this restore's own to raise, with `lw`.
+            StateKey::ListsNotice => continue,
             StateKey::MessageNotice { .. }
             | StateKey::Notice { .. }
             | StateKey::BlockedLost { .. } => {
@@ -593,6 +623,8 @@ pub(crate) fn restore_paykit_layer(
         let value = state::encode(&entry).map_err(|_| bad())?;
         writes.push(LocalWrite::Put { key, value });
     }
+    crate::publish::check_last_version(last_version, newest_sent)
+        .map_err(|_| String::from("Paykit's local state in the backup doesn't read"))?;
     if acknowledged
         .iter()
         .any(|attempt| !journaled.contains(attempt))
@@ -637,6 +669,21 @@ pub(crate) fn restore_paykit_layer(
     )
     .map_err(|_| String::from("the restore's block widening can't be written"))?;
     writes.push(widening);
+    // The list and its counterparties are the backup's: a change or a withdrawal made since
+    // is gone, so no list but a withdrawal goes until the host sets its list again
+    // (`publish.rs`), and the host is told once. An app that published none waits for
+    // nothing.
+    if published {
+        let lists = state::local_put(key::LISTS_AWAIT_HOST, &true)
+            .map_err(|_| String::from("the restore's lists mark can't be written"))?;
+        writes.push(lists);
+        let notice = state::local_put(
+            key::LISTS_NOTICE,
+            &KeptNotice::lists_await_host(own, cursor_time_ms),
+        )
+        .map_err(|_| String::from("the restore's lists notice can't be written"))?;
+        writes.push(notice);
+    }
     Ok(writes)
 }
 
@@ -2144,5 +2191,91 @@ mod receive_tests {
             p.record_seen("payer_activity", Some(&seen), Some(b"{}")),
             Some(seen)
         );
+    }
+
+    /// What was sent `[3; 32]`: one version, `version`, published at 1000.
+    fn sent(version: u64) -> crate::publish::Recipient {
+        crate::publish::Recipient {
+            versions: vec![crate::publish::Offered {
+                version,
+                published_at_ms: 1_000,
+                expires_at_ms: 1_000 + crate::LIST_LIFETIME_MS,
+                msg_id: "123e4567-e89b-42d3-a456-426614174000".into(),
+                accepted_at_ms: None,
+                fate: crate::publish::Fate::Pending,
+                endpoints: std::collections::BTreeMap::new(),
+                used: false,
+                asked: false,
+                restored: false,
+            }],
+            ..crate::publish::Recipient::new([3; 32])
+        }
+    }
+
+    /// Restore bob's shop from a layer holding `state`, each value as Paykit keeps it.
+    fn restore_state(state: &[(String, Vec<u8>)]) -> Result<Vec<LocalWrite>, String> {
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
+        let state: Vec<(Vec<u8>, Vec<u8>)> = state
+            .iter()
+            .map(|(k, v)| (k.clone().into_bytes(), v.clone()))
+            .collect();
+        let layer = ProtocolLayer {
+            protocol: "paykit".into(),
+            data: pubky_switch_client::app::encode_local_state(&state),
+        };
+        restore_paykit_layer(Some(&layer), bob.id(), &bob.cert, |_| [0; 32])
+    }
+
+    #[test]
+    fn test_protocol_restore_takes_the_lists_sent_only_at_their_own_key() {
+        let value = state::encode(&sent(1_000)).unwrap();
+        let last = (
+            key::LAST_VERSION.to_owned(),
+            state::encode(&1_000u64).unwrap(),
+        );
+        let writes =
+            restore_state(&[(key::list_recipient(&[3; 32]), value.clone()), last.clone()]).unwrap();
+        assert!(writes.iter().any(|w| matches!(
+            w,
+            LocalWrite::Put { key: k, .. } if *k == key::list_recipient(&[3; 32]).into_bytes()
+        )));
+        assert!(restore_state(&[(key::list_recipient(&[4; 32]), value), last]).is_err());
+    }
+
+    #[test]
+    fn test_protocol_restore_refuses_lists_sent_above_the_last_version() {
+        let at = key::list_recipient(&[3; 32]);
+        let value = state::encode(&sent(1_005)).unwrap();
+        let last = |version: u64| {
+            (
+                key::LAST_VERSION.to_owned(),
+                state::encode(&version).unwrap(),
+            )
+        };
+        assert!(restore_state(&[(at.clone(), value.clone()), last(1_005)]).is_ok());
+        assert!(restore_state(&[(at.clone(), value.clone()), last(1_009)]).is_ok());
+        assert!(restore_state(&[(at.clone(), value.clone()), last(1_004)]).is_err());
+        assert!(restore_state(&[(at, value)]).is_err());
+        assert!(restore_state(&[last(1_004)]).is_ok());
+    }
+
+    #[test]
+    fn test_protocol_restore_refuses_a_list_ask_with_a_msg_id_never_given_out() {
+        let payee = [3; 32];
+        let ask = |msg_id: &str| {
+            let asked = ListAsk {
+                payee,
+                app_id: None,
+                held_version: Some(5),
+                asked_at_ms: 1_000,
+                msg_id: msg_id.to_owned(),
+            };
+            (key::list_ask(&payee, None), state::encode(&asked).unwrap())
+        };
+        let good = "123e4567-e89b-42d3-a456-426614174000";
+        assert!(restore_state(&[ask(good)]).is_ok());
+        assert!(restore_state(&[ask("not-a-msg-id")]).is_err());
+        let (_, value) = ask(good);
+        assert!(restore_state(&[(key::list_ask(&[4; 32], None), value)]).is_err());
     }
 }

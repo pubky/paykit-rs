@@ -7,7 +7,8 @@
 //! by it. A payload `...?amount=<value>` fixes the amount it transfers, as an invoice does.
 //!
 //! It pays the identifiers of [`FAKE_ENDPOINT_IDENTIFIERS`], in that order, unless told
-//! another order or another choice, and keeps every set of candidates it was handed.
+//! another order or another choice, and keeps every set of candidates it was handed. It
+//! issues single-use payloads `bc1qissued<n>`, and keeps those it issued and took back.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -19,7 +20,7 @@ use serde_json::{Map, Value};
 
 use super::{
     CandidateId, EndpointSelection, PaymentEndpointCandidate, ProofCheck, Rail, RailDeclaration,
-    RailError, RailOutcome, RailPaid, RailPayment, Transfer,
+    RailError, RailOutcome, RailPaid, RailPayment, SingleUseIssue, SingleUseRelease, Transfer,
 };
 
 /// A choice of candidates in place of the fake rail's own.
@@ -73,6 +74,10 @@ struct Inner {
     max_fee: Option<paykit_lib::Decimal>,
     next_fees: VecDeque<Option<paykit_lib::Decimal>>,
     selections: Vec<(Vec<PaymentEndpointCandidate>, Option<PaymentAmount>)>,
+    issued: Vec<SingleUseIssue>,
+    issue_fails: bool,
+    released: Vec<SingleUseRelease>,
+    release_fails: bool,
 }
 
 /// An in-memory payment rail shared by payers and payees. Tests only.
@@ -269,6 +274,27 @@ impl FakeRail {
         }
     }
 
+    /// Every single-use payload issued, in order. The payload of the `n`th, from 1, is
+    /// `bc1qissued<n>`.
+    pub fn issued(&self) -> Vec<SingleUseIssue> {
+        self.lock().issued.clone()
+    }
+
+    /// Refuse to issue single-use payloads from now on, or issue them again.
+    pub fn set_issue_fails(&self, fails: bool) {
+        self.lock().issue_fails = fails;
+    }
+
+    /// Every single-use payload taken back, in order, a repeat included.
+    pub fn released(&self) -> Vec<SingleUseRelease> {
+        self.lock().released.clone()
+    }
+
+    /// Fail every release from now on, keeping none, or take them again.
+    pub fn set_release_fails(&self, fails: bool) {
+        self.lock().release_fails = fails;
+    }
+
     /// What a payload fixes: `...?amount=<value>`.
     fn fixed_amount(payload: &str, amount: &PaymentAmount) -> Option<Option<PaymentAmount>> {
         let (_, query) = payload.split_once('?')?;
@@ -444,6 +470,43 @@ impl Rail for FakeRail {
         };
         drop(inner);
         Box::pin(async move { Ok(answer) })
+    }
+
+    fn issue_single_use(
+        &self,
+        issue: SingleUseIssue,
+    ) -> BoxFuture<'_, Result<PaymentEndpointPayload, RailError>> {
+        let answer = {
+            let mut inner = self.lock();
+            if inner.issue_fails {
+                Err(RailError::Unavailable(
+                    "the wallet issues no address now".into(),
+                ))
+            } else {
+                inner.issued.push(issue);
+                PaymentEndpointPayload::new(&format!("bc1qissued{}", inner.issued.len()))
+                    .map_err(|_| RailError::Refused("no payload".into()))
+            }
+        };
+        Box::pin(async move { answer })
+    }
+
+    fn release_single_use(
+        &self,
+        release: SingleUseRelease,
+    ) -> BoxFuture<'_, Result<(), RailError>> {
+        let answer = {
+            let mut inner = self.lock();
+            if inner.release_fails {
+                Err(RailError::Unavailable(
+                    "the wallet takes nothing back now".into(),
+                ))
+            } else {
+                inner.released.push(release);
+                Ok(())
+            }
+        };
+        Box::pin(async move { answer })
     }
 
     fn verify(&self, check: ProofCheck) -> BoxFuture<'_, Result<Option<u64>, RailError>> {

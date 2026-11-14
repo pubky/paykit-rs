@@ -7,9 +7,9 @@
 //!
 //! The flows live in their own modules, each an `impl Paykit` block: receiving
 //! (`receive.rs`), requests and their answers (`requests.rs`), paying (`pay.rs`), destination
-//! checks (`destination.rs`), re-sends (`resend.rs`) and reconciliation (`reconcile.rs`).
-//! Recurring requests' Billing Periods have theirs (`periods.rs`); Allowances and publishing
-//! Private Payment Lists add their own the same way.
+//! checks (`destination.rs`), re-sends (`resend.rs`), reconciliation (`reconcile.rs`) and
+//! publishing Private Payment Lists (`publish.rs`). Recurring requests' Billing Periods have
+//! theirs (`periods.rs`); Allowances add their own the same way.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -70,6 +70,10 @@ pub(crate) fn check_orphan_window(config: &PaykitConfig, rail: &dyn Rail) -> Res
 /// The default number of messages re-sent to one requester identity a day (Paykit spec 9).
 pub const DEFAULT_RESEND_BUDGET: u64 = 500;
 
+/// The default number of newer Private Payment List versions sent to one counterparty in any
+/// 24 hours in answer to its list requests (Paykit spec 8.4).
+pub const DEFAULT_LIST_ANSWERS_PER_DAY: u64 = 4;
+
 /// The integrator's choices for one Paykit App.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -94,6 +98,13 @@ pub struct PaykitConfig {
     pub selling_label: Option<Label>,
     /// How many messages the app re-sends to one requester identity a day (Paykit spec 9).
     pub resend_budget: u64,
+    /// How many newer versions of its Private Payment List the app sends one counterparty in
+    /// any 24 hours in answer to its `private_payment_list_request`s (Paykit spec 8.4),
+    /// whatever they name; one newer version at most answers each version named. Renewals,
+    /// list changes and the answers to proofs don't count. Past it a request gets no answer,
+    /// and the version it named stays unanswered, for the counterparty's next request.
+    /// [`DEFAULT_LIST_ANSWERS_PER_DAY`] by default.
+    pub list_answers_per_day: u64,
 }
 
 impl PaykitConfig {
@@ -143,6 +154,14 @@ impl PaykitConfig {
         self
     }
 
+    /// How many newer list versions the app sends one counterparty in any 24 hours in answer
+    /// to its list requests (Paykit spec 8.4).
+    #[must_use]
+    pub fn with_list_answers_per_day(mut self, list_answers_per_day: u64) -> Self {
+        self.list_answers_per_day = list_answers_per_day;
+        self
+    }
+
     /// The `orphan_after` the app's attempts carry for a rail that declares `declaration`:
     /// the value set, or else the rail's floor ([`orphan_floor_s`]).
     pub fn orphan_after_s_for(&self, declaration: &RailDeclaration) -> u64 {
@@ -159,6 +178,7 @@ impl Default for PaykitConfig {
             fee_caps: BTreeMap::new(),
             selling_label: None,
             resend_budget: DEFAULT_RESEND_BUDGET,
+            list_answers_per_day: DEFAULT_LIST_ANSWERS_PER_DAY,
         }
     }
 }
@@ -240,6 +260,10 @@ pub struct ReceiveSummary {
     /// host is told once ([`crate::NoticeKind::MessageGivenUp`]), and its sender is asked to
     /// send it again once the app holds every key such messages waited for (Paykit spec 8.1).
     pub key_epochs_awaited: Vec<u64>,
+    /// The Private Payment Lists sent after the read: owed by its messages, or renewals due
+    /// (Paykit spec 8.4, Paykit wire 4.13), and those that couldn't be sent, tried again at
+    /// the next receive.
+    pub lists: crate::publish::ListsPublished,
     /// The account is gone at this switch: the client took it as erased (Switch spec 12.7),
     /// a provider loss (Switch spec 12.6). The host tells the user. The app reads nothing
     /// more there, and the SDK acts on nothing by itself: lookups of the identity there fail
@@ -436,6 +460,10 @@ impl Paykit {
         // written under a certificate Paykit refuses.
         if paykit.certificate_refused().is_none() {
             paykit.bound_restored_cursor_time().await?;
+            // A restore that failed after its commit may have left its withdrawals of the
+            // lists its restored outbox carries undone: they go before the host can flush
+            // (`Paykit::withdraw_restored_lists`).
+            Box::pin(paykit.withdraw_restored_lists()).await?;
         }
         // A load keeps nothing as listed under: a certificate the client took since the last
         // listing, a narrower one included, leaves the records unlisted until the next one
@@ -451,6 +479,14 @@ impl Paykit {
     /// key. On an error, neither layer is in the store. The app is in reconcile mode until
     /// [`Paykit::reconcile`] and [`Paykit::end_reconcile`].
     ///
+    /// A publishing app whose backup holds a list it published publishes no Private Payment
+    /// List after the restore until the host sets its list again
+    /// ([`Paykit::set_list_endpoints`]): the backup's list and counterparties may be older
+    /// than what the user changed since. Only a withdrawal goes meanwhile. The host re-applies
+    /// the withdrawals made since the backup first ([`Paykit::withdraw_list_from`]), then sets
+    /// the list; until then [`Paykit::lists_await_host`] reads `true`, and the restore raises
+    /// a [`crate::NoticeKind::ListsAwaitHost`] notice once, which goes when the list is set.
+    ///
     /// # Errors
     ///
     /// [`crate::PaykitError::Lib`] `Validation` for an `orphan_after_s` below the rail's floor
@@ -458,7 +494,10 @@ impl Paykit {
     /// anything is written but a store failure: `InvalidData` for a backup whose certificate
     /// Paykit refuses (Paykit wire 3.1), one without Paykit's layer or one another protocol
     /// made, or a journal with a malformed entry or two open entries for one obligation; a
-    /// store failure.
+    /// store failure. After the commit, a store failure or an alarm from the withdrawals of
+    /// the lists the restored outbox carries: the restored state is in the store then, and
+    /// [`Paykit::load`] makes those withdrawals before it hands the app back, so the host
+    /// loads the app before it flushes.
     pub async fn restore(
         env: AppEnv,
         config: PaykitConfig,
@@ -492,6 +531,12 @@ impl Paykit {
         let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
         paykit.bound_restored_cursor_time().await?;
         paykit.stamp_restore_time().await?;
+        // The backup's lists that may still be in the restored outbox, with endpoints the
+        // user may have removed since, are withdrawn behind it before the host can flush it
+        // (`Paykit::withdraw_restored_lists`); one that doesn't go now goes at a receive.
+        if paykit.certificate_refused().is_none() {
+            Box::pin(paykit.withdraw_restored_lists()).await?;
+        }
         Ok(paykit)
     }
 
@@ -719,11 +764,21 @@ impl Paykit {
         let duties = Box::pin(self.app.unacknowledged_events()).await?;
         let account_gone =
             account_gone(&report.events) || (report.stopped && account_gone(&duties));
-        // The duty events about stored entries and divergent records are taken before
-        // anything returns, so that once the host acknowledges what this report showed none
-        // is lost: only the SDK's own marks and notes are kept here, and nothing is written at
-        // the switch (`stored.rs`, `divergent.rs`).
+        // The duty events about stored entries and divergent records, and about messages a
+        // record holds that were given up undelivered, are taken before anything returns, so
+        // that once the host acknowledges what this report showed none is lost: only the
+        // SDK's own marks, notes and notices are kept here, and nothing is written at the
+        // switch (`stored.rs`, `divergent.rs`).
         Box::pin(self.take_stored_events(&duties)).await?;
+        // Removed from its identity, the app's lists are paid no more (Paykit spec 4): their
+        // single-use payloads go back to the payment method.
+        if report
+            .events
+            .iter()
+            .any(|event| matches!(event, AppEvent::Removed))
+        {
+            Box::pin(self.tend_lists(true, &duties)).await?;
+        }
         if account_gone {
             // Nothing more is read or written there: the summary tells the host.
             let divergent = Box::pin(self.newly_paused(&paused_before)).await?;
@@ -807,6 +862,9 @@ impl Paykit {
         Box::pin(self.confirm_consents_again()).await?;
         Box::pin(self.sweep_consents()).await?;
         Box::pin(self.sweep_notice_targets()).await?;
+        // The list requests that didn't reach their payees' inboxes go again (Paykit spec
+        // 8.4, "No usable list").
+        Box::pin(self.ask_again_for_lists()).await?;
         let applied = report
             .events
             .iter()
@@ -831,6 +889,9 @@ impl Paykit {
         // A confirmed mark goes once its record's view isn't divergent any more, after this
         // read's events were taken.
         Box::pin(self.end_confirmed_marks()).await?;
+        // The lists owed or due (Paykit spec 8.4), after the withdrawals a restore owes.
+        Box::pin(self.withdraw_restored_lists()).await?;
+        let lists = Box::pin(self.tend_lists(false, &duties)).await?;
         let divergent = Box::pin(self.newly_paused(&paused_before)).await?;
         Ok(ReceiveSummary {
             report,
@@ -840,6 +901,7 @@ impl Paykit {
             records_unlisted,
             scope_keys_awaited: keys.is_some() || !key_epochs_awaited.is_empty(),
             key_epochs_awaited,
+            lists,
             account_gone: false,
             divergent,
         })

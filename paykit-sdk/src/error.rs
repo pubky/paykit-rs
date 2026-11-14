@@ -120,10 +120,15 @@ pub enum Refusal {
     #[error("no endpoint the payment method pays: {0}")]
     UnsupportedEndpoint(String),
     /// No usable Private Payment List from the payee: none held, or each one expired or its
-    /// single-use endpoints the payment would use already used (Paykit spec 8.4, "No usable
-    /// list"). The app asked the payee for its current list with a
+    /// version consumed by a payment to one of its single-use endpoints (Paykit spec 8.4, "No
+    /// usable list"). The app asked the payee for its current list with a
     /// `paykit.private_payment_list_request`; the payee can't be forced to answer, so the
-    /// user is told the app is waiting for the payee's list. The user may choose to pay to
+    /// user is told the app is waiting for the payee's list. A payee answers a request
+    /// naming the version the app holds within its own bounds; past them, the app waits for
+    /// the payee's renewal, sent once less than half of the list's lifetime is left, and a
+    /// later payment asks again at most once in any 24 hours. A request that didn't reach the
+    /// payee's inbox counts as not sent, and goes again at the next receive. The user may
+    /// choose to pay to
     /// the payee's public endpoints instead ([`crate::PaymentMode::Public`]); the app never
     /// switches on its own.
     #[error("Paykit spec 8.4: waiting for the payee's Private Payment List")]
@@ -187,6 +192,18 @@ pub enum Refusal {
     /// make one, and pays only attempt-first (Paykit spec 7.2). Nothing was written or paid.
     #[error("Paykit spec 8.4: the own switch doesn't answer: {0}")]
     SwitchUnavailable(String),
+    /// The identity's deny list holds the counterparty, or couldn't be read: no Private
+    /// Payment List is sent to it while it does, and what is owed it goes once it is
+    /// unblocked (Paykit spec 8.1, "Blocked counterparties"). Nothing was sent.
+    #[error("Paykit spec 8.1: the counterparty is blocked; no list is sent to it")]
+    CounterpartyBlocked,
+    /// The proof names a version of this app's Private Payment List, or an endpoint in it,
+    /// that this app didn't offer the payer (Paykit spec 8.4): the payment isn't confirmed,
+    /// and no receipt is sent. The proof stays in its record. A version past the time the app
+    /// keeps its offer, [`crate::KEPT_MESSAGE_MS`] after its `expires_at`, isn't refused: a late
+    /// proof of it is checked by the payment method alone (Paykit spec 7.2).
+    #[error("Paykit spec 8.4: the proof names a list endpoint this app didn't offer the payer")]
+    NotOffered,
     /// The identity's deny list holds the payee: what is open with it is paused, and its
     /// request is paid only once the user confirms (Paykit spec 8.1, "Blocked
     /// counterparties"). `payment` is what the user is shown; paying anyway carries it back

@@ -833,8 +833,10 @@ impl Paykit {
     /// [`Refusal::CertificateRefused`] while the app's certificate fails Paykit's checks;
     /// [`Refusal::NotFound`] for a record without a proof; [`Refusal::NotNow`] for a Billing
     /// Period's record whose request record the app holds but can't open or bind yet;
-    /// [`Refusal::MaybeCredited`] while
-    /// whether another record credits the settlement can't be told; the rail's errors.
+    /// [`Refusal::MaybeCredited`] while whether another record credits the settlement can't
+    /// be told; [`Refusal::NotOffered`] for a proof naming a version of this app's Private
+    /// Payment List, or an endpoint of it, that this app didn't offer the payer, while it
+    /// keeps the offer; the rail's errors.
     pub async fn verify_payment(&mut self, record: &[u8; 32]) -> Result<Option<u64>> {
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.verify_payment_inner(record)).await
@@ -923,6 +925,22 @@ impl Paykit {
                 _ => {}
             }
         }
+        // A proof naming a version of this app's list is checked against the payload this
+        // app offered that payer at that version, while it keeps the offer (Paykit spec 8.4,
+        // "Only what it offered"); one this app didn't offer it isn't confirmed. Another own
+        // app's list, and a version past the time its offer is kept, are checked by the
+        // method alone.
+        let payload = match (payload, proof.list_version) {
+            (None, Some(version)) if proof.payment_app_id == self.app_id() => {
+                self.offered_payload(
+                    &bound.counterparty,
+                    version,
+                    &proof.payment_endpoint_identifier,
+                )
+                .await??
+            }
+            (payload, _) => payload,
+        };
         let check = ProofCheck {
             endpoint_id: proof.payment_endpoint_identifier.clone(),
             payload,

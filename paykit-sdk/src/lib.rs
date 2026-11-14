@@ -31,8 +31,13 @@
 //! - Divergent records after a provider loss: paused until the user confirms
 //!   ([`Paykit::divergent_records`], [`Paykit::confirm_divergent`], [`DivergentRecord`]).
 //!
-//! Paying recurring requests' periods, the Allowance executor with its grant and ledger, and
-//! publishing Private Payment Lists build on the same parts, in their own modules.
+//! - Publishing Private Payment Lists ([`Paykit::set_list_endpoints`],
+//!   [`Paykit::publish_list_to`], [`Paykit::withdraw_list_from`]): versions, renewals, the
+//!   answers to proofs and list requests, and single-use payloads the rail issues and takes
+//!   back ([`Rail::issue_single_use`], [`Rail::release_single_use`]).
+//!
+//! Paying recurring requests' periods and the Allowance executor with its grant and ledger
+//! build on the same parts, in their own modules.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -57,6 +62,7 @@ mod pay;
 mod paykit;
 mod periods;
 mod protocol;
+mod publish;
 pub mod rail;
 mod receipts;
 mod receive;
@@ -84,14 +90,18 @@ pub use pay::{
     UnrequestedPayment, UNREQUESTED_DEADLINE_MS,
 };
 pub use paykit::{
-    orphan_floor_s, Paykit, PaykitBackup, PaykitConfig, ReceiveSummary, DEFAULT_RESEND_BUDGET,
-    PRE_DISPATCH_BUDGET_MS,
+    orphan_floor_s, Paykit, PaykitBackup, PaykitConfig, ReceiveSummary,
+    DEFAULT_LIST_ANSWERS_PER_DAY, DEFAULT_RESEND_BUDGET, PRE_DISPATCH_BUDGET_MS,
 };
 pub use periods::{PeriodDetailsView, PeriodView};
 pub use protocol::{PaykitProtocol, HANDLED_KINDS};
+pub use publish::{
+    ListNotSent, ListsPublished, OfferedEndpoint, PublishedList, SentList, LIST_LIFETIME_MS,
+};
 pub use rail::{
     CandidateError, CandidateId, EndpointSelection, PaymentEndpointCandidate, Rail,
-    RailDeclaration, RailError, RailOutcome, RailPaid, RailPayment, Transfer,
+    RailDeclaration, RailError, RailOutcome, RailPaid, RailPayment, SingleUseIssue,
+    SingleUseRelease, Transfer,
 };
 pub use receipts::{ReceiptDetails, ReceiptsOf, ReceivedReceipt};
 pub use receive::{

@@ -46,8 +46,9 @@
 //! | `ro` | set by a restore: this app's own messages its activity and Allowance records store to be sent are queued again once the records are listed (`hold.rs`, `Paykit::queue_own_again`); after a pass, the counterparties whose messages wait: those whose sends were held then, and those whose period details wait for their request record to show whether a later stop covers them; or none named, every record judged again at the next receive, after a pass that found an activity or Allowance record it couldn't read within 30 days of the restore; and the restore's time, which `Paykit::restore` writes right after the restore and the mark keeps; never restored | |
 //! | `ha/<payee>/<msg_id>` | a rejection or payer's cancellation recorded while sends to its payee were held, its message stored in the request record and not queued, written with the record's batch: queued from the record once sends to the payee aren't held, or given up with a notice past its window (`hold.rs`, `Paykit::queue_own_again`) | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `paykit_pay` ran that pass (`hold.rs`); never restored | |
-//! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
-//! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
+//! | `lw` | set by a restore whose backup holds a list this app published (`ll`, `lv` or `lp/`): the list and the counterparties are the backup's, so no list but a withdrawal goes until the host sets its list again, which clears it (`publish.rs`); never restored | |
+//! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named, when, and its `msg_id`, to ask again for one that didn't reach the payee's inbox (Paykit spec 8.4) | |
+//! | `nt/<attempt_id>/<kind>`, `nt/<counterparty>/<msg_id>`, `nt/<counterparty>/lost-<from_ms>`, `nt/lists/await_host` | a notice for the host about a payment, a message received, or an own held answer, given up, a message this app sent that a record holds and the client gave up undelivered, messages a block dropped that can no longer come back, or, written with `lw`, that lists wait for the host, until acknowledged or, for the last, until the host sets its list (`notices.rs`) | |
 //! | `dl` | the deny list as the app last read it, with this app's blocks kept unanswered (`bk/`), for the views and a payment the user starts (Paykit spec 8.1) | |
 //! | `fg` | the flagged senders as the app last read them, at most `MAX_FLAGGED_COPY`; absent while not known, which holds the asks of block marks (`marks.rs`); never restored | |
 //! | `bf` | the raise of the identity's block floor this app owes: the latest of the latest times of the block marks gone for the bound or their own expiry, and of a restore's first read of the lists; written to the shared `block_floor` record before the block marks ask and with any ask, and deleted in that batch; applied as a floor meanwhile (`crate::floor`) | yes |
@@ -62,6 +63,10 @@
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing, since a dropped entry's time is already in its sender's mark | |
 //! | `dv/<record key>` | the pause mark of a record the app has seen divergent: paused until the user confirms, or the write the user confirmed over, with the write a credit's refusal showed it at and the write a credit's confirmation was given over, which is always the write that showing names, at or before the plain confirmation: any other stored state reads as a corrupt store (`divergent.rs`); a restore installs it paused, neither shown nor confirmed for a credit | |
 //! | `dw/<record key>/<role>/<sender>/<msg_id>` | a received message, by its sender and `msg_id`, whose write over a divergent record waits for the user's confirmation, or for the messages kept over the record before it, to write into its record later, in the order its inbox accepted them (by acceptance time, then where the receive step took it among those kept over the record, which is the feed's order, never by `msg_id`), a receipt over a payer record that doesn't read included, written once the record also reads, and one kept in `pr/` whose record read paused; never one from anyone but the counterparty of a record that reads; given up at its 30 days, also one that no longer points to its record (`divergent.rs`) | |
+//! | `ll` | the app's Private Payment List: its endpoints, reusable with their payloads or single-use (`publish.rs`, Paykit spec 8.4) | yes |
+//! | `lv` | the last version of a Private Payment List this app published | |
+//! | `lp/<counterparty>` | the lists this app sent a counterparty: each version still tracked, its expiry, its delivery and the payloads it offered, and whether a newer one is owed (`publish.rs`) | yes |
+//! | `rl/<counterparty>/<version>` | single-use payloads of a list version no payer can pay, kept until the payment method takes them back (`publish.rs`) | yes |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, with the entry's ID and message hash, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
 //! | `ae/<record key>/<msg_id>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection; every distinct end is kept, each under its `msg_id`, until the record shows which one names what it holds (`allowances.rs`, Paykit spec 8.3) | |
 //! | `ac/<record key>` | the consent list: an Allowance this app may pay under, or removed from it for good (`allowances.rs`, Paykit spec 8.3); a restore marks every entry to confirm again | |
@@ -255,7 +260,7 @@ impl<'a> Binder<'a> {
     }
 
     /// The binding of a reader without the certificate or the naming key, a [`LocalView`].
-    fn unblinded(own: [u8; 32]) -> Self {
+    pub(crate) fn unblinded(own: [u8; 32]) -> Self {
         Self {
             own,
             cert: None,
@@ -387,7 +392,8 @@ impl Stored for u64 {
             | StateKey::Resent { .. }
             | StateKey::ResentDay { .. }
             | StateKey::ListsRead
-            | StateKey::BlockFloor => Ok(()),
+            | StateKey::BlockFloor
+            | StateKey::LastVersion => Ok(()),
             _ => corrupt(),
         }
     }
@@ -439,6 +445,46 @@ impl OwnBlockMark {
     }
 }
 
+impl sealed::Sealed for crate::publish::KeptList {}
+
+/// The app's Private Payment List (`ll`), read whole (`publish.rs`).
+impl Stored for crate::publish::KeptList {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::List => self.check(),
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for crate::publish::Recipient {}
+
+/// The lists sent one counterparty (`lp/<counterparty>`), of the counterparty its key names.
+impl Stored for crate::publish::Recipient {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::ListRecipient(counterparty) => self.check(counterparty),
+            _ => corrupt(),
+        }
+    }
+}
+
+impl sealed::Sealed for crate::publish::Releases {}
+
+/// Single-use payloads to give back (`rl/<counterparty>/<version>`), of the counterparty and
+/// version its key names.
+impl Stored for crate::publish::Releases {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::Releases {
+                counterparty,
+                version,
+            } => self.check(counterparty, *version),
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for OwnBlockMark {}
 
 /// Every form a run writes; an unblock with no batch is no such form: an unblock is marked
@@ -469,6 +515,7 @@ impl Stored for bool {
             | StateKey::MissedUnlisted
             | StateKey::MissedConsents
             | StateKey::PayerPassOwed
+            | StateKey::ListsAwaitHost
             | StateKey::HoldConfirmed(_)
             | StateKey::FloorOpened(_)
             | StateKey::Taken(_)
@@ -573,11 +620,7 @@ impl sealed::Sealed for ListAsk {}
 impl Stored for ListAsk {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::ListAsk { payee, app_id }
-                if self.payee == *payee && self.app_id == *app_id =>
-            {
-                Ok(())
-            }
+            StateKey::ListAsk { payee, app_id } => self.check(payee, app_id.as_ref()),
             _ => corrupt(),
         }
     }
@@ -737,8 +780,8 @@ impl sealed::Sealed for KeptNotice {}
 /// A notice: of the attempt and kind, or the sender and `msg_id`, its key names
 /// ([`crate::notices::bind_notice`]).
 impl Stored for KeptNotice {
-    fn bind(&self, key: &str, _: &StateKey, _: &Binder<'_>) -> Result<()> {
-        crate::notices::bind_notice(key, self)
+    fn bind(&self, key: &str, _: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        crate::notices::bind_notice(key, self, &binder.own)
     }
 }
 
@@ -1083,9 +1126,12 @@ pub(crate) mod key {
     pub(crate) const MISSED_CONSENTS: &str = "mc";
     pub(crate) const PAYER_PASS_OWED: &str = "pp";
     pub(crate) const OWN_RESEND_OWED: &str = "ro";
+    pub(crate) const LISTS_AWAIT_HOST: &str = "lw";
     pub(crate) const HELD_ANSWERS: &str = "ha/";
     pub(crate) const LISTED_CERT: &str = "lc";
     pub(crate) const NOTICES: &str = "nt/";
+    /// The notice that, after a restore, lists wait for the host.
+    pub(crate) const LISTS_NOTICE: &str = "nt/lists/await_host";
     pub(crate) const STORED_NOTES: &str = "se/";
     pub(crate) const KEPT_REPLIES: &str = "pr/";
     pub(crate) const DROPPED_REPLIES: &str = "pd/";
@@ -1101,6 +1147,7 @@ pub(crate) mod key {
     /// The request records this read opened without `manual_only`, to check against the
     /// block floor once it is done (`crate::floor`).
     pub(crate) const FLOOR_OPENED: &str = "fo/";
+    pub(crate) const LIST_ASKS: &str = "lq/";
     pub(crate) const KEY_WAITS: &str = "kw/";
     pub(crate) const DIVERGENT: &str = "dv/";
     pub(crate) const DIVERGENT_WRITES: &str = "dw/";
@@ -1219,6 +1266,20 @@ pub(crate) mod key {
     pub(crate) const DENIED: &str = "dl";
     pub(crate) const OWN_BLOCKS: &str = "bk/";
     pub(crate) const TAKEN: &str = "dt/";
+    pub(crate) const LIST: &str = "ll";
+    pub(crate) const LAST_VERSION: &str = "lv";
+    pub(crate) const LIST_RECIPIENTS: &str = "lp/";
+    pub(crate) const RELEASES: &str = "rl/";
+
+    /// The lists this app sent `counterparty`.
+    pub(crate) fn list_recipient(counterparty: &[u8; 32]) -> String {
+        format!("{LIST_RECIPIENTS}{}", b64(counterparty))
+    }
+
+    /// The single-use payloads of `counterparty`'s list `version` to give back.
+    pub(crate) fn releases(counterparty: &[u8; 32], version: u64) -> String {
+        format!("{RELEASES}{}/{}", b64(counterparty), num(version))
+    }
 
     /// The mark of the duty event `id`, taken.
     pub(crate) fn taken(id: &pubky_switch_client::app::EventId) -> String {
@@ -1334,8 +1395,8 @@ pub(crate) mod key {
     /// A list request asked of `payee`, of its app `app_id` or of none.
     pub(crate) fn list_ask(payee: &[u8; 32], app_id: Option<&[u8; 16]>) -> String {
         match app_id {
-            Some(app) => format!("lq/{}/{}", b64(payee), b64(app)),
-            None => format!("lq/{}", b64(payee)),
+            Some(app) => format!("{LIST_ASKS}{}/{}", b64(payee), b64(app)),
+            None => format!("{LIST_ASKS}{}", b64(payee)),
         }
     }
 }
@@ -1374,6 +1435,8 @@ pub(crate) enum StateKey {
     MissedConsents,
     /// `pp`: no reconcile ran the payer pass since a restore.
     PayerPassOwed,
+    /// `lw`: set by a restore: no list but a withdrawal goes until the host sets its list.
+    ListsAwaitHost,
     /// `ro`: the restore's re-send of this app's own messages is owed.
     OwnResendOwed,
     /// `lc`: the certificate the shared records were last listed under.
@@ -1433,6 +1496,17 @@ pub(crate) enum StateKey {
     },
     /// `kw/<sender>`: the mark of a sender's entries dropped while they waited for a key.
     KeyWaits { sender: [u8; 32] },
+    /// `ll`: the app's Private Payment List.
+    List,
+    /// `lv`: the last list version published.
+    LastVersion,
+    /// `lp/<counterparty>`: the lists sent a counterparty.
+    ListRecipient([u8; 32]),
+    /// `rl/<counterparty>/<version>`: single-use payloads to give back.
+    Releases {
+        counterparty: [u8; 32],
+        version: u64,
+    },
     /// `pr/<sender>/<record key>/<msg_id>`: a payer's reply kept for its record.
     KeptReply {
         sender: [u8; 32],
@@ -1441,7 +1515,8 @@ pub(crate) enum StateKey {
     },
     /// `se/<sender>/<msg_id>`: a stored entry's message to write later.
     StoredNote { sender: [u8; 32], msg_id: String },
-    /// `nt/<sender>/<msg_id>`: a notice for the host about a message given up.
+    /// `nt/<counterparty>/<msg_id>`: a notice for the host about a message given up, its
+    /// sender, or undelivered, its recipient.
     MessageNotice { sender: [u8; 32], msg_id: String },
     /// `dv/<record key>`: the pause mark of a divergent record.
     Divergent([u8; 32]),
@@ -1453,6 +1528,8 @@ pub(crate) enum StateKey {
         sender: [u8; 32],
         msg_id: String,
     },
+    /// `nt/lists/await_host`: the notice that, after a restore, lists wait for the host.
+    ListsNotice,
     /// `nt/<attempt_id>/<kind>`: a notice for the host.
     Notice {
         attempt: AttemptId,
@@ -1470,6 +1547,9 @@ pub(crate) enum StateKey {
     /// message is owed.
     OwedEnd([u8; 32]),
 }
+
+/// The rest of [`key::LISTS_NOTICE`] after the family's prefix.
+const LISTS_NOTICE_REST: &str = "lists/await_host";
 
 impl StateKey {
     /// The family of `key`, read whole and strictly: a base64 member in its one spelling,
@@ -1505,12 +1585,15 @@ impl StateKey {
             "ml" => Self::MissedUnlisted,
             "mc" => Self::MissedConsents,
             "pp" => Self::PayerPassOwed,
+            "lw" => Self::ListsAwaitHost,
             "ro" => Self::OwnResendOwed,
             "lc" => Self::ListedCert,
             "lr" => Self::ListsRead,
             "dl" => Self::Denied,
             "fg" => Self::Flagged,
             "bf" => Self::BlockFloor,
+            "ll" => Self::List,
+            "lv" => Self::LastVersion,
             _ => {
                 let (family, rest) = text.split_once('/')?;
                 match family {
@@ -1571,6 +1654,14 @@ impl StateKey {
                     "cf" => Self::Conflict(b64_32(rest)?),
                     "en" => Self::NoticeTarget(msg_id(rest)?),
                     "eo" => Self::OwedEnd(b64_32(rest)?),
+                    "lp" => Self::ListRecipient(b64_32(rest)?),
+                    "rl" => {
+                        let (counterparty, version) = rest.split_once('/')?;
+                        Self::Releases {
+                            counterparty: b64_32(counterparty)?,
+                            version: number(version)?,
+                        }
+                    }
                     "rs" => {
                         let (requester, id) = rest.split_once('/')?;
                         Self::Resent {
@@ -1650,6 +1741,9 @@ impl StateKey {
                         }
                     }
                     "nt" => {
+                        if rest == LISTS_NOTICE_REST {
+                            return Some(Self::ListsNotice);
+                        }
                         let (attempt, tag) = rest.split_once('/')?;
                         if let (Some(counterparty), Some(from)) =
                             (b64_32(attempt), tag.strip_prefix("lost-"))
@@ -1963,10 +2057,11 @@ mod tests {
             held(&pubky_switch_core::enc::b64(&[4; 32]), id)
         ));
         assert!(!reads::<HeldAnswer>(&key::side(id), held(&sender, id)));
-        // A list ask of the payee and app its key names.
+        // A list ask of the payee and app its key names, with its request's `msg_id`.
         let asked = |app: Option<[u8; 16]>| {
             serde_json::json!({
                 "payee": sender, "app_id": app, "held_version": null, "asked_at_ms": 1,
+                "msg_id": id,
             })
         };
         assert!(reads::<ListAsk>(&key::list_ask(&pubky, None), asked(None)));
@@ -2092,6 +2187,8 @@ mod tests {
             (key::MISSED_UNLISTED.into(), StateKey::MissedUnlisted),
             (key::MISSED_CONSENTS.into(), StateKey::MissedConsents),
             (key::PAYER_PASS_OWED.into(), StateKey::PayerPassOwed),
+            (key::LISTS_AWAIT_HOST.into(), StateKey::ListsAwaitHost),
+            (key::LISTS_NOTICE.into(), StateKey::ListsNotice),
             (key::OWN_RESEND_OWED.into(), StateKey::OwnResendOwed),
             (key::LISTED_CERT.into(), StateKey::ListedCert),
             (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),
@@ -2101,6 +2198,16 @@ mod tests {
             (
                 format!("{}{}-7", key::TAKEN, "05".repeat(16)),
                 StateKey::Taken(format!("{}-7", "05".repeat(16))),
+            ),
+            (key::LIST.into(), StateKey::List),
+            (key::LAST_VERSION.into(), StateKey::LastVersion),
+            (key::list_recipient(&pubky), StateKey::ListRecipient(pubky)),
+            (
+                key::releases(&pubky, 11),
+                StateKey::Releases {
+                    counterparty: pubky,
+                    version: 11,
+                },
             ),
             (key::held_list(&pubky), StateKey::HeldList(pubky)),
             (key::side(id), StateKey::Side(id.into())),
@@ -2269,6 +2376,11 @@ mod tests {
             "ac/",
             "cf/not-base64",
             "en/not-a-uuid",
+            "nt/lists/await_hostx",
+            "nt/lists",
+            "lp/",
+            "rl/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM/11",
+            "llx",
         ] {
             assert_eq!(StateKey::parse(key.as_bytes()), None, "{key}");
         }

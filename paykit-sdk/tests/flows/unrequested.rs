@@ -5,10 +5,10 @@ use paykit_sdk::{PayOptions, PayOutcome, PayeeStatus, Paykit, Refusal, Unrequest
 use pubky_switch_client::app::AppEvent;
 use pubky_switch_client::clock::Clock;
 
-use crate::common::{btc, endpoint, World, HOUR_MS};
+use crate::common::{btc, endpoint, is_corrupt, rewrite_state, World, HOUR_MS};
 
-/// How many `private_payment_list_request`s `shop` takes at its next receive. It publishes no
-/// list, so each one is taken with no effect (Paykit spec 8.4).
+/// How many `private_payment_list_request`s `shop` takes at its next receive. It sent alice no
+/// list itself, so each one is taken with no effect (Paykit spec 8.4).
 async fn list_requests(shop: &mut Paykit) -> usize {
     let got = shop.receive(None).await.unwrap();
     got.report
@@ -31,8 +31,7 @@ async fn test_unrequested_payment_paid_proven_and_receipted() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
-        .await;
+    w.publish_to_alice(&mut shop).await;
     assert_eq!(wallet.receive(None).await.unwrap().applied.len(), 1);
 
     let outcome = wallet
@@ -135,6 +134,73 @@ async fn test_unrequested_single_use_endpoint_used_once() {
 }
 
 #[tokio::test]
+async fn test_unrequested_single_use_payment_consumes_its_whole_list_version() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    // Its reusable endpoint is consumed with it: the payee is asked for a newer list.
+    let waiting = pay_lightning(&w, &mut wallet).await;
+    assert!(
+        matches!(waiting.refusal(), Some(Refusal::WaitingForList)),
+        "{waiting:?}"
+    );
+    assert_eq!(list_requests(&mut shop).await, 1);
+    assert_eq!(w.rail.all_executions().len(), 1);
+    // A request paid to any of the payee's endpoints waits for it too.
+    let mut any = crate::common::draft("1", w.clock.now_ms());
+    any.destination = paykit_lib::bodies::RequestDestination::Any;
+    let request = crate::common::request_from(&mut shop, w.alice_id(), any).await;
+    wallet.receive(None).await.unwrap();
+    let waiting = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(waiting.refusal(), Some(Refusal::WaitingForList)),
+        "{waiting:?}"
+    );
+    // A newer version is payable again, its reusable endpoint included.
+    w.clock.advance_ms(1000);
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    let again = wallet
+        .pay_without_request(to_bob(&w, "1", "btc-lightning-bolt12"))
+        .await
+        .unwrap();
+    assert!(matches!(again, PayOutcome::Paid { .. }), "{again:?}");
+}
+
+#[tokio::test]
+async fn test_unrequested_reusable_payment_consumes_no_list_version() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "1", "btc-lightning-bolt12"))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let single = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap();
+    assert!(matches!(single, PayOutcome::Paid { .. }), "{single:?}");
+    assert_eq!(list_requests(&mut shop).await, 0);
+}
+
+#[tokio::test]
 async fn test_unrequested_without_a_list_refused() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -213,11 +279,204 @@ async fn test_unrequested_without_a_list_asks_the_payee_once_while_outstanding()
         "{refused:?}"
     );
     assert_eq!(list_requests(&mut shop).await, 0);
-    // A day on, unanswered, it is asked once more.
-    w.clock.advance_ms(24 * HOUR_MS + 1);
+    // 24 hours on, unanswered, it is asked once more.
+    w.clock.advance_ms(24 * HOUR_MS - 1);
+    pay_lightning(&w, &mut wallet).await;
+    assert_eq!(list_requests(&mut shop).await, 0);
+    w.clock.advance_ms(1);
     pay_lightning(&w, &mut wallet).await;
     assert_eq!(list_requests(&mut shop).await, 1);
     assert!(w.rail.all_executions().is_empty());
+}
+
+/// Bob's switch refuses the next message to his inbox for good.
+fn refuse_next_to_bob(w: &World) {
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "inbox".into(),
+            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            current: serde_json::Value::Null,
+        });
+}
+
+#[tokio::test]
+async fn test_unrequested_list_request_not_delivered_asked_again_at_the_next_receive() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    refuse_next_to_bob(&w);
+    let refused = pay_lightning(&w, &mut wallet).await;
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        "{refused:?}"
+    );
+    assert_eq!(list_requests(&mut shop).await, 0);
+    // Not delivered, it counts as not sent: the next receive asks again, and so would a
+    // payment.
+    wallet.receive(None).await.unwrap();
+    assert_eq!(list_requests(&mut shop).await, 1);
+    // Delivered, it is outstanding: neither asks again within 24 hours.
+    wallet.receive(None).await.unwrap();
+    pay_lightning(&w, &mut wallet).await;
+    assert_eq!(list_requests(&mut shop).await, 0);
+}
+
+#[tokio::test]
+async fn test_unrequested_list_request_held_while_the_payee_is_blocked() {
+    let w = World::new();
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            paykit_sdk::AppScopes::new()
+                .pay()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+            paykit_sdk::PaykitConfig::default(),
+            crate::common::store(),
+        )
+        .await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    refuse_next_to_bob(&w);
+    pay_lightning(&w, &mut wallet).await;
+    assert_eq!(list_requests(&mut shop).await, 0);
+    // Not delivered, it would go again at the receive: blocked, bob is asked nothing.
+    wallet.block(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(list_requests(&mut shop).await, 0);
+    // Unblocked, the receive asks him.
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(list_requests(&mut shop).await, 1);
+}
+
+#[tokio::test]
+async fn test_unrequested_list_request_held_while_the_deny_copy_is_unknown() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    refuse_next_to_bob(&w);
+    pay_lightning(&w, &mut wallet).await;
+    assert_eq!(list_requests(&mut shop).await, 0);
+    // The copy is due again and its read fails: it isn't known, so nothing is asked.
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/allow".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    wallet.receive(None).await.unwrap();
+    assert_eq!(list_requests(&mut shop).await, 0);
+    // Read again, the request goes.
+    wallet.receive(None).await.unwrap();
+    assert_eq!(list_requests(&mut shop).await, 1);
+}
+
+#[tokio::test]
+async fn test_unrequested_list_request_not_delivered_asked_again_by_a_payment() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    refuse_next_to_bob(&w);
+    pay_lightning(&w, &mut wallet).await;
+    pay_lightning(&w, &mut wallet).await;
+    assert_eq!(list_requests(&mut shop).await, 1);
+}
+
+#[tokio::test]
+async fn test_unrequested_list_request_not_delivered_not_asked_again_once_a_list_came() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    refuse_next_to_bob(&w);
+    pay_lightning(&w, &mut wallet).await;
+    // Bob's list comes in the read that would ask again: she has one, and asks nothing.
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(list_requests(&mut shop).await, 0);
+}
+
+#[tokio::test]
+async fn test_unrequested_list_request_not_delivered_a_day_ago_asked_again_by_a_payment_only() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    refuse_next_to_bob(&w);
+    pay_lightning(&w, &mut wallet).await;
+    assert_eq!(list_requests(&mut shop).await, 0);
+    // Asked 24 hours ago, its mark is outstanding no more: the receive leaves it to the
+    // next payment.
+    w.clock.advance_ms(24 * HOUR_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(list_requests(&mut shop).await, 0);
+    pay_lightning(&w, &mut wallet).await;
+    assert_eq!(list_requests(&mut shop).await, 1);
+}
+
+#[tokio::test]
+async fn test_unrequested_list_request_of_an_app_not_held_asked_again_beside_another_apps_list() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    // Asked of another app of bob's, whose list she doesn't hold: the shop's list she holds
+    // doesn't answer it.
+    refuse_next_to_bob(&w);
+    let refused = wallet
+        .pay_without_request(
+            UnrequestedPayment::new(w.bob_id(), btc("1")).with_options(
+                PayOptions::default()
+                    .with_endpoint(endpoint("btc-lightning-bolt12"))
+                    .with_list_app([9; 16]),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        "{refused:?}"
+    );
+    assert_eq!(list_requests(&mut shop).await, 0);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(list_requests(&mut shop).await, 1);
+}
+
+#[tokio::test]
+async fn test_unrequested_list_request_the_restored_outbox_lacks_asked_again() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    pay_lightning(&w, &mut wallet).await;
+    assert_eq!(list_requests(&mut shop).await, 1);
+    let backup = wallet.backup().await.unwrap();
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    // The restored outbox doesn't keep the request the mark names: it counts as not sent,
+    // and the first receive asks again.
+    restored.receive(None).await.unwrap();
+    assert_eq!(list_requests(&mut shop).await, 1);
 }
 
 #[tokio::test]
@@ -294,8 +553,7 @@ async fn test_unrequested_proof_and_receipt_carry_the_attempt_and_no_request_mem
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
-        .await;
+    w.publish_to_alice(&mut shop).await;
     wallet.receive(None).await.unwrap();
     let outcome = wallet
         .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
@@ -846,6 +1104,41 @@ async fn test_unrequested_list_over_a_value_awaiting_its_epoch_key_keeps_single_
     assert_eq!(value["used"].as_array().unwrap().len(), 1, "{value}");
     assert_eq!(value["msg_ids"].as_array().unwrap().len(), 2, "{value}");
     assert!(wallet.held_lists().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_unrequested_list_ask_kept_under_another_payee_refused_as_corrupt() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    pay_lightning(&w, &mut wallet).await;
+    assert_eq!(list_requests(&mut shop).await, 1);
+    // Bob's mark names carol: it is no absent mark, so nothing is asked again.
+    let mark = format!("lq/{}", pubky_switch_core::enc::b64(&w.bob_id()));
+    rewrite_state(&mut wallet, &mark, |d| {
+        d["payee"] = pubky_switch_core::enc::b64(&[7; 32]).into();
+    })
+    .await;
+    assert!(is_corrupt(&pay_lightning(&w, &mut wallet).await));
+    assert!(is_corrupt(&wallet.receive(None).await.unwrap_err()));
+    assert_eq!(list_requests(&mut shop).await, 0);
+}
+
+#[tokio::test]
+async fn test_unrequested_list_ask_with_a_msg_id_never_given_out_refused_as_corrupt() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    pay_lightning(&w, &mut wallet).await;
+    assert_eq!(list_requests(&mut shop).await, 1);
+    // A `msg_id` the outbox can't hold is no request that left it: none is asked again.
+    let mark = format!("lq/{}", pubky_switch_core::enc::b64(&w.bob_id()));
+    rewrite_state(&mut wallet, &mark, |d| d["msg_id"] = "not-a-msg-id".into()).await;
+    assert!(is_corrupt(&pay_lightning(&w, &mut wallet).await));
+    assert!(is_corrupt(&wallet.receive(None).await.unwrap_err()));
+    assert_eq!(list_requests(&mut shop).await, 0);
 }
 
 /// The `paykit.payment_receipt` body of `attempt_id`, for a payment without a request: its

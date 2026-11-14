@@ -266,8 +266,7 @@ async fn test_restore_paid_attempt_to_a_single_use_list_endpoint_sends_its_proof
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
-        .await;
+    w.publish_to_alice(&mut shop).await;
     let mut any = draft("1", w.clock.now_ms());
     any.destination = paykit_lib::bodies::RequestDestination::Any;
     let request = request_from(&mut shop, w.alice_id(), any).await;
@@ -1393,6 +1392,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
             "app_id": null,
             "held_version": null,
             "asked_at_ms": 1,
+            "msg_id": "123e4567-e89b-42d3-a456-426614174000",
         })
     };
     // A mark of entries dropped while they waited for a scope key, of the sender its key

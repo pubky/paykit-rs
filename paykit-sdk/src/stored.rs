@@ -1,6 +1,6 @@
-//! Entries the client stored locally for good, and what Paykit does with each (Switch spec
-//! 8.2; Paykit spec 8.1): the duty events that tell of them are taken at every receive and
-//! kept in Paykit's own state.
+//! Entries the client stored locally for good, and messages it gave up undelivered, and what
+//! Paykit does with each (Switch spec 8.2, 11; Paykit spec 8.1): the duty events that tell of
+//! them are taken at every receive and kept in Paykit's own state.
 //!
 //! - **An effect refused for good** (`EffectRefused`, or a `Parked` duty event of any reason
 //!   but `Uncertain`), such as a record write the switch refused (`403
@@ -33,6 +33,14 @@
 //!   once to send again what its inbox accepted from the mark's earliest time to its latest,
 //!   while it may still keep them, and again at most once a day while the mark lives (Paykit
 //!   spec 8.1, 9).
+//! - **A message given up undelivered** (`MessageUndelivered`, not a re-send): the client
+//!   deleted it from its outbox, never accepted. When an activity record of this app holds
+//!   it in one of its roles, signed by this identity and app, the host is told
+//!   ([`crate::NoticeKind::MessageUndelivered`]),
+//!   naming the record's counterparty and request (`nt/<counterparty>/<msg_id>`). A message
+//!   no record holds, such as a `resend_request`, a `private_payment_list_request`, a list
+//!   (`publish.rs` reads that event itself), a re-send, or a message whose record write
+//!   failed, is not taken: its event stays for the host.
 //! - **An entry dropped while it waited for a scope key** (`StoredEntryDropped` with its
 //!   `awaited_epoch`): the message was never processed. The host is told once that it is
 //!   given up ([`crate::NoticeKind::MessageGivenUp`]), by the event that names its `msg_id`,
@@ -52,8 +60,9 @@
 //! don't pile up for a host that acknowledges only its own: housekeeping, which decides
 //! nothing.
 
+use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
-use paykit_lib::records::{ActivityRecord, StoredMessage};
+use paykit_lib::records::{ActivityRecord, ActivitySide, StoredMessage};
 use paykit_lib::Body;
 use pubky_switch_client::app::{
     AppError, AppEvent, OpBatch, ParkReason, RecordContent, Refusal as ClientRefusal,
@@ -71,8 +80,7 @@ use crate::receive::{
     ReceiptClaim, ReceiptSettles, SwitchClaim,
 };
 use crate::records::{list_target, KeptMessage};
-use crate::requests::{RequestRef, RequestStatus, RequestView};
-
+use crate::requests::{request_of, RequestRef, RequestStatus, RequestView};
 use crate::state::{key, StateKey, Tx};
 
 /// Whether a kept message is in its record ([`Paykit::place_note`]).
@@ -422,6 +430,11 @@ impl Paykit {
                 Box::pin(self.take_divergent_event(record, id)).await?;
                 true
             }
+            AppEvent::MessageUndelivered {
+                msg_id,
+                resend: false,
+                ..
+            } => Box::pin(self.note_undelivered(msg_id, &mut tx)).await?,
             _ => false,
         };
         if taken {
@@ -429,6 +442,72 @@ impl Paykit {
             self.local_commit(tx).await?;
         }
         Ok(taken)
+    }
+
+    /// Keep, in `tx`, the host's notice that the message `msg_id` this app sent was given up
+    /// undelivered, when an activity record of this app holds it ([`crate::NoticeKind::MessageUndelivered`]).
+    /// Whether it is kept, or was already: `false` when no record holds it.
+    async fn note_undelivered(&mut self, msg_id: &str, tx: &mut Tx) -> Result<bool> {
+        let Some(record) = self.record_holding(msg_id).await? else {
+            return Ok(false);
+        };
+        let notice = key::message_notice(&record.counterparty, msg_id);
+        if self.local_get::<KeptNotice>(&notice).await?.is_none() {
+            let request = request_of(&record)
+                .map(|(stored, _)| stored.hash())
+                .or(record.request_hash);
+            let at = self.service_time().unwrap_or(0);
+            tx.put(
+                &notice,
+                &KeptNotice::undelivered(record.counterparty, msg_id, request, at),
+            )?;
+        }
+        Ok(true)
+    }
+
+    /// The activity record this app holds that holds its own message `msg_id`, one this
+    /// identity and app signed, in a role: of `payer_activity`, then of `payee_activity`
+    /// under every label, each bound to its key (Paykit wire 5.3). A counterparty's message
+    /// under the same `msg_id` holds nothing of this app's. A record that doesn't read or
+    /// bind is passed over, as a reader doesn't act on it.
+    async fn record_holding(&self, msg_id: &str) -> Result<Option<ActivityRecord>> {
+        let own = self.identity();
+        for (collection, side) in [
+            (Collection::PayerActivity, ActivitySide::Payer),
+            (Collection::PayeeActivity, ActivitySide::Payee),
+        ] {
+            for held in self.app.records_of(collection.name()).await? {
+                let Some(label) = collection.policy_label(&held.policy) else {
+                    continue;
+                };
+                let Some(value) = held.content.value() else {
+                    continue;
+                };
+                let Some(record) = crate::records::bind_activity(
+                    value,
+                    &own,
+                    side,
+                    label.as_ref(),
+                    &held.key,
+                    |t| self.app.record_key(t).ok(),
+                    &|p| self.rail.settlement_id(p),
+                ) else {
+                    continue;
+                };
+                // Only a message this identity and app signed: a counterparty's message under
+                // the same `msg_id` names no message of this app's.
+                let own_app = self.app.cert().app_id();
+                let holds = record.stored().iter().any(|(_, stored)| {
+                    stored.message().msg_id == msg_id
+                        && stored.sender() == own
+                        && stored.cert().app_id() == own_app
+                });
+                if holds {
+                    return Ok(Some(record));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Keep, in `tx`, the message of the entry stored at `stored_id` to write it later, and
@@ -808,12 +887,20 @@ impl Paykit {
                                 );
                                 tx.put(&notice, &given_up)?;
                             }
-                            Some(mut kept) if kept.stored.as_ref() != Some(&handle) => {
+                            Some(mut kept)
+                                if kept.kind == crate::NoticeKind::MessageGivenUp
+                                    && kept.stored.as_ref() != Some(&handle) =>
+                            {
                                 kept.stored = Some(handle);
                                 kept.origin = None;
                                 tx.put(&notice, &kept)?;
                             }
-                            Some(_) => {}
+                            Some(kept) if kept.kind == crate::NoticeKind::MessageGivenUp => {}
+                            // The key holds this app's own message given up undelivered to
+                            // that sender, under the same `msg_id`: the give-up waits, the note
+                            // and its entry kept, until the host acknowledges that notice.
+                            // Nothing is dropped and neither notice is overwritten.
+                            Some(_) => continue,
                         }
                         self.local_commit(tx).await?;
                     }

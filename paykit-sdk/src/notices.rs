@@ -2,12 +2,11 @@
 //! no call's result carries, kept in Paykit's local state (`p/nt/`) until the host
 //! acknowledges them, and carried in the app's backups (Paykit spec 7.2).
 //!
-//! A notice is raised once per attempt and kind, or per message given up: raising it again,
-//! as a re-sent receipt or a
-//! later resume would, changes nothing, and an acknowledged one stays acknowledged. A notice
-//! that messages a block dropped can no longer come back is kept per window: per
-//! counterparty and the window's earliest acceptance time, which its key names; it is
-//! deleted at its acknowledgement.
+//! A notice is raised once per attempt and kind, or per message given up or undelivered:
+//! raising it again, as a re-sent receipt or a later resume would, changes nothing, and an
+//! acknowledged one stays acknowledged. A notice that messages a block dropped can no
+//! longer come back is kept per window: per counterparty and the window's earliest
+//! acceptance time, which its key names; it is deleted at its acknowledgement.
 
 use paykit_lib::AttemptId;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
@@ -68,6 +67,33 @@ pub enum NoticeKind {
     /// spec 8.1, "Blocked counterparties"). The app never kept them, so the notice holds no
     /// content: a payment among them shows only in the payment method.
     BlockedMessagesLost,
+    /// A message this app sent, held in one of its activity records, was given up by this
+    /// app's client before its store saw the counterparty's inbox accept it: the client
+    /// deleted it from its outbox, plaintext and all
+    /// ([`pubky_switch_client::app::AppEvent::MessageUndelivered`], Switch spec 11). For
+    /// example its delivery wasn't admitted for
+    /// [`pubky_switch_client::app::UNDELIVERABLE_MS`], or a restore didn't deliver it, its
+    /// backup's outbox past [`pubky_switch_client::app::MAX_CARRIED_OUTBOX_BYTES`] or older
+    /// than [`pubky_switch_client::app::SENT_RETENTION_MS`]. The record still holds it, so a
+    /// request shows as sent, a reply as made and a proof as sent.
+    ///
+    /// What the host may conclude: this store never saw it accepted. What it may not: that
+    /// the counterparty never got it. After a restore the device the backup came from may
+    /// have delivered it before the restore, so the host must not present it as never
+    /// received, and a new request in its place may be paid as well as the first: the user
+    /// may ask the counterparty, or cancel the first request before sending another. The
+    /// notice names the counterparty, the message's
+    /// recipient, and the record's request, if any. A message no record holds, such as a
+    /// `resend_request` or a re-send, raises none: its event stays for the host.
+    MessageUndelivered,
+    /// After a restore, this app publishes no Private Payment List until the host sets its
+    /// list again ([`Paykit::set_list_endpoints`]): the backup's list and its counterparties
+    /// may be older than what the user changed since ([`Paykit::lists_await_host`]). Only a
+    /// withdrawal goes meanwhile ([`Paykit::withdraw_list_from`]), so the host re-applies
+    /// the withdrawals made since the backup first, then sets the list. Raised once, by a
+    /// restore whose backup holds a list this app published, and gone when the host sets the
+    /// list. Its `counterparty` is the app's own identity.
+    ListsAwaitHost,
 }
 
 impl NoticeKind {
@@ -78,6 +104,8 @@ impl NoticeKind {
             Self::HeldWithoutPay => "held_without_pay",
             Self::MessageGivenUp => "given_up",
             Self::BlockedMessagesLost => "blocked_lost",
+            Self::MessageUndelivered => "undelivered",
+            Self::ListsAwaitHost => "lists_await_host",
         }
     }
 
@@ -88,8 +116,16 @@ impl NoticeKind {
             "held_without_pay" => Some(Self::HeldWithoutPay),
             "given_up" => Some(Self::MessageGivenUp),
             "blocked_lost" => Some(Self::BlockedMessagesLost),
+            "undelivered" => Some(Self::MessageUndelivered),
+            "lists_await_host" => Some(Self::ListsAwaitHost),
             _ => None,
         }
+    }
+
+    /// Whether the kind tells of a message, kept at `nt/<counterparty>/<msg_id>`, rather
+    /// than of an attempt.
+    pub(crate) fn of_message(self) -> bool {
+        matches!(self, Self::MessageGivenUp | Self::MessageUndelivered)
     }
 }
 
@@ -105,8 +141,9 @@ pub struct Notice {
     pub attempt_id: Option<AttemptId>,
     /// The message it is about, by its `msg_id`; `None` for a notice about an attempt.
     pub msg_id: Option<String>,
-    /// The counterparty: the payee of an attempt, the message's sender, or, for an own
-    /// answer given up, its payee.
+    /// The counterparty: the payee of an attempt, the sender of a message given up, the
+    /// recipient of a message undelivered, or, for an own answer given up, its payee; for
+    /// [`NoticeKind::ListsAwaitHost`], the app's own identity.
     pub counterparty: [u8; 32],
     /// The request paid or named, `None` for none.
     pub request_hash: Option<[u8; 32]>,
@@ -120,10 +157,11 @@ pub struct Notice {
     pub lost_until_ms: Option<u64>,
 }
 
-/// A notice as kept (`p/nt/<attempt_id>/<kind>`, `p/nt/<sender>/<msg_id>` for a message
-/// given up, or `p/nt/<counterparty>/lost-<from_ms>` for a window of messages a block
-/// dropped that can no longer come back, `from_ms` its earliest acceptance time, zero-padded
-/// to 20 digits): what its key names repeats in it, so a restore binds the value to its key.
+/// A notice as kept (`p/nt/<attempt_id>/<kind>`, `p/nt/<counterparty>/<msg_id>` for a
+/// message given up or undelivered, or `p/nt/<counterparty>/lost-<from_ms>` for a window of
+/// messages a block dropped that can no longer come back, `from_ms` its earliest acceptance
+/// time, zero-padded to 20 digits): what its key names repeats in it, so a restore binds the
+/// value to its key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct KeptNotice {
     pub(crate) kind: NoticeKind,
@@ -258,18 +296,80 @@ impl KeptNotice {
         }
     }
 
+    /// The notice that the message `msg_id` this app sent `recipient`, held in a record of
+    /// the request `request_hash`, if any, was given up undelivered, raised at `at`: the
+    /// client gave it up from its outbox, so no entry is stored and no origin is named.
+    pub(crate) fn undelivered(
+        recipient: [u8; 32],
+        msg_id: &str,
+        request_hash: Option<[u8; 32]>,
+        at: u64,
+    ) -> Self {
+        Self {
+            kind: NoticeKind::MessageUndelivered,
+            attempt_id: None,
+            msg_id: Some(msg_id.to_owned()),
+            counterparty: recipient,
+            request_hash: request_hash.map(|hash| pubky_switch_core::enc::b64(&hash)),
+            raised_at_ms: at,
+            acknowledged: false,
+            stored: None,
+            origin: None,
+            lost: None,
+        }
+    }
+
+    /// The notice that, after a restore, lists wait for the host ([`NoticeKind::ListsAwaitHost`]),
+    /// of `own`, the app's identity, raised at `at`.
+    pub(crate) fn lists_await_host(own: [u8; 32], at: u64) -> Self {
+        Self {
+            kind: NoticeKind::ListsAwaitHost,
+            attempt_id: None,
+            msg_id: None,
+            counterparty: own,
+            request_hash: None,
+            raised_at_ms: at,
+            acknowledged: false,
+            stored: None,
+            origin: None,
+            lost: None,
+        }
+    }
+
+    /// The notice that lists wait for the host read whole: of no attempt or message, not
+    /// acknowledged (it is deleted then), and of `own`; one that isn't is a corrupt store.
+    pub(crate) fn check_lists(&self, own: &[u8; 32]) -> Result<()> {
+        if self.kind != NoticeKind::ListsAwaitHost
+            || self.attempt_id.is_some()
+            || self.msg_id.is_some()
+            || self.request_hash.is_some()
+            || self.stored.is_some()
+            || self.origin.is_some()
+            || self.lost.is_some()
+            || self.acknowledged
+            || self.counterparty != *own
+        {
+            return Err(PaykitError::corrupt());
+        }
+        Ok(())
+    }
+
     /// Whether the message given up stays processed, so a copy sent again has no effect while
-    /// the notice is kept: every give-up but the client's drop of an entry waiting for a
-    /// key, which was never processed ([`GivenUpOrigin::KeyWait`]).
+    /// the notice is kept: a message received and given up, but for the client's drop of an
+    /// entry waiting for a key, which was never processed ([`GivenUpOrigin::KeyWait`]). A
+    /// notice of another kind at a message's key, such as this app's own message given up
+    /// undelivered to that counterparty, says nothing of a message received: a counterparty
+    /// that sends a message under that `msg_id` neither has it dropped nor takes the notice
+    /// over.
     pub(crate) fn keeps_processed(&self) -> bool {
-        self.origin != Some(GivenUpOrigin::KeyWait)
+        self.kind == NoticeKind::MessageGivenUp && self.origin != Some(GivenUpOrigin::KeyWait)
     }
 
     /// The notice read whole, at the attempt and kind its key names: one that doesn't is a
     /// corrupt store.
     pub(crate) fn check(&self, attempt: &AttemptId, kind: NoticeKind) -> Result<()> {
         if self.kind != kind
-            || kind == NoticeKind::MessageGivenUp
+            || kind.of_message()
             || self.attempt_id.as_deref() != Some(attempt.to_text().as_str())
             || self.msg_id.is_some()
             || self.stored.is_some()
@@ -319,18 +419,23 @@ impl KeptNotice {
         Ok(())
     }
 
-    /// The notice of a message given up read whole, at the sender and `msg_id` its key
-    /// names: one that doesn't is a corrupt store.
-    pub(crate) fn check_message(&self, sender: &[u8; 32], msg_id: &str) -> Result<()> {
+    /// The notice of a message given up or undelivered read whole, at the counterparty and
+    /// `msg_id` its key names: one that doesn't is a corrupt store.
+    pub(crate) fn check_message(&self, counterparty: &[u8; 32], msg_id: &str) -> Result<()> {
         // A message notice is deleted at its acknowledgement, after its entry is forgotten,
-        // so a valid run keeps none acknowledged. It holds its entry's handle exactly when it
-        // names no origin: one raised for a stored entry always has it, and one with no
-        // entry stored (a key wait's, a kept reply's) names where it came from instead.
-        if self.kind != NoticeKind::MessageGivenUp
+        // so a valid run keeps none acknowledged. A given-up one holds its entry's handle
+        // exactly when it names no origin: one raised for a stored entry always has it, and
+        // one with no entry stored (a key wait's, a kept reply's) names where it came from
+        // instead. An undelivered one, given up from the client's outbox, has neither.
+        let entry_named = match self.kind {
+            NoticeKind::MessageGivenUp => self.stored.is_some() != self.origin.is_some(),
+            NoticeKind::MessageUndelivered => self.stored.is_none() && self.origin.is_none(),
+            _ => false,
+        };
+        if !entry_named
             || self.attempt_id.is_some()
             || self.msg_id.as_deref() != Some(msg_id)
-            || self.counterparty != *sender
-            || self.stored.is_some() == self.origin.is_some()
+            || self.counterparty != *counterparty
             || self.lost.is_some()
             || self.acknowledged
         {
@@ -376,7 +481,7 @@ impl KeptNotice {
 
 /// Bind `notice`, read at `key` (`nt/...`), to what the key names, as a restore checks it:
 /// a value at another notice's key, or under a key that names no notice, is a corrupt store.
-pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
+pub(crate) fn bind_notice(key: &str, notice: &KeptNotice, own: &[u8; 32]) -> Result<()> {
     match StateKey::parse(key.as_bytes()) {
         Some(StateKey::Notice { attempt, kind }) => notice.check(&attempt, kind),
         Some(StateKey::MessageNotice { sender, msg_id }) => notice.check_message(&sender, &msg_id),
@@ -384,6 +489,7 @@ pub(crate) fn bind_notice(key: &str, notice: &KeptNotice) -> Result<()> {
             counterparty,
             from_ms,
         }) => notice.check_lost(&counterparty, from_ms),
+        Some(StateKey::ListsNotice) => notice.check_lists(own),
         _ => Err(PaykitError::corrupt()),
     }
 }
@@ -426,6 +532,7 @@ impl Paykit {
                 StateKey::Notice { .. }
                     | StateKey::MessageNotice { .. }
                     | StateKey::BlockedLost { .. }
+                    | StateKey::ListsNotice
             )
         ) {
             return Err(Refusal::NotFound.into());
@@ -436,7 +543,7 @@ impl Paykit {
         }
         // Kept acknowledged while the journal holds its payment, which could raise it again;
         // dropped with it, or now when it is gone (`Paykit::prune_journal`). A message given
-        // up is never raised again: its notice goes now.
+        // up or undelivered is never raised again: its notice goes now.
         let attempt = kept
             .attempt_id
             .as_deref()
@@ -591,5 +698,66 @@ mod tests {
         assert!(notice
             .check(&AttemptId::from_bytes([5; 16]), NoticeKind::MessageGivenUp)
             .is_err());
+    }
+
+    #[test]
+    fn test_notices_undelivered_notice_bound_to_its_recipient_and_message() {
+        let id = "123e4567-e89b-42d3-a456-426614174000";
+        let notice = KeptNotice::undelivered([1; 32], id, Some([2; 32]), 3);
+        assert_eq!(notice.kind, NoticeKind::MessageUndelivered);
+        assert!(notice.check_message(&[1; 32], id).is_ok());
+        let view = notice.view(format!("x/{id}")).unwrap();
+        assert_eq!(view.counterparty, [1; 32]);
+        assert_eq!(view.request_hash, Some([2; 32]));
+        assert_eq!(view.msg_id.as_deref(), Some(id));
+        assert!(notice.check_message(&[9; 32], id).is_err());
+        assert!(notice
+            .check_message(&[1; 32], "223e4567-e89b-42d3-a456-426614174000")
+            .is_err());
+        // Kept at an attempt's key, it is no notice of a message.
+        let attempt = AttemptId::from_bytes([5; 16]);
+        assert!(notice
+            .check(&attempt, NoticeKind::MessageUndelivered)
+            .is_err());
+        let at_attempt = KeptNotice {
+            attempt_id: Some(attempt.to_text()),
+            msg_id: None,
+            ..notice
+        };
+        assert!(at_attempt
+            .check(&attempt, NoticeKind::MessageUndelivered)
+            .is_err());
+        assert_eq!(
+            NoticeKind::from_tag(NoticeKind::MessageUndelivered.tag()),
+            Some(NoticeKind::MessageUndelivered)
+        );
+    }
+
+    #[test]
+    fn test_notices_undelivered_notice_keeps_no_message_processed() {
+        // Only a message received and given up stays processed: a notice of this app's own
+        // message given up undelivered, at the same key form, isn't one, so neither the
+        // stored-entry writers nor the receive step take it as one.
+        let id = "123e4567-e89b-42d3-a456-426614174000";
+        let undelivered = KeptNotice::undelivered([1; 32], id, None, 3);
+        assert!(!undelivered.keeps_processed());
+        let given_up = KeptNotice::given_up(
+            [1; 32],
+            id,
+            None,
+            3,
+            GivenUpFrom::Stored(StoredHandle {
+                stored_id: 4,
+                hash: [5; 32],
+            }),
+        );
+        assert!(given_up.keeps_processed());
+        // Adopted as a given-up one, an undelivered notice would read corrupt.
+        let mut adopted = undelivered.clone();
+        adopted.stored = Some(StoredHandle {
+            stored_id: 4,
+            hash: [5; 32],
+        });
+        assert!(adopted.check_message(&[1; 32], id).is_err());
     }
 }
