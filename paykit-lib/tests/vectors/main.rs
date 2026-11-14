@@ -4,6 +4,10 @@
 //! The set is self-contained: its keys come from fixed seed labels (`keys.json`), and its
 //! certificates, app records, record keys, policies and sealed values are built from them
 //! with `pubky-switch-core`'s algorithms, at the Switch revision Paykit's spec builds on.
+//!
+//! The set is regenerated as one by the driver in `regenerate.rs`, which builds every file
+//! in dependency order from one in-memory corpus:
+//! `PAYKIT_WRITE_VECTORS=1 cargo test -p paykit-lib --test vectors regenerate`.
 
 mod common;
 
@@ -14,6 +18,7 @@ mod identifiers;
 mod keys;
 mod messages;
 mod periods;
+mod regenerate;
 mod sealed;
 mod signatures;
 mod writers;

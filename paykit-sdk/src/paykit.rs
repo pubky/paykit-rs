@@ -587,7 +587,7 @@ impl Paykit {
         if acts_as_payee(self.app.cert().scopes()) {
             Ok(())
         } else {
-            Err(Refusal::ScopeMissing("request or a labelled selling scope".into()).into())
+            Err(Refusal::ScopeMissing("paykit_request or paykit_request:<label>".into()).into())
         }
     }
 
@@ -754,6 +754,10 @@ impl Paykit {
         // followed) may have returned before it.
         if !report.stopped {
             Box::pin(self.records_listed(keys_held_before)).await?;
+            // A `missed` item whose end isn't known holds every open request until a read
+            // completes: this one did, so the hold is bounded by the service time verified
+            // (`hold.rs`).
+            Box::pin(self.bound_missed_hold()).await?;
         }
         // A certificate the read took, any other than the one the records were listed under,
         // a narrower one included: they are listed now, or stay unlisted for the next

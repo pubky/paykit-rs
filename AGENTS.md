@@ -47,7 +47,7 @@
 ## Coding Style & Naming Conventions
 - Follow Rust 2021 defaults: four-space indentation, snake_case for functions and modules, UpperCamelCase for types and traits, SCREAMING_SNAKE_CASE for consts.
 - Every public item has `///` docs; each crate sets `#![deny(missing_docs)]` and `#![forbid(unsafe_code)]`.
-- Keep files ASCII. Copy Paykit vocabulary spellings from `THESAURUS.md`, and wire names (`paykit.payment_request`, `payer_activity`, `allowance_execute`) exactly as the wire formats spell them.
+- Keep files ASCII. Copy Paykit vocabulary spellings from `THESAURUS.md`, and wire names (`paykit.payment_request`, `payer_activity`, `paykit_allowance_execute`) exactly as the wire formats spell them.
 - Cite the rule a piece of code enforces by its section, naming the spec: `(Paykit spec 3.1)`, `(Paykit wire 4.5)`, `(Switch spec 3.5)` or `(Switch wire 7.4)`.
 
 ## Backends
@@ -63,7 +63,7 @@
 
 ## Messages and Shared State
 - Sealing, opening, the message frame and the common message checks are the Switch's (Switch wire 4 and 5.1), and come from `pubky-switch-core`. A receiving app runs those checks, then Paykit's, before acting on a message; a message that fails a check is dropped as that check says, and is never partly applied.
-- Paykit's kinds are `paykit.<name>`, plus extension kinds `<prefix>.<name>` under an `ext:<prefix>` scope, which carry no Paykit payment semantics (Paykit spec 3.3 and 5). Which scope sends and which receives each kind is the table of Paykit spec 3.3; a payer's replies are narrowed by label (Paykit spec 3.4). Bodies are Paykit wire 4.
+- Paykit's kinds are `paykit.<name>`, plus extension kinds `<prefix>.<name>` under a `paykit_ext:<prefix>` scope, which carry no Paykit payment semantics (Paykit spec 3.3 and 5). Which scope sends and which receives each kind is the table of Paykit spec 3.3; a payer's replies are narrowed by label (Paykit spec 3.4). Bodies are Paykit wire 4.
 - A kind stored in an activity record is at most 16 KiB (Paykit spec 5). Envelope sizes are the Switch's.
 - Paykit's collections use the fixed policies of Paykit spec 6; apps ignore a record whose policy or label doesn't match. Destinations come only from the payee: no own app can redirect a payment by writing shared state (Paykit spec 6).
 - The record write a received message causes and the cursor move past it go in one batch (Switch spec 8.2). Every payment follows the paying order of Paykit spec 7.2.

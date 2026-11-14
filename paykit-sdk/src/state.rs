@@ -34,6 +34,9 @@
 //! | `ct` | the acceptance time of the last Paykit entry the receive step passed | |
 //! | `rh` | the hold a restore set on the open requests (`hold.rs`); never backed up | |
 //! | `hc/<record key>` | the user confirmed a held request; never backed up | |
+//! | `mh` | the hold a `missed` item set on the open requests, bounded by a time: the item's last acceptance time, or, for an item whose end isn't known, a service time verified after the read that handed it (`hold.rs`); never restored | |
+//! | `mu` | set by a `missed` item whose end isn't known: every open request is held, as after a restore, until a read that completes bounds the hold by the service time verified then, into `mh`, and clears it (`hold.rs`); never restored | |
+//! | `ml` | set by a `missed` item: the shared records aren't listed by Paykit since, so a record's absence means nothing yet; cleared by Paykit's next listing (`hold.rs`); never restored | |
 //! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads | |
 //! | `kc/<record key>` | a payee's cancellation of a request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
@@ -53,8 +56,9 @@
 //! | `bf` | the raise of the identity's block floor this app owes: the latest of the latest times of the block marks gone for the bound or their own expiry, and of a restore's first read of the lists; written to the shared `block_floor` record before the block marks ask and with any ask, and deleted in that batch; applied as a floor meanwhile (`crate::floor`) | yes |
 //! | `fo/<record key>` | a request record a read opened without `manual_only`, checked against the block floor once the read is done and marked if dated before it (`crate::floor`); never restored | |
 //! | `bk/<pubky>` | this app's block or unblock of `pubky` not yet shown by the list (`OwnBlockMark`): a block from before the switch is asked, an unblock only with the batch the client keeps; a block counts until a read of the list shows it, and is written again at a receive while the client neither keeps nor applied its batch, a restored one too, since the kept batch stays with the device that kept it; an unblock counts for payments and held sends only while the client still keeps its batch, never for the spam rule, and isn't restored (Paykit spec 8.1) | |
-//! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
+//! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`); at most `MAX_DROPPED_MARKS` in each family of marks (`pd/`, `ud/`, `kw/`, `bd/`), and a restore refuses a backup holding more | |
 //! | `bd/<sender>` | a mark of a sender's messages dropped for the user's block, each as one never processed (its pair forgotten), as `pd/` holds; it asks that sender once it is neither blocked nor flagged (`marks.rs`, Paykit spec 8.1) | |
+//! | `bl/<sender>/<msg_id>` | a notice of lost messages owed on a block's mark the receive step dropped for the bound while it named a request as queued: the mark's window, when the notice was raised, and the request's `msg_id` and hash; settled in the pass after the read from the outbox's answer on that request, told or dropped (`marks.rs`, `Paykit::settle_lost_owed`); at most `MAX_LOST_OWED`, the receive step holding the next entry that would owe one more; restored, and a restore refuses a backup holding more | |
 //! | `bw/<from_ms>` | a widening of the block marks, from `from_ms` to the time it holds, owed to every counterparty the deny list holds at the next read of the lists: written by a restore and by a `missed` item (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `kw/<sender>` | a mark of a sender's entries the client dropped while they waited for a scope key, as `pd/` holds, with the data epochs they waited for; it asks only while the app holds every key of those epochs (`marks.rs`) | |
@@ -471,6 +475,7 @@ impl Stored for bool {
         match family {
             StateKey::RecordsUnlisted
             | StateKey::MissedUnlisted
+            | StateKey::MissedEndUnknown
             | StateKey::MissedConsents
             | StateKey::PayerPassOwed
             | StateKey::HoldConfirmed(_)
@@ -1167,6 +1172,8 @@ pub(crate) mod key {
     pub(crate) const CURSOR_TIME: &str = "ct";
     pub(crate) const RESTORE_HOLD: &str = "rh";
     pub(crate) const MISSED_HOLD: &str = "mh";
+    /// A `missed` item's hold whose end isn't known yet (`Paykit::bound_missed_hold`).
+    pub(crate) const MISSED_END_UNKNOWN: &str = "mu";
     pub(crate) const HOLD_CONFIRMED: &str = "hc/";
     pub(crate) const LISTS_READ: &str = "lr";
     pub(crate) const HELD_LISTS: &str = "lh/";
@@ -1473,6 +1480,8 @@ pub(crate) enum StateKey {
     RestoreHold,
     /// `mh`: the hold a `missed` item set.
     MissedHold,
+    /// `mu`: a `missed` item's hold whose end isn't known yet.
+    MissedEndUnknown,
     /// `nl`: the shared records aren't listed since a restore.
     RecordsUnlisted,
     /// `ml`: the shared records aren't listed by Paykit since a `missed` item.
@@ -1614,6 +1623,7 @@ impl StateKey {
             "ct" => Self::CursorTime,
             "rh" => Self::RestoreHold,
             "mh" => Self::MissedHold,
+            "mu" => Self::MissedEndUnknown,
             "nl" => Self::RecordsUnlisted,
             "ml" => Self::MissedUnlisted,
             "mc" => Self::MissedConsents,
@@ -1993,6 +2003,14 @@ mod tests {
             serde_json::json!([])
         ));
         assert!(reads::<bool>(key::MISSED_UNLISTED, serde_json::json!(true)));
+        assert!(reads::<bool>(
+            key::MISSED_END_UNKNOWN,
+            serde_json::json!(true)
+        ));
+        assert!(!reads::<bool>(
+            key::MISSED_END_UNKNOWN,
+            serde_json::json!(false)
+        ));
         assert!(reads::<MissedHold>(
             key::MISSED_HOLD,
             serde_json::json!({ "bound_ms": 9 })
@@ -2204,6 +2222,7 @@ mod tests {
             (key::CURSOR_TIME.into(), StateKey::CursorTime),
             (key::RESTORE_HOLD.into(), StateKey::RestoreHold),
             (key::MISSED_HOLD.into(), StateKey::MissedHold),
+            (key::MISSED_END_UNKNOWN.into(), StateKey::MissedEndUnknown),
             (key::RECORDS_UNLISTED.into(), StateKey::RecordsUnlisted),
             (key::MISSED_UNLISTED.into(), StateKey::MissedUnlisted),
             (key::MISSED_CONSENTS.into(), StateKey::MissedConsents),
