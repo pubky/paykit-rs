@@ -124,13 +124,15 @@ fn not_automatic(why: &str) -> PaykitError {
 /// content, the base the next version is checked against. The Allowance record it names
 /// repeats the key's, so a value read back is bound to its key.
 ///
-/// With it go the attempts its content no longer lists that an earlier kept version did,
-/// while this app's journal holds them under the Allowance (`dropped`): compaction drops a
-/// `done` entry into the totals, and a compacted `failed` attempt leaves `totals.failed`
-/// into the totals once its `done` is seen, so the ledger alone no longer shows the
-/// Allowance such an attempt was made under. They stay what bears out the Allowance its
-/// journal entry names ([`Paykit::entry_allowance`]), for a payment whose proof is still
-/// to be written.
+/// With it go the attempts of this app's journal entries under the Allowance that its
+/// content doesn't list (`dropped`): compaction drops a `done` entry into the totals, and a
+/// compacted `failed` attempt leaves `totals.failed` into the totals once its `done` is
+/// seen, so the ledger alone no longer shows the Allowance such an attempt was made under.
+/// They stay what bears out the Allowance its journal entry names
+/// ([`Paykit::entry_allowance`]), for a payment whose proof is still to be written. Bounded
+/// by the journal: every attempt there is one of a journal entry this app holds naming the
+/// Allowance, only those are written, a pruned entry's attempt leaves it in the prune's
+/// commit, and a restore refuses a backup that carries another.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct KeptLedger {
     #[serde(with = "serde_b64")]
@@ -146,9 +148,8 @@ pub(crate) struct KeptLedger {
     pub(crate) item_hash: [u8; 32],
     #[serde(with = "serde_b64_vec")]
     pub(crate) value: Vec<u8>,
-    /// The attempts, as text, an earlier kept version listed among its entries or
-    /// `totals.failed` and this one doesn't, of this app's journal entries under the
-    /// Allowance when it was kept.
+    /// The attempts, as text, of this app's journal entries under the Allowance that this
+    /// version doesn't list among its entries or `totals.failed`.
     pub(crate) dropped: Vec<String>,
 }
 
@@ -365,7 +366,7 @@ impl KeptLedger {
 
     /// The attempts kept as dropped, read as written: one that doesn't read is a corrupt
     /// store.
-    fn dropped(&self) -> Result<Vec<AttemptId>> {
+    pub(crate) fn dropped(&self) -> Result<Vec<AttemptId>> {
         self.dropped
             .iter()
             .map(|text| AttemptId::parse(text).map_err(|_| PaykitError::corrupt()))
@@ -373,9 +374,9 @@ impl KeptLedger {
     }
 }
 
-/// Whether `ledger`, the content of `kept`, or an earlier kept version as `kept` carries it,
-/// lists `attempt` (Paykit wire 5.5): among its entries, in `totals.failed`, or dropped
-/// from them since.
+/// Whether `ledger`, the content of `kept`, lists `attempt` (Paykit wire 5.5) among its
+/// entries or in `totals.failed`, or `kept` carries it as dropped: an attempt of a journal
+/// entry under the Allowance that the content no longer lists, or never did.
 fn kept_lists(kept: &KeptLedger, ledger: &Ledger, attempt: &AttemptId) -> Result<bool> {
     Ok(ledger_lists(ledger, attempt) || kept.dropped()?.contains(attempt))
 }
@@ -392,7 +393,10 @@ fn ledger_lists(ledger: &Ledger, attempt: &AttemptId) -> bool {
 /// (`seq` at least 1), its content is no longer than a shared record holds
 /// (`MAX_LEDGER_VALUE`), which no write or read the executor keeps exceeds, and it reads as
 /// a ledger; each attempt kept as dropped reads, once, and isn't one the ledger lists.
-/// Returns the ledger.
+/// Returns the ledger. That each attempt kept as dropped is one of a journal entry naming
+/// the Allowance needs the journal: a write takes them from it
+/// ([`Paykit::dropped_attempts`]), and a restore checks them against the journal restored
+/// (`protocol::restore_paykit_layer`).
 ///
 /// # Errors
 ///
@@ -594,8 +598,8 @@ impl Paykit {
     /// Allowance in the request record in the same batch as the attempt, so the payer record
     /// held must name it; without a record that reads, such as one another own app deleted,
     /// the kept ledger version must list the attempt, among its entries, in `totals.failed`
-    /// once compacted, or as dropped since from a version kept earlier ([`KeptLedger`]), so
-    /// neither compaction nor a compacted attempt's move into the totals loses it. An entry
+    /// once compacted, or as dropped ([`KeptLedger`]), so neither compaction, nor a compacted
+    /// attempt's move into the totals, nor a version that was never kept loses it. An entry
     /// naming another Allowance than its proof is a corrupt store, checked before money
     /// moves and before the outcome's proof or record is built.
     ///
@@ -772,16 +776,17 @@ impl Paykit {
         self.local_commit(tx).await
     }
 
-    /// The attempts the version kept now of the Allowance at `record` lists, among its
-    /// entries or `totals.failed` or as dropped from an earlier one, that `next`, the version
-    /// about to be kept, doesn't, of this app's journal entries under that Allowance: what
-    /// still bears out the Allowance those entries name once the ledger has compacted them
-    /// or moved them into the totals ([`KeptLedger`]). An attempt whose journal entry is
-    /// gone, pruned past its reconciliation window, isn't carried further.
+    /// The attempts of this app's journal entries under the Allowance at `record` that
+    /// `next`, the version about to be kept, doesn't list among its entries or
+    /// `totals.failed`: what still bears out the Allowance those entries name once the ledger
+    /// has compacted them or moved them into the totals ([`KeptLedger`]). A journal entry
+    /// names its Allowance only when this app's executor batch made the attempt, so the
+    /// journal, not an earlier kept version, is the source: a version written and compacted
+    /// while no version was kept (the read after the write failed) loses no attempt. An
+    /// attempt whose journal entry is gone, pruned past its reconciliation window, isn't
+    /// carried: the prune takes it out of the kept version in its own commit
+    /// ([`Paykit::unlist_pruned`]).
     async fn dropped_attempts(&self, record: &[u8; 32], next: &Ledger) -> Result<Vec<AttemptId>> {
-        let Some((kept, ledger)) = self.kept_ledger(record).await? else {
-            return Ok(Vec::new());
-        };
         let mut dropped = Vec::new();
         for entry in self.journal().await? {
             let Some(allowance_id) = entry.allowance()? else {
@@ -795,15 +800,36 @@ impl Paykit {
                 continue;
             }
             let attempt = entry.attempt()?;
-            if kept_lists(&kept, &ledger, &attempt)?
-                && !ledger_lists(next, &attempt)
-                && !dropped.contains(&attempt)
-            {
+            if !ledger_lists(next, &attempt) && !dropped.contains(&attempt) {
                 dropped.push(attempt);
             }
         }
         dropped.sort_by_key(|a| a.to_bytes());
         Ok(dropped)
+    }
+
+    /// Take `pruned`, attempts whose journal entries `tx` deletes, out of every kept ledger
+    /// version that carries them as dropped, in the same commit: a kept version carries as
+    /// dropped only attempts of journal entries this app holds under its Allowance, which a
+    /// restore checks ([`KeptLedger`]).
+    pub(crate) async fn unlist_pruned(&self, tx: &mut Tx, pruned: &[AttemptId]) -> Result<()> {
+        if pruned.is_empty() {
+            return Ok(());
+        }
+        for (_, mut kept) in Box::pin(self.local_scan::<KeptLedger>(key::KEPT_LEDGERS)).await? {
+            let before = kept.dropped.len();
+            let mut left = Vec::with_capacity(before);
+            for attempt in kept.dropped()? {
+                if !pruned.contains(&attempt) {
+                    left.push(attempt.to_text());
+                }
+            }
+            if left.len() != before {
+                kept.dropped = left;
+                tx.put(&key::kept_ledger(&kept.record), &kept)?;
+            }
+        }
+        Ok(())
     }
 
     /// Whether a ledger was at its key at the first grant (`el/`), so the executor takes it

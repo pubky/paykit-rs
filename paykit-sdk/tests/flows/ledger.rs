@@ -660,7 +660,18 @@ async fn proofs_name(shop: &mut Paykit) -> Vec<Value> {
 /// by another own app; the method's history then shows the payment made. Returns the
 /// apps, the record key and the attempt.
 async fn compacted_then_paid(w: &World) -> (Paykit, Paykit, [u8; 32], AttemptId) {
-    let (mut shop, mut wallet, record) = Box::pin(set_up(w, terms_with(json!({})))).await;
+    let (shop, wallet, record) = Box::pin(set_up(w, terms_with(json!({})))).await;
+    Box::pin(compacted_then_paid_from(w, shop, wallet, record)).await
+}
+
+/// [`compacted_then_paid`], from the shop and the wallet set up under the Allowance at
+/// `record`.
+async fn compacted_then_paid_from(
+    w: &World,
+    mut shop: Paykit,
+    mut wallet: Paykit,
+    record: [u8; 32],
+) -> (Paykit, Paykit, [u8; 32], AttemptId) {
     let mut phone = Box::pin(w.wallet("phone")).await;
     let first = Box::pin(request(w, &mut shop, &mut wallet, "1")).await;
     w.rail.next(paykit_sdk::rail::Behaviour::Fail);
@@ -825,6 +836,155 @@ async fn test_ledger_compacted_attempt_rebuilt_after_a_restore_stays_doubtful() 
     assert_eq!(w.rail.executions(&attempt_id), 1);
     let named = proofs_name(&mut shop).await;
     assert!(!named.contains(&Value::Null), "{named:?}");
+}
+
+/// A store that, while set to, leaves out of every commit its puts of kept ledger versions
+/// (`lv/`), as an executor whose read after its own ledger write fails keeps none.
+#[derive(Default)]
+struct SkipKeeps {
+    inner: pubky_switch_client::store::MemoryStore,
+    skip: std::sync::atomic::AtomicBool,
+}
+
+impl SkipKeeps {
+    fn skip(&self, skip: bool) {
+        self.skip.store(skip, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl pubky_switch_client::store::StateStore for SkipKeeps {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        mut batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        if self.skip.load(std::sync::atomic::Ordering::SeqCst) {
+            batch.writes.retain(|write| {
+                !matches!(write, pubky_switch_client::store::Write::Put { key, .. }
+                    if key.starts_with(b"p/lv/"))
+            });
+        }
+        self.inner.commit(batch)
+    }
+}
+
+#[tokio::test]
+async fn test_ledger_attempt_no_kept_version_listed_gets_its_proof() {
+    // Every keep is skipped from before the attempt is made until the ledger has compacted
+    // it and moved it into the totals, so no kept ledger version ever lists it: its late
+    // success can't be written meanwhile. The next version kept, at a later payment,
+    // carries it from the journal, whose entry names the Allowance, and the late success's
+    // proof names the Allowance.
+    let w = World::new();
+    let store = std::sync::Arc::new(SkipKeeps::default());
+    let (shop, wallet, record) = Box::pin(crate::executor::set_up_on(
+        &w,
+        std::sync::Arc::clone(&store) as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    ))
+    .await;
+    store.skip(true);
+    let (mut shop, mut wallet, record, attempt_id) =
+        Box::pin(compacted_then_paid_from(&w, shop, wallet, record)).await;
+    let id = wallet.allowance(&record).await.unwrap().allowance_id;
+    let resumed = Box::pin(wallet.resume_payments()).await.unwrap();
+    assert!(
+        matches!(
+            resumed.as_slice(),
+            [PayOutcome::PaidOutcomeUnwritten { .. }]
+        ),
+        "{resumed:?}"
+    );
+    let moved = ledger(&wallet, &record).await;
+    assert!(moved.entries.iter().all(|e| e.attempt_id != attempt_id));
+    assert!(moved.failed.iter().all(|f| f.attempt_id != attempt_id));
+    store.skip(false);
+    let later = Box::pin(request(&w, &mut shop, &mut wallet, "0.1")).await;
+    let paid = Box::pin(wallet.pay_under_allowance(&later, &record))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let resumed = Box::pin(wallet.resume_payments()).await.unwrap();
+    assert!(
+        resumed
+            .iter()
+            .any(|o| matches!(o, PayOutcome::Paid { attempt_id: a, .. } if *a == attempt_id)),
+        "{resumed:?}"
+    );
+    let named = proofs_name(&mut shop).await;
+    assert!(named.contains(&json!(id.as_str())), "{named:?}");
+}
+
+/// The wallet's backup after an attempt under the Allowance at `record`, with its kept
+/// ledger version listing `listed` and carrying `dropped` as dropped.
+fn with_kept_ledger(backup: &Value, listed: &[AttemptId], dropped: &[String]) -> Value {
+    let mut state = crate::restore::layer_of(backup);
+    let (_, kept) = state
+        .iter_mut()
+        .find(|(key, _)| key.starts_with(b"lv/"))
+        .unwrap();
+    let bytes = pubky_switch_core::enc::unb64(kept["d"]["value"].as_str().unwrap()).unwrap();
+    let mut ledger = Ledger::from_json(&bytes).unwrap();
+    ledger.entries.retain(|e| listed.contains(&e.attempt_id));
+    let value = ledger.to_json().unwrap();
+    kept["d"]["value"] = json!(pubky_switch_core::enc::b64(&value));
+    kept["d"]["dropped"] = json!(dropped);
+    crate::restore::with_layer(backup, state)
+}
+
+#[tokio::test]
+async fn test_ledger_kept_dropped_attempt_without_its_journal_entry_refused_at_restore() {
+    // A kept ledger version carries as dropped only the attempts of journal entries naming
+    // its Allowance: a backup whose version carries another is refused, nothing written; one
+    // carrying its own journal entry's attempt, which the content doesn't list, is restored.
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(&w, terms_with(json!({})))).await;
+    let first = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    let PayOutcome::Paid { attempt_id, .. } = Box::pin(wallet.pay_under_allowance(&first, &record))
+        .await
+        .unwrap()
+    else {
+        panic!("paid");
+    };
+    let bytes = wallet.backup().await.unwrap().to_bytes().unwrap();
+    let good: Value = serde_json::from_slice(&bytes).unwrap();
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let foreign = AttemptId::from_bytes([0x77; 16]).to_text();
+    let over = with_kept_ledger(&good, &[], &[attempt_id.to_text(), foreign]);
+    Box::pin(crate::restore::refused_writing_nothing(
+        &w, over, app_id, "lv/",
+    ))
+    .await;
+    let own = with_kept_ledger(&good, &[], &[attempt_id.to_text()]);
+    let backup = paykit_sdk::PaykitBackup::from_bytes(&serde_json::to_vec(&own).unwrap()).unwrap();
+    let restored = Box::pin(Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(restored.app().protocol_scan(b"lv/").await.unwrap().len(), 1);
 }
 
 #[tokio::test]

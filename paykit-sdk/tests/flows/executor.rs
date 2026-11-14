@@ -2286,7 +2286,7 @@ async fn set_up_through(
 }
 
 /// [`set_up_through`], the wallet on `store`.
-async fn set_up_on(w: &World, store: Arc<dyn StateStore>) -> (Paykit, Paykit, [u8; 32]) {
+pub(crate) async fn set_up_on(w: &World, store: Arc<dyn StateStore>) -> (Paykit, Paykit, [u8; 32]) {
     let router = Arc::clone(&w.router) as Arc<dyn Transport>;
     Box::pin(set_up_through(w, store, router)).await
 }

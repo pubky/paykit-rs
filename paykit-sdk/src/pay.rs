@@ -3234,7 +3234,8 @@ impl Paykit {
     /// receipt the user is told about, and a payment made under an Allowance this app
     /// executes whose kept ledger version doesn't show it paid yet
     /// ([`Paykit::journal_decides_ledger`]). A bound passes as [`bound_passed`] says. An entry's
-    /// acknowledged notices go with it.
+    /// acknowledged notices go with it, and so does its attempt in a kept ledger version's
+    /// `dropped` ([`Paykit::unlist_pruned`]).
     ///
     /// Two of those have no bound of their own: a payment made after `failed` was written
     /// waits for its receipt for as long as no receipt comes, and a dispatch the method
@@ -3244,6 +3245,7 @@ impl Paykit {
         let service = self.service_time();
         let now = self.now();
         let mut tx = state::Tx::default();
+        let mut pruned = Vec::new();
         for entry in self.journal().await? {
             let Some(bound) = prune_bound(
                 entry.stage,
@@ -3261,6 +3263,7 @@ impl Paykit {
                 }
                 let attempt = entry.attempt()?;
                 tx.delete(&key::journal(&attempt));
+                pruned.push(attempt);
                 // Its acknowledged notices go with it; one not acknowledged stays for the
                 // host, and goes when acknowledged.
                 for kind in [NoticeKind::PaidAfterFailed, NoticeKind::HeldWithoutPay] {
@@ -3275,6 +3278,9 @@ impl Paykit {
                 }
             }
         }
+        // A kept ledger version carries as dropped only attempts the journal holds under its
+        // Allowance: a pruned one leaves it in the same commit.
+        self.unlist_pruned(&mut tx, &pruned).await?;
         self.local_commit(tx).await
     }
 
