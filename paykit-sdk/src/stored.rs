@@ -744,12 +744,23 @@ impl Paykit {
     /// app's own, built on the version held; then forget the stored entry of each one in
     /// place, and drop its note. A write that fails now is tried again at the next receive;
     /// a message not written within [`crate::KEPT_MESSAGE_MS`] of its acceptance, on the
-    /// highest service time verified, is given up, its entry left stored for the host.
+    /// highest service time verified, is given up, its entry left stored for the host. The
+    /// messages are taken in the order their inbox accepted them, by acceptance time and
+    /// then by their entries' local IDs, never in the order of their `msg_id`s.
     pub(crate) async fn place_stored(&mut self) -> Result<()> {
         let own = self.identity();
-        for (rest, mut note) in self.local_scan::<StoredNote>(key::STORED_NOTES).await? {
+        // Every note in the order its inbox accepted its message, never in the order of the
+        // keys, which end in a `msg_id` its sender chooses: by acceptance time, then by the
+        // entry's local ID, which the client gives its entries in the order it stores them
+        // (Paykit spec 8.1). Each is read bound to its key first.
+        let mut notes = Vec::new();
+        for (rest, note) in self.local_scan::<StoredNote>(key::STORED_NOTES).await? {
             let note_key = format!("{}{rest}", key::STORED_NOTES);
             let stored = note.bound(&note_key, &own)?;
+            notes.push((stored.accepted_at(), note_key, note, stored));
+        }
+        notes.sort_by(|a, b| (a.0, a.2.stored_id, &a.1).cmp(&(b.0, b.2.stored_id, &b.1)));
+        for (_, note_key, mut note, stored) in notes {
             if !note.placed {
                 // A kept message carries its entry's acceptance time; one without it is a
                 // corrupt store, never a message past its window.
@@ -762,7 +773,7 @@ impl Paykit {
                         Placed::Done
                     }
                     Some(Place::Allowance) => {
-                        Box::pin(self.place_allowance_note(stored.clone())).await?
+                        Box::pin(self.place_allowance_note(stored.clone(), note.stored_id)).await?
                     }
                     Some(Place::Record {
                         target,

@@ -2041,35 +2041,33 @@ impl Paykit {
     /// error, returned, and the message stays kept. Every kept message is read with a
     /// restore's check, and one that fails it fails the call as a corrupt store.
     ///
-    /// The Allowance answers kept before their record go too
+    /// The Allowance answers kept before their record, or waiting over it, go too
     /// ([`Paykit::place_kept_allowance_response`]), each once the Allowances side is listed.
+    ///
+    /// Every kept reply is taken in the order its inbox accepted it
+    /// ([`crate::records::KeptOrder`]), so the replies of one record are placed in that
+    /// order, never in the order of their `msg_id`s.
     pub(crate) async fn place_kept_replies(&mut self) -> crate::error::Result<()> {
         use crate::stored::{PeriodPlace, Placed};
         let own = self.identity();
-        let held = self.local_scan::<KeptMessage>(key::KEPT_REPLIES).await?;
-        // The Allowances' answers kept before their record (`allowances.rs`), each sender's
-        // for one record in the order their inbox accepted them (`records::KeptOrder`): the
-        // first placed is the record's response, and a different later one conflicts with
-        // it. Read bound to its key, as a restore reads it.
-        let mut answers = Vec::new();
-        for (rest, kept) in &held {
-            let reply = kept.stored(&own)?;
-            if crate::allowances::is_allowance_response(reply.body()) {
-                let record = rest.rsplit_once('/').map(|(record, _)| record.to_owned());
-                answers.push((record, kept.order()?, rest.clone(), reply));
-            }
+        // Every kept reply in the order its inbox accepted it (`records::KeptOrder`), never
+        // in the order of the keys, which end in a `msg_id` its sender chooses: the replies
+        // of one record are placed in that order, and those that move over a record paused
+        // as divergent are kept there in it (Paykit spec 8.1).
+        let mut held = Vec::new();
+        for (rest, kept) in self.local_scan::<KeptMessage>(key::KEPT_REPLIES).await? {
+            held.push((kept.order()?, rest, kept));
         }
-        answers.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
-        for (_, _, rest, reply) in answers {
-            let kept_key = format!("{}{rest}", key::KEPT_REPLIES);
-            Box::pin(self.place_kept_allowance_response(&kept_key, reply)).await?;
-        }
-        for (rest, kept) in held {
+        held.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        for ((_, intake), rest, kept) in held {
             // Read bound to its key, as a restore reads it: a message that fails it is a
             // corrupt store, so the receive fails rather than drop, give up or place it.
             let reply = kept.stored(&own)?;
             let kept_key = format!("{}{rest}", key::KEPT_REPLIES);
+            // An Allowance's answer kept before its record (`allowances.rs`): the first
+            // placed is the record's response, and a different later one conflicts with it.
             if crate::allowances::is_allowance_response(reply.body()) {
+                Box::pin(self.place_kept_allowance_response(&kept_key, reply, intake)).await?;
                 continue;
             }
             let (Some(role), Some(accepted_at)) =
