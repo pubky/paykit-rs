@@ -443,7 +443,7 @@ fn test_writers_refuse_every_rejection_case() {
         let name = st(case, "name");
         let sender = verify_certificate(&signed(&case["sender_cert"]), &pubky(BOB)).unwrap();
         let recipient = verify_certificate(&signed(&case["recipient_cert"]), &alice).unwrap();
-        let side = if sender.scopes().iter().any(|s| s == "pay") {
+        let side = if sender.scopes().iter().any(|s| s == "paykit_pay") {
             Side::Payer
         } else {
             Side::Payee

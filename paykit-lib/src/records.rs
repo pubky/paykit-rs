@@ -906,8 +906,10 @@ pub struct ActivityRecord {
     /// A payer's request record of a recurring request, beside `allowance_id`: the Allowances
     /// the user moved later Billing Periods to, by ascending `from_period`; empty when absent.
     pub reassociations: Vec<Reassociation>,
-    /// A payer's request record of a one-time request, or a payer's period record: no
-    /// executor pays the occurrence automatically. Never lifted once set.
+    /// A payer's request record, or a payer's period record: no app pays the occurrence
+    /// automatically; in the request record of a recurring request, no executor accepts the
+    /// request and no app pays one of its Billing Periods automatically (Paykit spec 8.2,
+    /// 8.3). Never lifted once set.
     pub manual_only: bool,
     /// The members the writer doesn't know, kept as read (Paykit wire 5).
     pub unknown: UnknownMembers,
@@ -1370,10 +1372,11 @@ impl ActivityRecord {
     /// stored messages are between the counterparty and one other identity, each of its
     /// role's kind, from the side that sends it and addressed to the other; the members'
     /// shapes; the binding; the members only some records carry; the `refs` that tie the
-    /// messages together; `attempt_id` and `unrequested.amount`, the stored proof's; `attempted_periods`, only in a payer's request record of a recurring request,
+    /// messages together; `attempt_id` and `unrequested.amount`, the stored proof's;
+    /// `attempted_periods`, only in a payer's request record of a recurring request,
     /// ascending, each once, at most 16; `reassociations`, there too, beside `allowance_id`,
     /// each from a Billing Period start of the request; `manual_only`, only in a payer's
-    /// request record of a one-time request or a payer's period record; and the period
+    /// request record or a payer's period record; and the period
     /// details ([`ActivityRecord::details`]), at most 8, `period_details` the latest unless a
     /// proof names it.
     ///
@@ -1524,12 +1527,11 @@ impl ActivityRecord {
             )?;
         }
         if self.manual_only {
-            let one_time_request =
-                matches!(binding, RecordBinding::Request { .. }) && !recurring_request;
+            let request = matches!(binding, RecordBinding::Request { .. });
             let period = matches!(binding, RecordBinding::Period { .. });
             ensure(
-                self.side == ActivitySide::Payer && (one_time_request || period),
-                "Paykit wire 5.3: manual_only only in a payer's request record of a one-time request, or a payer's period record",
+                self.side == ActivitySide::Payer && (request || period),
+                "Paykit wire 5.3: manual_only only in a payer's request record or a payer's period record",
             )?;
         }
         Ok(())

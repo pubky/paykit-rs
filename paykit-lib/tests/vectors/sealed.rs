@@ -298,10 +298,10 @@ fn check_labelled(keys: &Keys, l: &Value) {
         .unwrap();
     assert_eq!(b64(&record_key), st(l, "record_key"));
 
-    // Sealed under the label key, with request:shop1 in the AAD, byte for byte.
+    // Sealed under the label key, with paykit_request:shop1 in the AAD, byte for byte.
     let plaintext = st(l, "plaintext").as_bytes();
     assert_eq!(
-        hex(&aad(&bob, "request:shop1", &record_key)),
+        hex(&aad(&bob, "paykit_request:shop1", &record_key)),
         st(l, "aad_hex")
     );
     let nonce: [u8; 24] = crate::common::unhex(st(l, "nonce_hex")).try_into().unwrap();
@@ -309,7 +309,7 @@ fn check_labelled(keys: &Keys, l: &Value) {
         &label_key,
         &bob,
         epoch,
-        "request:shop1",
+        "paykit_request:shop1",
         &record_key,
         plaintext,
         &nonce,
@@ -328,8 +328,8 @@ fn check_labelled(keys: &Keys, l: &Value) {
     // The request key and another label's key don't open it.
     let root = identity.switch_root();
     for other in [
-        key_of_scope(&root, epoch, "request"),
-        key_of_scope(&root, epoch, "request:shop2"),
+        key_of_scope(&root, epoch, "paykit_request"),
+        key_of_scope(&root, epoch, "paykit_request:shop2"),
     ] {
         assert!(sealed.open(&other, &bob, &record_key).is_err());
     }
@@ -685,7 +685,7 @@ fn side_collection(side: ActivitySide) -> &'static str {
 /// The top-level description, which names every member.
 const DESCRIPTION: &str =
     "Paykit's sealed record values (wire 5), sealed as the Switch's sealed values are (the \
-Switch set's sealed.json) under alice's scope_key(2, \"pay\") from the Switch set's \
+Switch set's sealed.json) under alice's scope_key(2, \"paykit_pay\") from the Switch set's \
 keys.json, with record keys blinded with alice's naming key. binding_accepted holds record \
 values, as they are sealed, that a reader binds to their record keys, recomputed with \
 alice's naming key (wire 5.4, 5.5): a payment_lists record, an allowances record and its \
@@ -705,20 +705,20 @@ alice's for payer_activity, bob's for payee_activity. Some members only some rec
 request_hash, billing_period and earlier_details only a period record, attempt_id and \
 unrequested only the record of a payment without a request, allowance_id and \
 reassociations only a payer's request record, and manual_only only a payer's request record \
-of a one-time request or a payer's period record. \
+or a payer's period record. \
 accepted are records their reader binds at their keys; refused are the same records with a \
 member where their binding and side don't allow it, which their reader refuses, and, last, \
 alice's request records storing a request whose sender's certificate doesn't allow it \
 (wire 5.2, the sender's side of check 8): messages.json label_rejections' request labelled \
-shop2 from bob's hosted app, which holds only request:shop1, and messages.json's \
+shop2 from bob's hosted app, which holds only paykit_request:shop1, and messages.json's \
 payment_request presented with documents.json's chat-only certificate of the shop's keys, at \
 the keys their requests name. Appended after \
 them, on payment evidence (wire 4.11): accepted, records whose receipt is of the stored \
 proof's attempt, or of the record's attempt_id; refused, the same with a receipt of another \
 attempt. Appended last, on the members only some records carry (wire 4.9, 5.3): accepted, \
 a payer's request record of the recurring request with reassociations; alice's request \
-record of the one-time request, manual_only; her \
-period record, manual_only; the period record whose proof names messages.json's period \
+record of the one-time request, manual_only; her request record of the recurring request, \
+manual_only; her period record, manual_only; the period record whose proof names messages.json's period \
 details, with later details, signed again by the shop a day later under another msg_id, in \
 earlier_details; the same record without its proof, the later details in period_details and \
 the earlier in earlier_details; the record of the payment without a request with \
@@ -867,6 +867,14 @@ fn member_cases(keys: &Keys) -> (Vec<ActivityCase>, Vec<ActivityCase>) {
             key(&one_time),
         ),
         (
+            "a payer's request record of a recurring request, manual_only",
+            ActivityRecord {
+                manual_only: true,
+                ..b.payer_request.clone()
+            },
+            key(&b.payer_request),
+        ),
+        (
             "a payer's period record, manual_only",
             period_marked.clone(),
             key(&period_marked),
@@ -945,14 +953,6 @@ fn member_cases(keys: &Keys) -> (Vec<ActivityCase>, Vec<ActivityCase>) {
             "reassociations not strictly ascending",
             ActivityRecord {
                 reassociations: moved(vec![(other.clone(), 1_772_236_800), (named, 1_772_236_800)]),
-                ..b.payer_request.clone()
-            },
-            key(&b.payer_request),
-        ),
-        (
-            "manual_only in a payer's request record of a recurring request",
-            ActivityRecord {
-                manual_only: true,
                 ..b.payer_request.clone()
             },
             key(&b.payer_request),
@@ -1387,11 +1387,11 @@ fn binding_cases(keys: &Keys) -> Vec<(Place<'static>, Value)> {
 /// The label of each `labelled` rejection, by its name: the policy it is read under.
 fn labelled_rejection_label(name: &str) -> Option<Label> {
     match name {
-        "the labelled request's record under another label's policy (request:shop2)" => {
+        "the labelled request's record under another label's policy (paykit_request:shop2)" => {
             Some(Label::parse("shop2").unwrap())
         }
         "the labelled request's record under the fixed policy" => None,
-        "a record under request:shop1 holding an unlabelled request (messages.json payment_request)" => {
+        "a record under paykit_request:shop1 holding an unlabelled request (messages.json payment_request)" => {
             Some(Label::parse("shop1").unwrap())
         }
         other => panic!("no label for the labelled rejection {other}"),
@@ -1775,7 +1775,7 @@ fn unauthorized_stored(
         .clone();
     vec![
         (
-            "a stored request labelled shop2 from the hosted app, which holds only request:shop1",
+            "a stored request labelled shop2 from the hosted app, which holds only paykit_request:shop1",
             shop2,
             crate::common::cert_doc("hosted"),
         ),
@@ -1790,7 +1790,7 @@ fn unauthorized_stored(
     .collect()
 }
 
-/// Alice's payer request record holding `request`, as JSON, and the key it would sit at.
+/// Alice's payer request record holding `paykit_request`, as JSON, and the key it would sit at.
 fn record_with_request(keys: &Keys, request: Value, json: &str) -> (Vec<u8>, [u8; 32]) {
     let alice = pubky(ALICE);
     let base = activity(ActivitySide::Payer, pubky(BOB));

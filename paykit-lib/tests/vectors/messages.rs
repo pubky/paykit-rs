@@ -335,7 +335,7 @@ fn check_resend(keys: &Keys, read: &HashMap<String, Read>) {
         by_ids.msg_ids,
         [read["payment_request_acceptance"].message.msg_id.clone()]
     );
-    // A wallet with `pay` alone doesn't receive Allowance kinds: a resend answer leaves them
+    // A wallet with `paykit_pay` alone doesn't receive Allowance kinds: a resend answer leaves them
     // out (Paykit wire 4.12).
     let wallet = &keys.app("wallet").scopes;
     let proposal = &read["allowance_proposal"].message;
@@ -415,7 +415,7 @@ protocol's scope, chat (sender_cert, documents.json multi_protocol_certificates)
 wallet (recipient_app), whose certificate is the Switch set's. Another protocol's scopes, \
 and the switch permissions they bring, authorize no Paykit message: each kind still needs \
 its Paykit scope, and a resend_request needs a Paykit App, one holding at least one Paykit \
-scope. accepted are messages the wallet takes at check 8, from the shop holding request \
+scope. accepted are messages the wallet takes at check 8, from the shop holding paykit_request \
 beside chat; refused are those it drops there, from the shop holding chat alone, a \
 certificate Paykit's verifiers take. reason is paykit-lib's wording, of the first check \
 that refuses it.";
@@ -428,7 +428,7 @@ fn sender_cert(keys: &Keys, chat_only: bool) -> AppCert {
         reissued(
             keys,
             "shop",
-            &["request", "chat"],
+            &["paykit_request", "chat"],
             &[Permission::ListsRead, Permission::ConversationAdd],
         )
     }
@@ -481,8 +481,8 @@ fn generate(keys: &Keys) {
     };
     let member = json!({
         "accepted": [
-            case("a payment_request from an app holding request and chat", "payment_request", false),
-            case("a resend_request from an app holding request and chat", "resend_request_ids", false),
+            case("a payment_request from an app holding paykit_request and chat", "payment_request", false),
+            case("a resend_request from an app holding paykit_request and chat", "resend_request_ids", false),
         ],
         "description": MULTI_PROTOCOL_DESCRIPTION,
         "refused": [
@@ -562,10 +562,10 @@ fn signed_messages(keys: &Keys) -> Vec<(Place<'static>, Value)> {
         ));
         if case.get("recipient_cert").is_some() {
             let recipient = match st(case, "name") {
-                "an acceptance labelled shop1 at an app holding only request:shop2" => {
-                    with_scopes(keys, "hosted", &["request:shop2"])
+                "an acceptance labelled shop1 at an app holding only paykit_request:shop2" => {
+                    with_scopes(keys, "hosted", &["paykit_request:shop2"])
                 }
-                "an acceptance without a label at an app holding only request:shop1" => {
+                "an acceptance without a label at an app holding only paykit_request:shop1" => {
                     cert(keys.app("hosted"))
                 }
                 other => panic!("no recipient certificate for {other}"),
@@ -583,10 +583,11 @@ const CANCELLATION_DESCRIPTION: &str = "Wire 4.1 check 8, 4.3, 4.8, spec 3.3: me
 payment_request_cancellation, as the shop signs it, without a label, presented with a \
 certificate of the shop's keys (sender_cert) at a certificate of alice's wallet's keys \
 (recipient_cert), each with its scopes changed, its permissions those Paykit's scopes need, \
-and signed again; a certificate holding pay holds contacts too, which pay requires (spec \
+and signed again; a certificate holding paykit_pay holds paykit_contacts too, which paykit_pay requires (spec \
 3.1). A cancellation's recipient holds the other role than its sender: the \
-payer's goes from pay to request, the payee's from request to pay. accepted are the two \
-pairings the recipient takes at check 8; refused are pay to pay and request to request, \
+payer's goes from paykit_pay to paykit_request, the payee's from paykit_request to \
+paykit_pay. accepted are the two \
+pairings the recipient takes at check 8; refused are paykit_pay to paykit_pay and paykit_request to paykit_request, \
 which it drops there. reason is paykit-lib's wording, of the first check that refuses it.";
 
 /// The certificate of `app` with `scopes` and the permissions Paykit's scopes need.
@@ -620,9 +621,9 @@ fn cancellation_at(
     PaykitKindRules::for_certificate(recipient).check_scopes(&message, sender)
 }
 
-/// The scopes of a payer's certificate in `cancellation_roles`: `pay`, with the `contacts` it
+/// The scopes of a payer's certificate in `cancellation_roles`: `paykit_pay`, with the `paykit_contacts` it
 /// requires (Paykit spec 3.1).
-const PAY: &[&str] = &["pay", "contacts"];
+const PAY: &[&str] = &["paykit_pay", "paykit_contacts"];
 
 /// `cancellation_roles`, as paykit-lib generates it.
 fn cancellation_roles(keys: &Keys) -> Value {
@@ -655,13 +656,13 @@ fn cancellation_roles(keys: &Keys) -> Value {
     };
     json!({
         "accepted": [
-            case("the payee's cancellation, from request to pay", &["request"], PAY, true),
-            case("the payer's cancellation, from pay to request", PAY, &["request"], true),
+            case("the payee's cancellation, from paykit_request to paykit_pay", &["paykit_request"], PAY, true),
+            case("the payer's cancellation, from paykit_pay to paykit_request", PAY, &["paykit_request"], true),
         ],
         "description": CANCELLATION_DESCRIPTION,
         "refused": [
-            case("a cancellation from pay to pay", PAY, PAY, false),
-            case("a cancellation from request to request", &["request"], &["request"], false),
+            case("a cancellation from paykit_pay to paykit_pay", PAY, PAY, false),
+            case("a cancellation from paykit_request to paykit_request", &["paykit_request"], &["paykit_request"], false),
         ],
     })
 }

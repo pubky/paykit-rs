@@ -117,42 +117,42 @@ pub const APPS: [AppSeed; 6] = [
     AppSeed {
         name: "wallet",
         owner: "alice",
-        scopes: &["pay", "contacts", "manage_contacts"],
+        scopes: &["paykit_pay", "paykit_contacts", "paykit_manage_contacts"],
         expires_at: "2026-12-01T00:00:00.000Z",
     },
     AppSeed {
         name: "phone",
         owner: "alice",
-        scopes: &["pay", "allowance"],
+        scopes: &["paykit_pay", "paykit_allowance"],
         expires_at: "2027-01-01T00:00:00.000Z",
     },
     AppSeed {
         name: "executor",
         owner: "alice",
-        scopes: &["pay", "allowance", "allowance_execute"],
+        scopes: &["paykit_pay", "paykit_allowance", "paykit_allowance_execute"],
         expires_at: "2026-12-01T00:00:00.000Z",
     },
     AppSeed {
         name: "shop",
         owner: "bob",
-        scopes: &["request", "allowance"],
+        scopes: &["paykit_request", "paykit_allowance"],
         expires_at: "2026-12-01T00:00:00.000Z",
     },
     AppSeed {
         name: "cap",
         owner: "bob",
-        scopes: &["request", "ext:paykit-cap"],
+        scopes: &["paykit_request", "paykit_ext:paykit-cap"],
         expires_at: "2026-12-01T00:00:00.000Z",
     },
     AppSeed {
         name: "hosted",
         owner: "bob",
-        scopes: &["request:shop1"],
+        scopes: &["paykit_request:shop1"],
         expires_at: "2026-12-01T00:00:00.000Z",
     },
 ];
 
-/// The extension kind bob's `cap` app accepts, under its scope `ext:paykit-cap`.
+/// The extension kind bob's `cap` app accepts, under its scope `paykit_ext:paykit-cap`.
 pub const CAP_EXTENSION_KIND: &str = "paykit-cap.offer";
 
 /// The label of bob's labelled selling scope, which his `hosted` app holds.
@@ -355,16 +355,21 @@ pub fn cap_app_record(keys: &Keys) -> AppRecord {
 }
 
 /// The scopes of Paykit's own executor certificate (Paykit spec 3.1): the base certificate's,
-/// with `contacts`, which `allowance_execute` requires.
-pub const EXECUTOR_SCOPES: [&str; 4] = ["pay", "allowance", "allowance_execute", "contacts"];
+/// with `paykit_contacts`, which `paykit_allowance_execute` requires.
+pub const EXECUTOR_SCOPES: [&str; 4] = [
+    "paykit_pay",
+    "paykit_allowance",
+    "paykit_allowance_execute",
+    "paykit_contacts",
+];
 
 /// The scopes of Paykit's own phone certificate (Paykit spec 3.1): the base certificate's,
-/// with `contacts`, which `pay` requires.
-pub const PHONE_SCOPES: [&str; 3] = ["pay", "allowance", "contacts"];
+/// with `paykit_contacts`, which `paykit_pay` requires.
+pub const PHONE_SCOPES: [&str; 3] = ["paykit_pay", "paykit_allowance", "paykit_contacts"];
 
 /// The scopes of the certificates this set holds beside the base ones, by app name: the apps
-/// whose base certificate lacks `contacts`, which Paykit requires beside `pay` and
-/// `allowance_execute` (Paykit spec 3.1).
+/// whose base certificate lacks `paykit_contacts`, which Paykit requires beside `paykit_pay` and
+/// `paykit_allowance_execute` (Paykit spec 3.1).
 pub fn paykit_signed_scopes(app: &str) -> Option<&'static [&'static str]> {
     match app {
         "executor" => Some(&EXECUTOR_SCOPES),
@@ -385,7 +390,7 @@ pub fn cert_doc(app: &str) -> SignedDoc {
 
 /// Paykit's own certificate of `app`, the executor or the phone: its base certificate with
 /// [`paykit_signed_scopes`] and the permissions they need, signed by alice's identity key.
-/// The base certificates hold no `contacts`, so Paykit's verifiers refuse them (Paykit spec
+/// The base certificates hold no `paykit_contacts`, so Paykit's verifiers refuse them (Paykit spec
 /// 3.1).
 pub fn paykit_cert(keys: &Keys, app: &str) -> AppCert {
     let scopes = paykit_signed_scopes(app).unwrap_or_else(|| panic!("{app} isn't Paykit's"));

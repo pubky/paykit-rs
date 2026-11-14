@@ -107,7 +107,7 @@ impl MissedHold {
 /// Which side waits for a wider certificate's scope keys ([`Paykit::scope_keys_awaited`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum KeysAwaited {
-    /// The payer's records, claims or `pay` key: a resume writes nothing to the switch.
+    /// The payer's records, claims or `paykit_pay` key: a resume writes nothing to the switch.
     PayerSide,
     /// Only records the payer's side doesn't read: a resume goes on.
     PayeeSideOnly,
@@ -281,7 +281,7 @@ impl Paykit {
     /// Whether the app waits for a certificate's scope keys, which the signer stores when it
     /// is next online (Switch spec 3.5), and on which side: the records aren't listed under
     /// it ([`side_unlisted`]), and can't be until the keys come. The payer's side waits when
-    /// the app lacks the current key of `pay`, the certificate reads claims the one listed
+    /// the app lacks the current key of `paykit_pay`, the certificate reads claims the one listed
     /// under didn't, or the payer's side isn't listed under it; otherwise only the payee's
     /// side does, which a payment's resume doesn't touch.
     pub(crate) async fn scope_keys_awaited(&self) -> Result<Option<KeysAwaited>> {
@@ -296,13 +296,16 @@ impl Paykit {
         let Some(listed) = since else {
             return Ok(Some(KeysAwaited::PayerSide));
         };
-        // Without the current `pay` key the payer's records can't be written, as after a data
+        // Without the current `paykit_pay` key the payer's records can't be written, as after a data
         // epoch rotation.
-        let pay_key = self.app.scope_key(self.app.data_epoch(), "pay").is_some();
+        let pay_key = self
+            .app
+            .scope_key(self.app.data_epoch(), "paykit_pay")
+            .is_some();
         // Claims read now and not under the certificate listed under. Today this follows from
-        // the payer collections' term or from `pay` not held, where a resume reads nothing:
-        // `claims.read` comes with `pay`, which reads `payer_activity`, or with `allowance`
-        // (paykit-lib `scopes.rs`), which doesn't hold `pay`. It is kept so the rule doesn't
+        // the payer collections' term or from `paykit_pay` not held, where a resume reads nothing:
+        // `claims.read` comes with `paykit_pay`, which reads `payer_activity`, or with `paykit_allowance`
+        // (paykit-lib `scopes.rs`), which doesn't hold `paykit_pay`. It is kept so the rule doesn't
         // lean on that table.
         let claims = !listed.has_permission(Permission::ClaimsRead)
             && held.has_permission(Permission::ClaimsRead);
@@ -316,7 +319,7 @@ impl Paykit {
     }
 
     /// Whether the payer's side waits ([`KeysAwaited`], `keys` as
-    /// [`Paykit::scope_keys_awaited`] gave it): the payer's records, claims or `pay` key
+    /// [`Paykit::scope_keys_awaited`] gave it): the payer's records, claims or `paykit_pay` key
     /// wait, or keys wait while the payer's side of the copy isn't listed yet
     /// ([`side_unlisted`]), as a restore's isn't. Nothing built on the payer's records is
     /// written then, at a resume or a receive.
@@ -634,10 +637,10 @@ impl Paykit {
 
     /// Whether a reconcile still owes the payer pass since a restore: the restore sets the
     /// mark in its own commit, and only a [`Paykit::reconcile`] that ran the payer pass,
-    /// under `pay`, clears it. The backup doesn't hold the attempts made after it, and only
+    /// under `paykit_pay`, clears it. The backup doesn't hold the attempts made after it, and only
     /// that pass finds them on the payer's obligations (Paykit spec 7.3), so until then no
     /// new attempt is made and nothing is dispatched, whatever the host does meanwhile, such
-    /// as [`Paykit::end_reconcile`] after a reconcile without `pay` skipped the pass.
+    /// as [`Paykit::end_reconcile`] after a reconcile without `paykit_pay` skipped the pass.
     pub(crate) async fn payer_pass_owed(&self) -> Result<bool> {
         Ok(self
             .local_get::<bool>(key::PAYER_PASS_OWED)
@@ -1413,14 +1416,22 @@ mod tests {
 
     #[test]
     fn test_side_unlisted_under_any_other_certificate_that_reads_the_side() {
-        let listed = cert(&["pay", "contacts", "request"], 0);
+        let listed = cert(&["paykit_pay", "paykit_contacts", "paykit_request"], 0);
         for held in [
             // Narrower: one held between may have read less again.
-            cert(&["pay", "contacts"], 1),
+            cert(&["paykit_pay", "paykit_contacts"], 1),
             // The same scopes, renewed: one held between may have read less.
-            cert(&["pay", "contacts", "request"], 2),
+            cert(&["paykit_pay", "paykit_contacts", "paykit_request"], 2),
             // Wider.
-            cert(&["pay", "contacts", "request", "allowance"], 3),
+            cert(
+                &[
+                    "paykit_pay",
+                    "paykit_contacts",
+                    "paykit_request",
+                    "paykit_allowance",
+                ],
+                3,
+            ),
         ] {
             for side in [RecordSide::Payer, RecordSide::All] {
                 assert!(side_unlisted(side, false, Some(&listed), &held));
@@ -1437,11 +1448,11 @@ mod tests {
 
     #[test]
     fn test_side_unlisted_not_under_the_certificate_listed_under_or_for_a_side_unread() {
-        let listed = cert(&["pay", "contacts", "request"], 0);
+        let listed = cert(&["paykit_pay", "paykit_contacts", "paykit_request"], 0);
         for side in [RecordSide::Payer, RecordSide::Payee, RecordSide::All] {
             assert!(!side_unlisted(side, false, Some(&listed), &listed));
         }
-        let payer_only = cert(&["pay", "contacts"], 1);
+        let payer_only = cert(&["paykit_pay", "paykit_contacts"], 1);
         assert!(!side_unlisted(
             RecordSide::Payee,
             false,

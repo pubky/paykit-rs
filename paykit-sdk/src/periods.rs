@@ -383,14 +383,14 @@ impl Paykit {
     /// (Paykit spec 8.2): one not shown paid that is the next to start, or one started
     /// whose payment deadline hasn't passed, or, for a request without one, one of the 16
     /// latest to have started, on the highest service time verified. Nothing is signed,
-    /// written or queued while sends to the payer are held: at an app holding `contacts`,
+    /// written or queued while sends to the payer are held: at an app holding `paykit_contacts`,
     /// while the copy of the deny list holds the payer, or while that copy isn't known, which
     /// a read of the lists is tried for first (Paykit spec 8.1, "Blocked counterparties"), as
-    /// a new request is held. An app without `contacts` reads no lists, and holds nothing.
+    /// a new request is held. An app without `paykit_contacts` reads no lists, and holds nothing.
     ///
     /// # Errors
     ///
-    /// [`Refusal::ScopeMissing`] without `request` or a label; [`Refusal::NotFound`] for a
+    /// [`Refusal::ScopeMissing`] without `paykit_request` or a label; [`Refusal::NotFound`] for a
     /// record this app doesn't hold, or a period record; [`Refusal::NotNow`] while sends to
     /// the payer are held, before anything else is judged, with nothing written or queued;
     /// [`Refusal::Usage`] for a one-time
@@ -602,8 +602,8 @@ mod tests {
 
     fn parties() -> (Party, Party) {
         (
-            Party::new("alice", "wallet", &["pay", "contacts"]),
-            Party::new("bob", "shop", &["request"]),
+            Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]),
+            Party::new("bob", "shop", &["paykit_request"]),
         )
     }
 

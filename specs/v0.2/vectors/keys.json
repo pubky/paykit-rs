@@ -16,9 +16,9 @@
         "conversation.add"
       ],
       "scopes": [
-        "pay",
-        "contacts",
-        "manage_contacts"
+        "paykit_pay",
+        "paykit_contacts",
+        "paykit_manage_contacts"
       ],
       "signing_public": "34ZGVmVZLEaW9LV-fvdhq5LWstPhljHGbJgcQVSR9Ek",
       "signing_secret_hex": "9089f52c5b8ccd2526c4213f15714a9a888a56afb1fc99f57f970a8afdcdc31b",
@@ -39,9 +39,9 @@
         "conversation.add"
       ],
       "scopes": [
-        "pay",
-        "allowance",
-        "contacts"
+        "paykit_pay",
+        "paykit_allowance",
+        "paykit_contacts"
       ],
       "signing_public": "UDyX-NYVmJ-eY_CQlFTMbivTuLgYpG8IhudJ4ppkcz4",
       "signing_secret_hex": "312f585936c8abaa5175dd3734e5793014d59bc9c17a46e5cee2c82008d10b4c",
@@ -62,10 +62,10 @@
         "conversation.add"
       ],
       "scopes": [
-        "pay",
-        "allowance",
-        "allowance_execute",
-        "contacts"
+        "paykit_pay",
+        "paykit_allowance",
+        "paykit_allowance_execute",
+        "paykit_contacts"
       ],
       "signing_public": "XnAJx2W5wcu3tEWuCMCvImc3bRFSxWP1-8lnRCsrzcY",
       "signing_secret_hex": "3374d21ebc17b511713cb2d84f91a5505258fc9d39c5a652bd69dde6498a1052",
@@ -84,8 +84,8 @@
         "conversation.add"
       ],
       "scopes": [
-        "request",
-        "allowance"
+        "paykit_request",
+        "paykit_allowance"
       ],
       "signing_public": "D9vXhyOi76BsSuPscqj3tU8t_i5rcRkdOkqPyMy1WWM",
       "signing_secret_hex": "7b76ff58f1291242cef22f34ca9e428be511bb2b3799abeaf7b0af302c9dc9e2",
@@ -103,8 +103,8 @@
         "conversation.add"
       ],
       "scopes": [
-        "request",
-        "ext:paykit-cap"
+        "paykit_request",
+        "paykit_ext:paykit-cap"
       ],
       "signing_public": "-n6_hkQIUSztrFP_1eY8bKLkUd-Qs2h4kVekkOpmGvs",
       "signing_secret_hex": "95844dec84ef19d35d31c4ff01664a365e7dc03da039cf4d57146dc539e23979",
@@ -122,14 +122,14 @@
         "conversation.add"
       ],
       "scopes": [
-        "request:shop1"
+        "paykit_request:shop1"
       ],
       "signing_public": "vtgs3-ir2M6ybOE-DN6ERGO2KRzE8FdmBzU-bWuQIJs",
       "signing_secret_hex": "505b8c416a7d115f8bbaec5445aceb77f00da01410a09cd7c1445af589ece305",
       "signing_seed_label": "bob/hosted/signing"
     }
   ],
-  "description": "The fixed keys every other file of this set uses (Switch wire 1.3, 1.5, 3.1). Each secret is BLAKE3(\"paykit/v1/test-vectors/\" + seed label); X25519 secrets (bundle keys) are then clamped as RFC 7748 requires, and Ed25519 secrets are 32-byte seeds. identities holds alice, the payer, and bob, the payee, with their Pubky IDs, their Switch roots, derive(\"pubky-switch/v1/scope-root\", identity secret), and their naming keys, derive(\"pubky-switch/v1/naming\", root), which blind every record key and claim input of this set. apps holds each app with its signing and bundle keys, its App ID and the scopes and switch permissions of its certificate in documents.json certificates: the executor's and the phone's hold contacts. scope_keys are derive(\"pubky-switch/v1/scope-key\", root, u64(data_epoch), scope), key_material_hex being the input after the label: alice's pay key under which sealed.json's values are sealed, and bob's request key and the key of his label shop1, which seals sealed.json's labelled record.",
+  "description": "The fixed keys every other file of this set uses (Switch wire 1.3, 1.5, 3.1). Each secret is BLAKE3(\"paykit/v1/test-vectors/\" + seed label); X25519 secrets (bundle keys) are then clamped as RFC 7748 requires, and Ed25519 secrets are 32-byte seeds. identities holds alice, the payer, and bob, the payee, with their Pubky IDs, their Switch roots, derive(\"pubky-switch/v1/scope-root\", identity secret), and their naming keys, derive(\"pubky-switch/v1/naming\", root), which blind every record key and claim input of this set. apps holds each app with its signing and bundle keys, its App ID and the scopes and switch permissions of its certificate in documents.json certificates: the executor's and the phone's hold paykit_contacts. scope_keys are derive(\"pubky-switch/v1/scope-key\", root, u64(data_epoch), scope), key_material_hex being the input after the label: alice's paykit_pay key under which sealed.json's values are sealed, and bob's paykit_request key and the key of his label shop1, which seals sealed.json's labelled record.",
   "identities": [
     {
       "name": "alice",
@@ -154,23 +154,23 @@
     {
       "data_epoch": 2,
       "identity": "alice",
-      "key_hex": "c86fd7962631391f2d5a02a8c0375ea99f68429b80ed01126a30ce1d13dede51",
-      "key_material_hex": "0000002025f576c9daa8ddd87f67727eefadf3624989ca8e4e1fce14c80a40e023a7bc4d00000008000000000000000200000003706179",
-      "scope": "pay"
+      "key_hex": "223b35a250806f35fea13a230188788df19fa5ea3f17f8c5fdd58a598f26a392",
+      "key_material_hex": "0000002025f576c9daa8ddd87f67727eefadf3624989ca8e4e1fce14c80a40e023a7bc4d0000000800000000000000020000000a7061796b69745f706179",
+      "scope": "paykit_pay"
     },
     {
       "data_epoch": 1,
       "identity": "bob",
-      "key_hex": "d1728ab2944fbb1b8794c239e19a88ad4bcdcc8bc2e042966b2a61bde89456b8",
-      "key_material_hex": "000000201832075ee5bef0026fcda26c57cb8a67b6cfffdf8d43bbcce2107d6cf97f81760000000800000000000000010000000772657175657374",
-      "scope": "request"
+      "key_hex": "0e5c600ba8ab10707c03afc8f2e3c9b84485844cc57aed28716e30df317df837",
+      "key_material_hex": "000000201832075ee5bef0026fcda26c57cb8a67b6cfffdf8d43bbcce2107d6cf97f81760000000800000000000000010000000e7061796b69745f72657175657374",
+      "scope": "paykit_request"
     },
     {
       "data_epoch": 1,
       "identity": "bob",
-      "key_hex": "67a63016e52cd5fe849302d7cbfc02ed3d7b22a45c1f5e974f8f3acedf433b35",
-      "key_material_hex": "000000201832075ee5bef0026fcda26c57cb8a67b6cfffdf8d43bbcce2107d6cf97f81760000000800000000000000010000000d726571756573743a73686f7031",
-      "scope": "request:shop1"
+      "key_hex": "b9a83669747b0f685b996e7b986c08bec2c7ae42930d811a7ec6d20a17146560",
+      "key_material_hex": "000000201832075ee5bef0026fcda26c57cb8a67b6cfffdf8d43bbcce2107d6cf97f8176000000080000000000000001000000147061796b69745f726571756573743a73686f7031",
+      "scope": "paykit_request:shop1"
     }
   ]
 }

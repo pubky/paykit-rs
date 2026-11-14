@@ -5,8 +5,8 @@
 //! payer app of the identity, not only to the app whose mark asked: a newly added app, or one
 //! that holds no mark of the sender, can receive it first. So the time before which a
 //! one-time request is paid only by hand is identity-shared: the `block_floor` record, one per
-//! identity, under `pay`, which every app that pays holds (Paykit spec 3.1:
-//! `allowance_execute` requires `pay`). Its floor only rises: a writer raises it, a reader
+//! identity, under `paykit_pay`, which every app that pays holds (Paykit spec 3.1:
+//! `paykit_allowance_execute` requires `paykit_pay`). Its floor only rises: a writer raises it, a reader
 //! refuses a later write of a lower one, and it never expires. A request created now is dated
 //! above every floor, so nothing fresh is held by it.
 //!
@@ -208,9 +208,9 @@ impl Paykit {
 
     /// The time the floor must reach before an ask to `to` goes: its live block mark's latest
     /// time and the raise owed, the higher; `None` when neither is kept, or the app doesn't
-    /// hold `pay`: it opens no payer record, so its marks raise nothing (`crate::floor`).
+    /// hold `paykit_pay`: it opens no payer record, so its marks raise nothing (`crate::floor`).
     async fn floor_owed_for(&self, to: Option<&[u8; 32]>) -> Result<Option<u64>> {
-        if !self.holds("pay") {
+        if !self.holds("paykit_pay") {
             return Ok(None);
         }
         let owed = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
@@ -228,7 +228,7 @@ impl Paykit {
     /// or the copy can't open it, the record as the switch holds it now, read alone. A read
     /// that fails leaves it unknown, as does a scope key the app waits for.
     async fn floor_for_write(&mut self) -> Result<SharedFloor> {
-        // Sealed under `pay` at the current data epoch: without that key nothing is written,
+        // Sealed under `paykit_pay` at the current data epoch: without that key nothing is written,
         // and nothing read while the copy waits for a wider certificate's keys.
         if !self.holds_scope_keys() {
             return Ok(SharedFloor::Unknown);

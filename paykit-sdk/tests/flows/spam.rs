@@ -1,8 +1,8 @@
-//! The spam rule (Paykit wire 4.1, Switch spec 7): at an app holding `contacts`, a message
+//! The spam rule (Paykit wire 4.1, Switch spec 7): at an app holding `paykit_contacts`, a message
 //! that would create state from a sender the user blocked or the service flagged is only
 //! counted, and one from a sender whose standing the app can't tell waits until the lists
 //! are read; a message that updates a record the app holds is applied whoever sent it. An
-//! app without `contacts` gates nothing.
+//! app without `paykit_contacts` gates nothing.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -29,7 +29,7 @@ enum Standing {
     Unknown,
 }
 
-/// Alice's wallet holding `pay` and `manage_contacts`, on `store`, inviting bob as
+/// Alice's wallet holding `paykit_pay` and `paykit_manage_contacts`, on `store`, inviting bob as
 /// [`World::wallet`] does.
 async fn contacts_wallet(w: &World, store: Arc<dyn StateStore>) -> Paykit {
     let mut wallet = w
@@ -404,9 +404,9 @@ async fn test_spam_blocked_payer_unrequested_proof_only_counted() {
 
 #[tokio::test]
 async fn test_spam_without_contacts_unknown_lists_gate_nothing() {
-    // A payee app without `contacts` never reads the lists: alice's standing is unknown
+    // A payee app without `paykit_contacts` never reads the lists: alice's standing is unknown
     // there, and her proof of a payment without a request is recorded. A paying app always
-    // holds `contacts` (Paykit spec 3.1), so this is a payee app.
+    // holds `paykit_contacts` (Paykit spec 3.1), so this is a payee app.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -470,7 +470,7 @@ impl Transport for CountingAllow {
     }
 }
 
-/// Alice's wallet holding `contacts`, its lists read at its join, loaded again with its
+/// Alice's wallet holding `paykit_contacts`, its lists read at its join, loaded again with its
 /// requests through a counting transport.
 async fn counted_wallet(w: &World) -> (Paykit, Arc<CountingAllow>) {
     let store = store();

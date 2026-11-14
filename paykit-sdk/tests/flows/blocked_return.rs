@@ -13,7 +13,7 @@ use crate::common::{asked, draft, request_from, store, ListsStore, ReadHook, Wor
 
 const MINUTE_MS: u64 = 60_000;
 
-/// Alice's wallet holding `pay` and `manage_contacts`, on `store`, inviting bob.
+/// Alice's wallet holding `paykit_pay` and `paykit_manage_contacts`, on `store`, inviting bob.
 async fn contacts_wallet(w: &World, store: Arc<dyn StateStore>) -> Paykit {
     contacts_wallet_with(w, store, PaykitConfig::default()).await
 }
@@ -1356,7 +1356,7 @@ async fn test_blocked_return_floor_that_does_not_read_holds_every_one_time_reque
     let target = pubky_switch_client::app::RecordTarget::new(
         pubky_switch_client::app::Collection::new(
             "block_floor",
-            pubky_switch_core::ident::Policy::new("pay", &["pay"]),
+            pubky_switch_core::ident::Policy::new("paykit_pay", &["paykit_pay"]),
         ),
         &paykit_lib::derive::natural_key::block_floor(&w.alice_id()),
     );
@@ -1379,7 +1379,7 @@ fn floor_record(w: &World) -> pubky_switch_client::app::RecordTarget {
     pubky_switch_client::app::RecordTarget::new(
         pubky_switch_client::app::Collection::new(
             "block_floor",
-            pubky_switch_core::ident::Policy::new("pay", &["pay"]),
+            pubky_switch_core::ident::Policy::new("paykit_pay", &["paykit_pay"]),
         ),
         &paykit_lib::derive::natural_key::block_floor(&w.alice_id()),
     )

@@ -36,9 +36,9 @@ pub enum NoticeKind {
     /// can't tell and raises nothing. Either way the app records the receipt in its
     /// activity record.
     PaidAfterFailed,
-    /// The payment is held: the app's certificate no longer holds `pay`, so the app reads
+    /// The payment is held: the app's certificate no longer holds `paykit_pay`, so the app reads
     /// and writes no claim and no payer record, and the attempt waits, open, for an app
-    /// holding `pay` (Paykit spec 3.1, 7.3). The payment reports only
+    /// holding `paykit_pay` (Paykit spec 3.1, 7.3). The payment reports only
     /// [`crate::PayOutcome::Pending`] or [`crate::PayOutcome::PaidOutcomeUnwritten`]
     /// meanwhile.
     HeldWithoutPay,

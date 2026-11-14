@@ -35,17 +35,17 @@ Switch roots, derive(\"pubky-switch/v1/scope-root\", identity secret), and their
 derive(\"pubky-switch/v1/naming\", root), which blind every record key and claim input of \
 this set. apps holds each app with its signing and bundle keys, its App ID and the scopes and \
 switch permissions of its certificate in documents.json certificates: the executor's and \
-the phone's hold contacts. scope_keys are derive(\"pubky-switch/v1/scope-key\", root, \
-u64(data_epoch), scope), key_material_hex being the input after the label: alice's pay key \
-under which sealed.json's values are sealed, and bob's request key and the key of his label \
+the phone's hold paykit_contacts. scope_keys are derive(\"pubky-switch/v1/scope-key\", root, \
+u64(data_epoch), scope), key_material_hex being the input after the label: alice's paykit_pay key \
+under which sealed.json's values are sealed, and bob's paykit_request key and the key of his label \
 shop1, which seals sealed.json's labelled record.";
 
 /// The scope keys this set uses, by identity name, data epoch and scope.
 fn scope_key_cases() -> [(&'static str, u64, String); 3] {
     [
-        ("alice", 2, "pay".to_owned()),
-        ("bob", 1, "request".to_owned()),
-        ("bob", 1, format!("request:{SHOP1}")),
+        ("alice", 2, "paykit_pay".to_owned()),
+        ("bob", 1, "paykit_request".to_owned()),
+        ("bob", 1, format!("paykit_request:{SHOP1}")),
     ]
 }
 

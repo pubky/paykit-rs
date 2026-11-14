@@ -111,7 +111,10 @@ fn check_executor_grant(keys: &Keys, d: &Value) {
     let error = phone
         .verify(&alice, &bob, &allowance, &terms, built_on)
         .unwrap_err();
-    assert!(error.to_string().contains("allowance_execute"), "{error}");
+    assert!(
+        error.to_string().contains("paykit_allowance_execute"),
+        "{error}"
+    );
 }
 
 fn strings(v: &Value) -> Vec<String> {
@@ -187,7 +190,7 @@ fn check_labelled_scope_rejections(keys: &Keys, d: &Value) {
             | "a label that isn't valid (upper case)"
             | "an empty label" => "a scope that isn't a name or name:<sub>",
             "nine labelled scopes" => "Paykit wire 3.1: more than 8 labelled selling scopes",
-            "plain request beside a labelled scope" => "a name beside one of its sub-scopes",
+            "plain paykit_request beside a labelled scope" => "a name beside one of its sub-scopes",
             other => panic!("unknown labelled scope rejection {other}"),
         };
         assert!(error.contains(rule), "{name}: {error}");
@@ -203,7 +206,7 @@ const DESCRIPTION: &str = "Paykit's signed documents and Paykit's checks of the 
 certificates and app records (wire 3): the executor grant, alone and as the Allowance \
 record's grant history holds it, with Paykit's own executor certificate, and the Switch \
 set's, which Paykit's verifiers refuse; Paykit's own phone certificate, and certificates \
-holding pay without contacts, which they refuse; certificates that Paykit's verifiers refuse for their \
+holding paykit_pay without paykit_contacts, which they refuse; certificates that Paykit's verifiers refuse for their \
 scopes or their permissions, certificates that hold another protocol's scopes beside \
 Paykit's or instead of them, and app records as a Paykit reader reads their Paykit member. \
 The certificates are the Switch set's documents.json certificates with scopes or \
@@ -211,21 +214,23 @@ permissions changed, and the app records its shop app record with its Paykit mem
 
 const MULTI_PROTOCOL_DESCRIPTION: &str = "Wire 3.1, spec 3.2, Switch wire 3.1 \"Several \
 protocols\" and \"Scope roots\": certificates that hold another protocol's scopes beside \
-Paykit's or instead of them, and one whose extension prefix holds no -, as Paykit's \
+Paykit's or instead of them, and one whose extension prefix doesn't start with paykit-, as \
+Paykit's \
 verifiers check them. Each is the shop certificate of the Switch set's documents.json (the \
 last, the cap certificate) with scopes and permissions changed, signed again by bob's \
 identity key; the switch takes every one (switch_accepts). A scope whose root, the part \
-before any :, isn't one of Paykit's reserved roots (pay, request, allowance, \
-allowance_execute, contacts, manage_contacts and ext) is another protocol's, such as chat. \
+before any :, isn't Paykit's (paykit, or paykit followed by _ or - and more characters) is \
+another protocol's, such as chat. \
 paykit_scopes are the scopes Paykit reads, and paykit_permissions the list they need. A \
 Paykit verifier requires every permission of paykit_permissions, and, when the certificate \
 holds no other protocol's scope, permissions exactly that list. accepted are certificates \
-Paykit's verifiers take: request beside chat, with lists.read, which chat needs, and \
-conversation.add, which request needs; and chat alone with lists.read, a valid certificate \
+Paykit's verifiers take: paykit_request beside chat, with lists.read, which chat needs, and \
+conversation.add, which paykit_request needs; and chat alone with lists.read, a valid certificate \
 that holds no Paykit scope, whose Paykit messages recipients drop at check 8 (messages.json \
-multi_protocol_senders). refused are certificates they refuse: request beside chat without \
-conversation.add; request alone with lists.read beside conversation.add; and request beside \
-ext:cap, an extension scope whose prefix holds no -. reason is paykit-lib's wording at a \
+multi_protocol_senders). refused are certificates they refuse: paykit_request beside chat \
+without conversation.add; paykit_request alone with lists.read beside conversation.add; and \
+paykit_request beside paykit_ext:cap, an extension scope whose prefix doesn't start with \
+paykit-. reason is paykit-lib's wording at a \
 Paykit verifier, of the first check that refuses it.";
 
 const APP_RECORDS_DESCRIPTION: &str = "Wire 3.2: Paykit's member of an app record, \
@@ -260,9 +265,9 @@ const ADD: Permission = Permission::ConversationAdd;
 
 const MULTI_PROTOCOL_ACCEPTED: [CertCase; 2] = [
     (
-        "request and chat, with lists.read and conversation.add",
+        "paykit_request and chat, with lists.read and conversation.add",
         "shop",
-        &["request", "chat"],
+        &["paykit_request", "chat"],
         &[LISTS_READ, ADD],
     ),
     (
@@ -275,21 +280,21 @@ const MULTI_PROTOCOL_ACCEPTED: [CertCase; 2] = [
 
 const MULTI_PROTOCOL_REFUSED: [CertCase; 3] = [
     (
-        "request and chat without conversation.add",
+        "paykit_request and chat without conversation.add",
         "shop",
-        &["request", "chat"],
+        &["paykit_request", "chat"],
         &[LISTS_READ],
     ),
     (
-        "request only, with lists.read beside conversation.add",
+        "paykit_request only, with lists.read beside conversation.add",
         "shop",
-        &["request"],
+        &["paykit_request"],
         &[LISTS_READ, ADD],
     ),
     (
-        "an extension prefix without a -: ext:cap",
+        "an extension prefix without paykit-: paykit_ext:cap",
         "cap",
-        &["request", "ext:cap"],
+        &["paykit_request", "paykit_ext:cap"],
         &[ADD],
     ),
 ];
@@ -390,22 +395,22 @@ fn app_record_case(keys: &Keys, name: &str, member: &Value) -> Value {
 }
 
 const EXECUTOR_CERTIFICATES_DESCRIPTION: &str = "Spec 3.1, wire 3.1 and 3.3: the executor's \
-certificate. allowance_execute requires allowance, pay and contacts, so that every executor \
-reads the deny list. accepted is Paykit's own executor certificate, which the executor grant \
-of this file carries: the Switch set's documents.json executor certificate with contacts \
+certificate. paykit_allowance_execute requires paykit_allowance, paykit_pay and \
+paykit_contacts, so that every executor reads the deny list. accepted is Paykit's own executor certificate, which the executor grant \
+of this file carries: the Switch set's documents.json executor certificate with paykit_contacts \
 added to its scopes and the permissions its scopes need, signed again by alice's identity \
 key. refused is the Switch set's executor certificate as it is, which holds \
-allowance_execute without contacts: the switch takes it (switch_accepts), and Paykit's \
+paykit_allowance_execute without paykit_contacts: the switch takes it (switch_accepts), and Paykit's \
 verifiers refuse it. reason is paykit-lib's wording at a Paykit verifier.";
 
 /// `executor_certificates` (Paykit spec 3.1): Paykit's own executor certificate, which the
-/// grant carries, and the base one, which holds `allowance_execute` without `contacts`.
+/// grant carries, and the base one, which holds `paykit_allowance_execute` without `paykit_contacts`.
 fn executor_certificates(keys: &Keys) -> Value {
     let base = base_cert(keys, "executor");
     json!({
-        "accepted": [certificate_case(&executor_cert(keys), "Paykit's executor certificate, with contacts", true)],
+        "accepted": [certificate_case(&executor_cert(keys), "Paykit's executor certificate, with paykit_contacts", true)],
         "description": EXECUTOR_CERTIFICATES_DESCRIPTION,
-        "refused": [certificate_case(&base, "allowance_execute without contacts", false)],
+        "refused": [certificate_case(&base, "paykit_allowance_execute without paykit_contacts", false)],
     })
 }
 
@@ -437,7 +442,7 @@ fn check_executor_certificates(keys: &Keys, d: &Value) {
                     assert!(
                         error
                             .to_string()
-                            .contains("allowance_execute requires allowance, pay and contacts"),
+                            .contains("allowance_execute requires paykit_allowance, paykit_pay and paykit_contacts"),
                         "{name}: {error}"
                     );
                 }
@@ -452,36 +457,36 @@ fn check_executor_certificates(keys: &Keys, d: &Value) {
 }
 
 const PAYER_CERTIFICATES_DESCRIPTION: &str = "Spec 3.1, wire 3.1: a paying app's \
-certificate. pay requires contacts, so that every paying app reads the deny list and pays \
+certificate. paykit_pay requires paykit_contacts, so that every paying app reads the deny list and pays \
 no counterparty the user blocked. accepted is Paykit's own phone certificate, which the \
 phone's messages stored in sealed.json carry: the Switch set's documents.json phone \
-certificate with contacts added to its scopes and the permissions its scopes need, signed \
-again by alice's identity key. refused are the Switch set's phone certificate as it is, \
-which holds pay and allowance without contacts, and the Switch set's wallet certificate \
-with pay alone and the permissions pay needs, signed again by alice's identity key: the \
+certificate with paykit_contacts added to its scopes and the permissions its scopes need, \
+signed again by alice's identity key. refused are the Switch set's phone certificate as it is, \
+which holds paykit_pay and paykit_allowance without paykit_contacts, and the Switch set's wallet certificate \
+with paykit_pay alone and the permissions paykit_pay needs, signed again by alice's identity key: the \
 switch takes each (switch_accepts), and Paykit's verifiers refuse each. reason is \
 paykit-lib's wording at a Paykit verifier.";
 
 /// `payer_certificates` (Paykit spec 3.1): Paykit's own phone certificate, which the phone's
-/// stored messages carry, and certificates holding `pay` without `contacts`: the phone's base
-/// certificate, and the wallet's with `pay` alone.
+/// stored messages carry, and certificates holding `paykit_pay` without `paykit_contacts`: the phone's base
+/// certificate, and the wallet's with `paykit_pay` alone.
 fn payer_certificates(keys: &Keys) -> Value {
     let base = base_cert(keys, "phone");
-    let pay = ["pay".to_owned()];
-    let pay_alone = reissued(keys, "wallet", &["pay"], &permissions_for(&pay));
+    let pay = ["paykit_pay".to_owned()];
+    let pay_alone = reissued(keys, "wallet", &["paykit_pay"], &permissions_for(&pay));
     json!({
-        "accepted": [certificate_case(&phone_cert(keys), "Paykit's phone certificate, with contacts", true)],
+        "accepted": [certificate_case(&phone_cert(keys), "Paykit's phone certificate, with paykit_contacts", true)],
         "description": PAYER_CERTIFICATES_DESCRIPTION,
         "refused": [
-            certificate_case(&base, "pay and allowance without contacts", false),
-            certificate_case(&pay_alone, "pay alone", false),
+            certificate_case(&base, "paykit_pay and paykit_allowance without paykit_contacts", false),
+            certificate_case(&pay_alone, "paykit_pay alone", false),
         ],
     })
 }
 
 /// `payer_certificates`: each verifies at the switch, signed by alice's identity key;
-/// Paykit's verifiers take Paykit's phone certificate and refuse each holding `pay` without
-/// `contacts` for the scope rule of Paykit spec 3.1.
+/// Paykit's verifiers take Paykit's phone certificate and refuse each holding `paykit_pay` without
+/// `paykit_contacts` for the scope rule of Paykit spec 3.1.
 fn check_payer_certificates(keys: &Keys, d: &Value) {
     let alice = pubky(ALICE);
     let identity = keys.identity(&alice);
@@ -498,7 +503,7 @@ fn check_payer_certificates(keys: &Keys, d: &Value) {
             let c = AppCert::verify(&doc, &alice).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(case["switch_accepts"], true, "{name}");
             assert_eq!(c.scopes(), strings(&case["scopes"]).as_slice(), "{name}");
-            assert!(c.scopes().iter().any(|s| s == "pay"), "{name}");
+            assert!(c.scopes().iter().any(|s| s == "paykit_pay"), "{name}");
             // Its permissions are exactly what its scopes need: only the scope rule refuses.
             assert_eq!(
                 c.permissions(),
@@ -513,7 +518,9 @@ fn check_payer_certificates(keys: &Keys, d: &Value) {
                 Err(error) => {
                     assert!(!accepted, "{name}: {error}");
                     assert!(
-                        error.to_string().contains("pay requires contacts"),
+                        error
+                            .to_string()
+                            .contains("paykit_pay requires paykit_contacts"),
                         "{name}: {error}"
                     );
                     assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
@@ -533,7 +540,7 @@ each app of keys.json, as Paykit's verifiers take it, in its carrying form (sign
 sig). Each holds its app's keys, scopes and permissions as keys.json gives them, issued_at \
 2025-12-01T00:00:00.000Z and the app's expires_at, signed by its identity's key under \
 pubky-switch/v1/app-cert. The executor's and the phone's are Paykit's own, the accepted \
-certificates of executor_certificates and payer_certificates, holding contacts; the others \
+certificates of executor_certificates and payer_certificates, holding paykit_contacts; the others \
 are the certificates every other case of this set signs again with scopes or permissions \
 changed. app is the app's name in keys.json.";
 
@@ -557,8 +564,8 @@ fn certificates(keys: &Keys) -> Value {
 }
 
 const EXTENSION_APP_DESCRIPTION: &str = "Wire 3.1, 3.2, Switch wire 3.1, 3.2: bob's \
-extension app cap. certificate is its certificate of certificates, holding request beside \
-the extension scope ext:paykit-cap. app_record is its app record, signed by its signing key \
+extension app cap. certificate is its certificate of certificates, holding paykit_request \
+beside the extension scope paykit_ext:paykit-cap. app_record is its app record, signed by its signing key \
 under pubky-switch/v1/app-record: it carries that certificate, accepts the kinds a payee \
 app takes from payers and the extension kind paykit-cap.offer, and its Paykit member states \
 its endpoint identifiers and no public endpoints; its label is bob cap, its updated_at its \
@@ -654,18 +661,14 @@ fn generate(keys: &Keys) {
             app_record_case(keys, name, &member),
         ));
     }
-    for (pointer, case) in [
-        (
-            "/certificate_rejections/cases",
-            certificate_rejections(keys),
-        ),
-        (
-            "/labelled_scope_rejections/cases",
-            labelled_scope_rejections(keys),
-        ),
-    ] {
-        cases.extend(case.into_iter().map(|c| (Place::Case(pointer), c)));
-    }
+    cases.push((
+        Place::Member("/certificate_rejections/cases"),
+        Value::Array(certificate_rejections(keys)),
+    ));
+    cases.push((
+        Place::Member("/labelled_scope_rejections/cases"),
+        Value::Array(labelled_scope_rejections(keys)),
+    ));
     cases.extend(app_record_signatures(keys, &file));
     generated("documents.json", &cases);
 }
@@ -673,9 +676,9 @@ fn generate(keys: &Keys) {
 /// The cases of `certificate_rejections`: their names, scopes and permissions.
 const CERTIFICATE_REJECTIONS: [CertCase; 2] = [
     (
-        "extra: lists.manage kept after manage_contacts is gone",
+        "extra: lists.manage kept after paykit_manage_contacts is gone",
         "wallet",
-        &["pay", "contacts"],
+        &["paykit_pay", "paykit_contacts"],
         &[
             Permission::ClaimsRead,
             Permission::ClaimsWrite,
@@ -685,9 +688,9 @@ const CERTIFICATE_REJECTIONS: [CertCase; 2] = [
         ],
     ),
     (
-        "missing: conversation.add, which pay needs",
+        "missing: conversation.add, which paykit_pay needs",
         "wallet",
-        &["pay", "contacts", "manage_contacts"],
+        &["paykit_pay", "paykit_contacts", "paykit_manage_contacts"],
         &[
             Permission::ClaimsRead,
             Permission::ClaimsWrite,
@@ -702,38 +705,38 @@ const CERTIFICATE_REJECTIONS: [CertCase; 2] = [
 const LABELLED_SCOPE_REJECTIONS: [(&str, &[&str], &str); 5] = [
     (
         "a label of 33 characters",
-        &["request:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
-        "invalid: \"request:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" isn't a scope name or name:<sub>",
+        &["paykit_request:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+        "invalid: \"paykit_request:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" isn't a scope name or name:<sub>",
     ),
     (
         "a label that isn't valid (upper case)",
-        &["request:Shop1"],
-        "invalid: \"request:Shop1\" isn't a scope name or name:<sub>",
+        &["paykit_request:Shop1"],
+        "invalid: \"paykit_request:Shop1\" isn't a scope name or name:<sub>",
     ),
     (
         "an empty label",
-        &["request:"],
-        "invalid: \"request:\" isn't a scope name or name:<sub>",
+        &["paykit_request:"],
+        "invalid: \"paykit_request:\" isn't a scope name or name:<sub>",
     ),
     (
         "nine labelled scopes",
         &[
-            "request:shop1",
-            "request:shop2",
-            "request:shop3",
-            "request:shop4",
-            "request:shop5",
-            "request:shop6",
-            "request:shop7",
-            "request:shop8",
-            "request:shop9",
+            "paykit_request:shop1",
+            "paykit_request:shop2",
+            "paykit_request:shop3",
+            "paykit_request:shop4",
+            "paykit_request:shop5",
+            "paykit_request:shop6",
+            "paykit_request:shop7",
+            "paykit_request:shop8",
+            "paykit_request:shop9",
         ],
         "invalid: more than 8 labelled scopes",
     ),
     (
-        "plain request beside a labelled scope",
-        &["request", "request:shop1"],
-        "invalid: request and request:shop1 together: request covers every request:<sub>",
+        "plain paykit_request beside a labelled scope",
+        &["paykit_request", "paykit_request:shop1"],
+        "invalid: paykit_request and paykit_request:shop1 together: paykit_request covers every paykit_request:<sub>",
     ),
 ];
 

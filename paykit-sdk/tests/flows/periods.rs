@@ -543,8 +543,8 @@ async fn test_periods_details_naming_another_period_never_stored() {
 
 #[tokio::test]
 async fn test_periods_details_for_a_record_not_listed_yet_held_until_listed() {
-    // The wallet is narrowed to `contacts`; meanwhile bob's request comes and the phone
-    // accepts it. The wallet is renewed to `pay` and `request` with no bundle, the `request`
+    // The wallet is narrowed to `paykit_contacts`; meanwhile bob's request comes and the phone
+    // accepts it. The wallet is renewed to `paykit_pay` and `paykit_request` with no bundle, the `paykit_request`
     // key missing, so its records can't be
     // listed, and bob's details come. The request record's absence from the wallet's copy
     // decides nothing: the entry is held, not kept as details before their record. Once
@@ -808,7 +808,7 @@ async fn test_periods_payee_drops_a_proof_naming_another_period() {
 #[tokio::test]
 async fn test_periods_proof_for_a_payee_record_not_listed_yet_held_until_listed() {
     // Alice's till sends bob a monthly request, which bob's wallet accepts; the till's
-    // record is written while alice's wallet, holding `pay` only, can't read it. The wallet
+    // record is written while alice's wallet, holding `paykit_pay` only, can't read it. The wallet
     // is renewed to read `request` too, with no bundle, and bob's proof of January comes.
     // The record's absence decides nothing: the entry is held. Once the keys come and the
     // records are listed, the proof goes into the period record, once.
@@ -1257,7 +1257,7 @@ async fn test_periods_details_bound_kept_before_the_record_far_period_dropped() 
     assert_eq!(periods, [month(1)]);
 }
 
-/// Alice's wallet holding `pay` and `manage_contacts` on `lists`, inviting bob.
+/// Alice's wallet holding `paykit_pay` and `paykit_manage_contacts` on `lists`, inviting bob.
 async fn contacts_wallet(w: &World, lists: &Arc<crate::common::ListsStore>) -> Paykit {
     let mut wallet = w
         .join_with(
@@ -2694,7 +2694,7 @@ async fn test_periods_credit_given_beside_a_record_under_another_policy() {
     shop.receive(None).await.unwrap();
     let record = shop.payee_activity().await.unwrap()[0].periods[0].record;
     let mut policy = Collection::PayeeActivity.fixed_policy();
-    policy.write_scopes = vec!["pay".into(), "request".into()];
+    policy.write_scopes = vec!["paykit_pay".into(), "paykit_request".into()];
     let foreign = RecordTarget::new(
         SwitchCollection::new(Collection::PayeeActivity.name(), policy),
         b"another protocol's record",
@@ -3912,7 +3912,7 @@ async fn test_periods_details_from_a_flagged_payee_over_a_period_record_that_doe
 #[tokio::test]
 async fn test_periods_proof_from_a_flagged_payer_over_a_payee_period_record_that_doesnt_bind_kept()
 {
-    // Bob's till holds `contacts`. His shop writes, at the till's January period record,
+    // Bob's till holds `paykit_contacts`. His shop writes, at the till's January period record,
     // February's record: a value that reads but doesn't bind to that key (Paykit wire 5.3).
     // Alice is flagged since, and her proof of a real payment of January reaches the till.
     // It updates a subscription the till holds, no new state, so the spam rule doesn't gate

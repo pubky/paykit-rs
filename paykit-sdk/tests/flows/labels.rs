@@ -1,6 +1,6 @@
 //! Labelled selling scopes (Paykit spec 3.1, 3.4, 6, 8.1): a hosted app holding
-//! `request:<label>` sends every request under its label and gets the payer's replies only
-//! about its label's requests; the identity's apps holding `request` see them too.
+//! `paykit_request:<label>` sends every request under its label and gets the payer's replies only
+//! about its label's requests; the identity's apps holding `paykit_request` see them too.
 
 use paykit_lib::Label;
 use paykit_sdk::{AppScopes, PayOptions, PayOutcome, PayeeStatus, PaykitConfig, Refusal};
@@ -14,7 +14,7 @@ async fn test_labels_reply_reaches_only_the_labelled_app_and_request() {
     let mut wallet = w.wallet("wallet").await;
     let mut shop1 = w.labelled_shop("shop1", "shop1").await;
     let mut shop2 = w.labelled_shop("shop2", "shop2").await;
-    // The identity's own app holding `request` reads every label's records, with no list of
+    // The identity's own app holding `paykit_request` reads every label's records, with no list of
     // labels to follow.
     let mut owner = w
         .join(&w.bob, "owner", AppScopes::new().request().build().unwrap())

@@ -55,10 +55,10 @@ async fn test_protocols_chat_only_payment_request_dropped() {
 
 #[tokio::test]
 async fn test_protocols_payee_that_also_chats_request_recorded() {
-    // `request` beside `chat`, with the chat's lists.read: a Paykit App, and its request is
+    // `paykit_request` beside `chat`, with the chat's lists.read: a Paykit App, and its request is
     // taken.
     let (dropped, recorded) = request_from_app(
-        &["request", "chat"],
+        &["paykit_request", "chat"],
         &[Permission::ListsRead, Permission::ConversationAdd],
     )
     .await;

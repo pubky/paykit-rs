@@ -7,7 +7,7 @@
 //! kind, narrowed by label (check 8). The body, check 10, is [`crate::bodies`].
 //!
 //! Security: check 8 decides which app may send a kind and which may take it. A labelled
-//! selling scope counts as `request` for the kind, and the request's `label` then narrows it,
+//! selling scope counts as `paykit_request` for the kind, and the request's `label` then narrows it,
 //! so a hosted app never sends a request outside its labels or takes the payer's replies
 //! about the identity's own requests.
 
@@ -41,14 +41,14 @@ pub const OPAQUE_MEMBERS: &[OpaqueMember<'static>] = &[
 /// Who may send or receive a kind (Paykit spec 3.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
-    /// An app holding `pay`.
+    /// An app holding `paykit_pay`.
     Pay,
-    /// An app holding `request`, or a labelled selling scope, which counts as `request` for
+    /// An app holding `paykit_request`, or a labelled selling scope, which counts as `paykit_request` for
     /// the kind before labels narrow it.
     Request,
-    /// An app holding `allowance`.
+    /// An app holding `paykit_allowance`.
     Allowance,
-    /// An app holding `allowance_execute`.
+    /// An app holding `paykit_allowance_execute`.
     AllowanceExecute,
     /// Any Paykit App: one holding at least one of Paykit's scopes.
     Any,
@@ -328,7 +328,7 @@ impl MessageKind {
     }
 }
 
-/// Whether `scopes` hold one of `roles`, a labelled selling scope counting as `request`
+/// Whether `scopes` hold one of `roles`, a labelled selling scope counting as `paykit_request`
 /// (Paykit wire 4.1 check 8; the labels then narrow it). [`Role::Any`] is any Paykit App:
 /// a certificate holding at least one of Paykit's scopes, so a certificate of another
 /// protocol only sends and receives no Paykit kind (Switch wire 3.1 "Several protocols").
@@ -336,10 +336,10 @@ fn holds_role(scopes: &[String], roles: &[Role]) -> bool {
     let has = |s: &str| scopes.iter().any(|x| x == s);
     roles.iter().any(|role| match role {
         Role::Any => scopes::holds_paykit_scope(scopes),
-        Role::Pay => has("pay"),
+        Role::Pay => has("paykit_pay"),
         Role::Request => scopes::acts_as_payee(scopes),
-        Role::Allowance => has("allowance"),
-        Role::AllowanceExecute => has("allowance_execute"),
+        Role::Allowance => has("paykit_allowance"),
+        Role::AllowanceExecute => has("paykit_allowance_execute"),
     })
 }
 
@@ -361,11 +361,11 @@ fn body_label(message: &Message) -> Result<Option<&str>> {
 /// one read from shared state.
 ///
 /// - the sender's scopes hold one that sends the kind;
-/// - a `payment_request` with `label` needs `request` or `request:<label>` in the sender's
-///   certificate, and one without needs `request`;
-/// - a cancellation with `label` is the payer's, so it needs `pay` in the sender's
+/// - a `payment_request` with `label` needs `paykit_request` or `paykit_request:<label>` in the sender's
+///   certificate, and one without needs `paykit_request`;
+/// - a cancellation with `label` is the payer's, so it needs `paykit_pay` in the sender's
 ///   certificate;
-/// - an extension kind `<prefix>.<name>` needs `ext:<prefix>` in the sender's certificate;
+/// - an extension kind `<prefix>.<name>` needs `paykit_ext:<prefix>` in the sender's certificate;
 /// - a `resend_request` names no kinds: any Paykit App may send it, one holding at least one
 ///   of Paykit's scopes.
 ///
@@ -382,7 +382,7 @@ pub fn check_sender_scopes(message: &Message, sender: &[String]) -> Result<()> {
         MessageKind::Extension(ext) => {
             if !sender.contains(&ext.prefix().scope()) {
                 return invalid(
-                    "Paykit wire 4.1 check 8: an extension kind needs ext:<prefix> in both certificates",
+                    "Paykit wire 4.1 check 8: an extension kind needs paykit_ext:<prefix> in both certificates",
                 );
             }
             return Ok(());
@@ -396,7 +396,10 @@ pub fn check_sender_scopes(message: &Message, sender: &[String]) -> Result<()> {
     }
     let label = body_label(message)?;
     if kind == Kind::PaymentRequest {
-        let needs = label.map_or_else(|| "request".to_owned(), |l| format!("request:{l}"));
+        let needs = label.map_or_else(
+            || "paykit_request".to_owned(),
+            |l| format!("{}:{l}", scopes::REQUEST),
+        );
         if !switch_scopes::holds(sender, &needs) {
             return invalid(
                 "Paykit wire 4.5: the sender's certificate doesn't hold the request's label",
@@ -405,10 +408,10 @@ pub fn check_sender_scopes(message: &Message, sender: &[String]) -> Result<()> {
     }
     if kind == Kind::PaymentRequestCancellation
         && label.is_some()
-        && !sender.iter().any(|s| s == "pay")
+        && !sender.iter().any(|s| s == "paykit_pay")
     {
         return invalid(
-            "Paykit spec 3.3: a labelled cancellation is the payer's, from an app holding pay",
+            "Paykit spec 3.3: a labelled cancellation is the payer's, from an app holding paykit_pay",
         );
     }
     Ok(())
@@ -418,12 +421,12 @@ pub fn check_sender_scopes(message: &Message, sender: &[String]) -> Result<()> {
 /// the sender's side ([`check_sender_scopes`]), then the own scopes hold one that receives
 /// the kind, and the labels and roles:
 ///
-/// - a payer's acceptance, rejection, cancellation or proof with `label` needs `request` or
-///   `request:<label>` in the own certificate, and one without needs `request`;
-/// - a cancellation goes to the other role than its sender's: the payer's, from `pay`, at
+/// - a payer's acceptance, rejection, cancellation or proof with `label` needs `paykit_request` or
+///   `paykit_request:<label>` in the own certificate, and one without needs `paykit_request`;
+/// - a cancellation goes to the other role than its sender's: the payer's, from `paykit_pay`, at
 ///   an app the label rule above lets take it, or the payee's, which carries no label, from
-///   `request` or a labelled selling scope at an app holding `pay`;
-/// - an extension kind `<prefix>.<name>` needs `ext:<prefix>` in the own certificate too.
+///   `paykit_request` or a labelled selling scope at an app holding `paykit_pay`;
+/// - an extension kind `<prefix>.<name>` needs `paykit_ext:<prefix>` in the own certificate too.
 ///
 /// # Errors
 ///
@@ -434,7 +437,7 @@ pub fn check_kind_scopes(message: &Message, sender: &[String], own: &[String]) -
         MessageKind::Extension(ext) => {
             if !own.contains(&ext.prefix().scope()) {
                 return invalid(
-                    "Paykit wire 4.1 check 8: an extension kind needs ext:<prefix> in both certificates",
+                    "Paykit wire 4.1 check 8: an extension kind needs paykit_ext:<prefix> in both certificates",
                 );
             }
             return Ok(());
@@ -459,16 +462,16 @@ pub fn check_kind_scopes(message: &Message, sender: &[String], own: &[String]) -
 }
 
 /// A cancellation's roles (Paykit spec 3.3, Paykit wire 4.3, 4.8): its recipient holds the
-/// other role than its sender. It is the payer's, sent from `pay` to an app that takes the
+/// other role than its sender. It is the payer's, sent from `paykit_pay` to an app that takes the
 /// payer's replies under its label (Paykit spec 3.4), or the payee's, which carries no
-/// label, sent from `request` or a labelled selling scope to an app holding `pay`. So `pay`
-/// to `pay` and `request` to `request` are dropped, whatever the label.
+/// label, sent from `paykit_request` or a labelled selling scope to an app holding `paykit_pay`. So `paykit_pay`
+/// to `paykit_pay` and `paykit_request` to `paykit_request` are dropped, whatever the label.
 ///
 /// Security: check 8 sees only the two certificates, not which side the sender is on; the
 /// request record decides the side (Paykit wire 5.3). An app holding both roles may stand on
 /// either side, so the check passes when either pairing holds.
 fn check_cancellation_roles(label: Option<&str>, sender: &[String], own: &[String]) -> Result<()> {
-    let holds_pay = |scopes: &[String]| scopes.iter().any(|s| s == "pay");
+    let holds_pay = |scopes: &[String]| scopes.iter().any(|s| s == "paykit_pay");
     let payer_cancels = holds_pay(sender) && reply_label_allowed(label, own);
     let payee_cancels = label.is_none() && scopes::acts_as_payee(sender) && holds_pay(own);
     if payer_cancels || payee_cancels {
@@ -480,11 +483,11 @@ fn check_cancellation_roles(label: Option<&str>, sender: &[String], own: &[Strin
 }
 
 /// Whether an app holding `scopes` takes a payer's reply labelled `label` (Paykit spec 3.4,
-/// Paykit wire 4.1 check 8): with a label, `request` or that label; without, `request`.
+/// Paykit wire 4.1 check 8): with a label, `paykit_request` or that label; without, `paykit_request`.
 fn reply_label_allowed(label: Option<&str>, scopes: &[String]) -> bool {
     match label {
-        Some(label) => switch_scopes::holds(scopes, &format!("request:{label}")),
-        None => scopes.iter().any(|s| s == "request"),
+        Some(label) => switch_scopes::holds(scopes, &format!("{}:{label}", scopes::REQUEST)),
+        None => scopes.iter().any(|s| s == "paykit_request"),
     }
 }
 
@@ -502,9 +505,9 @@ pub enum Side {
 /// labelled `label`, to an app holding `scopes`.
 ///
 /// The payer wraps its acceptance, rejection, cancellation and proof about a labelled
-/// request only to the payee's apps holding `request` or that label, and about an
-/// unlabelled request, or a payment without one, only to those holding `request`. A payee's
-/// cancellation carries no label and goes only to the payer's apps holding `pay`: a
+/// request only to the payee's apps holding `paykit_request` or that label, and about an
+/// unlabelled request, or a payment without one, only to those holding `paykit_request`. A payee's
+/// cancellation carries no label and goes only to the payer's apps holding `paykit_pay`: a
 /// cancellation's recipient holds the other role than its sender (Paykit spec 3.3), as
 /// check 8 requires ([`check_kind_scopes`]). Every other kind goes to the apps that receive
 /// it (Paykit spec 3.3). A resend answer follows the same targets (Paykit wire 4.12).
@@ -514,11 +517,11 @@ pub fn targets_app(kind: Kind, side: Side, label: Option<&Label>, scopes: &[Stri
     }
     match (kind, side) {
         (Kind::PaymentRequestCancellation, Side::Payee) => {
-            label.is_none() && scopes.iter().any(|s| s == "pay")
+            label.is_none() && scopes.iter().any(|s| s == "paykit_pay")
         }
         (k, Side::Payer) if k.is_payer_reply() => match label {
             Some(label) => switch_scopes::holds(scopes, &label.scope()),
-            None => scopes.iter().any(|s| s == "request"),
+            None => scopes.iter().any(|s| s == "paykit_request"),
         },
         _ => true,
     }
@@ -661,24 +664,44 @@ mod tests {
     #[test]
     fn test_kinds_check_8_accepts_the_table() {
         let request = message("paykit.payment_request", json!({}));
-        check_kind_scopes(&request, &owned(&["request"]), &owned(&["pay"])).unwrap();
+        check_kind_scopes(
+            &request,
+            &owned(&["paykit_request"]),
+            &owned(&["paykit_pay"]),
+        )
+        .unwrap();
         let labelled = message("paykit.payment_request", json!({ "label": "shop1" }));
-        check_kind_scopes(&labelled, &owned(&["request:shop1"]), &owned(&["pay"])).unwrap();
-        check_kind_scopes(&labelled, &owned(&["request"]), &owned(&["pay"])).unwrap();
+        check_kind_scopes(
+            &labelled,
+            &owned(&["paykit_request:shop1"]),
+            &owned(&["paykit_pay"]),
+        )
+        .unwrap();
+        check_kind_scopes(
+            &labelled,
+            &owned(&["paykit_request"]),
+            &owned(&["paykit_pay"]),
+        )
+        .unwrap();
         let notice = message("paykit.executor_notice", json!({}));
         check_kind_scopes(
             &notice,
-            &owned(&["allowance"]),
-            &owned(&["allowance_execute"]),
+            &owned(&["paykit_allowance"]),
+            &owned(&["paykit_allowance_execute"]),
         )
         .unwrap();
         let resend = message("paykit.resend_request", json!({}));
-        check_kind_scopes(&resend, &owned(&["contacts"]), &owned(&["pay"])).unwrap();
+        check_kind_scopes(
+            &resend,
+            &owned(&["paykit_contacts"]),
+            &owned(&["paykit_pay"]),
+        )
+        .unwrap();
         let ext = message("paykit-cap.offer", json!({}));
         check_kind_scopes(
             &ext,
-            &owned(&["ext:paykit-cap"]),
-            &owned(&["ext:paykit-cap"]),
+            &owned(&["paykit_ext:paykit-cap"]),
+            &owned(&["paykit_ext:paykit-cap"]),
         )
         .unwrap();
     }
@@ -686,23 +709,47 @@ mod tests {
     #[test]
     fn test_kinds_check_8_rejects_each_rule() {
         let request = message("paykit.payment_request", json!({}));
-        assert!(check_kind_scopes(&request, &owned(&["pay"]), &owned(&["pay"])).is_err());
-        assert!(check_kind_scopes(&request, &owned(&["request"]), &owned(&["request"])).is_err());
-        assert!(check_kind_scopes(&request, &owned(&["request:shop1"]), &owned(&["pay"])).is_err());
+        assert!(
+            check_kind_scopes(&request, &owned(&["paykit_pay"]), &owned(&["paykit_pay"])).is_err()
+        );
+        assert!(check_kind_scopes(
+            &request,
+            &owned(&["paykit_request"]),
+            &owned(&["paykit_request"])
+        )
+        .is_err());
+        assert!(check_kind_scopes(
+            &request,
+            &owned(&["paykit_request:shop1"]),
+            &owned(&["paykit_pay"])
+        )
+        .is_err());
         let other = message("paykit.payment_request", json!({ "label": "shop2" }));
-        assert!(check_kind_scopes(&other, &owned(&["request:shop1"]), &owned(&["pay"])).is_err());
+        assert!(check_kind_scopes(
+            &other,
+            &owned(&["paykit_request:shop1"]),
+            &owned(&["paykit_pay"])
+        )
+        .is_err());
         let ext = message("paykit-cap.offer", json!({}));
         assert!(check_kind_scopes(
             &ext,
-            &owned(&["ext:paykit-cap"]),
-            &owned(&["ext:paykit-other"])
+            &owned(&["paykit_ext:paykit-cap"]),
+            &owned(&["paykit_ext:paykit-other"])
         )
         .is_err());
         // A prefix without a `-` is no extension's: the kind is dropped, whatever the scopes.
         let other = message("cap.offer", json!({}));
-        assert!(check_kind_scopes(&other, &owned(&["ext:cap"]), &owned(&["ext:cap"])).is_err());
+        assert!(check_kind_scopes(
+            &other,
+            &owned(&["paykit_ext:cap"]),
+            &owned(&["paykit_ext:cap"])
+        )
+        .is_err());
         let unknown = message("paykit.other", json!({}));
-        assert!(check_kind_scopes(&unknown, &owned(&["pay"]), &owned(&["pay"])).is_err());
+        assert!(
+            check_kind_scopes(&unknown, &owned(&["paykit_pay"]), &owned(&["paykit_pay"])).is_err()
+        );
     }
 
     #[test]
@@ -711,24 +758,56 @@ mod tests {
             "paykit.payment_request_acceptance",
             json!({ "label": "shop1" }),
         );
-        check_kind_scopes(&labelled, &owned(&["pay"]), &owned(&["request:shop1"])).unwrap();
-        check_kind_scopes(&labelled, &owned(&["pay"]), &owned(&["request"])).unwrap();
-        assert!(
-            check_kind_scopes(&labelled, &owned(&["pay"]), &owned(&["request:shop2"])).is_err()
-        );
+        check_kind_scopes(
+            &labelled,
+            &owned(&["paykit_pay"]),
+            &owned(&["paykit_request:shop1"]),
+        )
+        .unwrap();
+        check_kind_scopes(
+            &labelled,
+            &owned(&["paykit_pay"]),
+            &owned(&["paykit_request"]),
+        )
+        .unwrap();
+        assert!(check_kind_scopes(
+            &labelled,
+            &owned(&["paykit_pay"]),
+            &owned(&["paykit_request:shop2"])
+        )
+        .is_err());
         let plain = message("paykit.payment_request_acceptance", json!({}));
-        assert!(check_kind_scopes(&plain, &owned(&["pay"]), &owned(&["request:shop1"])).is_err());
+        assert!(check_kind_scopes(
+            &plain,
+            &owned(&["paykit_pay"]),
+            &owned(&["paykit_request:shop1"])
+        )
+        .is_err());
         let cancel = message("paykit.payment_request_cancellation", json!({}));
-        check_kind_scopes(&cancel, &owned(&["request"]), &owned(&["pay"])).unwrap();
-        assert!(check_kind_scopes(&cancel, &owned(&["pay"]), &owned(&["request:shop1"])).is_err());
+        check_kind_scopes(
+            &cancel,
+            &owned(&["paykit_request"]),
+            &owned(&["paykit_pay"]),
+        )
+        .unwrap();
+        assert!(check_kind_scopes(
+            &cancel,
+            &owned(&["paykit_pay"]),
+            &owned(&["paykit_request:shop1"])
+        )
+        .is_err());
     }
 
     #[test]
     fn test_kinds_sender_side_of_check_8() {
         let labelled = message("paykit.payment_request", json!({ "label": "shop1" }));
-        check_sender_scopes(&labelled, &owned(&["request:shop1"])).unwrap();
-        check_sender_scopes(&labelled, &owned(&["request"])).unwrap();
-        for sender in [&["request:shop2"][..], &["chat"][..], &["pay"][..]] {
+        check_sender_scopes(&labelled, &owned(&["paykit_request:shop1"])).unwrap();
+        check_sender_scopes(&labelled, &owned(&["paykit_request"])).unwrap();
+        for sender in [
+            &["paykit_request:shop2"][..],
+            &["chat"][..],
+            &["paykit_pay"][..],
+        ] {
             assert!(
                 check_sender_scopes(&labelled, &owned(sender)).is_err(),
                 "{sender:?}"
@@ -738,11 +817,11 @@ mod tests {
             "paykit.payment_request_cancellation",
             json!({ "label": "shop1" }),
         );
-        check_sender_scopes(&cancel, &owned(&["pay"])).unwrap();
-        assert!(check_sender_scopes(&cancel, &owned(&["request:shop1"])).is_err());
+        check_sender_scopes(&cancel, &owned(&["paykit_pay"])).unwrap();
+        assert!(check_sender_scopes(&cancel, &owned(&["paykit_request:shop1"])).is_err());
         let ext = message("paykit-cap.offer", json!({}));
-        check_sender_scopes(&ext, &owned(&["ext:paykit-cap"])).unwrap();
-        assert!(check_sender_scopes(&ext, &owned(&["request"])).is_err());
+        check_sender_scopes(&ext, &owned(&["paykit_ext:paykit-cap"])).unwrap();
+        assert!(check_sender_scopes(&ext, &owned(&["paykit_request"])).is_err());
     }
 
     #[test]
@@ -752,20 +831,40 @@ mod tests {
             "paykit.payment_request_cancellation",
             json!({ "label": "shop1" }),
         );
-        // The payee's, to the payer's `pay`; the payer's, to the payee's `request` or label.
-        check_kind_scopes(&plain, &owned(&["request"]), &owned(&["pay"])).unwrap();
-        check_kind_scopes(&plain, &owned(&["request:shop1"]), &owned(&["pay"])).unwrap();
-        check_kind_scopes(&plain, &owned(&["pay"]), &owned(&["request"])).unwrap();
-        check_kind_scopes(&labelled, &owned(&["pay"]), &owned(&["request:shop1"])).unwrap();
-        check_kind_scopes(&labelled, &owned(&["pay"]), &owned(&["request"])).unwrap();
+        // The payee's, to the payer's `paykit_pay`; the payer's, to the payee's `paykit_request` or label.
+        check_kind_scopes(&plain, &owned(&["paykit_request"]), &owned(&["paykit_pay"])).unwrap();
+        check_kind_scopes(
+            &plain,
+            &owned(&["paykit_request:shop1"]),
+            &owned(&["paykit_pay"]),
+        )
+        .unwrap();
+        check_kind_scopes(&plain, &owned(&["paykit_pay"]), &owned(&["paykit_request"])).unwrap();
+        check_kind_scopes(
+            &labelled,
+            &owned(&["paykit_pay"]),
+            &owned(&["paykit_request:shop1"]),
+        )
+        .unwrap();
+        check_kind_scopes(
+            &labelled,
+            &owned(&["paykit_pay"]),
+            &owned(&["paykit_request"]),
+        )
+        .unwrap();
         // An app holding both roles may be on either side.
-        check_kind_scopes(&plain, &owned(&["pay", "request"]), &owned(&["pay"])).unwrap();
+        check_kind_scopes(
+            &plain,
+            &owned(&["paykit_pay", "paykit_request"]),
+            &owned(&["paykit_pay"]),
+        )
+        .unwrap();
         // The same role on both ends is dropped.
         for (sender, own) in [
-            (&["pay"][..], &["pay"][..]),
-            (&["request"][..], &["request"][..]),
-            (&["request:shop1"][..], &["request"][..]),
-            (&["request"][..], &["request:shop1"][..]),
+            (&["paykit_pay"][..], &["paykit_pay"][..]),
+            (&["paykit_request"][..], &["paykit_request"][..]),
+            (&["paykit_request:shop1"][..], &["paykit_request"][..]),
+            (&["paykit_request"][..], &["paykit_request:shop1"][..]),
         ] {
             let error = check_kind_scopes(&plain, &owned(sender), &owned(own)).unwrap_err();
             assert!(
@@ -773,12 +872,22 @@ mod tests {
                 "{sender:?} to {own:?}"
             );
         }
-        // A labelled cancellation is the payer's: from `request`, or to `pay`, it is dropped.
-        assert!(check_kind_scopes(&labelled, &owned(&["request"]), &owned(&["pay"])).is_err());
-        assert!(check_kind_scopes(&labelled, &owned(&["pay"]), &owned(&["pay"])).is_err());
+        // A labelled cancellation is the payer's: from `paykit_request`, or to `paykit_pay`, it is dropped.
+        assert!(check_kind_scopes(
+            &labelled,
+            &owned(&["paykit_request"]),
+            &owned(&["paykit_pay"])
+        )
+        .is_err());
         assert!(
-            check_kind_scopes(&labelled, &owned(&["request:shop1"]), &owned(&["request"])).is_err()
+            check_kind_scopes(&labelled, &owned(&["paykit_pay"]), &owned(&["paykit_pay"])).is_err()
         );
+        assert!(check_kind_scopes(
+            &labelled,
+            &owned(&["paykit_request:shop1"]),
+            &owned(&["paykit_request"])
+        )
+        .is_err());
     }
 
     fn issued(identity: &IdentityKey, scopes: &[&str], permissions: &[Permission]) -> AppCert {
@@ -805,7 +914,7 @@ mod tests {
         // kind: its payment_request and its resend_request are dropped at check 8.
         let chat = issued(&identity, &["chat"], &[Permission::ListsRead]);
         crate::scopes::check_certificate(&chat).unwrap();
-        let wallet = PaykitKindRules::new(owned(&["pay", "contacts"]));
+        let wallet = PaykitKindRules::new(owned(&["paykit_pay", "paykit_contacts"]));
         let request = message(
             "paykit.payment_request",
             json!({ "amount": { "asset": "btc", "value": "1" }, "payment_reference": "r",
@@ -821,13 +930,13 @@ mod tests {
         // The same kinds from a Paykit App that also chats pass.
         let shop = issued(
             &identity,
-            &["request", "chat"],
+            &["paykit_request", "chat"],
             &[Permission::ListsRead, Permission::ConversationAdd],
         );
         wallet.check_scopes(&request, &shop).unwrap();
         wallet.check_scopes(&resend, &shop).unwrap();
         // An own app of another protocol only takes no Paykit kind either.
-        assert!(check_kind_scopes(&resend, &owned(&["pay"]), &owned(&["chat"])).is_err());
+        assert!(check_kind_scopes(&resend, &owned(&["paykit_pay"]), &owned(&["chat"])).is_err());
     }
 
     #[test]
@@ -835,14 +944,14 @@ mod tests {
         let identity = IdentityKey::from_secret([6; 32]);
         let good = issued(
             &identity,
-            &["allowance"],
+            &["paykit_allowance"],
             &[Permission::ClaimsRead, Permission::ConversationAdd],
         );
         let rules = PaykitKindRules::new(owned(&[
-            "allowance_execute",
-            "allowance",
-            "pay",
-            "contacts",
+            "paykit_allowance_execute",
+            "paykit_allowance",
+            "paykit_pay",
+            "paykit_contacts",
         ]));
         let mut notice = message("paykit.executor_notice", json!({}));
         notice.from.identity = identity.public();
@@ -858,7 +967,7 @@ mod tests {
         notice.to = identity.public();
         let extra = issued(
             &identity,
-            &["allowance"],
+            &["paykit_allowance"],
             &[
                 Permission::ClaimsRead,
                 Permission::ClaimsWrite,
@@ -880,47 +989,62 @@ mod tests {
             acc,
             Side::Payer,
             Some(&shop1),
-            &owned(&["request:shop1"])
+            &owned(&["paykit_request:shop1"])
         ));
         assert!(targets_app(
             acc,
             Side::Payer,
             Some(&shop1),
-            &owned(&["request"])
+            &owned(&["paykit_request"])
         ));
         assert!(!targets_app(
             acc,
             Side::Payer,
             Some(&shop1),
-            &owned(&["request:shop2"])
+            &owned(&["paykit_request:shop2"])
         ));
         assert!(!targets_app(
             acc,
             Side::Payer,
             None,
-            &owned(&["request:shop1"])
+            &owned(&["paykit_request:shop1"])
         ));
         let cancel = Kind::PaymentRequestCancellation;
-        assert!(targets_app(cancel, Side::Payee, None, &owned(&["pay"])));
         assert!(targets_app(
             cancel,
             Side::Payee,
             None,
-            &owned(&["pay", "request"])
+            &owned(&["paykit_pay"])
+        ));
+        assert!(targets_app(
+            cancel,
+            Side::Payee,
+            None,
+            &owned(&["paykit_pay", "paykit_request"])
         ));
         assert!(!targets_app(
             cancel,
             Side::Payee,
             None,
-            &owned(&["request:shop1"])
+            &owned(&["paykit_request:shop1"])
         ));
-        assert!(!targets_app(cancel, Side::Payer, None, &owned(&["pay"])));
-        assert!(targets_app(cancel, Side::Payer, None, &owned(&["request"])));
+        assert!(!targets_app(
+            cancel,
+            Side::Payer,
+            None,
+            &owned(&["paykit_pay"])
+        ));
+        assert!(targets_app(
+            cancel,
+            Side::Payer,
+            None,
+            &owned(&["paykit_request"])
+        ));
         assert!(!targets_app(
             Kind::AllowanceProposal,
             Side::Payee,
             None,
-            &owned(&["pay"])
+            &owned(&["paykit_pay"])
         ));
     }
 
@@ -928,33 +1052,38 @@ mod tests {
     fn test_kinds_cancellation_targets_the_other_role() {
         let cancel = Kind::PaymentRequestCancellation;
         let shop1 = Label::parse("shop1").unwrap();
-        // The payee's goes only to the payer's apps holding `pay`, never to one holding only
-        // `request`, which check 8 would drop.
+        // The payee's goes only to the payer's apps holding `paykit_pay`, never to one holding only
+        // `paykit_request`, which check 8 would drop.
         assert!(!targets_app(
             cancel,
             Side::Payee,
             None,
-            &owned(&["request"])
+            &owned(&["paykit_request"])
         ));
         assert!(!targets_app(
             cancel,
             Side::Payee,
             Some(&shop1),
-            &owned(&["pay"])
+            &owned(&["paykit_pay"])
         ));
-        // The payer's goes only to the payee's apps the label rule allows, never to `pay`.
-        assert!(!targets_app(cancel, Side::Payer, None, &owned(&["pay"])));
+        // The payer's goes only to the payee's apps the label rule allows, never to `paykit_pay`.
+        assert!(!targets_app(
+            cancel,
+            Side::Payer,
+            None,
+            &owned(&["paykit_pay"])
+        ));
         assert!(targets_app(
             cancel,
             Side::Payer,
             Some(&shop1),
-            &owned(&["request:shop1"])
+            &owned(&["paykit_request:shop1"])
         ));
         assert!(!targets_app(
             cancel,
             Side::Payer,
             Some(&shop1),
-            &owned(&["pay"])
+            &owned(&["paykit_pay"])
         ));
         // Every app a cancellation targets takes it at check 8, from a sender of that side.
         let plain = message("paykit.payment_request_cancellation", json!({}));
@@ -963,20 +1092,20 @@ mod tests {
             json!({ "label": "shop1" }),
         );
         let scope_sets: [&[&str]; 6] = [
-            &["pay"],
-            &["request"],
-            &["request:shop1"],
-            &["pay", "request"],
-            &["pay", "request:shop1"],
-            &["contacts"],
+            &["paykit_pay"],
+            &["paykit_request"],
+            &["paykit_request:shop1"],
+            &["paykit_pay", "paykit_request"],
+            &["paykit_pay", "paykit_request:shop1"],
+            &["paykit_contacts"],
         ];
         for own in scope_sets {
             let own = owned(own);
             for (side, sender, label, m) in [
-                (Side::Payee, owned(&["request"]), None, &plain),
-                (Side::Payee, owned(&["request:shop1"]), None, &plain),
-                (Side::Payer, owned(&["pay"]), None, &plain),
-                (Side::Payer, owned(&["pay"]), Some(&shop1), &labelled),
+                (Side::Payee, owned(&["paykit_request"]), None, &plain),
+                (Side::Payee, owned(&["paykit_request:shop1"]), None, &plain),
+                (Side::Payer, owned(&["paykit_pay"]), None, &plain),
+                (Side::Payer, owned(&["paykit_pay"]), Some(&shop1), &labelled),
             ] {
                 assert_eq!(
                     targets_app(cancel, side, label, &own),
@@ -990,6 +1119,8 @@ mod tests {
     #[test]
     fn test_kinds_label_must_be_a_string() {
         let bad = message("paykit.payment_request", json!({ "label": 1 }));
-        assert!(check_kind_scopes(&bad, &owned(&["request"]), &owned(&["pay"])).is_err());
+        assert!(
+            check_kind_scopes(&bad, &owned(&["paykit_request"]), &owned(&["paykit_pay"])).is_err()
+        );
     }
 }

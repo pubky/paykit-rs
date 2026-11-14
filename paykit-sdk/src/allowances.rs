@@ -138,7 +138,7 @@ pub struct AllowanceView {
     /// (Paykit spec 8.1, "Blocked counterparties"): nothing new from it is taken, its
     /// requests are paused and nothing is sent to it, so the host shows the Allowance as
     /// blocked. `None` while the copy of the deny list isn't known, at an app holding
-    /// `contacts` after a failed read of the lists or a restore: sends are held then too,
+    /// `paykit_contacts` after a failed read of the lists or a restore: sends are held then too,
     /// and the host can't show it as not blocked.
     pub blocked: Option<bool>,
 }
@@ -488,7 +488,7 @@ enum Held {
 }
 
 /// The receive step of a proposal, an acceptance, a rejection or an end that passed check
-/// 10, at an app holding `allowance` (module docs). The entry of a proposal or an answer is
+/// 10, at an app holding `paykit_allowance` (module docs). The entry of a proposal or an answer is
 /// held while the record waits for its scope key or the copy of `allowances` isn't listed
 /// yet: its absence then decides nothing (Paykit spec 8.1, "Records not listed yet"). An
 /// end's stop waits for no key ([`keep_end`]).
@@ -671,7 +671,7 @@ fn keep_conflict(
     let record_key = cx.record_key(target)?;
     let kept = state::cx_get::<KeptMessage>(cx, &key::conflict(&record_key))?.is_some();
     let consent = state::cx_get::<ConsentEntry>(cx, &key::consent(&record_key))?;
-    let executes = scopes.iter().any(|s| s == "allowance_execute");
+    let executes = scopes.iter().any(|s| s == "paykit_allowance_execute");
     for write in conflict_writes(&record_key, stored, kept, consent.as_ref(), executes)
         .map_err(|_| Fail::corrupt())?
     {
@@ -683,7 +683,7 @@ fn keep_conflict(
 /// The writes a second, different proposal or response makes, the receive step's and a
 /// later write's alike (Paykit spec 8.3, "Conflicted"): its stop (`cf/<record key>`) unless
 /// one is kept already, the first one kept staying; and, at an app holding
-/// `allowance_execute`, the consent list's entry removed for good, unless it is already.
+/// `paykit_allowance_execute`, the consent list's entry removed for good, unless it is already.
 fn conflict_writes(
     record_key: &[u8; 32],
     stored: &StoredMessage,
@@ -811,7 +811,7 @@ fn keep_end(
         }
         receive::keep_local(cx, receive::local(&stop, &KeptMessage::of(stored))?);
     }
-    if checked && scopes.iter().any(|s| s == "allowance_execute") {
+    if checked && scopes.iter().any(|s| s == "paykit_allowance_execute") {
         drop_consent(cx, &record_key, (sender, allowance_id), ConsentEnd::Ended)?;
     }
     receive::note_peer(cx, &sender, stored)
@@ -877,7 +877,7 @@ fn drop_consent(
     Ok(())
 }
 
-/// An `executor_notice` from an own app, at an app holding `allowance_execute` (Paykit spec
+/// An `executor_notice` from an own app, at an app holding `paykit_allowance_execute` (Paykit spec
 /// 8.3): the Allowance leaves its consent list for good, if the list holds it. It changes
 /// nothing else.
 pub(crate) fn notice_effect(
@@ -964,10 +964,10 @@ fn stale(kept: &StoredMessage, service: Option<u64>) -> Result<bool> {
 
 impl Paykit {
     pub(crate) fn require_allowance(&self) -> Result<()> {
-        if self.holds("allowance") {
+        if self.holds("paykit_allowance") {
             Ok(())
         } else {
-            Err(Refusal::ScopeMissing("allowance".into()).into())
+            Err(Refusal::ScopeMissing("paykit_allowance".into()).into())
         }
     }
 
@@ -1052,8 +1052,8 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::ScopeMissing`] without `allowance`; [`Refusal::NotNow`] while sends to `to`
-    /// are held, at an app holding `contacts`: the deny list holds it, or the copy of the
+    /// [`Refusal::ScopeMissing`] without `paykit_allowance`; [`Refusal::NotNow`] while sends to `to`
+    /// are held, at an app holding `paykit_contacts`: the deny list holds it, or the copy of the
     /// lists isn't known after a read tried now (Paykit spec 8.1, "Blocked counterparties"),
     /// with nothing signed, written or queued; [`PaykitError::Lib`] with `Validation` for
     /// terms that break Paykit wire 4.15, with nothing sent; the client's errors. A
@@ -1397,7 +1397,7 @@ impl Paykit {
 
     /// The `executor_notice` an end of the Allowance `held`, at `record`, sends to its
     /// executor (Paykit spec 8.3, Paykit wire 4.17), added to `queue`, with the local write
-    /// naming the app it is wrapped to; and, at an app holding `allowance_execute`, its own
+    /// naming the app it is wrapped to; and, at an app holding `paykit_allowance_execute`, its own
     /// consent list's removal, added to `locals`. No notice when the record holds no current
     /// grant, or names this app.
     fn end_notice(
@@ -1408,7 +1408,7 @@ impl Paykit {
         locals: &mut Vec<LocalWrite>,
     ) -> Result<()> {
         let own = self.identity();
-        if self.holds("allowance_execute") {
+        if self.holds("paykit_allowance_execute") {
             locals.push(consent_removed(held, record, ConsentEnd::Ended)?);
         }
         let Some((grant, _)) = held.current_grant(&own) else {
@@ -1751,7 +1751,7 @@ impl Paykit {
     /// message of the Allowance is kept to write; one that can't be written now stays for
     /// the next run. Nothing runs while the copy of `allowances` may lack records.
     pub(crate) async fn place_allowance_stops(&mut self) -> Result<()> {
-        if !self.holds("allowance")
+        if !self.holds("paykit_allowance")
             || Box::pin(self.scope_keys_awaited()).await?.is_some()
             || Box::pin(self.side_unlisted(RecordSide::Allowances)).await?
         {
@@ -2046,7 +2046,7 @@ impl Paykit {
             stored,
             kept,
             consent.as_ref(),
-            self.holds("allowance_execute"),
+            self.holds("paykit_allowance_execute"),
         )?);
         Ok(Box::pin(self.app.protocol_commit(&locals)).await?)
     }
@@ -2087,7 +2087,7 @@ impl Paykit {
         }
         if self
             .app
-            .scope_key(self.app.data_epoch(), "allowance")
+            .scope_key(self.app.data_epoch(), "paykit_allowance")
             .is_none()
         {
             return Ok(Placed::Not);
@@ -2253,8 +2253,12 @@ mod tests {
 
     /// Bob's proposal to alice as allowee, alice's record of it, and the two parties.
     fn proposed() -> (Party, Party, AllowanceRecord) {
-        let alice = Party::new("alice", "wallet", &["pay", "allowance", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request", "allowance"]);
+        let alice = Party::new(
+            "alice",
+            "wallet",
+            &["paykit_pay", "paykit_allowance", "paykit_contacts"],
+        );
+        let bob = Party::new("bob", "shop", &["paykit_request", "paykit_allowance"]);
         let proposal = bob.message(
             &alice,
             "paykit.allowance_proposal",

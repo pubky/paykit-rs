@@ -558,7 +558,7 @@ impl Paykit {
     /// exactly one.
     fn selling_label(&self) -> Result<Option<Label>> {
         let scopes = self.scopes();
-        let plain = scopes.iter().any(|s| s == "request");
+        let plain = scopes.iter().any(|s| s == "paykit_request");
         let labels: Vec<Label> = scopes
             .iter()
             .filter_map(|s| match PaykitScope::classify(s) {
@@ -589,15 +589,15 @@ impl Paykit {
     /// app's selling label: one-time, or recurring with a recurrence. The payer must admit
     /// this identity, for example after an invite (Paykit spec 1). The request is signed, and
     /// its record written in the batch that queues it, then it is sent. Nothing is signed,
-    /// written or queued while sends to `to` are held: at an app holding `contacts`, while
+    /// written or queued while sends to `to` are held: at an app holding `paykit_contacts`, while
     /// the copy of the deny list holds it, or while that copy isn't known, which a read of
     /// the lists is tried for first (Paykit spec 8.1, "Blocked counterparties"). An app
-    /// without `contacts` reads no lists, and holds nothing.
+    /// without `paykit_contacts` reads no lists, and holds nothing.
     ///
     /// # Errors
     ///
     /// [`Refusal::NotNow`] while sends to `to` are held, with nothing recorded or queued;
-    /// [`Refusal::ScopeMissing`] without `request` or a label; [`Refusal::Label`];
+    /// [`Refusal::ScopeMissing`] without `paykit_request` or a label; [`Refusal::Label`];
     /// [`PaykitError::Lib`] with `Validation` for a draft that breaks Paykit wire 4.5, such
     /// as a payment deadline of the other kind of request, or both kinds; the
     /// client's errors. A failure that leaves the request's batch kept (the network, `429`,
@@ -1097,7 +1097,7 @@ impl Paykit {
     }
 
     /// The payee cancels a request it sent (Paykit spec 8.1, Paykit wire 4.8). The
-    /// cancellation carries no label and goes to the payer's apps holding `pay` or
+    /// cancellation carries no label and goes to the payer's apps holding `paykit_pay` or
     /// `request` (Paykit spec 3.4). A proof that crosses it still counts as payment.
     ///
     /// # Errors
@@ -2208,8 +2208,8 @@ mod tests {
     /// as another own app wrote them: the period record holds no request.
     fn payee_period_records() -> (ActivityRecord, ActivityRecord) {
         use crate::testkit::{object, Party};
-        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
-        let bob = Party::new("bob", "shop", &["request"]);
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bob = Party::new("bob", "shop", &["paykit_request"]);
         let request = bob.message(
             &alice,
             "paykit.payment_request",
