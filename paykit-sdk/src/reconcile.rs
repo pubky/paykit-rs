@@ -339,13 +339,34 @@ impl Paykit {
         Ok(report)
     }
 
+    /// Whether the payer's period record of `obligation`'s Billing Period may show the period
+    /// paid by period details (Paykit spec 8.2): it holds period details carrying
+    /// `payment_endpoints`, or it is held as a value that doesn't read or bind, which may hold
+    /// them. No record holds no details.
+    async fn period_paid_by_details_maybe(&self, obligation: &Obligation) -> Result<bool> {
+        let target = ActivityTarget::payer(obligation.natural_key.clone());
+        if let Some(record) = self.held_activity(&target).await? {
+            return Ok(record.details().iter().any(|details| {
+                matches!(details.body(), Body::PaymentPeriodDetails(body)
+                    if body.payment_endpoints.is_some())
+            }));
+        }
+        let held = self
+            .app
+            .shared_record(&self.activity_key(&target)?)
+            .await?
+            .map(|held| held.content);
+        Ok(!matches!(held, None | Some(RecordContent::Deleted)))
+    }
+
     /// The journal entry of an own attempt on `obligation` the journal doesn't hold, rebuilt
     /// from the payer's request record and the payee's lists, enough for its outcome and its
     /// proof (Paykit spec 7.2, Paykit wire 4.10): the request's amount, label and deadline,
     /// and the destination paid. `None` when the records can't tell which destination was
     /// paid: a request whose own endpoints leave more than one usable, a list endpoint not
-    /// marked used by this attempt at the version held, or a payment without a request,
-    /// whose record doesn't keep the amount its proof states.
+    /// marked used by this attempt at the version held, a Billing Period that period details
+    /// may have paid ([`Paykit::period_paid_by_details_maybe`]), or a payment without a
+    /// request, whose record doesn't keep the amount its proof states.
     async fn rebuilt_entry(
         &mut self,
         obligation: &Obligation,
@@ -360,11 +381,17 @@ impl Paykit {
             return Ok(None);
         }
         // A period's request endpoints serve it unless the request has
-        // `per_period_endpoints` and it isn't the first; a destination from period details
-        // can't be told from the records (Paykit spec 8.2).
+        // `per_period_endpoints` and it isn't the first. A destination from period details
+        // can't be told from the records, and any period may be paid by them: by default
+        // the latest valid ones carrying a destination, even when nothing requires them
+        // (Paykit spec 8.2). So a period whose record holds period details with a
+        // destination, or whose record is held and doesn't read, is left doubtful.
         if let Some(period) = obligation.period {
             let first = body.recurrence.as_ref().and_then(|r| r.first().ok());
             if body.per_period_endpoints && first != Some(period) {
+                return Ok(None);
+            }
+            if self.period_paid_by_details_maybe(obligation).await? {
                 return Ok(None);
             }
         }

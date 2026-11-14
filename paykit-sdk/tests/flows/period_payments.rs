@@ -2547,3 +2547,42 @@ async fn test_period_payments_proof_over_a_divergent_period_record_kept_until_co
         .unwrap();
     assert!(subscription.periods[0].paid);
 }
+
+#[tokio::test]
+async fn test_period_payments_reconcile_leaves_a_period_paid_by_unrequired_details_doubtful() {
+    // The request pays every period to its own endpoint, but February's period details
+    // carry a destination, which pays February by default though nothing requires it
+    // (Paykit spec 8.2). Once the device is lost, the records can't tell which destination
+    // was paid: the restored app leaves the attempt doubtful, never rebuilt with the
+    // request's endpoint.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    let now = w.clock.now_ms();
+    shop.send_period_details(&sale, details(february(), "lnbc1feb", now + DAY_MS))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let attempt = by_user(&mut wallet, &request, february(), early())
+        .await
+        .unwrap()
+        .attempt_id();
+    w.rail.settle(&attempt, true);
+    drop(wallet);
+    let mut app = restored(&w, &backup).await;
+    let report = app.reconcile().await.unwrap();
+    assert_eq!(report.doubtful.len(), 1, "{report:?}");
+    assert_eq!(report.doubtful[0].attempts, [attempt]);
+    assert!(
+        !report
+            .resolved
+            .iter()
+            .any(|o| matches!(o, PayOutcome::Paid { .. })),
+        "{report:?}"
+    );
+    let record = period_record(&w, &app, &request, february()).await.unwrap();
+    assert!(record.proof.is_none());
+}
