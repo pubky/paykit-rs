@@ -247,3 +247,71 @@ fn test_private_list_compaction_bounds_failed_lists_without_losing_recovery_inte
     }
     assert_eq!(state.outbound_private_messages.len(), 4);
 }
+
+#[tokio::test]
+async fn test_compaction_preserves_invalidated_withdrawal_history() {
+    let storage = registered_storage();
+    let peer = counterparty();
+    let owner = counterparty();
+    storage
+        .transaction(|tx| {
+            tx.save_identity_state(IdentityState {
+                public_key: Some(owner.clone()),
+                initialized_at: timestamp(),
+            });
+            for _ in 0..3 {
+                let mut row =
+                    tx.insert_outbound_private_message(outbound_private_message(peer.clone()))?;
+                row.attempt_count = 1;
+                row.last_attempt_at = Some(timestamp());
+                tx.save_outbound_private_message(mark_outbound_sent(row, timestamp()))?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    for confirmed_at in [None, Some(timestamp())] {
+        let mut state = storage.snapshot().unwrap();
+        let id = state.outbound_private_messages[0].outbound_message_id;
+        state.private_payment_list_withdrawals.insert(
+            peer.clone(),
+            PrivatePaymentListWithdrawalRecord {
+                owner: owner.clone(),
+                app_id: app_id(),
+                counterparty: peer.clone(),
+                outbound_message_id: id,
+                homeserver: counterparty(),
+                grant_id: "original-grant".into(),
+                client_id: "original-client".into(),
+                noise_public_key: counterparty(),
+                blocked_generation: 1,
+                prepared: PreparedOutboundPrivateSend {
+                    destination_path: format!(
+                        "{}/{}/0",
+                        paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX,
+                        "ab".repeat(32)
+                    ),
+                    ciphertext: vec![0; pubky_noise::snow_crypto::PUBKY_NOISE_TRANSPORT_PACKET_LEN],
+                },
+                confirmed_at,
+                invalidated: true,
+            },
+        );
+        compact_private_payment_lists(&mut state);
+        assert!(state
+            .outbound_private_messages
+            .iter()
+            .any(|row| row.outbound_message_id == id));
+        let bytes = encode_storage_state_blob(&state).unwrap();
+        let restored = decode_storage_state_blob(&bytes).unwrap();
+        assert_eq!(
+            restored.private_payment_list_withdrawals,
+            state.private_payment_list_withdrawals
+        );
+        let mut corrupt = state.clone();
+        corrupt
+            .outbound_private_messages
+            .retain(|row| row.outbound_message_id != id);
+        assert!(crate::validate_storage_state(&corrupt).is_err());
+    }
+}

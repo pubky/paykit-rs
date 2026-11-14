@@ -490,7 +490,8 @@ where
     /// Remove this application's public Payment Endpoints and registry entry.
     ///
     /// Removal requires app-owned Payment Requests and private financial events
-    /// to be complete. It then blocks new app-owned private work before cleanup
+    /// to be complete, and retained private list withdrawals to be confirmed.
+    /// It then blocks new app-owned private work before cleanup
     /// begins. If cleanup fails, call this method again or publish the app to
     /// reactivate it.
     pub async fn remove_paykit_app(&self) -> Result<paykit_lib::PaykitAppRegistry> {

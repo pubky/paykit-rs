@@ -328,7 +328,17 @@ async fn test_pubky_shared_state_is_visible_to_independent_apps_and_survives_sig
         .transaction(|tx| Ok(tx.export_storage_state()))
         .await
         .unwrap();
-    assert_eq!(after_sign_out, before_sign_out);
+    let info = access.session.as_grant().unwrap().session_info().await;
+    let mut expected = before_sign_out;
+    expected
+        .closed_private_payment_list_withdrawal_grants
+        .insert(paykit_sdk::storage::PrivatePaymentListWithdrawalGrant {
+            owner: access.public_key().unwrap(),
+            homeserver: PubkyPublicKey::from_public_key(&info.homeserver),
+            grant_id: info.grant_id.to_string(),
+            client_id: info.client_id.to_string(),
+        });
+    assert_eq!(after_sign_out, expected);
     assert_no_pending_shared_state_writes(&server_session).await;
 }
 
@@ -2958,6 +2968,20 @@ async fn test_paykit_identity_key_rotation_rekeys_shared_state_and_registry() {
     ));
     assert_eq!(storage.last_revision().unwrap(), revision);
 
+    let mut delegated_access = access.clone();
+    delegated_access.paykit_identity_secret_key =
+        Some(secret.derive_paykit_identity_secret_key(1).unwrap());
+    delegated_access.local_secret_key = None;
+    let delegated_provider =
+        TestnetSessionProvider::with_session_secret(delegated_access, session_secret.clone());
+    let delegated_sdk = PaykitSdk::new(
+        PubkySharedStateStorage::new(delegated_provider.clone()),
+        delegated_provider,
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new("bitkit").unwrap(),
+    );
+    delegated_sdk.initialize().await.unwrap();
+
     let replacement = secret
         .derive_paykit_identity_secret_key(2)
         .expect("replacement Paykit key derivation should succeed");
@@ -2975,6 +2999,51 @@ async fn test_paykit_identity_key_rotation_rekeys_shared_state_and_registry() {
         .await
         .expect_err("the previous Paykit key must not decrypt rotated state");
     assert!(matches!(old_key_error, PaykitSdkError::Identity { .. }));
+    assert!(
+        delegated_sdk.sign_out().await.is_err(),
+        "an obsolete delegated key cannot prove absence of retained journals"
+    );
+    assert!(
+        access
+            .session
+            .storage()
+            .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
+            .await
+            .is_ok(),
+        "failed admission must leave the original grant live"
+    );
+    let info = access.session.as_grant().unwrap().session_info().await;
+    let original_grant = paykit_sdk::storage::PrivatePaymentListWithdrawalGrant {
+        owner: owner.clone(),
+        homeserver: homeserver.clone(),
+        grant_id: info.grant_id.to_string(),
+        client_id: info.client_id.to_string(),
+    };
+    let wrapped: Box<Arc<dyn StorageAdapter>> = Box::new(Arc::new(storage.clone()));
+    let revision = storage.last_revision().unwrap();
+    let foreign_secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
+    assert!(wrapped
+        .close_private_payment_list_withdrawal_admission(&original_grant, Some(&foreign_secret))
+        .await
+        .is_err());
+    let mut foreign_home = original_grant.clone();
+    foreign_home.homeserver = foreign_secret.public_key();
+    assert!(wrapped
+        .close_private_payment_list_withdrawal_admission(&foreign_home, Some(&secret))
+        .await
+        .is_err());
+    assert_eq!(storage.last_revision().unwrap(), revision);
+    wrapped
+        .close_private_payment_list_withdrawal_admission(&original_grant, Some(&secret))
+        .await
+        .unwrap();
+    assert!(
+        storage
+            .transaction(|tx| Ok(tx.export_storage_state()))
+            .await
+            .is_err(),
+        "denial-only access must not upgrade ordinary old-key reads"
+    );
     sdk.sign_out()
         .await
         .expect("old-key app must still be able to revoke its grant");
@@ -3008,12 +3077,235 @@ async fn test_paykit_identity_key_rotation_rekeys_shared_state_and_registry() {
         .await
         .unwrap();
     assert_eq!(state.registered_paykit_apps.len(), 1);
+    assert_eq!(
+        state.closed_private_payment_list_withdrawal_grants,
+        std::collections::HashSet::from([original_grant])
+    );
     let registry = replacement_sdk
         .paykit_app_registry(owner)
         .await
         .unwrap()
         .expect("rotated App Registry should remain published");
     assert_eq!(registry.key_generation(), 2);
+}
+
+#[tokio::test]
+async fn test_sign_out_closes_only_original_grant_with_distinct_shared_authorizer() {
+    let testnet = build_testnet().await;
+    let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
+    let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
+    let caller = session_bootstrap(&testnet, "paykit-sdk.test")
+        .sign_up(
+            &secret,
+            &homeserver,
+            None,
+            PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        )
+        .await
+        .unwrap()
+        .access;
+    let caller_secret = caller
+        .session
+        .as_grant()
+        .unwrap()
+        .export_local_secret()
+        .await
+        .unwrap();
+    let authorizer = session_bootstrap(&testnet, "separate-authorizer.test")
+        .sign_in(&secret, PAYKIT_SESSION_CAPABILITIES)
+        .await
+        .unwrap()
+        .access;
+    let storage = PubkySharedStateStorage::new(TestnetSessionProvider::new(authorizer.clone()));
+    let sdk = PaykitSdk::new(
+        storage.clone(),
+        TestnetSessionProvider::with_session_secret(caller.clone(), caller_secret.clone()),
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new("bitkit").unwrap(),
+    );
+    sdk.initialize().await.unwrap();
+    let mut expected = storage
+        .transaction(|tx| Ok(tx.export_storage_state()))
+        .await
+        .unwrap();
+    let info = caller.session.as_grant().unwrap().session_info().await;
+    expected
+        .closed_private_payment_list_withdrawal_grants
+        .insert(paykit_sdk::storage::PrivatePaymentListWithdrawalGrant {
+            owner: caller.public_key().unwrap(),
+            homeserver,
+            grant_id: info.grant_id.to_string(),
+            client_id: info.client_id.to_string(),
+        });
+    let remote = authorizer.session.storage();
+    let saved = remote
+        .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap()
+        .to_vec();
+    let mut corrupted = saved.clone();
+    *corrupted.last_mut().unwrap() ^= 1;
+    remote
+        .put(paykit_lib::PAYKIT_SHARED_STATE_PATH, corrupted)
+        .await
+        .unwrap();
+    assert!(
+        sdk.sign_out().await.is_err(),
+        "corrupt state is not absence of journals"
+    );
+    assert!(caller
+        .session
+        .storage()
+        .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
+        .await
+        .is_ok());
+    remote
+        .delete(paykit_lib::PAYKIT_SHARED_STATE_PATH)
+        .await
+        .unwrap();
+    assert!(
+        sdk.sign_out().await.is_err(),
+        "previously observed missing state must refuse"
+    );
+
+    // Restore only this isolated test's exact bytes after injected faults.
+    remote
+        .put(paykit_lib::PAYKIT_SHARED_STATE_PATH, saved)
+        .await
+        .unwrap();
+    assert!(caller
+        .session
+        .storage()
+        .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
+        .await
+        .is_ok());
+    sdk.sign_out().await.unwrap();
+    assert!(testnet
+        .sdk()
+        .unwrap()
+        .restore_session(&caller_secret)
+        .await
+        .is_err());
+    assert!(authorizer
+        .session
+        .storage()
+        .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
+        .await
+        .is_ok());
+    assert_eq!(
+        storage
+            .transaction(|tx| Ok(tx.export_storage_state()))
+            .await
+            .unwrap(),
+        expected
+    );
+    assert_no_pending_shared_state_writes(&authorizer.session).await;
+}
+
+#[tokio::test]
+async fn test_rotated_shared_withdrawal_keeps_original_receipt_before_sign_out() {
+    // This shared fixture uses bitkit.test, unlike the default harness grant.
+    // Preserve that original client binding for the real revocation assertion.
+    #[derive(Clone)]
+    struct OriginalClientProvider {
+        inner: TestnetSessionProvider,
+        secret: String,
+    }
+    #[async_trait]
+    impl paykit_sdk::PubkySessionProvider for OriginalClientProvider {
+        async fn load_session_access(&self) -> PaykitResult<Option<PubkySessionAccess>> {
+            self.inner.load_session_access().await
+        }
+        async fn revoke_session_access(&self, access: &PubkySessionAccess) -> PaykitResult<()> {
+            paykit_sdk::PubkySessionBootstrap::with_pubky(
+                access.outbox_client.clone(),
+                "bitkit.test",
+            )?
+            .revoke_grant(&self.secret, access)
+            .await
+        }
+        async fn clear_session_access(&self) -> PaykitResult<()> {
+            self.inner.clear_session_access().await
+        }
+        async fn load_public_storage(&self) -> PaykitResult<Option<pubky::PublicStorage>> {
+            self.inner.load_public_storage().await
+        }
+    }
+    let pair = linked_homeserver_shared_pair().await;
+    let handle = pair
+        .bitkit
+        .sdk
+        .prepare_private_payment_list_withdrawal_and_block(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    pair.bitkit
+        .sdk
+        .retry_private_payment_list_withdrawal(handle.clone())
+        .await
+        .unwrap();
+    let replacement = pair
+        .bitkit
+        .access
+        .local_secret_key
+        .as_ref()
+        .unwrap()
+        .derive_paykit_identity_secret_key(2)
+        .unwrap();
+    pair.bitkit
+        .sdk
+        .rotate_paykit_identity_key(replacement.clone())
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            pair.bitkit.sdk.sign_out().await,
+            Err(PaykitSdkError::Policy { .. })
+        ),
+        "even authenticated current state must retain the original unfinished receipt"
+    );
+    let mut current_access = pair.bitkit.access.clone();
+    current_access.paykit_identity_secret_key = Some(replacement);
+    let session_secret = current_access
+        .session
+        .as_grant()
+        .unwrap()
+        .export_local_secret()
+        .await
+        .unwrap();
+    let provider = OriginalClientProvider {
+        inner: TestnetSessionProvider::new(current_access),
+        secret: session_secret.clone(),
+    };
+    let storage = PubkySharedStateStorage::new(provider.clone());
+    let sdk = PaykitSdk::new(
+        storage.clone(),
+        provider,
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new(pair.bitkit.app_id.clone()).unwrap(),
+    );
+    sdk.initialize().await.unwrap();
+    let before = storage
+        .transaction(|tx| Ok(tx.export_storage_state()))
+        .await
+        .unwrap();
+    assert_eq!(before.private_payment_list_withdrawals.len(), 1);
+    assert!(before
+        .closed_private_payment_list_withdrawal_grants
+        .is_empty());
+    sdk.finish_private_payment_list_withdrawal(handle)
+        .await
+        .unwrap();
+    sdk.sign_out().await.unwrap();
+    assert!(pair
+        ._testnet
+        .sdk()
+        .unwrap()
+        .restore_session(&session_secret)
+        .await
+        .is_err());
 }
 
 #[tokio::test]

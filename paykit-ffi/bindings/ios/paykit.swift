@@ -2094,6 +2094,14 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func fetchPubkyText(uri: String, maxBytes: UInt64) async throws  -> String?
 
     /**
+     * Consume a completed receipt only after the caller durably accepts it.
+     *
+     * Releases the packet journal so backup export can resume; keeps outbound
+     * history. Unknown/pending work refuses. Does not authorize local erasure.
+     */
+    func finishPrivatePaymentListWithdrawal(withdrawal: PrivatePaymentListWithdrawal) async throws
+
+    /**
      * Forget what a blocked counterparty sent, when the local identity never
      * acted on it.
      *
@@ -2289,6 +2297,16 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * for a later outbound processing call; this method does not schedule a worker.
      */
     func prepareAndResolvePrivatePaymentRequest(counterparty: String, paymentRequestId: String, afterPrivatePaymentListVersion: UInt64?, maxAdvanceSteps: UInt32) async throws  -> PreparedPrivateContactPayment
+
+    /**
+     * Prepare one original empty-list packet and atomically block its peer.
+     *
+     * Requires explicit withdrawal confirmation. No withdrawal packet is published.
+     * Retain the returned handle with the original owner/app cleanup operation.
+     * Already-lost state and an occupied nonempty/Event slot refuse. This does
+     * not unblock, relink, cancel payment reservations, or erase credentials.
+     */
+    func preparePrivatePaymentListWithdrawalAndBlock(counterparty: String) async throws  -> PrivatePaymentListWithdrawal
 
     /**
      * Prepare a receipt issuance and persist it before network side effects.
@@ -2681,6 +2699,15 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Fetch, decrypt, and store a receipt from an indexed Receipt Access event.
      */
     func retrieveReceipt(counterparty: String, receiptId: String) async throws  -> ReceiptRecord
+
+    /**
+     * Retry only the original retained empty packet after explicit confirmation.
+     *
+     * Requires the same owner/app/grant and blocked generation. Acknowledges
+     * publication and its durable commit, not peer receipt or completed cleanup.
+     * Failed/canceled attempts retain uncertainty; no arbitrary sends run.
+     */
+    func retryPrivatePaymentListWithdrawal(withdrawal: PrivatePaymentListWithdrawal) async throws  -> PrivatePaymentListWithdrawalAcknowledgement
 
     /**
      * Rotate identity-wide Paykit key material to the next generation.
@@ -4031,6 +4058,29 @@ open func fetchPubkyText(uri: String, maxBytes: UInt64)async throws  -> String? 
 }
 
     /**
+     * Consume a completed receipt only after the caller durably accepts it.
+     *
+     * Releases the packet journal so backup export can resume; keeps outbound
+     * history. Unknown/pending work refuses. Does not authorize local erasure.
+     */
+open func finishPrivatePaymentListWithdrawal(withdrawal: PrivatePaymentListWithdrawal)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_finish_private_payment_list_withdrawal(
+                    self.uniffiClonePointer(),
+                    FfiConverterTypePrivatePaymentListWithdrawal_lower(withdrawal)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_void,
+            completeFunc: ffi_paykit_rust_future_complete_void,
+            freeFunc: ffi_paykit_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
      * Forget what a blocked counterparty sent, when the local identity never
      * acted on it.
      *
@@ -4603,6 +4653,31 @@ open func prepareAndResolvePrivatePaymentRequest(counterparty: String, paymentRe
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypePreparedPrivateContactPayment_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Prepare one original empty-list packet and atomically block its peer.
+     *
+     * Requires explicit withdrawal confirmation. No withdrawal packet is published.
+     * Retain the returned handle with the original owner/app cleanup operation.
+     * Already-lost state and an occupied nonempty/Event slot refuse. This does
+     * not unblock, relink, cancel payment reservations, or erase credentials.
+     */
+open func preparePrivatePaymentListWithdrawalAndBlock(counterparty: String)async throws  -> PrivatePaymentListWithdrawal  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_prepare_private_payment_list_withdrawal_and_block(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePrivatePaymentListWithdrawal_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -5715,6 +5790,30 @@ open func retrieveReceipt(counterparty: String, receiptId: String)async throws  
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeReceiptRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Retry only the original retained empty packet after explicit confirmation.
+     *
+     * Requires the same owner/app/grant and blocked generation. Acknowledges
+     * publication and its durable commit, not peer receipt or completed cleanup.
+     * Failed/canceled attempts retain uncertainty; no arbitrary sends run.
+     */
+open func retryPrivatePaymentListWithdrawal(withdrawal: PrivatePaymentListWithdrawal)async throws  -> PrivatePaymentListWithdrawalAcknowledgement  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_retry_private_payment_list_withdrawal(
+                    self.uniffiClonePointer(),
+                    FfiConverterTypePrivatePaymentListWithdrawal_lower(withdrawal)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePrivatePaymentListWithdrawalAcknowledgement_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -18062,6 +18161,210 @@ public func FfiConverterTypePrivatePaymentListView_lower(_ value: PrivatePayment
 
 
 /**
+ * Original owner/app/grant-bound empty-list withdrawal handle.
+ *
+ * Persist with the original operation; never replace it from the current wallet.
+ */
+public struct PrivatePaymentListWithdrawal {
+    /**
+     * Original owner public key.
+     */
+    public var owner: String
+    /**
+     * Original local Paykit App.
+     */
+    public var appId: String
+    /**
+     * Original counterparty public key.
+     */
+    public var counterparty: String
+    /**
+     * Original history row.
+     */
+    public var outboundMessageId: UInt64
+    /**
+     * Opaque binding of the original grant, signer, block, and packet.
+     */
+    public var originalBinding: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Original owner public key.
+         */owner: String,
+        /**
+         * Original local Paykit App.
+         */appId: String,
+        /**
+         * Original counterparty public key.
+         */counterparty: String,
+        /**
+         * Original history row.
+         */outboundMessageId: UInt64,
+        /**
+         * Opaque binding of the original grant, signer, block, and packet.
+         */originalBinding: String) {
+        self.owner = owner
+        self.appId = appId
+        self.counterparty = counterparty
+        self.outboundMessageId = outboundMessageId
+        self.originalBinding = originalBinding
+    }
+}
+
+#if compiler(>=6)
+extension PrivatePaymentListWithdrawal: Sendable {}
+#endif
+
+
+extension PrivatePaymentListWithdrawal: Equatable, Hashable {
+    public static func ==(lhs: PrivatePaymentListWithdrawal, rhs: PrivatePaymentListWithdrawal) -> Bool {
+        if lhs.owner != rhs.owner {
+            return false
+        }
+        if lhs.appId != rhs.appId {
+            return false
+        }
+        if lhs.counterparty != rhs.counterparty {
+            return false
+        }
+        if lhs.outboundMessageId != rhs.outboundMessageId {
+            return false
+        }
+        if lhs.originalBinding != rhs.originalBinding {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(owner)
+        hasher.combine(appId)
+        hasher.combine(counterparty)
+        hasher.combine(outboundMessageId)
+        hasher.combine(originalBinding)
+    }
+}
+
+extension PrivatePaymentListWithdrawal: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrivatePaymentListWithdrawal: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrivatePaymentListWithdrawal {
+        return
+            try PrivatePaymentListWithdrawal(
+                owner: FfiConverterString.read(from: &buf),
+                appId: FfiConverterString.read(from: &buf),
+                counterparty: FfiConverterString.read(from: &buf),
+                outboundMessageId: FfiConverterUInt64.read(from: &buf),
+                originalBinding: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrivatePaymentListWithdrawal, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.owner, into: &buf)
+        FfiConverterString.write(value.appId, into: &buf)
+        FfiConverterString.write(value.counterparty, into: &buf)
+        FfiConverterUInt64.write(value.outboundMessageId, into: &buf)
+        FfiConverterString.write(value.originalBinding, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrivatePaymentListWithdrawal_lift(_ buf: RustBuffer) throws -> PrivatePaymentListWithdrawal {
+    return try FfiConverterTypePrivatePaymentListWithdrawal.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrivatePaymentListWithdrawal_lower(_ value: PrivatePaymentListWithdrawal) -> RustBuffer {
+    return FfiConverterTypePrivatePaymentListWithdrawal.lower(value)
+}
+
+
+/**
+ * Publication and durable acknowledgement of exactly the original withdrawal.
+ */
+public struct PrivatePaymentListWithdrawalAcknowledgement {
+    /**
+     * Match this entire value to the caller's original operation.
+     */
+    public var withdrawal: PrivatePaymentListWithdrawal
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Match this entire value to the caller's original operation.
+         */withdrawal: PrivatePaymentListWithdrawal) {
+        self.withdrawal = withdrawal
+    }
+}
+
+#if compiler(>=6)
+extension PrivatePaymentListWithdrawalAcknowledgement: Sendable {}
+#endif
+
+
+extension PrivatePaymentListWithdrawalAcknowledgement: Equatable, Hashable {
+    public static func ==(lhs: PrivatePaymentListWithdrawalAcknowledgement, rhs: PrivatePaymentListWithdrawalAcknowledgement) -> Bool {
+        if lhs.withdrawal != rhs.withdrawal {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(withdrawal)
+    }
+}
+
+extension PrivatePaymentListWithdrawalAcknowledgement: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrivatePaymentListWithdrawalAcknowledgement: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrivatePaymentListWithdrawalAcknowledgement {
+        return
+            try PrivatePaymentListWithdrawalAcknowledgement(
+                withdrawal: FfiConverterTypePrivatePaymentListWithdrawal.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrivatePaymentListWithdrawalAcknowledgement, into buf: inout [UInt8]) {
+        FfiConverterTypePrivatePaymentListWithdrawal.write(value.withdrawal, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrivatePaymentListWithdrawalAcknowledgement_lift(_ buf: RustBuffer) throws -> PrivatePaymentListWithdrawalAcknowledgement {
+    return try FfiConverterTypePrivatePaymentListWithdrawalAcknowledgement.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrivatePaymentListWithdrawalAcknowledgement_lower(_ value: PrivatePaymentListWithdrawalAcknowledgement) -> RustBuffer {
+    return FfiConverterTypePrivatePaymentListWithdrawalAcknowledgement.lower(value)
+}
+
+
+/**
  * Payment-method-specific receiving detail for a Private Payment List.
  */
 public struct PrivateReceivingDetail {
@@ -28281,6 +28584,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_text() != 46340) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_finish_private_payment_list_withdrawal() != 23143) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_forget_peer() != 15344) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -28357,6 +28663,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_and_resolve_private_payment_request() != 47410) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_private_payment_list_withdrawal_and_block() != 47077) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_receipt_issuance() != 41997) {
@@ -28501,6 +28810,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_retrieve_receipt() != 26622) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_retry_private_payment_list_withdrawal() != 799) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_rotate_paykit_identity_key() != 20685) {
