@@ -52,9 +52,7 @@ pub(crate) struct RestoreHold {
     /// The re-sends are all queued.
     pub(crate) asks_queued: bool,
     /// The counterparties asked already while a record of the copy was sealed, in
-    /// increasing order ([`Paykit::queue_restore_asks`]). A hold written before this member
-    /// existed, a valid run's form, reads as having asked none.
-    #[serde(default)]
+    /// increasing order ([`Paykit::queue_restore_asks`]).
     pub(crate) asked: Vec<[u8; 32]>,
 }
 
@@ -73,20 +71,16 @@ impl RestoreHold {
 /// The hold a `missed` item set (`p/mh`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct MissedHold {
-    /// A time no earlier than the last acceptance time of the entries the item tells of:
-    /// the item's own last acceptance time (`MissedEntries::accepted_until_ms`), or, for an
-    /// item kept owed by a build that didn't keep it, the highest service time verified once
-    /// the read that took the item returned ([`Paykit::bound_missed_hold`]). `None` until
-    /// then, when every open request is held.
-    pub(crate) bound_ms: Option<u64>,
+    /// The item's last acceptance time (`MissedEntries::accepted_until_ms`), no earlier than
+    /// that of any entry it tells of.
+    pub(crate) bound_ms: u64,
 }
 
 impl MissedHold {
-    /// The hold of an item whose last acceptance time is `accepted_until_ms`: bounded by it,
-    /// or unbounded until the read returns when the client knows no end (`u64::MAX`).
+    /// The hold of an item whose last acceptance time is `accepted_until_ms`: bounded by it.
     pub(crate) fn of_item(accepted_until_ms: u64) -> Self {
         Self {
-            bound_ms: (accepted_until_ms != u64::MAX).then_some(accepted_until_ms),
+            bound_ms: accepted_until_ms,
         }
     }
 
@@ -96,9 +90,7 @@ impl MissedHold {
     /// bound plus the clock tolerance: a request created later can't have had its
     /// cancellation among the entries missed. A request with no acceptance time is held.
     pub(crate) fn holds(&self, request: &paykit_lib::records::StoredMessage) -> bool {
-        let Some(bound) = self.bound_ms else {
-            return true;
-        };
+        let bound = self.bound_ms;
         let held_at_item = request.accepted_at().is_none_or(|at| at <= bound);
         held_at_item || request.message().created_at_ms < bound.saturating_add(CLOCK_TOLERANCE_MS)
     }
@@ -383,25 +375,6 @@ impl Paykit {
             .local_get::<bool>(&key::hold_confirmed(record_key))
             .await?
             .is_none())
-    }
-
-    /// Bound a `missed` item's hold set by the read that just returned with no last
-    /// acceptance time ([`MissedHold::bound_ms`]) by the highest service time verified: the
-    /// item came no later. Without a verified time, it stays unbounded.
-    pub(crate) async fn bound_missed_hold(&mut self) -> Result<()> {
-        let Some(hold) = self.local_get::<MissedHold>(key::MISSED_HOLD).await? else {
-            return Ok(());
-        };
-        if hold.bound_ms.is_some() {
-            return Ok(());
-        }
-        let Some(bound) = self.service_time() else {
-            return Ok(());
-        };
-        let hold = MissedHold {
-            bound_ms: Some(bound),
-        };
-        self.local_put(key::MISSED_HOLD, &hold).await
     }
 
     /// The user has seen that the payee may have cancelled `request` since the backup the
@@ -948,10 +921,9 @@ impl Paykit {
             tx.delete(&key::held_answer(&answer.payee, &answer.msg_id));
         }
         if let Some(owed) = &owed {
-            // The restore's time, kept for the life of the mark. A mark without it, written
-            // before it was kept or by a restore that stopped before writing it, takes the
-            // time of the first pass that finds a record it can't read, which is later: the
-            // wait never ends early.
+            // The restore's time, kept for the life of the mark. A mark without it, after a
+            // restore that stopped before writing it, takes the time of the first pass that
+            // finds a record it can't read, which is later: the wait never ends early.
             let restored_at_ms = owed
                 .restored_at_ms
                 .or_else(|| unread.then(|| self.window_now()));
@@ -1184,10 +1156,9 @@ pub(crate) struct OwnResendOwed {
     /// The restore's time, on [`Paykit::window_now`], written by [`Paykit::restore`] right
     /// after the client's restore commit and kept for the life of the mark: 30 days after it
     /// no message a record stores to be sent again could still go, so no record that can't
-    /// be read keeps the re-send owed past it. `None`, in a mark written before this field or
-    /// by a restore that stopped before writing it, fails closed: the first pass that finds
-    /// a record it can't read sets it to its own time, which is later.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// be read keeps the re-send owed past it. `None`, after a restore that stopped before
+    /// writing it, fails closed: the first pass that finds a record it can't read sets it to
+    /// its own time, which is later.
     pub(crate) restored_at_ms: Option<u64>,
 }
 

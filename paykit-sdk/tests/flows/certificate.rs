@@ -1388,9 +1388,9 @@ async fn test_certificate_renewal_reading_more_listing_lost_before_its_note_list
 
 #[tokio::test]
 async fn test_certificate_store_without_a_listed_certificate_lists_once_then_keeps_it() {
-    // A store that keeps no certificate listed under, as an earlier build wrote: a load
-    // doesn't take the one held as listed, so the records count as unlisted until a read
-    // lists them, which keeps it.
+    // A store that keeps no certificate listed under, as after a join or a restore before
+    // Paykit's own listing: a load doesn't take the one held as listed, so the records count
+    // as unlisted until a read lists them, which keeps it.
     let w = World::new();
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
@@ -2186,8 +2186,9 @@ async fn test_certificate_reconcile_waits_for_the_scope_keys_then_lists() {
 
 #[tokio::test]
 async fn test_certificate_none_listed_under_a_refused_one_lists_once_one_passes() {
-    // A store an earlier build wrote keeps no certificate listed under, and loads under one
-    // Paykit refuses, so it keeps none. Once a renewal passes, its read lists the records.
+    // A store that keeps no certificate listed under, as after a join or a restore before
+    // Paykit's own listing, loads under one Paykit refuses, so it keeps none. Once a renewal
+    // passes, its read lists the records.
     let w = World::new();
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;

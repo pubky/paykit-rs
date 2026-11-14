@@ -39,7 +39,10 @@
 //!   no longer come back is told to the host, once per sender and window
 //!   ([`crate::NoticeKind::BlockedMessagesLost`]): a window that expires before an ask for it
 //!   was delivered, the part of a window its sender no longer keeps at the window's first
-//!   ask, and a window the bound drops before it asked. A restore and a `missed` item widen
+//!   ask, and a window the bound drops before it asked. A request such a mark names as queued
+//!   that the outbox shows delivered before the mark's expiry counts as its ask, as at expiry;
+//!   one the bound drops in a receive step owes its notice until the pass after the read has
+//!   read that delivery ([`LostOwed`]). A restore and a `missed` item widen
 //!   these marks for every counterparty the deny list holds then (`bw/`), at the next read
 //!   of the lists; such a speculative mark is the first the bound drops.
 //!
@@ -74,7 +77,12 @@
 //!
 //! **Backups** carry the marks whole, their times and when they were last asked, so a
 //! restore neither loses nor resets them; a restore takes each mark bound to its key's
-//! sender.
+//! sender. They carry the notices owed too ([`LostOwed`]), and the client's backup carries
+//! the outbox's records under their `msg_id`s, not its sent messages: the restored outbox
+//! holds the request a notice names as the backup's outbox did, and the pass after the read
+//! settles the notice from its answer. A request delivered within the window after the
+//! restore tells nothing; one still queued, refused, or delivered before the backup and gone
+//! from the outbox then tells the window lost.
 
 use pubky_switch_client::app::Delivery;
 use pubky_switch_client::app::Protocol as _;
@@ -172,6 +180,52 @@ pub(crate) struct QueuedRequest {
     /// anew. `None` for a request queued at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) kept_batch: Option<[u8; 16]>,
+}
+
+/// The most notices of lost messages the app keeps owed (`bl/`, [`LostOwed`]): past it, the
+/// receive step holds the next entry whose count would drop a mark that owes one, until the
+/// pass after the read settles those kept. None is dropped for this bound.
+pub const MAX_LOST_OWED: usize = 64;
+
+/// The notice owed on a block's mark the receive step dropped for the bound before an ask
+/// for it was seen delivered, while the mark still named a request as queued
+/// (`bl/<sender>/<msg_id>`). The receive step makes no client reads, so the outbox's answer
+/// on that request is read in the pass after the read ([`Paykit::settle_lost_owed`]): one
+/// delivered before the mark's expiry tells nothing, as at expiry; any other tells
+/// [`crate::NoticeKind::BlockedMessagesLost`] for the window, raised at `raised_ms`. Written
+/// in the commit that drops the mark and folds its latest time into the raise owed, so the
+/// bound on marks and the block floor hold as when the notice is told at once.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LostOwed {
+    /// The dropped mark's sender identity.
+    #[serde(with = "serde_b64")]
+    pub(crate) sender: [u8; 32],
+    /// The dropped mark's earliest time: where the window told lost starts.
+    pub(crate) earliest_ms: u64,
+    /// Its latest time: where that window ends, and what the delivery is judged in time by.
+    pub(crate) latest_ms: u64,
+    /// The time the notice carries as raised: the receive step's, as when told at once.
+    pub(crate) raised_ms: u64,
+    /// The `msg_id` of the request the mark named as queued.
+    pub(crate) msg_id: String,
+    /// That request's hash, the proof that the message the outbox delivered under the
+    /// `msg_id` is this request ([`Paykit::delivered_request`]).
+    #[serde(with = "serde_b64")]
+    pub(crate) hash: [u8; 32],
+}
+
+impl LostOwed {
+    /// The notice owed on `gone`, dropped with `queued` named as queued, raised at `raised`.
+    pub(crate) fn of(gone: &DropMark, queued: &QueuedRequest, raised: u64) -> Self {
+        Self {
+            sender: gone.sender,
+            earliest_ms: gone.earliest_ms,
+            latest_ms: gone.latest_ms,
+            raised_ms: raised,
+            msg_id: queued.msg_id.clone(),
+            hash: queued.hash,
+        }
+    }
 }
 
 impl DropMark {
@@ -954,15 +1008,83 @@ impl Paykit {
         let Some(queued) = &mark.queued else {
             return Ok(None);
         };
+        self.delivered_by(&mark.sender, mark.latest_ms, queued)
+            .await
+    }
+
+    /// When `queued`, a request to `sender` for a mark whose latest time is `latest_ms`, was
+    /// delivered, as the outbox shows it, if that was before such a mark expired and the
+    /// message delivered is shown to be that request; `None` otherwise
+    /// ([`Paykit::delivered_in_time`]). Nothing is sent or tried.
+    ///
+    /// # Errors
+    ///
+    /// A store failure; a corrupt store when the message delivered under its `msg_id` is
+    /// another one.
+    async fn delivered_by(
+        &self,
+        sender: &[u8; 32],
+        latest_ms: u64,
+        queued: &QueuedRequest,
+    ) -> Result<Option<u64>> {
         let Some(Delivery::Accepted { accepted_at_ms }) = self.app.delivery(&queued.msg_id).await?
         else {
             return Ok(None);
         };
-        if mark.expired(Some(accepted_at_ms)) {
+        if latest_ms.saturating_add(crate::KEPT_MESSAGE_MS) <= accepted_at_ms {
             return Ok(None);
         }
-        self.delivered_request(&mark.sender, queued).await?;
+        self.delivered_request(sender, queued).await?;
         Ok(Some(accepted_at_ms))
+    }
+
+    /// Settle every notice owed on a block's mark the receive step dropped for the bound
+    /// (`bl/`, [`LostOwed`]), each in its own commit: a request the outbox shows delivered
+    /// before the mark's expiry tells nothing; one still queued, refused, kept in a batch, or
+    /// not known to the outbox tells the window lost. Either way the owed notice goes in the
+    /// commit that settles it. A failed read returns its error, leaving that notice and the
+    /// ones after it owed for the next pass.
+    ///
+    /// After a restore the outbox holds the records the backup carried, under the same
+    /// `msg_id`s, and none of the sent messages: a request still queued at the backup is
+    /// queued again, and settles as it is delivered or not; one delivered before the backup
+    /// whose record had left the outbox isn't known, and tells the window lost.
+    ///
+    /// Each notice is told at most once: the notice and the deletion of what owed it are one
+    /// commit, and a crash before that commit leaves the owed notice as it was, settled anew
+    /// at the next pass from the outbox's answer. A crash between the receive step's commit
+    /// and this pass leaves it owed in the same way.
+    ///
+    /// # Errors
+    ///
+    /// A store failure; a corrupt store when the message delivered under an owed request's
+    /// `msg_id` is another one.
+    pub(crate) async fn settle_lost_owed(&mut self) -> Result<()> {
+        for (rest, owed) in self.local_scan::<LostOwed>(key::LOST_OWED).await? {
+            let queued = QueuedRequest {
+                msg_id: owed.msg_id.clone(),
+                hash: owed.hash,
+                kept_batch: None,
+            };
+            let delivered = self
+                .delivered_by(&owed.sender, owed.latest_ms, &queued)
+                .await?;
+            let mut tx = crate::state::Tx::default();
+            if delivered.is_none() {
+                tx.put(
+                    &key::blocked_lost(&owed.sender, owed.earliest_ms),
+                    &crate::notices::KeptNotice::blocked_lost(
+                        owed.sender,
+                        owed.earliest_ms,
+                        owed.latest_ms,
+                        owed.raised_ms,
+                    ),
+                )?;
+            }
+            tx.delete(&format!("{}{rest}", key::LOST_OWED));
+            self.local_commit(tx).await?;
+        }
+        Ok(())
     }
 
     /// Check that the message the outbox delivered to `sender` under `queued`'s `msg_id` is
@@ -1077,7 +1199,8 @@ pub(crate) fn fold_into_floor(
 /// no ask delivered: a block's mark that expires or that the bound drops (module docs). At
 /// expiry and when a widening is applied, the delivery of a request the mark still names as
 /// queued is read first ([`Paykit::delivered_in_time`]); the receive step, which makes no
-/// client reads, tells a mark the bound drops there by the mark alone.
+/// client reads, tells here only for a mark the bound drops there that names no request as
+/// queued, and keeps the notice owed for one that names one ([`LostOwed`]).
 pub(crate) fn tell_lost_if_unasked(
     tx: &mut crate::state::Tx,
     gone: &DropMark,

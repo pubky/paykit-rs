@@ -724,9 +724,6 @@ impl Paykit {
         // is lost: only the SDK's own marks and notes are kept here, and nothing is written at
         // the switch (`stored.rs`, `divergent.rs`).
         Box::pin(self.take_stored_events(&duties)).await?;
-        // A `missed` item the read took holds the open requests from a time on
-        // (`hold.rs`), bounded now that the read verified the service time.
-        Box::pin(self.bound_missed_hold()).await?;
         if account_gone {
             // Nothing more is read or written there: the summary tells the host.
             let divergent = Box::pin(self.newly_paused(&paused_before)).await?;
@@ -783,7 +780,10 @@ impl Paykit {
         // bounds once the app holds the record of a request, of either side, naming them, of
         // entries dropped unverified at once, then again at most once a day while the mark
         // lives. The pairs a block's marks counted are forgotten first, so their asks may go
-        // (`marks.rs`).
+        // (`marks.rs`). Before them, the notices of lost messages owed on block marks the
+        // receive steps dropped for the bound are settled from the outbox's answer, which
+        // only this side of the read can make (`marks::LostOwed`).
+        Box::pin(self.settle_lost_owed()).await?;
         Box::pin(self.forget_blocked_pairs()).await?;
         let marked = Box::pin(self.ask_on_marks()).await?;
         // The payer's records opened before this app held the block floor they fall under
