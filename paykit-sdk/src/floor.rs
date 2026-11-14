@@ -29,13 +29,14 @@
 //!   the floor plus the tolerance automatically, whatever its record holds. Read after the
 //!   app's read of the feed, the floor is at least every raise applied before an entry the
 //!   app took, so this one holds whatever the order of the apps' reads. And immediately
-//!   before each automatic dispatch the record is read again from the switch
-//!   ([`Paykit::floor_holds_fresh`]), as the deny list is: a raise the app's copy doesn't
-//!   hold yet, applied before the attempt's commit or after it, still holds the dispatch. A
-//!   first dispatch journals `Paying` after that read, and reads the record once more after
-//!   that commit, with no await between the last checks and the payment method's call
-//!   (`Paykit::dispatch`), so a raise applied while the journal write commits holds it too.
-//!   A raise after the dispatch began is too late for that payment.
+//!   before each automatic dispatch the record is read again from the switch, with the deny
+//!   list and the request record, twice, and the dispatch holds unless the second reads show
+//!   the very writes the first did (`Paykit::automatic_dispatch_held`): a raise the app's
+//!   copy doesn't hold yet, applied before the attempt's commit, after it, or between those
+//!   reads, still holds the dispatch. A first dispatch journals `Paying` after one such
+//!   check, and makes it once more after that commit, with no await between the second
+//!   reads and the payment method's call (`Paykit::dispatch`). A raise after the second
+//!   read of the floor is too late for that payment.
 //! - **Unknown holds:** while the floor can't be read (the payer's records not listed yet, its
 //!   value sealed under a key not held, or a value that doesn't read with none seen before),
 //!   every one-time request counts as dated before it.
@@ -112,11 +113,16 @@ pub(crate) fn write_base(
         .unwrap_or_else(|| BlockFloorRecord::new(floor.unwrap_or(0)))
 }
 
+/// Whether the floor applies to `stored`: a one-time request (module docs).
+pub(crate) fn floor_applies(stored: &StoredMessage) -> bool {
+    matches!(stored.body(), Body::PaymentRequest(r) if !r.is_recurring())
+}
+
 /// Whether `stored`, a one-time request, is dated before the floor (module docs): its signed
 /// `created_at` is earlier than the higher of `shared` and `owed`, the raise this app owes,
 /// plus the clock tolerance. An unknown floor holds every one.
 pub(crate) fn dated_before(stored: &StoredMessage, shared: SharedFloor, owed: Option<u64>) -> bool {
-    if !matches!(stored.body(), Body::PaymentRequest(r) if !r.is_recurring()) {
+    if !floor_applies(stored) {
         return false;
     }
     let SharedFloor::Known(floor) = shared else {
@@ -151,26 +157,36 @@ impl Paykit {
         Ok(dated_before(stored, self.shared_floor().await?, owed))
     }
 
-    /// Whether `stored` is a one-time request dated before the floor as a read of the record
-    /// made now, from the switch, shows it, with the floor this app holds and a raise it owes
-    /// (module docs, "Applied before every automatic attempt"): the check immediately before
-    /// an automatic dispatch, as the deny list is read again there (Paykit spec 8.1, How fresh
-    /// the deny list is). It waits for no raise. A read that fails, or a value that doesn't
-    /// read with none seen, holds the request.
-    pub(crate) async fn floor_holds_fresh(&mut self, stored: &StoredMessage) -> Result<bool> {
-        if !matches!(stored.body(), Body::PaymentRequest(r) if !r.is_recurring()) {
+    /// The floor record read from the switch now (`GET /records/{key}`), as the app holds
+    /// it after the read, `None` inside for no record; `None` for a read that fails, which
+    /// never counts as a floor that doesn't hold a request. Read immediately before an
+    /// automatic dispatch (module docs, "Applied before every automatic attempt"), as the
+    /// deny list is read again there (Paykit spec 8.1, How fresh the deny list is).
+    pub(crate) async fn floor_read_now(&mut self) -> Option<Option<SharedRecord>> {
+        self.app
+            .read_record(&floor_target(&self.identity()))
+            .await
+            .ok()
+    }
+
+    /// Whether `stored` is a one-time request dated before the floor as `read`, the record
+    /// as [`Paykit::floor_read_now`] read it, shows it, with the floor this app has seen and
+    /// a raise it owes ([`dated_before`]). It waits for no raise. A value that doesn't read
+    /// with none seen holds the request.
+    pub(crate) async fn floor_holds_read(
+        &self,
+        stored: &StoredMessage,
+        read: Option<&SharedRecord>,
+    ) -> Result<bool> {
+        if !floor_applies(stored) {
             return Ok(false);
         }
         let owed = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
-        let target = floor_target(&self.identity());
-        let Ok(read) = self.app.read_record(&target).await else {
-            return Ok(true);
-        };
-        let key = self.app.record_key(&target)?;
+        let key = self.app.record_key(&floor_target(&self.identity()))?;
         let seen = self.app.record_seen(&key).await?;
         Ok(dated_before(
             stored,
-            shared_floor_of(read.as_ref(), seen.as_deref()),
+            shared_floor_of(read, seen.as_deref()),
             owed,
         ))
     }

@@ -2451,6 +2451,16 @@ impl Paykit {
     /// [`crate::Refusal::SwitchUnavailable`] when the own switch doesn't answer; the
     /// client's errors: a read that fails is never taken as a payee not blocked.
     pub(crate) async fn denied(&mut self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
+        Ok(self.deny_list_now().await?.contains(pubky))
+    }
+
+    /// The deny list as this app judges payments by ([`Paykit::judged_deny`]), read from the
+    /// switch now, as [`Paykit::denied`] reads it, sorted and without repeats.
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::denied`].
+    pub(crate) async fn deny_list_now(&mut self) -> crate::error::Result<Vec<[u8; 32]>> {
         let lists = self.app.allow_list().await.map_err(|error| {
             if crate::pay::switch_unavailable(&error) {
                 crate::error::Refusal::SwitchUnavailable(error.to_string()).into()
@@ -2464,7 +2474,10 @@ impl Paykit {
         put_flagged(&mut tx, &lists.flagged)?;
         self.local_commit(tx).await?;
         Box::pin(self.apply_block_widenings(&deny)).await?;
-        Ok(deny.contains(pubky))
+        let mut deny = deny;
+        deny.sort_unstable();
+        deny.dedup();
+        Ok(deny)
     }
 
     /// The deny list as this app judges payments by, from `deny` as read from the switch:

@@ -38,7 +38,7 @@ use serde_json::{Map, Value};
 
 use crate::activity::{self, ActivityTarget, KeptSide, Role, SideTag};
 use crate::error::{PaykitError, Refusal, Result};
-use crate::pay::BlockedPayment;
+use crate::pay::{BlockedPayment, WriteStamp};
 use crate::paykit::Paykit;
 use crate::periods::PeriodView;
 use crate::rail::ProofCheck;
@@ -1586,19 +1586,34 @@ impl Paykit {
     /// A read that fails: [`Refusal::SwitchUnavailable`] for a switch that couldn't be read
     /// now, the switch's refusal for one it refused; never taken as the record unchanged.
     pub(crate) async fn fresh_request(&mut self, target: &ActivityTarget) -> Result<Fresh> {
+        Ok(self.fresh_request_stamped(target).await?.0)
+    }
+
+    /// [`Paykit::fresh_request`], with the stamp of the write the read shows current
+    /// ([`WriteStamp`]) when it is [`Fresh::Held`], for a check that reads the record again
+    /// and fails closed when the write changed ([`Paykit::automatic_dispatch_held`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::fresh_request`].
+    pub(crate) async fn fresh_request_stamped(
+        &mut self,
+        target: &ActivityTarget,
+    ) -> Result<(Fresh, Option<WriteStamp>)> {
         let record = match self.app.read_record_fresh(&target.record_target()).await? {
             RecordRead::Fresh(record) => record,
-            RecordRead::Kept { reason, .. } => return fresh_kept(reason),
+            RecordRead::Kept { reason, .. } => return Ok((fresh_kept(reason)?, None)),
             // A read a later client names: nothing shows the switch's write held now.
-            _ => return Ok(Fresh::Unreadable),
+            _ => return Ok((Fresh::Unreadable, None)),
         };
+        let stamp = WriteStamp::of(&record);
         Ok(match record.content {
-            RecordContent::Deleted => Fresh::Missing,
+            RecordContent::Deleted => (Fresh::Missing, None),
             RecordContent::Value(_) => match self.held_activity(target).await? {
-                Some(record) => Fresh::Held(Box::new(record)),
-                None => Fresh::Unreadable,
+                Some(record) => (Fresh::Held(Box::new(record)), Some(stamp)),
+                None => (Fresh::Unreadable, None),
             },
-            _ => Fresh::Unreadable,
+            _ => (Fresh::Unreadable, None),
         })
     }
 

@@ -7,8 +7,9 @@ use std::sync::Arc;
 use paykit_sdk::{AppScopes, NoticeKind, Paykit, PaykitConfig};
 use pubky_switch_client::clock::Clock;
 use pubky_switch_client::store::StateStore;
+use pubky_switch_client::transport::Transport;
 
-use crate::common::{asked, draft, request_from, store, ListsStore, World};
+use crate::common::{asked, draft, request_from, store, ListsStore, ReadHook, World};
 
 const MINUTE_MS: u64 = 60_000;
 
@@ -1443,6 +1444,16 @@ async fn phone_paying_carol_on(
     w: &World,
     phone_store: Arc<dyn StateStore>,
 ) -> (Paykit, Paykit, Paykit, paykit_sdk::RequestRef) {
+    let router = Arc::clone(&w.router) as Arc<dyn Transport>;
+    Box::pin(phone_paying_carol_through(w, phone_store, router)).await
+}
+
+/// [`phone_paying_carol_on`], the phone's requests going through `transport`.
+async fn phone_paying_carol_through(
+    w: &World,
+    phone_store: Arc<dyn StateStore>,
+    transport: Arc<dyn Transport>,
+) -> (Paykit, Paykit, Paykit, paykit_sdk::RequestRef) {
     w.rail.set_declaration(
         paykit_sdk::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
             .with_idempotent(true),
@@ -1450,12 +1461,13 @@ async fn phone_paying_carol_on(
     let mut wallet = contacts_wallet(w, store()).await;
     wallet.app_mut().invite(&w.carol_id()).await.unwrap();
     let mut phone = w
-        .join_with(
+        .join_through(
             &w.alice,
             "phone",
             AppScopes::new().pay().build().unwrap(),
             crate::common::day_window(),
             phone_store,
+            transport,
         )
         .await;
     let mut carol_shop = w
@@ -1899,6 +1911,223 @@ async fn mark_manual_only(app: &mut Paykit, payee: &[u8; 32]) {
         .put_record(&target, &serde_json::to_vec(&value).unwrap(), Vec::new())
         .await
         .unwrap();
+}
+
+/// Which of the phone's reads at an automatic dispatch another payer app's write lands
+/// after: the deny list, carol's request record, or the block floor, each answered before
+/// the write.
+#[derive(Clone, Copy)]
+enum LandsAfter {
+    /// The wallet blocks carol.
+    DenyList,
+    /// The wallet marks carol's request record `manual_only`, raising no floor.
+    Record,
+    /// The wallet raises the floor past carol's request.
+    Floor,
+}
+
+impl LandsAfter {
+    /// A part of the path of the phone's read.
+    fn path(self, w: &World, phone: &Paykit, carols: &paykit_sdk::RequestRef) -> String {
+        let target = |collection: paykit_lib::collections::Collection, natural: Vec<u8>| {
+            let target = pubky_switch_client::app::RecordTarget::new(
+                pubky_switch_client::app::Collection::new(
+                    collection.name(),
+                    collection.policy(None),
+                ),
+                &natural,
+            );
+            let key = phone.app().record_key(&target).unwrap();
+            format!("/records/{}", pubky_switch_core::enc::b64(&key))
+        };
+        match self {
+            Self::DenyList => "/allow".into(),
+            Self::Record => target(
+                paykit_lib::collections::Collection::PayerActivity,
+                paykit_lib::derive::natural_key::request_record(
+                    &carols.payee,
+                    &carols.request_hash,
+                ),
+            ),
+            Self::Floor => target(
+                paykit_lib::collections::Collection::BlockFloor,
+                paykit_lib::derive::natural_key::block_floor(&w.alice_id()),
+            ),
+        }
+    }
+
+    /// The wallet makes the write, on its own thread while the phone waits for it.
+    fn write(self, w: &World, mut wallet: Paykit) {
+        let carol = w.carol_id();
+        let bob = w.bob_id();
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    match self {
+                        Self::DenyList => wallet.app_mut().deny(&carol).await.unwrap(),
+                        Self::Record => OwnWrite::ManualOnly.run(&mut wallet, &carol).await,
+                        Self::Floor => {
+                            wallet.receive(None).await.unwrap();
+                            assert_eq!(asked(&wallet, &bob).await.len(), 1);
+                            assert!(shared_floor(&wallet).await.is_some());
+                        }
+                    }
+                })
+        })
+        .join()
+        .unwrap();
+    }
+}
+
+/// The phone starts carol's payment automatically, a first dispatch; after its journal
+/// write of `Paying`, the wallet makes `write` right after the phone's next read of it. The
+/// method isn't called, and the attempt is known unsubmitted.
+async fn first_dispatch_with_a_write_after_its_read(w: &Arc<World>, write: LandsAfter) {
+    let phone_store = Arc::new(PayingStore::default());
+    let reads = Arc::new(ReadHook::new(Arc::clone(&w.router)));
+    // On the heap: the setup nests deep.
+    let (mut wallet, mut phone, mut shop, carols) = Box::pin(phone_paying_carol_through(
+        w,
+        Arc::clone(&phone_store) as Arc<dyn StateStore>,
+        Arc::clone(&reads) as Arc<dyn Transport>,
+    ))
+    .await;
+    if matches!(write, LandsAfter::Floor) {
+        Box::pin(wallet_about_to_raise_the_floor(w, &mut wallet, &mut shop)).await;
+    }
+    assert_eq!(shared_floor(&wallet).await, None);
+    let path = write.path(w, &phone, &carols);
+    let world = Arc::clone(w);
+    let armed = Arc::clone(&reads);
+    phone_store.on_paying(move || {
+        armed.after_read(&path, move || write.write(&world, wallet));
+    });
+    let outcome =
+        Box::pin(phone.pay_request_automatically(&carols, paykit_sdk::PayOptions::default()))
+            .await
+            .unwrap();
+    let (paykit_sdk::PayOutcome::Pending { attempt_id, .. }
+    | paykit_sdk::PayOutcome::Paid { attempt_id, .. }) = &outcome
+    else {
+        panic!("{outcome:?}");
+    };
+    assert!(reads.fired());
+    assert_eq!(w.rail.pay_calls(attempt_id), 0);
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Pending { .. }),
+        "{outcome:?}"
+    );
+    let payment = phone.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Attempted);
+}
+
+/// The phone pays carol's request by hand, left in flight. At the resume, once the repeat's
+/// check has read the deny list, the wallet makes `write`: at once for the deny list, which
+/// that read has answered, or right after the phone's next read of the record or the floor.
+/// The method isn't called again, and the attempt stays open, at this resume and the next.
+async fn repeat_with_a_write_after_its_read(w: &Arc<World>, write: LandsAfter) {
+    let phone_store = Arc::new(PayingStore::default());
+    let reads = Arc::new(ReadHook::new(Arc::clone(&w.router)));
+    // On the heap: the setup nests deep.
+    let (mut wallet, mut phone, mut shop, carols) = Box::pin(phone_paying_carol_through(
+        w,
+        Arc::clone(&phone_store) as Arc<dyn StateStore>,
+        Arc::clone(&reads) as Arc<dyn Transport>,
+    ))
+    .await;
+    let attempt_id = paid_in_flight(w, &mut phone, &carols).await;
+    if matches!(write, LandsAfter::Floor) {
+        Box::pin(wallet_about_to_raise_the_floor(w, &mut wallet, &mut shop)).await;
+    }
+    w.clock.advance_ms(MINUTE_MS);
+    let path = write.path(w, &phone, &carols);
+    let world = Arc::clone(w);
+    let armed = Arc::clone(&reads);
+    let wrote = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let done = Arc::clone(&wrote);
+    phone_store.on_deny_list_read(move || {
+        if matches!(write, LandsAfter::DenyList) {
+            write.write(&world, wallet);
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            armed.after_read(&path, move || write.write(&world, wallet));
+        }
+    });
+    Box::pin(phone.resume_payments()).await.unwrap();
+    assert!(reads.fired() || wrote.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    let payment = phone.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Paying);
+    Box::pin(phone.resume_payments()).await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_blocked_return_payee_blocked_after_the_deny_list_read_not_paid() {
+    // After the journal write of `Paying`, the phone reads the deny list, which doesn't hold
+    // carol; right after that read, another payer app blocks her. The second read of the deny
+    // list holds the payment.
+    let w = Arc::new(World::new());
+    Box::pin(first_dispatch_with_a_write_after_its_read(
+        &w,
+        LandsAfter::DenyList,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_blocked_return_request_marked_manual_only_after_the_record_read_not_paid() {
+    // After the journal write of `Paying`, the phone reads carol's record, open and not
+    // `manual_only`; right after that read, another payer app marks it `manual_only`. The
+    // second read of the record shows another write and holds the payment.
+    let w = Arc::new(World::new());
+    Box::pin(first_dispatch_with_a_write_after_its_read(
+        &w,
+        LandsAfter::Record,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_blocked_return_floor_raised_after_the_floor_read_not_paid() {
+    // After the journal write of `Paying`, the phone reads the floor, which no app has
+    // raised; right after that read, another payer app raises it past carol's request. The
+    // second read of the floor shows another write and holds the payment.
+    let w = Arc::new(World::new());
+    Box::pin(first_dispatch_with_a_write_after_its_read(
+        &w,
+        LandsAfter::Floor,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_blocked_return_payee_blocked_after_the_repeat_deny_list_read_not_repeated() {
+    // At the resume, the repeat's check reads the deny list, which doesn't hold carol; right
+    // after that read, another payer app blocks her. The second read holds the repeat.
+    let w = Arc::new(World::new());
+    Box::pin(repeat_with_a_write_after_its_read(&w, LandsAfter::DenyList)).await;
+}
+
+#[tokio::test]
+async fn test_blocked_return_request_marked_manual_only_after_the_repeat_record_read_not_repeated()
+{
+    // At the resume, the repeat's check reads carol's record, open and not `manual_only`;
+    // right after that read, another payer app marks it `manual_only`. The second read of
+    // the record holds the repeat.
+    let w = Arc::new(World::new());
+    Box::pin(repeat_with_a_write_after_its_read(&w, LandsAfter::Record)).await;
+}
+
+#[tokio::test]
+async fn test_blocked_return_floor_raised_after_the_repeat_floor_read_not_repeated() {
+    // At the resume, the repeat's check reads the floor, which no app has raised; right
+    // after that read, another payer app raises it past carol's request. The second read of
+    // the floor holds the repeat.
+    let w = Arc::new(World::new());
+    Box::pin(repeat_with_a_write_after_its_read(&w, LandsAfter::Floor)).await;
 }
 
 /// The wallet drops bob's request for the block and asks for it again, raising the floor

@@ -163,9 +163,26 @@ impl World {
         config: PaykitConfig,
         store: Arc<dyn StateStore>,
     ) -> Paykit {
+        let router = Arc::clone(&self.router) as Arc<dyn Transport>;
+        self.join_through(signer, name, scopes, config, store, router)
+            .await
+    }
+
+    /// [`World::join_with`], the app's requests going through `transport`.
+    pub async fn join_through(
+        &self,
+        signer: &TestSigner,
+        name: &str,
+        scopes: RequestedScopes,
+        config: PaykitConfig,
+        store: Arc<dyn StateStore>,
+        transport: Arc<dyn Transport>,
+    ) -> Paykit {
         let request = self.approve(signer, name, &scopes);
+        let mut env = self.env(signer, store);
+        env.transport = transport;
         let mut app = Paykit::join(
-            self.env(signer, store),
+            env,
             config,
             request,
             Arc::clone(&self.rail) as Arc<dyn paykit_sdk::Rail>,
@@ -738,6 +755,72 @@ impl World {
         )
         .await
         .unwrap()
+    }
+}
+
+/// A hook [`ReadHook`] runs once.
+type Hook = Box<dyn FnOnce() + Send>;
+
+/// A transport that runs a hook once, when the next `GET` whose path holds a part it was
+/// given has its answer, before the app gets the answer: what the hook writes lands after
+/// that read. Every request goes through the world's router.
+pub struct ReadHook {
+    pub inner: Arc<Router>,
+    hook: std::sync::Mutex<Option<(String, Hook)>>,
+    fired: std::sync::atomic::AtomicBool,
+}
+
+impl ReadHook {
+    pub fn new(inner: Arc<Router>) -> Self {
+        Self {
+            inner,
+            hook: std::sync::Mutex::new(None),
+            fired: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Run `hook` once, right after the next `GET` whose path holds `part` is answered.
+    pub fn after_read(&self, part: &str, hook: impl FnOnce() + Send + 'static) {
+        *self.hook.lock().unwrap() = Some((part.to_owned(), Box::new(hook)));
+    }
+
+    /// Whether the hook ran.
+    pub fn fired(&self) -> bool {
+        self.fired.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Transport for ReadHook {
+    fn send(
+        &self,
+        request: pubky_switch_client::transport::Request,
+    ) -> pubky_switch_client::transport::BoxFuture<
+        '_,
+        Result<
+            pubky_switch_client::transport::Response,
+            pubky_switch_client::error::TransportError,
+        >,
+    > {
+        let hook = {
+            let mut armed = self.hook.lock().unwrap();
+            let due = request.method == "GET"
+                && armed
+                    .as_ref()
+                    .is_some_and(|(part, _)| request.path_and_query.contains(part.as_str()));
+            if due {
+                armed.take().map(|(_, hook)| hook)
+            } else {
+                None
+            }
+        };
+        Box::pin(async move {
+            let answer = self.inner.send(request).await;
+            if let Some(hook) = hook {
+                hook();
+                self.fired.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            answer
+        })
     }
 }
 
