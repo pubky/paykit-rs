@@ -33,6 +33,6 @@ byte.
 
 The same tests check every case byte for byte and verdict for verdict: they build each value again and compare it with the file, the switch takes each certificate and record, every signature verifies, every message passes the recipient checks and decodes by kind, and Paykit's readers and verifiers take or refuse each case as its list says. Anyone can run them: `cargo test -p paykit-lib --test vectors`. In `cancellation_roles` a certificate holding `paykit_pay` holds `paykit_contacts` too.
 
-After an intended wire change, the same tests run with `PAYKIT_WRITE_VECTORS` set write the files again, and the diff is reviewed.
+After an intended wire change, the same tests run with `PAYKIT_WRITE_VECTORS` set write the files again, and their diff shows every value the change moved.
 
 The JSON examples in `specs/v0.2/wire-format.md` are taken from these files; update them with the vectors.
