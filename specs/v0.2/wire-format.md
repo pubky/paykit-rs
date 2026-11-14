@@ -93,7 +93,7 @@ Paykit's identifiers, beside the Switch's (Switch wire 1.7):
   | Proof `type` | Settlement ID |
   |---|---|
   | `bitcoin-txid` | the `txid` member, 64 lower-case hex characters, as its UTF-8 text (64 bytes). It has no output index: one transaction is one settlement, so a payer pays two payments, with or without a request, to one endpoint or two, in two transactions (spec 8.1 step 4). Other members, such as a `vout`, aren't part of it |
-  | the prototype's fake rail (`{ "rail": "fake", "tx": ... }`, no `type`) | its `tx` text, not empty |
+  | the prototype's fake rail (`{ "rail": "fake", "tx": ... }`, no `type`) | `fake:` followed by its `tx` text, `tx` not empty, so it never equals another method's |
   | any other | defined by its payment method; a payee that doesn't know the method credits no payment without a request by it |
 
   The vectors' payment without a request uses `bitcoin-txid` (`identifiers.json`).
@@ -828,7 +828,7 @@ Example (alice's `payer_activity` record of bob's request, certificate and plain
     "sender": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
     "cert": {
       "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFw...",
-      "sig": "4bAiKsZ2ITml9GP7Nqxgz3-lJ5WB25fIqYRarBxke89Mye8URlPFAM5qGTqWMxRcPS5lWLy1aDPt6IyRVQsoDA"
+      "sig": "Se1j4Odl8vAxIDDGWWJJfRErL1caE7-LLHqIKHppu2jz0L37si7gp5wVD0H3h39SfZYPoEnznKLKwkgPaZKVBg"
     },
     "plaintext": {
       "sender_app": "CQl8r8bZGV9VwrqRrTtDSw",
@@ -1003,7 +1003,7 @@ The identity's settlement marks (spec 6, Settlement marks), in at most 1,024 buc
 | `v` | int | yes | 1 |
 | `marks` | b64 | yes | the bucket's marks, 21 bytes each, concatenated in ascending byte order: the settlement's tag (12 bytes), the occurrence's kind (1 byte) and the occurrence's tag (8 bytes) (1.5); at most 9,000 marks |
 
-**Kinds:** `1` a one-time request, `2` a Billing Period, `3` a payment without a request. A bucket whose `marks` isn't a whole number of marks, holds more than 9,000, isn't in strictly ascending order of settlement tag, so names a settlement twice, or holds a mark of another kind, which names an occurrence no writer produces, is invalid. The marks name no counterparty, amount, label or settlement ID, since every payee app reads every bucket (spec 3.1, 12).
+**Kinds:** `1` a one-time request, `2` a Billing Period, `3` a payment without a request. A bucket whose `marks` isn't a whole number of marks, holds more than 9,000, isn't in strictly ascending order of settlement tag, so names a settlement twice, or holds a mark of another kind, which names an occurrence no writer produces, is invalid; so is a bucket with no mark, since a bucket is first written with the credit that adds its first mark and no mark is ever removed. The marks name no counterparty, amount, label or settlement ID, since every payee app reads every bucket (spec 3.1, 12).
 
 **Writing** (spec 8.1 step 4): the credit's batch carries the `record.put` of the settlement's bucket at the version the app read, or `{0, 0}` with its `id_inputs` for a bucket not yet written (Switch wire 6.2), holding every mark the bucket held and the new one in its place, beside the `record.put` of the `payee_activity` record that stores the receipt, at the version read, and the queued receipt. When another credit wrote the bucket first, the batch fails with `409 conflict`, whose answer carries the bucket's current write to a writer holding `paykit_settlements` (Switch wire 6.2 and 7.6), and the writer decides again on it: a mark of the settlement there is a credit already; otherwise it adds its mark to that write and sends the batch again. No writer removes or changes a mark, or deletes a bucket.
 
