@@ -2080,7 +2080,8 @@ message check 10 drops: a rejection carrying executor_app_id, and a conflicting 
 whose terms aren't valid. Among them, an Allowance handed on from alice's executor to her \
 wallet, its grant history with both grants, and the executor's ledger_handoff for the \
 wallet's grant, which a reader binds, and the same ledger_handoff naming a ledger version no \
-write gives, which it refuses. reason is paykit-lib's wording.";
+write gives, which it binds too, the ledger_handoff counting for nothing. reason is \
+paykit-lib's wording.";
 
 /// A case of `allowance_records`: its name and the record.
 type AllowanceCase = (&'static str, AllowanceRecord);
@@ -2254,16 +2255,19 @@ fn allowance_cases(keys: &Keys) -> (Vec<AllowanceCase>, Vec<AllowanceCase>) {
     accepted.extend(more_accepted);
     refused.extend(more_refused);
     let handed = handed_on(keys, &base);
-    let mut no_write = handed.clone();
-    if let Some(handoff) = no_write.ledger_handoff.as_mut() {
-        handoff.ledger.version = 0;
-    }
+    // A ledger_handoff that doesn't read doesn't affect whether the record is valid: the
+    // record binds, and it counts for nothing (Paykit wire 5.4).
+    let mut value: Value = serde_json::from_slice(&handed.to_json().unwrap()).unwrap();
+    value["ledger_handoff"]["ledger"]["version"] = serde_json::json!(0);
+    let no_write =
+        AllowanceRecord::read(&serde_json::to_vec(&value).unwrap(), &pubky(ALICE)).unwrap();
+    assert!(no_write.ledger_handoff.is_none() && no_write.ledger_handoff_unread.is_some());
     accepted.push((
         "an Allowance handed on from the executor to the wallet, with the executor's ledger_handoff",
         handed,
     ));
-    refused.push((
-        "a ledger_handoff naming a ledger version no write gives",
+    accepted.push((
+        "an Allowance handed on with a ledger_handoff naming a ledger version no write gives, which counts for nothing",
         no_write,
     ));
     (accepted, refused)
@@ -2572,9 +2576,21 @@ fn test_ledger_handoff_binds_and_writes_back() {
     }
     let written: Value = serde_json::from_slice(&replaced.to_json().unwrap()).unwrap();
     assert!(written["ledger_handoff"].get("note").is_none());
+    // One that doesn't read leaves the record valid: it binds, counts for nothing, and is
+    // written back as read; a reader holding the record without it flags the write.
     value["ledger_handoff"]["item_hash"] = serde_json::json!(b64(&[9; 31]));
     let bad = serde_json::to_vec(&value).unwrap();
-    assert!(AllowanceRecord::bind(&bad, &alice, &nk, &key).is_err());
+    let read = AllowanceRecord::bind(&bad, &alice, &nk, &key).unwrap();
+    assert!(read.ledger_handoff.is_none());
+    assert!(read.ledger_handoff_counts(&alice).is_err());
+    let written: Value = serde_json::from_slice(&read.to_json().unwrap()).unwrap();
+    assert_eq!(written["ledger_handoff"], value["ledger_handoff"]);
+    let held = AllowanceRecord {
+        ledger_handoff: None,
+        ledger_handoff_unread: None,
+        ..handed.clone()
+    };
+    assert!(held.check_later_handoff(&read, &alice).is_err());
 }
 
 #[test]
@@ -2596,6 +2612,7 @@ fn test_ledger_handoff_counts_only_signed_by_the_previous_executor() {
     );
     let held = AllowanceRecord {
         ledger_handoff: None,
+        ledger_handoff_unread: None,
         ..handed.clone()
     };
     held.check_later_handoff(&handed, &alice).unwrap();

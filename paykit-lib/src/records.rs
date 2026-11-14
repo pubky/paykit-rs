@@ -2549,6 +2549,10 @@ pub struct AllowanceRecord {
     /// The previous executor's ledger handoff, for the grant that handed the Allowance on
     /// (Paykit spec 8.3, "Handoff"): at most one, which a later handoff replaces.
     pub ledger_handoff: Option<LedgerHandoff>,
+    /// A `ledger_handoff` that doesn't read as one, as read: it doesn't affect whether the
+    /// record is valid, counts for nothing, and every writer keeps it as read until a later
+    /// handoff's replaces it (Paykit wire 5.4).
+    pub ledger_handoff_unread: Option<Value>,
     /// The members the writer doesn't know, kept as read (Paykit wire 5).
     pub unknown: UnknownMembers,
 }
@@ -2727,14 +2731,21 @@ impl AllowanceRecord {
                 origin: origins.at("/grant"),
                 ..g
             });
-        let ledger_handoff = obj
-            .opt("ledger_handoff")
-            .map(LedgerHandoff::from_json)
-            .transpose()?
-            .map(|h| LedgerHandoff {
-                origin: origins.at("/ledger_handoff"),
-                ..h
-            });
+        // A `ledger_handoff` doesn't affect whether the record is valid (Paykit wire 5.4): one
+        // that doesn't read is kept as read, counting for nothing.
+        let (ledger_handoff, ledger_handoff_unread) = match obj.opt("ledger_handoff") {
+            None => (None, None),
+            Some(value) => match LedgerHandoff::from_json(value) {
+                Ok(handoff) => (
+                    Some(LedgerHandoff {
+                        origin: origins.at("/ledger_handoff"),
+                        ..handoff
+                    }),
+                    None,
+                ),
+                Err(_) => (None, Some(value.clone())),
+            },
+        };
         let record = Self {
             counterparty,
             allowance_id,
@@ -2746,6 +2757,7 @@ impl AllowanceRecord {
             grant,
             grants,
             ledger_handoff,
+            ledger_handoff_unread,
             unknown,
         };
         record.check()?;
@@ -3019,6 +3031,9 @@ impl AllowanceRecord {
     /// [`Error::Invalid`] or [`Error::Switch`] for one that doesn't verify: the reader
     /// ignores it and flags it.
     pub fn ledger_handoff_counts(&self, own: &[u8; 32]) -> Result<Option<&LedgerHandoff>> {
+        if self.ledger_handoff_unread.is_some() {
+            return invalid("Paykit wire 5.4: ledger_handoff doesn't read as one");
+        }
         let Some(handoff) = &self.ledger_handoff else {
             return Ok(None);
         };
@@ -3090,6 +3105,11 @@ impl AllowanceRecord {
     ///
     /// [`Error::Invalid`] or [`Error::Switch`] naming the rule `later` breaks.
     pub fn check_later_handoff(&self, later: &AllowanceRecord, own: &[u8; 32]) -> Result<()> {
+        if later.ledger_handoff_unread.is_some()
+            && later.ledger_handoff_unread != self.ledger_handoff_unread
+        {
+            return invalid("Paykit wire 5.4: a later write's ledger_handoff doesn't read as one");
+        }
         match &later.ledger_handoff {
             Some(handoff) if self.ledger_handoff.as_ref() != Some(handoff) => {
                 later.check_ledger_handoff(own, handoff).map(|_| ())
@@ -3193,7 +3213,11 @@ impl AllowanceRecord {
                 })
                 .collect(),
             msg_ids: &msg_ids,
-            ledger_handoff: self.ledger_handoff.as_ref().map(LedgerHandoff::to_json),
+            ledger_handoff: self
+                .ledger_handoff
+                .as_ref()
+                .map(LedgerHandoff::to_json)
+                .or_else(|| self.ledger_handoff_unread.clone()),
         };
         let json = serde_json::to_vec(&out)
             .map_err(|_| Error::Invalid(format!("{ALLOWANCES}: can't be written")))?;
