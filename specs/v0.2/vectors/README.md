@@ -1,9 +1,9 @@
 # Paykit v0.2 test vectors
 
 Test vectors for Paykit's own wire format in `specs/v0.2/wire-format.md`: its amounts, derivations, the Paykit
-member of app records, the executor grant, messages and shared record values. Every file is computed from fixed keys and fixed
-randomness by `paykit-lib`'s vector tests (How the files were generated, below), so any implementation can check them byte for
-byte.
+member of app records, the executor grant, messages and shared record values. Every file but the hand-written `encoding.json` is computed from fixed
+keys and fixed randomness by `paykit-lib`'s vector tests (How the files were generated, below), so any implementation can check
+them byte for byte.
 
 **This set builds on no vector of [the Switch's set](https://github.com/pubky/pubky-switch/tree/28562dc9095d09e1d9b28d1fe7faa9c0f4d676e3/spec/vectors), at pubky-switch commit `28562dc9095d09e1d9b28d1fe7faa9c0f4d676e3`, the commit Paykit's spec builds on**: its fixed keys, certificates and records are its own (`keys.json`, `documents.json` `certificates`), and its seeds, encodings and times follow that set's conventions.
 
