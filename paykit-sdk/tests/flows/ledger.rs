@@ -638,3 +638,191 @@ async fn test_ledger_outcome_done_from_a_previous_executors_proof() {
     let refused = new.pay_under_allowance(&third, &record).await.unwrap_err();
     assert!(refused_for(&refused, "lifetime limit"), "{refused:?}");
 }
+
+/// The `allowance_id` of every proof bob's shop holds in its payee records.
+async fn proofs_name(shop: &mut Paykit) -> Vec<Value> {
+    Box::pin(shop.receive(None)).await.unwrap();
+    let mut named = Vec::new();
+    for held in shop.app().records_of("payee_activity").await.unwrap() {
+        let value: Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+        let Some(proof) = value["proof"]["plaintext"]["json"].as_str() else {
+            continue;
+        };
+        let bytes = pubky_switch_core::enc::unb64(proof).unwrap();
+        let proof: Value = serde_json::from_slice(&bytes).unwrap();
+        named.push(proof["body"]["allowance_id"].clone());
+    }
+    named
+}
+
+/// An executor attempt of 1 btc the method reports failed, its entry then compacted into
+/// `totals.failed` by a later payment, and its payer record, which shows it unpaid, deleted
+/// by another own app; the method's history then shows the payment made. Returns the
+/// apps, the record key and the attempt.
+async fn compacted_then_paid(w: &World) -> (Paykit, Paykit, [u8; 32], AttemptId) {
+    let (mut shop, mut wallet, record) = Box::pin(set_up(w, terms_with(json!({})))).await;
+    let mut phone = Box::pin(w.wallet("phone")).await;
+    let first = Box::pin(request(w, &mut shop, &mut wallet, "1")).await;
+    w.rail.next(paykit_sdk::rail::Behaviour::Fail);
+    let PayOutcome::Failed { attempt_id, .. } =
+        Box::pin(wallet.pay_under_allowance(&first, &record))
+            .await
+            .unwrap()
+    else {
+        panic!("failed");
+    };
+    // Old paid entries fill the ledger near its size limit; once the failed entry is older
+    // than the 60 s every entry is kept, the next payment compacts it.
+    let base = ledger(&wallet, &record).await;
+    let old = w.clock.now_ms() - 10 * DAY_MS;
+    let full = filled(&base, "0.0001", old, Some(EntryOutcome::Done), 230_000);
+    Box::pin(write_ledger(&mut wallet, &record, &full)).await;
+    w.clock.advance_ms(2 * 60 * 1000);
+    let second = Box::pin(request(w, &mut shop, &mut wallet, "0.5")).await;
+    let paid = Box::pin(wallet.pay_under_allowance(&second, &record))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let compacted = ledger(&wallet, &record).await;
+    assert!(compacted.entries.iter().all(|e| e.attempt_id != attempt_id));
+    assert!(compacted.failed.iter().any(|f| f.attempt_id == attempt_id));
+    Box::pin(phone.receive(None)).await.unwrap();
+    Box::pin(crate::outcome_record::phone_writes(
+        &mut phone, &first, None,
+    ))
+    .await;
+    Box::pin(wallet.receive(None)).await.unwrap();
+    w.rail.complete_after_failure(&attempt_id);
+    (shop, wallet, record, attempt_id)
+}
+
+#[tokio::test]
+async fn test_ledger_compacted_failed_attempt_paid_later_gets_its_proof() {
+    // The payment's proof names the Allowance, its rebuilt payer record holds it, and the
+    // compacted attempt moves into the totals.
+    let w = World::new();
+    let (mut shop, mut wallet, record, attempt_id) = Box::pin(compacted_then_paid(&w)).await;
+    let id = wallet.allowance(&record).await.unwrap().allowance_id;
+    let before = ledger(&wallet, &record).await.count;
+    let resumed = Box::pin(wallet.resume_payments()).await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Paid { .. }]),
+        "{resumed:?}"
+    );
+    let paid = ledger(&wallet, &record).await;
+    assert!(paid.failed.iter().all(|f| f.attempt_id != attempt_id));
+    assert_eq!(paid.count, before + 1);
+    let named = proofs_name(&mut shop).await;
+    assert!(named.contains(&json!(id.as_str())), "{named:?}");
+}
+
+#[tokio::test]
+async fn test_ledger_compacted_attempt_moved_into_the_totals_gets_its_proof_at_a_retry() {
+    // The outcome's batch is refused once, so the resume leaves the proof unwritten; the
+    // same resume then moves the compacted attempt into the totals, as the journal shows it
+    // paid. The next resume still writes the proof naming the Allowance.
+    let w = World::new();
+    let (mut shop, mut wallet, record, attempt_id) = Box::pin(compacted_then_paid(&w)).await;
+    let id = wallet.allowance(&record).await.unwrap().allowance_id;
+    w.alice.switch().fail_next(Fault::Error {
+        path: "/ops".into(),
+        code: pubky_switch_core::http::ErrorCode::BadRequest,
+        current: Value::Null,
+    });
+    let resumed = Box::pin(wallet.resume_payments()).await.unwrap();
+    assert!(
+        matches!(
+            resumed.as_slice(),
+            [PayOutcome::PaidOutcomeUnwritten { .. }]
+        ),
+        "{resumed:?}"
+    );
+    let moved = ledger(&wallet, &record).await;
+    assert!(moved.entries.iter().all(|e| e.attempt_id != attempt_id));
+    assert!(moved.failed.iter().all(|f| f.attempt_id != attempt_id));
+    let resumed = Box::pin(wallet.resume_payments()).await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Paid { .. }]),
+        "{resumed:?}"
+    );
+    let named = proofs_name(&mut shop).await;
+    assert!(named.contains(&json!(id.as_str())), "{named:?}");
+}
+
+#[tokio::test]
+async fn test_ledger_compacted_attempt_rebuilt_after_a_restore_stays_doubtful() {
+    // The backup is taken after the grant. A payment under the Allowance is made and its
+    // outcome's batch refused, so its claim stays open while the resume writes `done` into
+    // its entry from the journal; a later payment compacts that entry into the totals, and
+    // the device is lost. The restored app rebuilds the attempt from the request record,
+    // which names the Allowance, but the ledger no longer lists it: it stays doubtful, and
+    // no proof is written that names the Allowance or leaves it out.
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(&w, terms_with(json!({})))).await;
+    let backup = wallet.backup().await.unwrap();
+    let first = Box::pin(request(&w, &mut shop, &mut wallet, "1")).await;
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } =
+        Box::pin(wallet.pay_under_allowance(&first, &record))
+            .await
+            .unwrap()
+    else {
+        panic!("in flight");
+    };
+    w.rail.settle(&attempt_id, true);
+    // Refused with its ledger write, then on its claim alone.
+    for _ in 0..2 {
+        w.alice.switch().fail_next(Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::BadRequest,
+            current: Value::Null,
+        });
+    }
+    let resumed = Box::pin(wallet.resume_payments()).await.unwrap();
+    assert!(
+        matches!(
+            resumed.as_slice(),
+            [PayOutcome::PaidOutcomeUnwritten { .. }]
+        ),
+        "{resumed:?}"
+    );
+    let done = ledger(&wallet, &record).await;
+    assert_eq!(done.entries[0].attempt_id, attempt_id);
+    assert_eq!(done.entries[0].outcome, Some(EntryOutcome::Done));
+    let base = ledger(&wallet, &record).await;
+    let old = w.clock.now_ms() - 10 * DAY_MS;
+    let full = filled(&base, "0.0001", old, Some(EntryOutcome::Done), 230_000);
+    Box::pin(write_ledger(&mut wallet, &record, &full)).await;
+    w.clock.advance_ms(2 * 60 * 1000);
+    let second = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    let paid = Box::pin(wallet.pay_under_allowance(&second, &record))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let compacted = ledger(&wallet, &record).await;
+    assert!(compacted.entries.iter().all(|e| e.attempt_id != attempt_id));
+    assert!(compacted.failed.iter().all(|f| f.attempt_id != attempt_id));
+    drop(wallet);
+
+    let mut wallet = Box::pin(Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    let report = Box::pin(wallet.reconcile()).await.unwrap();
+    assert!(report.resolved.is_empty(), "{report:?}");
+    assert!(
+        report
+            .doubtful
+            .iter()
+            .any(|d| d.attempts.contains(&attempt_id)),
+        "{report:?}"
+    );
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+    let named = proofs_name(&mut shop).await;
+    assert!(!named.contains(&Value::Null), "{named:?}");
+}

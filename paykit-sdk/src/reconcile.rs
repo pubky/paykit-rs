@@ -35,6 +35,7 @@ use pubky_switch_core::ops::{Condition, OpKind};
 use crate::activity::{self, ActivityTarget};
 use crate::destination::Carrier;
 use crate::error::{Refusal, Result};
+use crate::executor::AttemptUnder;
 use crate::hold::RestoreHold;
 use crate::journal::{Destination, JournalEntry, KeptAmount, Stage};
 use crate::pay::{own_deadline, PayOutcome, Written};
@@ -285,8 +286,10 @@ impl Paykit {
     /// proof (Paykit spec 7.2, Paykit wire 4.10): the request's amount, label and deadline,
     /// and the destination paid. `None` when the records can't tell which destination was
     /// paid: a request whose own endpoints leave more than one usable, a list endpoint not
-    /// marked used by this attempt at the version held, or a payment without a request,
-    /// whose record doesn't keep the amount its proof states.
+    /// marked used by this attempt at the version held, a payment without a request, whose
+    /// record doesn't keep the amount its proof states, and an attempt on a request record
+    /// naming an Allowance whose ledger can't tell whether it was made under it
+    /// ([`crate::executor::AttemptUnder::Unknown`]).
     async fn rebuilt_entry(
         &mut self,
         obligation: &Obligation,
@@ -375,6 +378,23 @@ impl Paykit {
                 found
             }
         };
+        // Made under an Allowance when the request record names it and that Allowance's
+        // ledger lists the attempt: its proof names the Allowance then, as the executor's own
+        // would (Paykit spec 8.3 step 4). A ledger that can't tell, such as one compacted
+        // since, leaves the attempt doubtful: its proof can't name the Allowance it may not
+        // have been made under, nor leave out the one it may have been.
+        let allowance_id = match self
+            .attempt_under(
+                &obligation.payee,
+                obligation.record.allowance_id.as_ref(),
+                attempt,
+            )
+            .await?
+        {
+            AttemptUnder::Allowance(allowance_id) => Some(allowance_id.as_str().to_owned()),
+            AttemptUnder::ByHand => None,
+            AttemptUnder::Unknown => return Ok(None),
+        };
         let mut entry = JournalEntry {
             attempt_id: attempt.to_text(),
             obligation: obligation.claim_key,
@@ -409,17 +429,7 @@ impl Paykit {
             transfer_bound: None,
             failed_on_claim: false,
             receipted: false,
-            // Made under an Allowance when the request record names it and that Allowance's
-            // ledger, as held, holds an entry for the attempt: its proof names the Allowance
-            // then, as the executor's own would (Paykit spec 8.3 step 4).
-            allowance_id: self
-                .attempt_under(
-                    &obligation.payee,
-                    obligation.record.allowance_id.as_ref(),
-                    attempt,
-                )
-                .await?
-                .map(|allowance_id| allowance_id.as_str().to_owned()),
+            allowance_id,
         };
         entry.keep_carrier(&carrier);
         Ok(Some(entry))
