@@ -20,11 +20,20 @@ use serde_json::{json, Value};
 use crate::common::{
     arr, b64n, base_cert, body_text, cap_app_record, cert, cert_doc, executor_cert, generated,
     paykit, phone_cert, pubky, quoted, recertified, reissued, shop_app_record, signed, signed_json,
-    st, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
+    st, writing, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
 };
 
 #[test]
 fn test_vectors_documents() {
+    if !writing() {
+        check();
+    }
+}
+
+/// `documents.json` against paykit-lib: its generated cases, then every check of its cases. With
+/// [`WRITE_VECTORS`](crate::common::WRITE_VECTORS) set, the regeneration driver runs it once it
+/// has written the set.
+pub(crate) fn check() {
     let keys = Keys::from_seeds();
     generate(&keys);
     let d = paykit("documents.json");
@@ -102,7 +111,7 @@ fn check_executor_grant(keys: &Keys, d: &Value) {
     assert!(grant
         .verify(&alice, &bob, &other, &terms, built_on)
         .is_err());
-    // A certificate without allowance_execute can't hold a grant: the phone's.
+    // A certificate without paykit_allowance_execute can't hold a grant: the phone's.
     let phone = ExecutorGrant {
         app_id: keys.app("phone").keys.app_id_bytes(),
         cert: cert_doc("phone"),
@@ -442,7 +451,7 @@ fn check_executor_certificates(keys: &Keys, d: &Value) {
                     assert!(
                         error
                             .to_string()
-                            .contains("allowance_execute requires paykit_allowance, paykit_pay and paykit_contacts"),
+                            .contains("paykit_allowance_execute requires paykit_allowance, paykit_pay and paykit_contacts"),
                         "{name}: {error}"
                     );
                 }
@@ -595,8 +604,9 @@ fn extension_app(keys: &Keys) -> Value {
 }
 
 /// The cases paykit-lib generates in `documents.json` (README "How the files were
-/// generated"), compared with the file, and written into it with `PAYKIT_WRITE_VECTORS`.
-fn generate(keys: &Keys) {
+/// generated"), compared with the file, and written into the set by the
+/// regeneration driver (`regenerate.rs`).
+pub(crate) fn generate(keys: &Keys) {
     // Signed again with their own scopes and permissions, the certificates are the same byte
     // for byte.
     for app in ["shop", "cap"] {
@@ -811,6 +821,30 @@ fn app_record_signatures(keys: &Keys, file: &Value) -> Vec<(Place<'static>, Valu
             let at = format!("/app_records/{list}/{i}");
             out.push((Place::At(format!("{at}/body")), json!(text)));
             out.push((Place::At(format!("{at}/signed")), signed_json(&doc)));
+            let record = AppRecord::verify(&doc, &pubky(BOB));
+            if list == "refused" {
+                out.push((
+                    Place::At(format!("{at}/switch_accepts")),
+                    json!(record.is_ok()),
+                ));
+                continue;
+            }
+            // What a Paykit reader takes from an accepted record's member.
+            let read = PaykitMember::read(&record.unwrap()).unwrap();
+            let endpoints: serde_json::Map<String, Value> = read
+                .public_endpoints
+                .iter()
+                .map(|(i, p)| (i.as_str().to_owned(), json!(p.as_str())))
+                .collect();
+            let ids: Vec<&str> = read
+                .endpoint_identifiers
+                .iter()
+                .map(|i| i.as_str())
+                .collect();
+            out.push((
+                Place::At(format!("{at}/reads")),
+                json!({ "endpoint_identifiers": ids, "public_endpoints": endpoints }),
+            ));
         }
     }
     out

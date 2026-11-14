@@ -792,7 +792,7 @@ impl Protocol for PaykitProtocol {
     /// The label narrowing of Paykit spec 3.4: a payer's acceptance, rejection,
     /// cancellation and proof about a labelled request go only to apps holding `paykit_request` or
     /// that label, and about an unlabelled request only to apps holding `paykit_request`; a payee's
-    /// cancellation, without a label, to apps holding `paykit_pay` or `paykit_request`.
+    /// cancellation, without a label, only to apps holding `paykit_pay`.
     fn sends_to(&self, message: &Message, recipient: &AppRecord) -> bool {
         self.narrows(message, recipient, None)
     }

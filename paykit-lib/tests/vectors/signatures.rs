@@ -10,11 +10,21 @@ use pubky_switch_core::enc::b64;
 use serde_json::json;
 
 use crate::common::{
-    arr, b64n, generated, hex, paykit, pubky, st, unhex, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
+    arr, b64n, generated, hex, paykit, pubky, st, unhex, writing, Keys, Place, ALICE, ALLOWANCE_ID,
+    BOB,
 };
 
 #[test]
 fn test_vectors_signatures() {
+    if !writing() {
+        check();
+    }
+}
+
+/// `signatures.json` against paykit-lib: its generated cases, then every check of its cases. With
+/// [`WRITE_VECTORS`](crate::common::WRITE_VECTORS) set, the regeneration driver runs it once it
+/// has written the set.
+pub(crate) fn check() {
     let keys = Keys::from_seeds();
     generate(&keys);
     let v = paykit("signatures.json");
@@ -67,9 +77,9 @@ fn test_vectors_signatures() {
 }
 
 /// The grant's signed fields, its signed bytes, the executor's public key and its signature,
-/// from the grant history entry of `documents.json`, written into `signatures.json` with
-/// `PAYKIT_WRITE_VECTORS`.
-fn generate(keys: &Keys) {
+/// from the grant history entry of `documents.json`, written into `signatures.json`
+/// by the regeneration driver (`regenerate.rs`).
+pub(crate) fn generate(keys: &Keys) {
     let d = paykit("documents.json");
     let entry = &d["executor_grant_history_entry"];
     let grant = &entry["grant"];

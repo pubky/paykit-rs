@@ -4,6 +4,8 @@
 
 #![allow(dead_code)]
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use paykit_lib::kinds::Kind;
@@ -22,13 +24,40 @@ pub const BOB: &str = "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo";
 /// The Allowance of the vectors.
 pub const ALLOWANCE_ID: &str = "d0efffb7-191b-4709-b6c7-e343af5500b4";
 
-/// A file of Paykit's set, `specs/v0.2/vectors/`.
+/// The folder of Paykit's set, `specs/v0.2/vectors/`.
+pub fn vectors_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../specs/v0.2/vectors")
+}
+
+/// The exact bytes of the file `name` of Paykit's set on disk.
+pub fn file_bytes(name: &str) -> Vec<u8> {
+    let path = vectors_dir().join(name);
+    std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+thread_local! {
+    /// The set as the regeneration driver ([`crate::regenerate`]) builds it, file by file,
+    /// on the thread that runs it: while it is set, [`paykit`] reads a file from here and
+    /// [`generated`] writes a file's cases into it, so a generator takes the values of the
+    /// files it builds on as their own generators made them, never from disk.
+    static CORPUS: RefCell<Option<BTreeMap<String, Value>>> = const { RefCell::new(None) };
+}
+
+/// Run `build` with `corpus` as the set [`paykit`] reads and [`generated`] writes, and
+/// return the set as `build` left it.
+pub fn in_corpus(corpus: BTreeMap<String, Value>, build: impl FnOnce()) -> BTreeMap<String, Value> {
+    CORPUS.with(|c| assert!(c.replace(Some(corpus)).is_none(), "one corpus at a time"));
+    build();
+    CORPUS.with(|c| c.take()).expect("the corpus")
+}
+
+/// A file of Paykit's set: the driver's corpus while it builds one ([`in_corpus`]), else
+/// the file in `specs/v0.2/vectors/`.
 pub fn paykit(name: &str) -> Value {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../specs/v0.2/vectors")
-        .join(name);
-    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    serde_json::from_slice(&bytes).unwrap()
+    if let Some(file) = CORPUS.with(|c| c.borrow().as_ref().map(|set| set.get(name).cloned())) {
+        return file.unwrap_or_else(|| panic!("{name}: not a file of the set"));
+    }
+    serde_json::from_slice(&file_bytes(name)).unwrap()
 }
 
 /// A string member.
@@ -492,10 +521,16 @@ pub enum Place<'a> {
     At(String),
 }
 
-/// The environment variable that makes the vector tests write the cases paykit-lib generates
-/// into `specs/v0.2/vectors/` before comparing them, after an intended change. Test-only: the
-/// generator runs only in these tests.
+/// The environment variable that makes the regeneration driver ([`crate::regenerate`])
+/// write the set again after an intended change. Test-only: the generators run only in these
+/// tests.
 pub const WRITE_VECTORS: &str = "PAYKIT_WRITE_VECTORS";
+
+/// Whether [`WRITE_VECTORS`] is set. The per-file tests then leave their checks to the
+/// driver, which runs every one of them once it has written the set.
+pub fn writing() -> bool {
+    std::env::var_os(WRITE_VECTORS).is_some()
+}
 
 /// Write `cases` into `file`, the vector file `name`.
 fn apply(name: &str, file: &mut Value, cases: &[(Place<'_>, Value)]) {
@@ -527,40 +562,33 @@ fn apply(name: &str, file: &mut Value, cases: &[(Place<'_>, Value)]) {
     }
 }
 
-/// The vector file `name` with `cases` written into it, in memory: what [`generated`] writes
-/// in update mode. A generator that builds on another generated case reads it from here, so
-/// that it never needs an earlier run to have written it.
+/// The vector file `name` with `cases` written into it, in memory. A generator that builds
+/// on another case of its own file reads it from here, so that it never takes that case's
+/// value from an earlier run.
 pub fn with_generated(name: &str, cases: &[(Place<'_>, Value)]) -> Value {
     let mut file = paykit(name);
     apply(name, &mut file, cases);
     file
 }
 
-/// Compare the cases paykit-lib generates for the file `name` with the file, value for value;
-/// with [`WRITE_VECTORS`] set, write them into the file first, creating it if the set doesn't
-/// hold it. Every file is JSON written with
-/// sorted members, indented by two spaces, and a final newline, so writing one changes no
-/// other byte of it.
+/// The cases paykit-lib generates for the file `name`. While the driver builds the set
+/// ([`in_corpus`]), they are written into its corpus, a file the set doesn't hold yet starting
+/// as an empty object; otherwise they are compared with the file, value for value. Nothing
+/// here writes to disk: only the driver does.
 pub fn generated(name: &str, cases: &[(Place<'_>, Value)]) {
-    if std::env::var_os(WRITE_VECTORS).is_some() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../specs/v0.2/vectors")
-            .join(name);
-        // A file the set doesn't hold yet starts as an empty object.
-        let file = if path.exists() {
-            with_generated(name, cases)
-        } else {
-            let mut file = Value::Object(Default::default());
-            apply(name, &mut file, cases);
-            file
+    let building = CORPUS.with(|c| {
+        let mut set = c.borrow_mut();
+        let Some(set) = set.as_mut() else {
+            return false;
         };
-        let mut text = serde_json::to_string_pretty(&file).unwrap();
-        text.push('\n');
-        // The other tests read the file in parallel: write it beside and rename it into
-        // place, so none of them reads it half written.
-        let partial = path.with_extension("json.partial");
-        std::fs::write(&partial, text).unwrap_or_else(|e| panic!("{}: {e}", partial.display()));
-        std::fs::rename(&partial, &path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let file = set
+            .entry(name.to_owned())
+            .or_insert_with(|| Value::Object(Default::default()));
+        apply(name, file, cases);
+        true
+    });
+    if building {
+        return;
     }
     let file = paykit(name);
     for (place, value) in cases {
@@ -575,9 +603,17 @@ pub fn generated(name: &str, cases: &[(Place<'_>, Value)]) {
         assert_eq!(
             held,
             Some(value),
-            "{name}: {place:?} isn't what paykit-lib generates; set {WRITE_VECTORS} after an intended change"
+            "{name}: {place:?} isn't what paykit-lib generates; regenerate the set with {WRITE_VECTORS} after an intended change"
         );
     }
+}
+
+/// A vector file as the set writes it: JSON with sorted members, indented by two spaces,
+/// with a final newline.
+pub fn file_text(file: &Value) -> String {
+    let mut text = serde_json::to_string_pretty(file).unwrap();
+    text.push('\n');
+    text
 }
 
 /// `text`, a record value or a document body, with every app certificate it carries (a

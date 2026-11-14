@@ -809,7 +809,7 @@ async fn test_periods_payee_drops_a_proof_naming_another_period() {
 async fn test_periods_proof_for_a_payee_record_not_listed_yet_held_until_listed() {
     // Alice's till sends bob a monthly request, which bob's wallet accepts; the till's
     // record is written while alice's wallet, holding `paykit_pay` only, can't read it. The wallet
-    // is renewed to read `request` too, with no bundle, and bob's proof of January comes.
+    // is renewed to read `paykit_request` too, with no bundle, and bob's proof of January comes.
     // The record's absence decides nothing: the entry is held. Once the keys come and the
     // records are listed, the proof goes into the period record, once.
     use crate::certificate::{list, renew, store_bundle};
