@@ -863,7 +863,7 @@ fn queue_delivery_confirmation(
                 message.last_attempt_at = None;
                 message.sent_at = None;
                 message.last_error = None;
-                message.updated_at = now;
+                message.updated_at = message.updated_at.max(now);
                 tx.save_outbound_private_message(message)?;
                 return Ok(());
             }
@@ -889,7 +889,7 @@ fn queue_delivery_confirmation(
     Ok(())
 }
 
-fn apply_delivery_confirmation(
+pub(crate) fn apply_delivery_confirmation(
     tx: &mut dyn crate::storage::StorageTransaction,
     counterparty: &PubkyPublicKey,
     confirmation: &paykit_lib::DeliveryConfirmation,
@@ -914,8 +914,11 @@ fn apply_delivery_confirmation(
             .is_some_and(|event| event.event_id == confirmation.event_id().as_str())
         {
             // A staged ciphertext still owns its Noise slot, even if a previous publication reached the peer.
-            message.confirmed_at = Some(now);
-            message.updated_at = now;
+            // A wall clock that moved backwards must not date the
+            // confirmation before the message's last recorded change.
+            let confirmed_at = now.max(message.updated_at);
+            message.confirmed_at = Some(confirmed_at);
+            message.updated_at = confirmed_at;
             tx.save_outbound_private_message(message)?;
         }
     }

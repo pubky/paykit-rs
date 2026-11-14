@@ -74,6 +74,11 @@ pub enum FfiReceiptIssuanceStatus {
     AccessQueued,
     /// Last storage or queueing attempt failed.
     Failed,
+    /// Receipt Access was published to the counterparty.
+    AccessSent,
+    /// Receipt Access delivery stopped without automatic retry; `last_error`
+    /// carries the failure. Recovering the Encrypted Link queues it again.
+    AccessFailed,
     /// SDK returned a value this binding version does not understand.
     Unknown,
 }
@@ -120,12 +125,17 @@ pub struct FfiReceiptIssuanceView {
     pub outbound_message_id: Option<u64>,
     /// Creation time as RFC3339 text.
     pub created_at: String,
-    /// Last status update time as RFC3339 text.
+    /// Last change to the issuance or its Receipt Access delivery as RFC3339
+    /// text: each delivery attempt, failure, recovery requeue, publication or
+    /// Delivery Confirmation moves it, and it never moves backwards.
     pub updated_at: String,
     /// Time the Encrypted Receipt was stored as RFC3339 text.
     pub stored_at: Option<String>,
     /// Time Receipt Access was queued for private delivery as RFC3339 text.
     pub access_queued_at: Option<String>,
+    /// Last storage, queueing or Receipt Access delivery error. While the
+    /// status stays `AccessQueued`, the outbound queue retries delivery.
+    pub last_error: Option<String>,
 }
 
 impl fmt::Debug for FfiReceiptIssuanceView {
@@ -149,6 +159,13 @@ impl fmt::Debug for FfiReceiptIssuanceView {
             .field("updated_at", &self.updated_at)
             .field("stored_at", &self.stored_at)
             .field("access_queued_at", &self.access_queued_at)
+            .field(
+                "last_error",
+                &self
+                    .last_error
+                    .as_ref()
+                    .map(|error| format!("<redacted:{} bytes>", error.len())),
+            )
             .finish()
     }
 }

@@ -629,6 +629,9 @@ See the [SDK accounting contract](../specs/paykit-sdk.md#durable-allowance-payme
   `receiptIssuanceRecords`, `receiptAccess`, `receiptAccessFrom`,
   `receiptAccessRecords`, `retrieveReceipt`, `receipts`, `receiptsFrom`, and
   `receiptRecords` — inspect issued, indexed, and decrypted receipts.
+  An issued receipt's `status` moves from `AccessQueued` to `AccessSent` once
+  any outbound drain publishes its Receipt Access, or to `AccessFailed` when
+  delivery stops without automatic retry (`lastError` says why).
 
 Receipt Decryption Keys and encrypted payloads stay inside SDK-managed state.
 Payment References are exposed through the redacted `PaymentReference`

@@ -185,7 +185,7 @@ pub(super) fn supersede_outdated_private_payment_lists(
             && message.status == OutboundPrivateMessageStatus::Pending
         {
             message.status = OutboundPrivateMessageStatus::Superseded;
-            message.updated_at = now;
+            message.updated_at = message.updated_at.max(now);
             message.last_error = None;
         }
     }

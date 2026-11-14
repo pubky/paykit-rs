@@ -365,6 +365,9 @@ fn validate_receipt_issuance_status(record: &ReceiptIssuanceRecord) -> Result<()
                 || record.outbound_message_id.is_some()
                 || record.last_error.is_none()
         }
+        // Delivery statuses are derived from the outbound queue on read and
+        // never stored, so a stored record carrying one is malformed.
+        ReceiptIssuanceStatus::AccessSent | ReceiptIssuanceStatus::AccessFailed => true,
     };
     if invalid {
         return Err(PaykitSdkError::Protocol {

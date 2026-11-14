@@ -28,6 +28,8 @@ impl From<ReceiptIssuanceStatus> for FfiReceiptIssuanceStatus {
             ReceiptIssuanceStatus::Stored => Self::Stored,
             ReceiptIssuanceStatus::AccessQueued => Self::AccessQueued,
             ReceiptIssuanceStatus::Failed => Self::Failed,
+            ReceiptIssuanceStatus::AccessSent => Self::AccessSent,
+            ReceiptIssuanceStatus::AccessFailed => Self::AccessFailed,
             _ => Self::Unknown,
         }
     }
@@ -110,6 +112,7 @@ impl From<ReceiptIssuanceView> for FfiReceiptIssuanceView {
             updated_at: value.updated_at.to_rfc3339(),
             stored_at: value.stored_at.map(|time| time.to_rfc3339()),
             access_queued_at: value.access_queued_at.map(|time| time.to_rfc3339()),
+            last_error: value.last_error,
         }
     }
 }
