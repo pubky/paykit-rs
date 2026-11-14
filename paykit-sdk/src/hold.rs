@@ -97,6 +97,41 @@ pub(crate) struct RestoreHold {
     /// open, and before such a read; only with a widening of its own, the read no earlier
     /// than its start.
     pub(crate) widening_read: Option<WideningRead>,
+    /// The widening an earlier restore still owed when the backup was taken, its clean
+    /// verdict ended before the read of the lists that applies it: from its start, as of the
+    /// first read it kept ([`RestoreHold::widening_owed`]). Kept here, not as a window, so a
+    /// window the backup carries at the same start stands beside it; applied at the next
+    /// read of the lists whatever this restore's verdict, as that restore's own verdict is
+    /// known. Two owed through a chain of backups are kept as one that covers both.
+    pub(crate) earlier_widening: Option<OwedWidening>,
+}
+
+/// A restore's widening of the block marks owed as of a read of the lists
+/// ([`RestoreHold::earlier_widening`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OwedWidening {
+    /// The widening's start.
+    pub(crate) from_ms: u64,
+    /// The read it is applied as of.
+    pub(crate) read: WideningRead,
+}
+
+impl OwedWidening {
+    /// One widening covering `self` and `other`: from the earlier start, as of the later
+    /// read, with the counterparties either read's deny list holds.
+    fn covering(self, other: Self) -> Self {
+        let mut deny = self.read.deny;
+        deny.extend(other.read.deny);
+        deny.sort_unstable();
+        deny.dedup();
+        Self {
+            from_ms: self.from_ms.min(other.from_ms),
+            read: WideningRead {
+                at_ms: self.read.at_ms.max(other.read.at_ms),
+                deny,
+            },
+        }
+    }
 }
 
 /// The client's verdict on a restore, as Paykit took it (Switch spec 12.4, "The held
@@ -131,6 +166,7 @@ impl RestoreHold {
             verdict: RestoreVerdict::Open,
             widening_from_ms: Some(own),
             widening_read: None,
+            earlier_widening: before.and_then(RestoreHold::owed_before),
         }
     }
 
@@ -161,22 +197,38 @@ impl RestoreHold {
 
     /// The widening still to be applied as of the first read it kept, once a later report
     /// ended its clean verdict: its start and that read.
-    pub(crate) fn widening_owed(&self) -> Option<(u64, WideningRead)> {
+    pub(crate) fn widening_owed(&self) -> Option<OwedWidening> {
         match (self.verdict, self.widening_from_ms, &self.widening_read) {
-            (RestoreVerdict::NotClean, Some(from_ms), Some(read)) => Some((from_ms, read.clone())),
+            (RestoreVerdict::NotClean, Some(from_ms), Some(read)) => Some(OwedWidening {
+                from_ms,
+                read: read.clone(),
+            }),
             _ => None,
         }
     }
 
+    /// What a restore from a backup holding this hold still owes of its widenings: this
+    /// hold's own owed one, and an earlier one it carried, kept as one that covers both.
+    fn owed_before(&self) -> Option<OwedWidening> {
+        match (self.widening_owed(), self.earlier_widening.clone()) {
+            (Some(own), Some(earlier)) => Some(own.covering(earlier)),
+            (own, earlier) => own.or(earlier),
+        }
+    }
+
     /// Whether its times are in order: a read kept only once a verdict is taken, with a
-    /// widening of its own, and no earlier than the widening's start.
+    /// widening of its own, and no earlier than the widening's start; an earlier restore's
+    /// widening read no earlier than its start.
     pub(crate) fn in_order(&self) -> bool {
         self.widening_read.as_ref().is_none_or(|read| {
             self.verdict != RestoreVerdict::Open
                 && self
                     .widening_from_ms
                     .is_some_and(|from_ms| read.at_ms >= from_ms)
-        })
+        }) && self
+            .earlier_widening
+            .as_ref()
+            .is_none_or(|owed| owed.read.at_ms >= owed.from_ms)
     }
 }
 
@@ -664,7 +716,8 @@ impl Paykit {
         }
         // So are the start of a widening the hold names that a clean verdict dropped, and the
         // first read of the lists the hold keeps for it, both brought down to the same bound,
-        // so they stay in order; the read goes with a widening the hold no longer names.
+        // so they stay in order; the read goes with a widening the hold no longer names. So
+        // are an earlier restore's owed widening's start and read.
         if let Some(hold) = hold.as_mut() {
             hold.widening_from_ms = hold.widening_from_ms.map(|from_ms| from_ms.min(bound));
             if hold.widening_from_ms.is_none() {
@@ -672,6 +725,10 @@ impl Paykit {
             }
             if let Some(read) = hold.widening_read.as_mut() {
                 read.at_ms = read.at_ms.min(bound);
+            }
+            if let Some(owed) = hold.earlier_widening.as_mut() {
+                owed.from_ms = owed.from_ms.min(bound);
+                owed.read.at_ms = owed.read.at_ms.min(bound);
             }
         }
         if hold != held {
@@ -1775,12 +1832,47 @@ mod tests {
     #[test]
     fn test_restore_hold_widening_owed_only_once_a_clean_verdict_ended() {
         let ended = hold_with_read(RestoreVerdict::NotClean, Some(5), 9);
-        let (from_ms, read) = ended.widening_owed().unwrap();
-        assert_eq!((from_ms, read.at_ms), (5, 9));
+        let owed = ended.widening_owed().unwrap();
+        assert_eq!((owed.from_ms, owed.read.at_ms), (5, 9));
         assert!(hold_with_read(RestoreVerdict::Clean, Some(5), 9)
             .widening_owed()
             .is_none());
         assert!(RestoreHold::of(10_000, None).widening_owed().is_none());
+    }
+
+    #[test]
+    fn test_restore_hold_of_carries_the_widenings_its_backup_owed() {
+        let owed = |from_ms, at_ms, deny: [u8; 32]| OwedWidening {
+            from_ms,
+            read: WideningRead {
+                at_ms,
+                deny: vec![deny],
+            },
+        };
+        // Its own owed widening, and none when the backup's hold owed none.
+        let ended = hold_with_read(RestoreVerdict::NotClean, Some(5), 9);
+        assert_eq!(
+            RestoreHold::of(20_000, Some(&ended)).earlier_widening,
+            Some(owed(5, 9, [7; 32]))
+        );
+        let clean = hold_with_read(RestoreVerdict::Clean, Some(5), 9);
+        assert_eq!(RestoreHold::of(20_000, Some(&clean)).earlier_widening, None);
+        // With one it carried too: one covering both.
+        let both = RestoreHold {
+            earlier_widening: Some(owed(3, 6, [8; 32])),
+            ..ended
+        };
+        let covering = RestoreHold::of(20_000, Some(&both))
+            .earlier_widening
+            .unwrap();
+        assert_eq!((covering.from_ms, covering.read.at_ms), (3, 9));
+        assert_eq!(covering.read.deny, vec![[7; 32], [8; 32]]);
+        // Out of order: read before its start.
+        let reversed = RestoreHold {
+            earlier_widening: Some(owed(9, 5, [8; 32])),
+            ..RestoreHold::of(10_000, None)
+        };
+        assert!(!reversed.in_order());
     }
 
     fn switch(code: ErrorCode) -> PaykitError {

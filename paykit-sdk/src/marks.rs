@@ -838,15 +838,25 @@ impl Paykit {
             .local_get::<crate::hold::RestoreHold>(key::RESTORE_HOLD)
             .await?;
         if let Some(mut hold) = hold.clone() {
-            if let Some((from_ms, read)) = hold.widening_owed() {
+            // An earlier restore's widening the backup's hold still owed, applied as of the
+            // read it kept, whatever this restore's verdict, beside any window the backup
+            // carried at the same start. Kept for the next read while some counterparty
+            // can't be marked yet.
+            if let Some(owed) = hold.earlier_widening.clone() {
+                let mut tx = crate::state::Tx::default();
+                if self.apply_owed_widening(&mut tx, &owed).await? {
+                    hold.earlier_widening = None;
+                    tx.put(key::RESTORE_HOLD, &hold)?;
+                    self.local_commit(tx).await?;
+                }
+            }
+            if let Some(owed) = hold.widening_owed() {
                 // A later report ended the restore's clean verdict: its widening is applied as
                 // of the first read the hold kept, from the hold, so a `missed` item's
                 // widening at the same start, such as the gap that report shows, stays beside
                 // it. Kept for the next read while some counterparty can't be marked yet.
-                if self.widen_marks(&read.deny, from_ms, read.at_ms).await? {
-                    let mut tx = crate::state::Tx::default();
-                    let floor = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
-                    fold_into_floor(&mut tx, floor, read.at_ms)?;
+                let mut tx = crate::state::Tx::default();
+                if self.apply_owed_widening(&mut tx, &owed).await? {
                     hold.widening_read = None;
                     tx.put(key::RESTORE_HOLD, &hold)?;
                     self.local_commit(tx).await?;
@@ -919,6 +929,26 @@ impl Paykit {
             }
         }
         Ok(())
+    }
+
+    /// Apply `owed`, a restore's widening as of a read it kept: each counterparty that read's
+    /// deny list held marked from its start to the read, and, once every one is, the block
+    /// floor raised to the read's time in `tx`, as a restore's window raises it, in the
+    /// commit that drops the widening. Returns whether every one was marked.
+    async fn apply_owed_widening(
+        &mut self,
+        tx: &mut crate::state::Tx,
+        owed: &crate::hold::OwedWidening,
+    ) -> Result<bool> {
+        if !self
+            .widen_marks(&owed.read.deny, owed.from_ms, owed.read.at_ms)
+            .await?
+        {
+            return Ok(false);
+        }
+        let floor = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
+        fold_into_floor(tx, floor, owed.read.at_ms)?;
+        Ok(true)
     }
 
     /// Mark each of `deny` for a widening from `from` to `until`, one commit per counterparty,

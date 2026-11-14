@@ -526,6 +526,64 @@ async fn test_blocked_return_clean_restore_over_an_earlier_hold_drops_only_its_o
 }
 
 #[tokio::test]
+async fn test_blocked_return_restore_keeps_an_owed_first_read_beside_a_window_at_its_start() {
+    let w = World::new();
+    let (backup, taken) = backed_up_blocking_bob(&w).await;
+    // The backup holds an earlier restore's hold whose clean verdict a later report ended,
+    // its widening owed as of that restore's first read of the lists, which held carol; and
+    // a `missed` item's window carried at the same start.
+    let earlier = taken - 60 * MINUTE_MS;
+    let first_read = earlier + 10 * MINUTE_MS;
+    let mut state = crate::restore::layer_of(&backup);
+    state.push((
+        b"rh".to_vec(),
+        serde_json::json!({ "v": 1, "d": {
+            "resend_from_ms": earlier,
+            "asks_queued": true,
+            "asked": [],
+            "earlier": false,
+            "earlier_asks": false,
+            "verdict": "not_clean",
+            "widening_from_ms": earlier,
+            "widening_read": { "at_ms": first_read, "deny": [w.carol_id()] },
+        }}),
+    ));
+    state.push((
+        format!("bw/{earlier:020}").into_bytes(),
+        serde_json::json!({ "v": 1, "d": {
+            "from_ms": earlier,
+            "until_ms": earlier + 5 * MINUTE_MS,
+        }}),
+    ));
+    let backup = crate::restore::with_layer(&backup, state);
+    let mut restored = restore_from(&w, &backup).await;
+    restored.app_mut().refresh_identity().await.unwrap();
+    restored.receive(None).await.unwrap();
+    assert_eq!(
+        restored.app().restore_held_cursor(),
+        Some(pubky_switch_client::app::HeldCursor::Clean)
+    );
+    w.clock.advance_ms(11 * MINUTE_MS);
+    restored.receive(None).await.unwrap();
+    // Both stand: the window marks bob, whom the lists hold, over its times; the owed
+    // widening marks carol as of the first read it kept.
+    let marks = block_mark_values(&restored).await;
+    let of = |id: [u8; 32]| {
+        let sender = pubky_switch_core::enc::b64(&id);
+        marks
+            .iter()
+            .find(|mark| mark["sender"] == sender.as_str())
+            .cloned()
+    };
+    let carol = of(w.carol_id()).unwrap_or_else(|| panic!("{marks:?}"));
+    assert_eq!(carol["earliest_ms"], earlier);
+    assert_eq!(carol["latest_ms"], first_read);
+    let bob = of(w.bob_id()).unwrap_or_else(|| panic!("{marks:?}"));
+    assert_eq!(bob["latest_ms"], earlier + 5 * MINUTE_MS);
+    assert!(widening_starts(&restored).await.is_empty());
+}
+
+#[tokio::test]
 async fn test_blocked_return_missed_window_marks_every_blocked_counterparty() {
     let w = World::new();
     let mut wallet = contacts_wallet(&w, store()).await;
