@@ -29,7 +29,7 @@ async fn test_labels_reply_reaches_only_the_labelled_app_and_request() {
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 
-    // The labelled app and the identity's own `request` app get the replies; another
+    // The labelled app and the identity's own `paykit_request` app get the replies; another
     // label's app gets none.
     shop1.receive(None).await.unwrap();
     let sales = shop1.payee_activity().await.unwrap();
@@ -77,8 +77,12 @@ async fn test_labels_payer_cannot_send_requests() {
         .send_request(w.bob_id(), draft("1", w.clock.now_ms()))
         .await
         .unwrap_err();
-    assert!(
-        matches!(refused.refusal(), Some(Refusal::ScopeMissing(_))),
-        "{refused:?}"
+    let Some(refusal @ Refusal::ScopeMissing(scope)) = refused.refusal() else {
+        panic!("{refused:?}")
+    };
+    assert_eq!(scope, "paykit_request or paykit_request:<label>");
+    assert_eq!(
+        refusal.to_string(),
+        "Paykit spec 3.1: the certificate doesn't hold paykit_request or paykit_request:<label>"
     );
 }

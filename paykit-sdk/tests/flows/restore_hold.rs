@@ -1072,6 +1072,176 @@ async fn test_restore_hold_missed_item_bounded_by_its_last_acceptance_time() {
     assert_eq!(status_of(&w, &wallet, &after).await, RequestStatus::Open);
 }
 
+/// The hold a `missed` item left, as the wallet keeps it: its bound, and whether its end
+/// is still not known.
+async fn missed_hold(wallet: &Paykit) -> (Option<u64>, bool) {
+    let bound = wallet
+        .app()
+        .protocol_get(b"mh")
+        .await
+        .unwrap()
+        .map(|bytes| {
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            value["d"]["bound_ms"].as_u64().unwrap()
+        });
+    let unknown = wallet.app().protocol_get(b"mu").await.unwrap().is_some();
+    (bound, unknown)
+}
+
+/// Bob's requests created at the read's time and an hour later, both first seen after it:
+/// the first is held, the second, created past the read's service time plus the clock
+/// tolerance, isn't.
+async fn assert_bounded_by_the_read(w: &World, wallet: &mut Paykit, read_ms: u64) {
+    w.clock.set_ms(read_ms);
+    let within = signed_request(w, "order-1");
+    w.clock.set_ms(read_ms + HOUR_MS);
+    let after = signed_request(w, "order-2");
+    for request in [&within, &after] {
+        w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], request);
+    }
+    wallet.receive(None).await.unwrap();
+    assert_eq!(status_of(w, wallet, &within).await, RequestStatus::Held);
+    assert_eq!(status_of(w, wallet, &after).await, RequestStatus::Open);
+}
+
+#[tokio::test]
+async fn test_restore_hold_held_cursor_gap_bounded_by_the_verified_service_time() {
+    // The cursor the switch holds is ahead of the wallet's position: the client hands the
+    // gap as a `missed` item with no end, `u64::MAX` (Switch spec 8.3 "Ahead"). That is no
+    // time: the hold's end is set as not known, and the receive bounds it by the service
+    // time verified once its read completed, so a request created an hour later isn't held.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    wallet.receive(None).await.unwrap();
+    let position = wallet.app().cursor().seq;
+    w.alice
+        .switch()
+        .set_held_cursor(&wallet.app_id(), position + 4);
+    let read_ms = w.clock.now_ms();
+    let report = wallet.receive(None).await.unwrap();
+    assert!(
+        matches!(
+            report.report.held_cursor,
+            Some(pubky_switch_client::app::HeldCursor::Ahead { .. })
+        ),
+        "{:?}",
+        report.report.held_cursor
+    );
+    let verified = wallet.app().highest_service_time().unwrap();
+    assert_eq!(missed_hold(&wallet).await, (Some(verified), false));
+    // The other instance's cursor goes back to the wallet's position, so the wallet's own
+    // moves go through again.
+    w.alice.switch().set_held_cursor(&wallet.app_id(), position);
+    assert_bounded_by_the_read(&w, &mut wallet, read_ms).await;
+}
+
+#[tokio::test]
+async fn test_restore_hold_owed_missed_call_with_no_end_bounded_by_the_verified_service_time() {
+    // A gap's `missed` call the client kept owed, as it keeps one the protocol couldn't
+    // answer, with no end, `u64::MAX`: the client makes it again at the next read with that
+    // end. The hold's end is set as not known, and bounded by the service time verified at
+    // that read.
+    let w = World::new();
+    let target = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&target)).await;
+    let _shop = w.shop().await;
+    wallet.receive(None).await.unwrap();
+    let cursor = wallet.app().cursor();
+    let owed = serde_json::json!({
+        "v": pubky_switch_client::app::SCHEMA_VERSION,
+        "d": { "Missed": {
+            "seq": cursor.seq,
+            "entries": 0,
+            "accepted_from_ms": w.clock.now_ms() - 1_000,
+            "accepted_until_ms": u64::MAX,
+        } },
+    });
+    let mut batch = pubky_switch_client::store::WriteBatch::new();
+    batch
+        .put(
+            &pubky_switch_client::store::client_namespace(&wallet.app_id()),
+            format!("owed/{:020}/{:020}", cursor.generation, cursor.seq),
+            serde_json::to_vec(&owed).unwrap(),
+        )
+        .unwrap();
+    target.commit(batch).unwrap();
+    let read_ms = w.clock.now_ms();
+    wallet.receive(None).await.unwrap();
+    let verified = wallet.app().highest_service_time().unwrap();
+    assert_eq!(missed_hold(&wallet).await, (Some(verified), false));
+    assert_bounded_by_the_read(&w, &mut wallet, read_ms).await;
+}
+
+#[tokio::test]
+async fn test_restore_hold_held_cursor_gap_and_a_bounded_item_hold_to_the_later_bound() {
+    // A gap with no end and a `missed` item whose end is an hour before the read, in one
+    // read: the item's bound doesn't replace the gap's end not known, and the hold is bounded
+    // by the later of the two, the read's service time. A request created half an hour
+    // before the read, past the item's end plus the clock tolerance, is held.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    wallet.receive(None).await.unwrap();
+    let position = wallet.app().cursor().seq;
+    let now = w.clock.now_ms();
+    w.alice
+        .switch()
+        .set_held_cursor(&wallet.app_id(), position + 4);
+    w.alice
+        .switch()
+        .push_missed(1, now - 2 * HOUR_MS, now - HOUR_MS);
+    wallet.receive(None).await.unwrap();
+    let verified = wallet.app().highest_service_time().unwrap();
+    assert!(verified >= now, "{verified} {now}");
+    assert_eq!(missed_hold(&wallet).await, (Some(verified), false));
+    w.alice.switch().set_held_cursor(&wallet.app_id(), position);
+    w.clock.set_ms(now - HOUR_MS / 2);
+    let between = signed_request(&w, "order-1");
+    w.clock.set_ms(now);
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &between);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(status_of(&w, &wallet, &between).await, RequestStatus::Held);
+}
+
+#[tokio::test]
+async fn test_restore_hold_missed_end_not_known_holds_every_open_request_until_bounded() {
+    // The hold of an earlier item bounded at the start of time, and the end of a later one
+    // not known, as a crash right after the commit that passed it leaves them: bob's open
+    // request, created and accepted after that bound, is held until a read completes, and
+    // stays held after it, accepted before the service time that read verified.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    w.clock.advance_ms(HOUR_MS);
+    let request = signed_request(&w, "order-1");
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &request);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(status_of(&w, &wallet, &request).await, RequestStatus::Open);
+    let kept = |value: serde_json::Value| {
+        serde_json::to_vec(&serde_json::json!({ "v": 1, "d": value })).unwrap()
+    };
+    wallet
+        .app_mut()
+        .protocol_commit(&[
+            pubky_switch_client::app::LocalWrite::Put {
+                key: b"mh".to_vec(),
+                value: kept(serde_json::json!({ "bound_ms": 0 })),
+            },
+            pubky_switch_client::app::LocalWrite::Put {
+                key: b"mu".to_vec(),
+                value: kept(serde_json::json!(true)),
+            },
+        ])
+        .await
+        .unwrap();
+    assert_eq!(status_of(&w, &wallet, &request).await, RequestStatus::Held);
+    wallet.receive(None).await.unwrap();
+    let verified = wallet.app().highest_service_time().unwrap();
+    assert_eq!(missed_hold(&wallet).await, (Some(verified), false));
+    assert_eq!(status_of(&w, &wallet, &request).await, RequestStatus::Held);
+}
+
 #[tokio::test]
 async fn test_restore_hold_request_sent_again_over_its_seen_deleted_record_changes_nothing() {
     // The wallet took bob's request; alice's phone then deletes its record. Past the 30

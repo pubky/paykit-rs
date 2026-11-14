@@ -7,12 +7,21 @@ use pubky_switch_core::scopes::permission_names;
 use serde_json::{json, Value};
 
 use crate::common::{
-    cert, generated, hex, identity_label, paykit, pubky, seed, Keys, Place, ALICE, BOB,
+    cert, generated, hex, identity_label, paykit, pubky, seed, writing, Keys, Place, ALICE, BOB,
     SEED_PREFIX, SHOP1,
 };
 
 #[test]
 fn test_vectors_keys() {
+    if !writing() {
+        check();
+    }
+}
+
+/// `keys.json` against paykit-lib: its generated cases, then every check of its cases. With
+/// [`WRITE_VECTORS`](crate::common::WRITE_VECTORS) set, the regeneration driver runs it once it
+/// has written the set.
+pub(crate) fn check() {
     let keys = Keys::from_seeds();
     generate(&keys);
     // The vectors' payer and payee are the seeded identities.
@@ -50,8 +59,8 @@ fn scope_key_cases() -> [(&'static str, u64, String); 3] {
 }
 
 /// The cases paykit-lib generates in `keys.json`, compared with the file, and written into
-/// it with `PAYKIT_WRITE_VECTORS`.
-fn generate(keys: &Keys) {
+/// the set by the regeneration driver (`regenerate.rs`).
+pub(crate) fn generate(keys: &Keys) {
     let identities: Vec<Value> = keys
         .identities
         .iter()

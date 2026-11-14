@@ -280,6 +280,58 @@ fn store_failure(error: pubky_switch_client::app::AppError) -> StoreFailure {
     }
 }
 
+/// How many keys of each family whose size the runtime bounds a restored layer holds
+/// ([`restore_paykit_layer`]).
+#[derive(Default)]
+struct BoundedFamilies {
+    lost_owed: usize,
+    dropped_replies: usize,
+    dropped_unverified: usize,
+    key_waits: usize,
+    dropped_blocked: usize,
+}
+
+impl BoundedFamilies {
+    /// Count a key of `family`: `Err` naming the family once it is past its bound.
+    fn count(&mut self, family: &StateKey) -> Result<(), String> {
+        let (count, bound, what) = match family {
+            StateKey::LostOwed { .. } => (
+                &mut self.lost_owed,
+                crate::marks::MAX_LOST_OWED,
+                "notices of lost messages owed",
+            ),
+            StateKey::DroppedReplies { .. } => (
+                &mut self.dropped_replies,
+                crate::marks::MAX_DROPPED_MARKS,
+                "marks of dropped replies",
+            ),
+            StateKey::DroppedUnverified { .. } => (
+                &mut self.dropped_unverified,
+                crate::marks::MAX_DROPPED_MARKS,
+                "marks of entries dropped unverified",
+            ),
+            StateKey::KeyWaits { .. } => (
+                &mut self.key_waits,
+                crate::marks::MAX_DROPPED_MARKS,
+                "marks of key waits",
+            ),
+            StateKey::DroppedBlocked { .. } => (
+                &mut self.dropped_blocked,
+                crate::marks::MAX_DROPPED_MARKS,
+                "marks of blocked messages",
+            ),
+            _ => return Ok(()),
+        };
+        *count += 1;
+        if *count > bound {
+            return Err(format!(
+                "Paykit's local state in the backup holds more {what} than the SDK keeps"
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// The name of Paykit's layer in app backups (Switch spec 12.4).
 pub const BACKUP_NAME: &str = "paykit";
 
@@ -308,6 +360,14 @@ pub const BACKUP_NAME: &str = "paykit";
 /// and those owed `bl/`, the consent list `ac/`, each entry marked to be confirmed again): a
 /// backup carries the app's signing keys, so whoever can write one can sign anything the
 /// app can, and a check of what the app signed guards against corruption only.
+///
+/// The families whose size the runtime bounds at every write are counted, and a layer
+/// past a bound is refused: the notices of lost messages owed (`bl/`, at most
+/// [`crate::marks::MAX_LOST_OWED`]) and each family of marks (`pd/`, `ud/`, `kw/`, `bd/`, at
+/// most [`crate::marks::MAX_DROPPED_MARKS`] each). No run leaves more, and the runtime
+/// checks the bound only as it adds one, so a restored layer over it would stay over it. A
+/// kept ledger version (`lv/`) longer than a shared record value is refused too: no write or
+/// read the executor keeps is longer (`executor::check_kept_ledger`).
 pub(crate) fn restore_paykit_layer(
     layer: Option<&ProtocolLayer>,
     own: [u8; 32],
@@ -328,6 +388,7 @@ pub(crate) fn restore_paykit_layer(
     let mut acknowledged = Vec::new();
     let mut writes = Vec::with_capacity(state.len());
     let mut cursor_time_ms = 0;
+    let mut bounded = BoundedFamilies::default();
     for (key, value) in state {
         // The schema is closed: a key no builder of the SDK writes is refused, and every
         // value is read as its family's, bound to what its key names (`state::StateKey`).
@@ -337,6 +398,7 @@ pub(crate) fn restore_paykit_layer(
             );
         };
         let unread = || String::from("Paykit's local state in the backup doesn't read");
+        bounded.count(&family)?;
         let attempt = match family {
             // A hold, or a user's confirmation of one, belongs to a restore before: this one
             // sets its own (`hold.rs`).
@@ -352,6 +414,7 @@ pub(crate) fn restore_paykit_layer(
             // which asks on its own cadence (`marks.rs`).
             StateKey::RestoreHold
             | StateKey::MissedHold
+            | StateKey::MissedEndUnknown
             | StateKey::HoldConfirmed(_)
             | StateKey::RecordsUnlisted
             | StateKey::MissedUnlisted
@@ -501,7 +564,8 @@ pub(crate) fn restore_paykit_layer(
             }
             StateKey::KeptLedger(_) => {
                 // The same check a runtime read makes: bound to its key's Allowance record,
-                // at a version a write gives, its content a ledger (`state::Stored`).
+                // at a version a write gives, its content a ledger no longer than a shared
+                // record value (`state::Stored`).
                 state::restored::<crate::executor::KeptLedger>(&key, &value, &binder)
                     .map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
@@ -552,7 +616,7 @@ pub(crate) fn restore_paykit_layer(
             // `msg_id`s, and no sent messages: the pass after the read settles the notice from
             // the restored outbox's answer on its request (`Paykit::settle_lost_owed`). Its
             // times aren't bounded as a mark's are: it asks nothing, and its latest time is
-            // already in the raise owed, which is.
+            // already in the raise owed, which is. Their number is (`BoundedFamilies`).
             StateKey::LostOwed { .. } => {
                 state::restored::<crate::marks::LostOwed>(&key, &value, &binder)
                     .map_err(|_| unread())?;
@@ -753,7 +817,7 @@ impl Protocol for PaykitProtocol {
     /// The label narrowing of Paykit spec 3.4: a payer's acceptance, rejection,
     /// cancellation and proof about a labelled request go only to apps holding `paykit_request` or
     /// that label, and about an unlabelled request only to apps holding `paykit_request`; a payee's
-    /// cancellation, without a label, to apps holding `paykit_pay` or `paykit_request`.
+    /// cancellation, without a label, only to apps holding `paykit_pay`.
     fn sends_to(&self, message: &Message, recipient: &AppRecord) -> bool {
         self.narrows(message, recipient, None)
     }
@@ -866,9 +930,14 @@ impl Protocol for PaykitProtocol {
     /// (Paykit spec 7.2; `hold.rs`): a payee's cancellation may be among
     /// the entries the service deleted. Every request the app holds is held, and one first
     /// seen later only when created before the item's last acceptance time plus the clock
-    /// tolerance, the time the item carries (`MissedEntries::accepted_until_ms`). The
-    /// confirmations of an earlier hold go in the same commit, so none releases the new
-    /// one. The copy of the shared records counts as not listed from the item on (`ml`,
+    /// tolerance, the time the item carries (`MissedEntries::accepted_until_ms`). The client
+    /// hands `u64::MAX` there when no end is known: for a gap the cursor the service holds
+    /// shows ahead (Switch spec 8.3 "Ahead"), and for a call it kept owed without one. That
+    /// is no time: the item sets the hold's end as not known (`mu`), which holds every open
+    /// request, and leaves the bound an earlier item set in place, since this step can't
+    /// read it; the receive bounds the hold once its read completes, by the service time it
+    /// verified then (`Paykit::bound_missed_hold`). The confirmations of an earlier hold go
+    /// in the same commit, so none releases the new one. The copy of the shared records counts as not listed from the item on (`ml`,
     /// Paykit spec 8.1, "Records not listed yet"), until Paykit's own listing at the end of
     /// the receive (`Paykit::list_records`): the client lists them right after the item,
     /// inside its read, but Paykit judges the copy listed only from a listing of its own,
@@ -878,6 +947,14 @@ impl Protocol for PaykitProtocol {
     /// restore (Paykit spec 8.3; `mc`, which `Paykit::confirm_consents_again` turns into each
     /// entry's mark after the receive): an end may be among the deleted entries.
     fn missed(&self, missed: &MissedEntries) -> Result<Vec<LocalWrite>, StoreFailure> {
+        let hold = if missed.accepted_until_ms == u64::MAX {
+            local_write(key::MISSED_END_UNKNOWN, &true)?
+        } else {
+            local_write(
+                key::MISSED_HOLD,
+                &crate::hold::MissedHold::bounded_by(missed.accepted_until_ms),
+            )?
+        };
         Ok(vec![
             local_write(
                 &key::missed_item(missed.accepted_from_ms),
@@ -886,10 +963,7 @@ impl Protocol for PaykitProtocol {
                     asked: Vec::new(),
                 },
             )?,
-            local_write(
-                key::MISSED_HOLD,
-                &crate::hold::MissedHold::of_item(missed.accepted_until_ms),
-            )?,
+            hold,
             local_write(key::MISSED_UNLISTED, &true)?,
             // What a blocked counterparty's inbox accepted among the missed entries is asked
             // for once it is unblocked: every counterparty the deny list holds at the next
@@ -1218,6 +1292,55 @@ mod receive_tests {
         };
         assert_eq!(widening(&missed)["d"]["from_ms"], 10);
         assert_eq!(widening(&missed)["d"]["until_ms"], 20);
+    }
+
+    /// The keys `missed()` puts, with their values as JSON.
+    fn missed_puts(missed: &MissedEntries) -> Vec<(String, serde_json::Value)> {
+        PaykitProtocol::new()
+            .missed(missed)
+            .unwrap()
+            .into_iter()
+            .filter_map(|write| match write {
+                LocalWrite::Put { key, value } => Some((
+                    String::from_utf8(key).unwrap(),
+                    serde_json::from_slice(&value).unwrap(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_missed_with_no_end_sets_the_holds_end_not_known() {
+        // `u64::MAX` is the client's "no end known": the hold's end is set as not known,
+        // and no bound is written over an earlier item's.
+        let missed = MissedEntries {
+            seq: 1,
+            entries: 0,
+            accepted_from_ms: 10,
+            accepted_until_ms: u64::MAX,
+        };
+        let puts = missed_puts(&missed);
+        let value = |key: &str| {
+            puts.iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v["d"].clone())
+        };
+        assert_eq!(value(key::MISSED_END_UNKNOWN), Some(json!(true)));
+        assert_eq!(value(key::MISSED_HOLD), None);
+        // An item with an end is bounded by it, and sets no unknown end.
+        let missed = MissedEntries {
+            accepted_until_ms: 20,
+            ..missed
+        };
+        let puts = missed_puts(&missed);
+        let value = |key: &str| {
+            puts.iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v["d"].clone())
+        };
+        assert_eq!(value(key::MISSED_HOLD), Some(json!({ "bound_ms": 20 })));
+        assert_eq!(value(key::MISSED_END_UNKNOWN), None);
     }
 
     fn protocol_of(own: &Party) -> PaykitProtocol {

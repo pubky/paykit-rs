@@ -47,7 +47,7 @@ async fn request_from_app(scopes: &[&str], permissions: &[Permission]) -> (bool,
 #[tokio::test]
 async fn test_protocols_chat_only_payment_request_dropped() {
     // A chat-only certificate is valid at Paykit's verifiers, but its payment_request is
-    // dropped at check 8: it holds no `request` (Paykit spec 3.3).
+    // dropped at check 8: it holds no `paykit_request` (Paykit spec 3.3).
     let (dropped, recorded) = request_from_app(&["chat"], &[Permission::ListsRead]).await;
     assert!(dropped, "dropped at check 8");
     assert!(!recorded);

@@ -206,7 +206,7 @@ async fn test_executor_refuses_a_payment_over_the_lifetime_limit() {
 }
 
 #[tokio::test]
-async fn test_executor_grant_refused_without_allowance_execute() {
+async fn test_executor_grant_refused_without_paykit_allowance_execute() {
     let w = World::new();
     let mut shop = allowance_shop(&w).await;
     let mut wallet = w
@@ -2809,4 +2809,54 @@ async fn test_executor_attempt_rebuilt_after_a_restore_keeps_its_allowance() {
         proofs += 1;
     }
     assert_eq!(proofs, 1);
+}
+
+/// `backup` with its kept ledger version's content padded, by a member the SDK doesn't
+/// know, to `len` bytes.
+fn with_kept_ledger_of_len(backup: &Value, len: usize) -> Value {
+    let mut state = crate::restore::layer_of(backup);
+    let (_, kept) = state
+        .iter_mut()
+        .find(|(key, _)| key.starts_with(b"lv/"))
+        .unwrap();
+    let bytes = pubky_switch_core::enc::unb64(kept["d"]["value"].as_str().unwrap()).unwrap();
+    let mut ledger: Value = serde_json::from_slice(&bytes).unwrap();
+    ledger["pad"] = json!("");
+    let unpadded = serde_json::to_vec(&ledger).unwrap().len();
+    ledger["pad"] = json!("a".repeat(len - unpadded));
+    let padded = serde_json::to_vec(&ledger).unwrap();
+    assert_eq!(padded.len(), len);
+    Ledger::from_json(&padded).unwrap();
+    kept["d"]["value"] = json!(pubky_switch_core::enc::b64(&padded));
+    crate::restore::with_layer(backup, state)
+}
+
+#[tokio::test]
+async fn test_executor_kept_ledger_past_the_record_size_refused_at_restore() {
+    // A kept ledger version is a shared record value, at most 256 KiB less its 4-byte length
+    // once sealed (Switch wire 6.2): no run keeps a longer one, so a backup holding one is
+    // refused, nothing written; one at the limit is restored.
+    const MAX_LEDGER_VALUE: usize = 256 * 1024 - 4;
+    let w = World::new();
+    let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
+    let first = request(&w, &mut shop, &mut wallet, "0.5").await;
+    wallet.pay_under_allowance(&first, &record).await.unwrap();
+    let bytes = wallet.backup().await.unwrap().to_bytes().unwrap();
+    let good: Value = serde_json::from_slice(&bytes).unwrap();
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let over = with_kept_ledger_of_len(&good, MAX_LEDGER_VALUE + 1);
+    crate::restore::refused_writing_nothing(&w, over, app_id, "lv/").await;
+    let at = with_kept_ledger_of_len(&good, MAX_LEDGER_VALUE);
+    let backup = paykit_sdk::PaykitBackup::from_bytes(&serde_json::to_vec(&at).unwrap()).unwrap();
+    let restored = Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(restored.app().protocol_scan(b"lv/").await.unwrap().len(), 1);
 }
