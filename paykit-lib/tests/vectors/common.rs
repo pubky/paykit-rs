@@ -476,18 +476,60 @@ pub fn quoted(error: &str) -> String {
 
 /// Where a case that paykit-lib generates lies in its vector file (README "How the files were
 /// generated"), as a JSON pointer.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum Place<'a> {
     /// A member paykit-lib writes whole.
     Member(&'a str),
     /// A case of an array, found by its `name`.
     Case(&'a str),
+    /// A value the file already holds, which paykit-lib computes from the file's authored
+    /// inputs beside it: a hash, a signature, a key or a value built from certificates.
+    At(String),
 }
 
 /// The environment variable that makes the vector tests write the cases paykit-lib generates
 /// into `specs/v0.2/vectors/` before comparing them, after an intended change. Test-only: the
 /// generator runs only in these tests.
 pub const WRITE_VECTORS: &str = "PAYKIT_WRITE_VECTORS";
+
+/// Write `cases` into `file`, the vector file `name`.
+fn apply(name: &str, file: &mut Value, cases: &[(Place<'_>, Value)]) {
+    for (place, value) in cases {
+        match place {
+            Place::Member(pointer) => {
+                let (parent, member) = pointer.rsplit_once('/').expect("a member pointer");
+                file.pointer_mut(parent)
+                    .and_then(Value::as_object_mut)
+                    .unwrap_or_else(|| panic!("{name}: no object at {parent}"))
+                    .insert(member.to_owned(), value.clone());
+            }
+            Place::At(pointer) => {
+                *file
+                    .pointer_mut(pointer)
+                    .unwrap_or_else(|| panic!("{name}: nothing at {pointer}")) = value.clone();
+            }
+            Place::Case(pointer) => {
+                let list = file
+                    .pointer_mut(pointer)
+                    .and_then(Value::as_array_mut)
+                    .unwrap_or_else(|| panic!("{name}: no array at {pointer}"));
+                match list.iter_mut().find(|c| c["name"] == value["name"]) {
+                    Some(held) => *held = value.clone(),
+                    None => list.push(value.clone()),
+                }
+            }
+        }
+    }
+}
+
+/// The vector file `name` with `cases` written into it, in memory: what [`generated`] writes
+/// in update mode. A generator that builds on another generated case reads it from here, so
+/// that it never needs an earlier run to have written it.
+pub fn with_generated(name: &str, cases: &[(Place<'_>, Value)]) -> Value {
+    let mut file = paykit(name);
+    apply(name, &mut file, cases);
+    file
+}
 
 /// Compare the cases paykit-lib generates for the file `name` with the file, value for value;
 /// with [`WRITE_VECTORS`] set, write them into the file first, creating it if the set doesn't
@@ -500,32 +542,13 @@ pub fn generated(name: &str, cases: &[(Place<'_>, Value)]) {
             .join("../specs/v0.2/vectors")
             .join(name);
         // A file the set doesn't hold yet starts as an empty object.
-        let mut file = if path.exists() {
-            paykit(name)
+        let file = if path.exists() {
+            with_generated(name, cases)
         } else {
-            Value::Object(Default::default())
+            let mut file = Value::Object(Default::default());
+            apply(name, &mut file, cases);
+            file
         };
-        for (place, value) in cases {
-            match place {
-                Place::Member(pointer) => {
-                    let (parent, member) = pointer.rsplit_once('/').expect("a member pointer");
-                    file.pointer_mut(parent)
-                        .and_then(Value::as_object_mut)
-                        .unwrap_or_else(|| panic!("{name}: no object at {parent}"))
-                        .insert(member.to_owned(), value.clone());
-                }
-                Place::Case(pointer) => {
-                    let list = file
-                        .pointer_mut(pointer)
-                        .and_then(Value::as_array_mut)
-                        .unwrap_or_else(|| panic!("{name}: no array at {pointer}"));
-                    match list.iter_mut().find(|c| c["name"] == value["name"]) {
-                        Some(held) => *held = value.clone(),
-                        None => list.push(value.clone()),
-                    }
-                }
-            }
-        }
         let mut text = serde_json::to_string_pretty(&file).unwrap();
         text.push('\n');
         // The other tests read the file in parallel: write it beside and rename it into
@@ -538,6 +561,7 @@ pub fn generated(name: &str, cases: &[(Place<'_>, Value)]) {
     for (place, value) in cases {
         let held = match place {
             Place::Member(pointer) => file.pointer(pointer),
+            Place::At(pointer) => file.pointer(pointer),
             Place::Case(pointer) => file
                 .pointer(pointer)
                 .and_then(Value::as_array)
@@ -549,4 +573,59 @@ pub fn generated(name: &str, cases: &[(Place<'_>, Value)]) {
             "{name}: {place:?} isn't what paykit-lib generates; set {WRITE_VECTORS} after an intended change"
         );
     }
+}
+
+/// `text`, a record value or a document body, with every app certificate it carries (a
+/// `body` and `sig` pair whose body is a `pubky-switch.app_cert`) replaced by the certificate
+/// of the same app in this set ([`cert_doc`]). Only the scopes and permissions of a carried
+/// certificate may differ from this set's: every other byte of `text` stays.
+pub fn recertified(keys: &Keys, text: &str) -> String {
+    fn carried(v: &Value, out: &mut Vec<SignedDoc>) {
+        match v {
+            Value::Object(map) => {
+                if let (Some(Value::String(body)), Some(Value::String(sig))) =
+                    (map.get("body"), map.get("sig"))
+                {
+                    let doc = SignedDoc {
+                        body: body.clone(),
+                        sig: sig.clone(),
+                    };
+                    let is_cert = doc
+                        .body_bytes()
+                        .ok()
+                        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                        .is_some_and(|b| b["kind"] == "pubky-switch.app_cert");
+                    if is_cert {
+                        out.push(doc);
+                    }
+                }
+                map.values().for_each(|x| carried(x, out));
+            }
+            Value::Array(list) => list.iter().for_each(|x| carried(x, out)),
+            _ => {}
+        }
+    }
+    let without_scopes = |doc: &SignedDoc| {
+        let mut body: Value = serde_json::from_slice(&doc.body_bytes().unwrap()).unwrap();
+        let object = body.as_object_mut().unwrap();
+        object.remove("scopes");
+        object.remove("permissions");
+        body
+    };
+    let mut held = Vec::new();
+    carried(&serde_json::from_str(text).unwrap(), &mut held);
+    let mut out = text.to_owned();
+    for old in held {
+        let body: Value = serde_json::from_slice(&old.body_bytes().unwrap()).unwrap();
+        let new = cert_doc(&keys.app_by_id(st(&body, "app_id")).name);
+        assert_eq!(
+            without_scopes(&old),
+            without_scopes(&new),
+            "a certificate of the set"
+        );
+        out = out
+            .replace(&old.body, &new.body)
+            .replace(&old.sig, &new.sig);
+    }
+    out
 }

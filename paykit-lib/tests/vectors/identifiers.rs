@@ -88,13 +88,72 @@ fn test_vectors_identifiers() {
 /// The cases paykit-lib generates in `identifiers.json`, compared with the file, and written
 /// into it with `PAYKIT_WRITE_VECTORS`.
 fn generate(keys: &Keys) {
-    generated(
-        "identifiers.json",
-        &[
-            (Place::Member("/policies"), policies()),
-            (Place::Member("/record_keys"), record_keys(keys)),
-        ],
+    let mut cases = vec![
+        (Place::Member("/policies"), policies()),
+        (Place::Member("/record_keys"), record_keys(keys)),
+    ];
+    cases.extend(derived(keys));
+    generated("identifiers.json", &cases);
+}
+
+/// The request hashes, the obligation IDs with their blinded inputs, and the terms hash, from
+/// the authored members beside them: the messages they name, the identity, the payee, the
+/// period start and the attempt ID.
+fn derived(keys: &Keys) -> Vec<(Place<'static>, Value)> {
+    let v = paykit("identifiers.json");
+    let mut out = Vec::new();
+    for (i, case) in arr(&v, "request_hash").iter().enumerate() {
+        out.push((
+            Place::At(format!("/request_hash/{i}/hash")),
+            json!(b64(&request_hash(&message_json(st(case, "message"))))),
+        ));
+    }
+    for (i, case) in arr(&v, "obligations").iter().enumerate() {
+        let at = |member: &str| Place::At(format!("/obligations/{i}/{member}"));
+        let nk = keys.identity(&pubky(st(case, "identity"))).naming_key();
+        let (material, obligation) = match case.get("attempt_id") {
+            Some(attempt) => {
+                let attempt = AttemptId::parse(attempt.as_str().unwrap()).unwrap();
+                (
+                    payment_obligation_material(&attempt),
+                    payment_obligation(&attempt),
+                )
+            }
+            None => {
+                let message = match st(case, "name") {
+                    "one-time request" => "payment_request",
+                    "recurring request, February period" => "payment_request_recurring",
+                    other => panic!("no request for the obligation {other}"),
+                };
+                let rh = request_hash(&message_json(message));
+                let payee = pubky(st(case, "payee"));
+                let start = case["period_start_secs"].as_u64().unwrap();
+                out.push((at("request_hash"), json!(b64(&rh))));
+                out.push((at("blinded_payee"), json!(b64(&nk.blind(&payee)))));
+                out.push((at("blinded_request_hash"), json!(b64(&nk.blind(&rh)))));
+                (
+                    request_obligation_material(&nk, &payee, &rh, start),
+                    request_obligation(&nk, &payee, &rh, start),
+                )
+            }
+        };
+        out.push((at("key_material_hex"), json!(hex(&material))));
+        out.push((at("obligation"), json!(b64(&obligation))));
+    }
+    let t = &v["terms_hash"];
+    let (proposal, acceptance) = (
+        message_json(st(t, "proposal")),
+        message_json(st(t, "acceptance")),
     );
+    out.push((
+        Place::At("/terms_hash/key_material_hex".into()),
+        json!(hex(&terms_hash_material(&proposal, &acceptance))),
+    ));
+    out.push((
+        Place::At("/terms_hash/terms_hash".into()),
+        json!(b64(&terms_hash(&proposal, &acceptance))),
+    ));
+    out
 }
 
 const POLICIES_DESCRIPTION: &str = "Wire 1.5, Switch wire 1.5: the policies of Paykit's \

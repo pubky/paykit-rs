@@ -14,12 +14,13 @@ use pubky_switch_core::labels;
 use pubky_switch_core::ops::RecordVersion;
 use pubky_switch_core::records::{AppCert, AppRecord};
 use pubky_switch_core::scopes::{permission_names, Permission};
+use pubky_switch_core::sig::SignedDoc;
 use serde_json::{json, Value};
 
 use crate::common::{
     arr, b64n, base_cert, body_text, cap_app_record, cert, cert_doc, executor_cert, generated,
-    paykit, phone_cert, pubky, quoted, reissued, shop_app_record, signed, signed_json, st, Keys,
-    Place, ALICE, ALLOWANCE_ID, BOB,
+    paykit, phone_cert, pubky, quoted, recertified, reissued, shop_app_record, signed, signed_json,
+    st, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
 };
 
 #[test]
@@ -606,13 +607,26 @@ fn generate(keys: &Keys) {
         "description": MULTI_PROTOCOL_DESCRIPTION,
         "refused": MULTI_PROTOCOL_REFUSED.iter().map(|c| cert_case(keys, *c, false)).collect::<Vec<_>>(),
     });
-    // Paykit's own executor certificate, in the grant and its history entry: the grant's
-    // signature doesn't cover the certificate, so it stays (Paykit wire 3.3).
-    let held = ExecutorGrant::from_json(&paykit("documents.json")["executor_grant"]).unwrap();
-    let grant = ExecutorGrant {
-        cert: executor_cert(keys).signed().clone(),
-        ..held
-    }
+    // The grant, signed by the executor over its authored members (Paykit wire 3.3), with
+    // Paykit's own executor certificate, which the signature doesn't cover.
+    let file = paykit("documents.json");
+    let entry = &file["executor_grant_history_entry"];
+    let held = ExecutorGrant::from_json(&file["executor_grant"]).unwrap();
+    let terms = b64n::<32>(st(&paykit("identifiers.json")["terms_hash"], "terms_hash"));
+    let built_on = RecordVersion {
+        generation: entry["generation"].as_u64().unwrap(),
+        version: entry["version"].as_u64().unwrap(),
+    };
+    let grant = ExecutorGrant::sign(
+        &keys.app("executor").keys,
+        executor_cert(keys).signed().clone(),
+        &pubky(ALICE),
+        &pubky(BOB),
+        &AllowanceId::parse(ALLOWANCE_ID).unwrap(),
+        terms,
+        held.confirmed_generation,
+        built_on,
+    )
     .to_json();
     let mut cases = vec![
         (Place::Member("/description"), json!(DESCRIPTION)),
@@ -640,7 +654,163 @@ fn generate(keys: &Keys) {
             app_record_case(keys, name, &member),
         ));
     }
+    for (pointer, case) in [
+        (
+            "/certificate_rejections/cases",
+            certificate_rejections(keys),
+        ),
+        (
+            "/labelled_scope_rejections/cases",
+            labelled_scope_rejections(keys),
+        ),
+    ] {
+        cases.extend(case.into_iter().map(|c| (Place::Case(pointer), c)));
+    }
+    cases.extend(app_record_signatures(keys, &file));
     generated("documents.json", &cases);
+}
+
+/// The cases of `certificate_rejections`: their names, scopes and permissions.
+const CERTIFICATE_REJECTIONS: [CertCase; 2] = [
+    (
+        "extra: lists.manage kept after manage_contacts is gone",
+        "wallet",
+        &["pay", "contacts"],
+        &[
+            Permission::ClaimsRead,
+            Permission::ClaimsWrite,
+            LISTS_READ,
+            Permission::ListsManage,
+            ADD,
+        ],
+    ),
+    (
+        "missing: conversation.add, which pay needs",
+        "wallet",
+        &["pay", "contacts", "manage_contacts"],
+        &[
+            Permission::ClaimsRead,
+            Permission::ClaimsWrite,
+            LISTS_READ,
+            Permission::ListsManage,
+        ],
+    ),
+];
+
+/// The cases of `labelled_scope_rejections`: their names, scopes and the reason every
+/// verifier gives, in the prototype's wording.
+const LABELLED_SCOPE_REJECTIONS: [(&str, &[&str], &str); 5] = [
+    (
+        "a label of 33 characters",
+        &["request:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+        "invalid: \"request:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" isn't a scope name or name:<sub>",
+    ),
+    (
+        "a label that isn't valid (upper case)",
+        &["request:Shop1"],
+        "invalid: \"request:Shop1\" isn't a scope name or name:<sub>",
+    ),
+    (
+        "an empty label",
+        &["request:"],
+        "invalid: \"request:\" isn't a scope name or name:<sub>",
+    ),
+    (
+        "nine labelled scopes",
+        &[
+            "request:shop1",
+            "request:shop2",
+            "request:shop3",
+            "request:shop4",
+            "request:shop5",
+            "request:shop6",
+            "request:shop7",
+            "request:shop8",
+            "request:shop9",
+        ],
+        "invalid: more than 8 labelled scopes",
+    ),
+    (
+        "plain request beside a labelled scope",
+        &["request", "request:shop1"],
+        "invalid: request and request:shop1 together: request covers every request:<sub>",
+    ),
+];
+
+/// A certificate of `app` with `scopes` and `permissions`, signed by its identity key without
+/// the switch's checks, which some of these certificates fail.
+fn signed_with(keys: &Keys, app: &str, scopes: &[&str], permissions: &[Permission]) -> SignedDoc {
+    let app = keys.app(app);
+    let mut body = base_cert(keys, &app.name).body().clone();
+    body.scopes = scopes.iter().map(|s| (*s).to_owned()).collect();
+    body.permissions = permission_names(permissions);
+    keys.identity(&app.identity)
+        .sign_doc(labels::sig::APP_CERT, &[], body.to_json().unwrap())
+}
+
+/// `certificate_rejections` (Paykit wire 3.1): the wallet's certificate with scopes and
+/// permissions that aren't the list Paykit derives from its scopes.
+fn certificate_rejections(keys: &Keys) -> Vec<Value> {
+    CERTIFICATE_REJECTIONS
+        .iter()
+        .map(|&(name, app, scopes, permissions)| {
+            let doc = signed_with(keys, app, scopes, permissions);
+            let owned: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
+            let identity = keys.app(app).identity;
+            let error = verify_certificate(&doc, &identity).unwrap_err().to_string();
+            json!({
+                "body": body_text(&doc),
+                "name": name,
+                "paykit_permissions": permission_names(&permissions_for(&owned)),
+                "permissions": permission_names(permissions),
+                "reason": quoted(&error),
+                "scopes": scopes,
+                "signed": signed_json(&doc),
+                "switch_accepts": AppCert::verify(&doc, &identity).is_ok(),
+            })
+        })
+        .collect()
+}
+
+/// `labelled_scope_rejections` (Paykit wire 3.1): the hosted app's certificate with its
+/// scopes changed and the permissions Paykit derives from them.
+fn labelled_scope_rejections(keys: &Keys) -> Vec<Value> {
+    LABELLED_SCOPE_REJECTIONS
+        .iter()
+        .map(|&(name, scopes, reason)| {
+            let owned: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
+            let doc = signed_with(keys, "hosted", scopes, &permissions_for(&owned));
+            json!({
+                "body": body_text(&doc),
+                "name": name,
+                "reason": reason,
+                "scopes": scopes,
+                "signed": signed_json(&doc),
+                "switch_accepts": AppCert::verify(&doc, &pubky(BOB)).is_ok(),
+            })
+        })
+        .collect()
+}
+
+/// Every `app_records` case's record: its body as the file holds it, the shop's app record
+/// with the case's `protocols` and `expires_at`, carrying the shop's certificate of this set,
+/// signed by the shop's signing key (Switch wire 3.2).
+fn app_record_signatures(keys: &Keys, file: &Value) -> Vec<(Place<'static>, Value)> {
+    let mut out = Vec::new();
+    for list in ["accepted", "refused"] {
+        for (i, case) in arr(&file["app_records"], list).iter().enumerate() {
+            let text = recertified(keys, st(case, "body"));
+            let doc = keys.app("shop").keys.sign_doc(
+                labels::sig::APP_RECORD,
+                &[],
+                text.as_bytes().to_vec(),
+            );
+            let at = format!("/app_records/{list}/{i}");
+            out.push((Place::At(format!("{at}/body")), json!(text)));
+            out.push((Place::At(format!("{at}/signed")), signed_json(&doc)));
+        }
+    }
+    out
 }
 
 /// `multi_protocol_certificates` (Paykit wire 3.1, Switch wire 3.1 "Several protocols"):

@@ -490,20 +490,93 @@ fn generate(keys: &Keys) {
             case("a resend_request from an app holding only chat", "resend_request_ids", true),
         ],
     });
-    generated(
-        "messages.json",
-        &[
-            (Place::Member("/description"), json!(DESCRIPTION)),
-            (Place::Member("/multi_protocol_senders"), member),
-            (
-                Place::Member("/cancellation_roles"),
-                cancellation_roles(keys),
-            ),
-            (Place::Member("/conversion_terms"), conversion_terms(keys)),
-            (Place::Member("/proof_members"), proof_members(keys)),
-            (Place::Member("/receipt_members"), receipt_members(keys)),
-        ],
-    );
+    let mut cases = vec![
+        (Place::Member("/description"), json!(DESCRIPTION)),
+        (Place::Member("/multi_protocol_senders"), member),
+        (
+            Place::Member("/cancellation_roles"),
+            cancellation_roles(keys),
+        ),
+        (Place::Member("/conversion_terms"), conversion_terms(keys)),
+        (Place::Member("/proof_members"), proof_members(keys)),
+        (Place::Member("/receipt_members"), receipt_members(keys)),
+    ];
+    cases.extend(signed_messages(keys));
+    generated("messages.json", &cases);
+}
+
+/// The executor notice's JSON with the record key of the Allowance record it names, under
+/// the `allowances` policy (Paykit wire 4.17, 5.1).
+fn executor_notice_json(keys: &Keys, json: &str) -> String {
+    let message = Message::parse(json.as_bytes(), OPAQUE_MEMBERS).unwrap();
+    let Body::ExecutorNotice(notice) = check_body(&message, json.as_bytes()).unwrap() else {
+        panic!("a notice")
+    };
+    let key = Collection::Allowances
+        .record_key(
+            &keys.identity(&pubky(ALICE)).naming_key(),
+            &natural_key::allowance(&pubky(BOB), &AllowanceId::parse(ALLOWANCE_ID).unwrap()),
+            None,
+        )
+        .unwrap();
+    let held = format!("\"allowance_record\":\"{}\"", b64(&notice.allowance_record));
+    assert!(json.contains(&held));
+    json.replace(&held, &format!("\"allowance_record\":\"{}\"", b64(&key)))
+}
+
+/// What the sender app signs of each message of `messages` and `label_rejections`, from its
+/// authored JSON: the signature, and for `messages` the plaintext and its hash; the executor
+/// notice's record key; and the certificates `label_rejections` presents its acceptances at.
+fn signed_messages(keys: &Keys) -> Vec<(Place<'static>, Value)> {
+    let file = paykit("messages.json");
+    let mut out = Vec::new();
+    for (i, m) in arr(&file, "messages").iter().enumerate() {
+        let mut json = st(m, "json").to_owned();
+        if st(m, "name") == "executor_notice" {
+            json = executor_notice_json(keys, &json);
+            out.push((Place::At(format!("/messages/{i}/json")), json!(json)));
+        }
+        let sender = keys.app_by_id(st(m, "sender_app"));
+        let plaintext =
+            MessagePlaintext::sign_json(&sender.keys, json.into_bytes(), OPAQUE_MEMBERS).unwrap();
+        for (member, value) in [
+            ("hash", b64(&plaintext.hash())),
+            ("plaintext_hex", hex(&plaintext.encode())),
+            ("signature", b64(&plaintext.signature())),
+        ] {
+            out.push((Place::At(format!("/messages/{i}/{member}")), json!(value)));
+        }
+    }
+    for (i, case) in arr(&file["label_rejections"], "cases").iter().enumerate() {
+        let sender = keys.app_by_id(st(case, "sender_app"));
+        let plaintext = MessagePlaintext::sign_json(
+            &sender.keys,
+            st(case, "json").as_bytes().to_vec(),
+            OPAQUE_MEMBERS,
+        )
+        .unwrap();
+        let at = format!("/label_rejections/cases/{i}");
+        out.push((
+            Place::At(format!("{at}/signature")),
+            json!(b64(&plaintext.signature())),
+        ));
+        if case.get("recipient_cert").is_some() {
+            let recipient = match st(case, "name") {
+                "an acceptance labelled shop1 at an app holding only request:shop2" => {
+                    with_scopes(keys, "hosted", &["request:shop2"])
+                }
+                "an acceptance without a label at an app holding only request:shop1" => {
+                    cert(keys.app("hosted"))
+                }
+                other => panic!("no recipient certificate for {other}"),
+            };
+            out.push((
+                Place::At(format!("{at}/recipient_cert")),
+                signed_json(recipient.signed()),
+            ));
+        }
+    }
+    out
 }
 
 const CANCELLATION_DESCRIPTION: &str = "Wire 4.1 check 8, 4.3, 4.8, spec 3.3: messages.json's \
