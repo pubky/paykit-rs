@@ -1,4 +1,4 @@
-//! A blocked payee's requests are paused at a payer app holding `contacts`, and paid only
+//! A blocked payee's requests are paused at a payer app holding `paykit_contacts`, and paid only
 //! once the user confirms what it was shown (Paykit spec 8.1, "Blocked counterparties").
 
 use paykit_sdk::rail::Behaviour;
@@ -12,16 +12,16 @@ use pubky_switch_core::http::ErrorCode;
 
 use crate::common::{btc, day_window, draft, endpoint, request_from, store, World, HOUR_MS};
 
-/// Alice's wallet holding `pay` and `manage_contacts`, with bob's request received, then
-/// bob blocked. Returns the wallet and the request.
+/// Alice's wallet holding `paykit_pay` and `paykit_manage_contacts`, with bob's request received,
+/// then bob blocked. Returns the wallet and the request.
 async fn blocked(w: &World) -> (Paykit, RequestRef) {
     let (mut wallet, _, request) = received(w, PaykitConfig::default()).await;
     wallet.block(&w.bob_id()).await.unwrap();
     (wallet, request)
 }
 
-/// Alice's wallet holding `pay` and `manage_contacts`, with `config`, and bob's request
-/// received. Returns the wallet, bob's shop and the request.
+/// Alice's wallet holding `paykit_pay` and `paykit_manage_contacts`, with `config`, and bob's
+/// request received. Returns the wallet, bob's shop and the request.
 async fn received(w: &World, config: PaykitConfig) -> (Paykit, Paykit, RequestRef) {
     let mut wallet = w
         .join_with(
@@ -350,7 +350,7 @@ async fn test_blocked_own_unblock_kept_unanswered_lets_the_users_payment_go() {
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
 
-/// A `resend_request` from bob's shop for `request`, kept by the wallet to answer, as a
+/// A `resend_request` from bob's shop for `paykit_request`, kept by the wallet to answer, as a
 /// receive that stopped before answering it leaves it.
 async fn kept_resend_request(w: &World, wallet: &mut Paykit, shop: &Paykit, request: &RequestRef) {
     let body = paykit_lib::bodies::ResendRequest {
@@ -482,8 +482,8 @@ async fn test_blocked_kept_resend_request_answered_only_once_the_deny_list_reads
         .is_empty());
 }
 
-/// Bob's shop holding `request` and `manage_contacts`, with a due mark of alice's replies
-/// dropped for the bounds, as the shop keeps one once it holds her request's record, and
+/// Bob's shop holding `paykit_request` and `paykit_manage_contacts`, with a due mark of alice's
+/// replies dropped for the bounds, as the shop keeps one once it holds her request's record, and
 /// alice's wallet to ask. Returns the shop.
 async fn shop_with_a_due_mark(w: &World) -> Paykit {
     let _wallet = w.wallet("wallet").await;
@@ -1960,8 +1960,8 @@ async fn test_blocked_list_request_while_the_deny_list_is_unknown_not_sent() {
     no_list_asked_while_held(Held::Unknown).await;
 }
 
-/// Bob's till, holding `request` and `manage_contacts`, on `store`, with its copy of the
-/// lists read.
+/// Bob's till, holding `paykit_request` and `paykit_manage_contacts`, on `store`, with its copy of
+/// the lists read.
 async fn contacts_till(
     w: &World,
     store: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
@@ -1992,7 +1992,7 @@ fn fail_bobs_list_read(w: &World) {
     });
 }
 
-/// Bob's till holds `contacts`, and its sends to alice are then `held`: a new request to
+/// Bob's till holds `paykit_contacts`, and its sends to alice are then `held`: a new request to
 /// her, `recurring` or one-time, is refused, nothing recorded, queued or reaching her (Paykit
 /// spec 8.1, "Blocked counterparties"). Once alice is unblocked, or the lists read, the same
 /// request goes.
@@ -2074,7 +2074,7 @@ async fn test_blocked_recurring_request_while_the_deny_list_is_unknown_refused_w
     request_held(Held::Unknown, true).await;
 }
 
-/// Bob's till holds `contacts` and a subscription alice accepted, and its sends to alice
+/// Bob's till holds `paykit_contacts` and a subscription alice accepted, and its sends to alice
 /// are then `held`: its period details are refused, nothing recorded, queued or reaching her
 /// (Paykit spec 8.1, "Blocked counterparties"). Once alice is unblocked, or the lists read,
 /// the same details go, and her wallet stores them.
@@ -2159,7 +2159,7 @@ async fn test_blocked_period_details_while_the_deny_list_is_unknown_refused_with
 
 #[tokio::test]
 async fn test_blocked_period_details_from_an_app_without_contacts_sent_while_the_lists_dont_read() {
-    // Bob's shop holds no `contacts`, so it reads no lists and holds nothing: its period
+    // Bob's shop holds no `paykit_contacts`, so it reads no lists and holds nothing: its period
     // details go while a read of the lists would fail.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -2196,7 +2196,7 @@ async fn test_blocked_period_details_from_an_app_without_contacts_sent_while_the
 
 #[tokio::test]
 async fn test_blocked_request_from_an_app_without_contacts_sent_while_the_lists_dont_read() {
-    // Bob's shop holds no `contacts`, so it reads no lists and holds nothing: a read of them
+    // Bob's shop holds no `paykit_contacts`, so it reads no lists and holds nothing: a read of them
     // that would fail decides nothing, and its request goes.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -2214,7 +2214,7 @@ async fn test_blocked_request_from_an_app_without_contacts_sent_while_the_lists_
 
 #[tokio::test]
 async fn test_blocked_payees_cancellation_to_a_blocked_payer_delivered() {
-    // A payee's cancellation stops a payment: bob's till, holding `contacts`, cancels its
+    // A payee's cancellation stops a payment: bob's till, holding `paykit_contacts`, cancels its
     // request to alice after blocking her, and the cancellation reaches her wallet.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -2233,7 +2233,7 @@ async fn test_blocked_payees_cancellation_to_a_blocked_payer_delivered() {
 
 #[tokio::test]
 async fn test_blocked_receipt_to_a_blocked_payer_delivered() {
-    // A receipt settles a payment already made: bob's till, holding `contacts`, confirms
+    // A receipt settles a payment already made: bob's till, holding `paykit_contacts`, confirms
     // alice's payment after blocking her, and the receipt reaches her wallet's record.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;

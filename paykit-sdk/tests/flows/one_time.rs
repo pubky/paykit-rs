@@ -1988,10 +1988,10 @@ async fn test_one_time_no_response_over_a_record_sealed_at_a_key_not_held() {
 #[tokio::test]
 async fn test_one_time_payers_cancellation_before_its_record_placed_at_an_app_paying_and_requesting(
 ) {
-    // Bob's dual app holds `pay` and `request`. Bob's till sends alice a request and writes
-    // its record; alice cancels it. The dual app reads the record and alice's cancellation
-    // in one read: the payee's record shows alice's cancellation (Paykit spec 8.1, "Replies
-    // before their record"), the till never reading it.
+    // Bob's dual app holds `paykit_pay` and `paykit_request`. Bob's till sends alice a request and
+    // writes its record; alice cancels it. The dual app reads the record and alice's cancellation
+    // in one read: the payee's record shows alice's cancellation (Paykit spec 8.1, "Replies before
+    // their record"), the till never reading it.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut dual = w

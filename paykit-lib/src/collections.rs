@@ -62,18 +62,21 @@ impl Collection {
     pub fn fixed_policy(self) -> Policy {
         match self {
             Self::PayerActivity | Self::PaymentLists | Self::BlockFloor => {
-                Policy::new("pay", &["pay"])
+                Policy::new("paykit_pay", &["paykit_pay"])
             }
-            Self::PayeeActivity => Policy::new("request", &["request"]),
-            Self::Allowances => Policy::new("allowance", &["allowance"]),
-            Self::AllowanceLedgers => Policy::new("allowance", &["allowance_execute"]),
+            Self::PayeeActivity => Policy::new("paykit_request", &["paykit_request"]),
+            Self::Allowances => Policy::new("paykit_allowance", &["paykit_allowance"]),
+            Self::AllowanceLedgers => {
+                Policy::new("paykit_allowance", &["paykit_allowance_execute"])
+            }
         }
     }
 
     /// The policy of a record about a request sent under `label` (Paykit spec 6): a
     /// `payee_activity` record of a labelled request has its label's policy, `read_scope =
-    /// request:<label>` and `write_scopes = ["request:<label>"]`; every other record keeps its
-    /// collection's fixed policy, a `payer_activity` record whatever the request's label.
+    /// paykit_request:<label>` and `write_scopes =
+    /// ["paykit_request:<label>"]`; every other record keeps its collection's fixed policy, a
+    /// `payer_activity` record whatever the request's label.
     pub fn policy(self, label: Option<&Label>) -> Policy {
         match (self, label) {
             (Self::PayeeActivity, Some(label)) => {
@@ -126,15 +129,15 @@ mod tests {
     fn test_collections_fixed_policies() {
         assert_eq!(
             Collection::PayerActivity.fixed_policy(),
-            Policy::new("pay", &["pay"])
+            Policy::new("paykit_pay", &["paykit_pay"])
         );
         assert_eq!(
             Collection::AllowanceLedgers.fixed_policy(),
-            Policy::new("allowance", &["allowance_execute"])
+            Policy::new("paykit_allowance", &["paykit_allowance_execute"])
         );
         assert_eq!(
             Collection::BlockFloor.fixed_policy(),
-            Policy::new("pay", &["pay"])
+            Policy::new("paykit_pay", &["paykit_pay"])
         );
         for c in Collection::ALL {
             assert_eq!(Collection::from_name(c.name()), Some(c));
@@ -146,7 +149,10 @@ mod tests {
     fn test_collections_labelled_policy_only_for_payee_activity() {
         let label = Label::parse("shop1").unwrap();
         let labelled = Collection::PayeeActivity.policy(Some(&label));
-        assert_eq!(labelled, Policy::new("request:shop1", &["request:shop1"]));
+        assert_eq!(
+            labelled,
+            Policy::new("paykit_request:shop1", &["paykit_request:shop1"])
+        );
         assert_eq!(
             Collection::PayeeActivity.policy_label(&labelled),
             Some(Some(label.clone()))
@@ -161,10 +167,10 @@ mod tests {
     #[test]
     fn test_collections_refuse_other_policies() {
         for policy in [
-            Policy::new("request:shop1", &["request"]),
-            Policy::new("request:Shop1", &["request:Shop1"]),
-            Policy::new("pay", &["pay", "request"]),
-            Policy::new("request", &["pay"]),
+            Policy::new("paykit_request:shop1", &["paykit_request"]),
+            Policy::new("paykit_request:Shop1", &["paykit_request:Shop1"]),
+            Policy::new("paykit_pay", &["paykit_pay", "paykit_request"]),
+            Policy::new("paykit_request", &["paykit_pay"]),
         ] {
             assert_eq!(
                 Collection::PayeeActivity.policy_label(&policy),

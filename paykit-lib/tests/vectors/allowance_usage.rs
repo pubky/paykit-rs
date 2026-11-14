@@ -222,20 +222,66 @@ fn generate() {
             json!({ "name": name, "reason": quoted(&error.to_string()), "terms": terms })
         })
         .collect();
-    generated(
-        "allowance_usage.json",
-        &[
-            (Place::Member("/description"), json!(DESCRIPTION)),
-            (
-                Place::Member("/period_limit_spellings"),
-                json!({ "accepted": accepted, "description": SPELLINGS_DESCRIPTION, "refused": refused }),
-            ),
-            (
-                Place::Member("/period_limit_members"),
-                period_limit_members(),
-            ),
-        ],
-    );
+    let mut cases = vec![
+        (Place::Member("/description"), json!(DESCRIPTION)),
+        (
+            Place::Member("/period_limit_spellings"),
+            json!({ "accepted": accepted, "description": SPELLINGS_DESCRIPTION, "refused": refused }),
+        ),
+        (
+            Place::Member("/period_limit_members"),
+            period_limit_members(),
+        ),
+    ];
+    cases.extend(computed());
+    generated("allowance_usage.json", &cases);
+}
+
+/// Each case's usage and its candidates' verdicts, and the compaction's result, from their
+/// authored terms, ledgers, claims, times and amounts.
+fn computed() -> Vec<(Place<'static>, Value)> {
+    let v = paykit("allowance_usage.json");
+    let mut out = Vec::new();
+    for (i, case) in arr(&v, "cases").iter().enumerate() {
+        let terms = AllowanceTerms::from_json(&case["terms"]).unwrap();
+        let u = usage(
+            &terms,
+            &ledger(&case["ledger"]),
+            &claims(case),
+            time(st(case, "t")),
+        )
+        .unwrap();
+        out.push((Place::At(format!("/cases/{i}/usage")), usage_json(&u)));
+        for (j, candidate) in arr(case, "candidates").iter().enumerate() {
+            let amount = st(candidate, "amount");
+            let verdict = match check_limits(&terms, &u, &Decimal::parse(amount).unwrap()) {
+                Ok(()) => json!({ "allowed": true, "amount": amount }),
+                Err(by) => json!({ "allowed": false, "amount": amount, "refused_by": by.as_str() }),
+            };
+            out.push((Place::At(format!("/cases/{i}/candidates/{j}")), verdict));
+        }
+    }
+    let c = &v["compaction"];
+    let terms = AllowanceTerms::from_json(&c["terms"]).unwrap();
+    let now = time(st(c, "now"));
+    let before = ledger(&c["before"]);
+    let after = compact(&terms, &before, now).unwrap();
+    out.push((
+        Place::At("/compaction/changed".into()),
+        json!(after.is_some()),
+    ));
+    let after = after.unwrap_or(before.clone());
+    let written: Value = serde_json::from_slice(&after.to_json().unwrap()).unwrap();
+    out.push((Place::At("/compaction/after".into()), written));
+    let claim_map = claims(c);
+    for (l, key) in [(&before, "lifetime_before"), (&after, "lifetime_after")] {
+        let u = usage(&terms, l, &claim_map, now).unwrap();
+        out.push((
+            Place::At(format!("/compaction/{key}")),
+            json!(u.lifetime().as_str()),
+        ));
+    }
+    out
 }
 
 const MEMBERS_DESCRIPTION: &str = "Wire 4.15, specs/allowances.md: the terms of the first \

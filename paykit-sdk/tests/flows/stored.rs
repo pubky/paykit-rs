@@ -1083,7 +1083,7 @@ async fn test_stored_refused_older_list_never_replaces_a_newer_held() {
     }
 }
 
-/// The wallet's kept receipt for `request`, waiting for a scope key: kept a day short of 30
+/// The wallet's kept receipt for `paykit_request`, waiting for a scope key: kept a day short of 30
 /// days from its acceptance, then given up with the host's notice.
 async fn given_up_after_30_days(
     w: &World,

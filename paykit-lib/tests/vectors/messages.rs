@@ -29,7 +29,7 @@ struct Read {
 
 #[test]
 fn test_vectors_messages() {
-    let keys = Keys::load();
+    let keys = Keys::from_seeds();
     generate(&keys);
     let file = paykit("messages.json");
     let mut read: HashMap<String, Read> = HashMap::new();
@@ -335,7 +335,7 @@ fn check_resend(keys: &Keys, read: &HashMap<String, Read>) {
         by_ids.msg_ids,
         [read["payment_request_acceptance"].message.msg_id.clone()]
     );
-    // A wallet with `pay` alone doesn't receive Allowance kinds: a resend answer leaves them
+    // A wallet with `paykit_pay` alone doesn't receive Allowance kinds: a resend answer leaves them
     // out (Paykit wire 4.12).
     let wallet = &keys.app("wallet").scopes;
     let proposal = &read["allowance_proposal"].message;
@@ -412,10 +412,11 @@ const MULTI_PROTOCOL_DESCRIPTION: &str = "Wire 4.1 check 8, spec 3.2, 3.3, Switc
 \"Several protocols\": messages.json's payment_request and resend_request_ids, as the shop \
 signs them, each presented with a certificate of the shop's keys that holds another \
 protocol's scope, chat (sender_cert, documents.json multi_protocol_certificates), at alice's \
-wallet (recipient_app), whose certificate is the Switch set's. Another protocol's scopes, \
+wallet (recipient_app), whose certificate is its certificate of documents.json \
+certificates. Another protocol's scopes, \
 and the switch permissions they bring, authorize no Paykit message: each kind still needs \
 its Paykit scope, and a resend_request needs a Paykit App, one holding at least one Paykit \
-scope. accepted are messages the wallet takes at check 8, from the shop holding request \
+scope. accepted are messages the wallet takes at check 8, from the shop holding paykit_request \
 beside chat; refused are those it drops there, from the shop holding chat alone, a \
 certificate Paykit's verifiers take. reason is paykit-lib's wording, of the first check \
 that refuses it.";
@@ -428,7 +429,7 @@ fn sender_cert(keys: &Keys, chat_only: bool) -> AppCert {
         reissued(
             keys,
             "shop",
-            &["request", "chat"],
+            &["paykit_request", "chat"],
             &[Permission::ListsRead, Permission::ConversationAdd],
         )
     }
@@ -481,8 +482,8 @@ fn generate(keys: &Keys) {
     };
     let member = json!({
         "accepted": [
-            case("a payment_request from an app holding request and chat", "payment_request", false),
-            case("a resend_request from an app holding request and chat", "resend_request_ids", false),
+            case("a payment_request from an app holding paykit_request and chat", "payment_request", false),
+            case("a resend_request from an app holding paykit_request and chat", "resend_request_ids", false),
         ],
         "description": MULTI_PROTOCOL_DESCRIPTION,
         "refused": [
@@ -490,30 +491,104 @@ fn generate(keys: &Keys) {
             case("a resend_request from an app holding only chat", "resend_request_ids", true),
         ],
     });
-    generated(
-        "messages.json",
-        &[
-            (Place::Member("/description"), json!(DESCRIPTION)),
-            (Place::Member("/multi_protocol_senders"), member),
-            (
-                Place::Member("/cancellation_roles"),
-                cancellation_roles(keys),
-            ),
-            (Place::Member("/conversion_terms"), conversion_terms(keys)),
-            (Place::Member("/proof_members"), proof_members(keys)),
-            (Place::Member("/receipt_members"), receipt_members(keys)),
-        ],
-    );
+    let mut cases = vec![
+        (Place::Member("/description"), json!(DESCRIPTION)),
+        (Place::Member("/multi_protocol_senders"), member),
+        (
+            Place::Member("/cancellation_roles"),
+            cancellation_roles(keys),
+        ),
+        (Place::Member("/conversion_terms"), conversion_terms(keys)),
+        (Place::Member("/proof_members"), proof_members(keys)),
+        (Place::Member("/receipt_members"), receipt_members(keys)),
+    ];
+    cases.extend(signed_messages(keys));
+    generated("messages.json", &cases);
+}
+
+/// The executor notice's JSON with the record key of the Allowance record it names, under
+/// the `allowances` policy (Paykit wire 4.17, 5.1).
+fn executor_notice_json(keys: &Keys, json: &str) -> String {
+    let message = Message::parse(json.as_bytes(), OPAQUE_MEMBERS).unwrap();
+    let Body::ExecutorNotice(notice) = check_body(&message, json.as_bytes()).unwrap() else {
+        panic!("a notice")
+    };
+    let key = Collection::Allowances
+        .record_key(
+            &keys.identity(&pubky(ALICE)).naming_key(),
+            &natural_key::allowance(&pubky(BOB), &AllowanceId::parse(ALLOWANCE_ID).unwrap()),
+            None,
+        )
+        .unwrap();
+    let held = format!("\"allowance_record\":\"{}\"", b64(&notice.allowance_record));
+    assert!(json.contains(&held));
+    json.replace(&held, &format!("\"allowance_record\":\"{}\"", b64(&key)))
+}
+
+/// What the sender app signs of each message of `messages` and `label_rejections`, from its
+/// authored JSON: the signature, and for `messages` the plaintext and its hash; the executor
+/// notice's record key; and the certificates `label_rejections` presents its acceptances at.
+fn signed_messages(keys: &Keys) -> Vec<(Place<'static>, Value)> {
+    let file = paykit("messages.json");
+    let mut out = Vec::new();
+    for (i, m) in arr(&file, "messages").iter().enumerate() {
+        let mut json = st(m, "json").to_owned();
+        if st(m, "name") == "executor_notice" {
+            json = executor_notice_json(keys, &json);
+            out.push((Place::At(format!("/messages/{i}/json")), json!(json)));
+        }
+        let sender = keys.app_by_id(st(m, "sender_app"));
+        let plaintext =
+            MessagePlaintext::sign_json(&sender.keys, json.into_bytes(), OPAQUE_MEMBERS).unwrap();
+        for (member, value) in [
+            ("hash", b64(&plaintext.hash())),
+            ("plaintext_hex", hex(&plaintext.encode())),
+            ("signature", b64(&plaintext.signature())),
+        ] {
+            out.push((Place::At(format!("/messages/{i}/{member}")), json!(value)));
+        }
+    }
+    for (i, case) in arr(&file["label_rejections"], "cases").iter().enumerate() {
+        let sender = keys.app_by_id(st(case, "sender_app"));
+        let plaintext = MessagePlaintext::sign_json(
+            &sender.keys,
+            st(case, "json").as_bytes().to_vec(),
+            OPAQUE_MEMBERS,
+        )
+        .unwrap();
+        let at = format!("/label_rejections/cases/{i}");
+        out.push((
+            Place::At(format!("{at}/signature")),
+            json!(b64(&plaintext.signature())),
+        ));
+        if case.get("recipient_cert").is_some() {
+            let recipient = match st(case, "name") {
+                "an acceptance labelled shop1 at an app holding only paykit_request:shop2" => {
+                    with_scopes(keys, "hosted", &["paykit_request:shop2"])
+                }
+                "an acceptance without a label at an app holding only paykit_request:shop1" => {
+                    cert(keys.app("hosted"))
+                }
+                other => panic!("no recipient certificate for {other}"),
+            };
+            out.push((
+                Place::At(format!("{at}/recipient_cert")),
+                signed_json(recipient.signed()),
+            ));
+        }
+    }
+    out
 }
 
 const CANCELLATION_DESCRIPTION: &str = "Wire 4.1 check 8, 4.3, 4.8, spec 3.3: messages.json's \
 payment_request_cancellation, as the shop signs it, without a label, presented with a \
 certificate of the shop's keys (sender_cert) at a certificate of alice's wallet's keys \
 (recipient_cert), each with its scopes changed, its permissions those Paykit's scopes need, \
-and signed again; a certificate holding pay holds contacts too, which pay requires (spec \
+and signed again; a certificate holding paykit_pay holds paykit_contacts too, which paykit_pay requires (spec \
 3.1). A cancellation's recipient holds the other role than its sender: the \
-payer's goes from pay to request, the payee's from request to pay. accepted are the two \
-pairings the recipient takes at check 8; refused are pay to pay and request to request, \
+payer's goes from paykit_pay to paykit_request, the payee's from paykit_request to \
+paykit_pay. accepted are the two \
+pairings the recipient takes at check 8; refused are paykit_pay to paykit_pay and paykit_request to paykit_request, \
 which it drops there. reason is paykit-lib's wording, of the first check that refuses it.";
 
 /// The certificate of `app` with `scopes` and the permissions Paykit's scopes need.
@@ -547,9 +622,9 @@ fn cancellation_at(
     PaykitKindRules::for_certificate(recipient).check_scopes(&message, sender)
 }
 
-/// The scopes of a payer's certificate in `cancellation_roles`: `pay`, with the `contacts` it
-/// requires (Paykit spec 3.1).
-const PAY: &[&str] = &["pay", "contacts"];
+/// The scopes of a payer's certificate in `cancellation_roles`: `paykit_pay`, with the
+/// `paykit_contacts` it requires (Paykit spec 3.1).
+const PAY: &[&str] = &["paykit_pay", "paykit_contacts"];
 
 /// `cancellation_roles`, as paykit-lib generates it.
 fn cancellation_roles(keys: &Keys) -> Value {
@@ -582,13 +657,13 @@ fn cancellation_roles(keys: &Keys) -> Value {
     };
     json!({
         "accepted": [
-            case("the payee's cancellation, from request to pay", &["request"], PAY, true),
-            case("the payer's cancellation, from pay to request", PAY, &["request"], true),
+            case("the payee's cancellation, from paykit_request to paykit_pay", &["paykit_request"], PAY, true),
+            case("the payer's cancellation, from paykit_pay to paykit_request", PAY, &["paykit_request"], true),
         ],
         "description": CANCELLATION_DESCRIPTION,
         "refused": [
-            case("a cancellation from pay to pay", PAY, PAY, false),
-            case("a cancellation from request to request", &["request"], &["request"], false),
+            case("a cancellation from paykit_pay to paykit_pay", PAY, PAY, false),
+            case("a cancellation from paykit_request to paykit_request", &["paykit_request"], &["paykit_request"], false),
         ],
     })
 }
