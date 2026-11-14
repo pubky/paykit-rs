@@ -1336,9 +1336,17 @@ async fn test_executor_pays_inside_its_limits_until_ended_through_a_restore() {
 /// a request for 0.5 btc paid under it and the dispatch left in flight. Returns bob's shop,
 /// the wallet, the wallet's record key and the attempt.
 async fn executor_in_flight(w: &World) -> (Paykit, Paykit, [u8; 32], paykit_lib::AttemptId) {
+    executor_in_flight_on(w, true).await
+}
+
+/// [`executor_in_flight`] on a rail that is idempotent on the attempt ID or not.
+async fn executor_in_flight_on(
+    w: &World,
+    idempotent: bool,
+) -> (Paykit, Paykit, [u8; 32], paykit_lib::AttemptId) {
     w.rail.set_declaration(
         paykit_sdk::rail::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
-            .with_idempotent(true),
+            .with_idempotent(idempotent),
     );
     let mut shop = allowance_shop(w).await;
     let mut wallet = w
@@ -1393,26 +1401,50 @@ async fn test_executor_repeat_goes_under_an_allowance_still_in_force() {
 }
 
 #[tokio::test]
-async fn test_executor_no_repeat_under_an_allowance_ended_since() {
-    // Bob ends the Allowance while the dispatch is in flight: the repeat's gate finds it
-    // ended, and the method isn't called again (Paykit spec 7.2 step 1, 8.3).
+async fn test_executor_repeat_finishes_a_dispatch_under_an_allowance_ended_since() {
+    // Bob ends the Allowance while the dispatch is in flight. An end cancels no payment
+    // already started: the resume repeats it with the same idempotency key, and nothing
+    // new is paid under the ended Allowance (Paykit spec 8.3, "Ending", "Conflicted").
     let w = World::new();
-    let (mut shop, mut wallet, _, attempt) = executor_in_flight(&w).await;
+    let (mut shop, mut wallet, record, attempt) = executor_in_flight(&w).await;
     shop.receive(None).await.unwrap();
     let theirs = shop.allowances().await.unwrap()[0].record;
     shop.end_allowance(&theirs).await.unwrap();
     wallet.receive(None).await.unwrap();
-    assert_eq!(calls_after_resume(&w, &mut wallet, &attempt).await, 1);
+    assert_eq!(calls_after_resume(&w, &mut wallet, &attempt).await, 2);
+    let next = request(&w, &mut shop, &mut wallet, "0.1").await;
+    let refused = wallet
+        .pay_under_allowance(&next, &record)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::AllowanceEnded)),
+        "{refused:?}"
+    );
 }
 
 #[tokio::test]
-async fn test_executor_no_repeat_under_an_allowance_conflicted_since() {
+async fn test_executor_repeat_finishes_a_dispatch_under_an_allowance_conflicted_since() {
     // Bob proposes again under the Allowance ID while the dispatch is in flight: the
-    // Allowance is conflicted, and the method isn't called again (Paykit spec 8.3,
-    // "Conflicted").
+    // Allowance is conflicted, and one already dispatched finishes (Paykit spec 8.3,
+    // "Conflicted"): the resume repeats it with the same idempotency key.
     let w = World::new();
     let (_shop, mut wallet, record, attempt) = executor_in_flight(&w).await;
     propose_again(&w, &wallet, &record).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(calls_after_resume(&w, &mut wallet, &attempt).await, 2);
+}
+
+#[tokio::test]
+async fn test_executor_no_repeat_under_an_allowance_on_a_method_without_idempotent_repeats() {
+    // The method isn't idempotent on the attempt ID: no repeat is made, Allowance in force
+    // or not, and the attempt stays "may be paid" (Paykit spec 7.2, "What a payment method
+    // declares").
+    let w = World::new();
+    let (mut shop, mut wallet, _, attempt) = executor_in_flight_on(&w, false).await;
+    shop.receive(None).await.unwrap();
+    let theirs = shop.allowances().await.unwrap()[0].record;
+    shop.end_allowance(&theirs).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert_eq!(calls_after_resume(&w, &mut wallet, &attempt).await, 1);
 }

@@ -1966,6 +1966,31 @@ impl Paykit {
             })
     }
 
+    /// Whether the consent list holds the Allowance at `record` to be confirmed again by the
+    /// user, after a restore or a `missed` item, or a `missed` item's mark waits for the next
+    /// receive, or holds no entry for it: a repeat of a payment dispatched under it waits
+    /// then (Paykit spec 8.3, "After a restore"). An entry removed for good, for an end, a
+    /// rejection, a handoff or a conflict, doesn't hold it.
+    pub(crate) async fn consent_to_confirm_again(&self, record: &[u8; 32]) -> Result<bool> {
+        if Box::pin(self.consents_unconfirmed()).await? {
+            return Ok(true);
+        }
+        Ok(
+            match self
+                .local_get::<ConsentEntry>(&key::consent(record))
+                .await?
+            {
+                None => true,
+                Some(entry) => matches!(
+                    entry.consent,
+                    Consent::Held {
+                        confirm_again: true
+                    }
+                ),
+            },
+        )
+    }
+
     /// Whether this app keeps a rejection from `counterparty` of the Allowance at `record`
     /// to write (`pr/`), not yet in the record: the receive step keeps every answer that
     /// would take the record's empty response for the placement after the read, and a

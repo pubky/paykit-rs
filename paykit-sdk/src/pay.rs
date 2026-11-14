@@ -2110,7 +2110,7 @@ impl Paykit {
             at: answered_at,
         };
         let doc = match self
-            .pay_gate(&entry, &carrier, &claim, by, unconfirmed, false)
+            .pay_gate(&entry, &carrier, &claim, by, unconfirmed, false, false)
             .await?
             .map_err(Held::refusal)
         {
@@ -3813,7 +3813,15 @@ impl Paykit {
             return Ok(Err(PayOutcome::Uncertain { attempt_id }));
         };
         let gate = self
-            .pay_gate(entry, &carrier, claim, Initiator::Automatic, None, true)
+            .pay_gate(
+                entry,
+                &carrier,
+                claim,
+                Initiator::Automatic,
+                None,
+                true,
+                true,
+            )
             .await?;
         Ok(Err(match gate {
             Ok(doc) => return Ok(Ok(doc)),
@@ -3850,7 +3858,8 @@ impl Paykit {
     ///    Switch spec 12.5, 12.6).
     ///
     /// `Err` inside holds the first refusal, as [`Held::OwnIdentity`] for 4, and
-    /// [`Refusal::NotCurrent`] for 5 and 6.
+    /// [`Refusal::NotCurrent`] for 5 and 6. Under an Allowance, a first dispatch (`repeat`
+    /// false) checks it in force, and a repeat only what holds while unknown.
     pub(crate) async fn pay_gate(
         &mut self,
         entry: &JournalEntry,
@@ -3859,6 +3868,7 @@ impl Paykit {
         by: Initiator,
         unconfirmed: Option<UserConfirmed>,
         refresh: bool,
+        repeat: bool,
     ) -> Result<std::result::Result<PeerIdentity, Held>> {
         if let Err(refusal) = self.app.may_attempt(by == Initiator::Automatic) {
             return Ok(Err(Held::Check(Refusal::NotNow(refusal.to_string()))));
@@ -3877,7 +3887,18 @@ impl Paykit {
         if let Some(allowance_id) = allowance_id {
             let target = crate::allowances::allowance_target(&entry.payee, &allowance_id);
             let record = self.app.record_key(&target)?;
-            if let Err(refusal) = self.allowance_gate(&record, false).await? {
+            // A repeat finishes a payment already dispatched, through the method's repeat
+            // with the same idempotency key: an end, a handoff or a conflict since cancels
+            // no payment already started (Paykit spec 8.3, "Conflicted", "Handoff"), so it
+            // is made then too, while what holds while unknown still holds it
+            // ([`Paykit::repeat_under_allowance_held`]). A first dispatch checks the
+            // Allowance in force.
+            let refused = if repeat {
+                self.repeat_under_allowance_held(&record).await?.err()
+            } else {
+                self.allowance_gate(&record, false).await?.err()
+            };
+            if let Some(refusal) = refused {
                 return Ok(Err(Held::Check(refusal)));
             }
         }

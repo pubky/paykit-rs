@@ -35,6 +35,10 @@
 //!   proposal is kept to write (`pr/`, `se/`), or its counterparty owes a re-send of replies
 //!   the bounds dropped (`pd/`), an earlier different answer may still take the response or
 //!   make the Allowance conflicted, so the executor pays nothing under it.
+//! - **A repeat finishes a payment already dispatched** (Paykit spec 8.3, "Conflicted",
+//!   "Handoff"): at a resume it is made after an end, a handoff or a conflict too, through
+//!   the method's repeat with the same idempotency key, while what holds while unknown
+//!   still holds it ([`Paykit::repeat_under_allowance_held`]).
 //! - **Immediately before the dispatch** (Paykit spec 8.1, 8.3): the deny list, the request
 //!   record and the block floor are read from the switch again, twice, before the attempt's
 //!   `Paying` commit and after it, and the dispatch holds on a block, a stop, a raise of the
@@ -777,6 +781,44 @@ impl Paykit {
             version,
             terms,
         }))
+    }
+
+    /// What holds the repeat of a payment the executor already dispatched under the
+    /// Allowance at `record`, read as held (Paykit spec 8.3): a repeat finishes that payment,
+    /// so the Allowance ended, handed off or conflicted since doesn't stop it ("Conflicted",
+    /// "Handoff"), and neither does its consent removed for those. What can't be known holds
+    /// it: the record not held or not binding, its view or its ledger's divergent or seen so
+    /// and not confirmed (Paykit spec 6), its current write one the app ignores and the user
+    /// hasn't confirmed, its consent to be confirmed again after a restore or a `missed`
+    /// item, or no consent entry at all.
+    pub(crate) async fn repeat_under_allowance_held(
+        &mut self,
+        record: &[u8; 32],
+    ) -> Result<std::result::Result<(), Refusal>> {
+        let refuse = |why: &str| Ok(Err(Refusal::NotAutomatic(why.into())));
+        let Some(allowance) = self.held_allowance(record).await? else {
+            return refuse("the Allowance record isn't held as one that binds");
+        };
+        let Some(shared) = self.app.shared_record(record).await? else {
+            return refuse("the Allowance record isn't held as one that binds");
+        };
+        if shared.divergent || shared.doubtful || self.pause_of(&shared).await?.blocks_automatic() {
+            return refuse("the Allowance record was seen divergent and isn't confirmed");
+        }
+        if shared.flagged && !self.ignored_write_confirmed(record).await? {
+            return refuse("the Allowance record's current write is one this app ignores");
+        }
+        let ledger = self.app.record_key(&ledger_target(
+            &allowance.counterparty,
+            &allowance.allowance_id,
+        ))?;
+        if self.pause_at(&ledger).await?.blocks_automatic() {
+            return refuse("the ledger is divergent, or was seen so and isn't confirmed");
+        }
+        if self.consent_to_confirm_again(record).await? {
+            return refuse("the consent list holds it to be confirmed again");
+        }
+        Ok(Ok(()))
     }
 
     /// The executor's checks on the request and its record (Paykit spec 8.3, "Executor"):
