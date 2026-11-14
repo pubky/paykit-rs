@@ -724,9 +724,6 @@ impl Paykit {
         // is lost: only the SDK's own marks and notes are kept here, and nothing is written at
         // the switch (`stored.rs`, `divergent.rs`).
         Box::pin(self.take_stored_events(&duties)).await?;
-        // A `missed` item the read took holds the open requests from a time on
-        // (`hold.rs`), bounded now that the read verified the service time.
-        Box::pin(self.bound_missed_hold()).await?;
         if account_gone {
             // Nothing more is read or written there: the summary tells the host.
             let divergent = Box::pin(self.newly_paused(&paused_before)).await?;
