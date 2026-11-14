@@ -280,6 +280,58 @@ fn store_failure(error: pubky_switch_client::app::AppError) -> StoreFailure {
     }
 }
 
+/// How many keys of each family whose size the runtime bounds a restored layer holds
+/// ([`restore_paykit_layer`]).
+#[derive(Default)]
+struct BoundedFamilies {
+    lost_owed: usize,
+    dropped_replies: usize,
+    dropped_unverified: usize,
+    key_waits: usize,
+    dropped_blocked: usize,
+}
+
+impl BoundedFamilies {
+    /// Count a key of `family`: `Err` naming the family once it is past its bound.
+    fn count(&mut self, family: &StateKey) -> Result<(), String> {
+        let (count, bound, what) = match family {
+            StateKey::LostOwed { .. } => (
+                &mut self.lost_owed,
+                crate::marks::MAX_LOST_OWED,
+                "notices of lost messages owed",
+            ),
+            StateKey::DroppedReplies { .. } => (
+                &mut self.dropped_replies,
+                crate::marks::MAX_DROPPED_MARKS,
+                "marks of dropped replies",
+            ),
+            StateKey::DroppedUnverified { .. } => (
+                &mut self.dropped_unverified,
+                crate::marks::MAX_DROPPED_MARKS,
+                "marks of entries dropped unverified",
+            ),
+            StateKey::KeyWaits { .. } => (
+                &mut self.key_waits,
+                crate::marks::MAX_DROPPED_MARKS,
+                "marks of key waits",
+            ),
+            StateKey::DroppedBlocked { .. } => (
+                &mut self.dropped_blocked,
+                crate::marks::MAX_DROPPED_MARKS,
+                "marks of blocked messages",
+            ),
+            _ => return Ok(()),
+        };
+        *count += 1;
+        if *count > bound {
+            return Err(format!(
+                "Paykit's local state in the backup holds more {what} than the SDK keeps"
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// The name of Paykit's layer in app backups (Switch spec 12.4).
 pub const BACKUP_NAME: &str = "paykit";
 
@@ -308,6 +360,12 @@ pub const BACKUP_NAME: &str = "paykit";
 /// and those owed `bl/`, the consent list `ac/`, each entry marked to be confirmed again): a
 /// backup carries the app's signing keys, so whoever can write one can sign anything the
 /// app can, and a check of what the app signed guards against corruption only.
+///
+/// The families whose size the runtime bounds at every write are counted, and a layer
+/// past a bound is refused: the notices of lost messages owed (`bl/`, at most
+/// [`crate::marks::MAX_LOST_OWED`]) and each family of marks (`pd/`, `ud/`, `kw/`, `bd/`, at
+/// most [`crate::marks::MAX_DROPPED_MARKS`] each). No run leaves more, and the runtime
+/// checks the bound only as it adds one, so a restored layer over it would stay over it.
 pub(crate) fn restore_paykit_layer(
     layer: Option<&ProtocolLayer>,
     own: [u8; 32],
@@ -328,6 +386,7 @@ pub(crate) fn restore_paykit_layer(
     let mut acknowledged = Vec::new();
     let mut writes = Vec::with_capacity(state.len());
     let mut cursor_time_ms = 0;
+    let mut bounded = BoundedFamilies::default();
     for (key, value) in state {
         // The schema is closed: a key no builder of the SDK writes is refused, and every
         // value is read as its family's, bound to what its key names (`state::StateKey`).
@@ -337,6 +396,7 @@ pub(crate) fn restore_paykit_layer(
             );
         };
         let unread = || String::from("Paykit's local state in the backup doesn't read");
+        bounded.count(&family)?;
         let attempt = match family {
             // A hold, or a user's confirmation of one, belongs to a restore before: this one
             // sets its own (`hold.rs`).
@@ -531,7 +591,7 @@ pub(crate) fn restore_paykit_layer(
             // `msg_id`s, and no sent messages: the pass after the read settles the notice from
             // the restored outbox's answer on its request (`Paykit::settle_lost_owed`). Its
             // times aren't bounded as a mark's are: it asks nothing, and its latest time is
-            // already in the raise owed, which is.
+            // already in the raise owed, which is. Their number is (`BoundedFamilies`).
             StateKey::LostOwed { .. } => {
                 state::restored::<crate::marks::LostOwed>(&key, &value, &binder)
                     .map_err(|_| unread())?;

@@ -2802,3 +2802,113 @@ async fn test_restore_own_record_found_unreadable_25_days_after_the_restore_wait
         before + 1 + asks
     );
 }
+
+/// `good` with its keys at `prefix` replaced by `count` others, the `i`th as `entry(i)` builds
+/// it: its key, and its value as Paykit keeps it.
+fn with_family(
+    good: &serde_json::Value,
+    prefix: &str,
+    count: usize,
+    entry: &dyn Fn(u8) -> (String, serde_json::Value),
+) -> serde_json::Value {
+    let mut state: Vec<(Vec<u8>, serde_json::Value)> = layer_of(good)
+        .into_iter()
+        .filter(|(key, _)| !key.starts_with(prefix.as_bytes()))
+        .collect();
+    for i in 0..count {
+        let (key, value) = entry(u8::try_from(i).unwrap());
+        state.push((key.into_bytes(), kept(value)));
+    }
+    with_layer(good, state)
+}
+
+/// A backup whose family at `prefix` holds one key past `bound` is refused, nothing written;
+/// one holding `bound` is restored whole.
+async fn family_bounded_at_restore(
+    prefix: &str,
+    bound: usize,
+    entry: &dyn Fn(u8) -> (String, serde_json::Value),
+) {
+    let w = World::new();
+    let (good, app_id) = backup_with_a_payment(&w).await;
+    let over = with_family(&good, prefix, bound + 1, entry);
+    refused_writing_nothing(&w, over, app_id, prefix).await;
+    let at = with_family(&good, prefix, bound, entry);
+    let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&at).unwrap()).unwrap();
+    let restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    let held = restored
+        .app()
+        .protocol_scan(prefix.as_bytes())
+        .await
+        .unwrap();
+    assert_eq!(held.len(), bound, "{prefix}");
+}
+
+/// A mark of dropped messages from the sender `[i; 32]`, at its family's key `prefix`.
+fn drop_mark(prefix: &str, i: u8, due: bool) -> (String, serde_json::Value) {
+    let sender = pubky_switch_core::enc::b64(&[i; 32]);
+    (
+        format!("{prefix}{sender}"),
+        serde_json::json!({
+            "sender": sender,
+            "earliest_ms": 5, "latest_ms": 6, "due": due,
+            "asked_at_ms": null, "queued": null,
+        }),
+    )
+}
+
+#[tokio::test]
+async fn test_restore_layer_lost_owed_past_its_bound_refused_writing_nothing() {
+    // The runtime holds the next entry rather than keep a 65th notice owed: a backup with
+    // more is no run's.
+    let entry = |i: u8| {
+        let sender = pubky_switch_core::enc::b64(&[i; 32]);
+        let msg_id = format!("{i:08x}-0000-4000-8000-000000000000");
+        (
+            format!("bl/{sender}/{msg_id}"),
+            serde_json::json!({
+                "sender": sender,
+                "earliest_ms": 5, "latest_ms": 6, "raised_ms": 9,
+                "msg_id": msg_id, "hash": pubky_switch_core::enc::b64(&[3; 32]),
+            }),
+        )
+    };
+    // The SDK's `MAX_LOST_OWED`.
+    family_bounded_at_restore("bl/", 64, &entry).await;
+}
+
+#[tokio::test]
+async fn test_restore_layer_dropped_reply_marks_past_their_bound_refused_writing_nothing() {
+    let entry = |i: u8| drop_mark("pd/", i, true);
+    family_bounded_at_restore("pd/", paykit_sdk::MAX_DROPPED_MARKS, &entry).await;
+}
+
+#[tokio::test]
+async fn test_restore_layer_unverified_marks_past_their_bound_refused_writing_nothing() {
+    let entry = |i: u8| drop_mark("ud/", i, true);
+    family_bounded_at_restore("ud/", paykit_sdk::MAX_DROPPED_MARKS, &entry).await;
+}
+
+#[tokio::test]
+async fn test_restore_layer_blocked_marks_past_their_bound_refused_writing_nothing() {
+    let entry = |i: u8| drop_mark("bd/", i, true);
+    family_bounded_at_restore("bd/", paykit_sdk::MAX_DROPPED_MARKS, &entry).await;
+}
+
+#[tokio::test]
+async fn test_restore_layer_key_wait_marks_past_their_bound_refused_writing_nothing() {
+    let entry = |i: u8| {
+        let (key, mut value) = drop_mark("kw/", i, false);
+        value["epochs"] = serde_json::json!([1]);
+        (key, value)
+    };
+    family_bounded_at_restore("kw/", paykit_sdk::MAX_DROPPED_MARKS, &entry).await;
+}
