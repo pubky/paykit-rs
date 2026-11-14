@@ -561,10 +561,10 @@ async fn test_certificate_renewal_bringing_pay_back_drops_the_held_payment_notic
 #[tokio::test]
 async fn test_certificate_renewal_dropping_pay_keeps_a_dispatched_payment() {
     // The payment is in flight, its acceptance released, when the app is renewed to
-    // `paykit_contacts`. Without `paykit_pay` the app can neither write nor read payer records, so its
-    // outcome waits, the proof kept in the journal; the backup and a restore still take
-    // the entry. Renewed to `paykit_pay` again, the outcome is written, the acceptance placed under
-    // the certificate it was signed under.
+    // `paykit_contacts`. Without `paykit_pay` the app can neither write nor read payer records, so
+    // its outcome waits, the proof kept in the journal; the backup and a restore still take the
+    // entry. Renewed to `paykit_pay` again, the outcome is written, the acceptance placed under the
+    // certificate it was signed under.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let me = wallet.app_id();
@@ -685,11 +685,11 @@ async fn test_certificate_issued_ahead_of_the_apps_clock_keeps_its_acceptance_ba
 #[tokio::test]
 async fn test_certificate_restored_lost_acceptance_not_signed_again_without_pay() {
     // In flight, its acceptance released, the payment is backed up while the app holds
-    // `paykit_pay`; the app is then renewed to `paykit_contacts`. A restore of that backup on a fresh
-    // store, with no outbox, finds the payment paid and its acceptance unknown to the
-    // client, so lost: no new one is signed under a certificate without `paykit_pay`, and the
-    // entry waits, backed up and restored as it is. Renewed to `paykit_pay` again, the outcome is
-    // written once, with the acceptance and the proof.
+    // `paykit_pay`; the app is then renewed to `paykit_contacts`. A restore of that backup on a
+    // fresh store, with no outbox, finds the payment paid and its acceptance unknown to the client,
+    // so lost: no new one is signed under a certificate without `paykit_pay`, and the entry waits,
+    // backed up and restored as it is. Renewed to `paykit_pay` again, the outcome is written once,
+    // with the acceptance and the proof.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let me = wallet.app_id();
@@ -1174,8 +1174,8 @@ async fn test_certificate_restored_payee_ends_reconcile_and_requests() {
 
 /// Alice's till, holding `paykit_request`, sent bob a request: its `payee_activity` record is
 /// alice's. Her wallet holds `paykit_pay` only and reads none of them. Its certificate is then
-/// renewed to hold `paykit_request` too, with the scope keys it needs, and listed: the wallet's next
-/// read takes it. Returns the wallet, on `base`, and the renewed certificate.
+/// renewed to hold `paykit_request` too, with the scope keys it needs, and listed: the wallet's
+/// next read takes it. Returns the wallet, on `base`, and the renewed certificate.
 async fn renewed_to_read_more_on(w: &World, base: Arc<dyn StateStore>) -> (Paykit, AppCert) {
     let (wallet, wider, _) = renewed_to_read_more_with_till(w, base).await;
     (wallet, wider)
@@ -1907,8 +1907,8 @@ pub(crate) fn store_bundle(w: &World, me: [u8; 16], cert: &AppCert) {
 
 #[tokio::test]
 async fn test_certificate_narrowed_then_widened_lists_again() {
-    // Listed under `paykit_pay` and `paykit_request`, renewed to `paykit_pay`, and back: a record written while
-    // narrowed is listed once the wider certificate's keys are held.
+    // Listed under `paykit_pay` and `paykit_request`, renewed to `paykit_pay`, and back: a record
+    // written while narrowed is listed once the wider certificate's keys are held.
     let w = World::new();
     let (mut wallet, wider) = renewed_to_read_more(&w).await;
     let me = wallet.app_id();
@@ -1959,13 +1959,13 @@ enum Narrowed {
     Stopped,
 }
 
-/// The wallet, listed under `paykit_pay` and `paykit_request`, is narrowed as `narrowed` says, in the read
-/// that also brings a request alice's till sent meanwhile, which the narrower certificate
-/// doesn't read. It is renewed back to `paykit_pay` and `paykit_request` as the data epoch rotates, and
-/// bob's acceptance comes in the read that takes it, before any listing: the copy lacks the
-/// request's record, so the acceptance is held, not taken as a reply to a request the wallet
-/// didn't send, and stays held while the keys wait. Once they come and the records are
-/// listed, it goes into the record, once.
+/// The wallet, listed under `paykit_pay` and `paykit_request`, is narrowed as `narrowed` says, in
+/// the read that also brings a request alice's till sent meanwhile, which the narrower certificate
+/// doesn't read. It is renewed back to `paykit_pay` and `paykit_request` as the data epoch rotates,
+/// and bob's acceptance comes in the read that takes it, before any listing: the copy lacks the
+/// request's record, so the acceptance is held, not taken as a reply to a request the wallet didn't
+/// send, and stays held while the keys wait. Once they come and the records are listed, it goes
+/// into the record, once.
 async fn narrowed_then_renewed_back(narrowed: Narrowed) {
     let w = World::new();
     let base = store();
@@ -2248,10 +2248,10 @@ async fn test_certificate_wider_on_the_payer_side_places_no_kept_cancellation() 
     payer_side_widened(AppScopes::new().contacts().build().unwrap(), true).await;
 }
 
-/// The wallet pays bob's request, the payment in flight; it is narrowed to `narrowed`, then
-/// renewed to `paykit_pay` and `paykit_request` with no bundle. With `cancelled`, bob cancels the request
-/// once the wider certificate is taken. The method then reports it paid, and the resume
-/// writes nothing.
+/// The wallet pays bob's request, the payment in flight; it is narrowed to `narrowed`, then renewed
+/// to `paykit_pay` and `paykit_request` with no bundle. With `cancelled`, bob cancels the request
+/// once the wider certificate is taken. The method then reports it paid, and the resume writes
+/// nothing.
 async fn payer_side_widened(narrowed: RequestedScopes, cancelled: bool) {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -2674,11 +2674,11 @@ fn received(summary: &paykit_sdk::ReceiveSummary, kind: &str) -> bool {
 #[tokio::test]
 async fn test_certificate_receipt_for_a_record_not_listed_yet_is_held_until_listed() {
     // The wallet is narrowed to `paykit_contacts`. Meanwhile bob's request comes, and the phone
-    // pays it: the payer record is written while the wallet can't read it. The wallet is
-    // renewed to `paykit_pay` and `paykit_request` with no bundle, so its records can't be listed, and
-    // bob's receipt comes. The record's absence from the wallet's copy decides nothing:
-    // the receipt's entry is held, the cursor before it. Once the keys come and the records
-    // are listed, the receipt goes into the record, once, and the claim stays settled once.
+    // pays it: the payer record is written while the wallet can't read it. The wallet is renewed to
+    // `paykit_pay` and `paykit_request` with no bundle, so its records can't be listed, and bob's
+    // receipt comes. The record's absence from the wallet's copy decides nothing: the receipt's
+    // entry is held, the cursor before it. Once the keys come and the records are listed, the
+    // receipt goes into the record, once, and the claim stays settled once.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let me = wallet.app_id();
@@ -2998,12 +2998,12 @@ async fn test_certificate_restore_taking_a_labelled_one_without_keys_keeps_the_m
 #[tokio::test]
 async fn test_certificate_late_receipt_for_a_record_not_listed_yet_is_held_then_taken_once() {
     // The wallet is narrowed to `paykit_contacts` while the phone pays bob's request: the method
-    // reports a failure, `failed` is written, and its history then shows the payment made.
-    // Past the claim's window the wallet is renewed to `paykit_pay` with no bundle, so its copy lacks
-    // the payer record, and bob's receipt comes. The record's absence decides nothing: the
-    // receipt is held, raising nothing. Once the keys come and the records are listed, it is
-    // taken once. The wallet neither made the payment nor saw its claim, which the switch
-    // no longer holds: it can't tell the payment was marked failed, and raises nothing.
+    // reports a failure, `failed` is written, and its history then shows the payment made. Past the
+    // claim's window the wallet is renewed to `paykit_pay` with no bundle, so its copy lacks the
+    // payer record, and bob's receipt comes. The record's absence decides nothing: the receipt is
+    // held, raising nothing. Once the keys come and the records are listed, it is taken once. The
+    // wallet neither made the payment nor saw its claim, which the switch no longer holds: it can't
+    // tell the payment was marked failed, and raises nothing.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let me = wallet.app_id();

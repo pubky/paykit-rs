@@ -334,8 +334,8 @@ mod tests {
             .grant_paths(&[3; 16], &names(&["chat"]))
             .unwrap()
             .is_empty());
-        // A paying app's request holds the `paykit_contacts` that `paykit_pay` requires, and is offered
-        // the Paykit Profile too.
+        // A paying app's request holds the `paykit_contacts` that `paykit_pay` requires, and is
+        // offered the Paykit Profile too.
         let wallet = names(&["paykit_pay", "paykit_contacts"]);
         protocols.terms(&wallet).unwrap();
         let paths = protocols.grant_paths(&[3; 16], &wallet).unwrap();

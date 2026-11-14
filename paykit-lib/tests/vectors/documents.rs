@@ -403,8 +403,8 @@ so that it holds paykit_allowance_execute without paykit_contacts, and the permi
 scopes need, signed again by alice's identity key: the switch takes it (switch_accepts), and Paykit's \
 verifiers refuse it. reason is paykit-lib's wording at a Paykit verifier.";
 
-/// `executor_certificates` (Paykit spec 3.1): Paykit's own executor certificate, which the
-/// grant carries, and the base one, which holds `paykit_allowance_execute` without `paykit_contacts`.
+/// `executor_certificates` (Paykit spec 3.1): Paykit's own executor certificate, which the grant
+/// carries, and the base one, which holds `paykit_allowance_execute` without `paykit_contacts`.
 fn executor_certificates(keys: &Keys) -> Value {
     let base = base_cert(keys, "executor");
     json!({
@@ -467,9 +467,9 @@ and the wallet's certificate of this file's certificates with paykit_pay alone a
 switch takes each (switch_accepts), and Paykit's verifiers refuse each. reason is \
 paykit-lib's wording at a Paykit verifier.";
 
-/// `payer_certificates` (Paykit spec 3.1): Paykit's own phone certificate, which the phone's
-/// stored messages carry, and certificates holding `paykit_pay` without `paykit_contacts`: the phone's base
-/// certificate, and the wallet's with `paykit_pay` alone.
+/// `payer_certificates` (Paykit spec 3.1): Paykit's own phone certificate, which the phone's stored
+/// messages carry, and certificates holding `paykit_pay` without `paykit_contacts`: the phone's
+/// base certificate, and the wallet's with `paykit_pay` alone.
 fn payer_certificates(keys: &Keys) -> Value {
     let base = base_cert(keys, "phone");
     let pay = ["paykit_pay".to_owned()];

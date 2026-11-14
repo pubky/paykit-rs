@@ -2959,8 +2959,8 @@ impl Paykit {
             }
             let held = !self.holds("paykit_pay") || payer_waits;
             if !held {
-                // Under `paykit_pay` again, the payment is held without it no more: that notice goes,
-                // so a later certificate without `paykit_pay` tells the host again.
+                // Under `paykit_pay` again, the payment is held without it no more: that notice
+                // goes, so a later certificate without `paykit_pay` tells the host again.
                 self.drop_notice(NoticeKind::HeldWithoutPay, &entry).await?;
             }
             if !entry.open() {

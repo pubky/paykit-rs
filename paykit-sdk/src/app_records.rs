@@ -10,7 +10,7 @@
 //! - it verifies as the Switch's app record for the payee (Switch wire 3.2), and its
 //!   `app_id` is the one of the path it was read from;
 //! - the app is current in the payee's `identity.json` with the certificate the record
-//!   carries, which allows `request`, and a listed certificate hasn't expired (Paykit spec
+//!   carries, which allows `paykit_request`, and a listed certificate hasn't expired (Paykit spec
 //!   4);
 //! - its Paykit member reads ([`PaykitMember::read`]), a record with public endpoints
 //!   carrying `expires_at` (Paykit wire 3.2);
@@ -457,7 +457,7 @@ mod tests {
     fn test_app_records_record_with_wrong_permissions_ignored() {
         use pubky_switch_core::scopes::Permission;
         // The Switch takes both certificates; Paykit's verifiers refuse them (Paykit wire
-        // 3.1): `request` needs exactly `conversation.add`.
+        // 3.1): `paykit_request` needs exactly `conversation.add`.
         let missing = Party::with_permissions("bob", "shop", &["paykit_request"], &[]);
         let extra = Party::with_permissions(
             "bob",

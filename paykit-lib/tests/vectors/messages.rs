@@ -622,8 +622,8 @@ fn cancellation_at(
     PaykitKindRules::for_certificate(recipient).check_scopes(&message, sender)
 }
 
-/// The scopes of a payer's certificate in `cancellation_roles`: `paykit_pay`, with the `paykit_contacts` it
-/// requires (Paykit spec 3.1).
+/// The scopes of a payer's certificate in `cancellation_roles`: `paykit_pay`, with the
+/// `paykit_contacts` it requires (Paykit spec 3.1).
 const PAY: &[&str] = &["paykit_pay", "paykit_contacts"];
 
 /// `cancellation_roles`, as paykit-lib generates it.

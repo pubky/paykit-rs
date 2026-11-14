@@ -1052,14 +1052,13 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::ScopeMissing`] without `paykit_allowance`; [`Refusal::NotNow`] while sends to `to`
-    /// are held, at an app holding `paykit_contacts`: the deny list holds it, or the copy of the
-    /// lists isn't known after a read tried now (Paykit spec 8.1, "Blocked counterparties"),
-    /// with nothing signed, written or queued; [`PaykitError::Lib`] with `Validation` for
-    /// terms that break Paykit wire 4.15, with nothing sent; the client's errors. A
-    /// failure that leaves the batch kept (the network, `429`, `503`) is no error: the
-    /// proposal is reported sent, [`MessageDelivery::Kept`], and goes with the app's next
-    /// write or read.
+    /// [`Refusal::ScopeMissing`] without `paykit_allowance`; [`Refusal::NotNow`] while sends to
+    /// `to` are held, at an app holding `paykit_contacts`: the deny list holds it, or the copy of
+    /// the lists isn't known after a read tried now (Paykit spec 8.1, "Blocked counterparties"),
+    /// with nothing signed, written or queued; [`PaykitError::Lib`] with `Validation` for terms
+    /// that break Paykit wire 4.15, with nothing sent; the client's errors. A failure that leaves
+    /// the batch kept (the network, `429`, `503`) is no error: the proposal is reported sent,
+    /// [`MessageDelivery::Kept`], and goes with the app's next write or read.
     pub async fn propose_allowance(
         &mut self,
         to: [u8; 32],
@@ -2064,7 +2063,7 @@ impl Paykit {
     ///
     /// - It waits while the copy of `allowances` may lack records ([`Placed::Waits`]), never
     ///   given up meanwhile, whatever else holds.
-    /// - It isn't written now ([`Placed::Not`]) while the current epoch's `allowance` key is
+    /// - It isn't written now ([`Placed::Not`]) while the current epoch's `paykit_allowance` key is
     ///   missing or the record waits for its key, over a value that doesn't read or bind,
     ///   never written over, for an answer whose record is absent or deleted (given up past
     ///   its window with the notice, as Stored entries says), or when the switch

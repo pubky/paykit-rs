@@ -208,13 +208,13 @@ pub(crate) fn effect(
             if pay && held_request(cx, &payer_target)? {
                 return keep_cancellation(cx, &payer_target, stored, true);
             }
-            // A payer's cancellation of a request this app holds goes into its record. One
-            // naming a request held on neither side is new state, which the spam rule gates
-            // once: at an app holding `paykit_pay`, it is kept as the stop, which no payment passes;
-            // at one taking payments, as a payer's reply until the record comes (Paykit spec
-            // 8.1, "Replies before their record"). An app holding both keeps both, each
-            // counted only in its own bounds: the message may be a payee's cancellation of a
-            // request to this identity, or a payer's of one another own app sent.
+            // A payer's cancellation of a request this app holds goes into its record. One naming a
+            // request held on neither side is new state, which the spam rule gates once: at an app
+            // holding `paykit_pay`, it is kept as the stop, which no payment passes; at one taking
+            // payments, as a payer's reply until the record comes (Paykit spec 8.1, "Replies before
+            // their record"). An app holding both keeps both, each counted only in its own bounds:
+            // the message may be a payee's cancellation of a request to this identity, or a payer's
+            // of one another own app sent.
             let label = stored.body().label().cloned();
             let payee_target = ActivityTarget::payee(
                 natural_key::request_record(&cx.identity(), &request),
@@ -1423,8 +1423,8 @@ fn receipt_effect(
         &claim,
     )
     .map_err(|_| Fail::corrupt())?;
-    // A receipt reaches only an app holding `paykit_pay`, which carries `claims.write`, and an entry
-    // that comes under a certificate without it is held unprocessed: this returns only for a
+    // A receipt reaches only an app holding `paykit_pay`, which carries `claims.write`, and an
+    // entry that comes under a certificate without it is held unprocessed: this returns only for a
     // certificate Paykit's checks would refuse.
     if !cx.cert().has_permission(Permission::ClaimsWrite) {
         return Ok(());
@@ -2377,10 +2377,10 @@ impl Paykit {
             .unwrap_or(0))
     }
 
-    /// Read the lists again (`GET /allow`, [`pubky_switch_client::app::App::allow_list`])
-    /// when the last read is [`LISTS_REFRESH_MS`] old or more on the host's clock, or none
-    /// is kept, at an app holding `paykit_contacts`, so the flagged senders the spam rule reads stay
-    /// fresh (Paykit wire 4.1). A clock that went back reads as due.
+    /// Read the lists again (`GET /allow`, [`pubky_switch_client::app::App::allow_list`]) when the
+    /// last read is [`LISTS_REFRESH_MS`] old or more on the host's clock, or none is kept, at an
+    /// app holding `paykit_contacts`, so the flagged senders the spam rule reads stay fresh (Paykit
+    /// wire 4.1). A clock that went back reads as due.
     ///
     /// It fails closed: a refused or failed read drops the time of the last one
     /// ([`key::LISTS_READ`]), so the copy of the lists isn't known to be complete, and the

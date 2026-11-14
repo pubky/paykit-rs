@@ -811,7 +811,8 @@ async fn sealed_allowance(
     (theirs, mine, cert)
 }
 
-/// A wallet and a phone of alice's, both holding `paykit_pay` and `paykit_allowance`, and bob's shop.
+/// A wallet and a phone of alice's, both holding `paykit_pay` and `paykit_allowance`, and bob's
+/// shop.
 async fn two_wallets(w: &World) -> (Paykit, Paykit, Paykit) {
     let shop = Box::pin(shop(w)).await;
     let wallet = Box::pin(wallet(w)).await;
@@ -1939,8 +1940,8 @@ fn missed_and_listing_fails(w: &World) {
 /// `allowance`: the payer's side, `payment_lists`, `block_floor` and `allowances`.
 const WALLET_COLLECTIONS: usize = 4;
 
-/// How many collections the client lists for bob's shop, holding `paykit_request` and `paykit_allowance`:
-/// the payee's side and `allowances`.
+/// How many collections the client lists for bob's shop, holding `paykit_request` and
+/// `paykit_allowance`: the payee's side and `allowances`.
 const SHOP_COLLECTIONS: usize = 2;
 
 /// Fail Paykit's own listing at the end of the next receive of `party`'s app after a
@@ -2985,8 +2986,8 @@ async fn test_allowances_conflict_by_a_response_over_a_record_deleted_since_stil
     assert!(!view.consented);
 }
 
-/// Alice's keeper app, holding `paykit_pay`, `paykit_allowance` and `paykit_manage_contacts`: it reads the lists
-/// and blocks.
+/// Alice's keeper app, holding `paykit_pay`, `paykit_allowance` and `paykit_manage_contacts`: it
+/// reads the lists and blocks.
 async fn keeper(w: &World) -> Paykit {
     Box::pin(alice_app(
         w,
@@ -4673,7 +4674,8 @@ fn inject_with_id(
         .unwrap();
 }
 
-/// Carol's app `shop`, holding `paykit_request` and `paykit_allowance`, which alice's `wallet` admits.
+/// Carol's app `shop`, holding `paykit_request` and `paykit_allowance`, which alice's `wallet`
+/// admits.
 async fn carol_admitted(w: &World, wallet: &mut Paykit) -> Paykit {
     wallet.app_mut().invite(&w.carol_id()).await.unwrap();
     let mut carol = w

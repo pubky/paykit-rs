@@ -134,11 +134,10 @@ pub(crate) fn switch_collection(collection: Collection, label: Option<&Label>) -
     SwitchCollection::new(collection.name(), collection.policy(label))
 }
 
-/// The client's collection of one of Paykit's collections with every policy it allows
-/// (Paykit spec 6, Paykit wire 5.1): `payee_activity` is a sub-scope family, the fixed
-/// `paykit_request` policy and one per label, so an app holding `paykit_request` lists and takes every
-/// label's records, and one holding only `paykit_request:<label>` its label's; the others have
-/// their fixed policy alone.
+/// The client's collection of one of Paykit's collections with every policy it allows (Paykit spec
+/// 6, Paykit wire 5.1): `payee_activity` is a sub-scope family, the fixed `paykit_request` policy
+/// and one per label, so an app holding `paykit_request` lists and takes every label's records, and
+/// one holding only `paykit_request:<label>` its label's; the others have their fixed policy alone.
 pub(crate) fn family(collection: Collection) -> SwitchCollection {
     match collection {
         Collection::PayeeActivity => {

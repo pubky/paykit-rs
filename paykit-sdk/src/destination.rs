@@ -12,7 +12,7 @@
 //!   paid);
 //! - it carries the destination, and hasn't expired: a Private Payment List is used until the
 //!   earlier of its `expires_at` and 30 days after its inbox accepted it (Paykit spec 5);
-//! - the sending app's certificate allows `request` (a labelled selling scope counts), a
+//! - the sending app's certificate allows `paykit_request` (a labelled selling scope counts), a
 //!   listed certificate hasn't expired, and the app is current in the payee's
 //!   `identity.json`, its certificate counting at the time the message was accepted.
 //!
@@ -811,7 +811,7 @@ mod tests {
     fn test_destination_record_carrier_with_wrong_permissions_refused() {
         use pubky_switch_core::scopes::Permission;
         // A public record's certificate is checked in full before it carries a destination
-        // (Paykit wire 3.1): permissions missing one `request` needs, or holding another.
+        // (Paykit wire 3.1): permissions missing one `paykit_request` needs, or holding another.
         let missing = Party::with_permissions("bob", "shop", &["paykit_request"], &[]);
         let extra = Party::with_permissions(
             "bob",

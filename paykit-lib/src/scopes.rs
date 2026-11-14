@@ -425,9 +425,9 @@ pub fn permissions_for(scopes: &[String]) -> Vec<Permission> {
 ///   already taken the list as well formed, each a switch permission, once, in order.
 ///
 /// A `paykit_pay:x` or a plain `paykit_ext` is Paykit's name with no meaning, not another
-/// protocol's scope, so it doesn't widen the list. Another protocol's scopes, and the permissions they
-/// bring, authorize nothing in Paykit: each of its messages and documents still needs its
-/// own Paykit scope (Paykit spec 3.3).
+/// protocol's scope, so it doesn't widen the list. Another protocol's scopes, and the permissions
+/// they bring, authorize nothing in Paykit: each of its messages and documents still needs its own
+/// Paykit scope (Paykit spec 3.3).
 ///
 /// # Errors
 ///
@@ -822,8 +822,8 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("exactly what"), "{error}");
-        // `paykit_pay:x` and a plain `paykit_ext` are Paykit's names, not another protocol's: they don't
-        // let the list hold more.
+        // `paykit_pay:x` and a plain `paykit_ext` are Paykit's names, not another protocol's: they
+        // don't let the list hold more.
         assert!(check_certificate(&cert(
             &["paykit_request", "paykit_pay:x"],
             &[LISTS_READ, ADD]

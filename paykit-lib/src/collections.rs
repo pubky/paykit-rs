@@ -74,8 +74,9 @@ impl Collection {
 
     /// The policy of a record about a request sent under `label` (Paykit spec 6): a
     /// `payee_activity` record of a labelled request has its label's policy, `read_scope =
-    /// request:<label>` and `write_scopes = ["paykit_request:<label>"]`; every other record keeps its
-    /// collection's fixed policy, a `payer_activity` record whatever the request's label.
+    /// paykit_request:<label>` and `write_scopes =
+    /// ["paykit_request:<label>"]`; every other record keeps its collection's fixed policy, a
+    /// `payer_activity` record whatever the request's label.
     pub fn policy(self, label: Option<&Label>) -> Policy {
         match (self, label) {
             (Self::PayeeActivity, Some(label)) => {

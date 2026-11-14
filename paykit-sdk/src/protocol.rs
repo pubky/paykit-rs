@@ -1275,8 +1275,8 @@ mod receive_tests {
         let kinds = p.accepts(&wallet.cert);
         assert!(kinds.contains(&"paykit.payment_request".to_owned()));
         assert!(!kinds.contains(&"paykit.payment_proof".to_owned()));
-        // `paykit_allowance` takes the four Allowance messages; only `paykit_allowance_execute` takes
-        // `executor_notice` (Paykit spec 3.3).
+        // `paykit_allowance` takes the four Allowance messages; only `paykit_allowance_execute`
+        // takes `executor_notice` (Paykit spec 3.3).
         for kind in [
             "paykit.allowance_proposal",
             "paykit.allowance_acceptance",
@@ -1316,7 +1316,7 @@ mod receive_tests {
             "wallet",
             &["paykit_pay", "paykit_contacts"],
         ));
-        // `request` needs exactly `conversation.add` (Paykit wire 3.1): one without it, or
+        // `paykit_request` needs exactly `conversation.add` (Paykit wire 3.1): one without it, or
         // with `lists.read` beside it, is a certificate the Switch takes and Paykit refuses.
         let missing = Party::with_permissions("bob", "shop", &["paykit_request"], &[]);
         let extra = Party::with_permissions(

@@ -544,11 +544,11 @@ async fn test_periods_details_naming_another_period_never_stored() {
 #[tokio::test]
 async fn test_periods_details_for_a_record_not_listed_yet_held_until_listed() {
     // The wallet is narrowed to `paykit_contacts`; meanwhile bob's request comes and the phone
-    // accepts it. The wallet is renewed to `paykit_pay` and `paykit_request` with no bundle, the `paykit_request`
-    // key missing, so its records can't be
-    // listed, and bob's details come. The request record's absence from the wallet's copy
-    // decides nothing: the entry is held, not kept as details before their record. Once
-    // the keys come and the records are listed, the details go into the period record.
+    // accepts it. The wallet is renewed to `paykit_pay` and `paykit_request` with no bundle, the
+    // `paykit_request` key missing, so its records can't be listed, and bob's details come. The
+    // request record's absence from the wallet's copy decides nothing: the entry is held, not kept
+    // as details before their record. Once the keys come and the records are listed, the details go
+    // into the period record.
     use crate::certificate::{list, renew, store_bundle};
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;

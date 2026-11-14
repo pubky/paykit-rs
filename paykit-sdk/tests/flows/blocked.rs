@@ -12,16 +12,16 @@ use pubky_switch_core::http::ErrorCode;
 
 use crate::common::{btc, day_window, draft, endpoint, request_from, store, World, HOUR_MS};
 
-/// Alice's wallet holding `paykit_pay` and `paykit_manage_contacts`, with bob's request received, then
-/// bob blocked. Returns the wallet and the request.
+/// Alice's wallet holding `paykit_pay` and `paykit_manage_contacts`, with bob's request received,
+/// then bob blocked. Returns the wallet and the request.
 async fn blocked(w: &World) -> (Paykit, RequestRef) {
     let (mut wallet, _, request) = received(w, PaykitConfig::default()).await;
     wallet.block(&w.bob_id()).await.unwrap();
     (wallet, request)
 }
 
-/// Alice's wallet holding `paykit_pay` and `paykit_manage_contacts`, with `config`, and bob's request
-/// received. Returns the wallet, bob's shop and the request.
+/// Alice's wallet holding `paykit_pay` and `paykit_manage_contacts`, with `config`, and bob's
+/// request received. Returns the wallet, bob's shop and the request.
 async fn received(w: &World, config: PaykitConfig) -> (Paykit, Paykit, RequestRef) {
     let mut wallet = w
         .join_with(
@@ -482,8 +482,8 @@ async fn test_blocked_kept_resend_request_answered_only_once_the_deny_list_reads
         .is_empty());
 }
 
-/// Bob's shop holding `paykit_request` and `paykit_manage_contacts`, with a due mark of alice's replies
-/// dropped for the bounds, as the shop keeps one once it holds her request's record, and
+/// Bob's shop holding `paykit_request` and `paykit_manage_contacts`, with a due mark of alice's
+/// replies dropped for the bounds, as the shop keeps one once it holds her request's record, and
 /// alice's wallet to ask. Returns the shop.
 async fn shop_with_a_due_mark(w: &World) -> Paykit {
     let _wallet = w.wallet("wallet").await;
@@ -1960,8 +1960,8 @@ async fn test_blocked_list_request_while_the_deny_list_is_unknown_not_sent() {
     no_list_asked_while_held(Held::Unknown).await;
 }
 
-/// Bob's till, holding `paykit_request` and `paykit_manage_contacts`, on `store`, with its copy of the
-/// lists read.
+/// Bob's till, holding `paykit_request` and `paykit_manage_contacts`, on `store`, with its copy of
+/// the lists read.
 async fn contacts_till(
     w: &World,
     store: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,

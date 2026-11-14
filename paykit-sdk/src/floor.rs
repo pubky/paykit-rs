@@ -1,14 +1,14 @@
 //! The block floor (Paykit wire 5.6; Paykit spec 8.1, "Blocked counterparties").
 //!
-//! A message dropped because the user blocked its sender is asked for again once the sender
-//! is unblocked (`marks.rs`). A request that comes back that way is routed to every current
-//! payer app of the identity, not only to the app whose mark asked: a newly added app, or one
-//! that holds no mark of the sender, can receive it first. So the time before which a
-//! one-time request is paid only by hand is identity-shared: the `block_floor` record, one per
-//! identity, under `paykit_pay`, which every app that pays holds (Paykit spec 3.1:
-//! `paykit_allowance_execute` requires `paykit_pay`). Its floor only rises: a writer raises it, a reader
-//! refuses a later write of a lower one, and it never expires. A request created now is dated
-//! above every floor, so nothing fresh is held by it.
+//! A message dropped because the user blocked its sender is asked for again once the sender is
+//! unblocked (`marks.rs`). A request that comes back that way is routed to every current payer app
+//! of the identity, not only to the app whose mark asked: a newly added app, or one that holds no
+//! mark of the sender, can receive it first. So the time before which a one-time request is paid
+//! only by hand is identity-shared: the `block_floor` record, one per identity, under `paykit_pay`,
+//! which every app that pays holds (Paykit spec 3.1: `paykit_allowance_execute` requires
+//! `paykit_pay`). Its floor only rises: a writer raises it, a reader refuses a later write of a
+//! lower one, and it never expires. A request created now is dated above every floor, so nothing
+//! fresh is held by it.
 //!
 //! - **Raised before the ask.** Every `resend_request` this app sends goes through
 //!   [`Paykit::queue_resend_request`]: when its counterparty holds a live block mark here, or

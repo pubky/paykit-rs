@@ -90,12 +90,12 @@ impl ResendSelection {
 }
 
 impl Paykit {
-    /// Ask `counterparty` to re-send messages (Paykit spec 9, Paykit wire 4.12). Best effort:
-    /// the counterparty can't be made to answer. Returns the request's `msg_id`. Nothing is
-    /// queued while sends to `counterparty` are held: while the copy of the deny list holds
-    /// it, or, at an app holding `paykit_contacts`, while that copy isn't known, which a read of the
-    /// lists is tried for first (Paykit spec 8.1, "Blocked counterparties"). The ask goes in
-    /// one batch with the raise of the block floor it needs (`crate::floor`).
+    /// Ask `counterparty` to re-send messages (Paykit spec 9, Paykit wire 4.12). Best effort: the
+    /// counterparty can't be made to answer. Returns the request's `msg_id`. Nothing is queued
+    /// while sends to `counterparty` are held: while the copy of the deny list holds it, or, at an
+    /// app holding `paykit_contacts`, while that copy isn't known, which a read of the lists is
+    /// tried for first (Paykit spec 8.1, "Blocked counterparties"). The ask goes in one batch with
+    /// the raise of the block floor it needs (`crate::floor`).
     ///
     /// # Errors
     ///

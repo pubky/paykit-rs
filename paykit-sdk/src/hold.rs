@@ -296,17 +296,17 @@ impl Paykit {
         let Some(listed) = since else {
             return Ok(Some(KeysAwaited::PayerSide));
         };
-        // Without the current `paykit_pay` key the payer's records can't be written, as after a data
-        // epoch rotation.
+        // Without the current `paykit_pay` key the payer's records can't be written, as after a
+        // data epoch rotation.
         let pay_key = self
             .app
             .scope_key(self.app.data_epoch(), "paykit_pay")
             .is_some();
-        // Claims read now and not under the certificate listed under. Today this follows from
-        // the payer collections' term or from `paykit_pay` not held, where a resume reads nothing:
-        // `claims.read` comes with `paykit_pay`, which reads `payer_activity`, or with `paykit_allowance`
-        // (paykit-lib `scopes.rs`), which doesn't hold `paykit_pay`. It is kept so the rule doesn't
-        // lean on that table.
+        // Claims read now and not under the certificate listed under. Today this follows from the
+        // payer collections' term or from `paykit_pay` not held, where a resume reads nothing:
+        // `claims.read` comes with `paykit_pay`, which reads `payer_activity`, or with
+        // `paykit_allowance` (paykit-lib `scopes.rs`), which doesn't hold `paykit_pay`. It is kept
+        // so the rule doesn't lean on that table.
         let claims = !listed.has_permission(Permission::ClaimsRead)
             && held.has_permission(Permission::ClaimsRead);
         let payer =

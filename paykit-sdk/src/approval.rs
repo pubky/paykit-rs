@@ -2,8 +2,9 @@
 //! switch permissions `paykit-lib` derives for them, which the signer signs.
 //!
 //! A certificate lists every scope explicitly, including those another requires: asking for
-//! `paykit_pay` also asks for `paykit_contacts`, `paykit_allowance_execute` for `paykit_allowance`, `paykit_pay` and `paykit_contacts`,
-//! and `paykit_manage_contacts` for `paykit_contacts`. A certificate holds `paykit_request` or labelled selling scopes, never both.
+//! `paykit_pay` also asks for `paykit_contacts`, `paykit_allowance_execute` for `paykit_allowance`,
+//! `paykit_pay` and `paykit_contacts`, and `paykit_manage_contacts` for `paykit_contacts`. A
+//! certificate holds `paykit_request` or labelled selling scopes, never both.
 
 use paykit_lib::scopes::{check_requested_scopes, permissions_for, ExtensionPrefix};
 use paykit_lib::Label;
@@ -59,7 +60,7 @@ impl AppScopes {
         self.with("paykit_pay").with("paykit_contacts")
     }
 
-    /// `request`: act as payee, for every label.
+    /// `paykit_request`: act as payee, for every label.
     #[must_use]
     pub fn request(self) -> Self {
         self.with("paykit_request")
@@ -71,14 +72,14 @@ impl AppScopes {
         self.with(&label.scope())
     }
 
-    /// `allowance`: Allowances.
+    /// `paykit_allowance`: Allowances.
     #[must_use]
     pub fn allowance(self) -> Self {
         self.with("paykit_allowance")
     }
 
-    /// `paykit_allowance_execute`, with the `paykit_allowance`, `paykit_pay` and `paykit_contacts` it requires: every
-    /// executor reads the deny list (Paykit spec 3.1).
+    /// `paykit_allowance_execute`, with the `paykit_allowance`, `paykit_pay` and `paykit_contacts`
+    /// it requires: every executor reads the deny list (Paykit spec 3.1).
     #[must_use]
     pub fn allowance_execute(self) -> Self {
         self.with("paykit_allowance")
@@ -145,8 +146,8 @@ mod tests {
 
     #[test]
     fn test_approval_pay_asks_for_contacts() {
-        // A paying app reads the deny list, so `paykit_pay` brings the `paykit_contacts` it requires and
-        // its `lists.read` (Paykit spec 3.1, 3.2).
+        // A paying app reads the deny list, so `paykit_pay` brings the `paykit_contacts` it
+        // requires and its `lists.read` (Paykit spec 3.1, 3.2).
         let payer = AppScopes::new().pay().build().unwrap();
         assert_eq!(payer.scopes, vec!["paykit_pay", "paykit_contacts"]);
         assert!(payer.permissions.contains(&Permission::ListsRead));
