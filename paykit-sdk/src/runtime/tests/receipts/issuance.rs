@@ -864,6 +864,8 @@ async fn test_issued_receipts_report_receipt_access_delivery() {
     set_outbound(Box::new(move |mut message| {
         message.confirmed_at = None;
         message.sent_at = None;
+        message.attempt_count += 1;
+        message.last_attempt_at = Some(at(8));
         mark_outbound_sent(message, at(8))
     }))
     .await;
@@ -881,14 +883,46 @@ async fn test_issued_receipts_report_receipt_access_delivery() {
     assert_eq!(view.updated_at, at(8));
     assert!(view.last_error.is_none());
 
-    set_outbound(Box::new(move |mut message| {
-        message.confirmed_at = Some(at(10));
-        message
-    }))
-    .await;
+    // The peer's confirmation arrives while the wall clock reads earlier than
+    // the publication; delivery time must not move backwards.
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            let confirmation = paykit_lib::DeliveryConfirmation::new(
+                paykit_lib::PaykitAppId::new("test-app").unwrap(),
+                paykit_lib::EventId::new(&queued.receipt_access_event_id).unwrap(),
+                crate::domain::private_stream::payload_hash(&queued.access_json),
+            )
+            .unwrap();
+            move |tx| {
+                crate::domain::private_stream::apply_delivery_confirmation(
+                    tx,
+                    &counterparty,
+                    &confirmation,
+                    at(7),
+                )
+            }
+        })
+        .await
+        .unwrap();
+    let confirmed = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                Ok(tx
+                    .outbound_private_messages(&counterparty)
+                    .into_iter()
+                    .find(|message| message.outbound_message_id == outbound_message_id)
+                    .unwrap())
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(confirmed.confirmed_at, Some(at(8)));
+    assert_eq!(confirmed.updated_at, at(9));
     let view = views().await;
     assert_eq!(view.status, ReceiptIssuanceStatus::AccessSent);
-    assert_eq!(view.updated_at, at(10));
+    assert_eq!(view.updated_at, at(8));
 
     // Repeating issuance returns the same delivery status.
     let repeated = sdk
