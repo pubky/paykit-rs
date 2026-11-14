@@ -1250,6 +1250,37 @@ impl Paykit {
         Ok(!answers_kept(&own, Some(&allowance.allowance_id), before, notes, None)?.is_empty())
     }
 
+    /// Whether the client stores an entry from `counterparty` that may be an answer to an
+    /// Allowance's proposal (Switch spec 8.2): an acceptance or a rejection, or one whose
+    /// message doesn't read, so its kind can't be told. Such an entry is applied, noted or
+    /// tried again later, and may be an earlier answer than the record's response, so an
+    /// executor pays nothing under an Allowance of that counterparty meanwhile (Paykit spec
+    /// 8.1, "Stored entries"; 8.3, "Conflicted"). An entry stored unverified names its
+    /// sender as its message claims it, and holds the same way.
+    pub(crate) async fn stored_answer_from(&mut self, counterparty: &[u8; 32]) -> Result<bool> {
+        for entry in Box::pin(self.app.parked_entries()).await? {
+            if !entry.readable {
+                // Its sender can't be read either: it may be the counterparty's.
+                return Ok(true);
+            }
+            let Some(parked) = Box::pin(self.app.parked_entry(entry.stored_id)).await? else {
+                continue;
+            };
+            if parked.sender != *counterparty {
+                continue;
+            }
+            let answer = parked.message.as_ref().is_none_or(|message| {
+                [Kind::AllowanceAcceptance, Kind::AllowanceRejection]
+                    .iter()
+                    .any(|kind| message.kind == kind.as_str())
+            });
+            if answer {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Whether `counterparty` owes this app a re-send of replies the bounds on kept replies
     /// dropped (its `pd/` mark is kept, [`crate::marks::MarkFamily::Replies`]): an answer to
     /// an Allowance's proposal may be among them, and until it comes back a later different

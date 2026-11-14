@@ -726,6 +726,11 @@ impl Paykit {
         if self.answer_kept_to_write(record, &allowance).await? {
             return refuse("an answer to the Allowance's proposal is kept, not yet written");
         }
+        if self.stored_answer_from(&allowance.counterparty).await? {
+            return refuse(
+                "the client stores an entry from the counterparty that may be an answer",
+            );
+        }
         if self.resend_owed_by(&allowance.counterparty).await? {
             return refuse("the counterparty owes a re-send of replies dropped for the bounds");
         }

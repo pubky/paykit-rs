@@ -2633,3 +2633,52 @@ async fn test_executor_payee_blocked_after_the_paying_commit_not_paid() {
     });
     Box::pin(held_at_the_dispatch(&w, &mut wallet, &request, &record)).await;
 }
+
+#[tokio::test]
+async fn test_executor_pays_nothing_while_the_client_stores_an_answer_of_its_counterparty() {
+    // An acceptance from bob comes while bob's standing can't be checked: the client stores
+    // it unverified and tries it again at each read. It may be an earlier answer than the
+    // record's response, so while it is stored the executor pays nothing under an Allowance
+    // of bob's; once a read takes it, the payment goes (Paykit spec 8.1, "Stored entries";
+    // 8.3, "Conflicted").
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(&w, terms_with(json!({})))).await;
+    let mut unexpiring = draft("0.5", w.clock.now_ms());
+    unexpiring.proposal_expires_at_ms = None;
+    let request = Box::pin(request_from(&mut shop, w.alice_id(), unexpiring)).await;
+    Box::pin(wallet.receive(None)).await.unwrap();
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.allowance_acceptance",
+        vec![[7; 32]],
+        json!({ "allowance_id": paykit_lib::AllowanceId::generate().unwrap().as_str() })
+            .as_object()
+            .cloned()
+            .unwrap(),
+    );
+    w.homeserver.set_down(true);
+    // Past the 10 minutes bob's `identity.json` is cached for, and the bounded wait.
+    w.clock.advance_ms(11 * 60_000);
+    let _ = Box::pin(wallet.receive(None)).await;
+    w.clock
+        .advance_ms(pubky_switch_client::app::DEFAULT_PARK_AFTER_MS + 1);
+    let _ = Box::pin(wallet.receive(None)).await;
+    assert_eq!(wallet.app_mut().parked_entries().await.unwrap().len(), 1);
+    w.homeserver.set_down(false);
+    let refused = Box::pin(wallet.pay_under_allowance(&request, &record))
+        .await
+        .unwrap_err();
+    assert!(refused_for(&refused, "stores an entry"), "{refused:?}");
+    assert!(w.rail.all_executions().is_empty());
+    // The next read verifies bob and takes the entry: nothing is stored, and the request is
+    // paid under the Allowance.
+    Box::pin(wallet.receive(None)).await.unwrap();
+    assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
+    let paid = Box::pin(wallet.pay_under_allowance(&request, &record))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+}
