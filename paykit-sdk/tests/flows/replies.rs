@@ -1595,3 +1595,125 @@ async fn test_replies_proof_over_an_unread_settlement_record_from_a_blocked_send
         "(t2 credited, carol's proofs only counted, stored entries after a day, after 31 days)"
     );
 }
+
+/// Alice's reply of `kind` to the request `request`, signed by her app `wallet` under
+/// `msg_id`, sent to bob's `shop`.
+fn replies_with_id(
+    w: &World,
+    shop: &Paykit,
+    kind: &str,
+    request: [u8; 32],
+    body: serde_json::Value,
+    msg_id: &str,
+) {
+    let keys = w.alice.identity().app_keys("wallet");
+    let cert = w.alice.switch().app(&keys.app_id_bytes()).cert.unwrap();
+    let mut message = pubky_switch_core::message::Message::new(
+        kind,
+        pubky_switch_core::message::Sender::of_app(w.alice_id(), &keys),
+        w.bob_id(),
+        w.clock.now_ms(),
+        vec![request],
+        body.as_object().cloned().unwrap(),
+    )
+    .unwrap();
+    message.msg_id = msg_id.to_owned();
+    let plaintext = message.sign(&keys).unwrap();
+    w.bob
+        .switch()
+        .send_plaintext(w.alice_id(), &cert, &plaintext, &[shop.app_id()])
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_replies_kept_of_one_millisecond_placed_in_acceptance_order() {
+    // Alice's rejection of a request, then her acceptance of it, reach the shop in one
+    // millisecond before it holds the request's record, the rejection under the `msg_id`
+    // that sorts last. Once the record is held, the reply the inbox accepted first is the
+    // record's response: the request is rejected, whatever the `msg_id`s (Paykit spec 8.1).
+    let w = World::new();
+    let _wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let body = json!({
+        "amount": { "asset": "btc", "value": "1" },
+        "payment_reference": "order-1",
+        "proposal_expires_at": null,
+        "payment_endpoints": { "btc-lightning-bolt11": "lnbc1invoice" }
+    });
+    let request = shop
+        .app()
+        .sign_message(OutgoingMessage::new(
+            w.alice_id(),
+            "paykit.payment_request",
+            body.as_object().cloned().unwrap(),
+        ))
+        .unwrap();
+    w.clock.advance_ms(1);
+    replies_with_id(
+        &w,
+        &shop,
+        "paykit.payment_request_rejection",
+        request.hash(),
+        json!({ "reason": null, "label": null }),
+        "f0e1d2c3-b4a5-4697-8879-6a5b4c3d2e1f",
+    );
+    replies_with_id(
+        &w,
+        &shop,
+        "paykit.payment_request_acceptance",
+        request.hash(),
+        json!({ "label": null }),
+        "0d6f5b9e-3c1a-4e8b-9f2d-7a4c1e5b8d30",
+    );
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 2);
+    record_request(&w, &mut shop, &request).await;
+    for _ in 0..2 {
+        shop.receive(None).await.unwrap();
+    }
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    let sales = shop.payee_activity().await.unwrap();
+    assert_eq!(sales.len(), 1);
+    assert_eq!(sales[0].status, PayeeStatus::Rejected);
+}
+
+#[tokio::test]
+async fn test_replies_stored_of_one_millisecond_placed_in_acceptance_order() {
+    // Alice's rejection of a request the shop holds, then her acceptance of it, come in one
+    // millisecond, the rejection under the `msg_id` that sorts last, and the switch refuses
+    // the record write of each for good: both entries are stored. The shop writes them by
+    // later writes of its own in the order its inbox accepted them, so the request is
+    // rejected, whatever the `msg_id`s (Paykit spec 8.1).
+    let w = World::new();
+    let _wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    w.clock.advance_ms(1);
+    replies_with_id(
+        &w,
+        &shop,
+        "paykit.payment_request_rejection",
+        request.request_hash,
+        json!({ "reason": null, "label": null }),
+        "f0e1d2c3-b4a5-4697-8879-6a5b4c3d2e1f",
+    );
+    replies_with_id(
+        &w,
+        &shop,
+        "paykit.payment_request_acceptance",
+        request.request_hash,
+        json!({ "label": null }),
+        "0d6f5b9e-3c1a-4e8b-9f2d-7a4c1e5b8d30",
+    );
+    crate::common::refuse_writes(&w.bob, 4);
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.app().protocol_scan(b"se/").await.unwrap().len(), 2);
+    for _ in 0..2 {
+        shop.receive(None).await.unwrap();
+    }
+    let sales = shop.payee_activity().await.unwrap();
+    assert_eq!(sales.len(), 1);
+    assert_eq!(sales[0].status, PayeeStatus::Rejected);
+}
