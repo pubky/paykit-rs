@@ -1097,8 +1097,8 @@ impl Paykit {
     }
 
     /// The payee cancels a request it sent (Paykit spec 8.1, Paykit wire 4.8). The
-    /// cancellation carries no label and goes to the payer's apps holding `paykit_pay` or
-    /// `request` (Paykit spec 3.4). A proof that crosses it still counts as payment.
+    /// cancellation carries no label and goes only to the payer's apps holding `paykit_pay`
+    /// (Paykit spec 3.4). A proof that crosses it still counts as payment.
     ///
     /// # Errors
     ///

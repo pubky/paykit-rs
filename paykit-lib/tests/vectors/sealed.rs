@@ -15,12 +15,21 @@ use pubky_switch_core::sealed::{aad, pad, RecordValue, SealedValue};
 use serde_json::Value;
 
 use crate::common::{
-    arr, b64n, generated, hex, message_json, paykit, pubky, quoted, recertified, st, unhex32, Keys,
-    Place, ALICE, ALLOWANCE_ID, BOB,
+    arr, b64n, generated, hex, message_json, paykit, pubky, quoted, recertified, st, unhex32,
+    writing, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
 };
 
 #[test]
 fn test_vectors_sealed() {
+    if !writing() {
+        check();
+    }
+}
+
+/// `sealed.json` against paykit-lib: its generated cases, then every check of its cases. With
+/// [`WRITE_VECTORS`](crate::common::WRITE_VECTORS) set, the regeneration driver runs it once it
+/// has written the set.
+pub(crate) fn check() {
     let keys = Keys::from_seeds();
     generate(&keys);
     let v = paykit("sealed.json");
@@ -1227,8 +1236,9 @@ fn check_later_writes(keys: &Keys, v: &Value) {
 }
 
 /// The cases paykit-lib generates in `sealed.json` (README "How the files were generated"),
-/// compared with the file, and written into it with `PAYKIT_WRITE_VECTORS`.
-fn generate(keys: &Keys) {
+/// compared with the file, and written into the set by the
+/// regeneration driver (`regenerate.rs`).
+pub(crate) fn generate(keys: &Keys) {
     let (accepted, refused) = activity_cases(keys);
     let write = |(name, record, key): &ActivityCase, taken: bool| -> Value {
         // A refused record is written without the writer's rules, which refuse it too.
@@ -1384,6 +1394,9 @@ fn binding_cases(keys: &Keys) -> Vec<(Place<'static>, Value)> {
     out
 }
 
+/// The seed label of the nonce `labelled` is sealed with.
+const LABELLED_NONCE_LABEL: &str = "sealed/labelled/nonce";
+
 /// The label of each `labelled` rejection, by its name: the policy it is read under.
 fn labelled_rejection_label(name: &str) -> Option<Label> {
     match name {
@@ -1421,7 +1434,10 @@ fn labelled_cases(keys: &Keys) -> Vec<(Place<'static>, Value)> {
         .record_key(&nk, &natural, Some(&shop1))
         .unwrap();
     let plaintext = recertified(keys, st(l, "plaintext"));
-    let nonce: [u8; 24] = crate::common::unhex(st(l, "nonce_hex")).try_into().unwrap();
+    // The nonce is the seed of its label, cut to the nonce's length (README "Seeds").
+    let nonce: [u8; 24] = crate::common::seed(LABELLED_NONCE_LABEL)[..24]
+        .try_into()
+        .unwrap();
     let sealed = SealedValue::seal_with_nonce(
         &label_key,
         &bob,
@@ -1433,6 +1449,7 @@ fn labelled_cases(keys: &Keys) -> Vec<(Place<'static>, Value)> {
     )
     .unwrap();
     let mut out = vec![
+        (Place::At("/labelled/nonce_hex".into()), json!(hex(&nonce))),
         (Place::At("/labelled/identity_hex".into()), json!(hex(&bob))),
         (
             Place::At("/labelled/label_key_hex".into()),
