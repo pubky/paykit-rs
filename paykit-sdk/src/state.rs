@@ -631,6 +631,27 @@ impl sealed::Sealed for KeptMessage {}
 ///   spec 8.3, "Conflicted").
 impl Stored for KeptMessage {
     fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        // A member of a bounded pool, the kept replies or the kept stops, is ordered by when
+        // its inbox accepted it, by the feed `seq` its entry was read at within one
+        // millisecond (`records::KeptOrder`): which one the bounds drop, which of an
+        // Allowance's ends stops it and which of its answers is the record's response. A
+        // conflict's stop is ordered the same way among its record's answers: an answer
+        // accepted after it never takes the response. One without its acceptance time or its
+        // `seq` can't be ordered, whatever its kind, so this is checked first, before any
+        // kind's own check can take the value; a held list is ordered by nothing, and no
+        // writer gives it a `seq`.
+        let pooled = matches!(
+            family,
+            StateKey::KeptCancellation(_)
+                | StateKey::KeptReply { .. }
+                | StateKey::AllowanceEnd { .. }
+                | StateKey::Conflict(_)
+        );
+        if pooled {
+            self.order()?;
+        } else if self.seq().is_some() {
+            return corrupt();
+        }
         let message = self.stored(&binder.own)?;
         let first = || {
             message
@@ -746,23 +767,6 @@ impl Stored for KeptMessage {
             _ => return corrupt(),
         };
         if binder.record_key(&target)? != *record_key {
-            return corrupt();
-        }
-        // A member of a bounded pool, the kept replies or the kept stops, is ordered by when
-        // its inbox accepted it, by the feed `seq` its entry was read at within one
-        // millisecond (`records::KeptOrder`): which one the bounds drop, which of an
-        // Allowance's ends stops it and which of its answers is the record's response. A
-        // conflict's stop is ordered the same way among its record's answers: an answer
-        // accepted after it never takes the response. One without its `seq` can't be
-        // ordered; a held list is ordered by nothing, and no writer gives it one.
-        let pooled = matches!(
-            family,
-            StateKey::KeptCancellation(_)
-                | StateKey::KeptReply { .. }
-                | StateKey::AllowanceEnd { .. }
-                | StateKey::Conflict(_)
-        );
-        if pooled != self.seq().is_some() {
             return corrupt();
         }
         Ok(())

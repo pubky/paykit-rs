@@ -1836,6 +1836,56 @@ mod receive_tests {
         assert!(!restores::<KeptMessage>(&alice, at.as_bytes(), &value));
     }
 
+    /// `value`, a kept message's encoded bytes, with its feed `seq` set to `seq`, or removed
+    /// for `None`.
+    fn with_seq(value: &[u8], seq: Option<serde_json::Value>) -> Vec<u8> {
+        let mut json: serde_json::Value = serde_json::from_slice(value).unwrap();
+        let kept = json["d"].as_object_mut().unwrap();
+        match seq {
+            Some(seq) => kept.insert("seq".into(), seq),
+            None => kept.remove("seq"),
+        };
+        serde_json::to_vec(&json).unwrap()
+    }
+
+    #[test]
+    fn test_protocol_restore_refuses_a_kept_unrequested_proof_it_cannot_order() {
+        // A proof of a payment without a request is a kept reply (`pr/`) like any other, and
+        // is placed among them in the order its inbox accepted it: one kept without its feed
+        // `seq`, or with a null one, can't be ordered, so a restore refuses it, though its
+        // record, which only the rail names, isn't bound until it is placed.
+        let alice = Party::new("alice", "wallet", &["pay", "contacts"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let proof = alice.message(
+            &bob,
+            "paykit.payment_proof",
+            Vec::new(),
+            object(json!({
+                "attempt_id": "mAFdg5_0tVNjmrgiTUZW4g",
+                "payment_app_id": "brrz3m6g5rci6iqnzke44q4djc",
+                "payment_endpoint_identifier": "btc-bitcoin-p2wpkh",
+                "amount": { "asset": "btc", "value": "0.1" },
+                "proof": { "rail": "fake", "tx": "t1" },
+            })),
+        );
+        let at = key::kept_reply(&alice.id(), &[9; 32], &proof.message().msg_id);
+        let value = state::encode(&KeptMessage::taken(&proof, 3)).unwrap();
+        assert!(restores::<KeptMessage>(&bob, at.as_bytes(), &value));
+        assert!(restores::<KeptMessage>(
+            &bob,
+            at.as_bytes(),
+            &with_seq(&value, Some(json!(0)))
+        ));
+        for unordered in [
+            with_seq(&value, None),
+            with_seq(&value, Some(serde_json::Value::Null)),
+            with_seq(&value, Some(json!("3"))),
+            without_acceptance(&value),
+        ] {
+            assert!(!restores::<KeptMessage>(&bob, at.as_bytes(), &unordered));
+        }
+    }
+
     #[test]
     fn test_protocol_restore_refuses_a_kept_reply_without_its_acceptance_time() {
         // A reply is kept only as its inbox accepted it: one without the time can't come
