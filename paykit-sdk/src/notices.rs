@@ -53,7 +53,10 @@ pub enum NoticeKind {
     /// of 30 days from its signing passed before they weren't: it was never sent, and never
     /// will be. Its request record still holds it, so no own app pays or accepts the
     /// request; the payee wasn't told. `counterparty` is then the payee, and `msg_id` the
-    /// answer's.
+    /// answer's. The same notice tells of such an answer whose request record, read and not
+    /// paused as divergent, no longer holds it nor any stop, as after a provider loss whose
+    /// confirmed write lacks it: it was never sent, the request may be paid or accepted
+    /// again, and the user may answer it again.
     MessageGivenUp,
 }
 
@@ -133,12 +136,19 @@ pub(crate) enum GivenUpOrigin {
     /// A payer's reply kept for its record, or a receipt kept for a payer record that
     /// didn't read (`pr/`), was given up.
     KeptReply,
+    /// A message kept to write over a divergent record (`dw/`) was given up, its record's
+    /// user not having confirmed it in time.
+    Divergent,
     /// The receive step gave up an Allowance proposal or answer over a record value that
     /// doesn't read, past its window (`allowances.rs`): it was processed.
     ReceiveStep,
     /// This app's own rejection or payer's cancellation, recorded while sends to the payee
-    /// were held (`ha/`), passed its replay window unsent.
+    /// were held (`ha/`), passed its replay window unsent, or was lost with a write of its
+    /// request record that holds neither it nor any stop.
     HeldAnswer,
+    /// A received message whose entry was held unprocessed while the record it goes into
+    /// couldn't be read, past its 30 days.
+    HeldUnread,
 }
 
 /// What a message given up leaves behind ([`KeptNotice::given_up`]).

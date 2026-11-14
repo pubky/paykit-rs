@@ -639,6 +639,17 @@ fn put_placed(
     {
         return keep_conflict(cx, target, stored, scopes);
     }
+    // Over a record whose view is divergent and unconfirmed, a write that adds no stop, a
+    // proposal or an acceptance, is stored, its entry tried again at each read, and written
+    // once the user confirms the record (Paykit spec 6, 8.1 "Stored entries"); a rejection
+    // goes over it (`divergent::adds_stop`).
+    if !reflects(&record, &stored.message().msg_id) {
+        if let Some(held) = cx.record(target)? {
+            if crate::divergent::step_write_waits(cx, &held, stored, &|_| None)? {
+                return stored_entry(cx, stored);
+            }
+        }
+    }
     if place(&mut record, stored.clone()) {
         cx.put_record(target, &record.to_json()?, Vec::new())?;
     }
@@ -1261,6 +1272,11 @@ impl Paykit {
             // "What stops or settles a payment still goes"; 8.3).
             if kind != Kind::AllowanceEnd {
                 Box::pin(self.refuse_while_sends_held(&held.counterparty)).await?;
+            }
+            // An acceptance adds no stop: it waits for the user's confirmation of a record
+            // seen divergent (Paykit spec 6). A rejection and an end are stops and go.
+            if kind == Kind::AllowanceAcceptance {
+                Box::pin(self.refuse_while_write_waits(record)).await?;
             }
             let proposal = held.proposal.hash();
             let to_here = held.proposal.message().to == own;
@@ -2117,6 +2133,14 @@ impl Paykit {
                 Some(held) if held.conflicted.is_none() && conflicts(&held, &stored) => {
                     Box::pin(self.keep_conflict_later(&record, &stored, locals)).await?;
                     return Ok(Placed::Done);
+                }
+                // A proposal or an acceptance waits over a divergent record until the user
+                // confirms it, as at receive; a rejection goes.
+                Some(held)
+                    if !reflects(&held, &stored.message().msg_id)
+                        && Box::pin(self.divergent_write_waits(&record, &stored)).await? =>
+                {
+                    return Ok(Placed::Not);
                 }
                 Some(mut held) => {
                     if !place(&mut held, stored) {

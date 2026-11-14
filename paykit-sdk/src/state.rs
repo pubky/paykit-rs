@@ -53,8 +53,10 @@
 //! | `pd/<sender>` | a mark of a sender's replies dropped for the bounds on kept replies: the earliest and the latest acceptance among them, and when it was last asked to send them again (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `kw/<sender>` | a mark of a sender's entries the client dropped while they waited for a scope key, as `pd/` holds, with the data epochs they waited for; it asks only while the app holds every key of those epochs (`marks.rs`) | |
-//! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply, or a payee's period details, for a request the app holds no record of yet, kept until it does, or a receipt for a payer record the app holds but can't read, kept until it reads (`receive.rs`), or a counterparty's Allowance answer before the app holds its Allowance record, with the intake that orders it (`allowances.rs`) | |
+//! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply, or a payee's period details, for a request the app holds no record of yet, or whose record it holds but can't open, read or bind, kept until it does, placed only once the record names its sender, a proof of a payment without a request for the payee's record of its settlement that the app holds but can't read, placed once it reads naming its sender and removed if it names another, or a receipt for a payer record the app holds but can't read and that isn't paused as divergent, kept until it reads, and moved to `dw/` if it reads paused (`receive.rs`), or a counterparty's Allowance answer before the app holds its Allowance record (`allowances.rs`); each with the intake that orders it in the pool (`records::KeptOrder`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing, since a dropped entry's time is already in its sender's mark | |
+//! | `dv/<record key>` | the pause mark of a record the app has seen divergent: paused until the user confirms, or the write the user confirmed over, with the write a credit's refusal showed it at and the write a credit's confirmation was given over, which is always the write that showing names, at or before the plain confirmation: any other stored state reads as a corrupt store (`divergent.rs`); a restore installs it paused, neither shown nor confirmed for a credit | |
+//! | `dw/<record key>/<role>/<sender>/<msg_id>` | a received message, by its sender and `msg_id`, whose write over a divergent record waits for the user's confirmation, or for the messages kept over the record before it, to write into its record later, in the order its inbox accepted them (by acceptance time, then where the receive step took it among those kept over the record, which is the feed's order, never by `msg_id`), a receipt over a payer record that doesn't read included, written once the record also reads, and one kept in `pr/` whose record read paused; never one from anyone but the counterparty of a record that reads; given up at its 30 days, also one that no longer points to its record (`divergent.rs`) | |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, with the entry's ID and message hash, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
 //! | `ae/<record key>/<msg_id>` | a counterparty's `allowance_end`, kept as the stop until the Allowance record holds an end or a rejection; every distinct end is kept, each under its `msg_id` and with the intake that orders it, until the record shows which one names what it holds (`allowances.rs`, Paykit spec 8.3) | |
 //! | `ac/<record key>` | the consent list: an Allowance this app may pay under, or removed from it for good (`allowances.rs`, Paykit spec 8.3); a restore marks every entry to confirm again | |
@@ -601,7 +603,9 @@ impl sealed::Sealed for KeptMessage {}
 ///   it names first: this app's payee record, under its label, for a reply; the payer's
 ///   record of the sender's request for details (Switch spec 8.2, Paykit spec 8.1, 8.2); or
 ///   a `paykit.payment_receipt`, kept under the record key of the payer's record it names
-///   ([`crate::receive::receipt_target`]).
+///   ([`crate::receive::receipt_target`]); or a proof of a payment without a request, from
+///   that sender and of that `msg_id`, whose record, the payee's of its settlement, is
+///   proven against the rail before it is placed.
 /// - At `lh/<record key>`, a `paykit.private_payment_list`, kept under the record key of its
 ///   payee app's `payment_lists` record, from its sender and App ID (Paykit wire 5.4).
 /// - At `pr/<sender>/<record key>/<msg_id>` too, an Allowance's acceptance or rejection its
@@ -628,6 +632,19 @@ impl Stored for KeptMessage {
                 .ok_or_else(PaykitError::corrupt)
         };
         let (target, record_key) = match (family, message.body()) {
+            // A proof of a payment without a request kept for the payee's record of its
+            // settlement, which didn't read: the record is the one the rail's settlement of
+            // the proof names, which no binder can read, so it is proven before the proof is
+            // placed (`Paykit::place_kept_replies`): one kept for another record is never
+            // written, and is given up at its 30 days.
+            (StateKey::KeptReply { sender, msg_id, .. }, Body::PaymentProof(_))
+                if message.message().refs.is_empty()
+                    && message.sender() == *sender
+                    && message.message().msg_id == *msg_id
+                    && message.accepted_at().is_some() =>
+            {
+                return Ok(());
+            }
             (StateKey::KeptCancellation(record_key), Body::PaymentRequestCancellation(_))
                 if message.accepted_at().is_some() =>
             {
@@ -907,6 +924,42 @@ impl Stored for KeyWaitMark {
     }
 }
 
+impl sealed::Sealed for crate::divergent::DivergentMark {}
+
+/// A divergent record's pause mark: of the record its key names, of one of Paykit's
+/// collections ([`crate::divergent::DivergentMark::bind_to`]).
+impl Stored for crate::divergent::DivergentMark {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        let StateKey::Divergent(record) = family else {
+            return corrupt();
+        };
+        self.bind_to(record)
+    }
+}
+
+impl sealed::Sealed for crate::divergent::DivergentWrite {}
+
+/// A message kept over a divergent record: of the record, role, sender and `msg_id` its key
+/// names,
+/// its message verified for this app and naming that record
+/// ([`crate::divergent::DivergentWrite::bind_to`]).
+impl Stored for crate::divergent::DivergentWrite {
+    fn bind(&self, _: &str, family: &StateKey, binder: &Binder<'_>) -> Result<()> {
+        let StateKey::DivergentWrite {
+            record,
+            role,
+            sender,
+            msg_id,
+        } = family
+        else {
+            return corrupt();
+        };
+        self.bind_to(record, *role, sender, msg_id, &binder.own, &|target| {
+            binder.record_key(target)
+        })
+    }
+}
+
 impl sealed::Sealed for ConsentEntry {}
 
 /// An entry of the consent list: of the Allowance record its key names, which its
@@ -994,6 +1047,43 @@ pub(crate) mod key {
     pub(crate) const DROPPED_REPLIES: &str = "pd/";
     pub(crate) const DROPPED_UNVERIFIED: &str = "ud/";
     pub(crate) const KEY_WAITS: &str = "kw/";
+    pub(crate) const DIVERGENT: &str = "dv/";
+    pub(crate) const DIVERGENT_WRITES: &str = "dw/";
+
+    /// The pause mark of the divergent record `record_key`.
+    pub(crate) fn divergent(record_key: &[u8; 32]) -> String {
+        format!("{DIVERGENT}{}", b64(record_key))
+    }
+
+    /// The prefix of every message kept to write over the divergent record `record_key`.
+    pub(crate) fn divergent_writes_at(record_key: &[u8; 32]) -> String {
+        format!("{DIVERGENT_WRITES}{}/", b64(record_key))
+    }
+
+    /// The prefix of the messages of `role` kept to write over the divergent record
+    /// `record_key`.
+    pub(crate) fn divergent_writes_of(
+        record_key: &[u8; 32],
+        role: crate::divergent::WriteRole,
+    ) -> String {
+        format!("{DIVERGENT_WRITES}{}/{}/", b64(record_key), role.tag())
+    }
+
+    /// The message `msg_id` from `sender` of `role` kept to write over the divergent record
+    /// `record_key`: a `msg_id` is the sender's own, so the key names both.
+    pub(crate) fn divergent_write(
+        record_key: &[u8; 32],
+        role: crate::divergent::WriteRole,
+        sender: &[u8; 32],
+        msg_id: &str,
+    ) -> String {
+        format!(
+            "{}{}/{msg_id}",
+            divergent_writes_of(record_key, role),
+            b64(sender)
+        )
+    }
+
     pub(crate) const ALLOWANCE_ENDS: &str = "ae/";
     pub(crate) const CONFLICTS: &str = "cf/";
     pub(crate) const CONSENTS: &str = "ac/";
@@ -1251,6 +1341,16 @@ pub(crate) enum StateKey {
     StoredNote { sender: [u8; 32], msg_id: String },
     /// `nt/<sender>/<msg_id>`: a notice for the host about a message given up.
     MessageNotice { sender: [u8; 32], msg_id: String },
+    /// `dv/<record key>`: the pause mark of a divergent record.
+    Divergent([u8; 32]),
+    /// `dw/<record key>/<role>/<sender>/<msg_id>`: a message kept to write over a divergent
+    /// record.
+    DivergentWrite {
+        record: [u8; 32],
+        role: crate::divergent::WriteRole,
+        sender: [u8; 32],
+        msg_id: String,
+    },
     /// `nt/<attempt_id>/<kind>`: a notice for the host.
     Notice {
         attempt: AttemptId,
@@ -1409,6 +1509,18 @@ impl StateKey {
                         Self::KeptReply {
                             sender: b64_32(sender)?,
                             record: b64_32(record)?,
+                            msg_id: msg_id(id)?,
+                        }
+                    }
+                    "dv" => Self::Divergent(b64_32(rest)?),
+                    "dw" => {
+                        let (record, rest) = rest.split_once('/')?;
+                        let (role, rest) = rest.split_once('/')?;
+                        let (sender, id) = rest.split_once('/')?;
+                        Self::DivergentWrite {
+                            record: b64_32(record)?,
+                            role: crate::divergent::WriteRole::from_tag(role)?,
+                            sender: b64_32(sender)?,
                             msg_id: msg_id(id)?,
                         }
                     }
@@ -1958,6 +2070,16 @@ mod tests {
                     msg_id: id.into(),
                 },
             ),
+            (key::divergent(&pubky), StateKey::Divergent(pubky)),
+            (
+                key::divergent_write(&pubky, crate::divergent::WriteRole::List, &pubky, id),
+                StateKey::DivergentWrite {
+                    record: pubky,
+                    role: crate::divergent::WriteRole::List,
+                    sender: pubky,
+                    msg_id: id.into(),
+                },
+            ),
             (
                 key::notice(&attempt, crate::notices::NoticeKind::HeldWithoutPay),
                 StateKey::Notice {
@@ -1999,6 +2121,10 @@ mod tests {
             "nt/BQUFBQUFBQUFBQUFBQUFBQ/paid",
             "dt/05-7",
             "nt/BQUFBQUFBQUFBQUFBQUFBQ",
+            "dv/not-base64",
+            "dw/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM/cancellation/123e4567-e89b-42d3-a456-426614174000",
+            "dw/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM/proof",
+            "dw/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
             "ae/not-base64",
             "ac/",
             "cf/not-base64",

@@ -506,6 +506,9 @@ impl Paykit {
                         "the record holds a value that doesn't read".into(),
                     )
                     .into()),
+                    Written::Divergent(record) => {
+                        Err(Box::pin(self.divergent_refusal(record)).await?)
+                    }
                 };
             }
         }
@@ -598,6 +601,9 @@ impl Paykit {
         {
             return Err(crate::hold::value_awaits_key());
         }
+        // A user's `done` by hand on a record paused after a view showed it divergent waits
+        // for the user's confirmation of that record first (Paykit spec 6).
+        Box::pin(self.refuse_while_paused(&[key])).await?;
         Ok(target)
     }
 
