@@ -592,6 +592,48 @@ async fn test_blocked_return_asked_window_not_told_lost_at_expiry() {
 }
 
 #[tokio::test]
+async fn test_blocked_return_window_delivered_before_a_crash_not_told_lost_at_expiry() {
+    // Bob's mark asks and the request is delivered, but the app stops before it writes the
+    // delivery into the mark: the mark still names the request as queued, and no ask as
+    // delivered. Past the mark's expiry, the outbox shows the request delivered in time: the
+    // mark goes, and its window isn't told lost.
+    let w = World::new();
+    let mut wallet = contacts_wallet(&w, store()).await;
+    let mut shop = w.shop().await;
+    Box::pin(came_back(&w, &mut wallet, &mut shop)).await;
+    let sent = wallet
+        .app()
+        .sent_to(&w.bob_id(), 0, u64::MAX)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|m| m.kind == "paykit.resend_request")
+        .expect("the request");
+    let key = format!("bd/{}", pubky_switch_core::enc::b64(&w.bob_id()));
+    let marks = wallet.app().protocol_scan(key.as_bytes()).await.unwrap();
+    let mut mark: serde_json::Value = serde_json::from_slice(&marks[0].1).unwrap();
+    assert!(mark["d"]["asked_at_ms"].is_u64(), "{mark}");
+    mark["d"]["asked_at_ms"] = serde_json::Value::Null;
+    mark["d"]["queued"] = serde_json::json!({
+        "msg_id": sent.msg_id,
+        "hash": pubky_switch_core::enc::b64(&sent.plaintext.hash()),
+    });
+    wallet
+        .app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: key.into_bytes(),
+            value: serde_json::to_vec(&mark).unwrap(),
+        }])
+        .await
+        .unwrap();
+    w.clock
+        .advance_ms(paykit_sdk::KEPT_MESSAGE_MS - 11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(block_marks(&wallet).await, 0);
+    assert_eq!(lost_count(&wallet).await, 0);
+}
+
+#[tokio::test]
 async fn test_blocked_return_asked_window_not_told_lost_near_its_end() {
     let w = World::new();
     let mut wallet = contacts_wallet(&w, store()).await;

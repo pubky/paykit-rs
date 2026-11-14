@@ -780,9 +780,15 @@ impl Paykit {
             let mut tx = crate::state::Tx::default();
             tx.delete(&key);
             // A block's window that expires before an ask for it was delivered: its messages
-            // can no longer come back. One asked for in time tells nothing.
+            // can no longer come back. One asked for in time tells nothing, the request the
+            // mark still names as queued included, once the outbox shows it delivered before
+            // the mark expired ([`Paykit::delivered_in_time`]): the write of the delivery
+            // into the mark may not have been made, as after a crash.
             if family == MarkFamily::Blocked {
-                let gone = mark.drop_mark().clone();
+                let mut gone = mark.drop_mark().clone();
+                if gone.asked_at_ms.is_none() {
+                    gone.asked_at_ms = self.delivered_in_time(&gone).await?;
+                }
                 tell_lost_if_unasked(&mut tx, &gone, self.service_time().unwrap_or(0))?;
                 let floor = self.local_get::<u64>(key::BLOCK_FLOOR).await?;
                 fold_into_floor(&mut tx, floor, gone.latest_ms)?;
@@ -926,6 +932,30 @@ impl Paykit {
             self.local_put(key, &held).await?;
         }
         Ok(1)
+    }
+
+    /// When the request `mark` names as queued was delivered, as the outbox shows it, if
+    /// that was before the mark expired and the message delivered is shown to be that
+    /// request ([`Paykit::delivered_request`]); `None` for a request still queued or kept, one
+    /// not sent, one delivered too late, or none. Nothing is sent or tried.
+    ///
+    /// # Errors
+    ///
+    /// A store failure; a corrupt store when the message delivered under its `msg_id` is
+    /// another one.
+    async fn delivered_in_time(&self, mark: &DropMark) -> Result<Option<u64>> {
+        let Some(queued) = &mark.queued else {
+            return Ok(None);
+        };
+        let Some(Delivery::Accepted { accepted_at_ms }) = self.app.delivery(&queued.msg_id).await?
+        else {
+            return Ok(None);
+        };
+        if mark.expired(Some(accepted_at_ms)) {
+            return Ok(None);
+        }
+        self.delivered_request(&mark.sender, queued).await?;
+        Ok(Some(accepted_at_ms))
     }
 
     /// Check that the message the outbox delivered to `sender` under `queued`'s `msg_id` is
