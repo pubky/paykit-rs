@@ -2858,3 +2858,38 @@ async fn test_period_payments_restore_refuses_a_one_time_entry_naming_a_period()
     );
     assert!(!restore_takes(&w, &backup, b"j/", |_, e| as_period(e)).await);
 }
+
+#[tokio::test]
+async fn test_period_payments_by_policy_built_again_over_a_period_record_written_since() {
+    // The phone writes January's period record after the wallet last read it: the wallet's
+    // payment by policy, its batch writing the record at the version read, fails, and the
+    // record is read again on that conflict, so the next try builds on the phone's write
+    // and pays (Paykit spec 8.2, "Paying periods").
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    let now = w.clock.now_ms();
+    shop.send_period_details(&sale, details(january(), "lnbc1jan", now + DAY_MS))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let record = period_record(&w, &phone, &request, january())
+        .await
+        .unwrap();
+    let natural = natural_key::period_record(
+        &request.payee,
+        &request.request_hash,
+        january().start_secs(),
+    );
+    write_payer_record(&mut phone, &natural, &record).await;
+    let refused = by_policy(&mut wallet, &request, january())
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, PaykitError::Conflict(_)), "{refused:?}");
+    assert!(w.rail.all_executions().is_empty());
+    let outcome = by_policy(&mut wallet, &request, january()).await.unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+}

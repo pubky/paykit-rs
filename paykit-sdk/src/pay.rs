@@ -2157,6 +2157,14 @@ impl Paykit {
                 if let Some(view) = claim_conflict(error.unkept()) {
                     self.refuse_claim(&view)?;
                 }
+                // A batch by the app's own policy writes the period record at the version
+                // read (Paykit spec 8.2, "Paying periods"): one another own app wrote since
+                // fails it, and is read again, so the next attempt builds on that write, not
+                // on the same stale copy.
+                if by == Initiator::Automatic && entry.period()?.is_some() {
+                    let period = ActivityTarget::payer(entry.natural_key.clone());
+                    self.app.read_record(&period.record_target()).await?;
+                }
                 let changed = PaykitError::Conflict(
                     "Paykit spec 7.2: the request or list record changed meanwhile".into(),
                 );
