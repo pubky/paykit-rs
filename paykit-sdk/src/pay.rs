@@ -2347,7 +2347,8 @@ impl Paykit {
             self.set_stage(&mut entry, Stage::Paying).await?;
         }
         // The commit and the checks were awaits, during which another payer app can block the
-        // payee, raise the block floor or mark the request record `manual_only`: an automatic
+        // payee, raise the block floor, or record a cancellation, a rejection or `manual_only`
+        // in the request record ([`Paykit::fresh_record_withholds`]): an automatic
         // payment, a first dispatch or a repeat, reads the deny list, the record and the floor
         // again now, from the switch, and a read that fails holds it (Paykit spec 8.1, 8.3,
         // `crate::floor`). A first dispatch goes back to `Attempted`, known unsubmitted, as it
@@ -3340,10 +3341,11 @@ impl Paykit {
     ///
     /// 0. for an automatic first dispatch, the deny list, read again: a blocked payee, or a
     ///    list that can't be read, holds it ([`FinalCheck::Hold`], Paykit spec 8.1); the
-    ///    request record, read again: one that holds `manual_only`, or isn't there or can't
-    ///    be read, holds it too (Paykit spec 8.3); and the block floor, read again: a
-    ///    one-time request dated before it, or a floor that can't be read, holds it too
-    ///    (`crate::floor`); an automatic repeat reads them after this check
+    ///    request record, read again: one that withholds it ([`Paykit::fresh_record_withholds`]:
+    ///    cancelled, rejected, `manual_only`, held after a restore, divergent), or isn't there
+    ///    or can't be read, holds it too (Paykit spec 8.1, 8.3); and the block floor, read
+    ///    again: a one-time request dated before it, or a floor that can't be read, holds it
+    ///    too (`crate::floor`); an automatic repeat reads them after this check
     ///    ([`Paykit::automatic_dispatch_held`]);
     /// 1. a switch lookup kept for the payee whose answer has come is taken, so a late
     ///    answer that removes the destination's app is acted on (Switch spec 4.3), and one
@@ -3380,10 +3382,11 @@ impl Paykit {
         confirmed: Option<UserConfirmed>,
         kind: Dispatch,
     ) -> Result<(FinalCheck, PeerIdentity)> {
-        // No automatic payment to a blocked payee (Paykit spec 8.1), nor of a request paid
-        // only by hand, its record's `manual_only` (Paykit spec 8.3), or a one-time request
-        // dated before the block floor (`crate::floor`), each read now, a read that fails
-        // holding it too. A first dispatch judges them before its attempt's `Paying` commit,
+        // No automatic payment to a blocked payee (Paykit spec 8.1), nor of a request its
+        // record withholds ([`Paykit::fresh_record_withholds`]: cancelled, rejected,
+        // `manual_only`, held after a restore, divergent; Paykit spec 8.1, 8.3), or a one-time
+        // request dated before the block floor (`crate::floor`), each read now, a read that
+        // fails holding it too. A first dispatch judges them before its attempt's `Paying` commit,
         // so that a held one is known unsubmitted, and again after it ([`Paykit::dispatch`]);
         // a repeat, whose entry is `Paying` already, judges them once, after every other
         // await before its call.
