@@ -2454,17 +2454,24 @@ async fn test_executor_pays_nothing_when_the_resend_mark_does_not_read() {
 const MINUTE_MS: u64 = 60_000;
 
 /// A store that notes the commit that journals an attempt's `Paying`, and runs a hook once,
-/// during it: after the checks before the commit and before the payment method's call.
+/// during it: after the checks before the commit and before the payment method's call. A
+/// second hook runs once during the first commit that journals an attempt `Attempted`: after
+/// the attempt's batch is applied and before the final payment check.
 #[derive(Default)]
 struct PayingStore {
     inner: pubky_switch_client::store::MemoryStore,
     paying: std::sync::atomic::AtomicBool,
     hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    attempted_hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl PayingStore {
     fn on_paying(&self, hook: impl FnOnce() + Send + 'static) {
         *self.hook.lock().unwrap() = Some(Box::new(hook));
+    }
+
+    fn on_attempted(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.attempted_hook.lock().unwrap() = Some(Box::new(hook));
     }
 
     /// Whether an attempt's `Paying` was committed.
@@ -2498,11 +2505,20 @@ impl StateStore for PayingStore {
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
         const PAYING: &[u8] = b"\"stage\":\"paying\"";
-        let paying = batch.writes.iter().any(|write| {
-            matches!(write, pubky_switch_client::store::Write::Put { key, value, .. }
-                if key.starts_with(b"p/j/") && value.windows(PAYING.len()).any(|w| w == PAYING))
-        });
+        const ATTEMPTED: &[u8] = b"\"stage\":\"attempted\"";
+        let journals = |stage: &[u8]| {
+            batch.writes.iter().any(|write| {
+                matches!(write, pubky_switch_client::store::Write::Put { key, value, .. }
+                    if key.starts_with(b"p/j/") && value.windows(stage.len()).any(|w| w == stage))
+            })
+        };
+        let (paying, attempted) = (journals(PAYING), journals(ATTEMPTED));
         self.inner.commit(batch)?;
+        if attempted {
+            if let Some(hook) = self.attempted_hook.lock().unwrap().take() {
+                hook();
+            }
+        }
         if paying {
             self.paying.store(true, std::sync::atomic::Ordering::SeqCst);
             if let Some(hook) = self.hook.lock().unwrap().take() {
@@ -2690,6 +2706,92 @@ async fn test_executor_payee_blocked_after_the_paying_commit_not_paid() {
         .unwrap();
     });
     Box::pin(held_at_the_dispatch(&w, &mut wallet, &request, &record)).await;
+}
+
+/// Another app of alice's that holds the Allowance at `record` and may end it.
+async fn own_app_holding(w: &World) -> Paykit {
+    let mut other = Box::pin(executor_wallet(w, "other")).await;
+    other.receive(None).await.unwrap();
+    other
+}
+
+/// Run `other`'s end of the Allowance at `record` on its own thread, while the caller waits.
+fn end_from(mut other: Paykit, record: [u8; 32]) {
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async { other.end_allowance(&record).await.unwrap() })
+    })
+    .join()
+    .unwrap();
+}
+
+#[tokio::test]
+async fn test_executor_allowance_ended_after_the_batch_holds_the_dispatch() {
+    // Right after the executor's batch is applied, another own app ends the Allowance. The
+    // copy the executor holds doesn't show the end; the Allowance record read from the
+    // switch at the final payment check, before the attempt's `Paying` commit, does, and
+    // holds the dispatch: nothing is journaled `Paying` and nothing is sent (Paykit spec
+    // 8.3, "Executor").
+    let w = Arc::new(World::new());
+    let wallet_store = Arc::new(PayingStore::default());
+    let (mut shop, mut wallet, record) = Box::pin(set_up_on(
+        &w,
+        Arc::clone(&wallet_store) as Arc<dyn StateStore>,
+    ))
+    .await;
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    let other = Box::pin(own_app_holding(&w)).await;
+    wallet_store.on_attempted(move || end_from(other, record));
+    Box::pin(held_at_the_dispatch(&w, &mut wallet, &request, &record)).await;
+    assert!(!wallet_store.paying_seen());
+}
+
+#[tokio::test]
+async fn test_executor_allowance_ended_after_the_paying_commit_holds_the_dispatch() {
+    // While the attempt's `Paying` commit runs, another own app ends the Allowance. The
+    // Allowance record read from the switch again after the commit holds the dispatch, and
+    // the attempt goes back to known unsubmitted (Paykit spec 8.3, "Executor").
+    let w = Arc::new(World::new());
+    let wallet_store = Arc::new(PayingStore::default());
+    let (mut shop, mut wallet, record) = Box::pin(set_up_on(
+        &w,
+        Arc::clone(&wallet_store) as Arc<dyn StateStore>,
+    ))
+    .await;
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    let other = Box::pin(own_app_holding(&w)).await;
+    wallet_store.on_paying(move || end_from(other, record));
+    Box::pin(held_at_the_dispatch(&w, &mut wallet, &request, &record)).await;
+    assert!(wallet_store.paying_seen());
+}
+
+#[tokio::test]
+async fn test_executor_allowance_read_failing_at_the_dispatch_holds_it() {
+    // No end, but the Allowance record's read after the attempt's `Paying` commit fails: it
+    // never counts as an Allowance still in force, so the dispatch is held (Paykit spec 8.3,
+    // "Executor").
+    let w = Arc::new(World::new());
+    let wallet_store = Arc::new(PayingStore::default());
+    let (mut shop, mut wallet, record) = Box::pin(set_up_on(
+        &w,
+        Arc::clone(&wallet_store) as Arc<dyn StateStore>,
+    ))
+    .await;
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    let world = Arc::clone(&w);
+    wallet_store.on_paying(move || {
+        world
+            .alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+                path: format!("/records/{}", pubky_switch_core::enc::b64(&record)),
+                after: 0,
+            });
+    });
+    Box::pin(held_at_the_dispatch(&w, &mut wallet, &request, &record)).await;
+    assert!(wallet_store.paying_seen());
 }
 
 #[tokio::test]

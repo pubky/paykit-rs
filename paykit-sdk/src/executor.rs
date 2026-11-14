@@ -40,10 +40,12 @@
 //!   the method's repeat with the same idempotency key, while what holds while unknown
 //!   still holds it ([`Paykit::repeat_under_allowance_held`]).
 //! - **Immediately before the dispatch** (Paykit spec 8.1, 8.3): the deny list, the request
-//!   record and the block floor are read from the switch again, twice, before the attempt's
-//!   `Paying` commit and after it, and the dispatch holds on a block, a stop, a raise of the
-//!   floor past the request's date, or a read that fails
-//!   (`Paykit::automatic_dispatch_held`); the batch doesn't condition on the floor's version.
+//!   record, the block floor and the Allowance record are read from the switch again, twice,
+//!   before the attempt's `Paying` commit and after it, and the dispatch holds on a block, a
+//!   stop, a raise of the floor past the request's date, an Allowance no longer in force
+//!   (ended, rejected, conflicted, handed off, its grant voided, paused), or a read that
+//!   fails (`Paykit::automatic_dispatch_held`); the batch doesn't condition on the floor's
+//!   version, and the Allowance record can change after the batch is applied.
 //!
 //! Security: every executor batch is conditioned on the Allowance record version read, so
 //! an end, a rejection or a handoff written since makes it fail; usage is counted from the
