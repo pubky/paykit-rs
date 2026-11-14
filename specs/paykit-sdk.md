@@ -1772,6 +1772,19 @@ one-call `issue_receipt` helper requires the draft to already contain a
 caller-provided Receipt ID so repeating the same call cannot create a second
 receipt after a partial failure.
 
+The App that observed the payment issues the Receipt. It need not be the App
+that proposed the Payment Request: Payment Requests and receipt issuance
+records are identity-wide shared state, so a wallet App can issue the Receipt
+for a request a merchant App proposed for the same identity, and the receipt
+carries that request's Payment Request ID. Only an App whose App Registry entry
+declares `receipts` may issue one. Other Apps on the identity read issued
+Receipts from shared state: `issued_receipts` lists the issuance records and
+`issued_receipt` returns the decrypted Receipt, Receipt Metadata included,
+without a network read. The record's App ID attributes the Receipt to the
+issuing App. That attribution assumes the identity's Apps write honestly: any
+App holding the Paykit secret and a Paykit session grant can write shared
+state.
+
 ### Retrieve Receipts
 
 1. Receive Receipt Access event.
