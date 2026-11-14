@@ -1803,6 +1803,8 @@ async fn test_restore_cursor_time_left_unclamped_by_a_crash_is_clamped_at_load()
     let hold = app.app().protocol_get(b"rh").await.unwrap().unwrap();
     let mut hold: serde_json::Value = serde_json::from_slice(&hold).unwrap();
     hold["d"]["resend_from_ms"] = serde_json::json!(ahead);
+    // Its verdict not clean, so the asks are due.
+    hold["d"]["verdict"] = serde_json::json!("not_clean");
     app.app_mut()
         .protocol_commit(&[
             pubky_switch_client::app::LocalWrite::Put {
@@ -1886,6 +1888,8 @@ async fn test_restore_asks_start_bounded_where_they_are_queued() {
     let hold = app.app().protocol_get(b"rh").await.unwrap().unwrap();
     let mut hold: serde_json::Value = serde_json::from_slice(&hold).unwrap();
     hold["d"]["resend_from_ms"] = serde_json::json!(ahead);
+    // Its verdict not clean, so the asks are due.
+    hold["d"]["verdict"] = serde_json::json!("not_clean");
     app.app_mut()
         .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
             key: b"rh".to_vec(),
@@ -2428,6 +2432,65 @@ async fn test_restore_own_rejection_to_a_blocked_payee_waits_until_unblocked() {
         w.bob.switch().entries_from(&w.alice_id()),
         before + 1 + asks
     );
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        paykit_sdk::PayeeStatus::Rejected
+    );
+}
+
+#[tokio::test]
+async fn test_restore_own_rejection_to_a_blocked_payee_waits_through_a_clean_restore() {
+    // Bob is blocked from another own app after the restore, which moves no cursor of the
+    // restored wallet: its restore is clean, so it marks no one and asks nothing for
+    // itself, and its rejection, which no outbox holds, waits while bob is blocked; once he
+    // is unblocked it goes, once, with no ask (Paykit spec 7.2, "What a restore loses"; 8.1,
+    // Blocked counterparties).
+    let w = World::new();
+    let contacts = || AppScopes::new().pay().manage_contacts().build().unwrap();
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            contacts(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    let mut phone = w
+        .join_with(
+            &w.alice,
+            "phone",
+            contacts(),
+            PaykitConfig::default(),
+            store(),
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    let (_, backup) = wallet_backed_up_with_its_rejection_unqueued(&w, wallet, &mut shop).await;
+    let mut wallet = restored_unreceived(&w, &w.alice, &backup).await;
+    phone.block(&w.bob_id()).await.unwrap();
+    wallet.app_mut().refresh_identity().await.unwrap();
+    let before = w.bob.switch().entries_from(&w.alice_id());
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    assert_eq!(
+        wallet.app().restore_held_cursor(),
+        Some(pubky_switch_client::app::HeldCursor::Clean)
+    );
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert!(wallet.app().protocol_scan(b"bd/").await.unwrap().is_empty());
+    phone.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * 60_000);
+    wallet.receive(None).await.unwrap();
+    assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
+    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
+    wallet.receive(None).await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
     shop.receive(None).await.unwrap();
     assert_eq!(
         shop.payee_activity().await.unwrap()[0].status,

@@ -138,6 +138,34 @@ pub(crate) struct WideningRead {
 impl BlockedWindow {
     /// The end of a widening that runs to the time it is applied.
     pub(crate) const TO_NOW: u64 = u64::MAX;
+
+    /// The window with every time it holds past `bound` brought down to it, a restore's
+    /// bound on the times it restores: its start, a fixed end, and the read it waits with,
+    /// whose time a restore's widening raises the block floor to. `None` when no time is
+    /// past the bound. Bounded, the times stay in order: each is brought down to the same
+    /// bound.
+    pub(crate) fn bounded(&self, bound: u64) -> Option<Self> {
+        let past = |time: u64| time > bound;
+        let fixed_end = self.until_ms != Self::TO_NOW;
+        if !past(self.from_ms)
+            && !(fixed_end && past(self.until_ms))
+            && self.read.as_ref().is_none_or(|read| !past(read.at_ms))
+        {
+            return None;
+        }
+        Some(Self {
+            from_ms: self.from_ms.min(bound),
+            until_ms: if fixed_end {
+                self.until_ms.min(bound)
+            } else {
+                Self::TO_NOW
+            },
+            read: self.read.clone().map(|read| WideningRead {
+                at_ms: read.at_ms.min(bound),
+                ..read
+            }),
+        })
+    }
 }
 
 /// A mark of a sender's dropped messages (module docs).
@@ -1264,6 +1292,40 @@ pub(crate) fn tell_lost_if_unasked(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn window(from_ms: u64, until_ms: u64, read_at: Option<u64>) -> BlockedWindow {
+        BlockedWindow {
+            from_ms,
+            until_ms,
+            read: read_at.map(|at_ms| WideningRead {
+                at_ms,
+                deny: vec![[7; 32]],
+            }),
+        }
+    }
+
+    #[test]
+    fn test_marks_widening_bounded_brings_every_time_down() {
+        let to_now = BlockedWindow::TO_NOW;
+        // Nothing past the bound: unchanged.
+        assert_eq!(window(5, to_now, Some(9)).bounded(10), None);
+        assert_eq!(window(5, 8, None).bounded(10), None);
+        // A read dated past the bound, its start before it: the read comes down.
+        assert_eq!(
+            window(5, to_now, Some(1_000)).bounded(10),
+            Some(window(5, to_now, Some(10)))
+        );
+        // A fixed end past the bound comes down; a restore's open end stays open.
+        assert_eq!(
+            window(5, 1_000, None).bounded(10),
+            Some(window(5, 10, None))
+        );
+        assert_eq!(
+            window(20, to_now, Some(30)).bounded(10),
+            Some(window(10, to_now, Some(10)))
+        );
+        assert_eq!(window(20, 30, None).bounded(10), Some(window(10, 10, None)));
+    }
 
     fn mark(sender: u8, earliest_ms: u64, latest_ms: u64) -> DropMark {
         DropMark {

@@ -4377,6 +4377,8 @@ async fn details_dropped_for_the_bounds(
             )
             .await
             .unwrap();
+            // Its verdict settled by its first page, as a host lets it.
+            wallet.app_mut().refresh_identity().await.unwrap();
         }
     }
     wallet.receive(None).await.unwrap();

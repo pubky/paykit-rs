@@ -485,6 +485,12 @@ async fn test_provider_loss_resume_never_repeats_a_dispatch_from_before_the_loss
     let attempt = read.view.attempt(&attempt_id.to_bytes()).unwrap();
     assert_eq!(attempt.owner, wallet.app_id());
     assert_eq!(attempt.outcome, pubky_switch_core::claims::Outcome::Open);
+    // The user states it wasn't paid before the loss: the obligation's doubt ends, and
+    // still the dispatch this app made before the loss isn't repeated.
+    wallet
+        .confirm_not_paid_before_loss(&obligation, UserConfirmed::new())
+        .await
+        .unwrap();
     let resumed = wallet.resume_payments().await.unwrap();
     assert!(
         resumed.iter().any(|outcome| matches!(

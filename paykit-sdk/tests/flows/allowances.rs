@@ -648,7 +648,7 @@ async fn asked_bob(w: &World, app: &Paykit) -> usize {
 }
 
 /// Alice's wallet restored from a backup taken while it held bob's Allowance, accepted and,
-/// with `ended`, ended since; the restored app's first read done.
+/// with `ended`, ended since; the restore not clean, and the restored app's first read done.
 async fn restored_with_allowance(w: &World, ended: bool) -> Paykit {
     let mut shop = Box::pin(shop(w)).await;
     let mut wallet = Box::pin(wallet(w)).await;
@@ -668,6 +668,9 @@ async fn restored_with_allowance(w: &World, ended: bool) -> Paykit {
     ))
     .await
     .unwrap();
+    // A restore that isn't clean, its cursor moved before its first page: it asks.
+    restored.app_mut().flush_cursor().await.unwrap();
+    restored.app_mut().refresh_identity().await.unwrap();
     restored.receive(None).await.unwrap();
     restored.reconcile().await.unwrap();
     restored.receive(None).await.unwrap();

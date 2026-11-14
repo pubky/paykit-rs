@@ -496,9 +496,14 @@ impl Paykit {
     ///   app resumes. No request reads [`crate::RequestStatus::Held`] for the restore, none
     ///   is refused [`crate::Refusal::HeldAfterRestore`], every Allowance the backup consented to
     ///   is consented again ([`crate::AllowanceView::consented`]), the user is asked
-    ///   nothing, and no counterparty is asked to re-send. What the backup held itself, of
-    ///   an earlier restore or a `missed` item, stays held.
-    /// - **Ahead, unknown, or not settled yet**: every open request reads held and is
+    ///   nothing, no counterparty is asked to re-send, and no block mark or floor raise is
+    ///   made for the restore. What the backup held itself, of an earlier restore or a
+    ///   `missed` item, stays held.
+    /// - **Not settled yet**: every open request reads held and is refused
+    ///   [`crate::Refusal::HeldAfterRestore`], every Allowance on the consent list waits,
+    ///   and nothing is asked yet: the re-sends and the restore's block marks wait for the
+    ///   verdict. Reconcile mode ended with the verdict still not settled counts as unknown.
+    /// - **Ahead or unknown**: every open request reads held and is
     ///   refused [`crate::Refusal::HeldAfterRestore`] until its record shows it stopped or the user
     ///   confirms it ([`Paykit::confirm_possibly_cancelled`]), every Allowance on the
     ///   consent list waits for the user's confirmation, and the counterparties of open
@@ -506,7 +511,8 @@ impl Paykit {
     ///   ahead is also a gap the client hands as a `missed` item.
     /// - **A clean verdict a later page ends**, its cursor reported ahead of the app's own
     ///   position, for an app whose devices don't share its cursor: the hold comes back as
-    ///   after a restore that isn't clean, the user's earlier confirmations dropped.
+    ///   after a restore that isn't clean, the user's earlier confirmations dropped, and the
+    ///   re-sends are asked for.
     ///
     /// A publishing app whose backup holds a list it published publishes no Private Payment
     /// List after the restore until the host sets its list again

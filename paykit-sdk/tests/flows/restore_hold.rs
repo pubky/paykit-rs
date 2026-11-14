@@ -1570,10 +1570,39 @@ async fn test_restore_clean_keeps_the_hold_its_backup_held() {
 }
 
 #[tokio::test]
-async fn test_restore_held_cursor_asks_sent_before_the_first_page_stay_sent() {
-    // A host that reconciles before its first read sends the restore's asks, queued alone
-    // with no raise of the block floor: they move no cursor, so the first page still shows
-    // the restore clean, and the hold lifts; the asks reached bob all the same.
+async fn test_restore_held_cursor_asks_wait_for_the_verdict() {
+    // A host that reconciles before its first read asks nothing yet: the restore's asks wait
+    // for the verdict. The first page then shows the restore clean, and nothing is asked for
+    // it at all.
+    let w = World::new();
+    let (mut shop, [first, _], backup, ..) = backed_up_with_requests(&w).await;
+    let mut app = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    app.app_mut().refresh_identity().await.unwrap();
+    app.reconcile().await.unwrap();
+    assert_eq!(shop.receive(None).await.unwrap().resends, 0);
+    app.receive(None).await.unwrap();
+    assert_eq!(app.app().restore_held_cursor(), Some(HeldCursor::Clean));
+    assert_eq!(restore_verdict(&app).await, "clean");
+    app.end_reconcile(UserConfirmed::new()).await.unwrap();
+    app.receive(None).await.unwrap();
+    assert_eq!(shop.receive(None).await.unwrap().resends, 0);
+    let view = app.request(&first).await.unwrap();
+    assert_eq!(view.status, RequestStatus::Open, "{view:?}");
+    assert!(!view.manual_only, "{view:?}");
+}
+
+#[tokio::test]
+async fn test_restore_held_cursor_reconcile_ended_before_a_verdict_holds_as_before() {
+    // A host that ends reconcile mode before its first read: the client may keep no verdict
+    // after that, so the restore counts as not clean, and asks.
     let w = World::new();
     let (mut shop, [first, _], backup, ..) = backed_up_with_requests(&w).await;
     let mut app = Paykit::restore(
@@ -1587,11 +1616,7 @@ async fn test_restore_held_cursor_asks_sent_before_the_first_page_stay_sent() {
     .unwrap();
     app.app_mut().refresh_identity().await.unwrap();
     reconciled(&mut app).await;
+    assert_eq!(restore_verdict(&app).await, "not_clean");
     app.receive(None).await.unwrap();
-    assert!(shop.receive(None).await.unwrap().resends >= 1);
-    assert_eq!(app.app().restore_held_cursor(), Some(HeldCursor::Clean));
-    assert_eq!(restore_verdict(&app).await, "clean");
-    let view = app.request(&first).await.unwrap();
-    assert_eq!(view.status, RequestStatus::Open, "{view:?}");
-    assert!(!view.manual_only, "{view:?}");
+    assert_held_as_before(&mut app, &mut shop, &first).await;
 }

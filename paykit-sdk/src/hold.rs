@@ -29,15 +29,14 @@
 //! - a cancellation the record shows, or the app keeps, stops it for good, and no
 //!   confirmation overrides it (Paykit spec 8.1).
 //!
-//! After a restore whose hold isn't lifted, at the reconciliation it requires, once the
-//! records are read again, the app asks every counterparty with an open request to re-send
-//! what its inbox accepted from the acceptance time of the last entry the backup's cursor
-//! had passed, less the clock tolerance (Paykit spec 9). A cancellation that comes back is
-//! kept and placed as any other. An ask the app sent before the verdict was known stays
-//! sent: one that went in a batch, with a raise of the block floor, carried the restored
-//! cursor move, which leaves the verdict unknown; one queued alone moved no cursor, and a
-//! clean verdict after it lifts the hold all the same, what it brings back taken as any
-//! other message.
+//! After a restore whose verdict isn't clean, once the records are read again, the app
+//! asks every counterparty with an open request to re-send what its inbox accepted from
+//! the acceptance time of the last entry the backup's cursor had passed, less the clock
+//! tolerance (Paykit spec 9). A cancellation that comes back is kept and placed as any
+//! other. The asks wait for the verdict, as the widening of the block marks does
+//! (`marks.rs`): none goes while it isn't known, and none for a clean restore. A host that
+//! ends reconcile mode before any verdict is known gets none from the client any more, so
+//! the restore counts as not clean then ([`Paykit::end_reconcile`]).
 
 use paykit_lib::collections::Collection;
 use paykit_lib::records::ActivityRecord;
@@ -82,6 +81,12 @@ pub(crate) struct RestoreHold {
     /// The client's verdict on this restore, as Paykit took it
     /// ([`Paykit::take_restore_verdict`]).
     pub(crate) verdict: RestoreVerdict,
+    /// The start of this restore's own widening of the block marks (`bw/<from_ms>`), which
+    /// a clean verdict drops and an ended one puts back; an earlier restore's, carried by
+    /// the backup, stays whatever this verdict. `None` when a carried widening at the same
+    /// start stands for it. Kept in step with the window when the restore's bound moves
+    /// it ([`Paykit::bound_restored_cursor_time`]).
+    pub(crate) widening_from_ms: Option<u64>,
 }
 
 /// The client's verdict on a restore, as Paykit took it (Switch spec 12.4, "The held
@@ -114,13 +119,22 @@ impl RestoreHold {
             earlier: before.is_some_and(RestoreHold::holds_all),
             earlier_asks,
             verdict: RestoreVerdict::Open,
+            widening_from_ms: Some(own),
         }
     }
 
     /// Whether re-sends are still to be asked for: this restore's while its hold is in
-    /// force, or an earlier one's the backup owed.
+    /// force, or an earlier one's the backup owed. What a backup of this state carries over
+    /// ([`RestoreHold::earlier_asks`]).
     pub(crate) fn asks_owed(&self) -> bool {
         !self.asks_queued && (self.in_force() || self.earlier_asks)
+    }
+
+    /// Whether the re-sends owed are asked for now: this restore's only once a verdict
+    /// that isn't clean is known, so a clean restore asks nothing for itself; an earlier
+    /// one's the backup owed whatever this verdict.
+    pub(crate) fn asks_due(&self) -> bool {
+        !self.asks_queued && (self.verdict == RestoreVerdict::NotClean || self.earlier_asks)
     }
 
     /// Whether this restore's own hold holds: until a clean verdict lifts it.
@@ -550,12 +564,13 @@ impl Paykit {
             .unwrap_or_else(|| self.now())
             .saturating_add(CLOCK_TOLERANCE_MS);
         let mut tx = Tx::default();
+        let mut hold = self.local_get::<RestoreHold>(key::RESTORE_HOLD).await?;
+        let held = hold.clone();
         if let Some(cursor) = self.local_get::<u64>(key::CURSOR_TIME).await? {
             if cursor > bound {
                 tx.put(key::CURSOR_TIME, &bound)?;
-                if let Some(mut hold) = self.local_get::<RestoreHold>(key::RESTORE_HOLD).await? {
+                if let Some(hold) = hold.as_mut() {
                     hold.resend_from_ms = resend_from(bound);
-                    tx.put(key::RESTORE_HOLD, &hold)?;
                 }
             }
         }
@@ -588,32 +603,37 @@ impl Paykit {
                 tx.put(key::BLOCK_FLOOR, &bound)?;
             }
         }
-        // So is a widening of the block marks owed: one from the backup's cursor time, dated
-        // past the bound, starts at the bound, at its own key.
-        for (_, window) in self
+        // So is a widening of the block marks owed, each of its times: one from the backup's
+        // cursor time, dated past the bound, starts at the bound, at its own key, and a read
+        // it waits with, whose time a restore's widening raises the block floor to, is at the
+        // bound at the latest. The hold's own widening moves with it; one that lands on the
+        // key of another leaves that one to stand for it, as at the restore.
+        let windows = self
             .local_scan::<crate::marks::BlockedWindow>(key::BLOCKED_WIDENINGS)
-            .await?
-        {
-            if window.from_ms > bound {
+            .await?;
+        let mut starts = std::collections::BTreeMap::<u64, usize>::new();
+        for (_, window) in &windows {
+            let start = window.bounded(bound).map_or(window.from_ms, |b| b.from_ms);
+            *starts.entry(start).or_default() += 1;
+        }
+        for (_, window) in &windows {
+            let Some(bounded) = window.bounded(bound) else {
+                continue;
+            };
+            if bounded.from_ms != window.from_ms {
                 tx.delete(&key::blocked_widening(window.from_ms));
-                // Its end was at or past its start, so past the bound too.
-                let until = if window.until_ms == crate::marks::BlockedWindow::TO_NOW {
-                    window.until_ms
-                } else {
-                    bound
-                };
-                tx.put(
-                    &key::blocked_widening(bound),
-                    &crate::marks::BlockedWindow {
-                        from_ms: bound,
-                        until_ms: until,
-                        // A read it waits with, past its start, is at the bound too.
-                        read: window.read.clone().map(|read| crate::marks::WideningRead {
-                            at_ms: bound,
-                            ..read
-                        }),
-                    },
-                )?;
+                if let Some(hold) = hold.as_mut() {
+                    if hold.widening_from_ms == Some(window.from_ms) {
+                        hold.widening_from_ms =
+                            (starts.get(&bounded.from_ms) == Some(&1)).then_some(bounded.from_ms);
+                    }
+                }
+            }
+            tx.put(&key::blocked_widening(bounded.from_ms), &bounded)?;
+        }
+        if hold != held {
+            if let Some(hold) = &hold {
+                tx.put(key::RESTORE_HOLD, hold)?;
             }
         }
         for prefix in [
@@ -1211,8 +1231,10 @@ impl Paykit {
         self.window_now() > until
     }
 
-    /// Queue, once after a restore, a `resend_request` to every counterparty with an open
-    /// request or Allowance, from the restore's re-send time; [`Paykit::receive`] sends them. The start is
+    /// Queue, once after a restore whose verdict isn't clean, a `resend_request` to every
+    /// counterparty with an open request or Allowance, from the restore's re-send time;
+    /// [`Paykit::receive`] sends them. Nothing is asked for the restore while its verdict
+    /// isn't known ([`RestoreHold::asks_due`]). The start is
     /// bounded where it is used as well as at the restore and the load: no ordering of a
     /// load, a renewal and a crash leaves the re-sends starting in the future. A request
     /// record sealed under a scope key the app doesn't hold yet shows no counterparty: the
@@ -1228,9 +1250,11 @@ impl Paykit {
             .unwrap_or_else(|| self.now())
             .saturating_add(CLOCK_TOLERANCE_MS);
         hold.resend_from_ms = hold.resend_from_ms.min(resend_from(bound));
-        // A hold the clean verdict lifted asks for nothing: no entry after the backup's
-        // position was passed, so none of them is lost (Paykit spec 7.2).
-        if !hold.asks_owed() {
+        // The asks wait for the client's verdict on the restore: a clean one asks for
+        // nothing, since no entry after the backup's position was passed, so none is lost
+        // (Paykit spec 7.2); one that isn't clean, or a clean one a later report ends, asks.
+        // An earlier restore's asks the backup owed go whatever this verdict.
+        if !hold.asks_due() {
             return Ok(());
         }
         let mut counterparties = std::collections::BTreeSet::new();
@@ -1262,6 +1286,26 @@ impl Paykit {
         } else {
             hold.asks_queued = true;
             hold.asked = Vec::new();
+        }
+        tx.put(key::RESTORE_HOLD, &hold)?;
+        self.local_commit(tx).await
+    }
+
+    /// A restore whose verdict Paykit hasn't taken yet counts as not clean, as an unknown
+    /// verdict does: at the end of reconcile mode, after which the client may keep no
+    /// verdict ([`Paykit::end_reconcile`]). Its asks and its widening of the block marks go
+    /// then, the lists made due for the widening.
+    pub(crate) async fn restore_verdict_not_known_holds(&mut self) -> Result<()> {
+        let Some(mut hold) = self.local_get::<RestoreHold>(key::RESTORE_HOLD).await? else {
+            return Ok(());
+        };
+        if hold.verdict != RestoreVerdict::Open {
+            return Ok(());
+        }
+        hold.verdict = RestoreVerdict::NotClean;
+        let mut tx = Tx::default();
+        if self.restore_widening_kept().await? {
+            tx.delete(key::LISTS_READ);
         }
         tx.put(key::RESTORE_HOLD, &hold)?;
         self.local_commit(tx).await
@@ -1333,17 +1377,16 @@ impl Paykit {
                     tx.delete(&format!("{}{rest}", key::RESTORE_CONSENTS));
                 }
                 // No entry after the backup's position was passed, so none was dropped for a
-                // block since it: the restore's widening of the block marks goes unapplied,
-                // with no mark, ask or raise of the block floor (`marks.rs`). One an earlier
-                // restore's hold the backup held in force carried stays.
-                if !hold.earlier {
-                    for (rest, window) in self
-                        .local_scan::<BlockedWindow>(key::BLOCKED_WIDENINGS)
+                // block since it: this restore's own widening of the block marks goes
+                // unapplied, with no mark, ask or raise of the block floor (`marks.rs`). One
+                // the backup carried, of an earlier restore or a `missed` item, stays.
+                if let Some(from) = hold.widening_from_ms {
+                    if self
+                        .local_get::<BlockedWindow>(&key::blocked_widening(from))
                         .await?
+                        .is_some_and(|window| window.until_ms == BlockedWindow::TO_NOW)
                     {
-                        if window.until_ms == BlockedWindow::TO_NOW {
-                            tx.delete(&format!("{}{rest}", key::BLOCKED_WIDENINGS));
-                        }
+                        tx.delete(&key::blocked_widening(from));
                     }
                 }
                 hold.verdict = RestoreVerdict::Clean;
@@ -1369,18 +1412,25 @@ impl Paykit {
                         tx.delete(&format!("{prefix}{rest}"));
                     }
                 }
-                // The restore's widening of the block marks the clean verdict dropped comes
-                // back, from the re-sends' start, for the next read of the lists, made due
-                // now.
-                if !hold.earlier {
-                    tx.put(
-                        &key::blocked_widening(hold.resend_from_ms),
-                        &BlockedWindow {
-                            from_ms: hold.resend_from_ms,
-                            until_ms: BlockedWindow::TO_NOW,
-                            read: None,
-                        },
-                    )?;
+                // This restore's own widening of the block marks, which the clean verdict
+                // dropped, comes back for the next read of the lists, made due now. It is
+                // applied as of that read, not the first read after the restore, which the
+                // clean verdict dropped with it: the later read's deny list may hold more
+                // counterparties, whose marks are speculative and only ask once each is
+                // unblocked, and its floor raise is later, so it holds more requests for
+                // payment by hand, never fewer.
+                if let Some(from) = hold.widening_from_ms {
+                    let at = key::blocked_widening(from);
+                    if self.local_get::<BlockedWindow>(&at).await?.is_none() {
+                        tx.put(
+                            &at,
+                            &BlockedWindow {
+                                from_ms: from,
+                                until_ms: BlockedWindow::TO_NOW,
+                                read: None,
+                            },
+                        )?;
+                    }
                     tx.delete(key::LISTS_READ);
                     lists_due = true;
                 }

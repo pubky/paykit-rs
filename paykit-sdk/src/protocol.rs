@@ -410,6 +410,9 @@ pub(crate) fn restore_paykit_layer(
     // Whether the backup holds a list this app published (`ll`, `lv` or `lp/`).
     let mut published = false;
     let mut bounded = BoundedFamilies::default();
+    // The starts of the widenings of the block marks the backup carries, an earlier
+    // restore's or a `missed` item's.
+    let mut carried_widenings = std::collections::BTreeSet::new();
     for (key, value) in state {
         // The schema is closed: a key no builder of the SDK writes is refused, and every
         // value is read as its family's, bound to what its key names (`state::StateKey`).
@@ -663,9 +666,10 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
-            StateKey::BlockedWidening { .. } => {
+            StateKey::BlockedWidening { from_ms } => {
                 state::restored::<crate::marks::BlockedWindow>(&key, &value, &binder)
                     .map_err(|_| unread())?;
+                carried_widenings.insert(from_ms);
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -755,11 +759,29 @@ pub(crate) fn restore_paykit_layer(
     // Every open request is held after a restore, set in the restore's own commit, until the
     // client's verdict shows the restore clean (Paykit spec 7.2, "What a restore loses";
     // `hold.rs`).
-    let hold = state::local_put(
-        key::RESTORE_HOLD,
-        &RestoreHold::of(cursor_time_ms, before.as_ref()),
-    )
-    .map_err(|_| String::from("the restore's hold can't be written"))?;
+    // What a blocked counterparty's inbox accepted after the backup is gone with the
+    // restore: every counterparty the deny list holds at the next read of the lists is
+    // marked from the backup's cursor time, to ask once it is unblocked (`marks.rs`). The
+    // hold names this restore's own widening, so a clean verdict drops it alone; a carried
+    // one at the same start stands for it, and is kept.
+    let mut restore_hold = RestoreHold::of(cursor_time_ms, before.as_ref());
+    let from = cursor_time_ms.saturating_sub(pubky_switch_core::records::CLOCK_TOLERANCE_MS);
+    if carried_widenings.contains(&from) {
+        restore_hold.widening_from_ms = None;
+    } else {
+        let widening = state::local_put(
+            &key::blocked_widening(from),
+            &crate::marks::BlockedWindow {
+                from_ms: from,
+                until_ms: crate::marks::BlockedWindow::TO_NOW,
+                read: None,
+            },
+        )
+        .map_err(|_| String::from("the restore's block widening can't be written"))?;
+        writes.push(widening);
+    }
+    let hold = state::local_put(key::RESTORE_HOLD, &restore_hold)
+        .map_err(|_| String::from("the restore's hold can't be written"))?;
     writes.push(hold);
     // The client's copy of the shared records is empty until they are listed again: until
     // then a record's absence means nothing (`Paykit::records_known`).
@@ -781,20 +803,6 @@ pub(crate) fn restore_paykit_layer(
     let resend = state::local_put(key::OWN_RESEND_OWED, &crate::hold::OwnResendOwed::default())
         .map_err(|_| String::from("the restore's re-send mark can't be written"))?;
     writes.push(resend);
-    // What a blocked counterparty's inbox accepted after the backup is gone with the
-    // restore: every counterparty the deny list holds at the next read of the lists is
-    // marked from the backup's cursor time, to ask once it is unblocked (`marks.rs`).
-    let from = cursor_time_ms.saturating_sub(pubky_switch_core::records::CLOCK_TOLERANCE_MS);
-    let widening = state::local_put(
-        &key::blocked_widening(from),
-        &crate::marks::BlockedWindow {
-            from_ms: from,
-            until_ms: crate::marks::BlockedWindow::TO_NOW,
-            read: None,
-        },
-    )
-    .map_err(|_| String::from("the restore's block widening can't be written"))?;
-    writes.push(widening);
     // The list and its counterparties are the backup's: a change or a withdrawal made since
     // is gone, so no list but a withdrawal goes until the host sets its list again
     // (`publish.rs`), and the host is told once. An app that published none waits for
@@ -821,10 +829,16 @@ pub(crate) fn restore_paykit_layer(
 /// layer or value that doesn't read is left to the layer's own check
 /// ([`restore_paykit_layer`]), which refuses it.
 ///
+/// The client offers no reading of the generation a backup's client follows before the
+/// restore's one commit, which writes Paykit's layer too, so this reads it from the
+/// backup's bytes as the client writes them (`meta`): a backup in which it can't be read
+/// is refused, never restored unchecked.
+///
 /// # Errors
 ///
-/// [`pubky_switch_client::app::AppError::InvalidData`] for such a backup; the client's
-/// errors for one whose bytes don't read.
+/// [`pubky_switch_client::app::AppError::InvalidData`] for such a backup, and for one
+/// keeping a loss whose client's generation can't be read; the client's errors for one
+/// whose bytes don't read.
 pub(crate) fn check_restored_loss(backup: &AppBackup) -> crate::error::Result<()> {
     /// The part of the client's backup this check reads: the identity and the generation
     /// its client follows.
@@ -850,8 +864,13 @@ pub(crate) fn check_restored_loss(backup: &AppBackup) -> crate::error::Result<()
     else {
         return Ok(());
     };
-    let followed: Followed = serde_json::from_slice(&backup.to_bytes()?)
-        .map_err(|_| AppError::InvalidData("the backup doesn't read".into()))?;
+    let followed: Followed = serde_json::from_slice(&backup.to_bytes()?).map_err(|_| {
+        AppError::InvalidData(
+            "the backup: Paykit spec 7.3: the generation its client follows can't be read, \
+             so its provider loss can't be checked"
+                .into(),
+        )
+    })?;
     let binder = state::Binder::unblinded(followed.meta.identity);
     let Ok(kept) = state::restored::<crate::loss::LossBoundary>(at, value, &binder) else {
         return Ok(());

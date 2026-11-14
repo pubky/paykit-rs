@@ -654,7 +654,9 @@ impl Paykit {
     /// re-send requests to the open requests' counterparties are queued first if
     /// [`Paykit::reconcile`] didn't queue them (Paykit spec 7.2), reading the records for
     /// them: a host that ends reconcile mode without reconciling still asks once; after a
-    /// clean one nothing is asked ([`Paykit::restore`]). After a restore, payments still wait for a
+    /// clean one nothing is asked ([`Paykit::restore`]). A restore whose verdict isn't
+    /// known yet counts as not clean from here: the client may drop the verdict as the
+    /// restore ends. After a restore, payments still wait for a
     /// reconcile under `paykit_pay` that runs the payer pass, if none has yet; the payee's side
     /// works at once.
     ///
@@ -664,13 +666,16 @@ impl Paykit {
     /// asks can't be queued.
     pub async fn end_reconcile(&mut self, confirmed: UserConfirmed) -> Result<()> {
         self.refresh_own()?;
-        // The verdict the client may drop as the restore ends is taken first.
+        // The verdict the client may drop as the restore ends is taken first. Still not
+        // known then, it never may be: the restore counts as not clean, so its asks and its
+        // widening of the block marks go (`hold.rs`).
         self.take_restore_verdict().await?;
-        let asks_owed = self
+        self.restore_verdict_not_known_holds().await?;
+        let asks_due = self
             .local_get::<RestoreHold>(key::RESTORE_HOLD)
             .await?
-            .is_some_and(|hold| hold.asks_owed());
-        if asks_owed {
+            .is_some_and(|hold| hold.asks_due());
+        if asks_due {
             self.list_records().await?;
             self.queue_restore_asks().await?;
             // Queued: what isn't sent now goes at the next receive.

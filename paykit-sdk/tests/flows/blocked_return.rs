@@ -351,6 +351,137 @@ async fn test_blocked_return_clean_restore_marks_no_one() {
     assert!(restored.app().protocol_get(b"bf").await.unwrap().is_none());
 }
 
+/// A wallet holding `paykit_contacts` that blocked bob, backed up, as JSON, and dropped;
+/// returns the backup and the time it was taken.
+async fn backed_up_blocking_bob(w: &World) -> (serde_json::Value, u64) {
+    let mut wallet = contacts_wallet(w, store()).await;
+    let _shop = w.shop().await;
+    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * MINUTE_MS);
+    wallet.receive(None).await.unwrap();
+    let bytes = wallet.backup().await.unwrap().to_bytes().unwrap();
+    (serde_json::from_slice(&bytes).unwrap(), w.clock.now_ms())
+}
+
+/// `backup` restored on a store of its own.
+async fn restore_from(w: &World, backup: &serde_json::Value) -> Paykit {
+    let backup =
+        paykit_sdk::PaykitBackup::from_bytes(&serde_json::to_vec(backup).unwrap()).unwrap();
+    Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap()
+}
+
+/// The block marks `app` keeps, as Paykit keeps them.
+async fn block_mark_values(app: &Paykit) -> Vec<serde_json::Value> {
+    app.app()
+        .protocol_scan(b"bd/")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, value)| serde_json::from_slice::<serde_json::Value>(&value).unwrap()["d"].clone())
+        .collect()
+}
+
+/// The starts of the widenings of the block marks `app` keeps.
+async fn widening_starts(app: &Paykit) -> Vec<u64> {
+    app.app()
+        .protocol_scan(b"bw/")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, value)| {
+            serde_json::from_slice::<serde_json::Value>(&value).unwrap()["d"]["from_ms"]
+                .as_u64()
+                .unwrap()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn test_blocked_return_restore_widening_applied_as_of_its_first_read() {
+    let w = World::new();
+    let (backup, _) = backed_up_blocking_bob(&w).await;
+    let mut restored = restore_from(&w, &backup).await;
+    // The first read of the lists shows bob blocked, before any verdict: the identity isn't
+    // confirmed yet, so a page settles nothing. The widening waits, keeping that read.
+    restored.receive(None).await.unwrap();
+    assert_eq!(restored.app().restore_held_cursor(), None);
+    assert_eq!(block_marks(&restored).await, 0);
+    let first_read = w.clock.now_ms();
+    w.clock.advance_ms(MINUTE_MS);
+    restored.unblock(&w.bob_id()).await.unwrap();
+    // Then a verdict that isn't clean, the cursor moved before the first settling page:
+    // bob is marked as of the first read, though the lists no longer hold him.
+    restored.app_mut().flush_cursor().await.unwrap();
+    restored.app_mut().refresh_identity().await.unwrap();
+    restored.receive(None).await.unwrap();
+    assert_eq!(
+        restored.app().restore_held_cursor(),
+        Some(pubky_switch_client::app::HeldCursor::Unknown)
+    );
+    let marks = block_mark_values(&restored).await;
+    assert_eq!(marks.len(), 1, "{marks:?}");
+    assert!(
+        marks[0]["latest_ms"].as_u64().unwrap() <= first_read,
+        "{marks:?}"
+    );
+    assert!(widening_starts(&restored).await.is_empty());
+}
+
+#[tokio::test]
+async fn test_blocked_return_clean_restore_over_an_earlier_hold_drops_only_its_own_widening() {
+    let w = World::new();
+    let (backup, taken) = backed_up_blocking_bob(&w).await;
+    // The backup holds an earlier restore's hold, not clean, with that restore's widening
+    // still owed: from an hour before this backup's.
+    let earlier = taken - 60 * MINUTE_MS;
+    let mut state = crate::restore::layer_of(&backup);
+    state.push((
+        b"rh".to_vec(),
+        serde_json::json!({ "v": 1, "d": {
+            "resend_from_ms": earlier,
+            "asks_queued": true,
+            "asked": [],
+            "earlier": false,
+            "earlier_asks": false,
+            "verdict": "not_clean",
+            "widening_from_ms": earlier,
+        }}),
+    ));
+    let to_now = u64::MAX;
+    state.push((
+        format!("bw/{earlier:020}").into_bytes(),
+        serde_json::json!({ "v": 1, "d": { "from_ms": earlier, "until_ms": to_now } }),
+    ));
+    let backup = crate::restore::with_layer(&backup, state);
+    let mut restored = restore_from(&w, &backup).await;
+    assert_eq!(widening_starts(&restored).await.len(), 2);
+    // Clean: this restore's own widening goes, with no mark or floor raise for it; the
+    // earlier restore's stays, owed.
+    restored.app_mut().refresh_identity().await.unwrap();
+    restored.receive(None).await.unwrap();
+    assert_eq!(
+        restored.app().restore_held_cursor(),
+        Some(pubky_switch_client::app::HeldCursor::Clean)
+    );
+    assert_eq!(widening_starts(&restored).await, vec![earlier]);
+    assert_eq!(block_marks(&restored).await, 0);
+    assert!(restored.app().protocol_get(b"bf").await.unwrap().is_none());
+    // At the next read of the lists the earlier one applies: bob is marked from its start.
+    w.clock.advance_ms(11 * MINUTE_MS);
+    restored.receive(None).await.unwrap();
+    let marks = block_mark_values(&restored).await;
+    assert_eq!(marks.len(), 1, "{marks:?}");
+    assert!(widening_starts(&restored).await.is_empty());
+}
+
 #[tokio::test]
 async fn test_blocked_return_missed_window_marks_every_blocked_counterparty() {
     let w = World::new();

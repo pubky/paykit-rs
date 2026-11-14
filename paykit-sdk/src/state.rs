@@ -1979,6 +1979,43 @@ mod tests {
     }
 
     #[test]
+    fn test_state_widening_read_bound_to_a_restores_window() {
+        let at = key::blocked_widening(5);
+        let window = |until: u64, read_at: Option<u64>| {
+            let mut window = serde_json::json!({ "from_ms": 5, "until_ms": until });
+            if let Some(at_ms) = read_at {
+                let deny = vec![[7u8; 32]];
+                window["read"] = serde_json::json!({ "at_ms": at_ms, "deny": deny });
+            }
+            window
+        };
+        let to_now = crate::marks::BlockedWindow::TO_NOW;
+        // A restore's window, waiting with the read it keeps, from its start on.
+        assert!(reads::<crate::marks::BlockedWindow>(
+            &at,
+            window(to_now, None)
+        ));
+        assert!(reads::<crate::marks::BlockedWindow>(
+            &at,
+            window(to_now, Some(5))
+        ));
+        assert!(reads::<crate::marks::BlockedWindow>(
+            &at,
+            window(to_now, Some(9))
+        ));
+        // A read before the window's start, or on a fixed window, is refused.
+        assert!(!reads::<crate::marks::BlockedWindow>(
+            &at,
+            window(to_now, Some(4))
+        ));
+        assert!(!reads::<crate::marks::BlockedWindow>(
+            &at,
+            window(9, Some(9))
+        ));
+        assert!(reads::<crate::marks::BlockedWindow>(&at, window(9, None)));
+    }
+
+    #[test]
     fn test_state_lost_owed_bound_to_its_sender_and_request() {
         let id = "6f1c2b8e-3d4a-4f5b-9c6d-7e8f9a0b1c2d";
         let owed = |sender: u8, earliest: u64, latest: u64, msg_id: &str| {
@@ -2160,6 +2197,7 @@ mod tests {
             "earlier": false,
             "earlier_asks": false,
             "verdict": "open",
+            "widening_from_ms": 1,
         });
         assert!(reads::<RestoreHold>(key::RESTORE_HOLD, hold.clone()));
         assert!(!reads::<RestoreHold>(key::CURSOR_TIME, hold));
