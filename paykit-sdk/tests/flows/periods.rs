@@ -4178,12 +4178,13 @@ async fn test_periods_proof_from_a_third_party_never_opens_the_period_record() {
 }
 
 #[tokio::test]
-async fn test_periods_proof_over_a_payee_request_record_that_never_opens_held_then_given_up() {
+async fn test_periods_proof_over_a_payee_request_record_that_never_opens_kept_then_given_up() {
     // Bob's till writes the shop's request record as a value sealed under a key that isn't
     // the epoch's: the shop holds the key, so it never opens. Alice's proof of January then
-    // reaches the shop: whether she is the record's counterparty can't be told, so the entry
-    // is held. Past 30 days from its acceptance it is taken as a reply before its record and
-    // given up with the host's notice.
+    // reaches the shop: whether she is the record's counterparty can't be told, so it is kept
+    // as a reply before its record at once, under the spam rule, never written over the
+    // value (Paykit spec 8.1, "Replies before their record"). Past 30 days from its
+    // acceptance it is given up with the host's notice.
     let w = World::new();
     let mut shop = w.shop().await;
     let mut till = w
@@ -4261,12 +4262,14 @@ async fn test_periods_proof_over_a_payee_request_record_that_never_opens_held_th
         body,
     );
     let summary = shop.receive(None).await.unwrap();
-    assert!(!received(&summary, "paykit.payment_proof"), "{summary:?}");
-    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert!(received(&summary, "paykit.payment_proof"), "{summary:?}");
+    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    assert!(shop.app_mut().parked_entries().await.unwrap().is_empty());
     w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS + DAY_MS);
     for _ in 0..3 {
         shop.receive(None).await.unwrap();
     }
+    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
     let notices = shop.notices().await.unwrap();
     assert!(
         notices
@@ -4528,4 +4531,157 @@ async fn test_periods_details_dropped_for_the_bounds_not_asked_on_a_period_recor
         true,
     ))
     .await;
+}
+
+// A record paused as divergent beside subscriptions and their Billing Periods (Paykit spec
+// 6): nothing is accepted, sent, written or lost past the pause.
+
+/// Bob's shop on `base`.
+async fn shop_on(w: &World, base: Arc<dyn pubky_switch_client::store::StateStore>) -> Paykit {
+    w.join_with(
+        &w.bob,
+        "shop",
+        AppScopes::new().request().build().unwrap(),
+        PaykitConfig::default(),
+        base,
+    )
+    .await
+}
+
+/// Whether `error` is a divergent refusal naming `record`.
+fn divergent_refusal(error: &PaykitError, record: &[u8; 32]) -> bool {
+    matches!(error.refusal(), Some(Refusal::Divergent { records })
+        if records.iter().any(|r| r.record == *record))
+}
+
+#[tokio::test]
+async fn test_periods_subscription_accepted_by_hand_only_once_its_paused_record_is_confirmed() {
+    // Alice's request record of bob's subscription is paused as divergent: the payee may
+    // have cancelled it. Her acceptance by hand is refused naming the record, nothing
+    // recorded, until she confirms it.
+    let w = World::new();
+    let base = store();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let request = requested(&w, &mut shop, &mut wallet).await;
+    let record = wallet.request(&request).await.unwrap().record;
+    crate::divergent::set_divergent(&base, &wallet, &record, true);
+    let refused = wallet.accept_subscription(&request).await.unwrap_err();
+    assert!(divergent_refusal(&refused, &record), "{refused:?}");
+    assert_ne!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Subscribed
+    );
+    crate::divergent::confirm(&mut wallet, &record)
+        .await
+        .unwrap();
+    wallet.accept_subscription(&request).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Subscribed
+    );
+}
+
+#[tokio::test]
+async fn test_periods_details_sent_only_once_a_paused_record_is_confirmed() {
+    // The shop's record of the subscription is paused as divergent: its period details, an
+    // own write of another kind than a stop, are refused naming the record, nothing signed
+    // or sent, until the user confirms it.
+    let w = World::new();
+    let base = store();
+    let mut shop = shop_on(&w, Arc::clone(&base)).await;
+    let mut wallet = w.wallet("wallet").await;
+    let (_, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    // Divergent at the switch, as a conflicting upload leaves it: a fresh read shows it so.
+    w.bob
+        .switch()
+        .make_divergent([0x5a; 16], sale, [1; 32])
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let now = w.clock.now_ms();
+    let refused = shop
+        .send_period_details(&sale, details(january(), "lnbc1first", now + DAY_MS))
+        .await
+        .unwrap_err();
+    assert!(divergent_refusal(&refused, &sale), "{refused:?}");
+    assert!(shop.payee_activity().await.unwrap()[0].periods.is_empty());
+    crate::divergent::confirm(&mut shop, &sale).await.unwrap();
+    shop.send_period_details(&sale, details(january(), "lnbc1first", now + DAY_MS))
+        .await
+        .unwrap();
+    assert_eq!(shop.payee_activity().await.unwrap()[0].periods.len(), 1);
+}
+
+#[tokio::test]
+async fn test_periods_details_over_a_paused_period_record_held_then_placed_once_confirmed() {
+    // Alice's period record of January holds bob's first details and is then paused as
+    // divergent. Bob's second details are neither written over it nor lost: their entry is
+    // held, and placed beside the first once the user confirms the record.
+    let w = World::new();
+    let base = store();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    let now = w.clock.now_ms();
+    shop.send_period_details(&sale, details(january(), "lnbc1first", now + DAY_MS))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let period = wallet.app().record_key(&payer_period(&request)).unwrap();
+    async fn count(wallet: &Paykit, request: &RequestRef) -> usize {
+        wallet.request(request).await.unwrap().periods[0]
+            .details
+            .len()
+    }
+    assert_eq!(count(&wallet, &request).await, 1);
+    crate::divergent::set_divergent(&base, &wallet, &period, true);
+    w.clock.advance_ms(1_000);
+    shop.send_period_details(&sale, details(january(), "lnbc1second", now + 2 * DAY_MS))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(count(&wallet, &request).await, 1);
+    assert!(wallet.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    crate::divergent::confirm(&mut wallet, &period)
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(count(&wallet, &request).await, 2);
+}
+
+#[tokio::test]
+async fn test_periods_proof_over_a_paused_period_record_held_then_placed_once_confirmed() {
+    // The shop's period record of January holds its details and is then paused as
+    // divergent. Alice's proof of January is neither written over it nor lost, and no
+    // kept write names a record it can't: its entry is held, and placed once the user
+    // confirms the record.
+    let w = World::new();
+    let base = store();
+    let mut shop = shop_on(&w, Arc::clone(&base)).await;
+    let mut wallet = w.wallet("wallet").await;
+    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    let now = w.clock.now_ms();
+    shop.send_period_details(&sale, details(january(), "lnbc1invoice", now + DAY_MS))
+        .await
+        .unwrap();
+    let period = shop.payee_activity().await.unwrap()[0].periods[0].record;
+    crate::divergent::set_divergent(&base, &shop, &period, true);
+    let body = period_proof(&w, shop.app_id(), january()).await;
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash],
+        body,
+    );
+    shop.receive(None).await.unwrap();
+    assert!(!shop.payee_activity().await.unwrap()[0].periods[0].paid);
+    assert!(shop.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    crate::divergent::confirm(&mut shop, &period).await.unwrap();
+    shop.receive(None).await.unwrap();
+    shop.receive(None).await.unwrap();
+    assert!(shop.payee_activity().await.unwrap()[0].periods[0].paid);
 }

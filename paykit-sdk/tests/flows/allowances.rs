@@ -4947,3 +4947,312 @@ async fn test_allowances_restored_end_acceptance_time_ahead_is_clamped() {
         "{value}"
     );
 }
+
+/// An app of alice's, `name`, with `scopes`, on `store`; she admits bob.
+async fn alice_on(
+    w: &World,
+    name: &str,
+    scopes: RequestedScopes,
+    store: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+) -> Paykit {
+    let mut app = w
+        .join_with(
+            &w.alice,
+            name,
+            scopes,
+            paykit_sdk::PaykitConfig::default(),
+            store,
+        )
+        .await;
+    app.app_mut().invite(&w.bob_id()).await.unwrap();
+    app
+}
+
+fn divergent_refusal(error: &PaykitError) -> bool {
+    matches!(refusal(error), Some(Refusal::Divergent { .. }))
+}
+
+#[tokio::test]
+async fn test_allowances_acceptance_received_over_a_divergent_record_waits_for_the_confirmation() {
+    // Alice's wallet proposed, and her copy of the record shows it divergent: the upload may
+    // hold an end or a rejection. Bob's acceptance adds no stop, so it is stored, not
+    // written, and goes into the record once the user confirms it (Paykit spec 6).
+    let w = World::new();
+    let base = crate::common::store();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(alice_on(
+        &w,
+        "wallet",
+        AppScopes::new().pay().allowance().build().unwrap(),
+        std::sync::Arc::clone(&base),
+    ))
+    .await;
+    let sent = wallet
+        .propose_allowance(w.bob_id(), AllowanceRole::Allower, terms())
+        .await
+        .unwrap();
+    crate::divergent::set_divergent(&base, &wallet, &sent.record, true);
+    shop.receive(None).await.unwrap();
+    let theirs = shop.allowances().await.unwrap()[0].record;
+    shop.accept_allowance(&theirs).await.unwrap();
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+        assert!(Box::pin(value(&wallet, &sent.record)).await["response"].is_null());
+    }
+    crate::divergent::confirm(&mut wallet, &sent.record)
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(!Box::pin(value(&wallet, &sent.record)).await["response"].is_null());
+    assert_eq!(
+        wallet.allowance(&sent.record).await.unwrap().status,
+        AllowanceStatus::Accepted
+    );
+}
+
+#[tokio::test]
+async fn test_allowances_proposal_received_over_a_divergent_record_kept_as_the_conflict_at_once() {
+    // A proposal under the ID of an Allowance whose record the wallet holds writes over it
+    // only as a conflict, a stop: over a divergent record it is kept as the stop at once and
+    // written into `conflicted`, never waiting for the confirmation (Paykit spec 6, 8.3).
+    let w = World::new();
+    let base = crate::common::store();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(alice_on(
+        &w,
+        "wallet",
+        AppScopes::new().pay().allowance().build().unwrap(),
+        std::sync::Arc::clone(&base),
+    ))
+    .await;
+    let (_, mine) = Box::pin(proposed(&w, &mut shop, &mut wallet)).await;
+    let id = wallet.allowance(&mine).await.unwrap().allowance_id;
+    crate::divergent::set_divergent(&base, &wallet, &mine, true);
+    w.clock.advance_ms(1);
+    propose_as(&w, &[wallet.app_id()], id.as_str(), "0.20");
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Conflicted
+    );
+}
+
+#[tokio::test]
+async fn test_allowances_kept_answer_waits_over_a_divergent_record_until_confirmed() {
+    // An acceptance kept before its record: once the record is held, its later write waits
+    // while the record's view is divergent and unconfirmed, and goes once the user confirms
+    // it (Paykit spec 6, 8.1).
+    let w = World::new();
+    let base = crate::common::store();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(alice_on(
+        &w,
+        "wallet",
+        AppScopes::new().pay().allowance().build().unwrap(),
+        std::sync::Arc::clone(&base),
+    ))
+    .await;
+    let mine = Box::pin(answer_kept_then_recorded_divergent(
+        &w,
+        &mut wallet,
+        &mut shop,
+        &base,
+    ))
+    .await;
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+        assert_eq!(wallet.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+        assert!(Box::pin(value(&wallet, &mine)).await["response"].is_null());
+    }
+    crate::divergent::confirm(&mut wallet, &mine).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert!(!Box::pin(value(&wallet, &mine)).await["response"].is_null());
+}
+
+#[tokio::test]
+async fn test_allowances_own_acceptance_over_a_divergent_record_refused_until_confirmed() {
+    // The wallet's own acceptance adds no stop: over a record seen divergent it is refused,
+    // with nothing signed, written or sent, until the user confirms the record.
+    let w = World::new();
+    let base = crate::common::store();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(alice_on(
+        &w,
+        "wallet",
+        AppScopes::new().pay().allowance().build().unwrap(),
+        std::sync::Arc::clone(&base),
+    ))
+    .await;
+    let (_, mine) = Box::pin(proposed(&w, &mut shop, &mut wallet)).await;
+    crate::divergent::set_divergent(&base, &wallet, &mine, true);
+    wallet.receive(None).await.unwrap();
+    let entries = w.bob.switch().entries_from(&w.alice_id());
+    let error = wallet.accept_allowance(&mine).await.unwrap_err();
+    assert!(divergent_refusal(&error), "{error:?}");
+    assert!(Box::pin(value(&wallet, &mine)).await["response"].is_null());
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    crate::divergent::confirm(&mut wallet, &mine).await.unwrap();
+    wallet.accept_allowance(&mine).await.unwrap();
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Accepted
+    );
+}
+
+/// Alice's wallet, on `base`, holding bob's proposal, the record's view set divergent.
+async fn proposed_over_divergent(
+    w: &World,
+) -> (
+    Paykit,
+    Paykit,
+    [u8; 32],
+    [u8; 32],
+    std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+) {
+    let base = crate::common::store();
+    let mut shop = Box::pin(shop(w)).await;
+    let mut wallet = Box::pin(alice_on(
+        w,
+        "wallet",
+        AppScopes::new().pay().allowance().build().unwrap(),
+        std::sync::Arc::clone(&base),
+    ))
+    .await;
+    let (theirs, mine) = Box::pin(proposed(w, &mut shop, &mut wallet)).await;
+    (shop, wallet, theirs, mine, base)
+}
+
+#[tokio::test]
+async fn test_allowances_rejection_goes_over_a_divergent_record() {
+    // A rejection is a stop: over a record seen divergent and unconfirmed, the wallet's own
+    // rejection is recorded and sent at once (Paykit spec 6).
+    let w = World::new();
+    let (mut shop, mut wallet, _, mine, base) = Box::pin(proposed_over_divergent(&w)).await;
+    crate::divergent::set_divergent(&base, &wallet, &mine, true);
+    wallet.receive(None).await.unwrap();
+    wallet.reject_allowance(&mine).await.unwrap();
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Rejected
+    );
+    assert_eq!(
+        Box::pin(taken(&mut shop, "paykit.allowance_rejection")).await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn test_allowances_end_goes_over_a_divergent_record() {
+    // An end is a stop: over a record seen divergent and unconfirmed, bob's end of the
+    // Allowance the wallet accepted is recorded at once, and so is the wallet's own end of
+    // it, sent (Paykit spec 6).
+    let w = World::new();
+    let (mut shop, mut wallet, theirs, mine, base) = Box::pin(proposed_over_divergent(&w)).await;
+    wallet.accept_allowance(&mine).await.unwrap();
+    shop.receive(None).await.unwrap();
+    crate::divergent::set_divergent(&base, &wallet, &mine, true);
+    wallet.receive(None).await.unwrap();
+    shop.end_allowance(&theirs).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.allowance(&mine).await.unwrap().status,
+        AllowanceStatus::Ended
+    );
+    assert!(!Box::pin(value(&wallet, &mine)).await["end"].is_null());
+}
+
+/// Alice's `wallet` sends bob a proposal without writing its record, as another own app
+/// would; bob accepts it and the wallet keeps the acceptance before its record. The record
+/// is then written, and its view on `base` set divergent. Returns its record key.
+async fn answer_kept_then_recorded_divergent(
+    w: &World,
+    wallet: &mut Paykit,
+    shop: &mut Paykit,
+    base: &std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+) -> [u8; 32] {
+    let id = paykit_lib::AllowanceId::generate().unwrap();
+    let body = json!({
+        "allowance_id": id.as_str(),
+        "proposer_role": "allower",
+        "terms": terms().to_json().unwrap(),
+    });
+    let signed = wallet
+        .app()
+        .sign_message(pubky_switch_client::app::OutgoingMessage::new(
+            w.bob_id(),
+            "paykit.allowance_proposal",
+            body.as_object().cloned().unwrap(),
+        ))
+        .unwrap();
+    wallet.app_mut().queue_signed(signed.clone()).await.unwrap();
+    wallet.app_mut().flush_outbox().await.unwrap();
+    shop.receive(None).await.unwrap();
+    let theirs = shop.allowances().await.unwrap()[0].record;
+    shop.accept_allowance(&theirs).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    let proposal = paykit_lib::records::StoredMessage::new(
+        w.alice_id(),
+        wallet.app().cert().signed(),
+        signed.plaintext().clone(),
+        None,
+        &w.bob_id(),
+    )
+    .unwrap();
+    let record = AllowanceRecord {
+        counterparty: w.bob_id(),
+        allowance_id: id.clone(),
+        proposal,
+        response: None,
+        end: None,
+        conflicted: None,
+        grant: None,
+        grants: Vec::new(),
+        msg_ids: Vec::new(),
+        unknown: Default::default(),
+    };
+    let target = allowances_target(&w.bob_id(), &id);
+    let op = wallet
+        .app_mut()
+        .record_op(&target, Some(&record.to_json().unwrap()), Vec::new())
+        .await
+        .unwrap();
+    wallet
+        .app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    let mine = wallet.app().record_key(&target).unwrap();
+    crate::divergent::set_divergent(base, wallet, &mine, true);
+    mine
+}
+
+#[tokio::test]
+async fn test_allowances_received_rejection_goes_over_a_divergent_record() {
+    // Bob's rejection of alice's proposal is a stop: over her record seen divergent and
+    // unconfirmed it is written at once, not stored for the confirmation (Paykit spec 6).
+    let w = World::new();
+    let base = crate::common::store();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(alice_on(
+        &w,
+        "wallet",
+        AppScopes::new().pay().allowance().build().unwrap(),
+        std::sync::Arc::clone(&base),
+    ))
+    .await;
+    let sent = wallet
+        .propose_allowance(w.bob_id(), AllowanceRole::Allower, terms())
+        .await
+        .unwrap();
+    crate::divergent::set_divergent(&base, &wallet, &sent.record, true);
+    shop.receive(None).await.unwrap();
+    let theirs = shop.allowances().await.unwrap()[0].record;
+    shop.reject_allowance(&theirs).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.allowance(&sent.record).await.unwrap().status,
+        AllowanceStatus::Rejected
+    );
+}

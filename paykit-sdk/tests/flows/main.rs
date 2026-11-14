@@ -12,6 +12,7 @@ mod common;
 mod crash;
 mod custom_rail;
 mod destinations;
+mod divergent;
 mod erasure;
 mod final_check;
 mod labels;

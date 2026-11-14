@@ -169,7 +169,7 @@ pub(crate) struct StoredNote {
 
 /// The host's notice that `stored`, which no entry keeps stored, was given up at `origin`,
 /// raised at `at`, service time.
-fn given_up_notice(
+pub(crate) fn given_up_notice(
     stored: &StoredMessage,
     at: u64,
     origin: crate::notices::GivenUpOrigin,
@@ -327,6 +327,7 @@ impl Paykit {
                 recurring: request.is_recurring(),
                 recurrence: request.recurrence,
                 status: RequestStatus::Unrecorded,
+                divergent: false,
                 receipt: None,
                 manual_only: self.came_back_from_block(&stored).await?,
                 periods: Vec::new(),
@@ -413,6 +414,12 @@ impl Paykit {
             } => {
                 self.count_dropped_unverified(&mut tx, *sender, *accepted_at_ms)
                     .await?;
+                true
+            }
+            // A record a view showed divergent pauses (`divergent.rs`): its mark is its own
+            // commit, before this event's, and taking the event again changes nothing.
+            AppEvent::RecordDivergent { key: record, id } => {
+                Box::pin(self.take_divergent_event(record, id)).await?;
                 true
             }
             _ => false,
@@ -910,11 +917,18 @@ impl Paykit {
         let content = self.app.shared_record(&key).await?.map(|held| held.content);
         // Absent or deleted while the copy of its side may lack records: the copy decides
         // nothing yet (Paykit spec 8.1, "Records not listed yet"), whatever key the record's
-        // scope waits for.
+        // scope waits for, nor whatever waits over the record: the message is neither written
+        // nor given up meanwhile.
         if matches!(content, None | Some(RecordContent::Deleted))
             && self.side_unlisted(record_side(target)).await?
         {
             return Ok(Placed::Waits);
+        }
+        // Over a divergent record its user hasn't confirmed, only a stop is written, and while
+        // messages kept over it before this one wait to be written, they go first: the
+        // message waits, within its own window (Paykit spec 6, 8.1 "Stored entries").
+        if Box::pin(self.divergent_write_waits(&key, &stored)).await? {
+            return Ok(Placed::Not);
         }
         // Without the current data epoch's key of the record's scope, nothing can be sealed
         // there yet: the message waits for it, within its window.
@@ -942,6 +956,13 @@ impl Paykit {
                 let Some(record) = self.held_activity(target).await? else {
                     return Ok(Placed::Not);
                 };
+                // A record that reads names its counterparty: a message about it from anyone
+                // else is never placed, its role held or not (Paykit spec 8.1), and is done
+                // with, nothing written. A receipt finds the same in `place_receipt`.
+                if role != Role::Receipt && record.counterparty != stored.sender() {
+                    self.local_commit(locals).await?;
+                    return Ok(Placed::Done);
+                }
                 if role == Role::Receipt {
                     return self.place_receipt(target, &record, stored, locals).await;
                 }

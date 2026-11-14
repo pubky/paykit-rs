@@ -176,6 +176,11 @@ impl Paykit {
         let side = target.side.side();
         let key = self.activity_key(target)?;
         let held = self.app.shared_record(&key).await?;
+        // Every own write takes the record's view first: one written over a divergent view,
+        // a stop included, leaves the record paused (`divergent.rs`).
+        if let Some(seen) = &held {
+            Box::pin(self.pause_of(seen)).await?;
+        }
         let current = held.as_ref().and_then(|r| r.content.value());
         let held_record = activity::read(current, &own, side);
         let opens = held_record.is_none();

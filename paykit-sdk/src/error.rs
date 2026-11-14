@@ -196,6 +196,31 @@ pub enum Refusal {
         /// The payment the user is shown.
         payment: Box<crate::BlockedPayment>,
     },
+    /// A record the call acts on is divergent after a provider loss, or was seen so, and the
+    /// user hasn't confirmed it (Paykit spec 6, "Divergent records"): its upload may hold
+    /// what the current write lacks, such as a cancellation of the request, a receipt, or a
+    /// newer list in which the payee withdrew a destination. Nothing was written or paid.
+    /// The host shows `records` and, once the user has seen that, calls
+    /// [`crate::Paykit::confirm_divergent`] for each, as given here, then calls again. A
+    /// record given here with [`crate::DivergentRecord::writes_waiting`] is confirmed
+    /// already, and confirming it again writes nothing: only a receive writes the messages
+    /// kept over it, so the host runs [`crate::Paykit::receive`] until
+    /// [`crate::Paykit::divergent_records`] shows it without `writes_waiting`, or no longer
+    /// lists it, and only then calls again. From
+    /// [`crate::Paykit::confirm_payment`], each record is shown with
+    /// [`crate::DivergentRecord::may_hold_credit`]: only a confirmation of these lets the
+    /// credit go, so this refusal comes also after the user confirmed the same record from a
+    /// receive's summary or [`crate::Paykit::divergent_records`], and is answered the same
+    /// way. A payment's refusal never names the list of an app the payee's `identity.json`
+    /// doesn't list in `apps`, or lists as removed, nor the record of a request past its
+    /// deadline, carrying endpoints of an app that copy doesn't list as current, or
+    /// requiring an app it lists as removed: such a payment goes on to the refusal of what
+    /// stops it ([`crate::Paykit::pay_request`]).
+    #[error("Paykit spec 6: a record is divergent; the user must confirm")]
+    Divergent {
+        /// The records the user is asked to confirm.
+        records: Vec<crate::DivergentRecord>,
+    },
 }
 
 /// A failure of the SDK.
