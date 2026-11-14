@@ -73,6 +73,7 @@
 //! | `mc` | set by a `missed` item: every entry of the consent list is to be confirmed again, as after a restore; nothing is consented while it is set, and the next receive marks each entry so and clears it (`allowances.rs`); never restored | |
 //! | `en/<msg_id>` | the executor app an `executor_notice` is wrapped to, kept with the batch that queues it | |
 //! | `lv/<record key>` | the last ledger version the executor accepted, with its content (`executor.rs`, Paykit spec 8.3); its content at most the 256 KiB less 4 bytes a shared record holds (`MAX_LEDGER_VALUE`), and a restore refuses a backup holding a longer one | |
+//! | `la` | the first rollback of an Allowance ledger this app found, the record, the generation of the own `identity.json` it was found at and the rule its ledger broke; while that generation stands the app makes no new attempt (`executor.rs`, Paykit spec 8.3); one key, so at most one; restored | |
 //! | `el/<record key>` | the first grant's empty ledger, not yet sent or sent without a verified answer (`executor.rs`); never restored, so a restored executor takes a missing ledger as usage history lost | |
 //! | `fc/<record key>` | the version of the ignored current write of an Allowance record its user confirmed the executor may pay under (`executor.rs`); never restored | |
 //! | `eo/<record key>` | this app's own crossing end of an Allowance, recorded while sends to its counterparty were held, whose message is sent from the record once they aren't (`allowances.rs`, `Paykit::send_owed_ends`); never restored | |
