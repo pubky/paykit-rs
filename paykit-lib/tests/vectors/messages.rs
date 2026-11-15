@@ -1,12 +1,15 @@
 //! `messages.json`: every kind as v0.2 sends it (Switch wire 4.5, Paykit wire 4),
-//! `label_rejections`, `multi_protocol_senders`, `cancellation_roles` and `conversion_terms`.
+//! `label_rejections`, `multi_protocol_senders`, `cancellation_roles`, `conversion_terms` and
+//! `conversion_amounts`.
 
 use std::collections::HashMap;
 
-use paykit_lib::bodies::{check_body, Body, ResendRequest};
+use paykit_lib::amount::{Asset, Decimal, PaymentAmount, Rate};
+use paykit_lib::amount_for_endpoint;
+use paykit_lib::bodies::{check_body, Body, PaymentRequest, ResendRequest};
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::{natural_key, request_obligation};
-use paykit_lib::identifiers::AllowanceId;
+use paykit_lib::identifiers::{AllowanceId, PaymentEndpointIdentifier};
 use paykit_lib::kinds::{check_kind_scopes, Kind, PaykitKindRules, OPAQUE_MEMBERS};
 use pubky_switch_core::enc::b64;
 use pubky_switch_core::message::{Message, MessagePlaintext, VerifiedSender};
@@ -133,6 +136,7 @@ pub(crate) fn check() {
     check_multi_protocol_senders(&keys, &file);
     check_cancellation_roles(&keys, &file);
     check_conversion_terms(&keys, &file);
+    check_conversion_amounts(&file);
     check_proof_members(&keys, &file);
     check_receipt_members(&keys, &file);
 }
@@ -413,7 +417,8 @@ of it copies the label; label_rejections holds requests a payer drops for their 
 multi_protocol_senders holds messages from apps whose certificates hold another protocol's \
 scopes; cancellation_roles holds a cancellation between certificates of each pair of roles; \
 conversion_terms holds the shop's period details and requests with their conversion terms \
-changed, which a payer takes or drops; proof_members holds alice's proofs with a member \
+changed, which a payer takes or drops; conversion_amounts holds the amount a payer pays to \
+an endpoint under a request's or period details' rates; proof_members holds alice's proofs with a member \
 outside the payment it proves, which a payee drops; receipt_members holds bob's receipts \
 with the payee's metadata and reference, which a payer takes or drops.";
 
@@ -509,6 +514,7 @@ pub(crate) fn generate(keys: &Keys) {
             cancellation_roles(keys),
         ),
         (Place::Member("/conversion_terms"), conversion_terms(keys)),
+        (Place::Member("/conversion_amounts"), conversion_amounts()),
         (Place::Member("/proof_members"), proof_members(keys)),
         (Place::Member("/receipt_members"), receipt_members(keys)),
     ];
@@ -755,7 +761,10 @@ payment_request_recurring (request), a usd request with per_period conversion: t
 are cross-asset only, so a bare or rail-qualified rate for the requested asset (usd, \
 usd-polygon) makes them invalid against the request; each rate's asset is <asset> or \
 <asset>-<rail> of lower-case letters and digits, and matches an endpoint the details or \
-the request name (here btc-lightning-bolt11). accepted are messages alice takes, \
+the request name (here btc-lightning-bolt11). Where a case has request_conversion, its \
+request is payment_request_recurring with its conversion terms replaced by it, or removed \
+where it is null: period details carry rates only for a request with per_period conversion \
+terms. accepted are messages alice takes, \
 at check 10 and, for period details, against their request; refused are those she drops. \
 reason is paykit-lib's wording, of the first check that refuses it.";
 
@@ -766,6 +775,8 @@ struct ConversionCase {
     base: &'static str,
     body: Value,
     request: Option<&'static str>,
+    /// The request's conversion terms in place of its own, or none where `null`.
+    request_conversion: Option<Value>,
 }
 
 /// The cases of `conversion_terms`, accepted then refused.
@@ -779,6 +790,13 @@ fn conversion_cases() -> (Vec<ConversionCase>, Vec<ConversionCase>) {
             "rates": rates,
         }),
         request: Some("payment_request_recurring"),
+        request_conversion: None,
+    };
+    // Period details with a rate, against payment_request_recurring with its conversion terms
+    // replaced by `conversion`, or removed where it is null.
+    let against = |name, conversion: Value| ConversionCase {
+        request_conversion: Some(conversion),
+        ..details(name, json!([{ "asset": "btc", "value": "0.00001234" }]))
     };
     // payment_request_required_app, a usd request accepting btc-lightning-bolt11 only, with
     // fixed rates `rates` and its asset `asset`.
@@ -796,6 +814,7 @@ fn conversion_cases() -> (Vec<ConversionCase>, Vec<ConversionCase>) {
             base: "payment_request_required_app",
             body,
             request: None,
+            request_conversion: None,
         }
     };
     let rate = |selector: &str| json!([{ "asset": selector, "value": "0.00001234" }]);
@@ -861,6 +880,14 @@ fn conversion_cases() -> (Vec<ConversionCase>, Vec<ConversionCase>) {
             "period details with a rate whose rail matches no endpoint",
             json!([{ "asset": "btc-bitcoin", "value": "0.00001234" }]),
         ),
+        against(
+            "period details with rates against a request with fixed conversion terms",
+            json!({ "rates": [{ "asset": "btc", "value": "0.00001234" }], "type": "fixed" }),
+        ),
+        against(
+            "period details with rates against a request without conversion terms",
+            Value::Null,
+        ),
     ];
     (accepted, refused)
 }
@@ -875,9 +902,36 @@ fn conversion_json(case: &ConversionCase) -> Vec<u8> {
     m.to_json().unwrap()
 }
 
+/// The request `name` of messages.json, with its conversion terms replaced by `conversion`,
+/// or removed where it is null.
+pub(crate) fn conversion_request(name: &str, conversion: Option<&Value>) -> PaymentRequest {
+    let mut message = Message::parse(&message_json(name), OPAQUE_MEMBERS).unwrap();
+    match conversion {
+        Some(Value::Null) => {
+            message.body.remove("conversion");
+        }
+        Some(terms) => {
+            message.body.insert("conversion".into(), terms.clone());
+        }
+        None => {}
+    }
+    let Body::PaymentRequest(request) =
+        Body::parse(&message).unwrap_or_else(|e| panic!("{name}: {e}"))
+    else {
+        panic!("{name}: a request")
+    };
+    request
+}
+
 /// Alice's checks of a case the shop signed: check 10, then, for period details, the checks
-/// against their request (Paykit wire 4.9).
-fn conversion_verdict(keys: &Keys, json: &[u8], request: Option<&str>) -> paykit_lib::Result<()> {
+/// against their request, its conversion terms replaced by `request_conversion` when given
+/// (Paykit wire 4.9).
+fn conversion_verdict(
+    keys: &Keys,
+    json: &[u8],
+    request: Option<&str>,
+    request_conversion: Option<&Value>,
+) -> paykit_lib::Result<()> {
     let shop = keys.app("shop");
     let plaintext = MessagePlaintext::sign_json(&shop.keys, json.to_vec(), OPAQUE_MEMBERS).unwrap();
     let message = plaintext
@@ -890,12 +944,7 @@ fn conversion_verdict(keys: &Keys, json: &[u8], request: Option<&str>) -> paykit
         .unwrap();
     let body = check_body(&message, json)?;
     if let (Some(request), Body::PaymentPeriodDetails(details)) = (request, &body) {
-        let Body::PaymentRequest(request) =
-            Body::parse(&Message::parse(&message_json(request), OPAQUE_MEMBERS).unwrap())?
-        else {
-            panic!("{request}: a request")
-        };
-        details.check_against(&request)?;
+        details.check_against(&conversion_request(request, request_conversion))?;
     }
     Ok(())
 }
@@ -923,7 +972,10 @@ fn conversion_terms(keys: &Keys) -> Value {
         if let Some(request) = case.request {
             out["request"] = json!(request);
         }
-        match conversion_verdict(keys, &json, case.request) {
+        if let Some(conversion) = &case.request_conversion {
+            out["request_conversion"] = conversion.clone();
+        }
+        match conversion_verdict(keys, &json, case.request, case.request_conversion.as_ref()) {
             Ok(()) => assert!(taken, "{}: taken", case.name),
             Err(error) => {
                 assert!(!taken, "{}: {error}", case.name);
@@ -961,12 +1013,187 @@ fn check_conversion_terms(keys: &Keys, file: &Value) {
             let read = Message::parse(&json, OPAQUE_MEMBERS).unwrap();
             base.body = read.body.clone();
             assert_eq!(base.to_json().unwrap(), json, "{name}: its base");
-            let verdict = conversion_verdict(keys, &json, case["request"].as_str());
+            let verdict = conversion_verdict(
+                keys,
+                &json,
+                case["request"].as_str(),
+                case.get("request_conversion"),
+            );
             assert_eq!(verdict.is_ok(), taken, "{name}: {verdict:?}");
             if let Err(error) = verdict {
                 assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
             }
         }
+    }
+}
+
+const CONVERSION_AMOUNTS_DESCRIPTION: &str = "Spec 7.2 step 1, wire 4.4, 4.9, \
+specs/payment-conversion.md: the amount to pay to an endpoint, payment_endpoint_identifier \
+of the form <asset>-<rail>-<format>, whose smallest unit has fraction_digits fraction \
+digits, for a request of requested, under rates, the request's fixed rates or the period \
+details' rates, null for none. The rate is the asset-rail rate (usdt-polygon), else the \
+asset-wide rate (usdt), else exactly 1 when the endpoint's asset is the requested asset; \
+else the endpoint is unusable for conversion and amount is null. requested times the rate \
+is computed exactly and rounded up once to the smallest unit; amount is in the endpoint's \
+asset, normalized.";
+
+/// The cases of `conversion_amounts`: name, requested value and asset, rates (selector,
+/// value), endpoint identifier and its smallest unit's fraction digits.
+type AmountCase = (
+    &'static str,
+    (&'static str, &'static str),
+    Option<&'static [(&'static str, &'static str)]>,
+    &'static str,
+    u32,
+);
+
+/// The cases of `conversion_amounts`, from specs/payment-conversion.md's examples.
+const AMOUNT_CASES: [AmountCase; 11] = {
+    const USDT_RATES: &[(&str, &str)] = &[("usdt", "1"), ("usdt-polygon", "1.008")];
+    const POLYGON: &[(&str, &str)] = &[("usdt-polygon", "1.008")];
+    const BTC: &[(&str, &str)] = &[("btc", "0.000012345")];
+    const PARITY: &[(&str, &str)] = &[("usdt", "1")];
+    [
+        (
+            "an asset-rail rate",
+            ("10", "usd"),
+            Some(USDT_RATES),
+            "usdt-polygon-address",
+            6,
+        ),
+        (
+            "an asset-wide rate",
+            ("10", "usd"),
+            Some(USDT_RATES),
+            "usdt-ethereum-address",
+            6,
+        ),
+        (
+            "an asset-rail rate for the requested asset",
+            ("10", "usdt"),
+            Some(POLYGON),
+            "usdt-polygon-address",
+            6,
+        ),
+        (
+            "the requested asset at exactly 1",
+            ("10", "usdt"),
+            Some(POLYGON),
+            "usdt-ethereum-address",
+            6,
+        ),
+        (
+            "the requested asset without rates",
+            ("10", "usdt"),
+            None,
+            "usdt-ethereum-address",
+            6,
+        ),
+        (
+            "the requested asset rounded up",
+            ("10.0000001", "usdt"),
+            None,
+            "usdt-ethereum-address",
+            6,
+        ),
+        (
+            "rounded up to satoshis",
+            ("0.05", "usd"),
+            Some(BTC),
+            "btc-onchain-address",
+            8,
+        ),
+        (
+            "exact in millisatoshis",
+            ("0.05", "usd"),
+            Some(BTC),
+            "btc-lightning-invoice",
+            11,
+        ),
+        (
+            "a token of six decimals",
+            ("0.05", "usd"),
+            Some(PARITY),
+            "usdt-polygon-address",
+            6,
+        ),
+        (
+            "an asset no rate prices",
+            ("10", "usd"),
+            Some(USDT_RATES),
+            "eur-sepa-iban",
+            2,
+        ),
+        (
+            "another rail of a rail-qualified rate",
+            ("10", "usd"),
+            Some(POLYGON),
+            "usdt-ethereum-address",
+            6,
+        ),
+    ]
+};
+
+/// The amount paykit-lib prices for a case's inputs, as the file writes it.
+fn priced_amount(case: &Value) -> Value {
+    let requested = PaymentAmount {
+        value: Decimal::parse(st(&case["requested"], "value")).unwrap(),
+        asset: Asset::parse(st(&case["requested"], "asset")).unwrap(),
+    };
+    let rates: Option<Vec<Rate>> = case["rates"].as_array().map(|rates| {
+        rates
+            .iter()
+            .map(|r| {
+                Rate::new(
+                    Asset::parse(st(r, "asset")).unwrap(),
+                    Decimal::parse(st(r, "value")).unwrap(),
+                )
+                .unwrap()
+            })
+            .collect()
+    });
+    let endpoint =
+        PaymentEndpointIdentifier::parse(st(case, "payment_endpoint_identifier")).unwrap();
+    let digits = u32::try_from(case["fraction_digits"].as_u64().unwrap()).unwrap();
+    match amount_for_endpoint(&requested, rates.as_deref(), &endpoint, digits).unwrap() {
+        Some(amount) => json!({ "asset": amount.asset.as_str(), "value": amount.value.as_str() }),
+        None => Value::Null,
+    }
+}
+
+/// `conversion_amounts`, as paykit-lib generates it.
+fn conversion_amounts() -> Value {
+    let cases: Vec<Value> = AMOUNT_CASES
+        .iter()
+        .map(|(name, (value, asset), rates, endpoint, digits)| {
+            let rates = rates.map(|rates| {
+                rates
+                    .iter()
+                    .map(|(asset, value)| json!({ "asset": asset, "value": value }))
+                    .collect::<Vec<_>>()
+            });
+            let mut case = json!({
+                "fraction_digits": digits,
+                "name": name,
+                "payment_endpoint_identifier": endpoint,
+                "rates": rates,
+                "requested": { "asset": asset, "value": value },
+            });
+            case["amount"] = priced_amount(&case);
+            case
+        })
+        .collect();
+    json!({ "cases": cases, "description": CONVERSION_AMOUNTS_DESCRIPTION })
+}
+
+/// `conversion_amounts` (spec 7.2 step 1, Paykit wire 4.4, 4.9): each case's amount is the
+/// one paykit-lib prices for its inputs.
+fn check_conversion_amounts(file: &Value) {
+    let m = &file["conversion_amounts"];
+    let cases = arr(m, "cases");
+    assert_eq!(cases.len(), AMOUNT_CASES.len());
+    for case in cases {
+        assert_eq!(priced_amount(case), case["amount"], "{}", st(case, "name"));
     }
 }
 

@@ -8,6 +8,90 @@ use pubky_switch_client::clock::Clock;
 use crate::common::{draft, request_from, FailingRecordReads, World, HOUR_MS};
 
 #[tokio::test]
+async fn test_one_time_credit_requires_the_requested_endpoint() {
+    use paykit_lib::bodies::PaymentProof;
+    use paykit_lib::{AttemptId, PaymentEndpointPayload};
+    use paykit_sdk::rail::RailOutcome;
+
+    use crate::common::{btc, endpoint};
+
+    for permitted in [false, true] {
+        let w = World::new();
+        let mut wallet = w.wallet("wallet").await;
+        let mut shop = w.shop().await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        let id = endpoint(if permitted {
+            "btc-lightning-bolt11"
+        } else {
+            "btc-onchain-address"
+        });
+        let attempt_id = AttemptId::from_bytes([12; 16]);
+        let outcome = w
+            .rail
+            .pay_outside(
+                id.clone(),
+                PaymentEndpointPayload::new("lnbc1invoice").unwrap(),
+                btc("1"),
+                attempt_id,
+            )
+            .await
+            .unwrap();
+        let RailOutcome::Paid(paid) = outcome else {
+            panic!("{outcome:?}")
+        };
+        let body = PaymentProof {
+            attempt_id,
+            billing_period: None,
+            payment_endpoint_identifier: id,
+            payment_app_id: shop.app_id(),
+            list_version: None,
+            amount: None,
+            allowance_id: None,
+            label: None,
+            payment_reference: None,
+            proof: paid.proof,
+        }
+        .to_body(1)
+        .unwrap();
+        w.inject(
+            &w.alice,
+            "wallet",
+            &w.bob,
+            &[shop.app_id()],
+            "paykit.payment_proof",
+            vec![request.request_hash],
+            body,
+        );
+        shop.receive(None).await.unwrap();
+        let record = shop.payee_activity().await.unwrap()[0].record;
+        assert_eq!(
+            shop.verify_payment(&record).await.unwrap().is_some(),
+            permitted
+        );
+        assert_eq!(
+            shop.confirm_payment(&record).await.unwrap().is_some(),
+            permitted
+        );
+        assert_eq!(
+            shop.payee_activity().await.unwrap()[0].status == PayeeStatus::Receipted,
+            permitted
+        );
+        // This external payment's proof was sent without the wallet's own record of
+        // paying. Check delivery; its receipt is stored only alongside a held proof.
+        let summary = wallet.receive(None).await.unwrap();
+        let received = summary.report.events.iter().any(|event| {
+            matches!(
+                event,
+                pubky_switch_client::app::AppEvent::MessageReceived { kind, .. }
+                    if kind == "paykit.payment_receipt"
+            )
+        });
+        assert_eq!(received, permitted);
+    }
+}
+
+#[tokio::test]
 async fn test_one_time_request_paid_proven_and_receipted() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -2229,4 +2313,83 @@ async fn test_one_time_stop_gone_at_30_days_stays_gone_after_a_restore() {
         wallet.receive(None).await.unwrap();
     }
     assert!(!keeps_stop(&w, &wallet, hash).await);
+}
+
+#[tokio::test]
+async fn test_one_time_credit_requires_the_fixed_endpoint_owner() {
+    use paykit_lib::bodies::PaymentProof;
+    use paykit_lib::{AttemptId, PaymentEndpointPayload};
+    use paykit_sdk::rail::RailOutcome;
+    use paykit_sdk::AppScopes;
+
+    use crate::common::{btc, endpoint};
+
+    for correct_owner in [false, true] {
+        let w = World::new();
+        let mut wallet = w.wallet("wallet").await;
+        let mut shop = w.shop().await;
+        let mut till = w
+            .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+            .await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        let attempt_id = AttemptId::from_bytes([13; 16]);
+        let RailOutcome::Paid(paid) = w
+            .rail
+            .pay_outside(
+                endpoint("btc-lightning-bolt11"),
+                PaymentEndpointPayload::new("lnbc1invoice").unwrap(),
+                btc("1"),
+                attempt_id,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("payment must complete")
+        };
+        let body = PaymentProof {
+            attempt_id,
+            billing_period: None,
+            payment_endpoint_identifier: endpoint("btc-lightning-bolt11"),
+            payment_app_id: if correct_owner {
+                shop.app_id()
+            } else {
+                till.app_id()
+            },
+            list_version: None,
+            amount: None,
+            allowance_id: None,
+            label: None,
+            payment_reference: None,
+            proof: paid.proof,
+        }
+        .to_body(1)
+        .unwrap();
+        // The app crediting the proof differs from the signed endpoint owner.
+        w.inject(
+            &w.alice,
+            "wallet",
+            &w.bob,
+            &[till.app_id()],
+            "paykit.payment_proof",
+            vec![request.request_hash],
+            body,
+        );
+        till.receive(None).await.unwrap();
+        let record = till.payee_activity().await.unwrap()[0].record;
+        let verified = till.verify_payment(&record).await.unwrap().is_some();
+        let confirmed = till.confirm_payment(&record).await.unwrap().is_some();
+        let credited = till.payee_activity().await.unwrap()[0].status == PayeeStatus::Receipted;
+        let summary = wallet.receive(None).await.unwrap();
+        let receipt = summary.report.events.iter().any(|event| matches!(event,
+            pubky_switch_client::app::AppEvent::MessageReceived { kind, .. } if kind == "paykit.payment_receipt"));
+        assert_eq!(
+            (verified, confirmed, credited, receipt),
+            (correct_owner, correct_owner, correct_owner, correct_owner)
+        );
+        assert_eq!(
+            w.rail.proof_checks().len(),
+            if correct_owner { 2 } else { 0 }
+        );
+    }
 }
