@@ -835,10 +835,10 @@ impl Paykit {
 
     /// The payee's own check of the proof in `record` (Paykit spec 8.1 step 4): the verified
     /// payment time, or `None` when the payment method doesn't confirm it. A Billing Period's
-    /// endpoint is the one in valid period details the proof names, or else the request's;
-    /// with per-period endpoints a later period is paid only to the destination of the
-    /// details its proof names, so one paid elsewhere is `None`. An identifier absent from
-    /// the selected endpoints, excluded by the request, or naming an app other than that
+    /// endpoint is the request's, except that with per-period endpoints a later period is
+    /// paid only to the destination of the valid details its proof names, so one paid
+    /// elsewhere is `None`. An identifier absent from the selected endpoints, excluded by
+    /// the request, or naming an app other than that
     /// source's signed owner is refused before the method's check. Named per-period rates
     /// price the payment through the same conversion rule as the payer's. The method's
     /// verified payment time must precede a selected details destination's expiry and, for
@@ -885,8 +885,8 @@ impl Paykit {
             return Err(Refusal::NotFound.into());
         };
         // A Billing Period's proof is of its request, whose record is the request's own; the
-        // endpoint paid is in the period details the proof names, or else the request's
-        // (Paykit spec 8.2).
+        // request decides whether its own destination or the named period details'
+        // destination serves this occurrence (Paykit spec 8.2).
         let request_record = self.payee_request_record(&target, &bound).await?;
         let id = &proof.payment_endpoint_identifier;
         let payment = match request_record.as_ref().and_then(request_of) {
@@ -917,18 +917,6 @@ impl Paykit {
                             _ => None,
                         })
                 });
-                let from_details = named_details.and_then(|(stored, details)| {
-                    details
-                        .payment_endpoints
-                        .as_ref()
-                        .map(|endpoints| (stored.message().from.app_id, endpoints))
-                });
-                let destination_expires = named_details.and_then(|(_, details)| {
-                    details
-                        .payment_endpoints
-                        .as_ref()
-                        .map(|_| details.expires_at)
-                });
                 // With per-period endpoints, the request's own serve only its first Billing
                 // Period: a later one is credited only for a payment to the destination of
                 // the period details its proof names (Paykit spec 8.2).
@@ -941,6 +929,17 @@ impl Paykit {
                     && proof.billing_period.is_some_and(|period| {
                         first.is_none_or(|first| first.starts_at != period.starts_at)
                     });
+                // Named rates remain usable independently of the destination. The details'
+                // endpoints, owner and expiry apply together, only to those later periods.
+                let from_details =
+                    named_details
+                        .filter(|_| later_period)
+                        .and_then(|(stored, details)| {
+                            details.payment_endpoints.as_ref().map(|endpoints| {
+                                (stored.message().from.app_id, endpoints, details.expires_at)
+                            })
+                        });
+                let destination_expires = from_details.map(|(_, _, expires)| expires);
                 if later_period && from_details.is_none() {
                     return Ok(None);
                 }
@@ -948,7 +947,7 @@ impl Paykit {
                 // wire 4.4). Select them together before looking up the identifier; neither
                 // an absent identifier nor another app falls back to another source.
                 let endpoints = match from_details {
-                    Some(endpoints) => Some(endpoints),
+                    Some((owner, endpoints, _)) => Some((owner, endpoints)),
                     None => match &request.destination {
                         RequestDestination::Endpoints(endpoints) => {
                             Some((stored_request.message().from.app_id, endpoints))

@@ -1,5 +1,5 @@
-//! A period's proof names the signed details that price it and supply its destination
-//! (Paykit spec 8.2, Paykit wire 4.9). Evidence time, not receipt time, decides their use.
+//! A period's proof names its signed rates; its request decides whether those details
+//! also supply the destination (Paykit spec 8.2, Paykit wire 4.9).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -40,6 +40,9 @@ enum PaidAt {
 #[derive(Clone, Copy, Debug)]
 struct Case {
     destination: Destination,
+    per_period_endpoints: bool,
+    later_period: bool,
+    details_endpoints: bool,
     paid_at: PaidAt,
     cross_asset: bool,
     wrong_amount: bool,
@@ -51,6 +54,9 @@ impl Case {
     fn priced(destination: Destination) -> Self {
         Self {
             destination,
+            per_period_endpoints: matches!(destination, Destination::Details),
+            later_period: matches!(destination, Destination::Details),
+            details_endpoints: matches!(destination, Destination::Details),
             paid_at: PaidAt::Inside,
             cross_asset: true,
             wrong_amount: false,
@@ -91,8 +97,15 @@ async fn check_credit(case: Case, expected: bool) {
     let mut draft = super::periods::monthly(w.clock.now_ms(), None)
         .with_conversion(Conversion::PerPeriod)
         .with_accepted_endpoint_identifiers(vec![endpoint(BTC), endpoint(USD)]);
-    let period: paykit_lib::periods::PeriodRef =
-        draft.recurrence.as_ref().unwrap().first().unwrap().into();
+    draft.per_period_endpoints = case.per_period_endpoints;
+    let recurrence = draft.recurrence.as_ref().unwrap();
+    let first = recurrence.first().unwrap();
+    let period: paykit_lib::periods::PeriodRef = if case.later_period {
+        recurrence.rule().containing(first.ends_at).unwrap()
+    } else {
+        first
+    }
+    .into();
     draft.destination = match case.destination {
         Destination::List | Destination::Public => RequestDestination::Any,
         _ => RequestDestination::Endpoints(endpoints),
@@ -103,6 +116,9 @@ async fn check_credit(case: Case, expected: bool) {
     wallet.accept_subscription(&request).await.unwrap();
     shop.receive(None).await.unwrap();
     let sale = shop.payee_activity().await.unwrap()[0].record;
+    if case.later_period {
+        w.clock.set_ms(period.starts_at);
+    }
     let id = if case.cross_asset { USD } else { BTC };
     let payload = match case.destination {
         Destination::Details => "details-endpoint",
@@ -140,13 +156,15 @@ async fn check_credit(case: Case, expected: bool) {
     let expires = w.clock.now_ms() + HOUR_MS;
     let terms = PeriodDetails {
         billing_period: period,
-        payment_endpoints: matches!(case.destination, Destination::Details).then(|| {
-            [(endpoint(id), PaymentEndpointPayload::new(payload).unwrap())]
-                .into_iter()
-                .collect()
+        payment_endpoints: case.details_endpoints.then(|| {
+            [(
+                endpoint(id),
+                PaymentEndpointPayload::new("details-endpoint").unwrap(),
+            )]
+            .into_iter()
+            .collect()
         }),
-        rates: (case.cross_asset || !matches!(case.destination, Destination::Details))
-            .then(|| rates("2.005")),
+        rates: (case.cross_asset || !case.details_endpoints).then(|| rates("2.005")),
         expires_at: expires,
     };
     shop.send_period_details(&sale, terms.clone())
@@ -277,7 +295,16 @@ async fn check_credit(case: Case, expected: bool) {
         "{case:?}"
     );
     let checks = w.rail.proof_checks();
-    assert_eq!(checks.len(), 2, "{case:?}");
+    let uses_details = case.per_period_endpoints && case.later_period;
+    assert_eq!(
+        checks.len(),
+        if uses_details && !case.details_endpoints {
+            0
+        } else {
+            2
+        },
+        "{case:?}"
+    );
     for check in checks {
         assert_eq!(
             check.amount,
@@ -289,11 +316,20 @@ async fn check_credit(case: Case, expected: bool) {
         );
         assert_eq!(
             check.payload.as_ref().map(|p| p.as_str()),
-            matches!(
+            if uses_details {
+                Some("details-endpoint")
+            } else if matches!(
                 case.destination,
                 Destination::Details | Destination::Request
-            )
-            .then_some(payload)
+            ) {
+                Some(if case.cross_asset {
+                    "request-usd"
+                } else {
+                    "request-btc"
+                })
+            } else {
+                None
+            }
         );
     }
     assert_eq!(w.rail.executions(&attempt_id), 1);
@@ -393,4 +429,78 @@ async fn test_period_credit_same_asset_request_ignores_unused_rate_expiry() {
         true,
     )
     .await;
+}
+
+async fn check_destination_policy(per_period_endpoints: bool, later_period: bool) {
+    for cross_asset in [true, false] {
+        for destination in [Destination::Details, Destination::Request] {
+            let uses_details = per_period_endpoints && later_period;
+            let expected = matches!(destination, Destination::Details) == uses_details;
+            check_credit(
+                Case {
+                    per_period_endpoints,
+                    later_period,
+                    details_endpoints: true,
+                    cross_asset,
+                    ..Case::priced(destination)
+                },
+                expected,
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_period_credit_fixed_destination_for_first_period() {
+    check_destination_policy(false, false).await;
+}
+
+#[tokio::test]
+async fn test_period_credit_fixed_destination_for_later_period() {
+    check_destination_policy(false, true).await;
+}
+
+#[tokio::test]
+async fn test_period_credit_per_period_destination_for_first_period() {
+    check_destination_policy(true, false).await;
+}
+
+#[tokio::test]
+async fn test_period_credit_per_period_destination_for_later_period() {
+    check_destination_policy(true, true).await;
+}
+
+#[tokio::test]
+async fn test_period_credit_later_period_requires_details_endpoints() {
+    for cross_asset in [false, true] {
+        check_credit(
+            Case {
+                per_period_endpoints: true,
+                later_period: true,
+                cross_asset,
+                ..Case::priced(Destination::Request)
+            },
+            false,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn test_period_credit_request_destination_ignores_unused_endpoint_expiry() {
+    for (per_period_endpoints, later_period) in [(false, false), (false, true), (true, false)] {
+        check_credit(
+            Case {
+                per_period_endpoints,
+                later_period,
+                details_endpoints: true,
+                cross_asset: false,
+                paid_at: PaidAt::AfterExpiry,
+                ..Case::priced(Destination::Request)
+            },
+            true,
+        )
+        .await;
+    }
 }
