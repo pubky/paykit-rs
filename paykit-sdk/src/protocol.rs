@@ -1214,6 +1214,7 @@ mod receive_tests {
     fn received(stored: &StoredMessage) -> ReceivedMessage {
         ReceivedMessage {
             seq: 3,
+            generation: 1,
             sender: stored.sender(),
             accepted_at_ms: NOW,
             message: stored.message().clone(),
