@@ -4325,7 +4325,10 @@ fn settlement_boundaries(mark: &SettlementMark) -> Value {
         current.lost_to_delete = left;
         let seen = SettlementBucket::with_boundary(right);
         let result = match current.merged_with(&seen) {
-            SeenMerge::Holds => current.clone(),
+            SeenMerge::Holds { twice } => {
+                assert!(twice.is_empty());
+                current.clone()
+            }
             SeenMerge::WriteBack { bucket, twice } => {
                 assert!(twice.is_empty());
                 bucket
@@ -4371,7 +4374,10 @@ fn check_settlement_boundaries(cases: &Value) {
         let current = SettlementBucket::read(st(case, "current").as_bytes()).unwrap();
         let seen = SettlementBucket::read(st(case, "seen").as_bytes()).unwrap();
         let result = match current.merged_with(&seen) {
-            SeenMerge::Holds => current.clone(),
+            SeenMerge::Holds { twice } => {
+                assert!(twice.is_empty());
+                current.clone()
+            }
             SeenMerge::WriteBack { bucket, twice } => {
                 assert!(twice.is_empty());
                 bucket

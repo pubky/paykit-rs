@@ -2615,8 +2615,12 @@ pub enum MarkAdded {
 /// ([`SettlementBucket::merged_with_seen`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SeenMerge {
-    /// The write holds every seen mark, or a lower mark of its settlement: nothing to write.
-    Holds,
+    /// The write holds every seen mark, or a lower mark of its settlement, and every retained
+    /// deletion restriction: nothing to write. Conflicts still need to be shown to the user.
+    Holds {
+        /// The settlements named with two occurrences, each once, in ascending order.
+        twice: Vec<[u8; SETTLEMENT_TAG_LEN]>,
+    },
     /// The write lacks a seen mark: the bucket to write back, with every mark of the write and
     /// every seen mark, the lower where two name one settlement, and the settlements so named
     /// with two occurrences, which the app shows its user as possibly credited twice.
@@ -2967,7 +2971,8 @@ impl SettlementBucket {
     }
 
     /// Merge current and seen marks and deletion restrictions (Paykit wire 5.7). Conflicting
-    /// marks keep the lower occurrence. If the complete union exceeds the mark bound, the
+    /// marks keep the lower occurrence and return their settlement tags in `twice`, even when
+    /// no write is needed. If the complete union exceeds the mark bound, the
     /// result preserves current settlements and fills remaining places in byte order, with
     /// the full boundary union. Every omitted mark must remain in the reader's local seen set.
     pub fn merged_with_seen(
@@ -2989,9 +2994,6 @@ impl SettlementBucket {
             }
             all.push(*mark);
         }
-        if !lacks {
-            return SeenMerge::Holds;
-        }
         all.sort();
         all.dedup();
         let mut marks: Vec<SettlementMark> = Vec::with_capacity(all.len());
@@ -3005,6 +3007,9 @@ impl SettlementBucket {
                 }
                 _ => marks.push(mark),
             }
+        }
+        if !lacks {
+            return SeenMerge::Holds { twice };
         }
         let full = marks.len() > MAX_SETTLEMENT_MARKS;
         if full {
@@ -3967,7 +3972,10 @@ mod tests {
         ])
         .unwrap();
         // Every seen mark there, or a lower one of its settlement: nothing to write.
-        assert_eq!(current.merged_with_seen(&[], None), SeenMerge::Holds);
+        assert_eq!(
+            current.merged_with_seen(&[], None),
+            SeenMerge::Holds { twice: Vec::new() }
+        );
         assert_eq!(
             current.merged_with_seen(
                 &[
@@ -3976,7 +3984,9 @@ mod tests {
                 ],
                 None
             ),
-            SeenMerge::Holds
+            SeenMerge::Holds {
+                twice: vec![[4; SETTLEMENT_TAG_LEN]]
+            }
         );
         // A seen mark the write lacks, and a lower mark of a settlement it holds.
         let merged = current.merged_with_seen(
@@ -4037,7 +4047,10 @@ mod tests {
         };
         assert_eq!(bucket, full);
         assert!(twice.is_empty());
-        assert_eq!(full.merged_with_seen(&marks, None), SeenMerge::Holds);
+        assert_eq!(
+            full.merged_with_seen(&marks, None),
+            SeenMerge::Holds { twice: Vec::new() }
+        );
     }
 
     #[test]
@@ -4101,7 +4114,10 @@ mod tests {
         left.check_later_write(&bucket).unwrap();
         right.check_later_write(&bucket).unwrap();
         assert!(bucket.check_later_write(&left).is_err());
-        assert_eq!(bucket.merged_with(&left), SeenMerge::Holds);
+        assert_eq!(
+            bucket.merged_with(&left),
+            SeenMerge::Holds { twice: Vec::new() }
+        );
         let MarkAdded::Added(added) = bucket.add(mark(1, OccurrenceKind::BillingPeriod, 1)) else {
             panic!("the mark is added");
         };
@@ -4210,7 +4226,10 @@ mod tests {
         known.check_later_write(&unknown).unwrap();
         assert!(unknown.check_later_write(&known).is_err());
         assert!(unknown.check_later_write(&SettlementBucket::new()).is_err());
-        assert_eq!(unknown.merged_with(&known), SeenMerge::Holds);
+        assert_eq!(
+            unknown.merged_with(&known),
+            SeenMerge::Holds { twice: Vec::new() }
+        );
         let SeenMerge::WriteBack { bucket, .. } = known.merged_with(&unknown) else {
             panic!("unknown is retained");
         };
