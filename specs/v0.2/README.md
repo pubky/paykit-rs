@@ -20,6 +20,10 @@ The design is still open to review. It may change before it is frozen. The spec'
 
 The settlement bucket and deletion-boundary rules in wire 5.7 are requirements for the implementation. Boundary-only buckets, monotonic boundary merging, authenticated absence at creation, exact delete-incarnation checks at put-back, provenance checks by later readers, authenticated delete application and evidence order, publication before the service acknowledges a delete, and the corresponding runtime and conformance tests are not implemented here. The pinned Switch needs generic support for the publication-time distinction and authenticated incarnation evidence, as well as the client's durable publication and acknowledgment hold. A prior read, zero-version condition, local notification or queued repair does not provide those guarantees. Publication before acknowledgment uses existing atomic batch and cursor semantics; the additional creation and provenance support is a release requirement, not a Switch wire format defined here. The specification's Section 18 lists the required scenarios, and Section 13 states the retention and availability limits.
 
+## Queued message delivery
+
+Section 8.1 requires the counterparty send rules to govern every queued delivery and retry, including kept batches, generic flush, payment resume, reload and restore. Blocked or unknown recipients do not receive held message kinds; owed stopping and payment-outcome messages and list withdrawals still go. The generic client support for identifying and durably holding individual owed messages, its SDK integration and the Section 18 conformance cases remain required before release. This specification adds no client API, wire format or generated vector.
+
 ## Shared separately
 
 The reference prototype, its results and an independent implementation aren't in this folder. They are shared separately. The documents name them but give no paths.
