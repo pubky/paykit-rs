@@ -347,22 +347,28 @@ impl Paykit {
     /// acknowledges duties, and only Paykit records are taken here. The normal receive
     /// retains responsibility for ordered delivery, acknowledgment and taken-mark cleanup.
     pub(crate) async fn take_pending_divergence(&mut self) -> Result<()> {
-        for event in self.app.pending_duty_events().await? {
-            let AppEvent::RecordDivergent { key: record, id } = &event else {
-                continue;
-            };
-            let Some(held) = self.app.shared_record(record).await? else {
-                continue;
-            };
-            if Collection::from_name(&held.collection).is_none() {
-                continue;
+        // The gate nests inside payment checks; keep its client reload and scan future
+        // off those callers' stack frames.
+        Box::pin(async move {
+            for event in self.app.pending_duty_events().await? {
+                let AppEvent::RecordDivergent { key: record, id } = &event else {
+                    continue;
+                };
+                let Some(held) = self.app.shared_record(record).await? else {
+                    continue;
+                };
+                if Collection::from_name(&held.collection).is_none() {
+                    continue;
+                }
+                let mark = key::taken(id);
+                if self.local_get::<bool>(&mark).await?.is_none() {
+                    self.take_divergent_event(record, id).await?;
+                    self.local_put(&mark, &true).await?;
+                }
             }
-            let mark = key::taken(id);
-            if self.local_get::<bool>(&mark).await?.is_none() {
-                Box::pin(self.take_stored_event(&event, &mark)).await?;
-            }
-        }
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     /// Take the duty events about stored entries the client hasn't had acknowledged,
