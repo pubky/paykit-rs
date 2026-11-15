@@ -2,19 +2,71 @@
 
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
-use super::{PubkyProfile, PubkyProfileLink};
+use super::{
+    PubkyProfile, PubkyProfileLink, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
+    SOCIAL_V1_FOLLOWS_PATH_PREFIX, SOCIAL_V1_PROFILE_PATH,
+};
 use crate::{PaykitSdkError, PubkyPublicKey, Result};
 
 /// Pubky app blob path prefix. Blob ids are content hashes.
 pub const PUBKY_APP_BLOB_PATH_PREFIX: &str = "/pub/pubky.app/blobs/";
 /// Pubky app file path prefix. File ids are timestamps.
 pub const PUBKY_APP_FILE_PATH_PREFIX: &str = "/pub/pubky.app/files/";
+/// Pubky social v1 file path prefix. A file is the raw bytes at `<content hash>.<extension>`.
+pub const SOCIAL_V1_FILE_PATH_PREFIX: &str = "/pub/social/v1/files/";
+/// The private flag pubky.app writes once it migrated an identity to Pubky social v1.
+pub const SOCIAL_V1_MIGRATION_FLAG_PATH: &str = "/priv/social/v1/_migrated.json";
+/// The lowest migration flag `transform_rev` pubky.app counts as migrated.
+const SOCIAL_V1_MIN_TRANSFORM_REV: u64 = 3;
 /// Session capabilities needed to write the Pubky app profile and its avatar.
 ///
-/// Apps that edit the shared Pubky app profile add these to their own session
-/// scope. They are not part of the Paykit session scopes.
-pub const PUBKY_APP_PROFILE_SESSION_CAPABILITIES: &str =
-    "/pub/pubky.app/profile.json:rw,/pub/pubky.app/blobs/:rw,/pub/pubky.app/files/:rw";
+/// They cover both the pubky.app (v0) and the Pubky social v1 layouts, and
+/// reading pubky.app's migration flag, which picks between them. Apps that
+/// edit the shared Pubky app profile add these to their own session scope.
+/// They are not part of the Paykit session scopes.
+pub const PUBKY_APP_PROFILE_SESSION_CAPABILITIES: &str = "/pub/pubky.app/profile.json:rw,\
+/pub/pubky.app/blobs/:rw,/pub/pubky.app/files/:rw,/pub/social/v1/profile.json:rw,\
+/pub/social/v1/files/:rw,/priv/social/v1/_migrated.json:r";
+/// The capability to read pubky.app's migration flag.
+pub(crate) const SOCIAL_V1_MIGRATION_FLAG_CAPABILITY: &str = "/priv/social/v1/_migrated.json:r";
+
+/// The layout an identity's Pubky app profile, follows and avatar use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SocialVersion {
+    /// `/pub/pubky.app/`, until pubky.app migrates the identity.
+    V0,
+    /// `/pub/social/v1/`, once pubky.app migrated the identity.
+    V1,
+}
+
+impl SocialVersion {
+    /// The version pubky.app's migration flag records, as pubky.app reads it:
+    /// a missing or unreadable flag, or one below the current transform, is v0.
+    pub(crate) fn from_migration_flag(flag: Option<&[u8]>) -> Self {
+        let transform_rev = flag
+            .and_then(|bytes| serde_json::from_slice::<JsonValue>(bytes).ok())
+            .and_then(|flag| flag.get("transform_rev").and_then(JsonValue::as_u64));
+        if transform_rev.is_some_and(|rev| rev >= SOCIAL_V1_MIN_TRANSFORM_REV) {
+            Self::V1
+        } else {
+            Self::V0
+        }
+    }
+
+    pub(crate) fn profile_path(self) -> &'static str {
+        match self {
+            Self::V0 => PUBKY_PROFILE_PATH,
+            Self::V1 => SOCIAL_V1_PROFILE_PATH,
+        }
+    }
+
+    pub(crate) fn follows_path_prefix(self) -> &'static str {
+        match self {
+            Self::V0 => PUBKY_FOLLOWS_PATH_PREFIX,
+            Self::V1 => SOCIAL_V1_FOLLOWS_PATH_PREFIX,
+        }
+    }
+}
 
 const NAME_MIN_CHARS: usize = 3;
 const NAME_MAX_CHARS: usize = 50;
@@ -64,6 +116,7 @@ pub struct PubkyProfileSnapshot {
 pub(crate) fn merge_pubky_profile_json(
     current: Option<&[u8]>,
     update: &PubkyProfileUpdate,
+    version: SocialVersion,
 ) -> Result<Vec<u8>> {
     let mut document = match current {
         Some(bytes) => serde_json::from_slice::<JsonMap<String, JsonValue>>(bytes)
@@ -92,6 +145,9 @@ pub(crate) fn merge_pubky_profile_json(
     let profile = serde_json::from_value::<PubkyProfile>(JsonValue::Object(document.clone()))
         .map_err(|err| protocol(format!("invalid Pubky profile: {err}")))?;
     validate_pubky_profile_update(&profile, update, current.is_none())?;
+    if version == SocialVersion::V1 {
+        validate_social_v1_update(&profile, update)?;
+    }
     serde_json::to_vec(&document).map_err(|err| protocol(format!("encode Pubky profile: {err}")))
 }
 
@@ -137,6 +193,34 @@ fn validate_pubky_profile_update(
     }
     if update.links.is_some() {
         validate_links(profile.links.as_deref())?;
+    }
+    Ok(())
+}
+
+/// Pubky social v1 accepts only `pubky://`, `http://` and `https://` images and
+/// `http://` and `https://` links, in lower case.
+fn validate_social_v1_update(profile: &PubkyProfile, update: &PubkyProfileUpdate) -> Result<()> {
+    const WEB: [&str; 2] = ["http://", "https://"];
+    if update.image.is_some() {
+        if let Some(image) = &profile.image {
+            if !["pubky://", WEB[0], WEB[1]]
+                .iter()
+                .any(|scheme| image.starts_with(scheme))
+            {
+                return Err(protocol(
+                    "Pubky profile image must be a pubky, http or https URI".into(),
+                ));
+            }
+        }
+    }
+    if update.links.is_some() {
+        for link in profile.links.iter().flatten() {
+            if !WEB.iter().any(|scheme| link.url.starts_with(scheme)) {
+                return Err(protocol(
+                    "Pubky profile link URL must be an http or https URL".into(),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -213,6 +297,18 @@ pub(crate) fn pubky_app_blob_id(bytes: &[u8]) -> String {
     base32::encode(base32::Alphabet::Crockford, &hash.as_bytes()[..16])
 }
 
+/// Pubky social v1 file name: the blob id and the extension of `content_type`,
+/// a normalized avatar image type.
+pub(crate) fn social_v1_file_name(bytes: &[u8], content_type: &str) -> String {
+    let extension = match content_type {
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "jpg",
+    };
+    format!("{}.{extension}", pubky_app_blob_id(bytes))
+}
+
 /// File id: Crockford Base32 of the big-endian creation time in microseconds.
 pub(crate) fn pubky_app_timestamp_id(timestamp_micros: i64) -> String {
     base32::encode(base32::Alphabet::Crockford, &timestamp_micros.to_be_bytes())
@@ -252,7 +348,8 @@ mod tests {
 
     fn merged(current: &str, update: PubkyProfileUpdate) -> JsonValue {
         serde_json::from_slice(
-            &merge_pubky_profile_json(Some(current.as_bytes()), &update).unwrap(),
+            &merge_pubky_profile_json(Some(current.as_bytes()), &update, SocialVersion::V0)
+                .unwrap(),
         )
         .unwrap()
     }
@@ -290,17 +387,17 @@ mod tests {
 
     #[test]
     fn test_pubky_profile_create_requires_valid_name() {
-        assert!(merge_pubky_profile_json(None, &update()).is_err());
+        assert!(merge_pubky_profile_json(None, &update(), SocialVersion::V0).is_err());
         let short = PubkyProfileUpdate {
             name: Some("Al".into()),
             ..update()
         };
-        assert!(merge_pubky_profile_json(None, &short).is_err());
+        assert!(merge_pubky_profile_json(None, &short, SocialVersion::V0).is_err());
         let deleted = PubkyProfileUpdate {
             name: Some(DELETED_NAME.into()),
             ..update()
         };
-        assert!(merge_pubky_profile_json(None, &deleted).is_err());
+        assert!(merge_pubky_profile_json(None, &deleted, SocialVersion::V0).is_err());
     }
 
     #[test]
@@ -310,7 +407,7 @@ mod tests {
             bio: Some("b".repeat(BIO_MAX_CHARS + 1)),
             ..update()
         };
-        assert!(merge_pubky_profile_json(None, &long_bio).is_err());
+        assert!(merge_pubky_profile_json(None, &long_bio, SocialVersion::V0).is_err());
         let link = PubkyProfileLink {
             title: "X".into(),
             url: "https://x.com".into(),
@@ -320,7 +417,7 @@ mod tests {
             links: Some(vec![link; LINKS_MAX_COUNT + 1]),
             ..update()
         };
-        assert!(merge_pubky_profile_json(None, &many_links).is_err());
+        assert!(merge_pubky_profile_json(None, &many_links, SocialVersion::V0).is_err());
     }
 
     #[test]
@@ -330,12 +427,12 @@ mod tests {
             bio: Some("Builder\nMaker".into()),
             ..update()
         };
-        assert!(merge_pubky_profile_json(None, &bio).is_err());
+        assert!(merge_pubky_profile_json(None, &bio, SocialVersion::V0).is_err());
         let name = PubkyProfileUpdate {
             name: Some("Al\nice".into()),
             ..update()
         };
-        assert!(merge_pubky_profile_json(None, &name).is_err());
+        assert!(merge_pubky_profile_json(None, &name, SocialVersion::V0).is_err());
     }
 
     #[test]
@@ -350,6 +447,65 @@ mod tests {
         );
         assert_eq!(result["name"], "Alicia");
         assert_eq!(result["bio"], "Builder\nMaker");
+    }
+
+    #[test]
+    fn test_social_version_reads_migration_flag_as_pubky_app_does() {
+        let flag = |json: &str| SocialVersion::from_migration_flag(Some(json.as_bytes()));
+        assert_eq!(SocialVersion::from_migration_flag(None), SocialVersion::V0);
+        assert_eq!(flag("not json"), SocialVersion::V0);
+        assert_eq!(flag(r#"{"migrated_at":1}"#), SocialVersion::V0);
+        assert_eq!(flag(r#"{"transform_rev":2}"#), SocialVersion::V0);
+        assert_eq!(
+            flag(r#"{"transform_rev":3,"skipped":[]}"#),
+            SocialVersion::V1
+        );
+        assert_eq!(flag(r#"{"transform_rev":4}"#), SocialVersion::V1);
+        assert_eq!(
+            SocialVersion::V1.profile_path(),
+            "/pub/social/v1/profile.json"
+        );
+        assert_eq!(
+            SocialVersion::V1.follows_path_prefix(),
+            "/pub/social/v1/follows/"
+        );
+    }
+
+    #[test]
+    fn test_social_v1_merge_rejects_uris_v1_refuses() {
+        let link = |url: &str| PubkyProfileUpdate {
+            name: Some("Alice".into()),
+            links: Some(vec![PubkyProfileLink {
+                title: "Mail".into(),
+                url: url.into(),
+            }]),
+            ..update()
+        };
+        assert!(merge_pubky_profile_json(None, &link("mailto:a@b.c"), SocialVersion::V0).is_ok());
+        assert!(merge_pubky_profile_json(None, &link("mailto:a@b.c"), SocialVersion::V1).is_err());
+        assert!(merge_pubky_profile_json(None, &link("https://x.com"), SocialVersion::V1).is_ok());
+        let image = |uri: &str| PubkyProfileUpdate {
+            name: Some("Alice".into()),
+            image: Some(uri.into()),
+            ..update()
+        };
+        assert!(merge_pubky_profile_json(None, &image("ipfs://cid"), SocialVersion::V1).is_err());
+        assert!(merge_pubky_profile_json(
+            None,
+            &image("pubky://o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo/pub/social/v1/files/A.jpg"),
+            SocialVersion::V1
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn test_social_v1_file_name_matches_specs_id() {
+        // pubky-social-specs 1.0.0-rc.1 known answer: blake3 of [1, 2], first 16 bytes, Crockford.
+        assert_eq!(
+            social_v1_file_name(&[1, 2], "image/png"),
+            "PZBQ010FF079VVZPQG1RNFN6DR.png"
+        );
+        assert!(social_v1_file_name(&[1, 2], "image/jpeg").ends_with(".jpg"));
     }
 
     #[test]

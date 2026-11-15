@@ -43,7 +43,8 @@ pub use domain::contacts::{
     PaykitProfileRecord, ProfileResolution, ProfileSource, PubkyProfile, PubkyProfileLink,
     PubkyProfileRecord, PubkyProfileSnapshot, PubkyProfileUpdate, PUBKY_APP_BLOB_PATH_PREFIX,
     PUBKY_APP_FILE_PATH_PREFIX, PUBKY_APP_PROFILE_SESSION_CAPABILITIES, PUBKY_FOLLOWS_PATH_PREFIX,
-    PUBKY_PROFILE_PATH,
+    PUBKY_PROFILE_PATH, SOCIAL_V1_FILE_PATH_PREFIX, SOCIAL_V1_FOLLOWS_PATH_PREFIX,
+    SOCIAL_V1_MIGRATION_FLAG_PATH, SOCIAL_V1_PROFILE_PATH,
 };
 #[doc(inline)]
 pub use domain::endpoints::{load_public_endpoint_records, EndpointSyncChange, EndpointSyncReport};

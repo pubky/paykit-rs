@@ -1,4 +1,5 @@
 use super::*;
+use crate::domain::contacts::{SocialVersion, SOCIAL_V1_PROFILE_PATH};
 use sha2::{Digest, Sha256};
 
 const MAX_PUBLIC_PROFILE_BYTES: usize = 256 * 1024;
@@ -254,7 +255,8 @@ where
             })
     }
 
-    /// Fetch a public Pubky app profile.
+    /// Fetch a public Pubky app profile, from Pubky social v1 when it has one
+    /// there, else from pubky.app (v0).
     pub async fn fetch_pubky_profile(
         &self,
         public_key: PubkyPublicKey,
@@ -267,23 +269,25 @@ where
                     context: "no Pubky public storage available for Pubky profile lookup".into(),
                     source: None,
                 })?;
-        let Some(raw_json) = fetch_public_text(
-            &public_storage,
-            &public_key,
-            PUBKY_PROFILE_PATH,
-            "fetch Pubky profile",
-            MAX_PUBLIC_PROFILE_BYTES,
-        )
-        .await?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(PubkyProfileRecord {
-            public_key,
-            profile: parse_pubky_profile_json(&raw_json)?,
-            path: PUBKY_PROFILE_PATH.into(),
-            fetched_at: self.clock.now(),
-        }))
+        for path in [SOCIAL_V1_PROFILE_PATH, PUBKY_PROFILE_PATH] {
+            if let Some(raw_json) = fetch_public_text(
+                &public_storage,
+                &public_key,
+                path,
+                "fetch Pubky profile",
+                MAX_PUBLIC_PROFILE_BYTES,
+            )
+            .await?
+            {
+                return Ok(Some(PubkyProfileRecord {
+                    public_key,
+                    profile: parse_pubky_profile_json(&raw_json)?,
+                    path: path.into(),
+                    fetched_at: self.clock.now(),
+                }));
+            }
+        }
+        Ok(None)
     }
 
     /// List one page of immediate children in a public Pubky directory.
@@ -336,11 +340,17 @@ where
     }
 
     /// Fetch public Pubky app follows.
+    ///
+    /// They are read from the layout pubky.app's migration flag names for the
+    /// signed-in identity when its session may read the flag; otherwise from
+    /// Pubky social v1 when the identity has a profile there, else from
+    /// pubky.app (v0).
     pub async fn fetch_pubky_follows(
         &self,
         public_key: PubkyPublicKey,
         max_entries: usize,
     ) -> Result<Vec<PubkyPublicKey>> {
+        let version = self.readable_own_social_version(&public_key).await?;
         let public_storage =
             self.pubky
                 .load_public_storage()
@@ -349,10 +359,26 @@ where
                     context: "no Pubky public storage available for Pubky follows lookup".into(),
                     source: None,
                 })?;
+        let version = match version {
+            Some(version) => version,
+            None if fetch_public_text(
+                &public_storage,
+                &public_key,
+                SOCIAL_V1_PROFILE_PATH,
+                "fetch Pubky profile",
+                MAX_PUBLIC_PROFILE_BYTES,
+            )
+            .await?
+            .is_some() =>
+            {
+                SocialVersion::V1
+            }
+            None => SocialVersion::V0,
+        };
         let entries = list_public_resources(
             &public_storage,
             &public_key,
-            PUBKY_FOLLOWS_PATH_PREFIX,
+            version.follows_path_prefix(),
             "fetch Pubky follows",
             max_entries,
         )

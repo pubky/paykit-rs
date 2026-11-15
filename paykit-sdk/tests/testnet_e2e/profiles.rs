@@ -570,3 +570,154 @@ async fn test_pubky_app_avatar_upload_writes_blob_and_file() {
         "{error:?}"
     );
 }
+
+#[tokio::test]
+async fn test_pubky_profile_follows_and_avatar_use_social_v1_once_migrated() {
+    let testnet = crate::harness::build_testnet().await;
+    // The extra scope lets the test write pubky.app's migration flag; the SDK only reads it.
+    let capabilities = format!(
+        "{},{},/priv/social/v1/:rw,/pub/social/v1/:rw,/pub/pubky.app/follows/:rw",
+        paykit_sdk::PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        paykit_sdk::PUBKY_APP_PROFILE_SESSION_CAPABILITIES
+    );
+    let alice = crate::harness::TestUser::sign_up_with_capabilities(
+        &testnet,
+        crate::harness::app_id("bitkit"),
+        &capabilities,
+    )
+    .await;
+    let bob = crate::harness::TestUser::sign_up(&testnet).await;
+    let storage = alice.access.session.storage();
+    let put = |path: String, body: String| {
+        let storage = storage.clone();
+        async move { storage.put(path.as_str(), body).await.unwrap() }
+    };
+    put(
+        paykit_sdk::PUBKY_PROFILE_PATH.into(),
+        r#"{"name":"Old Alice"}"#.into(),
+    )
+    .await;
+    put(
+        format!(
+            "{}{}",
+            paykit_sdk::PUBKY_FOLLOWS_PATH_PREFIX,
+            bob.public_key
+        ),
+        r#"{"created_at":1}"#.into(),
+    )
+    .await;
+    // Before the flag, the identity is on pubky.app (v0).
+    let snapshot = alice
+        .sdk
+        .fetch_pubky_profile_with_revision(alice.public_key.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.profile.name, "Old Alice");
+
+    // pubky.app's migration copies the data to social v1 and writes its flag last.
+    put(
+        paykit_sdk::SOCIAL_V1_PROFILE_PATH.into(),
+        r#"{"name":"Alice","status":"away"}"#.into(),
+    )
+    .await;
+    put(
+        paykit_sdk::SOCIAL_V1_MIGRATION_FLAG_PATH.into(),
+        r#"{"migrated_at":1,"transform_rev":3,"skipped":[],"migrated":[]}"#.into(),
+    )
+    .await;
+
+    let snapshot = alice
+        .sdk
+        .fetch_pubky_profile_with_revision(alice.public_key.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.profile.name, "Alice");
+    let published = alice
+        .sdk
+        .publish_pubky_profile(
+            paykit_sdk::PubkyProfileUpdate {
+                name: Some("Alicia".into()),
+                ..Default::default()
+            },
+            Some(snapshot.revision),
+        )
+        .await
+        .unwrap();
+    assert_eq!(published.profile.status.as_deref(), Some("away"));
+    let read = |path: &'static str| {
+        let storage = storage.clone();
+        async move {
+            match storage.get(path).await {
+                Ok(response) => Some(response.text().await.unwrap()),
+                Err(_) => None,
+            }
+        }
+    };
+    assert!(read(paykit_sdk::SOCIAL_V1_PROFILE_PATH)
+        .await
+        .unwrap()
+        .contains("Alicia"));
+    assert!(read(paykit_sdk::PUBKY_PROFILE_PATH)
+        .await
+        .unwrap()
+        .contains("Old Alice"));
+
+    // Others read the social v1 profile and follows.
+    let record = bob
+        .sdk
+        .fetch_pubky_profile(alice.public_key.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.path, paykit_sdk::SOCIAL_V1_PROFILE_PATH);
+    assert!(bob
+        .sdk
+        .fetch_pubky_follows(alice.public_key.clone(), 100)
+        .await
+        .unwrap()
+        .is_empty());
+    put(
+        format!(
+            "{}{}.json",
+            paykit_sdk::SOCIAL_V1_FOLLOWS_PATH_PREFIX,
+            bob.public_key
+        ),
+        r#"{"created_at":2}"#.into(),
+    )
+    .await;
+    for sdk in [&alice.sdk, &bob.sdk] {
+        assert_eq!(
+            sdk.fetch_pubky_follows(alice.public_key.clone(), 100)
+                .await
+                .unwrap(),
+            vec![bob.public_key.clone()]
+        );
+    }
+
+    let bytes = vec![0xff, 0xd8, 0xff, 0xe0, 1, 2, 3];
+    let uri = alice
+        .sdk
+        .upload_pubky_app_avatar(bytes.clone(), "image/jpeg")
+        .await
+        .unwrap();
+    assert!(
+        uri.contains(paykit_sdk::SOCIAL_V1_FILE_PATH_PREFIX),
+        "{uri}"
+    );
+    assert!(uri.ends_with(".jpg"), "{uri}");
+    assert_eq!(
+        bob.sdk.fetch_pubky_file(&uri, 4096).await.unwrap().unwrap(),
+        bytes
+    );
+
+    // A delete removes the social v1 profile and its pubky.app (v0) copy, as pubky.app does.
+    alice
+        .sdk
+        .delete_pubky_profile(published.revision)
+        .await
+        .unwrap();
+    assert!(read(paykit_sdk::SOCIAL_V1_PROFILE_PATH).await.is_none());
+    assert!(read(paykit_sdk::PUBKY_PROFILE_PATH).await.is_none());
+}
