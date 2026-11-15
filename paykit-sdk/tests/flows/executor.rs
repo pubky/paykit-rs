@@ -3519,3 +3519,473 @@ async fn test_executor_entry_rebuilt_after_a_restore_kept_as_automatic() {
     assert!(wallet.request(&request).await.unwrap().manual_only);
     assert_eq!(w.rail.executions(&attempt_id), 1);
 }
+
+#[derive(Clone, Copy)]
+enum RestoredLedger {
+    Unavailable,
+    WrongWriter,
+    Unconditioned,
+    Divergent,
+    WrongObligation,
+    WrongAmount,
+    WrongAsset,
+}
+
+async fn restore_with_uncertain_ledger(case: RestoredLedger) {
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(&w, terms_with(json!({})))).await;
+    let allowance_id = wallet.allowance(&record).await.unwrap().allowance_id;
+    let backup = wallet.backup().await.unwrap();
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } =
+        Box::pin(wallet.pay_under_allowance(&request, &record))
+            .await
+            .unwrap()
+    else {
+        panic!("in flight")
+    };
+    w.rail.settle(&attempt_id, true);
+    let (allowance, ledger) = held(&wallet, &record).await;
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "allowance_ledgers",
+            paykit_lib::collections::Collection::AllowanceLedgers.fixed_policy(),
+        ),
+        &paykit_lib::derive::natural_key::allowance(
+            &allowance.counterparty,
+            &allowance.allowance_id,
+        ),
+    );
+    let key = wallet.app().record_key(&target).unwrap();
+    let version = wallet
+        .app()
+        .shared_record(&record)
+        .await
+        .unwrap()
+        .unwrap()
+        .version;
+    let mut ledger = ledger.unwrap();
+    match case {
+        RestoredLedger::WrongObligation => ledger.entries[0].obligation = [0x71; 32],
+        RestoredLedger::WrongAmount => {
+            ledger.entries[0].value = paykit_lib::Decimal::parse("0.7").unwrap()
+        }
+        RestoredLedger::WrongAsset => {
+            ledger.entries[0].asset = paykit_lib::Asset::parse("eur").unwrap()
+        }
+        _ => {}
+    }
+    let conditions = vec![pubky_switch_core::ops::Condition::RecordVersion {
+        key: record,
+        version,
+    }];
+    match case {
+        RestoredLedger::WrongWriter => {
+            let mut other = Box::pin(executor_wallet(&w, "other")).await;
+            other.app_mut().read_record(&target).await.unwrap();
+            other
+                .app_mut()
+                .put_record(&target, &ledger.to_json().unwrap(), conditions)
+                .await
+                .unwrap();
+        }
+        RestoredLedger::Unconditioned => {
+            wallet
+                .app_mut()
+                .put_record(&target, &ledger.to_json().unwrap(), Vec::new())
+                .await
+                .unwrap();
+        }
+        RestoredLedger::WrongObligation
+        | RestoredLedger::WrongAmount
+        | RestoredLedger::WrongAsset => {
+            wallet
+                .app_mut()
+                .put_record(&target, &ledger.to_json().unwrap(), conditions)
+                .await
+                .unwrap();
+        }
+        RestoredLedger::Divergent => {
+            w.alice
+                .switch()
+                .make_divergent(UPLOADER, key, [1; 32])
+                .unwrap();
+        }
+        RestoredLedger::Unavailable => {}
+    }
+    drop(wallet);
+    let mut wallet = Box::pin(Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    if matches!(case, RestoredLedger::Unavailable) {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+                path: format!("/records/{}", pubky_switch_core::enc::b64(&key)),
+                after: 0,
+            });
+    }
+    let report = Box::pin(wallet.reconcile()).await.unwrap();
+    assert!(report.resolved.is_empty(), "{report:?}");
+    assert!(
+        report
+            .doubtful
+            .iter()
+            .any(|d| d.attempts.contains(&attempt_id)),
+        "{report:?}"
+    );
+    assert!(wallet.payments().await.unwrap().is_empty());
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+    if matches!(case, RestoredLedger::Unavailable) {
+        let report = Box::pin(wallet.reconcile()).await.unwrap();
+        assert!(
+            matches!(report.resolved.as_slice(), [PayOutcome::Paid { .. }]),
+            "{report:?}"
+        );
+        let journal = wallet.app().protocol_scan(b"j/").await.unwrap();
+        let entry: Value = serde_json::from_slice(&journal[0].1).unwrap();
+        assert_eq!(entry["d"]["allowance_id"], allowance_id.as_str());
+        assert_eq!(w.rail.executions(&attempt_id), 1);
+    }
+}
+
+#[tokio::test]
+async fn test_executor_restore_unavailable_ledger_retries_attribution() {
+    Box::pin(restore_with_uncertain_ledger(RestoredLedger::Unavailable)).await;
+}
+
+#[tokio::test]
+async fn test_executor_restore_wrong_ledger_writer_keeps_attempt_doubtful() {
+    Box::pin(restore_with_uncertain_ledger(RestoredLedger::WrongWriter)).await;
+}
+
+#[tokio::test]
+async fn test_executor_restore_unconditioned_ledger_keeps_attempt_doubtful() {
+    Box::pin(restore_with_uncertain_ledger(RestoredLedger::Unconditioned)).await;
+}
+
+#[tokio::test]
+async fn test_executor_restore_divergent_ledger_keeps_attempt_doubtful() {
+    Box::pin(restore_with_uncertain_ledger(RestoredLedger::Divergent)).await;
+}
+
+#[tokio::test]
+async fn test_executor_restore_wrong_ledger_obligation_keeps_attempt_doubtful() {
+    Box::pin(restore_with_uncertain_ledger(
+        RestoredLedger::WrongObligation,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_executor_restore_wrong_ledger_amount_keeps_attempt_doubtful() {
+    Box::pin(restore_with_uncertain_ledger(RestoredLedger::WrongAmount)).await;
+}
+
+#[tokio::test]
+async fn test_executor_restore_wrong_ledger_asset_keeps_attempt_doubtful() {
+    Box::pin(restore_with_uncertain_ledger(RestoredLedger::WrongAsset)).await;
+}
+
+async fn restored_destination_uses_terms(from_list: bool) {
+    use crate::common::endpoint;
+    use paykit_lib::{
+        bodies::{ListEndpoint, RequestDestination},
+        PaymentEndpointPayload,
+    };
+    let w = World::new();
+    let allowed = "btc-lightning-bolt11";
+    let excluded = "btc-bitcoin-p2wpkh";
+    let (mut shop, mut wallet, record) = Box::pin(set_up(
+        &w,
+        terms_with(json!({
+            "allowed_payment_endpoint_identifiers": [allowed]
+        })),
+    ))
+    .await;
+    let mut draft = draft("0.5", w.clock.now_ms());
+    if from_list {
+        let endpoints = [
+            (
+                endpoint(allowed),
+                ListEndpoint {
+                    payload: PaymentEndpointPayload::new("lnbc1single").unwrap(),
+                    single_use: true,
+                },
+            ),
+            (
+                endpoint(excluded),
+                ListEndpoint {
+                    payload: PaymentEndpointPayload::new("bc1qsingle").unwrap(),
+                    single_use: true,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        w.list_to_alice_with(&mut shop, &[wallet.app_id()], w.clock.now_ms(), endpoints)
+            .await;
+        wallet.receive(None).await.unwrap();
+        draft.destination = RequestDestination::Any;
+    } else if let RequestDestination::Endpoints(endpoints) = &mut draft.destination {
+        endpoints.insert(
+            endpoint(excluded),
+            PaymentEndpointPayload::new("bc1qrequest").unwrap(),
+        );
+    }
+    let request = Box::pin(request_from(&mut shop, w.alice_id(), draft)).await;
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } =
+        Box::pin(wallet.pay_under_allowance(&request, &record))
+            .await
+            .unwrap()
+    else {
+        panic!("in flight")
+    };
+    w.rail.settle(&attempt_id, true);
+    if from_list {
+        let target = pubky_switch_client::app::RecordTarget::new(
+            pubky_switch_client::app::Collection::new(
+                "payment_lists",
+                paykit_lib::collections::Collection::PaymentLists.fixed_policy(),
+            ),
+            &paykit_lib::derive::natural_key::payment_list(&w.bob_id(), &shop.app_id()),
+        );
+        let key = wallet.app().record_key(&target).unwrap();
+        let shared = wallet.app().shared_record(&key).await.unwrap().unwrap();
+        let mut value: Value = serde_json::from_slice(shared.content.value().unwrap()).unwrap();
+        let mut second = value["used"][0].clone();
+        second["endpoint"] = json!(excluded);
+        value["used"].as_array_mut().unwrap().push(second);
+        wallet
+            .app_mut()
+            .put_record(&target, &serde_json::to_vec(&value).unwrap(), Vec::new())
+            .await
+            .unwrap();
+    }
+    drop(wallet);
+    let mut wallet = Box::pin(Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    let report = Box::pin(wallet.reconcile()).await.unwrap();
+    assert!(report.doubtful.is_empty(), "{report:?}");
+    assert!(
+        matches!(report.resolved.as_slice(), [PayOutcome::Paid { .. }]),
+        "{report:?}"
+    );
+    let journal = wallet.app().protocol_scan(b"j/").await.unwrap();
+    let entry: Value = serde_json::from_slice(&journal[0].1).unwrap();
+    assert_eq!(entry["d"]["destination"]["endpoint_id"], allowed);
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_executor_restore_request_destination_uses_allowance_identifiers() {
+    Box::pin(restored_destination_uses_terms(false)).await;
+}
+
+#[tokio::test]
+async fn test_executor_restore_marked_list_destination_uses_allowance_identifiers() {
+    Box::pin(restored_destination_uses_terms(true)).await;
+}
+
+async fn removed_write_at_cutoff(ledger: bool, after: bool) {
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(&w, terms_with(json!({})))).await;
+    let mut other = Box::pin(executor_wallet(&w, "other")).await;
+    other.receive(None).await.unwrap();
+    let key = if ledger {
+        let first = Box::pin(request(&w, &mut shop, &mut wallet, "0.1")).await;
+        assert!(matches!(
+            Box::pin(wallet.pay_under_allowance(&first, &record))
+                .await
+                .unwrap(),
+            PayOutcome::Paid { .. }
+        ));
+        other.receive(None).await.unwrap();
+        other
+            .grant_executor(&record, UserConfirmed::new())
+            .await
+            .unwrap();
+        std::mem::swap(&mut wallet, &mut other);
+        ledger_key(&wallet, &record).await
+    } else {
+        let (allowance, _) = held(&other, &record).await;
+        other
+            .app_mut()
+            .put_record(
+                &allowances_target(&allowance),
+                &allowance.to_json().unwrap(),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        wallet.receive(None).await.unwrap();
+        record
+    };
+    let shared = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    assert_eq!(shared.writer, other.app_id());
+    let cutoff = shared.written_at_ms.unwrap() - u64::from(after);
+    let other_id = other.app_id();
+    w.alice
+        .next_doc(|body| {
+            body.apps.retain(|a| a.app_id != other_id);
+            body.removed.push(pubky_switch_core::records::RemovedApp {
+                app_id: other_id,
+                distrust_from: cutoff,
+            });
+        })
+        .unwrap();
+    w.clock.advance_ms(1_000);
+    wallet.receive(None).await.unwrap();
+    let next = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    let result = Box::pin(wallet.pay_under_allowance(&next, &record)).await;
+    if after {
+        assert!(
+            result.as_ref().err().is_some_and(not_automatic),
+            "{result:?}"
+        );
+    } else {
+        assert!(matches!(result, Ok(PayOutcome::Paid { .. })), "{result:?}");
+    }
+}
+
+#[tokio::test]
+async fn test_executor_allowance_write_at_removal_cutoff_keeps_standing() {
+    Box::pin(removed_write_at_cutoff(false, false)).await;
+}
+
+#[tokio::test]
+async fn test_executor_allowance_write_after_removal_cutoff_is_refused() {
+    Box::pin(removed_write_at_cutoff(false, true)).await;
+}
+
+#[tokio::test]
+async fn test_executor_ledger_write_at_removal_cutoff_keeps_standing() {
+    Box::pin(removed_write_at_cutoff(true, false)).await;
+}
+
+#[tokio::test]
+async fn test_executor_ledger_write_after_removal_cutoff_is_refused() {
+    Box::pin(removed_write_at_cutoff(true, true)).await;
+}
+
+async fn restored_manual_attempt_is_not_attributed(forged: bool) {
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(&w, terms_with(json!({})))).await;
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    w.rail.next(paykit_sdk::rail::Behaviour::Fail);
+    assert!(matches!(
+        Box::pin(wallet.pay_under_allowance(&request, &record))
+            .await
+            .unwrap(),
+        PayOutcome::Failed { .. }
+    ));
+    let backup = wallet.backup().await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } =
+        Box::pin(wallet.pay_request(&request, PayOptions::default()))
+            .await
+            .unwrap()
+    else {
+        panic!("in flight")
+    };
+    w.rail.settle(&attempt_id, true);
+    if forged {
+        let (allowance, ledger) = held(&wallet, &record).await;
+        let mut ledger = ledger.unwrap();
+        let mut entry = ledger.entries[0].clone();
+        entry.attempt_id = attempt_id;
+        ledger.entries.push(entry);
+        let target = pubky_switch_client::app::RecordTarget::new(
+            pubky_switch_client::app::Collection::new(
+                "allowance_ledgers",
+                paykit_lib::collections::Collection::AllowanceLedgers.fixed_policy(),
+            ),
+            &paykit_lib::derive::natural_key::allowance(
+                &allowance.counterparty,
+                &allowance.allowance_id,
+            ),
+        );
+        let mut other = Box::pin(executor_wallet(&w, "other")).await;
+        other.receive(None).await.unwrap();
+        let version = other
+            .app()
+            .shared_record(&record)
+            .await
+            .unwrap()
+            .unwrap()
+            .version;
+        other
+            .app_mut()
+            .put_record(
+                &target,
+                &ledger.to_json().unwrap(),
+                vec![pubky_switch_core::ops::Condition::RecordVersion {
+                    key: record,
+                    version,
+                }],
+            )
+            .await
+            .unwrap();
+    }
+    drop(wallet);
+    let mut wallet = Box::pin(Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    let report = Box::pin(wallet.reconcile()).await.unwrap();
+    if forged {
+        assert!(report.resolved.is_empty(), "{report:?}");
+        assert!(
+            report
+                .doubtful
+                .iter()
+                .any(|d| d.attempts.contains(&attempt_id)),
+            "{report:?}"
+        );
+    } else {
+        assert!(
+            matches!(report.resolved.as_slice(), [PayOutcome::Paid { .. }]),
+            "{report:?}"
+        );
+        let journal = wallet.app().protocol_scan(b"j/").await.unwrap();
+        let entry: Value = journal
+            .iter()
+            .map(|(_, value)| serde_json::from_slice::<Value>(value).unwrap())
+            .find(|value| value["d"]["attempt_id"] == attempt_id.to_text())
+            .unwrap();
+        assert!(entry["d"]["allowance_id"].is_null(), "{entry}");
+    }
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_executor_restore_manual_attempt_uses_validated_ledger_absence() {
+    Box::pin(restored_manual_attempt_is_not_attributed(false)).await;
+}
+
+#[tokio::test]
+async fn test_executor_restore_unauthorized_ledger_cannot_attribute_manual_attempt() {
+    Box::pin(restored_manual_attempt_is_not_attributed(true)).await;
+}

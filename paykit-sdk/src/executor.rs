@@ -177,7 +177,7 @@ pub(crate) fn check_kept_ledger(record: &[u8; 32], kept: &KeptLedger) -> Result<
 }
 
 /// Whether `shared`'s current write is by an app the own `identity.json` lists as removed,
-/// written at or after its `distrust_from`, or with no service time that dates it (Switch
+/// written after its `distrust_from`, or with no service time that dates it (Switch
 /// spec 12.2 step 3): a write the executor never builds or pays on, whether the client
 /// flagged it, marked it doubtful, or took it before it learned of the removal.
 fn written_by_removed_app(
@@ -190,13 +190,12 @@ fn written_by_removed_app(
         .iter()
         .find(|removed| removed.app_id == shared.writer)
         // Both times are on the service's clock, the write's dated by a proof or a verified
-        // stub: no tolerance between them. A write exactly at `distrust_from` is refused too:
-        // one millisecond stricter than the spec's "after its distrust_from" and the client's
-        // own check, so a write the service can't order against the removal pays nothing.
+        // stub: no tolerance between them. The cutoff itself retains standing (Switch
+        // spec 8.2); a write without a verified time cannot establish that standing.
         .is_some_and(|removed| {
             shared
                 .written_at_ms
-                .is_none_or(|at| at >= removed.distrust_from)
+                .is_none_or(|at| at > removed.distrust_from)
         })
 }
 
@@ -372,73 +371,108 @@ impl Paykit {
             .app
             .record_key(&allowance_target(&entry.payee, &allowance_id))?;
         let attempt = entry.attempt()?;
+        let amount = entry.amount.amount()?;
         let in_ledger = self
             .kept_ledger(&allowance)
             .await?
-            .is_some_and(|(_, ledger)| ledger.entries.iter().any(|e| e.attempt_id == attempt));
+            .is_some_and(|(_, ledger)| {
+                ledger.entries.iter().any(|e| {
+                    e.attempt_id == attempt
+                        && e.obligation == entry.obligation
+                        && e.value == amount.value
+                        && e.asset == amount.asset
+                })
+            });
         if !in_ledger {
             return unproven();
         }
         Ok(Ok(Some(allowance_id)))
     }
 
-    /// The Allowance `named`, of the request record of `payee`, that `attempt` was made
-    /// under: the one its ledger record, as held or else as read from the switch once, holds
-    /// an entry for the attempt in. `None` for a record naming none, or a ledger not held,
-    /// that doesn't read or bind, or holds no such entry: the attempt is then taken as made
-    /// by hand, and its proof names no Allowance. For a journal entry rebuilt after a
-    /// restore.
+    /// The validated Allowance context of an attempt whose journal entry must be rebuilt
+    /// (Paykit spec 8.3). `None` means the request names none, or the accepted ledger shows
+    /// no entry for this attempt. Unavailable or untrusted evidence is an error, never
+    /// evidence that the attempt was made by hand.
     pub(crate) async fn attempt_under(
         &mut self,
         payee: &[u8; 32],
         named: Option<&AllowanceId>,
         attempt: AttemptId,
-    ) -> Result<Option<AllowanceId>> {
+        obligation: &[u8; 32],
+        amount: &PaymentAmount,
+    ) -> Result<Option<Under>> {
         let Some(allowance_id) = named else {
             return Ok(None);
         };
-        let target = ledger_target(payee, allowance_id);
-        let key = self.app.record_key(&target)?;
-        if self
-            .held_ledger_names(&key, payee, allowance_id, attempt)
+        let under = self.attribution_allowance(payee, allowance_id).await?;
+        let ledger = self
+            .ledger_base(&under)
             .await?
-        {
-            return Ok(Some(allowance_id.clone()));
+            .ok_or_else(|| not_automatic("the attempt's ledger isn't available"))?;
+        let binding = if let Some(entry) = ledger.entries.iter().find(|e| e.attempt_id == attempt) {
+            Some(
+                entry.obligation == *obligation
+                    && entry.value == amount.value
+                    && entry.asset == amount.asset,
+            )
+        } else {
+            ledger
+                .failed
+                .iter()
+                .find(|e| e.attempt_id == attempt)
+                .map(|entry| {
+                    entry.obligation == *obligation
+                        && entry.value == amount.value
+                        && under.terms.asset == amount.asset
+                })
+        };
+        match binding {
+            Some(true) => Ok(Some(under)),
+            Some(false) => Err(not_automatic(
+                "the ledger entry doesn't match the attempt's obligation and amount",
+            )),
+            None => Ok(None),
         }
-        // The copy a restore holds may predate the attempt's entry: the ledger is read from
-        // the switch once. A read that fails leaves the copy as it was; only a failure of the
-        // app's own store is an error.
-        if let Err(error) = self.app.read_record(&target).await {
-            let error: PaykitError = error.into();
-            if crate::hold::local_failure(&error) {
-                return Err(error);
-            }
-            return Ok(None);
-        }
-        Ok(self
-            .held_ledger_names(&key, payee, allowance_id, attempt)
-            .await?
-            .then(|| allowance_id.clone()))
     }
 
-    /// Whether the ledger the app holds at `key`, bound to `payee`'s Allowance
-    /// `allowance_id`, holds an entry for `attempt`.
-    async fn held_ledger_names(
-        &self,
-        key: &[u8; 32],
+    /// Read the accepted terms and grant history for reconstructing a past attempt.
+    /// Consent, a later end or a handoff can stop a new payment, but cannot erase the
+    /// authority under which an already dispatched attempt was made (Paykit spec 8.3).
+    async fn attribution_allowance(
+        &mut self,
         payee: &[u8; 32],
         allowance_id: &AllowanceId,
-        attempt: AttemptId,
-    ) -> Result<bool> {
-        let Some(held) = self.app.shared_record(key).await? else {
-            return Ok(false);
+    ) -> Result<Under> {
+        let target = allowance_target(payee, allowance_id);
+        let record_key = self.app.record_key(&target)?;
+        let RecordRead::Fresh(shared) = self.app.read_record_fresh(&target).await? else {
+            return Err(not_automatic(
+                "the attempt's Allowance isn't read from the switch now",
+            ));
         };
-        Ok(held
-            .content
-            .value()
-            .and_then(|value| Ledger::from_json(value).ok())
-            .filter(|l| l.counterparty == *payee && &l.allowance_id == allowance_id)
-            .is_some_and(|ledger| ledger.entries.iter().any(|e| e.attempt_id == attempt)))
+        if shared.divergent
+            || shared.flagged
+            || shared.doubtful
+            || written_by_removed_app(self.app.own_identity(), &shared)
+            || self.pause_of(&shared).await?.blocks_automatic()
+        {
+            return Err(not_automatic("the attempt's Allowance record is untrusted"));
+        }
+        let allowance = self
+            .held_allowance(&record_key)
+            .await?
+            .ok_or_else(|| not_automatic("the attempt's Allowance doesn't bind"))?;
+        let Body::AllowanceProposal(proposal) = allowance.proposal.body() else {
+            return Err(PaykitError::corrupt());
+        };
+        let terms = proposal.terms.clone();
+        terms.to_json()?;
+        Ok(Under {
+            record_key,
+            allowance,
+            version: shared.version,
+            terms,
+        })
     }
 
     /// The kept ledger version of the Allowance at `record`, read bound to its key as a

@@ -300,13 +300,29 @@ impl Paykit {
         if body.is_recurring() {
             return Ok(None);
         }
+        let under = match self
+            .attempt_under(
+                &obligation.payee,
+                obligation.record.allowance_id.as_ref(),
+                attempt,
+                &obligation.claim_key,
+                &body.amount,
+            )
+            .await
+        {
+            Ok(under) => under,
+            Err(error) if crate::hold::local_failure(&error) => return Err(error),
+            Err(_) => return Ok(None),
+        };
+        let accepted = crate::executor::accepted_ids(
+            body.accepted_payment_endpoint_identifiers.as_deref(),
+            under.as_ref(),
+        );
         let (destination, carrier) = match &body.destination {
             RequestDestination::Endpoints(endpoints) => {
-                let mut usable = endpoints.iter().filter(|(id, _)| {
-                    body.accepted_payment_endpoint_identifiers
-                        .as_ref()
-                        .is_none_or(|ids| ids.contains(id))
-                });
+                let mut usable = endpoints
+                    .iter()
+                    .filter(|(id, _)| accepted.as_ref().is_none_or(|ids| ids.contains(id)));
                 let (Some((id, payload)), None) = (usable.next(), usable.next()) else {
                     return Ok(None);
                 };
@@ -339,14 +355,13 @@ impl Paykit {
                         continue;
                     };
                     for mark in list.used.iter().filter(|u| u.attempt_id == attempt) {
-                        let accepted = body
-                            .accepted_payment_endpoint_identifiers
+                        let allowed = accepted
                             .as_ref()
                             .is_none_or(|ids| ids.contains(&mark.endpoint));
                         let Some(endpoint) = listed
                             .payment_endpoints
                             .get(&mark.endpoint)
-                            .filter(|e| accepted && e.single_use && listed.version == mark.version)
+                            .filter(|e| allowed && e.single_use && listed.version == mark.version)
                         else {
                             continue;
                         };
@@ -408,17 +423,9 @@ impl Paykit {
             record_held: false,
             transfer_bound: None,
             failed_on_claim: false,
-            // Made under an Allowance when the request record names it and that Allowance's
-            // ledger, as held, holds an entry for the attempt: its proof names the Allowance
-            // then, as the executor's own would (Paykit spec 8.3 step 4).
-            allowance_id: self
-                .attempt_under(
-                    &obligation.payee,
-                    obligation.record.allowance_id.as_ref(),
-                    attempt,
-                )
-                .await?
-                .map(|allowance_id| allowance_id.as_str().to_owned()),
+            // The accepted ledger bound the attempt before destination selection (Paykit
+            // spec 8.3 step 4), so its proof carries the same authority as execution did.
+            allowance_id: under.map(|u| u.allowance.allowance_id.as_str().to_owned()),
             // Who started it isn't known from the claim: taken as automatic, so what holds an
             // automatic attempt, the request record's `manual_only` mark included, holds it.
             initiator: crate::journal::StartedBy::Automatic,
