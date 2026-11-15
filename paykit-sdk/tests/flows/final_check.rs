@@ -35,6 +35,7 @@ struct HookedStore {
     fail_queueing: std::sync::atomic::AtomicBool,
     queueing_next: std::sync::atomic::AtomicBool,
     paying_hook: Mutex<Option<Hook>>,
+    deny_hook: Mutex<Option<Hook>>,
     attempted_hook: Mutex<Option<Hook>>,
     stop_at_outbox: std::sync::atomic::AtomicBool,
     refuse_acceptances: std::sync::atomic::AtomicBool,
@@ -96,7 +97,13 @@ impl HookedStore {
 
 impl StateStore for HookedStore {
     fn get(&self, ns: &str, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
-        self.inner.get(ns, key)
+        let value = self.inner.get(ns, key)?;
+        if key == b"p/dl" {
+            if let Some(hook) = self.deny_hook.lock().unwrap().take() {
+                hook();
+            }
+        }
+        Ok(value)
     }
 
     fn scan(
@@ -1962,4 +1969,176 @@ async fn test_acceptance_owed_restored_bare_is_placed_at_the_first_resume() {
         .unwrap();
     assert!(!value["response"].is_null(), "{value}");
     assert!(!value["proof"].is_null(), "{value}");
+}
+
+#[derive(Clone, Copy)]
+enum DenyBoundary {
+    Commit,
+    LocalRead,
+    Unavailable,
+}
+
+/// A user payment whose deny copy expires immediately before dispatch.
+async fn manual_deny_boundary(
+    change: Option<fn(&mut paykit_sdk::BlockedPayment)>,
+    boundary: DenyBoundary,
+) -> (World, PayOutcome) {
+    let w = World::new();
+    let store = Arc::new(HookedStore::default());
+    let scopes = paykit_sdk::AppScopes::new()
+        .pay()
+        .manage_contacts()
+        .build()
+        .unwrap();
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            scopes.clone(),
+            crate::common::day_window(),
+            Arc::clone(&store) as Arc<dyn StateStore>,
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut phone = w
+        .join_with(
+            &w.alice,
+            "phone",
+            scopes,
+            PaykitConfig::default(),
+            crate::common::store(),
+        )
+        .await;
+    let mut shop = w.shop().await;
+    let request = request_from(
+        &mut shop,
+        w.alice_id(),
+        draft("0.000000001", w.clock.now_ms()),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    wallet.block(&w.bob_id()).await.unwrap();
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    let Some(paykit_sdk::Refusal::Blocked { payment }) = refused.refusal() else {
+        panic!("{refused:?}")
+    };
+    let mut payment = (**payment).clone();
+    assert_eq!(payment.amount, crate::common::btc("0.00000001"));
+    let options = if let Some(change) = change {
+        change(&mut payment);
+        PayOptions::default().with_blocked_confirmed(payment)
+    } else {
+        PayOptions::default()
+    };
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    phone.block(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS - 1);
+    let clock = Arc::clone(&w.clock);
+    let switch = w.alice.switch().clone();
+    let local = Arc::clone(&store);
+    store.on_paying(Box::new(move || {
+        if matches!(boundary, DenyBoundary::LocalRead) {
+            *local.deny_hook.lock().unwrap() = Some(Box::new(move || clock.advance_ms(1)));
+        } else {
+            clock.advance_ms(1);
+        }
+        if matches!(boundary, DenyBoundary::Unavailable) {
+            switch.fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/allow".into(),
+                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                current: serde_json::Value::Null,
+            });
+        }
+    }));
+    let outcome = wallet.pay_request(&request, options).await.unwrap();
+    (w, outcome)
+}
+
+#[tokio::test]
+async fn test_final_check_manual_dispatch_refreshes_the_deny_copy_at_ten_minutes() {
+    let (w, outcome) = manual_deny_boundary(None, DenyBoundary::Commit).await;
+    assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_final_check_manual_dispatch_binds_every_confirmed_payment_field() {
+    let changes: [fn(&mut paykit_sdk::BlockedPayment); 5] = [
+        |_| {},
+        |p| p.amount = crate::common::btc("0.000000001"),
+        |p| p.payee = [71; 32],
+        |p| p.request.as_mut().unwrap().request_hash = [71; 32],
+        |p| {
+            p.period = Some(paykit_lib::periods::PeriodRef {
+                starts_at: 1,
+                ends_at: 2,
+            })
+        },
+    ];
+    for (i, change) in changes.into_iter().enumerate() {
+        let (w, outcome) = manual_deny_boundary(Some(change), DenyBoundary::Commit).await;
+        assert_eq!(
+            matches!(outcome, PayOutcome::Paid { .. }),
+            i == 0,
+            "{i}: {outcome:?}"
+        );
+        assert_eq!(w.rail.all_executions().is_empty(), i != 0, "{i}");
+    }
+}
+
+#[tokio::test]
+async fn test_final_check_manual_confirmation_cannot_replace_a_due_deny_read() {
+    let (w, outcome) = manual_deny_boundary(Some(|_| {}), DenyBoundary::Unavailable).await;
+    assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_final_check_manual_deny_age_is_judged_after_the_local_read() {
+    let (w, outcome) = manual_deny_boundary(None, DenyBoundary::LocalRead).await;
+    assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_final_check_manual_override_keeps_its_selected_transfer_amount() {
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    w.rail.set_transfer_amount(Some(crate::common::btc("3")));
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    let Some(paykit_sdk::Refusal::Transfer { quote, .. }) = refused.refusal() else {
+        panic!("{refused:?}")
+    };
+    let rail = Arc::clone(&w.rail);
+    store.on_paying(Box::new(move || {
+        rail.set_transfer_amount(Some(crate::common::btc("1")))
+    }));
+    let refused = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_transfer_confirmed((**quote).clone()),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(paykit_sdk::Refusal::AttemptFailed(inner))
+        if matches!(**inner, paykit_sdk::Refusal::Transfer { .. })),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
 }

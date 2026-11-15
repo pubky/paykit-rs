@@ -19,12 +19,12 @@
 //! Sensitive: an entry holds the destination's payload, the message carrying it and the
 //! rail's proof.
 
-use paykit_lib::bodies::Body;
+use paykit_lib::bodies::{Body, Conversion};
 use paykit_lib::derive::{natural_key, payment_obligation};
 use paykit_lib::records::{DestinationSource, StoredMessage};
 use paykit_lib::{
     Asset, AttemptId, Decimal, Label, PaymentAmount, PaymentEndpointIdentifier,
-    PaymentEndpointPayload, PaymentReference,
+    PaymentEndpointPayload, PaymentReference, Rate,
 };
 use pubky_switch_core::chain::TransitionProof;
 use pubky_switch_core::enc::{serde_b64, serde_b64_vec};
@@ -34,9 +34,11 @@ use pubky_switch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::conversion::{PricedPayment, RateSource};
 use crate::destination::Carrier;
 use crate::error::{PaykitError, Result};
 use crate::records::KeptMessage;
+use crate::requests::RequestRef;
 
 /// An optional byte string as base64url, or null.
 mod serde_b64_opt {
@@ -176,8 +178,8 @@ pub(crate) enum TransferBound {
         /// The cap, as a decimal; `None` for none.
         cap: Option<String>,
     },
-    /// The transfer the user confirmed: this amount and this largest fee, or what the user
-    /// asked for.
+    /// The selected transfer the user confirmed: its amount and largest fee remain bound
+    /// for every dispatch.
     Confirmed {
         /// The cap at planning, for a transfer that is what the user asked for.
         cap: Option<String>,
@@ -186,6 +188,79 @@ pub(crate) enum TransferBound {
         /// The largest fee confirmed, as a decimal; `None` for none.
         max_fee: Option<String>,
     },
+}
+
+impl TransferBound {
+    /// The exact amount this bound permits, excluding fees, or no amount when the user
+    /// explicitly chose a transfer the payment method could not quantify.
+    pub(crate) fn paid_amount(
+        &self,
+        payment_amount: &PaymentAmount,
+    ) -> Result<Option<PaymentAmount>> {
+        match self {
+            Self::Asked { .. } => Ok(Some(payment_amount.clone())),
+            Self::Confirmed { amount, .. } => amount.as_ref().map(KeptAmount::amount).transpose(),
+        }
+    }
+}
+
+/// The price of a payment priced by a rate, as its user confirmed it (Paykit spec 7.2 step 1,
+/// 8.2): the rate the call amount ([`JournalEntry::payment_amount`]) was computed by, with where the
+/// rate comes from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct KeptPrice {
+    /// The rate's asset selector, bare or rail-qualified.
+    pub(crate) rate_asset: String,
+    /// The rate's value, as a decimal.
+    pub(crate) rate_value: String,
+    /// Where the rate comes from.
+    pub(crate) source: KeptRateSource,
+}
+
+/// Where a kept price's rate comes from ([`crate::RateSource`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum KeptRateSource {
+    /// The request's fixed rates.
+    Request,
+    /// The rates of the period details with this `msg_id`.
+    PeriodDetails {
+        /// The period details' `msg_id`.
+        msg_id: String,
+    },
+}
+
+impl KeptPrice {
+    /// The price of `shown`, as kept.
+    pub(crate) fn of(shown: &PricedPayment) -> Self {
+        Self {
+            rate_asset: shown.rate.asset().as_str().to_owned(),
+            rate_value: shown.rate.value().as_str().to_owned(),
+            source: match &shown.source {
+                RateSource::Request => KeptRateSource::Request,
+                RateSource::PeriodDetails { msg_id } => KeptRateSource::PeriodDetails {
+                    msg_id: msg_id.clone(),
+                },
+            },
+        }
+    }
+
+    /// The rate kept; a corrupt store for one that doesn't read.
+    pub(crate) fn rate(&self) -> Result<Rate> {
+        let asset = Asset::parse(&self.rate_asset).map_err(|_| PaykitError::corrupt())?;
+        let value = Decimal::parse(&self.rate_value).map_err(|_| PaykitError::corrupt())?;
+        Rate::new(asset, value).map_err(|_| PaykitError::corrupt())
+    }
+
+    /// Where the rate comes from.
+    pub(crate) fn source(&self) -> RateSource {
+        match &self.source {
+            KeptRateSource::Request => RateSource::Request,
+            KeptRateSource::PeriodDetails { msg_id } => RateSource::PeriodDetails {
+                msg_id: msg_id.clone(),
+            },
+        }
+    }
 }
 
 /// An amount as kept.
@@ -225,6 +300,9 @@ pub(crate) struct JournalEntry {
     #[serde(with = "serde_b64_vec")]
     pub(crate) natural_key: Vec<u8>,
     pub(crate) amount: KeptAmount,
+    /// The amount passed to the payment method: the request's computed amount or the
+    /// amount of a payment without a request. TransferBound carries any actual override.
+    pub(crate) payment_amount: KeptAmount,
     pub(crate) destination: Destination,
     pub(crate) deadline: Option<u64>,
     pub(crate) stage: Stage,
@@ -286,6 +364,10 @@ pub(crate) struct JournalEntry {
     /// entry a reconcile rebuilt from its claim (`restored`), which is never dispatched
     /// again: its repeat would be held to the app's cap now.
     pub(crate) transfer_bound: Option<TransferBound>,
+    /// The price its user confirmed, for a payment priced by a rate: the rate `paid` was
+    /// computed by, and `amount` stays the request's. `None` for a payment no rate prices,
+    /// and in an entry a reconcile rebuilt, which is never dispatched again.
+    pub(crate) price: Option<KeptPrice>,
     /// The payment method reported the dispatch failed, `failed` was written on the claim,
     /// and the method's history later showed it paid: its proof went, and `failed` stands on
     /// the claim until the payee's receipt settles it by evidence. A receipt that comes once
@@ -301,6 +383,46 @@ impl std::fmt::Debug for JournalEntry {
 }
 
 impl JournalEntry {
+    /// The amount passed to the payment method, computed and bound before dispatch.
+    pub(crate) fn call_amount(&self) -> Result<PaymentAmount> {
+        self.payment_amount.amount()
+    }
+
+    /// Exact transfer evidence bound before dispatch, excluding fees. A method whose
+    /// transfer was unknown and an outcome-only reconstruction supply no numeric amount.
+    pub(crate) fn paid_amount(&self) -> Result<Option<PaymentAmount>> {
+        self.transfer_bound
+            .as_ref()
+            .map(|bound| bound.paid_amount(&self.call_amount()?))
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    /// What a payment priced by a rate showed its user ([`PricedPayment`]), as kept; `None` for
+    /// a payment no rate prices.
+    pub(crate) fn priced_payment(&self) -> Result<Option<PricedPayment>> {
+        let Some(price) = &self.price else {
+            return Ok(None);
+        };
+        let Some(request_hash) = self.request_hash()? else {
+            return Err(PaykitError::corrupt());
+        };
+        let payload = self.destination.payload()?;
+        Ok(Some(PricedPayment {
+            request: RequestRef {
+                payee: self.payee,
+                request_hash,
+            },
+            app_id: self.destination.app_id,
+            endpoint_id: self.destination.endpoint_id()?,
+            payload_hash: pubky_switch_core::enc::hash(payload.as_str().as_bytes()),
+            requested: self.amount.amount()?,
+            source: price.source(),
+            rate: price.rate()?,
+            amount: self.payment_amount.amount()?,
+        }))
+    }
+
     pub(crate) fn attempt(&self) -> Result<AttemptId> {
         AttemptId::parse(&self.attempt_id).map_err(|_| PaykitError::corrupt())
     }
@@ -392,11 +514,44 @@ impl JournalEntry {
             _ => return bad(),
         }
         // Only a reconcile's rebuilt entry, never dispatched again, has no transfer bound.
-        if self.transfer_bound.is_none() && !self.restored {
+        if self.transfer_bound.is_none()
+            && (!self.restored
+                || !matches!(
+                    self.stage,
+                    Stage::RailPaid | Stage::RailFailed | Stage::AcceptanceOwed | Stage::Finished
+                ))
+        {
             return bad();
         }
         if (self.record_held || self.failed_on_claim) && self.rail_proof.is_none() {
             return bad();
+        }
+        // The call amount is the amount asked, but for a payment of a request: one priced by
+        // a rate, planned with a transfer bound, to an endpoint of the paid asset that the
+        // rate prices; another, the amount asked rounded up, in its asset, to an endpoint of
+        // that asset.
+        let asked = self.amount.amount()?;
+        let paid = self.payment_amount.amount()?;
+        if self.price.is_none()
+            && paid != asked
+            && (request_hash.is_none()
+                || paid.asset != asked.asset
+                || paid.value < asked.value
+                || self.destination.endpoint_id()?.asset_segment() != Some(paid.asset.as_str()))
+        {
+            return bad();
+        }
+        if let Some(price) = &self.price {
+            let rate = price.rate()?;
+            let endpoint_id = self.destination.endpoint_id()?;
+            if request_hash.is_none()
+                || self.paid_amount()?.as_ref() != Some(&paid)
+                || self.transfer_bound.is_none()
+                || endpoint_id.asset_segment() != Some(paid.asset.as_str())
+                || crate::conversion::rate_for(std::slice::from_ref(&rate), &endpoint_id).is_none()
+            {
+                return bad();
+            }
         }
         // Owed: a proof, and an acceptance to queue or to place. One queued and not yet
         // placed is released and still owed here, as `finish_owed_acceptance` saves it
@@ -493,6 +648,28 @@ impl JournalEntry {
                 || self.label()? != body.label
             {
                 return corrupt();
+            }
+            // The signed conversion terms determine whether a rate is required; omitting
+            // a kept price cannot turn a priced endpoint into an unpriced one (Paykit spec 7.2).
+            let endpoint_id = self.destination.endpoint_id()?;
+            match (&body.conversion, &self.price) {
+                (_, None) if self.transfer_bound.is_none() => {}
+                (Some(Conversion::Fixed(rates)), price) => {
+                    let expected = crate::conversion::rate_for(rates, &endpoint_id);
+                    match (expected, price) {
+                        (Some(expected), Some(price))
+                            if price.source == KeptRateSource::Request
+                                && price.rate()? == *expected => {}
+                        (None, None)
+                            if endpoint_id.asset_segment() == Some(body.amount.asset.as_str()) => {}
+                        _ => return corrupt(),
+                    }
+                }
+                (None, None) => {}
+                (Some(Conversion::PerPeriod), Some(price))
+                    if matches!(price.source, KeptRateSource::PeriodDetails { .. }) => {}
+                (Some(Conversion::PerPeriod), None) => {}
+                _ => return corrupt(),
             }
         }
         self.kept_carrier(own)?;
@@ -619,6 +796,12 @@ pub struct PaymentView {
     /// [`crate::Paykit::resume_payments`], or when the user has the record written again
     /// with [`crate::Paykit::repair_activity_record`].
     pub record_held: bool,
+    /// The exact transferred amount bound before dispatch, excluding fees. `None` when
+    /// the method could not quantify the selected transfer or the entry was rebuilt only
+    /// to report an outcome. The requested amount is never substituted for missing evidence.
+    pub paid: Option<PaymentAmount>,
+    /// The rate used for a payment priced by a rate; `None` for another payment.
+    pub rate: Option<Rate>,
     /// The payee's receipt of this attempt the payer's activity record holds, if any
     /// (Paykit wire 4.11), as this app's copy shows it: for display. While the records
     /// aren't listed, after a restore or a certificate that reads more, the copy may lack a
@@ -635,6 +818,8 @@ impl JournalEntry {
             payee: self.payee,
             request_hash: self.request_hash()?,
             amount: self.amount.amount()?,
+            paid: self.paid_amount()?,
+            rate: self.price.as_ref().map(KeptPrice::rate).transpose()?,
             endpoint_id: self.destination.endpoint_id()?,
             stage: self.stage,
             restored: self.restored,

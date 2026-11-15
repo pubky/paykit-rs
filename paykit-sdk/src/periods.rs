@@ -101,6 +101,19 @@ pub(crate) fn valid_details<'a>(
         .collect()
 }
 
+/// The signed rate interval of period details (Paykit wire 4.9), without a payer or
+/// payee time policy. Callers first validate the details against their request and use
+/// the interval only when the selected payment is priced by these rates.
+pub(crate) fn rate_window(details: &StoredMessage) -> Option<(u64, u64)> {
+    let Body::PaymentPeriodDetails(body) = details.body() else {
+        return None;
+    };
+    Some((
+        paykit_lib::periods::rates_start(details.message().created_at_ms),
+        body.expires_at,
+    ))
+}
+
 /// The view of a period record, `record` held at `key`, of a Billing Period of `request`;
 /// `None` for a record of another kind. It shows only the details valid against `request`
 /// ([`valid_details`]).

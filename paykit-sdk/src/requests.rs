@@ -14,8 +14,8 @@
 //!   replies copy it (Paykit spec 3.1, 3.3).
 
 use paykit_lib::bodies::{
-    PaymentDeadline, PaymentReceipt, PaymentRequest, PaymentRequestAcceptance, RequestDestination,
-    RequestReply,
+    Conversion, PaymentDeadline, PaymentReceipt, PaymentRequest, PaymentRequestAcceptance,
+    RequestDestination, RequestReply,
 };
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
@@ -87,6 +87,10 @@ pub struct RequestDraft {
     pub destination: RequestDestination,
     /// The only identifiers the payer may use.
     pub accepted_endpoint_identifiers: Option<Vec<PaymentEndpointIdentifier>>,
+    /// The conversion terms (Paykit wire 4.4): fixed rates pricing the endpoints of other
+    /// assets, or `per_period` on a recurring request, each Billing Period's rates coming
+    /// with its period details; `None` for none.
+    pub conversion: Option<Conversion>,
     /// Opaque metadata.
     pub metadata: Option<Map<String, Value>>,
 }
@@ -106,6 +110,7 @@ impl std::fmt::Debug for RequestDraft {
                 "accepted_endpoint_identifiers",
                 &self.accepted_endpoint_identifiers,
             )
+            .field("conversion", &self.conversion)
             .field(
                 "metadata",
                 &self
@@ -137,6 +142,7 @@ impl RequestDraft {
             per_period_endpoints: false,
             destination,
             accepted_endpoint_identifiers: None,
+            conversion: None,
             metadata: None,
         }
     }
@@ -187,6 +193,16 @@ impl RequestDraft {
         identifiers: Vec<PaymentEndpointIdentifier>,
     ) -> Self {
         self.accepted_endpoint_identifiers = Some(identifiers);
+        self
+    }
+
+    /// The conversion terms (Paykit wire 4.4): with fixed rates, a payer pays an endpoint a
+    /// rate prices the amount that rate gives, rounded up once to the endpoint's smallest
+    /// unit, only once its user confirms it, and the payee credits that amount and no other
+    /// (Paykit spec 7.2 step 1).
+    #[must_use]
+    pub fn with_conversion(mut self, conversion: Conversion) -> Self {
+        self.conversion = Some(conversion);
         self
     }
 
@@ -647,7 +663,7 @@ impl Paykit {
             per_period_endpoints: draft.per_period_endpoints,
             label: label.clone(),
             accepted_payment_endpoint_identifiers: draft.accepted_endpoint_identifiers,
-            conversion: None,
+            conversion: draft.conversion,
             metadata: draft.metadata,
         };
         // The writer reads back what it writes by the recipient's rules (Paykit wire 4.5).
@@ -819,12 +835,15 @@ impl Paykit {
 
     /// The payee's own check of the proof in `record` (Paykit spec 8.1 step 4): the verified
     /// payment time, or `None` when the payment method doesn't confirm it. A Billing Period's
-    /// endpoint is the one in valid period details the proof names, or else the request's;
-    /// with per-period endpoints a later period is paid only to the destination of the
-    /// details its proof names, so one paid elsewhere is `None`. An identifier absent from
-    /// the selected endpoints, excluded by the request, or naming an app other than that
-    /// source's signed owner is refused before the method's check. Without fixed endpoints,
-    /// the method verifies the destination itself.
+    /// endpoint is the request's, except that with per-period endpoints a later period is
+    /// paid only to the destination of the valid details its proof names, so one paid
+    /// elsewhere is `None`. An identifier absent from the selected endpoints, excluded by
+    /// the request, or naming an app other than that
+    /// source's signed owner is refused before the method's check. Named per-period rates
+    /// price the payment through the same conversion rule as the payer's. The method's
+    /// verified payment time must precede a selected details destination's expiry and, for
+    /// a rate-priced payment, lie within those details' inclusive signed rate interval.
+    /// Without fixed endpoints, the method verifies the destination itself.
     ///
     /// **One payment, one occurrence**, as in v0.1: a payment whose settlement this app has
     /// credited to another request, Billing Period or payment without a request of the same
@@ -866,11 +885,11 @@ impl Paykit {
             return Err(Refusal::NotFound.into());
         };
         // A Billing Period's proof is of its request, whose record is the request's own; the
-        // endpoint paid is in the period details the proof names, or else the request's
-        // (Paykit spec 8.2).
+        // request decides whether its own destination or the named period details'
+        // destination serves this occurrence (Paykit spec 8.2).
         let request_record = self.payee_request_record(&target, &bound).await?;
         let id = &proof.payment_endpoint_identifier;
-        let (amount, payload) = match request_record.as_ref().and_then(request_of) {
+        let payment = match request_record.as_ref().and_then(request_of) {
             Some((stored_request, request)) => {
                 if request
                     .accepted_payment_endpoint_identifiers
@@ -893,16 +912,10 @@ impl Paykit {
                         .into_iter()
                         .find_map(|d| match d.body() {
                             Body::PaymentPeriodDetails(details) if d.hash() == *hash => {
-                                Some((d.message().from.app_id, details))
+                                Some((d, details))
                             }
                             _ => None,
                         })
-                });
-                let from_details = named_details.and_then(|(owner, details)| {
-                    details
-                        .payment_endpoints
-                        .as_ref()
-                        .map(|endpoints| (owner, endpoints))
                 });
                 // With per-period endpoints, the request's own serve only its first Billing
                 // Period: a later one is credited only for a payment to the destination of
@@ -916,6 +929,17 @@ impl Paykit {
                     && proof.billing_period.is_some_and(|period| {
                         first.is_none_or(|first| first.starts_at != period.starts_at)
                     });
+                // Named rates remain usable independently of the destination. The details'
+                // endpoints, owner and expiry apply together, only to those later periods.
+                let from_details =
+                    named_details
+                        .filter(|_| later_period)
+                        .and_then(|(stored, details)| {
+                            details.payment_endpoints.as_ref().map(|endpoints| {
+                                (stored.message().from.app_id, endpoints, details.expires_at)
+                            })
+                        });
+                let destination_expires = from_details.map(|(_, _, expires)| expires);
                 if later_period && from_details.is_none() {
                     return Ok(None);
                 }
@@ -923,7 +947,7 @@ impl Paykit {
                 // wire 4.4). Select them together before looking up the identifier; neither
                 // an absent identifier nor another app falls back to another source.
                 let endpoints = match from_details {
-                    Some(endpoints) => Some(endpoints),
+                    Some((owner, endpoints, _)) => Some((owner, endpoints)),
                     None => match &request.destination {
                         RequestDestination::Endpoints(endpoints) => {
                             Some((stored_request.message().from.app_id, endpoints))
@@ -943,7 +967,46 @@ impl Paykit {
                     }
                     None => None,
                 };
-                (request.amount.clone(), payload)
+                // The amount the payer computed for the endpoint its proof names, by the same
+                // rule (Paykit spec 7.2 step 1), with this app's payment method's unit: the
+                // request's amount, rounded up once to the unit of an endpoint of its asset;
+                // under fixed or named per-period rates, only the computed amount is
+                // credited. An endpoint the terms leave unusable is not credited.
+                let request_ref = RequestRef {
+                    payee: self.identity(),
+                    request_hash: stored_request.hash(),
+                };
+                let period_rates = named_details.and_then(|(stored, details)| {
+                    details.rates.as_deref().map(|rates| (stored, rates))
+                });
+                let pricing = match (request.conversion.as_ref(), period_rates) {
+                    (Some(Conversion::PerPeriod), Some((stored, rates))) => {
+                        crate::pay::Pricing::by_rates(
+                            &request.amount,
+                            request_ref,
+                            crate::conversion::RateSource::PeriodDetails {
+                                msg_id: stored.message().msg_id.clone(),
+                            },
+                            rates,
+                            pubky_switch_client::app::Initiator::User,
+                        )
+                    }
+                    _ => crate::pay::Pricing::of_request(
+                        &request.amount,
+                        request_ref,
+                        request.conversion.as_ref(),
+                        pubky_switch_client::app::Initiator::User,
+                    ),
+                };
+                let (amount, rate_window) = match pricing.price(&*self.rail, id) {
+                    crate::conversion::Priced::Plain(amount) => (amount, None),
+                    crate::conversion::Priced::ByRate { amount, .. } => (
+                        amount,
+                        period_rates.and_then(|(stored, _)| crate::periods::rate_window(stored)),
+                    ),
+                    crate::conversion::Priced::Unusable(_) => return Ok(None),
+                };
+                (amount, payload, destination_expires, rate_window)
             }
             // A period record whose request record the app holds but can't open or bind yet,
             // sealed under a scope key it doesn't hold or a value that doesn't read: not now,
@@ -955,11 +1018,15 @@ impl Paykit {
                 )
                 .into());
             }
-            None if bound.request_hash.is_none() && bound.billing_period.is_none() => {
-                (proof.amount.clone().ok_or(Refusal::NotFound)?, None)
-            }
+            None if bound.request_hash.is_none() && bound.billing_period.is_none() => (
+                proof.amount.clone().ok_or(Refusal::NotFound)?,
+                None,
+                None,
+                None,
+            ),
             None => return Err(Refusal::NotFound.into()),
         };
+        let (amount, payload, destination_expires, rate_window) = payment;
         if let Some(settlement) = self.rail.settlement_id(&proof.proof) {
             match self
                 .other_credit(record, &bound.counterparty, &settlement)
@@ -979,7 +1046,15 @@ impl Paykit {
             attempt_id: proof.attempt_id,
             proof: proof.proof.clone(),
         };
-        Ok(self.rail.verify(check).await?)
+        // The method's evidence dates the payment, never this proof's arrival. A details
+        // destination must be unexpired; rates include both signed interval boundaries
+        // (Paykit spec 8.2, Paykit wire 4.9). Same-asset payments use no rate interval.
+        Ok(self.rail.verify(check).await?.filter(|paid_at| {
+            destination_expires.is_none_or(|expires| *paid_at < expires)
+                && rate_window.is_none_or(|(start, expires)| {
+                    paykit_lib::periods::rates_apply(start, expires, *paid_at)
+                })
+        }))
     }
 
     /// Whether another `payee_activity` record than `record` credits `settlement` from
@@ -1973,6 +2048,7 @@ impl Paykit {
             let shown = BlockedPayment {
                 payee: request.payee,
                 request: Some(*request),
+                period: None,
                 amount: body.amount.clone(),
             };
             crate::pay::refuse_blocked(blocked, shown, options.blocked_confirmed.as_ref())?;

@@ -1991,6 +1991,108 @@ async fn test_restore_journal_entry_breaking_its_payment_invariants_refused() {
     }
 }
 
+/// A backup of alice's wallet with a payment priced by a rate in flight, confirmed at the
+/// amount the request's fixed rate gives its invoice, and the wallet's App ID.
+async fn backup_with_a_priced_payment(w: &World) -> (serde_json::Value, [u8; 16]) {
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let draft = crate::conversion::priced(
+        w.clock.now_ms(),
+        &[("btc-lightning-bolt11", "lnbc1invoice")],
+        &[("btc", "0.0000123456")],
+    );
+    let request = request_from(&mut shop, w.alice_id(), draft).await;
+    wallet.receive(None).await.unwrap();
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    let shown = crate::conversion::priced_of(&refused);
+    w.rail.next(Behaviour::Hang);
+    wallet
+        .pay_request(&request, PayOptions::default().with_rate_confirmed(shown))
+        .await
+        .unwrap();
+    let bytes = wallet.backup().await.unwrap().to_bytes().unwrap();
+    (serde_json::from_slice(&bytes).unwrap(), wallet.app_id())
+}
+
+#[tokio::test]
+async fn test_restore_priced_journal_entry_with_another_price_refused() {
+    // A payment priced by a rate keeps the price its user confirmed. A rate the request's
+    // terms don't give its endpoint, a rail-qualified rate of another rail, a price in
+    // another asset than the endpoint's, or period details' rates on a one-time request,
+    // would each pay what the user never confirmed: each is refused, writing nothing. The
+    // entry as written restores.
+    let w = World::new();
+    let (good, app_id) = backup_with_a_priced_payment(&w).await;
+    let entry = layer_of(&good)
+        .into_iter()
+        .find(|(k, _)| k.starts_with(b"j/"))
+        .map(|(_, v)| v["d"].clone())
+        .unwrap();
+    assert_eq!(entry["payment_amount"]["value"], "0.00012346", "{entry}");
+    let price = entry["price"].clone();
+    let changed = |member: &str, value: serde_json::Value| {
+        let mut price = price.clone();
+        price[member] = value;
+        price
+    };
+    let cases = [
+        ("another rate", changed("rate_value", "0.00002".into())),
+        (
+            "another rail's rate",
+            changed("rate_asset", "btc-bitcoin".into()),
+        ),
+        (
+            "period details' rates",
+            changed(
+                "source",
+                serde_json::json!({ "kind": "period_details", "msg_id": "details" }),
+            ),
+        ),
+    ];
+    for (what, price) in cases {
+        let backup = with_journal_member(&good, "price", price);
+        refused_writing_nothing(&w, backup, app_id, what).await;
+    }
+    // An amount paid in another asset than the endpoint's.
+    let backup = with_journal_member(
+        &good,
+        "payment_amount",
+        serde_json::json!({ "value": "0.00012346", "asset": "eth" }),
+    );
+    refused_writing_nothing(&w, backup, app_id, "another asset").await;
+    let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&good).unwrap()).unwrap();
+    let restored = restored(&w, &backup).await;
+    assert_eq!(
+        restored.payments().await.unwrap()[0].paid,
+        Some(crate::common::btc("0.00012346"))
+    );
+}
+
+#[tokio::test]
+async fn test_restore_journal_entry_paying_another_amount_refused() {
+    // A payment no rate prices pays the amount asked, or it rounded up in its own asset:
+    // less, or another asset, is no amount a rule gives, so each is refused, writing
+    // nothing.
+    let w = World::new();
+    let (good, app_id) = backup_with_a_payment(&w).await;
+    for (what, paid) in [
+        (
+            "less",
+            serde_json::json!({ "value": "0.5", "asset": "btc" }),
+        ),
+        (
+            "another asset",
+            serde_json::json!({ "value": "1", "asset": "eth" }),
+        ),
+    ] {
+        let backup = with_journal_member(&good, "payment_amount", paid);
+        refused_writing_nothing(&w, backup, app_id, what).await;
+    }
+}
+
 #[tokio::test]
 async fn test_journal_entry_with_no_carrier_holds_its_payment() {
     // The live store holds a payment in flight whose entry keeps no carrier: the entry is a
@@ -2911,4 +3013,56 @@ async fn test_restore_layer_key_wait_marks_past_their_bound_refused_writing_noth
         (key, value)
     };
     family_bounded_at_restore("kw/", paykit_sdk::MAX_DROPPED_MARKS, &entry).await;
+}
+
+#[tokio::test]
+async fn test_restore_rebuilds_a_priced_outcome_without_authorizing_another_dispatch() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::conversion::priced(
+            w.clock.now_ms(),
+            &[("btc-lightning-bolt11", "lnbc1invoice")],
+            &[("btc", "0.0000123456")],
+        ),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    let price = crate::conversion::priced_of(
+        &wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap_err(),
+    );
+    let (attempt_id, backup) = paid_after_the_backup(
+        &w,
+        &mut wallet,
+        &request,
+        PayOptions::default().with_rate_confirmed(price),
+    )
+    .await;
+    drop(wallet);
+    let mut app = restored(&w, &backup).await;
+    let report = app.reconcile().await.unwrap();
+    assert!(
+        matches!(report.resolved.as_slice(), [PayOutcome::Paid { .. }]),
+        "{report:?}"
+    );
+    assert_eq!(
+        app.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
+    assert_eq!(app.payments().await.unwrap()[0].paid, None);
+    app.resume_payments().await.unwrap();
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+    shop.receive(None).await.unwrap();
+    let sales = shop.payee_activity().await.unwrap();
+    assert!(shop
+        .verify_payment(&sales[0].record)
+        .await
+        .unwrap()
+        .is_some());
 }

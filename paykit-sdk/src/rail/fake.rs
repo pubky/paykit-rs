@@ -67,13 +67,16 @@ struct Inner {
     idempotent: bool,
     forgotten: Vec<AttemptId>,
     calls: BTreeMap<AttemptId, u64>,
+    call_amounts: BTreeMap<AttemptId, Vec<PaymentAmount>>,
     declaration: Option<RailDeclaration>,
     endpoints: Option<Vec<PaymentEndpointIdentifier>>,
     choice: Option<Choice>,
     max_fee: Option<paykit_lib::Decimal>,
     next_fees: VecDeque<Option<paykit_lib::Decimal>>,
     selections: Vec<(Vec<PaymentEndpointCandidate>, Option<PaymentAmount>)>,
+    fraction_digits: BTreeMap<PaymentEndpointIdentifier, Option<u32>>,
     proof_checks: Vec<ProofCheck>,
+    transfer_amount: Option<Option<PaymentAmount>>,
 }
 
 /// An in-memory payment rail shared by payers and payees. Tests only.
@@ -175,6 +178,28 @@ impl FakeRail {
         self.lock().selections.clone()
     }
 
+    /// Name `digits` as the fraction digits of `endpoint_id`'s smallest unit from now on
+    /// ([`Rail::fraction_digits`]), `None` for a method that can't name it, instead of the
+    /// default: 8, satoshis, for an identifier of the `btc` asset, 2 for any other.
+    pub fn set_fraction_digits(&self, endpoint_id: PaymentEndpointIdentifier, digits: Option<u32>) {
+        self.lock().fraction_digits.insert(endpoint_id, digits);
+    }
+
+    /// The amount money moved for under `key`, as the method was asked to transfer it, or
+    /// the amount its payload fixes; `None` when nothing was paid under it.
+    pub fn paid_amount(&self, key: &AttemptId) -> Option<PaymentAmount> {
+        self.lock()
+            .payments
+            .get(key)
+            .map(|paid| paid.amount.clone())
+    }
+
+    /// Report `amount` for every transfer estimate from now on, including `None` when
+    /// the method cannot determine the amount. Actual execution keeps its payload's amount.
+    pub fn set_transfer_amount(&self, amount: Option<PaymentAmount>) {
+        self.lock().transfer_amount = Some(amount);
+    }
+
     /// Every proof handed to [`Rail::verify`], in the order of the calls.
     pub fn proof_checks(&self) -> Vec<ProofCheck> {
         self.lock().proof_checks.clone()
@@ -222,6 +247,16 @@ impl FakeRail {
     /// How many times [`Rail::pay`] was called under `key`, repeats included.
     pub fn pay_calls(&self, key: &AttemptId) -> u64 {
         self.lock().calls.get(key).copied().unwrap_or(0)
+    }
+
+    /// The amount each call of [`Rail::pay`] under `key` was asked to transfer, repeats
+    /// included, in the order of the calls.
+    pub fn pay_call_amounts(&self, key: &AttemptId) -> Vec<PaymentAmount> {
+        self.lock()
+            .call_amounts
+            .get(key)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// How many times money moved under `key`: more than one is a second execution.
@@ -376,9 +411,23 @@ impl Rail for FakeRail {
             inner.next_fees.pop_front().unwrap_or(max_fee)
         };
         Transfer::new(
-            Self::fixed_amount(payload.as_str(), amount).unwrap_or(Some(amount.clone())),
+            self.lock().transfer_amount.clone().unwrap_or_else(|| {
+                Self::fixed_amount(payload.as_str(), amount).unwrap_or(Some(amount.clone()))
+            }),
             fee,
         )
+    }
+
+    fn fraction_digits(&self, endpoint_id: &PaymentEndpointIdentifier) -> Option<u32> {
+        if let Some(digits) = self.lock().fraction_digits.get(endpoint_id) {
+            return *digits;
+        }
+        // Satoshis for btc, cents for any other asset, unless set otherwise.
+        Some(if endpoint_id.asset_segment() == Some("btc") {
+            8
+        } else {
+            2
+        })
     }
 
     fn pay(&self, payment: RailPayment) -> BoxFuture<'_, Result<RailOutcome, RailError>> {
@@ -388,6 +437,11 @@ impl Rail for FakeRail {
             let key = payment.idempotency_key;
             let calls = inner.calls.entry(key).or_insert(0);
             *calls = calls.saturating_add(1);
+            inner
+                .call_amounts
+                .entry(key)
+                .or_default()
+                .push(payment.amount.clone());
             let repeat = inner.payments.get(&key).cloned();
             match repeat {
                 Some(held) if inner.idempotent => Ok(held.outcome),

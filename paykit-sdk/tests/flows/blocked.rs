@@ -1925,7 +1925,7 @@ async fn no_list_asked_while_held(held: Held) {
         .unwrap_err();
     match held {
         Held::Blocked => assert!(
-            matches!(refused.refusal(), Some(Refusal::Blocked { .. })),
+            matches!(refused.refusal(), Some(Refusal::NotNow(_))),
             "{refused:?}"
         ),
         Held::Unknown => assert!(

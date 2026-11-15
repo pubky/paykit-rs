@@ -1744,28 +1744,29 @@ async fn proof_to(
 
 #[tokio::test]
 async fn test_periods_verify_takes_the_endpoint_of_the_named_details() {
-    // The payment went to the invoice of the details the proof names, not the request's:
-    // verified against that invoice, and credited.
+    // A later period with per-period endpoints is credited against its named details.
     let w = World::new();
     let mut shop = w.shop().await;
     let mut wallet = w.wallet("wallet").await;
-    let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+    let draft = monthly(w.clock.now_ms(), None).with_per_period_endpoints();
+    let (request, sale) = subscribed_for(&w, &mut shop, &mut wallet, draft, 40).await;
+    let period = month(1);
     shop.send_period_details(
         &sale,
-        details(january(), "lnbc1details", w.clock.now_ms() + DAY_MS),
+        details(period, "lnbc1details", w.clock.now_ms() + DAY_MS),
     )
     .await
     .unwrap();
     let held = shop
         .app_mut()
-        .read_record(&payee_period(&request))
+        .read_record(&payee_period_at(&request, period))
         .await
         .unwrap()
         .unwrap();
     let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
     let named =
         paykit_lib::records::StoredMessage::read(&value["period_details"], &w.alice_id()).unwrap();
-    let body = proof_to(&w, shop.app_id(), january(), "lnbc1details", 5).await;
+    let body = proof_to(&w, shop.app_id(), period, "lnbc1details", 5).await;
     w.inject(
         &w.alice,
         "wallet",
@@ -4938,8 +4939,8 @@ async fn test_periods_invalid_details_never_remove_the_request_destination_const
 
 #[tokio::test]
 async fn test_periods_credit_requires_the_selected_endpoint() {
-    // A details map replaces the request map as a whole. An identifier missing from it
-    // never falls back to the request, even when the request permits that identifier.
+    // A selected details map replaces the request map as a whole. An identifier missing
+    // from it never falls back to the request; unused details do not restrict the request.
     for per_period in [false, true] {
         for period_index in [0, 1] {
             for named in [false, true] {
@@ -5007,7 +5008,11 @@ async fn test_periods_credit_requires_the_selected_endpoint() {
                         &wallet.receive(None).await.unwrap(),
                         "paykit.payment_receipt",
                     );
-                    let expected = permitted && (named || !per_period || period_index == 0);
+                    let expected = if per_period && period_index != 0 {
+                        named && permitted
+                    } else {
+                        named || permitted
+                    };
                     assert_eq!((verified, confirmed, credited, receipt),
                         (expected, expected, expected, expected),
                         "per_period={per_period}, period={period_index}, named={named}, permitted={permitted}");
@@ -5080,8 +5085,8 @@ async fn test_periods_rates_only_details_keep_the_request_endpoint_owner() {
 async fn check_period_endpoint_owner(details_endpoints: bool) {
     use paykit_lib::{Asset, Decimal, Rate};
 
-    // Details are signed by another current app. Rates alone keep the request's
-    // endpoint owner; endpoints replace both the destination and its signed owner.
+    // Details are signed by another current app. Only a later period with per-period
+    // endpoints takes that destination and owner; otherwise the request supplies both.
     for period_index in [0, 1] {
         for correct_owner in [false, true] {
             let w = World::new();
@@ -5090,7 +5095,8 @@ async fn check_period_endpoint_owner(details_endpoints: bool) {
                 .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
                 .await;
             let mut wallet = w.wallet("wallet").await;
-            let (request, sale) = subscribed_with_conversion(&w, &mut shop, &mut wallet).await;
+            let (request, sale) =
+                subscribed_with_conversion(&w, &mut shop, &mut wallet, details_endpoints).await;
             if period_index != 0 {
                 w.clock.advance_ms(40 * DAY_MS);
             }
@@ -5120,13 +5126,14 @@ async fn check_period_endpoint_owner(details_endpoints: bool) {
             .unwrap();
             let named = record.period_details.unwrap();
             assert_eq!(named.message().from.app_id, till.app_id());
-            let (owner, other) = if details_endpoints {
+            let uses_details = details_endpoints && period_index != 0;
+            let (owner, other) = if uses_details {
                 (till.app_id(), shop.app_id())
             } else {
                 (shop.app_id(), till.app_id())
             };
             let payment_app = if correct_owner { owner } else { other };
-            let invoice = if details_endpoints {
+            let invoice = if uses_details {
                 "lnbc1details"
             } else {
                 "lnbc1invoice"
@@ -5169,6 +5176,7 @@ async fn subscribed_with_conversion(
     w: &World,
     shop: &mut Paykit,
     wallet: &mut Paykit,
+    per_period_endpoints: bool,
 ) -> (RequestRef, [u8; 32]) {
     use paykit_lib::bodies::{Conversion, PaymentRequest};
     use paykit_lib::records::{ActivityRecord, ActivitySide, StoredMessage};
@@ -5182,7 +5190,7 @@ async fn subscribed_with_conversion(
         payment_deadline: None,
         recurrence: draft.recurrence,
         destination: draft.destination,
-        per_period_endpoints: false,
+        per_period_endpoints,
         label: None,
         accepted_payment_endpoint_identifiers: Some(vec![
             endpoint("btc-lightning-bolt11"),

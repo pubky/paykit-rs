@@ -416,7 +416,11 @@ pub trait Rail: Send + Sync {
     ///
     /// - It takes the first payable candidate whose transfer check passes ([`Rail::transfer`];
     ///   Paykit spec 7.2 step 1), so a malformed or amount-incompatible payload falls to the
-    ///   next. The order returned is the whole choice: of two apps offering the same
+    ///   next. Under a request's conversion terms, the amount checked is the one computed
+    ///   for the candidate ([`Rail::fraction_digits`]); a candidate the terms leave unusable
+    ///   falls to the next, and one a rate prices is taken only once its user confirmed
+    ///   that amount, else it refuses as [`crate::Refusal::PricedByRate`] as a transfer
+    ///   refusal does below. The order returned is the whole choice: of two apps offering the same
     ///   identifier, the one returned first is paid. A candidate in error doesn't stop a
     ///   later payable one from being paid.
     /// - With none taken, a candidate in error decides: the payment fails with its error, the
@@ -424,6 +428,8 @@ pub trait Rail: Send + Sync {
     ///   again; it is never refused as unsupported, nor is the payee asked for a newer list.
     /// - Otherwise, a payable candidate that failed the transfer check refuses the payment
     ///   as [`crate::Refusal::Transfer`], the first one's refusal.
+    /// - Otherwise, when the conversion terms left a payable candidate unusable, the payment
+    ///   is refused as [`crate::Refusal::UnsupportedEndpoint`], naming why.
     /// - Otherwise the method pays none: the payment is refused as
     ///   [`crate::Refusal::UnsupportedEndpoint`], but for Private Payment Lists a newer one
     ///   may serve, when one has expired or a single-use endpoint is used up: then the payee
@@ -467,6 +473,18 @@ pub trait Rail: Send + Sync {
         payload: &PaymentEndpointPayload,
         amount: &PaymentAmount,
     ) -> Transfer;
+
+    /// The number of fraction digits of the smallest unit the method pays to `endpoint_id`
+    /// in, from 0 to 18 (Paykit spec 7.2 step 1, Paykit wire 1.2): 8 for satoshis, 11 for
+    /// millisatoshis, 6 for a token with six decimals. The SDK rounds the amount of a payment
+    /// priced by a rate up once to that unit ([`paykit_lib::amount_for_endpoint`]), as payer
+    /// and as payee, so both sides compute the same amount, and the amount of a request to
+    /// an endpoint of the requested asset likewise. The unit belongs to the identifier, not
+    /// to the method: the payer's and the payee's methods must name the same one for the same
+    /// identifier, or an honest payment isn't credited. A method names the unit of every
+    /// endpoint it pays: `None` makes a payment of a request to that endpoint unusable,
+    /// priced by a rate or of the requested asset, and a payee credits none to it.
+    fn fraction_digits(&self, endpoint_id: &PaymentEndpointIdentifier) -> Option<u32>;
 
     /// Pay, with the attempt ID as the idempotency key (Paykit spec 7.2 step 2).
     ///

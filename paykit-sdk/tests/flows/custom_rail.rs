@@ -86,6 +86,10 @@ impl Rail for LedgerRail {
         )
     }
 
+    fn fraction_digits(&self, endpoint_id: &PaymentEndpointIdentifier) -> Option<u32> {
+        self.fake.fraction_digits(endpoint_id)
+    }
+
     fn pay(&self, payment: RailPayment) -> BoxFuture<'_, Result<RailOutcome, RailError>> {
         Box::pin(async move { self.fake.pay(payment).await.map(|o| self.outcome(o)) })
     }
