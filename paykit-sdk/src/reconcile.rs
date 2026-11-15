@@ -382,6 +382,7 @@ impl Paykit {
             request_hash: Some(pubky_switch_core::enc::b64(&request_hash)),
             natural_key: natural_key::request_record(&obligation.payee, &request_hash),
             amount: KeptAmount::of(&body.amount),
+            payment_amount: KeptAmount::of(&body.amount),
             destination,
             deadline: body.attempt_deadline(None)?,
             stage: Stage::Paying,
@@ -407,6 +408,7 @@ impl Paykit {
             request: Some(KeptMessage::of(stored)),
             record_held: false,
             transfer_bound: None,
+            price: None,
             failed_on_claim: false,
         };
         entry.keep_carrier(&carrier);

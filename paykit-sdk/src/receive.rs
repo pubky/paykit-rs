@@ -2768,9 +2768,9 @@ impl Paykit {
                 return self.denied(pubky).await;
             }
         }
-        let now = self.now();
         let read = self.local_get::<u64>(key::LISTS_READ).await?;
         let copy = self.local_get::<Vec<[u8; 32]>>(key::DENIED).await?;
+        let now = self.now();
         match (read, copy) {
             (Some(read), Some(denied)) if read <= now && now - read < LISTS_REFRESH_MS => {
                 Ok(denied.contains(pubky))

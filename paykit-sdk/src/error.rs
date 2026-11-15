@@ -139,6 +139,23 @@ pub enum Refusal {
         /// The destination and what it would transfer.
         quote: Box<crate::TransferQuote>,
     },
+    /// The payment is priced by a rate, and its user hasn't confirmed the amount so computed
+    /// (Paykit spec 7.2 step 1, 8.2): `payment` is that amount, in the endpoint's asset, with
+    /// the rate and the destination, to show the user; paying it carries it back
+    /// ([`crate::PayOptions::with_rate_confirmed`]), and the payer then pays exactly that
+    /// amount. Nothing was written. An automatic payment never pays one: it is refused
+    /// whatever is confirmed, and is made by hand only. At the final payment check, a
+    /// payment whose confirmed rates stopped being usable, or whose kept amount the rate no
+    /// longer gives, pays nothing: a first dispatch writes `failed` with it, and the payment
+    /// is made again only once its user confirms again; a repeat, which may follow a
+    /// submitted call, writes nothing and stays "may be paid"
+    /// ([`crate::PayOutcome::Uncertain`]). `payment` then names what it would pay now, or,
+    /// when no amount can be computed now, what its user confirmed.
+    #[error("Paykit spec 7.2 step 1: a payment priced by a rate needs its user's confirmation of the amount")]
+    PricedByRate {
+        /// What the user is shown: the amount computed, the rate and the destination.
+        payment: Box<crate::PricedPayment>,
+    },
     /// The payee's `identity.json` couldn't be read, or the app's own couldn't be revalidated,
     /// before money moves (Paykit spec 4, 7.2).
     #[error("Paykit spec 7.2: {0}")]

@@ -45,6 +45,7 @@ mod activity;
 mod allowances;
 pub mod app_records;
 mod approval;
+mod conversion;
 mod destination;
 mod divergent;
 mod error;
@@ -73,6 +74,7 @@ mod timer;
 pub use activity::Role;
 pub use allowances::{AllowanceRole, AllowanceStatus, AllowanceView, SentAllowance};
 pub use approval::{AppScopes, RequestedScopes};
+pub use conversion::{PricedPayment, RateSource};
 pub use destination::IDENTITY_GRACE_MS;
 pub use divergent::DivergentRecord;
 pub use error::{PaykitError, Refusal, Result};
@@ -254,6 +256,28 @@ mod tests {
                 PaykitError::from(Refusal::Transfer {
                     reason: "another amount".into(),
                     quote: Box::new(quote),
+                })
+            ),
+            format!(
+                "{:?}",
+                PaykitError::from(Refusal::PricedByRate {
+                    payment: Box::new(PricedPayment {
+                        request: RequestRef {
+                            payee: [1; 32],
+                            request_hash: [4; 32],
+                        },
+                        app_id: [2; 16],
+                        endpoint_id: id(),
+                        payload_hash: pubky_switch_core::enc::hash(payload().as_str().as_bytes()),
+                        requested: btc(),
+                        source: RateSource::Request,
+                        rate: paykit_lib::Rate::new(
+                            paykit_lib::Asset::new("btc").unwrap(),
+                            paykit_lib::Decimal::new("1").unwrap(),
+                        )
+                        .unwrap(),
+                        amount: btc(),
+                    }),
                 })
             ),
             format!(

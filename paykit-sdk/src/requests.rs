@@ -14,8 +14,8 @@
 //!   replies copy it (Paykit spec 3.1, 3.3).
 
 use paykit_lib::bodies::{
-    PaymentDeadline, PaymentReceipt, PaymentRequest, PaymentRequestAcceptance, RequestDestination,
-    RequestReply,
+    Conversion, PaymentDeadline, PaymentReceipt, PaymentRequest, PaymentRequestAcceptance,
+    RequestDestination, RequestReply,
 };
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
@@ -87,6 +87,10 @@ pub struct RequestDraft {
     pub destination: RequestDestination,
     /// The only identifiers the payer may use.
     pub accepted_endpoint_identifiers: Option<Vec<PaymentEndpointIdentifier>>,
+    /// The conversion terms (Paykit wire 4.4): fixed rates pricing the endpoints of other
+    /// assets, or `per_period` on a recurring request, each Billing Period's rates coming
+    /// with its period details; `None` for none.
+    pub conversion: Option<Conversion>,
     /// Opaque metadata.
     pub metadata: Option<Map<String, Value>>,
 }
@@ -106,6 +110,7 @@ impl std::fmt::Debug for RequestDraft {
                 "accepted_endpoint_identifiers",
                 &self.accepted_endpoint_identifiers,
             )
+            .field("conversion", &self.conversion)
             .field(
                 "metadata",
                 &self
@@ -137,6 +142,7 @@ impl RequestDraft {
             per_period_endpoints: false,
             destination,
             accepted_endpoint_identifiers: None,
+            conversion: None,
             metadata: None,
         }
     }
@@ -187,6 +193,16 @@ impl RequestDraft {
         identifiers: Vec<PaymentEndpointIdentifier>,
     ) -> Self {
         self.accepted_endpoint_identifiers = Some(identifiers);
+        self
+    }
+
+    /// The conversion terms (Paykit wire 4.4): with fixed rates, a payer pays an endpoint a
+    /// rate prices the amount that rate gives, rounded up once to the endpoint's smallest
+    /// unit, only once its user confirms it, and the payee credits that amount and no other
+    /// (Paykit spec 7.2 step 1).
+    #[must_use]
+    pub fn with_conversion(mut self, conversion: Conversion) -> Self {
+        self.conversion = Some(conversion);
         self
     }
 
@@ -647,7 +663,7 @@ impl Paykit {
             per_period_endpoints: draft.per_period_endpoints,
             label: label.clone(),
             accepted_payment_endpoint_identifiers: draft.accepted_endpoint_identifiers,
-            conversion: None,
+            conversion: draft.conversion,
             metadata: draft.metadata,
         };
         // The writer reads back what it writes by the recipient's rules (Paykit wire 4.5).
@@ -943,7 +959,27 @@ impl Paykit {
                     }
                     None => None,
                 };
-                (request.amount.clone(), payload)
+                // The amount the payer computed for the endpoint its proof names, by the same
+                // rule (Paykit spec 7.2 step 1), with this app's payment method's unit: the
+                // request's amount, rounded up once to the unit of an endpoint of its asset;
+                // under the request's fixed rates, a payment priced by a rate is credited at
+                // the amount that rate gives and no other, and one to an endpoint the terms
+                // leave unusable isn't credited.
+                let pricing = crate::pay::Pricing::of_request(
+                    &request.amount,
+                    RequestRef {
+                        payee: self.identity(),
+                        request_hash: stored_request.hash(),
+                    },
+                    request.conversion.as_ref(),
+                    pubky_switch_client::app::Initiator::User,
+                );
+                let amount = match pricing.price(&*self.rail, id) {
+                    crate::conversion::Priced::Plain(amount) => amount,
+                    crate::conversion::Priced::ByRate { amount, .. } => amount,
+                    crate::conversion::Priced::Unusable(_) => return Ok(None),
+                };
+                (amount, payload)
             }
             // A period record whose request record the app holds but can't open or bind yet,
             // sealed under a scope key it doesn't hold or a value that doesn't read: not now,
@@ -1973,6 +2009,7 @@ impl Paykit {
             let shown = BlockedPayment {
                 payee: request.payee,
                 request: Some(*request),
+                period: None,
                 amount: body.amount.clone(),
             };
             crate::pay::refuse_blocked(blocked, shown, options.blocked_confirmed.as_ref())?;
