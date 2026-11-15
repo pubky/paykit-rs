@@ -322,6 +322,10 @@ pub(crate) struct JournalEntry {
     /// payment, which the request record's `manual_only` mark doesn't withhold (Paykit spec
     /// 8.3, "Manual only").
     pub(crate) initiator: StartedBy,
+    /// Durable proof that this attempt ended before the method's call and cannot
+    /// dispatch (Paykit spec 8.3). Required in every entry; never inferred from a failed
+    /// claim, a user's confirmation or an ambiguous call. Restore clears it.
+    pub(crate) never_dispatched: bool,
 }
 
 impl std::fmt::Debug for JournalEntry {
@@ -465,7 +469,34 @@ impl JournalEntry {
         if let Some(signed) = &self.attempt_proof {
             TransitionProof::peek(signed).map_err(|_| PaykitError::corrupt())?;
         }
+        if !self.never_dispatched_agrees() {
+            return bad();
+        }
         Ok(())
+    }
+
+    /// Whether a call never made agrees with the entry's other members, as every writer
+    /// keeps them ([`JournalEntry::check`]): only finished or given up, before any payment,
+    /// acceptance release or failure the method reported.
+    fn never_dispatched_agrees(&self) -> bool {
+        !self.never_dispatched
+            || (!self.restored
+                && matches!(self.stage, Stage::Finished | Stage::Abandoned)
+                && self.rail_proof.is_none()
+                && !self.acceptance_released
+                && !self.failed_by_method)
+    }
+
+    /// Mark the call never made (`never_dispatched`) as the entry is finished or given up,
+    /// only where the journal shows it: at `Recorded` or `Attempted`, in an entry that
+    /// didn't come back from a backup. This app journals `Paying` before the payment
+    /// method's call, and writes an entry back to `Attempted` only when the call wasn't
+    /// made. A restored entry's dispatch the backup can't tell, and an entry at any other
+    /// stage came to the call: either keeps what it shows.
+    pub(crate) fn end_before_the_call(&mut self) {
+        if matches!(self.stage, Stage::Recorded | Stage::Attempted) && !self.restored {
+            self.never_dispatched = true;
+        }
     }
 
     /// `entry`, read at its attempt's key, bound to `obligation`, the claim its caller looks
@@ -765,5 +796,117 @@ mod tests {
             asset: "btc".into(),
         };
         assert!(bad.amount().is_err());
+    }
+    /// An entry of a payment without a request at `stage`, marked never dispatched or not.
+    fn entry_at(stage: Stage, never_dispatched: bool) -> JournalEntry {
+        JournalEntry {
+            attempt_id: AttemptId::from_bytes([7; 16]).to_text(),
+            obligation: [1; 32],
+            payee: [2; 32],
+            request_hash: None,
+            natural_key: Vec::new(),
+            amount: KeptAmount {
+                value: "1".into(),
+                asset: "btc".into(),
+            },
+            destination: Destination {
+                app_id: [3; 16],
+                endpoint_id: "lightning".into(),
+                payload: "lnurl".into(),
+                source: "public".into(),
+                list_version: None,
+                single_use: false,
+            },
+            deadline: None,
+            stage,
+            step: None,
+            label: None,
+            payment_reference: None,
+            acceptance_owed: false,
+            acceptance_msg_id: None,
+            acceptance_plaintext: None,
+            acceptance_cert: None,
+            acceptance_released: false,
+            rail_proof: None,
+            paid_at_ms: None,
+            proof_msg_id: None,
+            restored: false,
+            journaled_at_ms: 0,
+            carrier: None,
+            carrier_record: None,
+            failed_by_method: false,
+            attempt_proof: None,
+            request: None,
+            record_held: false,
+            transfer_bound: None,
+            failed_on_claim: false,
+            allowance_id: None,
+            initiator: StartedBy::Automatic,
+            never_dispatched,
+        }
+    }
+
+    #[test]
+    fn test_journal_never_dispatched_only_finished_or_given_up_before_any_payment() {
+        for stage in [Stage::Finished, Stage::Abandoned] {
+            assert!(entry_at(stage, true).never_dispatched_agrees(), "{stage:?}");
+        }
+        for stage in [
+            Stage::Recorded,
+            Stage::Attempted,
+            Stage::Paying,
+            Stage::RailPaid,
+            Stage::RailFailed,
+            Stage::AcceptanceOwed,
+        ] {
+            assert!(
+                entry_at(stage, false).never_dispatched_agrees(),
+                "{stage:?}"
+            );
+            assert!(
+                !entry_at(stage, true).never_dispatched_agrees(),
+                "{stage:?}"
+            );
+        }
+        let mut restored = entry_at(Stage::Finished, true);
+        restored.restored = true;
+        assert!(!restored.never_dispatched_agrees());
+        let mut proven = entry_at(Stage::Finished, true);
+        proven.rail_proof = Some(Map::new());
+        assert!(!proven.never_dispatched_agrees());
+        let mut released = entry_at(Stage::Finished, true);
+        released.acceptance_released = true;
+        assert!(!released.never_dispatched_agrees());
+        let mut failed = entry_at(Stage::Finished, true);
+        failed.failed_by_method = true;
+        assert!(!failed.never_dispatched_agrees());
+    }
+
+    #[test]
+    fn test_journal_never_dispatched_marked_only_before_the_call() {
+        for stage in [Stage::Recorded, Stage::Attempted] {
+            let mut entry = entry_at(stage, false);
+            entry.end_before_the_call();
+            assert!(entry.never_dispatched, "{stage:?}");
+            // A restored one's dispatch the backup can't tell.
+            let mut restored = entry_at(stage, false);
+            restored.restored = true;
+            restored.end_before_the_call();
+            assert!(!restored.never_dispatched, "{stage:?}");
+        }
+        for stage in [Stage::Paying, Stage::RailFailed, Stage::RailPaid] {
+            let mut entry = entry_at(stage, false);
+            entry.end_before_the_call();
+            assert!(!entry.never_dispatched, "{stage:?}");
+        }
+    }
+
+    #[test]
+    fn test_journal_never_dispatched_is_required() {
+        let entry = entry_at(Stage::Finished, true);
+        let mut value = serde_json::to_value(&entry).unwrap();
+        assert_eq!(value["never_dispatched"], true);
+        value.as_object_mut().unwrap().remove("never_dispatched");
+        assert!(serde_json::from_value::<JournalEntry>(value).is_err());
     }
 }

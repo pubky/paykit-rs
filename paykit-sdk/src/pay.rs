@@ -970,6 +970,7 @@ impl Paykit {
                 .as_ref()
                 .map(|u| u.allowance.allowance_id.as_str().to_owned()),
             initiator: StartedBy::of(by),
+            never_dispatched: false,
         };
         self.execute(Plan {
             entry,
@@ -1090,6 +1091,7 @@ impl Paykit {
             failed_on_claim: false,
             allowance_id: None,
             initiator: StartedBy::User,
+            never_dispatched: false,
         };
         self.execute(Plan {
             entry,
@@ -1236,6 +1238,9 @@ impl Paykit {
     }
 
     pub(crate) async fn set_stage(&mut self, entry: &mut JournalEntry, stage: Stage) -> Result<()> {
+        if matches!(stage, Stage::Finished | Stage::Abandoned) {
+            entry.end_before_the_call();
+        }
         entry.stage = stage;
         self.save(entry).await
     }
@@ -2780,6 +2785,11 @@ impl Paykit {
                 batch = batch.entry(write);
             }
             let mut finished = entry.clone();
+            if paid {
+                finished.never_dispatched = false;
+            } else {
+                finished.end_before_the_call();
+            }
             // An acceptance still owed keeps the entry where a resume visits it: the outcome
             // is written, the acceptance not yet sent or placed.
             finished.stage = if paid && entry.owes_acceptance()? {

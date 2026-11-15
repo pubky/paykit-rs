@@ -59,7 +59,8 @@
 use std::collections::HashMap;
 
 use paykit_lib::allowances::{
-    check_limits, check_successor, usage, AllowanceTerms, ClaimState, Ledger, LedgerEntry,
+    check_limits, check_successor, usage, AllowanceTerms, AttemptEvidence, ClaimState, Ledger,
+    LedgerEntry,
 };
 use paykit_lib::bodies::{Body, ExecutorNotice, NoticeReason, PaymentRequest, ProposerRole};
 use paykit_lib::collections::Collection;
@@ -1205,23 +1206,7 @@ impl Paykit {
                 "the occurrence was attempted by hand or under another Allowance: it is paid only by hand",
             ));
         }
-        let mut claims = HashMap::new();
-        let open: Vec<([u8; 32], AttemptId)> = ledger
-            .entries
-            .iter()
-            .filter(|e| e.outcome != Some(paykit_lib::allowances::EntryOutcome::Done))
-            .map(|e| (e.obligation, e.attempt_id))
-            .chain(ledger.failed.iter().map(|f| (f.obligation, f.attempt_id)))
-            .collect();
-        for (obligation, attempt_id) in open {
-            // A read that fails is the error: never taken as a claim gone, which counts as
-            // spent, or as one that releases.
-            if let Some(read) = self.app.read_claim(&obligation).await? {
-                if let Some(state) = claim_state(&read.view, &attempt_id) {
-                    claims.insert(attempt_id, state);
-                }
-            }
-        }
+        let evidence = self.ledger_usage_evidence(under, &ledger).await?;
         let at = self
             .service_time()
             .ok_or_else(|| not_automatic("no service time verified"))?;
@@ -1234,7 +1219,7 @@ impl Paykit {
             .terms
             .check_payment(amount, &destination.endpoint_id()?, at)
             .map_err(|refused| not_automatic(&format!("the terms refuse it: {refused:?}")))?;
-        let used = usage(&under.terms, &ledger, &claims, at)
+        let used = usage(&under.terms, &ledger, &evidence, at)
             .map_err(|_| not_automatic("usage can't be counted"))?;
         check_limits(&under.terms, &used, &amount.value)
             .map_err(|limit| not_automatic(&format!("the {} limit has no room", limit.as_str())))?;
@@ -1281,6 +1266,92 @@ impl Paykit {
             ledger: lt,
             first_ledger_write,
         })
+    }
+
+    /// Count failures conservatively, releasing only an attempt the executor's own
+    /// durable journal proves ended before dispatch (Paykit wire 5.5, Counting). The raw
+    /// claim remains separate from this local evidence so it can also drive outcome copying.
+    async fn ledger_usage_evidence(
+        &mut self,
+        under: &Under,
+        ledger: &Ledger,
+    ) -> Result<HashMap<AttemptId, AttemptEvidence>> {
+        let mut evidence = HashMap::new();
+        let attempts = ledger
+            .entries
+            .iter()
+            .filter(|entry| entry.outcome != Some(paykit_lib::allowances::EntryOutcome::Done))
+            .map(|entry| {
+                (
+                    entry.obligation,
+                    entry.attempt_id,
+                    &entry.value,
+                    &entry.asset,
+                )
+            })
+            .chain(ledger.failed.iter().map(|entry| {
+                (
+                    entry.obligation,
+                    entry.attempt_id,
+                    &entry.value,
+                    &under.terms.asset,
+                )
+            }));
+        for (obligation, attempt, value, asset) in attempts {
+            // Failed reads remain errors, never absence or proof that dispatch never ran.
+            let read = self.app.read_claim(&obligation).await?;
+            let shown = read
+                .as_ref()
+                .and_then(|read| read.view.attempt(&attempt.to_bytes()));
+            let mut counted = AttemptEvidence {
+                claim: read
+                    .as_ref()
+                    .and_then(|read| claim_state(&read.view, &attempt)),
+                ..AttemptEvidence::default()
+            };
+            if let Some(entry) = self.journal_entry_on(&attempt, &obligation).await? {
+                let amount = entry.amount.amount()?;
+                if entry.payee != ledger.counterparty
+                    || entry.allowance()?.as_ref() != Some(&ledger.allowance_id)
+                    || amount.value != *value
+                    || amount.asset != *asset
+                {
+                    return Err(not_automatic(
+                        "the journal does not match the ledger attempt",
+                    ));
+                }
+                counted.paid = entry.rail_proof.is_some();
+                let target = ActivityTarget::payer(entry.natural_key.clone());
+                let payer_key = self.activity_key(&target)?;
+                let trusted_payer_record = match self.app.shared_record(&payer_key).await? {
+                    Some(shared) => {
+                        let pause = self.pause_of(&shared).await?;
+                        !shared.divergent
+                            && !shared.flagged
+                            && !shared.doubtful
+                            && !pause.blocks_automatic()
+                    }
+                    None => false,
+                };
+                let payer_record = self.held_activity(&target).await?;
+                if let Some(record) = &payer_record {
+                    counted.paid |= record.proof.as_ref().is_some_and(|proof| {
+                        matches!(proof.body(), Body::PaymentProof(proof)
+                            if proof.attempt_id == attempt
+                                && proof.allowance_id.as_ref() == Some(&ledger.allowance_id))
+                    });
+                }
+                // An unreadable or absent payer record cannot establish that no paid
+                // proof overrides the journal's release evidence (Paykit wire 5.5).
+                counted.never_dispatched = trusted_payer_record
+                    && payer_record.is_some()
+                    && entry.never_dispatched
+                    && !entry.restored
+                    && shown.is_none_or(|shown| shown.owner == self.app_id());
+            }
+            evidence.insert(attempt, counted);
+        }
+        Ok(evidence)
     }
 
     /// After an executor batch is applied: its ledger write is kept as the last version

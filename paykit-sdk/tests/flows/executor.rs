@@ -699,7 +699,7 @@ async fn test_executor_refuses_a_ledger_written_by_another_app() {
 #[tokio::test]
 async fn test_executor_lost_batch_answer_counts_the_attempt_once() {
     // The executor batch is applied and its answer lost: the resume writes the attempt
-    // `failed`, which releases its entry, so the limits count only what was paid.
+    // `failed`. Its durable journal proves dispatch never began, so the entry releases.
     let w = World::new();
     let (mut shop, mut wallet, record) = set_up(&w, terms_with(json!({}))).await;
     let first = request(&w, &mut shop, &mut wallet, "1").await;
@@ -717,7 +717,7 @@ async fn test_executor_lost_batch_answer_counts_the_attempt_once() {
     let (_, ledger) = held(&wallet, &record).await;
     assert_eq!(ledger.unwrap().entries.len(), 1);
     assert!(w.rail.all_executions().is_empty());
-    // Two more of 1 fit the lifetime limit of 2: the failed attempt is released.
+    // Two more of 1 fit the lifetime limit of 2: never-dispatched evidence releases the first.
     wallet.pay_under_allowance(&first, &record).await.unwrap();
     let second = request(&w, &mut shop, &mut wallet, "1").await;
     wallet.pay_under_allowance(&second, &record).await.unwrap();
@@ -4559,4 +4559,717 @@ async fn test_executor_pending_divergence_preserves_other_duties_and_delivery() 
         "{delivered:?}"
     );
     assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_executor_dispatched_failure_keeps_lifetime_capacity() {
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(
+        &w,
+        terms_with(json!({ "lifetime_amount_limit": "1" })),
+    ))
+    .await;
+    let first = Box::pin(request(&w, &mut shop, &mut wallet, "1")).await;
+    w.rail.next(paykit_sdk::rail::Behaviour::Fail);
+    let outcome = Box::pin(wallet.pay_under_allowance(&first, &record))
+        .await
+        .unwrap();
+    let PayOutcome::Failed { attempt_id, .. } = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(
+        w.rail.pay_calls(&attempt_id),
+        1,
+        "the first attempt reached the rail"
+    );
+    let next = Box::pin(request(&w, &mut shop, &mut wallet, "1")).await;
+    let second = Box::pin(wallet.pay_under_allowance(&next, &record)).await;
+    // A reported failure can complete after all, before the executor learns its proof.
+    w.rail.complete_after_failure(&attempt_id);
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+    let paid = w.rail.all_executions().values().sum::<u64>();
+    assert!(
+        second
+            .as_ref()
+            .is_err_and(|error| refused_for(error, "lifetime limit")),
+        "cap 1, first transfer 1, second transfer 1: {second:?}; executions={paid}"
+    );
+    assert_eq!(paid, 1);
+}
+
+#[derive(Clone, Copy)]
+enum FailedUsage {
+    NeverCalled,
+    MethodFailed,
+    MethodRefused,
+    Uncertain,
+    UserFailed,
+    OtherAppFailed,
+}
+
+/// A real journal and ledger entry at each dispatch boundary, then a second request at
+/// the lifetime ceiling. A failed ledger outcome and compaction never establish release.
+async fn failed_usage_capacity(kind: FailedUsage, gone: bool, compacted: bool) {
+    use paykit_lib::allowances::{CompactedFailed, EntryOutcome};
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(
+        &w,
+        terms_with(json!({ "lifetime_amount_limit": "1" })),
+    ))
+    .await;
+    let first = Box::pin(request(&w, &mut shop, &mut wallet, "1")).await;
+    match kind {
+        FailedUsage::NeverCalled => {
+            w.alice
+                .switch()
+                .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+                    path: "/ops".into(),
+                })
+        }
+        FailedUsage::MethodFailed => w.rail.next(paykit_sdk::rail::Behaviour::Fail),
+        FailedUsage::MethodRefused => w.rail.next(paykit_sdk::rail::Behaviour::Refuse),
+        _ => w.rail.next(paykit_sdk::rail::Behaviour::Hang),
+    }
+    let outcome = Box::pin(wallet.pay_under_allowance(&first, &record)).await;
+    if matches!(kind, FailedUsage::NeverCalled) {
+        assert!(outcome.is_err());
+        let resumed = Box::pin(wallet.resume_payments()).await.unwrap();
+        assert!(
+            matches!(resumed.as_slice(), [PayOutcome::Failed { .. }]),
+            "{resumed:?}"
+        );
+    } else {
+        assert!(outcome.is_ok(), "{outcome:?}");
+    }
+    let (_, mut l) = held(&wallet, &record).await;
+    let mut l = l.take().unwrap();
+    assert_eq!(l.entries.len(), 1);
+    let attempt = l.entries[0].attempt_id;
+    let obligation = l.entries[0].obligation;
+    if matches!(kind, FailedUsage::UserFailed) {
+        Box::pin(wallet.resolve_attempt(
+            &obligation,
+            attempt,
+            paykit_sdk::Resolution::Failed,
+            UserConfirmed::new(),
+        ))
+        .await
+        .unwrap();
+    }
+    if matches!(kind, FailedUsage::OtherAppFailed) {
+        w.alice
+            .switch()
+            .fail_attempt(obligation, attempt.to_bytes(), [0x5b; 16]);
+    }
+    assert_eq!(
+        w.rail.pay_calls(&attempt),
+        u64::from(!matches!(kind, FailedUsage::NeverCalled))
+    );
+    if gone {
+        if matches!(kind, FailedUsage::Uncertain) {
+            // An unresolved claim is retained. Another app may resolve it while this
+            // journal still cannot tell whether the dispatched payment completed.
+            w.alice
+                .switch()
+                .fail_attempt(obligation, attempt.to_bytes(), [0x5b; 16]);
+        }
+        let deadline = wallet
+            .app_mut()
+            .read_claim(&obligation)
+            .await
+            .unwrap()
+            .unwrap()
+            .view
+            .deadline
+            .unwrap();
+        w.clock
+            .set_ms(deadline + pubky_switch_core::claims::RECONCILIATION_MS);
+        assert!(wallet
+            .app_mut()
+            .read_claim(&obligation)
+            .await
+            .unwrap()
+            .is_none());
+    }
+    // Exercise the shared ledger shapes independently of the outcome-copying pass.
+    if !matches!(kind, FailedUsage::Uncertain) {
+        l.entries[0].outcome = Some(EntryOutcome::Failed);
+    }
+    if compacted {
+        if !gone {
+            w.clock
+                .advance_ms(paykit_lib::allowances::ENTRY_WINDOW_MS + 1);
+        }
+        let item = l.entries.remove(0);
+        l.failed.push(CompactedFailed {
+            obligation: item.obligation,
+            attempt_id: item.attempt_id,
+            value: item.value,
+        });
+    }
+    write_usage_ledger(&mut wallet, &record, &l).await;
+    let next = Box::pin(request(&w, &mut shop, &mut wallet, "1")).await;
+    let second = Box::pin(wallet.pay_under_allowance(&next, &record)).await;
+    if matches!(kind, FailedUsage::NeverCalled) {
+        assert!(matches!(second, Ok(PayOutcome::Paid { .. })), "{second:?}");
+    } else {
+        let error = second.unwrap_err();
+        assert!(refused_for(&error, "lifetime limit"), "{error:?}");
+        assert_eq!(
+            w.rail.all_executions().len(),
+            usize::from(matches!(
+                kind,
+                FailedUsage::Uncertain | FailedUsage::UserFailed | FailedUsage::OtherAppFailed
+            ))
+        );
+    }
+}
+
+async fn write_usage_ledger(wallet: &mut Paykit, record: &[u8; 32], next: &Ledger) {
+    let (allowance, _) = held(wallet, record).await;
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            "allowance_ledgers",
+            paykit_lib::collections::Collection::AllowanceLedgers.fixed_policy(),
+        ),
+        &paykit_lib::derive::natural_key::allowance(
+            &allowance.counterparty,
+            &allowance.allowance_id,
+        ),
+    );
+    wallet.app_mut().read_record(&target).await.unwrap();
+    let version = wallet
+        .app()
+        .shared_record(record)
+        .await
+        .unwrap()
+        .unwrap()
+        .version;
+    wallet
+        .app_mut()
+        .put_record(
+            &target,
+            &next.to_json().unwrap(),
+            vec![pubky_switch_core::ops::Condition::RecordVersion {
+                key: *record,
+                version,
+            }],
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_executor_failed_usage_claim_gone() {
+    Box::pin(failed_usage_capacity(
+        FailedUsage::MethodFailed,
+        true,
+        false,
+    ))
+    .await;
+}
+#[tokio::test]
+async fn test_executor_failed_usage_compacted_live_claim() {
+    Box::pin(failed_usage_capacity(
+        FailedUsage::MethodFailed,
+        false,
+        true,
+    ))
+    .await;
+}
+#[tokio::test]
+async fn test_executor_failed_usage_compacted_gone_claim() {
+    Box::pin(failed_usage_capacity(FailedUsage::MethodFailed, true, true)).await;
+}
+#[tokio::test]
+async fn test_executor_failed_usage_uncertain_dispatch() {
+    Box::pin(failed_usage_capacity(FailedUsage::Uncertain, false, false)).await;
+}
+#[tokio::test]
+async fn test_executor_failed_usage_ambiguous_journal_claim_gone() {
+    Box::pin(failed_usage_capacity(FailedUsage::Uncertain, true, false)).await;
+}
+#[tokio::test]
+async fn test_executor_failed_usage_user_confirmation_does_not_release() {
+    Box::pin(failed_usage_capacity(FailedUsage::UserFailed, false, false)).await;
+}
+#[tokio::test]
+async fn test_executor_failed_usage_other_app_failure_does_not_release() {
+    Box::pin(failed_usage_capacity(
+        FailedUsage::OtherAppFailed,
+        false,
+        false,
+    ))
+    .await;
+}
+#[tokio::test]
+async fn test_executor_failed_usage_never_dispatched_releases() {
+    Box::pin(failed_usage_capacity(
+        FailedUsage::NeverCalled,
+        false,
+        false,
+    ))
+    .await;
+}
+#[tokio::test]
+async fn test_executor_failed_usage_never_dispatched_gone_claim_releases() {
+    Box::pin(failed_usage_capacity(FailedUsage::NeverCalled, true, false)).await;
+}
+#[tokio::test]
+async fn test_executor_failed_usage_never_dispatched_compacted_releases() {
+    Box::pin(failed_usage_capacity(FailedUsage::NeverCalled, true, true)).await;
+}
+
+/// End before dispatch through the real lost-answer path, then alter one item of local
+/// evidence. An absent, unrelated or restored journal never releases the first amount.
+async fn mismatched_failure_evidence(member: &str, changed: Value) {
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(
+        &w,
+        terms_with(json!({ "lifetime_amount_limit": "1" })),
+    ))
+    .await;
+    let first = Box::pin(request(&w, &mut shop, &mut wallet, "1")).await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    assert!(Box::pin(wallet.pay_under_allowance(&first, &record))
+        .await
+        .is_err());
+    Box::pin(wallet.resume_payments()).await.unwrap();
+    assert!(w.rail.all_executions().is_empty());
+    let next = Box::pin(request(&w, &mut shop, &mut wallet, "1")).await;
+    let (key, bytes) = wallet.app().protocol_scan(b"j/").await.unwrap().remove(0);
+    let mut entry: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(entry["d"]["stage"], "finished");
+    assert_eq!(entry["d"]["never_dispatched"], true);
+    if matches!(member, "payer_divergent" | "payer_divergence_cleared") {
+        let target = crate::outcome_record::payer_record(&first);
+        let payer_key = wallet.app().record_key(&target).unwrap();
+        let before = wallet
+            .app()
+            .shared_record(&payer_key)
+            .await
+            .unwrap()
+            .unwrap();
+        w.alice
+            .switch()
+            .make_divergent(UPLOADER, payer_key, [2; 32])
+            .unwrap();
+        wallet.app_mut().read_record(&target).await.unwrap();
+        if member == "payer_divergence_cleared" {
+            wallet
+                .app_mut()
+                .put_record(&target, before.content.value().unwrap(), Vec::new())
+                .await
+                .unwrap();
+        }
+    } else if member == "payer_deleted" {
+        let target = crate::outcome_record::payer_record(&first);
+        wallet
+            .app_mut()
+            .delete_record(&target, Vec::new())
+            .await
+            .unwrap();
+    } else if member == "payer_unreadable" {
+        let target = crate::outcome_record::payer_record(&first);
+        wallet
+            .app_mut()
+            .put_record(&target, b"{}", Vec::new())
+            .await
+            .unwrap();
+    } else if member == "missing" {
+        wallet
+            .app_mut()
+            .protocol_commit(&[pubky_switch_client::app::LocalWrite::Delete { key }])
+            .await
+            .unwrap();
+    } else {
+        *entry["d"].pointer_mut(member).unwrap() = changed;
+        wallet
+            .app_mut()
+            .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+                key,
+                value: serde_json::to_vec(&entry).unwrap(),
+            }])
+            .await
+            .unwrap();
+    }
+    let second = Box::pin(wallet.pay_under_allowance(&next, &record)).await;
+    assert!(second.is_err(), "{member}: {second:?}");
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_executor_failed_usage_missing_journal_spends() {
+    Box::pin(mismatched_failure_evidence("missing", Value::Null)).await;
+}
+#[tokio::test]
+async fn test_executor_failed_usage_journal_amount_must_match() {
+    Box::pin(mismatched_failure_evidence("/amount/value", json!("0.5"))).await;
+}
+#[tokio::test]
+async fn test_executor_failed_usage_journal_asset_must_match() {
+    Box::pin(mismatched_failure_evidence("/amount/asset", json!("usd"))).await;
+}
+#[tokio::test]
+async fn test_executor_failed_usage_journal_allowance_must_match() {
+    Box::pin(mismatched_failure_evidence(
+        "/allowance_id",
+        json!("123e4567-e89b-42d3-a456-426614174000"),
+    ))
+    .await;
+}
+#[tokio::test]
+async fn test_executor_failed_usage_journal_obligation_must_match() {
+    Box::pin(mismatched_failure_evidence(
+        "/obligation",
+        json!(pubky_switch_core::enc::b64(&[0x55; 32])),
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_executor_failed_usage_restore_cannot_reuse_never_dispatched() {
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(
+        &w,
+        terms_with(json!({ "lifetime_amount_limit": "1" })),
+    ))
+    .await;
+    let first = Box::pin(request(&w, &mut shop, &mut wallet, "1")).await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    assert!(Box::pin(wallet.pay_under_allowance(&first, &record))
+        .await
+        .is_err());
+    Box::pin(wallet.resume_payments()).await.unwrap();
+    let journal = wallet.app().protocol_scan(b"j/").await.unwrap();
+    let entry: Value = serde_json::from_slice(&journal[0].1).unwrap();
+    assert_eq!(entry["d"]["never_dispatched"], true);
+    let mut wallet = Box::pin(restored_confirmed(&w, wallet, &record)).await;
+    let journal = wallet.app().protocol_scan(b"j/").await.unwrap();
+    let entry: Value = serde_json::from_slice(&journal[0].1).unwrap();
+    assert_eq!(entry["d"]["restored"], true);
+    assert_eq!(entry["d"]["never_dispatched"], false);
+    let next = Box::pin(request_after_restore(&w, &mut shop, &mut wallet, "1")).await;
+    let error = Box::pin(wallet.pay_under_allowance(&next, &record))
+        .await
+        .unwrap_err();
+    assert!(refused_for(&error, "lifetime limit"), "{error:?}");
+    assert!(w.rail.all_executions().is_empty());
+}
+
+async fn failed_usage_reload(never_called: bool) {
+    let w = World::new();
+    let store = crate::common::store();
+    let mut shop = Box::pin(allowance_shop(&w)).await;
+    let mut wallet = Box::pin(
+        w.join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new()
+                .pay()
+                .allowance()
+                .allowance_execute()
+                .contacts()
+                .build()
+                .unwrap(),
+            paykit_sdk::PaykitConfig::default(),
+            Arc::clone(&store),
+        ),
+    )
+    .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let record = Box::pin(accepted(
+        &w,
+        &mut shop,
+        &mut wallet,
+        terms_with(json!({ "lifetime_amount_limit": "1" })),
+    ))
+    .await;
+    Box::pin(wallet.grant_executor(&record, UserConfirmed::new()))
+        .await
+        .unwrap();
+    let first = Box::pin(request(&w, &mut shop, &mut wallet, "1")).await;
+    if never_called {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+                path: "/ops".into(),
+            });
+        assert!(Box::pin(wallet.pay_under_allowance(&first, &record))
+            .await
+            .is_err());
+        Box::pin(wallet.resume_payments()).await.unwrap();
+    } else {
+        w.rail.next(paykit_sdk::rail::Behaviour::Fail);
+        let result = Box::pin(wallet.pay_under_allowance(&first, &record))
+            .await
+            .unwrap();
+        assert!(matches!(result, PayOutcome::Failed { .. }), "{result:?}");
+    }
+    let id = wallet.app_id();
+    drop(wallet);
+    let mut wallet = Box::pin(Paykit::load(
+        w.env(&w.alice, store),
+        paykit_sdk::PaykitConfig::default(),
+        id,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    let next = Box::pin(request(&w, &mut shop, &mut wallet, "1")).await;
+    let result = Box::pin(wallet.pay_under_allowance(&next, &record)).await;
+    if never_called {
+        assert!(matches!(result, Ok(PayOutcome::Paid { .. })), "{result:?}");
+    } else {
+        let error = result.unwrap_err();
+        assert!(refused_for(&error, "lifetime limit"), "{error:?}");
+    }
+    assert_eq!(w.rail.all_executions().len(), usize::from(never_called));
+}
+
+#[tokio::test]
+async fn test_executor_failed_usage_never_dispatched_survives_reload() {
+    Box::pin(failed_usage_reload(true)).await;
+}
+#[tokio::test]
+async fn test_executor_failed_usage_dispatched_failure_survives_reload() {
+    Box::pin(failed_usage_reload(false)).await;
+}
+#[tokio::test]
+async fn test_executor_failed_usage_method_refusal_stays_spent() {
+    Box::pin(failed_usage_capacity(
+        FailedUsage::MethodRefused,
+        false,
+        false,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_executor_failed_usage_wrong_owner_does_not_release() {
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(
+        &w,
+        terms_with(json!({ "lifetime_amount_limit": "1" })),
+    ))
+    .await;
+    let first = Box::pin(request(&w, &mut shop, &mut wallet, "1")).await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    assert!(Box::pin(wallet.pay_under_allowance(&first, &record))
+        .await
+        .is_err());
+    Box::pin(wallet.resume_payments()).await.unwrap();
+    let (_, l) = held(&wallet, &record).await;
+    let l = l.unwrap();
+    let item = &l.entries[0];
+    let deadline = wallet
+        .app_mut()
+        .read_claim(&item.obligation)
+        .await
+        .unwrap()
+        .unwrap()
+        .view
+        .deadline
+        .unwrap();
+    w.clock
+        .set_ms(deadline + pubky_switch_core::claims::RECONCILIATION_MS);
+    assert!(wallet
+        .app_mut()
+        .read_claim(&item.obligation)
+        .await
+        .unwrap()
+        .is_none());
+    // A replacement claim naming that ID under another owner cannot borrow this app's
+    // earlier local evidence. The claim reader authenticates the current owner.
+    w.alice
+        .switch()
+        .open_attempt(item.obligation, item.attempt_id.to_bytes(), [0x5b; 16])
+        .unwrap();
+    w.alice
+        .switch()
+        .fail_attempt(item.obligation, item.attempt_id.to_bytes(), [0x5b; 16]);
+    let next = Box::pin(request(&w, &mut shop, &mut wallet, "1")).await;
+    let error = Box::pin(wallet.pay_under_allowance(&next, &record))
+        .await
+        .unwrap_err();
+    assert!(refused_for(&error, "lifetime limit"), "{error:?}");
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_executor_failed_usage_unavailable_claim_does_not_release() {
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(
+        &w,
+        terms_with(json!({ "lifetime_amount_limit": "1" })),
+    ))
+    .await;
+    let first = Box::pin(request(&w, &mut shop, &mut wallet, "1")).await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    assert!(Box::pin(wallet.pay_under_allowance(&first, &record))
+        .await
+        .is_err());
+    Box::pin(wallet.resume_payments()).await.unwrap();
+    let (_, l) = held(&wallet, &record).await;
+    let obligation = l.unwrap().entries[0].obligation;
+    let next = Box::pin(request(&w, &mut shop, &mut wallet, "1")).await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: format!("claims/{}", pubky_switch_core::enc::b64(&obligation)),
+            after: 0,
+        });
+    let error = Box::pin(wallet.pay_under_allowance(&next, &record))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            PaykitError::Client(pubky_switch_client::app::AppError::Transport(_))
+        ),
+        "{error:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    let paid = Box::pin(wallet.pay_under_allowance(&next, &record))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+}
+
+async fn failed_usage_paid_proof(matching: bool) {
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(
+        &w,
+        terms_with(json!({ "lifetime_amount_limit": "1" })),
+    ))
+    .await;
+    let first = Box::pin(request(&w, &mut shop, &mut wallet, "1")).await;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    assert!(Box::pin(wallet.pay_under_allowance(&first, &record))
+        .await
+        .is_err());
+    Box::pin(wallet.resume_payments()).await.unwrap();
+    let (allowance, l) = held(&wallet, &record).await;
+    let attempt = l.unwrap().entries[0].attempt_id;
+    let body = paykit_lib::bodies::PaymentProof {
+        attempt_id: if matching {
+            attempt
+        } else {
+            paykit_lib::AttemptId::from_bytes([0x54; 16])
+        },
+        billing_period: None,
+        payment_endpoint_identifier: crate::common::endpoint("btc-lightning-bolt11"),
+        payment_app_id: shop.app_id(),
+        list_version: None,
+        amount: None,
+        allowance_id: Some(allowance.allowance_id),
+        label: None,
+        payment_reference: None,
+        proof: json!({ "preimage": "00" }).as_object().unwrap().clone(),
+    }
+    .to_body(1)
+    .unwrap();
+    let plaintext = w.sign_as(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        "paykit.payment_proof",
+        vec![first.request_hash],
+        body,
+    );
+    let proof = paykit_lib::records::StoredMessage::new(
+        w.alice_id(),
+        wallet.app().cert().signed(),
+        plaintext,
+        None,
+        &w.bob_id(),
+    )
+    .unwrap();
+    let target = crate::outcome_record::payer_record(&first);
+    let held_record = wallet
+        .app_mut()
+        .read_record(&target)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut activity = paykit_lib::records::ActivityRecord::read(
+        held_record.content.value().unwrap(),
+        &w.alice_id(),
+        paykit_lib::records::ActivitySide::Payer,
+    )
+    .unwrap();
+    let mut ids: Vec<String> = activity
+        .stored()
+        .iter()
+        .map(|(_, s)| s.message().msg_id.clone())
+        .collect();
+    ids.push(proof.message().msg_id.clone());
+    activity.msg_ids = paykit_lib::records::bounded_msg_ids(&ids, &activity.msg_ids);
+    activity.proof = Some(proof);
+    wallet
+        .app_mut()
+        .put_record(&target, &activity.to_json().unwrap(), Vec::new())
+        .await
+        .unwrap();
+    let next = Box::pin(request(&w, &mut shop, &mut wallet, "1")).await;
+    let result = Box::pin(wallet.pay_under_allowance(&next, &record)).await;
+    if matching {
+        let error = result.unwrap_err();
+        assert!(refused_for(&error, "lifetime limit"), "{error:?}");
+        assert!(w.rail.all_executions().is_empty());
+    } else {
+        assert!(matches!(result, Ok(PayOutcome::Paid { .. })), "{result:?}");
+    }
+}
+
+#[tokio::test]
+async fn test_executor_failed_usage_paid_proof_overrides_never_dispatched() {
+    Box::pin(failed_usage_paid_proof(true)).await;
+}
+#[tokio::test]
+async fn test_executor_failed_usage_another_attempt_proof_cannot_override() {
+    Box::pin(failed_usage_paid_proof(false)).await;
+}
+
+#[tokio::test]
+async fn test_executor_failed_usage_deleted_payer_record_does_not_release() {
+    Box::pin(mismatched_failure_evidence("payer_deleted", Value::Null)).await;
+}
+#[tokio::test]
+async fn test_executor_failed_usage_unreadable_payer_record_does_not_release() {
+    Box::pin(mismatched_failure_evidence("payer_unreadable", Value::Null)).await;
+}
+
+#[tokio::test]
+async fn test_executor_failed_usage_divergent_payer_record_does_not_release() {
+    Box::pin(mismatched_failure_evidence("payer_divergent", Value::Null)).await;
+}
+#[tokio::test]
+async fn test_executor_failed_usage_cleared_divergence_still_holds_release() {
+    Box::pin(mismatched_failure_evidence(
+        "payer_divergence_cleared",
+        Value::Null,
+    ))
+    .await;
 }

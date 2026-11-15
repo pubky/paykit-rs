@@ -429,6 +429,7 @@ impl Paykit {
             // Who started it isn't known from the claim: taken as automatic, so what holds an
             // automatic attempt, the request record's `manual_only` mark included, holds it.
             initiator: crate::journal::StartedBy::Automatic,
+            never_dispatched: false,
         };
         entry.keep_carrier(&carrier);
         Ok(Some(entry))

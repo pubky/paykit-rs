@@ -5,7 +5,8 @@
 use std::collections::HashMap;
 
 use paykit_lib::allowances::{
-    check_limits, check_successor, compact, usage, AllowanceTerms, ClaimState, Ledger, Usage,
+    check_limits, check_successor, compact, usage, AllowanceTerms, AttemptEvidence, ClaimState,
+    EntryOutcome, Ledger, Usage,
 };
 use paykit_lib::amount::Decimal;
 use paykit_lib::identifiers::AttemptId;
@@ -23,7 +24,7 @@ fn usage_json(u: &Usage) -> Value {
     })
 }
 
-fn claims(case: &Value) -> HashMap<AttemptId, ClaimState> {
+fn claims(case: &Value) -> HashMap<AttemptId, AttemptEvidence> {
     arr(case, "claims")
         .iter()
         .map(|c| {
@@ -38,7 +39,7 @@ fn claims(case: &Value) -> HashMap<AttemptId, ClaimState> {
                 },
                 other => panic!("claim state {other}"),
             };
-            (AttemptId::parse(st(c, "attempt_id")).unwrap(), state)
+            (AttemptId::parse(st(c, "attempt_id")).unwrap(), state.into())
         })
         .collect()
 }
@@ -126,6 +127,11 @@ pub(crate) fn check() {
     let other = ledger(&other);
     assert!(usage(&terms, &other, &claim_map, now).is_err());
     assert!(compact(&terms, &other, now).is_err());
+    let failures = arr(&v, "failure_evidence");
+    assert_eq!(failures.len(), failure_cases().len());
+    for case in failures {
+        check_failure_case(case);
+    }
     check_spellings(&v);
     for case in arr(&v["period_limit_members"], "refused") {
         let name = st(case, "name");
@@ -139,19 +145,20 @@ pub(crate) fn check() {
 const DESCRIPTION: &str =
     "Allowance usage (wire 5.5, spec 8.3 with specs/allowances.md): for every period limit the \
 amount and count of counted entries in the period containing t (anchored) or with t < at + \
-60 s + L (rolling), the lifetime amount including the ledger's compacted totals, and how \
-many entries are reserved, spent and released. An entry's own done spends, and its own \
-failed releases unless its attempt's claim is now done (which spends); an entry without an \
-outcome counts by its attempt's claim state (claims): open and unknown reserve, done \
-spends, failed releases only when the attempt's owner wrote it (resolved_by_owner true), a \
-failed another app wrote stays reserved until the user releases it, and an entry whose \
-claim is gone spends. Candidates are checked against every limit; refused_by names the \
-first limit that refuses. A totals.failed item counts like an entry's own failed, in the \
-lifetime amount only: it adds its value while its attempt's claim is done, until the \
-executor moves it into spent and count. Compaction keeps each compacted failed entry's \
-attempt, obligation and value in totals.failed. period_limit_spellings holds terms whose \
-period limits are, or aren't, duplicates by their wire spelling (wire 4.15); \
-period_limit_members holds terms whose period limit leaves out one of its limits.";
+60 s + L (rolling), the lifetime amount including compacted totals, and entry counts \
+reserved, spent and released. A ledger or claim done, or a validated payer proof, spends. \
+Open and unknown claims reserve entries without an outcome. Every failed attempt spends \
+immediately, whoever wrote the failure, while its claim remains and after it is gone. \
+Only durable journal evidence bound to the attempt proving it ended before the payment \
+method's call and can never dispatch releases it; a restored journal, a reported failure \
+or user confirmation alone is insufficient. Done or a paid proof overrides release. An \
+entry without an outcome whose claim is gone spends. Compacted totals.failed items use \
+the same rule for lifetime usage. Candidates are checked against every limit; refused_by \
+names the first limit that refuses. failure_evidence holds pure counting inputs: evidence \
+means already validated local journal and payer-proof evidence, not a shared record member; \
+SDK checks bind it to the attempt, obligation, Allowance, amount, asset and owner. Its \
+compacted cases replace the entry with one totals.failed item. period_limit_spellings \
+checks duplicate terms by wire spelling; period_limit_members checks required members.";
 
 const SPELLINGS_DESCRIPTION: &str = "Wire 4.15, specs/allowances.md: the terms of the first \
 case with period_limits replaced. Two period limits are duplicates when every member is \
@@ -243,8 +250,238 @@ pub(crate) fn generate(_keys: &Keys) {
             period_limit_members(),
         ),
     ];
+    cases.push((Place::Member("/failure_evidence"), json!(failure_cases())));
+    for (index, name) in [
+        (
+            3,
+            "outcomes: open and unknown reserve; failed attempts spend; missing claims spend",
+        ),
+        (
+            6,
+            "failures by either app spend; done overrides a failed ledger outcome",
+        ),
+        (
+            7,
+            "compacted failed attempts spend while claims remain and after they are gone",
+        ),
+    ] {
+        cases.push((Place::At(format!("/cases/{index}/name")), json!(name)));
+    }
     cases.extend(computed());
     generated("allowance_usage.json", &cases);
+}
+
+/// Counting evidence is an input to the pure library, not a shared wire member.
+fn failure_cases() -> Vec<Value> {
+    use ClaimState::{Done, Failed, Open, Unknown};
+    use EntryOutcome::{Done as Paid, Failed as Unpaid};
+    let v = paykit("allowance_usage.json");
+    let mut terms = v["cases"][0]["terms"].clone();
+    terms["period_limits"] = json!([]);
+    terms["lifetime_amount_limit"] = json!("0.01");
+    let mut entry = v["cases"][3]["ledger"]["entries"][0].clone();
+    entry["value"] = json!("0.01");
+    let cases = [
+        (
+            "owner failed",
+            Some(Failed { by_owner: true }),
+            None,
+            false,
+            false,
+            false,
+            false,
+        ),
+        (
+            "another app failed",
+            Some(Failed { by_owner: false }),
+            None,
+            false,
+            false,
+            false,
+            false,
+        ),
+        (
+            "failed ledger, claim gone",
+            None,
+            Some(Unpaid),
+            false,
+            false,
+            false,
+            false,
+        ),
+        (
+            "unknown dispatch",
+            Some(Unknown),
+            None,
+            false,
+            false,
+            false,
+            false,
+        ),
+        ("open attempt", Some(Open), None, false, false, false, false),
+        (
+            "no outcome, claim gone",
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+        ),
+        (
+            "never dispatched, owner failed",
+            Some(Failed { by_owner: true }),
+            None,
+            true,
+            false,
+            false,
+            true,
+        ),
+        (
+            "never dispatched, failed ledger, claim gone",
+            None,
+            Some(Unpaid),
+            true,
+            false,
+            false,
+            true,
+        ),
+        (
+            "paid proof overrides never dispatched",
+            None,
+            Some(Unpaid),
+            true,
+            true,
+            false,
+            false,
+        ),
+        (
+            "done claim overrides never dispatched",
+            Some(Done),
+            Some(Unpaid),
+            true,
+            false,
+            false,
+            false,
+        ),
+        (
+            "done ledger overrides never dispatched",
+            None,
+            Some(Paid),
+            true,
+            false,
+            false,
+            false,
+        ),
+        (
+            "compacted owner failure",
+            Some(Failed { by_owner: true }),
+            Some(Unpaid),
+            false,
+            false,
+            true,
+            false,
+        ),
+        (
+            "compacted failure, claim gone",
+            None,
+            Some(Unpaid),
+            false,
+            false,
+            true,
+            false,
+        ),
+        (
+            "compacted never dispatched",
+            None,
+            Some(Unpaid),
+            true,
+            false,
+            true,
+            true,
+        ),
+        (
+            "compacted paid proof overrides never dispatched",
+            None,
+            Some(Unpaid),
+            true,
+            true,
+            true,
+            false,
+        ),
+        (
+            "compacted done claim overrides never dispatched",
+            Some(Done),
+            Some(Unpaid),
+            true,
+            false,
+            true,
+            false,
+        ),
+    ];
+    cases.into_iter().map(|(name, claim, outcome, never_dispatched, paid, compacted, released)| {
+        let mut entry = entry.clone();
+        match outcome {
+            Some(Paid) => entry["outcome"] = json!("done"),
+            Some(Unpaid) => entry["outcome"] = json!("failed"),
+            None => entry["outcome"] = Value::Null,
+        }
+        let claims = match claim {
+            None => json!([]),
+            Some(state) => {
+                let mut c = json!({ "attempt_id": entry["attempt_id"], "state": match state {
+                    Open => "open", Unknown => "unknown", Done => "done", Failed { .. } => "failed",
+                }});
+                if let Failed { by_owner } = state { c["resolved_by_owner"] = json!(by_owner); }
+                json!([c])
+            }
+        };
+        let mut l = v["cases"][0]["ledger"].clone();
+        l["totals"] = json!({ "spent": "", "count": 0, "failed": [] });
+        l["entries"] = json!([entry]);
+        if compacted {
+            l["entries"] = json!([]);
+            l["totals"]["failed"] = json!([{ "attempt_id": entry["attempt_id"], "obligation": entry["obligation"], "value": entry["value"] }]);
+        }
+        let evidence = AttemptEvidence { claim, paid, never_dispatched };
+        let attempt = AttemptId::parse(st(&entry, "attempt_id")).unwrap();
+        let u = usage(&AllowanceTerms::from_json(&terms).unwrap(), &ledger(&l), &HashMap::from([(attempt, evidence)]), time(st(&v["cases"][3], "t"))).unwrap();
+        // Independent exact expected amount prevents regeneration blessing an undercount.
+        assert_eq!(u.lifetime().as_str(), if released { "0" } else { "0.01" }, "{name}");
+        json!({ "name": name, "terms": terms, "ledger": l, "claims": claims,
+            "t": v["cases"][3]["t"], "attempt_id": entry["attempt_id"],
+            "evidence": { "never_dispatched": never_dispatched, "paid": paid },
+            "usage": usage_json(&u), "candidate": { "amount": "0.01", "allowed": released } })
+    }).collect()
+}
+
+fn check_failure_case(case: &Value) {
+    let terms = AllowanceTerms::from_json(&case["terms"]).unwrap();
+    let mut evidence = claims(case);
+    let counted = evidence
+        .entry(AttemptId::parse(st(case, "attempt_id")).unwrap())
+        .or_default();
+    counted.never_dispatched = case["evidence"]["never_dispatched"].as_bool().unwrap();
+    counted.paid = case["evidence"]["paid"].as_bool().unwrap();
+    let u = usage(
+        &terms,
+        &ledger(&case["ledger"]),
+        &evidence,
+        time(st(case, "t")),
+    )
+    .unwrap();
+    assert_eq!(usage_json(&u), case["usage"], "{}", st(case, "name"));
+    assert_eq!(
+        check_limits(
+            &terms,
+            &u,
+            &Decimal::parse(st(&case["candidate"], "amount")).unwrap()
+        )
+        .is_ok(),
+        case["candidate"]["allowed"].as_bool().unwrap(),
+        "{}",
+        st(case, "name")
+    );
 }
 
 /// Each case's usage and its candidates' verdicts, and the compaction's result, from their
