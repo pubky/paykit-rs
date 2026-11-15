@@ -879,6 +879,13 @@ impl Paykit {
                 {
                     return Ok(None);
                 }
+                // Named period endpoints do not relax the request's required app
+                // (Paykit wire 4.5); this restriction applies to every destination source.
+                if matches!(&request.destination, RequestDestination::RequiredApp(app)
+                    if *app != proof.payment_app_id)
+                {
+                    return Ok(None);
+                }
                 // Invalid details have no effect (Paykit wire 4.9, 5.3). The request
                 // still supplies a destination where its period rules permit it.
                 let named_details = proof_stored.message().refs.get(1).and_then(|hash| {
@@ -920,9 +927,6 @@ impl Paykit {
                     None => match &request.destination {
                         RequestDestination::Endpoints(endpoints) => {
                             Some((stored_request.message().from.app_id, endpoints))
-                        }
-                        RequestDestination::RequiredApp(app) if *app != proof.payment_app_id => {
-                            return Ok(None);
                         }
                         RequestDestination::RequiredApp(_) | RequestDestination::Any => None,
                     },

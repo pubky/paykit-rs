@@ -5236,3 +5236,82 @@ async fn subscribed_with_conversion(
     let sale = shop.payee_activity().await.unwrap()[0].record;
     (request, sale)
 }
+
+#[tokio::test]
+async fn test_periods_named_endpoints_keep_the_required_app_constraint() {
+    for per_period in [false, true] {
+        for period_index in [0, 1] {
+            for permitted_owner in [false, true] {
+                let w = World::new();
+                let mut shop = w.shop().await;
+                let mut till = w
+                    .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+                    .await;
+                let mut wallet = w.wallet("wallet").await;
+                let mut draft = monthly(w.clock.now_ms(), None);
+                draft.per_period_endpoints = per_period;
+                draft.destination = RequestDestination::RequiredApp(if permitted_owner {
+                    till.app_id()
+                } else {
+                    shop.app_id()
+                });
+                let (request, sale) = subscribed_for(
+                    &w,
+                    &mut shop,
+                    &mut wallet,
+                    draft,
+                    if period_index == 0 { 0 } else { 40 },
+                )
+                .await;
+                till.receive(None).await.unwrap();
+                let period = month(period_index);
+                till.send_period_details(
+                    &sale,
+                    details(period, "lnbc1details", w.clock.now_ms() + DAY_MS),
+                )
+                .await
+                .unwrap();
+                let held = till
+                    .app_mut()
+                    .read_record(&payee_period_at(&request, period))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let record = paykit_lib::records::ActivityRecord::read(
+                    held.content.value().unwrap(),
+                    &w.bob_id(),
+                    paykit_lib::records::ActivitySide::Payee,
+                )
+                .unwrap();
+                let named = record.period_details.unwrap();
+                assert_eq!(named.message().from.app_id, till.app_id());
+                let body = proof_to(&w, till.app_id(), period, "lnbc1details", 15).await;
+                w.inject(
+                    &w.alice,
+                    "wallet",
+                    &w.bob,
+                    &[shop.app_id()],
+                    "paykit.payment_proof",
+                    vec![request.request_hash, named.hash()],
+                    body,
+                );
+                shop.receive(None).await.unwrap();
+                let sale = shop.payee_activity().await.unwrap().remove(0);
+                assert_eq!(sale.periods[0].details.len(), 1);
+                let record = sale.periods[0].record;
+                let verified = shop.verify_payment(&record).await.unwrap().is_some();
+                let confirmed = shop.confirm_payment(&record).await.unwrap().is_some();
+                let credited = shop.payee_activity().await.unwrap()[0].periods[0].credited;
+                let receipt = received(
+                    &wallet.receive(None).await.unwrap(),
+                    "paykit.payment_receipt",
+                );
+                assert_eq!((verified, confirmed, credited, receipt), (permitted_owner, permitted_owner, permitted_owner, permitted_owner), "per_period={per_period}, period={period_index}, permitted_owner={permitted_owner}");
+                assert_eq!(
+                    w.rail.proof_checks().len(),
+                    if permitted_owner { 2 } else { 0 }
+                );
+            }
+        }
+    }
+}
