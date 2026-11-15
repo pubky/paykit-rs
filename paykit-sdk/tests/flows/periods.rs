@@ -1852,6 +1852,101 @@ async fn test_periods_per_period_endpoints_serve_only_the_first_period() {
 }
 
 #[tokio::test]
+async fn test_periods_per_period_endpoints_details_invalid_against_the_request_credit_nothing() {
+    // With per-period endpoints and no conversion terms, the payee's February record holds
+    // details with rates and a destination, as a record written by another app would: they
+    // are invalid against the request, so a payment of February to their destination, its
+    // proof naming them, is credited by none, with no receipt stored or sent.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    let mut wallet = w.wallet("wallet").await;
+    let now = w.clock.now_ms();
+    let draft = monthly(now, None).with_per_period_endpoints();
+    let (request, sale) = subscribed_for(&w, &mut shop, &mut wallet, draft, 40).await;
+    shop.send_period_details(
+        &sale,
+        details(month(1), "lnbc1february", w.clock.now_ms() + DAY_MS),
+    )
+    .await
+    .unwrap();
+    let target = payee_period_at(&request, month(1));
+    let held = shop.app_mut().read_record(&target).await.unwrap().unwrap();
+    let mut record = paykit_lib::records::ActivityRecord::read(
+        held.content.value().unwrap(),
+        &w.bob_id(),
+        paykit_lib::records::ActivitySide::Payee,
+    )
+    .unwrap();
+    w.clock.advance_ms(1);
+    let mut body = details(month(1), "lnbc1rated", w.clock.now_ms() + DAY_MS)
+        .to_body()
+        .unwrap();
+    body.insert(
+        "rates".into(),
+        json!([{ "asset": "usd", "value": "100000" }]),
+    );
+    let plaintext = w.sign_as(
+        &w.bob,
+        "shop",
+        &w.alice,
+        "paykit.payment_period_details",
+        vec![request.request_hash],
+        body,
+    );
+    let rated = paykit_lib::records::StoredMessage::new(
+        w.bob_id(),
+        shop.app().cert().signed(),
+        plaintext,
+        None,
+        &w.alice_id(),
+    )
+    .unwrap();
+    let valid = record.period_details.replace(rated.clone()).unwrap();
+    record.earlier_details.push(valid);
+    record.msg_ids.push(rated.message().msg_id.clone());
+    let op = shop
+        .app_mut()
+        .record_op(&target, Some(&record.to_json().unwrap()), Vec::new())
+        .await
+        .unwrap();
+    shop.app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    let body = proof_to(&w, shop.app_id(), month(1), "lnbc1rated", 9).await;
+    w.inject(
+        &w.alice,
+        "wallet",
+        &w.bob,
+        &[shop.app_id()],
+        "paykit.payment_proof",
+        vec![request.request_hash, rated.hash()],
+        body,
+    );
+    shop.receive(None).await.unwrap();
+    let february = |periods: Vec<paykit_sdk::PeriodView>| {
+        periods
+            .into_iter()
+            .find(|p| p.billing_period == month(1))
+            .unwrap()
+    };
+    let period = february(shop.payee_activity().await.unwrap()[0].periods.clone());
+    // Only the details valid against the request show.
+    assert_eq!(period.details.len(), 1);
+    assert!(period.paid);
+    assert!(shop.verify_payment(&period.record).await.unwrap().is_none());
+    assert!(shop
+        .confirm_payment(&period.record)
+        .await
+        .unwrap()
+        .is_none());
+    let period = february(shop.payee_activity().await.unwrap()[0].periods.clone());
+    assert!(!period.credited && period.receipt.is_none(), "{period:?}");
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(!received(&summary, "paykit.payment_receipt"));
+}
+
+#[tokio::test]
 async fn test_periods_unaccepted_expires_the_millisecond_after_its_proposal_expiry() {
     let w = World::new();
     let mut shop = w.shop().await;

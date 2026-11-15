@@ -783,12 +783,13 @@ impl PeriodDetails {
     }
 
     /// The checks that need the request (Paykit wire 4.9): the period is one of the
-    /// request's; the rates are cross-asset only, with no rate for the requested asset, bare
-    /// (`usdt`) or rail-qualified (`usdt-polygon`), so a same-asset payment of a period stays
-    /// 1:1 whatever its details say (`specs/payment-conversion.md`); and each rate matches an
-    /// endpoint the details or the request name, when they name any: the details'
-    /// `payment_endpoints`, the request's `accepted_payment_endpoint_identifiers` and its
-    /// `payment_endpoints`.
+    /// request's; rates come only for a request with `per_period` conversion terms, never for
+    /// one with fixed rates or without conversion terms; the rates are cross-asset only, with
+    /// no rate for the requested asset, bare (`usdt`) or rail-qualified (`usdt-polygon`), so a
+    /// same-asset payment of a period stays 1:1 whatever its details say
+    /// (`specs/payment-conversion.md`); and each rate matches an endpoint the details or the
+    /// request name, when they name any: the details' `payment_endpoints`, the request's
+    /// `accepted_payment_endpoint_identifiers` and its `payment_endpoints`.
     ///
     /// # Errors
     ///
@@ -797,6 +798,10 @@ impl PeriodDetails {
         // Details built in code are held to check 10's rules first (Paykit wire 4.9).
         self.to_body()?;
         let period = request.named_period(&self.billing_period)?;
+        ensure(
+            self.rates.is_none() || request.conversion == Some(Conversion::PerPeriod),
+            "Paykit wire 4.9: period details carry rates only for a request with per_period conversion terms",
+        )?;
         let mut visible: Vec<&PaymentEndpointIdentifier> = self
             .payment_endpoints
             .iter()
@@ -2280,6 +2285,48 @@ mod tests {
         for same in ["usdt", "usdt-polygon", "usdt-ethereum"] {
             let error = details(same).check_against(&request).unwrap_err();
             assert!(error.to_string().contains("cross-asset only"), "{same}");
+        }
+    }
+
+    #[test]
+    fn test_period_details_rates_need_per_period_conversion() {
+        let recurring = |conversion: Option<Value>| {
+            let mut r = request();
+            r["amount"] = json!({ "asset": "usd", "value": "10" });
+            r["payment_deadline"] = json!({ "type": "period_start", "seconds": 86400 });
+            r["recurrence"] = json!({ "anchor": "2026-01-31T00:00:00.000Z", "every": 1,
+                "unit": "month", "starts_at": "2026-01-31T00:00:00.000Z", "ends_at": null });
+            if let Some(conversion) = conversion {
+                r["conversion"] = conversion;
+            }
+            PaymentRequest::from_body(&body(r)).unwrap()
+        };
+        let per_period = recurring(Some(json!({ "type": "per_period" })));
+        let fixed = recurring(Some(
+            json!({ "type": "fixed", "rates": [{ "asset": "btc", "value": "0.00001234" }] }),
+        ));
+        let none = recurring(None);
+        let period = json!({ "starts_at": "2026-01-31T00:00:00.000Z",
+            "ends_at": "2026-02-28T00:00:00.000Z" });
+        let with_rates = PeriodDetails::from_body(&body(json!({ "billing_period": period,
+            "expires_at": "2026-02-01T00:00:00.000Z",
+            "rates": [{ "asset": "btc", "value": "0.00001234" }] })))
+        .unwrap();
+        with_rates.check_against(&per_period).unwrap();
+        for request in [&fixed, &none] {
+            let error = with_rates.check_against(request).unwrap_err();
+            assert!(matches!(error, Error::Invalid(_)), "{error}");
+            assert!(error.to_string().contains("per_period"), "{error}");
+            let error = with_rates.to_body_for(request).unwrap_err();
+            assert!(matches!(error, Error::Validation(_)), "{error}");
+        }
+        // Details with only a destination stay valid whatever the conversion terms.
+        let endpoints_only = PeriodDetails::from_body(&body(json!({ "billing_period": period,
+            "expires_at": "2026-02-01T00:00:00.000Z",
+            "payment_endpoints": { "btc-lightning-bolt11": "lnbc2" } })))
+        .unwrap();
+        for request in [&per_period, &fixed, &none] {
+            endpoints_only.check_against(request).unwrap();
         }
     }
 

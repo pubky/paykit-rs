@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 use crate::common::{
     arr, cert, message_json, paykit, pubky, signed, st, writing, Keys, ALICE, BOB,
 };
+use crate::messages::conversion_request;
 
 /// Every message of `messages.json`, parsed, with its body read.
 fn messages() -> Vec<(String, Message, Body)> {
@@ -353,12 +354,6 @@ fn writers_refuse_every_rejection_case() {
         let message = Message::parse(json.as_bytes(), OPAQUE_MEMBERS).unwrap();
         message.body
     };
-    let Body::PaymentRequest(recurring) = Body::parse(
-        &Message::parse(&message_json("payment_request_recurring"), OPAQUE_MEMBERS).unwrap(),
-    )
-    .unwrap() else {
-        panic!("a request")
-    };
     let rates_of = |body: &serde_json::Map<String, Value>, conversion: bool| -> Vec<Rate> {
         let rates = if conversion {
             &body["conversion"]["rates"]
@@ -399,7 +394,10 @@ fn writers_refuse_every_rejection_case() {
                 rates: Some(rates_of(&body, false)),
                 ..base
             }
-            .to_body_for(&recurring)
+            .to_body_for(&conversion_request(
+                "payment_request_recurring",
+                case.get("request_conversion"),
+            ))
             .is_err(),
             _ => panic!("{name}: a request or period details"),
         };

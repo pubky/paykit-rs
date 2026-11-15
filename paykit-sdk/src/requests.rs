@@ -790,8 +790,11 @@ impl Paykit {
                             .is_ok_and(|b| matches!(b, RecordBinding::Period { .. })) => {}
                 Ok((_, record)) => {
                     let mut view = payee_view(held.key, &record, None);
-                    if let Some(hash) = view.request_hash {
-                        view.periods = periods.remove(&hash).unwrap_or_default();
+                    if let (Some(hash), Some((_, request))) =
+                        (view.request_hash, request_of(&record))
+                    {
+                        let held = periods.remove(&hash).unwrap_or_default();
+                        view.periods = crate::periods::period_views(held, request);
                     }
                     // Shown divergent when its record, or one of its period records, is
                     // paused or its latest view divergent (Paykit spec 6).
@@ -863,17 +866,20 @@ impl Paykit {
         // endpoint paid is in the period details the proof names, or else the request's
         // (Paykit spec 8.2).
         let request_record = self.payee_request_record(&target, &bound).await?;
-        let named_details = proof_stored.message().refs.get(1).and_then(|hash| {
-            bound.details().into_iter().find_map(|d| match d.body() {
-                Body::PaymentPeriodDetails(details) if d.hash() == *hash => {
-                    details.payment_endpoints.clone()
-                }
-                _ => None,
-            })
-        });
         let id = &proof.payment_endpoint_identifier;
         let (amount, payload) = match request_record.as_ref().and_then(request_of) {
             Some((_, request)) => {
+                // Only details valid against the request are paid by (Paykit wire 4.9, 5.3).
+                let named_details = proof_stored.message().refs.get(1).and_then(|hash| {
+                    crate::periods::valid_details(&bound, request)
+                        .into_iter()
+                        .find_map(|d| match d.body() {
+                            Body::PaymentPeriodDetails(details) if d.hash() == *hash => {
+                                details.payment_endpoints.clone()
+                            }
+                            _ => None,
+                        })
+                });
                 let from_details = named_details.as_ref().and_then(|e| e.get(id).cloned());
                 // With per-period endpoints, the request's own serve only its first Billing
                 // Period: a later one is credited only for a payment to the destination of
@@ -1461,11 +1467,12 @@ impl Paykit {
         &self,
         record_key: [u8; 32],
         record: &ActivityRecord,
-        periods: Vec<PeriodView>,
+        periods: Vec<([u8; 32], ActivityRecord)>,
     ) -> Result<Option<RequestView>> {
         let Some((stored, request)) = request_of(record) else {
             return Ok(None);
         };
+        let periods = crate::periods::period_views(periods, request);
         let payee = record.counterparty;
         let hash = stored.hash();
         let mut status = self.request_status(record, request, &payee, &hash).await?;

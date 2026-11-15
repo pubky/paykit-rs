@@ -69,8 +69,9 @@ pub struct PeriodView {
     pub record: [u8; 32],
     /// The Billing Period.
     pub billing_period: PeriodRef,
-    /// Every period details the record holds, latest first (Paykit wire 4.9): the latest is
-    /// the payer's default, and each stays valid until its own expiry.
+    /// Every period details the record holds that is valid against its request, latest
+    /// first (Paykit wire 4.9, 5.3): the latest is the payer's default, and each stays valid
+    /// until its own expiry. Details invalid against the request aren't shown.
     pub details: Vec<PeriodDetailsView>,
     /// The record holds a proof of the period's payment, credited or not.
     pub paid: bool,
@@ -82,17 +83,36 @@ pub struct PeriodView {
     pub receipt: Option<ReceivedReceipt>,
 }
 
-/// The view of a period record, `record` held at `key`, with the request it belongs to;
-/// `None` for a record of another kind.
-fn period_view(key: [u8; 32], record: &ActivityRecord) -> Option<([u8; 32], PeriodView)> {
-    let Ok(RecordBinding::Period {
-        request_hash,
-        billing_period,
-    }) = record.binding()
-    else {
+/// The period details `record` holds that are valid against `request`, the request of its
+/// Billing Period (Paykit wire 4.9, 5.3). A reader of a period record ignores the others, for
+/// any reason of wire 4.9, such as rates under a request without `per_period` conversion
+/// terms: nothing shows them or pays by them.
+pub(crate) fn valid_details<'a>(
+    record: &'a ActivityRecord,
+    request: &PaymentRequest,
+) -> Vec<&'a StoredMessage> {
+    record
+        .details()
+        .into_iter()
+        .filter(|stored| match stored.body() {
+            Body::PaymentPeriodDetails(details) => details.check_against(request).is_ok(),
+            _ => false,
+        })
+        .collect()
+}
+
+/// The view of a period record, `record` held at `key`, of a Billing Period of `request`;
+/// `None` for a record of another kind. It shows only the details valid against `request`
+/// ([`valid_details`]).
+fn period_view(
+    key: [u8; 32],
+    record: &ActivityRecord,
+    request: &PaymentRequest,
+) -> Option<PeriodView> {
+    let Ok(RecordBinding::Period { billing_period, .. }) = record.binding() else {
         return None;
     };
-    let mut held = record.details();
+    let mut held = valid_details(record, request);
     held.sort_by(|a, b| period_details_order(b.message(), a.message()));
     let details = held
         .into_iter()
@@ -114,18 +134,28 @@ fn period_view(key: [u8; 32], record: &ActivityRecord) -> Option<([u8; 32], Peri
             })
         })
         .collect();
-    Some((
-        request_hash,
-        PeriodView {
-            record: key,
-            billing_period,
-            details,
-            paid: record.shows_paid(),
-            credited: record.receipt.is_some(),
-            // The request's reference stays on the request's view.
-            receipt: received_receipt(key, record, None),
-        },
-    ))
+    Some(PeriodView {
+        record: key,
+        billing_period,
+        details,
+        paid: record.shows_paid(),
+        credited: record.receipt.is_some(),
+        // The request's reference stays on the request's view.
+        receipt: received_receipt(key, record, None),
+    })
+}
+
+/// The views of `held`, period records of `request` with their keys, in period order.
+pub(crate) fn period_views(
+    held: Vec<([u8; 32], ActivityRecord)>,
+    request: &PaymentRequest,
+) -> Vec<PeriodView> {
+    let mut views: Vec<PeriodView> = held
+        .iter()
+        .filter_map(|(key, record)| period_view(*key, record, request))
+        .collect();
+    views.sort_by_key(|v| v.billing_period.starts_at);
+    views
 }
 
 /// The Billing Period a proof names, when `request` is recurring and the period is one of its
@@ -290,18 +320,18 @@ fn period_record_unread() -> PaykitError {
 }
 
 impl Paykit {
-    /// The period records of `collection` this app holds that bind, by the request they
-    /// belong to, each list in period order.
+    /// The period records of `collection` this app holds that bind, with their keys, by the
+    /// request they belong to; [`period_views`] shows them.
     pub(crate) async fn periods_of(
         &self,
         collection: Collection,
-    ) -> Result<HashMap<[u8; 32], Vec<PeriodView>>> {
+    ) -> Result<HashMap<[u8; 32], Vec<([u8; 32], ActivityRecord)>>> {
         let own = self.identity();
         let side = match collection {
             Collection::PayeeActivity => ActivitySide::Payee,
             _ => ActivitySide::Payer,
         };
-        let mut out: HashMap<[u8; 32], Vec<PeriodView>> = HashMap::new();
+        let mut out: HashMap<[u8; 32], Vec<([u8; 32], ActivityRecord)>> = HashMap::new();
         for held in self.app.records_of(collection.name()).await? {
             let (Some(value), Some(label)) =
                 (held.content.value(), collection.policy_label(&held.policy))
@@ -319,12 +349,11 @@ impl Paykit {
             ) else {
                 continue;
             };
-            if let Some((request, view)) = period_view(held.key, &record) {
-                out.entry(request).or_default().push(view);
+            if let Ok(RecordBinding::Period { request_hash, .. }) = record.binding() {
+                out.entry(request_hash)
+                    .or_default()
+                    .push((held.key, record));
             }
-        }
-        for views in out.values_mut() {
-            views.sort_by_key(|v| v.billing_period.starts_at);
         }
         Ok(out)
     }
@@ -600,6 +629,24 @@ mod tests {
         )
     }
 
+    /// A monthly usd request from 2026-01-31, with `conversion` as its conversion terms.
+    fn monthly(conversion: Option<serde_json::Value>) -> PaymentRequest {
+        let mut body = json!({
+            "amount": { "asset": "usd", "value": "10" },
+            "payment_reference": "plan-1",
+            "proposal_expires_at": null,
+            "payment_deadline": { "type": "period_start", "seconds": 86400 },
+            "recurrence": {
+                "anchor": "2026-01-31T00:00:00.000Z", "ends_at": null, "every": 1,
+                "starts_at": "2026-01-31T00:00:00.000Z", "unit": "month"
+            }
+        });
+        if let Some(conversion) = conversion {
+            body["conversion"] = conversion;
+        }
+        PaymentRequest::from_body(&object(body)).unwrap()
+    }
+
     fn parties() -> (Party, Party) {
         (
             Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]),
@@ -628,12 +675,60 @@ mod tests {
         assert_eq!(record.request_hash, Some([7; 32]));
         let json = record.to_json().unwrap();
         let read = ActivityRecord::read(&json, &alice.id(), ActivitySide::Payer).unwrap();
-        let (request, view) = period_view([1; 32], &read).unwrap();
-        assert_eq!(request, [7; 32]);
+        assert_eq!(read.request_hash, Some([7; 32]));
+        let view = period_view([1; 32], &read, &monthly(None)).unwrap();
         assert_eq!(view.details[0].msg_id, later.message().msg_id);
         assert_eq!(view.details.len(), 2);
         // The same details again change nothing.
         assert!(!place(&mut record, Role::PeriodDetails, later));
+    }
+
+    #[test]
+    fn test_periods_details_invalid_against_the_request_left_out_of_the_valid_details() {
+        let (alice, bob) = parties();
+        let mut record = empty(ActivitySide::Payer, bob.id());
+        let with_rates = bob.message(
+            &alice,
+            "paykit.payment_period_details",
+            vec![[7; 32]],
+            object(json!({
+                "billing_period": {
+                    "starts_at": "2026-02-28T00:00:00.000Z",
+                    "ends_at": "2026-03-31T00:00:00.000Z"
+                },
+                "expires_at": "2026-03-01T00:00:00.000Z",
+                "payment_endpoints": { "btc-lightning-bolt11": "lnbc1period" },
+                "rates": [{ "asset": "btc", "value": "0.00001234" }]
+            })),
+        );
+        assert!(place(&mut record, Role::PeriodDetails, with_rates.clone()));
+        let per_period = monthly(Some(json!({ "type": "per_period" })));
+        let view = period_view([1; 32], &record, &per_period).unwrap();
+        assert_eq!(view.details.len(), 1);
+        assert_eq!(view.details[0].rates.len(), 1);
+        assert_eq!(valid_details(&record, &per_period).len(), 1);
+        // Rates under fixed conversion terms, or none, make the details invalid against the
+        // request: the record still binds, and neither shows them nor counts them valid.
+        let fixed = monthly(Some(json!({ "type": "fixed",
+            "rates": [{ "asset": "btc", "value": "0.00001234" }] })));
+        for request in [fixed, monthly(None)] {
+            let view = period_view([1; 32], &record, &request).unwrap();
+            assert!(view.details.is_empty());
+            assert!(valid_details(&record, &request).is_empty());
+        }
+        // Details with a destination only stay, beside them.
+        let endpoints_only = details(&bob, &alice, [7; 32], "2026-03-02T00:00:00.000Z");
+        assert!(place(
+            &mut record,
+            Role::PeriodDetails,
+            endpoints_only.clone()
+        ));
+        let shown = valid_details(&record, &monthly(None));
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].hash(), endpoints_only.hash());
+        let views = period_views(vec![([1; 32], record)], &monthly(None));
+        assert_eq!(views[0].details.len(), 1);
+        assert_eq!(views[0].details[0].msg_id, endpoints_only.message().msg_id);
     }
 
     #[test]
