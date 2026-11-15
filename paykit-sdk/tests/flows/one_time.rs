@@ -8,6 +8,90 @@ use pubky_switch_client::clock::Clock;
 use crate::common::{draft, request_from, FailingRecordReads, World, HOUR_MS};
 
 #[tokio::test]
+async fn test_one_time_credit_requires_the_requested_endpoint() {
+    use paykit_lib::bodies::PaymentProof;
+    use paykit_lib::{AttemptId, PaymentEndpointPayload};
+    use paykit_sdk::rail::RailOutcome;
+
+    use crate::common::{btc, endpoint};
+
+    for permitted in [false, true] {
+        let w = World::new();
+        let mut wallet = w.wallet("wallet").await;
+        let mut shop = w.shop().await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        let id = endpoint(if permitted {
+            "btc-lightning-bolt11"
+        } else {
+            "btc-onchain-address"
+        });
+        let attempt_id = AttemptId::from_bytes([12; 16]);
+        let outcome = w
+            .rail
+            .pay_outside(
+                id.clone(),
+                PaymentEndpointPayload::new("lnbc1invoice").unwrap(),
+                btc("1"),
+                attempt_id,
+            )
+            .await
+            .unwrap();
+        let RailOutcome::Paid(paid) = outcome else {
+            panic!("{outcome:?}")
+        };
+        let body = PaymentProof {
+            attempt_id,
+            billing_period: None,
+            payment_endpoint_identifier: id,
+            payment_app_id: shop.app_id(),
+            list_version: None,
+            amount: None,
+            allowance_id: None,
+            label: None,
+            payment_reference: None,
+            proof: paid.proof,
+        }
+        .to_body(1)
+        .unwrap();
+        w.inject(
+            &w.alice,
+            "wallet",
+            &w.bob,
+            &[shop.app_id()],
+            "paykit.payment_proof",
+            vec![request.request_hash],
+            body,
+        );
+        shop.receive(None).await.unwrap();
+        let record = shop.payee_activity().await.unwrap()[0].record;
+        assert_eq!(
+            shop.verify_payment(&record).await.unwrap().is_some(),
+            permitted
+        );
+        assert_eq!(
+            shop.confirm_payment(&record).await.unwrap().is_some(),
+            permitted
+        );
+        assert_eq!(
+            shop.payee_activity().await.unwrap()[0].status == PayeeStatus::Receipted,
+            permitted
+        );
+        // This external payment's proof was sent without the wallet's own record of
+        // paying. Check delivery; its receipt is stored only alongside a held proof.
+        let summary = wallet.receive(None).await.unwrap();
+        let received = summary.report.events.iter().any(|event| {
+            matches!(
+                event,
+                pubky_switch_client::app::AppEvent::MessageReceived { kind, .. }
+                    if kind == "paykit.payment_receipt"
+            )
+        });
+        assert_eq!(received, permitted);
+    }
+}
+
+#[tokio::test]
 async fn test_one_time_request_paid_proven_and_receipted() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;

@@ -4780,3 +4780,289 @@ async fn test_periods_proof_over_a_paused_period_record_held_then_placed_once_co
     shop.receive(None).await.unwrap();
     assert!(shop.payee_activity().await.unwrap()[0].periods[0].paid);
 }
+
+#[tokio::test]
+async fn test_periods_invalid_details_never_remove_the_request_destination_constraint() {
+    // Fixed request endpoints and no conversion terms: discarding invalid named details
+    // must not erase the destination constraint. A payment to an unrelated destination
+    // is refused; one to the request's endpoint still counts where that endpoint applies.
+    for per_period in [false, true] {
+        for period_index in [0, 1] {
+            for permitted in [false, true] {
+                let w = World::new();
+                let mut shop = w.shop().await;
+                let mut wallet = w.wallet("wallet").await;
+                let now = w.clock.now_ms();
+                let mut draft = monthly(now, None);
+                draft.per_period_endpoints = per_period;
+                let (request, sale) = subscribed_for(
+                    &w,
+                    &mut shop,
+                    &mut wallet,
+                    draft,
+                    if period_index == 0 { 0 } else { 40 },
+                )
+                .await;
+                shop.send_period_details(
+                    &sale,
+                    details(
+                        month(period_index),
+                        "lnbc1february",
+                        w.clock.now_ms() + DAY_MS,
+                    ),
+                )
+                .await
+                .unwrap();
+                let target = payee_period_at(&request, month(period_index));
+                let held = shop.app_mut().read_record(&target).await.unwrap().unwrap();
+                let mut record = paykit_lib::records::ActivityRecord::read(
+                    held.content.value().unwrap(),
+                    &w.bob_id(),
+                    paykit_lib::records::ActivitySide::Payee,
+                )
+                .unwrap();
+                w.clock.advance_ms(1);
+                let mut body =
+                    details(month(period_index), "lnbc1rated", w.clock.now_ms() + DAY_MS)
+                        .to_body()
+                        .unwrap();
+                body["payment_endpoints"] = json!({
+                    "btc-onchain-address": "btc1named",
+                    "usd-ach-account": "usd1named"
+                });
+                body.insert(
+                    "rates".into(),
+                    json!([{ "asset": "usd", "value": "100000" }]),
+                );
+                let plaintext = w.sign_as(
+                    &w.bob,
+                    "shop",
+                    &w.alice,
+                    "paykit.payment_period_details",
+                    vec![request.request_hash],
+                    body,
+                );
+                let rated = paykit_lib::records::StoredMessage::new(
+                    w.bob_id(),
+                    shop.app().cert().signed(),
+                    plaintext,
+                    None,
+                    &w.alice_id(),
+                )
+                .unwrap();
+                let valid = record.period_details.replace(rated.clone()).unwrap();
+                record.earlier_details.push(valid);
+                record.msg_ids.push(rated.message().msg_id.clone());
+                let op = shop
+                    .app_mut()
+                    .record_op(&target, Some(&record.to_json().unwrap()), Vec::new())
+                    .await
+                    .unwrap();
+                shop.app_mut()
+                    .submit_batch(OpBatch::new().entry(op))
+                    .await
+                    .unwrap();
+                let (identifier, destination) = if permitted {
+                    ("btc-lightning-bolt11", "lnbc1invoice")
+                } else {
+                    ("btc-onchain-address", "btc1unrelated")
+                };
+                let attempt = AttemptId::from_bytes([9; 16]);
+                let RailOutcome::Paid(paid) = w
+                    .rail
+                    .pay_outside(
+                        endpoint(identifier),
+                        PaymentEndpointPayload::new(destination).unwrap(),
+                        btc("1"),
+                        attempt,
+                    )
+                    .await
+                    .unwrap()
+                else {
+                    panic!("payment must complete")
+                };
+                let body = PaymentProof {
+                    attempt_id: attempt,
+                    billing_period: Some(month(period_index)),
+                    payment_endpoint_identifier: endpoint(identifier),
+                    payment_app_id: shop.app_id(),
+                    list_version: None,
+                    amount: None,
+                    allowance_id: None,
+                    label: None,
+                    payment_reference: None,
+                    proof: paid.proof,
+                }
+                .to_body(2)
+                .unwrap();
+                w.inject(
+                    &w.alice,
+                    "wallet",
+                    &w.bob,
+                    &[shop.app_id()],
+                    "paykit.payment_proof",
+                    vec![request.request_hash, rated.hash()],
+                    body,
+                );
+                shop.receive(None).await.unwrap();
+                let february = |periods: Vec<paykit_sdk::PeriodView>| {
+                    periods
+                        .into_iter()
+                        .find(|p| p.billing_period == month(period_index))
+                        .unwrap()
+                };
+                let period = february(shop.payee_activity().await.unwrap()[0].periods.clone());
+                // Only the details valid against the request show.
+                assert_eq!(period.details.len(), 1);
+                assert!(period.paid);
+                let verified = shop.verify_payment(&period.record).await.unwrap();
+                let confirmed = shop.confirm_payment(&period.record).await.unwrap();
+                let period = february(shop.payee_activity().await.unwrap()[0].periods.clone());
+                let summary = wallet.receive(None).await.unwrap();
+                let sent = received(&summary, "paykit.payment_receipt");
+                let expected = permitted && (!per_period || period_index == 0);
+                assert_eq!(
+                    (
+                        verified.is_some(),
+                        confirmed.is_some(),
+                        period.credited,
+                        sent
+                    ),
+                    (expected, expected, expected, expected),
+                    "per_period={per_period}, period={period_index}, permitted={permitted}",
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_periods_credit_requires_the_selected_endpoint() {
+    // A details map replaces the request map as a whole. An identifier missing from it
+    // never falls back to the request, even when the request permits that identifier.
+    for per_period in [false, true] {
+        for period_index in [0, 1] {
+            for named in [false, true] {
+                for permitted in [false, true] {
+                    let w = World::new();
+                    let mut shop = w.shop().await;
+                    let mut wallet = w.wallet("wallet").await;
+                    let mut draft = monthly(w.clock.now_ms(), None);
+                    draft.per_period_endpoints = per_period;
+                    let endpoints = BTreeMap::from([(
+                        endpoint(if permitted {
+                            "btc-lightning-bolt11"
+                        } else {
+                            "btc-onchain-address"
+                        }),
+                        PaymentEndpointPayload::new("lnbc1invoice").unwrap(),
+                    )]);
+                    if !named {
+                        draft.destination = RequestDestination::Endpoints(endpoints.clone());
+                    }
+                    let (request, sale) = subscribed_for(
+                        &w,
+                        &mut shop,
+                        &mut wallet,
+                        draft,
+                        if period_index == 0 { 0 } else { 40 },
+                    )
+                    .await;
+                    let period = month(period_index);
+                    let mut refs = vec![request.request_hash];
+                    if named {
+                        let mut terms = details(period, "lnbc1invoice", w.clock.now_ms() + DAY_MS);
+                        terms.payment_endpoints = Some(endpoints);
+                        shop.send_period_details(&sale, terms).await.unwrap();
+                        let held = shop
+                            .app_mut()
+                            .read_record(&payee_period_at(&request, period))
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        let record = paykit_lib::records::ActivityRecord::read(
+                            held.content.value().unwrap(),
+                            &w.bob_id(),
+                            paykit_lib::records::ActivitySide::Payee,
+                        )
+                        .unwrap();
+                        refs.push(record.period_details.unwrap().hash());
+                    }
+                    let body = proof_to(&w, shop.app_id(), period, "lnbc1invoice", 10).await;
+                    w.inject(
+                        &w.alice,
+                        "wallet",
+                        &w.bob,
+                        &[shop.app_id()],
+                        "paykit.payment_proof",
+                        refs,
+                        body,
+                    );
+                    shop.receive(None).await.unwrap();
+                    let record = shop.payee_activity().await.unwrap()[0].periods[0].record;
+                    let verified = shop.verify_payment(&record).await.unwrap().is_some();
+                    let confirmed = shop.confirm_payment(&record).await.unwrap().is_some();
+                    let credited = shop.payee_activity().await.unwrap()[0].periods[0].credited;
+                    let receipt = received(
+                        &wallet.receive(None).await.unwrap(),
+                        "paykit.payment_receipt",
+                    );
+                    let expected = permitted && (named || !per_period || period_index == 0);
+                    assert_eq!((verified, confirmed, credited, receipt),
+                        (expected, expected, expected, expected),
+                        "per_period={per_period}, period={period_index}, named={named}, permitted={permitted}");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_periods_credit_without_fixed_endpoints_respects_request_restrictions() {
+    // No fixed payload lets the payment method check its own destination. The request's
+    // identifier restriction and required app still apply.
+    for required_app in [None, Some(true), Some(false)] {
+        for permitted in [false, true] {
+            let w = World::new();
+            let mut shop = w.shop().await;
+            let mut wallet = w.wallet("wallet").await;
+            let mut draft = monthly(w.clock.now_ms(), None);
+            draft.destination = match required_app {
+                None => RequestDestination::Any,
+                Some(true) => RequestDestination::RequiredApp(shop.app_id()),
+                Some(false) => RequestDestination::RequiredApp([0x3f; 16]),
+            };
+            draft.accepted_endpoint_identifiers = Some(vec![endpoint(if permitted {
+                "btc-lightning-bolt11"
+            } else {
+                "btc-onchain-address"
+            })]);
+            let (request, _) = subscribed_for(&w, &mut shop, &mut wallet, draft, 0).await;
+            let body = proof_to(&w, shop.app_id(), january(), "lnbc1invoice", 11).await;
+            w.inject(
+                &w.alice,
+                "wallet",
+                &w.bob,
+                &[shop.app_id()],
+                "paykit.payment_proof",
+                vec![request.request_hash],
+                body,
+            );
+            shop.receive(None).await.unwrap();
+            let record = shop.payee_activity().await.unwrap()[0].periods[0].record;
+            let verified = shop.verify_payment(&record).await.unwrap().is_some();
+            let confirmed = shop.confirm_payment(&record).await.unwrap().is_some();
+            let credited = shop.payee_activity().await.unwrap()[0].periods[0].credited;
+            let receipt = received(
+                &wallet.receive(None).await.unwrap(),
+                "paykit.payment_receipt",
+            );
+            let expected = permitted && required_app != Some(false);
+            assert_eq!(
+                (verified, confirmed, credited, receipt),
+                (expected, expected, expected, expected),
+                "required_app={required_app:?}, permitted={permitted}"
+            );
+        }
+    }
+}
