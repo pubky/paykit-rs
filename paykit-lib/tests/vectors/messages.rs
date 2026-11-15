@@ -15,13 +15,13 @@ use pubky_switch_core::enc::b64;
 use pubky_switch_core::message::{Message, MessagePlaintext, VerifiedSender};
 use pubky_switch_core::receive::KindRules;
 use pubky_switch_core::records::AppCert;
-use pubky_switch_core::scopes::Permission;
 use serde_json::{json, Value};
 
 use crate::common::{
-    arr, cert, generated, hex, message, message_json, paykit, pubky, quoted, reissued, signed,
-    signed_json, st, writing, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
+    arr, beyond_paykit, cert, generated, hex, message, message_json, paykit, pubky, quoted,
+    reissued, signed, signed_json, st, writing, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
 };
+use crate::documents::MULTI_PROTOCOL_ACCEPTED;
 
 /// One message of the file, checked and read.
 struct Read {
@@ -430,23 +430,16 @@ wallet (recipient_app), whose certificate is its certificate of documents.json \
 certificates. Another protocol's scopes, \
 and the switch permissions they bring, authorize no Paykit message: each kind still needs \
 its Paykit scope, and a resend_request needs a Paykit App, one holding at least one Paykit \
-scope. accepted are messages the wallet takes at check 8, from the shop holding paykit_request \
-beside chat; refused are those it drops there, from the shop holding chat alone, a \
+scope. accepted are messages the wallet takes at check 8, from the shop holding paykit_request, \
+with the paykit_settlements and paykit_contacts it requires, beside chat; refused are those it drops there, from the shop holding chat alone, a \
 certificate Paykit's verifiers take. reason is paykit-lib's wording, of the first check \
 that refuses it.";
 
-/// The certificates of `multi_protocol_senders`: request beside chat, and chat alone.
+/// The certificates of `multi_protocol_senders`: those `multi_protocol_certificates`
+/// accepts (`documents.json`), request beside chat, and chat alone.
 fn sender_cert(keys: &Keys, chat_only: bool) -> AppCert {
-    if chat_only {
-        reissued(keys, "shop", &["chat"], &[Permission::ListsRead])
-    } else {
-        reissued(
-            keys,
-            "shop",
-            &["paykit_request", "chat"],
-            &[Permission::ListsRead, Permission::ConversationAdd],
-        )
-    }
+    let (_, app, scopes, permissions) = MULTI_PROTOCOL_ACCEPTED[usize::from(chat_only)];
+    reissued(keys, app, scopes, permissions)
 }
 
 /// Check 8 at alice's wallet for a message the shop signed, presented with `sender`: the
@@ -580,7 +573,15 @@ fn signed_messages(keys: &Keys) -> Vec<(Place<'static>, Value)> {
         if case.get("recipient_cert").is_some() {
             let recipient = match st(case, "name") {
                 "an acceptance labelled shop1 at an app holding only paykit_request:shop2" => {
-                    with_scopes(keys, "hosted", &["paykit_request:shop2"])
+                    with_scopes(
+                        keys,
+                        "hosted",
+                        &[
+                            "paykit_request:shop2",
+                            "paykit_settlements",
+                            "paykit_contacts",
+                        ],
+                    )
                 }
                 "an acceptance without a label at an app holding only paykit_request:shop1" => {
                     cert(keys.app("hosted"))
@@ -600,8 +601,8 @@ const CANCELLATION_DESCRIPTION: &str = "Wire 4.1 check 8, 4.3, 4.8, spec 3.3: me
 payment_request_cancellation, as the shop signs it, without a label, presented with a \
 certificate of the shop's keys (sender_cert) at a certificate of alice's wallet's keys \
 (recipient_cert), each with its scopes changed, its permissions those Paykit's scopes need, \
-and signed again; a certificate holding paykit_pay holds paykit_contacts too, which paykit_pay requires (spec \
-3.1). A cancellation's recipient holds the other role than its sender: the \
+and signed again; a certificate holding paykit_pay holds paykit_contacts too, which paykit_pay requires, and one \
+holding paykit_request holds paykit_settlements, which paykit_request requires (spec 3.1). A cancellation's recipient holds the other role than its sender: the \
 payer's goes from paykit_pay to paykit_request, the payee's from paykit_request to \
 paykit_pay. accepted are the two \
 pairings the recipient takes at check 8; refused are paykit_pay to paykit_pay and paykit_request to paykit_request, \
@@ -642,6 +643,10 @@ fn cancellation_at(
 /// `paykit_contacts` it requires (Paykit spec 3.1).
 const PAY: &[&str] = &["paykit_pay", "paykit_contacts"];
 
+/// The payee's scopes of `cancellation_roles`: `paykit_request` and the `paykit_settlements`
+/// it requires (Paykit spec 3.1).
+const REQUEST: &[&str] = &["paykit_request", "paykit_settlements", "paykit_contacts"];
+
 /// `cancellation_roles`, as paykit-lib generates it.
 fn cancellation_roles(keys: &Keys) -> Value {
     let base = "payment_request_cancellation";
@@ -673,13 +678,13 @@ fn cancellation_roles(keys: &Keys) -> Value {
     };
     json!({
         "accepted": [
-            case("the payee's cancellation, from paykit_request to paykit_pay", &["paykit_request"], PAY, true),
-            case("the payer's cancellation, from paykit_pay to paykit_request", PAY, &["paykit_request"], true),
+            case("the payee's cancellation, from paykit_request to paykit_pay", REQUEST, PAY, true),
+            case("the payer's cancellation, from paykit_pay to paykit_request", PAY, REQUEST, true),
         ],
         "description": CANCELLATION_DESCRIPTION,
         "refused": [
             case("a cancellation from paykit_pay to paykit_pay", PAY, PAY, false),
-            case("a cancellation from paykit_request to paykit_request", &["paykit_request"], &["paykit_request"], false),
+            case("a cancellation from paykit_request to paykit_request", REQUEST, REQUEST, false),
         ],
     })
 }
@@ -741,6 +746,10 @@ fn check_multi_protocol_senders(keys: &Keys, file: &Value) {
                     .unwrap_or_else(|e| {
                         panic!("{name}: Paykit's verifiers take the certificate: {e}")
                     });
+            assert!(
+                !beyond_paykit(&sender).is_empty(),
+                "{name}: a permission only chat brings"
+            );
             let verdict = at_wallet(keys, &json, &sender);
             assert_eq!(verdict.is_ok(), accepted, "{name}: {verdict:?}");
             if let Err(error) = verdict {

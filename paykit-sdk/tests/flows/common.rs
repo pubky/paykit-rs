@@ -43,6 +43,7 @@ pub fn spec() -> ProtocolSpec {
         keyed_scopes: [
             "paykit_pay",
             "paykit_request",
+            "paykit_settlements",
             "paykit_allowance",
             "paykit_allowance_execute",
             "paykit_contacts",

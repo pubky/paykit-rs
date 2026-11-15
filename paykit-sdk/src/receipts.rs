@@ -294,7 +294,11 @@ mod tests {
     /// of it holding bob's receipt of one Billing Period, as another own app wrote them.
     fn period_records() -> (ActivityRecord, ActivityRecord, PeriodRef) {
         let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
-        let bob = Party::new("bob", "shop", &["paykit_request"]);
+        let bob = Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
         let request = bob.message(
             &alice,
             "paykit.payment_request",

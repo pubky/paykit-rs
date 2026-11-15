@@ -4,10 +4,13 @@
 
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::{
-    natural_key, payment_obligation, payment_obligation_material, request_hash, request_obligation,
-    request_obligation_material, terms_hash, terms_hash_material,
+    mark_settlement_tag, natural_key, occurrence_tag, payment_obligation,
+    payment_obligation_material, request_hash, request_obligation, request_obligation_material,
+    settlement_bucket, settlement_tag, settlement_tag_blinded, settlement_tag_material, terms_hash,
+    terms_hash_material,
 };
 use paykit_lib::identifiers::{AllowanceId, AttemptId, PaymentEndpointIdentifier};
+use paykit_lib::records::SettlementBucket;
 use paykit_lib::scopes::Label;
 use pubky_switch_core::enc::{b64, hash, lp, pubky_id, u64be};
 use pubky_switch_core::ident::{record_key_from_blinded, Policy};
@@ -16,7 +19,7 @@ use serde_json::{json, Value};
 
 use crate::common::{
     arr, b64n, generated, hex, message_json, paykit, pubky, st, writing, Keys, Place, ALICE,
-    ALLOWANCE_ID, BOB, SHOP1,
+    ALLOWANCE_ID, BOB, SHOP1, UNREQUESTED_TXID,
 };
 
 #[test]
@@ -169,7 +172,8 @@ const POLICIES_DESCRIPTION: &str = "Wire 1.5, Switch wire 1.5: the policies of P
 collections, each with its read scope, its write scopes and its policy hash, \
 hash(lp(\"pubky-switch/v1/policy\", read_scope, u64(n), write_scope_1, ..., write_scope_n)), \
 hashed_bytes_hex being the bytes hashed: the fixed policy of each collection, by its name, \
-and, last, payee_activity's policy for a request labelled shop1.";
+settlements' the one policy of every payee app's bucket writes, labelled or not, and, last, \
+payee_activity's policy for a request labelled shop1.";
 
 /// `policies`: each collection's fixed policy, and `payee_activity`'s under the label
 /// `shop1`.
@@ -239,7 +243,15 @@ the record key, lp(collection, blinded_natural_key, policy_hash), and record_key
 derive(\"pubky-switch/v1/record\", collection, blinded_natural_key, policy_hash). The \
 request hashes are those of messages.json's payment_request, payment_request_recurring \
 (its February period, 1772236800) and payment_request_labelled, whose payee record is under \
-the policy of its label shop1.";
+the policy of its label shop1. The last is the settlements bucket of the bitcoin-txid \
+settlement of the payment without a request, its settlement_id, held at bob's switch: \
+settlement_tag_input_hex is lp(settlement ID), blinded_settlement_tag_input its blind, \
+settlement_tag_hex the settlement's tag, derive(\"paykit/v1/settlement\", \"tag\", \
+blinded_settlement_tag_input), bucket u16_be(tag[0..2]) >> 6, mark_settlement_tag_hex bytes 2 \
+to 13 of the tag, which its mark stores, and natural_key lp(u64(bucket)); occurrence_tag_hex \
+is the first 8 bytes of derive(\"paykit/v1/settlement\", \"occurrence\", \
+occurrence_blinded_natural_key), the blind of the natural key of the occurrence it was \
+credited to, bob's payee record of that payment.";
 
 /// `record_keys` (Paykit wire 1.5): Paykit's natural keys, each blinded into its record key
 /// with the naming key of the identity whose switch holds it: bob's for his payee records,
@@ -252,7 +264,7 @@ fn record_keys(keys: &Keys) -> Value {
     let allowance = AllowanceId::parse(ALLOWANCE_ID).unwrap();
     let attempt = AttemptId::parse("mAFdg5_0tVNjmrgiTUZW4g").unwrap();
     let shop = keys.app("shop").keys.app_id_bytes();
-    let txid = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b";
+    let txid = UNREQUESTED_TXID;
     let shop1 = Label::parse(SHOP1).unwrap();
     let named: [(&str, Collection, Vec<u8>, Option<&Label>); 9] = [
         (
@@ -343,5 +355,59 @@ fn record_keys(keys: &Keys) -> Value {
             })
         })
         .collect();
+    let mut cases = cases;
+    cases.push(settlement_bucket_case(keys, txid));
     json!({ "cases": cases, "description": RECORD_KEYS_DESCRIPTION })
 }
+
+/// The `record_keys` case of the `settlements` bucket of the payment without a request's
+/// `bitcoin-txid` settlement (Paykit wire 1.5, 5.7): its tag and bucket, the bucket's record
+/// key under bob's naming key, and the tag of the occurrence it was credited to, bob's payee
+/// record of that payment.
+fn settlement_bucket_case(keys: &Keys, txid: &str) -> Value {
+    let bob = pubky(BOB);
+    let nk = keys.identity(&bob).naming_key();
+    let id = txid.as_bytes();
+    let material = settlement_tag_material(id);
+    let blinded_id = nk.blind(&material);
+    let tag = settlement_tag(&nk, id);
+    assert_eq!(settlement_tag_blinded(&blinded_id), tag);
+    let bucket = settlement_bucket(&tag);
+    let natural = natural_key::settlement_bucket(bucket);
+    let collection = Collection::Settlements;
+    let policy_hash = collection.fixed_policy().hash().unwrap();
+    let blinded = nk.blind(&natural);
+    let key = SettlementBucket::record_key(bucket, &nk).unwrap();
+    assert_eq!(
+        record_key_from_blinded(collection.name(), &blinded, &policy_hash),
+        key
+    );
+    let occurrence = natural_key::payee_payment_record(
+        &PaymentEndpointIdentifier::parse("btc-bitcoin-p2wpkh").unwrap(),
+        id,
+    );
+    json!({
+        "blinded_natural_key": b64(&blinded),
+        "blinded_settlement_tag_input": b64(&blinded_id),
+        "bucket": bucket,
+        "collection": collection.name(),
+        "identity": pubky_id(&bob),
+        "key_material_hex": hex(&lp(&[collection.name().as_bytes(), &blinded, &policy_hash])),
+        "mark_settlement_tag_hex": hex(&mark_settlement_tag(&tag)),
+        "name": SETTLEMENT_BUCKET_CASE,
+        "natural_key": b64(&natural),
+        "natural_key_hex": hex(&natural),
+        "occurrence": "payee record of a payment without a request",
+        "occurrence_blinded_natural_key": b64(&nk.blind(&occurrence)),
+        "occurrence_tag_hex": hex(&occurrence_tag(&nk, &occurrence)),
+        "policy_hash": b64(&policy_hash),
+        "record_key": b64(&key),
+        "settlement_id": txid,
+        "settlement_tag_hex": hex(&tag),
+        "settlement_tag_input_hex": hex(&material),
+    })
+}
+
+/// The name of the `settlements` case of `record_keys`.
+const SETTLEMENT_BUCKET_CASE: &str =
+    "settlements bucket of the bitcoin-txid settlement of the payment without a request";

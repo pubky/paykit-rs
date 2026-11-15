@@ -393,7 +393,11 @@ mod tests {
 
     #[test]
     fn test_app_records_current_record_is_usable_and_carries_its_endpoint() {
-        let bob = Party::new("bob", "shop", &["paykit_request"]);
+        let bob = Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
         let doc = bob.doc(&[&bob]);
         let bytes = record_bytes(&bob, tip_jar(), NOW, Some(NOW + 30 * DAY_MS));
         let usable = usable_bytes(&bob.id(), &bob.app_id(), &bytes, &doc, NOW + 1).unwrap();
@@ -412,7 +416,11 @@ mod tests {
 
     #[test]
     fn test_app_records_malformed_or_misplaced_record_ignored() {
-        let bob = Party::new("bob", "shop", &["paykit_request"]);
+        let bob = Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
         let doc = bob.doc(&[&bob]);
         let later = NOW + 30 * DAY_MS;
         // A payload that isn't a string, and public endpoints without expires_at (Paykit wire
@@ -431,13 +439,21 @@ mod tests {
         let good = record_bytes(&bob, tip_jar(), NOW, Some(later));
         assert!(usable_bytes(&bob.id(), &[9; 16], &good, &doc, NOW + 1).is_none());
         // Another identity's record.
-        let carol = Party::new("carol", "shop", &["paykit_request"]);
+        let carol = Party::new(
+            "carol",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
         assert!(usable_bytes(&carol.id(), &bob.app_id(), &good, &doc, NOW + 1).is_none());
     }
 
     #[test]
     fn test_app_records_expired_stale_or_ahead_record_ignored() {
-        let bob = Party::new("bob", "shop", &["paykit_request"]);
+        let bob = Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
         let doc = bob.doc(&[&bob]);
         // Expired at its own expires_at.
         let bytes = record_bytes(&bob, tip_jar(), NOW, Some(NOW + DAY_MS));
@@ -458,12 +474,21 @@ mod tests {
         use pubky_switch_core::scopes::Permission;
         // The Switch takes both certificates; Paykit's verifiers refuse them (Paykit wire
         // 3.1): `paykit_request` needs exactly `conversation.add`.
-        let missing = Party::with_permissions("bob", "shop", &["paykit_request"], &[]);
+        let missing = Party::with_permissions(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+            &[],
+        );
         let extra = Party::with_permissions(
             "bob",
             "shop",
-            &["paykit_request"],
-            &[Permission::ListsRead, Permission::ConversationAdd],
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+            &[
+                Permission::ClaimsRead,
+                Permission::ListsRead,
+                Permission::ConversationAdd,
+            ],
         );
         for app in [&missing, &extra] {
             let doc = app.doc(&[app]);
@@ -474,7 +499,11 @@ mod tests {
 
     #[test]
     fn test_app_records_record_of_an_app_not_current_ignored() {
-        let bob = Party::new("bob", "shop", &["paykit_request"]);
+        let bob = Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
         let bytes = record_bytes(&bob, tip_jar(), NOW, Some(NOW + DAY_MS));
         assert!(usable_bytes(&bob.id(), &bob.app_id(), &bytes, &bob.doc(&[]), NOW + 1).is_none());
         // An app without `paykit_request` publishes no destination.

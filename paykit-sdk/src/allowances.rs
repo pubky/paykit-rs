@@ -2566,7 +2566,16 @@ mod tests {
             "wallet",
             &["paykit_pay", "paykit_allowance", "paykit_contacts"],
         );
-        let bob = Party::new("bob", "shop", &["paykit_request", "paykit_allowance"]);
+        let bob = Party::new(
+            "bob",
+            "shop",
+            &[
+                "paykit_request",
+                "paykit_allowance",
+                "paykit_settlements",
+                "paykit_contacts",
+            ],
+        );
         let proposal = bob.message(
             &alice,
             "paykit.allowance_proposal",

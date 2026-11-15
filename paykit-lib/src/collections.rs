@@ -28,17 +28,21 @@ pub enum Collection {
     AllowanceLedgers,
     /// `block_floor`: one record, the identity's block floor (Paykit wire 5.6).
     BlockFloor,
+    /// `settlements`: at most 1,024 bucket records, the marks of the settlements any own
+    /// payee app has credited (Paykit wire 5.7).
+    Settlements,
 }
 
 impl Collection {
     /// Every collection.
-    pub const ALL: [Collection; 6] = [
+    pub const ALL: [Collection; 7] = [
         Self::PayerActivity,
         Self::PayeeActivity,
         Self::PaymentLists,
         Self::Allowances,
         Self::AllowanceLedgers,
         Self::BlockFloor,
+        Self::Settlements,
     ];
 
     /// The collection's name.
@@ -50,6 +54,7 @@ impl Collection {
             Self::Allowances => "allowances",
             Self::AllowanceLedgers => "allowance_ledgers",
             Self::BlockFloor => "block_floor",
+            Self::Settlements => "settlements",
         }
     }
 
@@ -69,6 +74,7 @@ impl Collection {
             Self::AllowanceLedgers => {
                 Policy::new("paykit_allowance", &["paykit_allowance_execute"])
             }
+            Self::Settlements => Policy::new("paykit_settlements", &["paykit_settlements"]),
         }
     }
 
@@ -76,7 +82,8 @@ impl Collection {
     /// `payee_activity` record of a labelled request has its label's policy, `read_scope =
     /// paykit_request:<label>` and `write_scopes =
     /// ["paykit_request:<label>"]`; every other record keeps its collection's fixed policy, a
-    /// `payer_activity` record whatever the request's label.
+    /// `payer_activity` record whatever the request's label, and a `settlements` bucket one
+    /// policy for every label.
     pub fn policy(self, label: Option<&Label>) -> Policy {
         match (self, label) {
             (Self::PayeeActivity, Some(label)) => {
@@ -139,6 +146,10 @@ mod tests {
             Collection::BlockFloor.fixed_policy(),
             Policy::new("paykit_pay", &["paykit_pay"])
         );
+        assert_eq!(
+            Collection::Settlements.fixed_policy(),
+            Policy::new("paykit_settlements", &["paykit_settlements"])
+        );
         for c in Collection::ALL {
             assert_eq!(Collection::from_name(c.name()), Some(c));
         }
@@ -178,6 +189,36 @@ mod tests {
                 "{policy:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_collections_settlements_have_one_policy_for_every_label() {
+        let label = Label::parse("shop1").unwrap();
+        let fixed = Collection::Settlements.fixed_policy();
+        assert_eq!(Collection::Settlements.policy(Some(&label)), fixed);
+        assert_eq!(Collection::Settlements.policy_label(&fixed), Some(None));
+        for other in [
+            Policy::new("paykit_request", &["paykit_request"]),
+            Policy::new("paykit_request:shop1", &["paykit_request:shop1"]),
+            Policy::new(
+                "paykit_settlements",
+                &["paykit_settlements", "paykit_request"],
+            ),
+            Policy::new("paykit_settlements", &["paykit_request"]),
+        ] {
+            assert_eq!(
+                Collection::Settlements.policy_label(&other),
+                None,
+                "{other:?}"
+            );
+        }
+        let nk = NamingKey::from_bytes([1; 32]);
+        assert_eq!(
+            Collection::Settlements
+                .record_key(&nk, b"k", Some(&label))
+                .unwrap(),
+            Collection::Settlements.record_key(&nk, b"k", None).unwrap()
+        );
     }
 
     #[test]

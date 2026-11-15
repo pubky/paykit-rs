@@ -655,7 +655,11 @@ mod tests {
     fn parties() -> (Party, Party) {
         (
             Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]),
-            Party::new("bob", "shop", &["paykit_request"]),
+            Party::new(
+                "bob",
+                "shop",
+                &["paykit_request", "paykit_settlements", "paykit_contacts"],
+            ),
         )
     }
 
@@ -684,7 +688,11 @@ mod tests {
     #[test]
     fn test_destination_refuses_another_identity_app_payload_or_request() {
         let (alice, bob) = parties();
-        let carol = Party::new("carol", "shop", &["paykit_request"]);
+        let carol = Party::new(
+            "carol",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
         let request = bob.message(&alice, "paykit.payment_request", vec![], request_body());
         let dest = destination(
             &bob,
@@ -812,19 +820,32 @@ mod tests {
         use pubky_switch_core::scopes::Permission;
         // A public record's certificate is checked in full before it carries a destination
         // (Paykit wire 3.1): permissions missing one `paykit_request` needs, or holding another.
-        let missing = Party::with_permissions("bob", "shop", &["paykit_request"], &[]);
+        let missing = Party::with_permissions(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+            &[],
+        );
         let extra = Party::with_permissions(
             "bob",
             "shop",
-            &["paykit_request"],
-            &[Permission::ListsRead, Permission::ConversationAdd],
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+            &[
+                Permission::ClaimsRead,
+                Permission::ListsRead,
+                Permission::ConversationAdd,
+            ],
         );
         for app in [&missing, &extra] {
             let carrier = Carrier::Record(Box::new(app.record(&["paykit.payment_request"])));
             let refused = current(&app.doc(&[app]), &app.app_id(), &carrier, NOW).unwrap_err();
             assert!(refused.contains("permissions"), "{refused}");
         }
-        let valid = Party::new("bob", "shop", &["paykit_request"]);
+        let valid = Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
         let carrier = Carrier::Record(Box::new(valid.record(&["paykit.payment_request"])));
         assert_eq!(
             current(&valid.doc(&[&valid]), &valid.app_id(), &carrier, NOW),

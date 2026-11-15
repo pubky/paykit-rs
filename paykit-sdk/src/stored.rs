@@ -1189,7 +1189,11 @@ mod tests {
 
     fn note(placed: bool) -> StoredNote {
         let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
-        let bob = Party::new("bob", "shop", &["paykit_request"]);
+        let bob = Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
         let stored = bob.message(
             &alice,
             "paykit.payment_request",

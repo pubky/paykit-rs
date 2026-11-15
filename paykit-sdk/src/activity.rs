@@ -419,7 +419,11 @@ mod place_tests {
     #[test]
     fn test_activity_place_stores_one_message_per_role() {
         let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
-        let bob = Party::new("bob", "shop", &["paykit_request"]);
+        let bob = Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
         let mut record = empty(ActivitySide::Payer, bob.id());
         let first = request(&bob, &alice, "order-1");
         assert!(place(&mut record, Role::Request, first.clone()));
@@ -441,7 +445,11 @@ mod place_tests {
     #[test]
     fn test_activity_place_keeps_the_newest_sixteen_others() {
         let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
-        let bob = Party::new("bob", "shop", &["paykit_request"]);
+        let bob = Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
         let mut record = empty(ActivitySide::Payer, bob.id());
         assert!(place(
             &mut record,
@@ -461,7 +469,11 @@ mod place_tests {
     #[test]
     fn test_activity_place_again_changes_no_role_however_long_ago() {
         let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
-        let bob = Party::new("bob", "shop", &["paykit_request"]);
+        let bob = Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
         let mut record = empty(ActivitySide::Payer, bob.id());
         let first = request(&bob, &alice, "r0");
         let second = request(&bob, &alice, "r1");

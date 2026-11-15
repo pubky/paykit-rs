@@ -60,16 +60,23 @@ impl AppScopes {
         self.with("paykit_pay").with("paykit_contacts")
     }
 
-    /// `paykit_request`: act as payee, for every label.
+    /// `paykit_request`, with the `paykit_settlements` and `paykit_contacts` it requires: act as
+    /// payee, for every label, marking every settlement credited and holding the lists (Paykit
+    /// spec 3.1).
     #[must_use]
     pub fn request(self) -> Self {
         self.with("paykit_request")
+            .with("paykit_settlements")
+            .with("paykit_contacts")
     }
 
-    /// `paykit_request:<label>`: act as payee under one label only (Paykit spec 3.1).
+    /// `paykit_request:<label>`, with the `paykit_settlements` and `paykit_contacts` it
+    /// requires: act as payee under one label only (Paykit spec 3.1).
     #[must_use]
     pub fn request_label(self, label: &Label) -> Self {
         self.with(&label.scope())
+            .with("paykit_settlements")
+            .with("paykit_contacts")
     }
 
     /// `paykit_allowance`: Allowances.
@@ -131,7 +138,12 @@ mod tests {
         let wallet = AppScopes::new().pay().request().build().unwrap();
         assert_eq!(
             wallet.scopes,
-            vec!["paykit_pay", "paykit_contacts", "paykit_request"]
+            vec![
+                "paykit_pay",
+                "paykit_contacts",
+                "paykit_request",
+                "paykit_settlements"
+            ]
         );
         assert_eq!(
             wallet.permissions,
@@ -179,8 +191,24 @@ mod tests {
     fn test_approval_labelled_seller_gets_request_permissions() {
         let label = Label::parse("shop1").unwrap();
         let shop = AppScopes::new().request_label(&label).build().unwrap();
-        assert_eq!(shop.scopes, vec!["paykit_request:shop1"]);
-        assert_eq!(shop.permissions, vec![Permission::ConversationAdd]);
+        assert_eq!(
+            shop.scopes,
+            vec![
+                "paykit_request:shop1",
+                "paykit_settlements",
+                "paykit_contacts"
+            ]
+        );
+        assert_eq!(
+            shop.permissions,
+            vec![Permission::ListsRead, Permission::ConversationAdd]
+        );
+        // Plain `paykit_request` asks for the same scopes it requires.
+        let payee = AppScopes::new().request().build().unwrap();
+        assert_eq!(
+            payee.scopes,
+            vec!["paykit_request", "paykit_settlements", "paykit_contacts"]
+        );
     }
 
     #[test]

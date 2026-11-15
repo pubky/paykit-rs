@@ -932,7 +932,12 @@ mod tests {
         // The same kinds from a Paykit App that also chats pass.
         let shop = issued(
             &identity,
-            &["paykit_request", "chat"],
+            &[
+                "paykit_request",
+                "paykit_settlements",
+                "paykit_contacts",
+                "chat",
+            ],
             &[Permission::ListsRead, Permission::ConversationAdd],
         );
         wallet.check_scopes(&request, &shop).unwrap();

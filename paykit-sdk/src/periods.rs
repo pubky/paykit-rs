@@ -663,7 +663,11 @@ mod tests {
     fn parties() -> (Party, Party) {
         (
             Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]),
-            Party::new("bob", "shop", &["paykit_request"]),
+            Party::new(
+                "bob",
+                "shop",
+                &["paykit_request", "paykit_settlements", "paykit_contacts"],
+            ),
         )
     }
 
