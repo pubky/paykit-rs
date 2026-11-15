@@ -574,7 +574,7 @@ async fn test_pubky_app_avatar_upload_writes_blob_and_file() {
 #[tokio::test]
 async fn test_pubky_profile_follows_and_avatar_use_social_v1_once_migrated() {
     let testnet = crate::harness::build_testnet().await;
-    // The extra scope lets the test write pubky.app's migration flag; the SDK only reads it.
+    // The broader scopes let the test write what pubky.app's migration writes.
     let capabilities = format!(
         "{},{},/priv/social/v1/:rw,/pub/social/v1/:rw,/pub/pubky.app/follows/:rw",
         paykit_sdk::PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
@@ -586,6 +586,19 @@ async fn test_pubky_profile_follows_and_avatar_use_social_v1_once_migrated() {
         &capabilities,
     )
     .await;
+    // The runtime under test holds exactly the scopes Bitkit requests.
+    let bitkit = alice
+        .additional_app_with_capabilities(
+            &testnet,
+            crate::harness::app_id("bitkit-social"),
+            "Bitkit",
+            &format!(
+                "{},{}",
+                paykit_sdk::PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+                paykit_sdk::PUBKY_APP_PROFILE_SESSION_CAPABILITIES
+            ),
+        )
+        .await;
     let bob = crate::harness::TestUser::sign_up(&testnet).await;
     let storage = alice.access.session.storage();
     let put = |path: String, body: String| {
@@ -607,7 +620,7 @@ async fn test_pubky_profile_follows_and_avatar_use_social_v1_once_migrated() {
     )
     .await;
     // Before the flag, the identity is on pubky.app (v0).
-    let snapshot = alice
+    let snapshot = bitkit
         .sdk
         .fetch_pubky_profile_with_revision(alice.public_key.clone())
         .await
@@ -627,14 +640,14 @@ async fn test_pubky_profile_follows_and_avatar_use_social_v1_once_migrated() {
     )
     .await;
 
-    let snapshot = alice
+    let snapshot = bitkit
         .sdk
         .fetch_pubky_profile_with_revision(alice.public_key.clone())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(snapshot.profile.name, "Alice");
-    let published = alice
+    let published = bitkit
         .sdk
         .publish_pubky_profile(
             paykit_sdk::PubkyProfileUpdate {
@@ -687,7 +700,7 @@ async fn test_pubky_profile_follows_and_avatar_use_social_v1_once_migrated() {
         r#"{"created_at":2}"#.into(),
     )
     .await;
-    for sdk in [&alice.sdk, &bob.sdk] {
+    for sdk in [&bitkit.sdk, &bob.sdk] {
         assert_eq!(
             sdk.fetch_pubky_follows(alice.public_key.clone(), 100)
                 .await
@@ -697,7 +710,7 @@ async fn test_pubky_profile_follows_and_avatar_use_social_v1_once_migrated() {
     }
 
     let bytes = vec![0xff, 0xd8, 0xff, 0xe0, 1, 2, 3];
-    let uri = alice
+    let uri = bitkit
         .sdk
         .upload_pubky_app_avatar(bytes.clone(), "image/jpeg")
         .await
@@ -713,7 +726,7 @@ async fn test_pubky_profile_follows_and_avatar_use_social_v1_once_migrated() {
     );
 
     // A delete removes the social v1 profile and its pubky.app (v0) copy, as pubky.app does.
-    alice
+    bitkit
         .sdk
         .delete_pubky_profile(published.revision)
         .await
