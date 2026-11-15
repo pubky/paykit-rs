@@ -2,7 +2,7 @@
 
 **Status.** INCOMPLETE for protected-record creation, put-back and incarnation verification (Section 5); a review candidate, with the spec. The wire format of `specs/v0.2/spec.md` ("the spec"). The reference prototype implements it but the rules this revision adds, which spec Section 18 lists ("Where the reference prototype differs") and Appendix A marks; `paykit-lib`, with `pubky-switch-core` for the Switch's rules, implements its format rules except the failed-attempt accounting and release rules and ledger repair (5.5), `ledger_handoff` and its grant-history and later-write checks (2, 5.4), the settlement marks, the selling-scope requirements of `paykit_settlements` and `paykit_contacts`, the outbound `paykit_contacts` requirements for extension messages, Allowance proposals and answers and recovery asks, and the deleted-record rules, including `lost_to_delete` (1.5, 3.1, 5; spec Section 18), whose code, checks and vectors are to come; an independent implementation, shared separately, written from this document alone, hasn't run this revision's vectors. `paykit-lib`'s vector tests on this repository's `v0.2` branch generate and check the stored values as that branch holds them, including the stale Allowance cases excluded below, and `pubky-switch-core`'s check every vector of the Switch's, in public code anyone can run. The spec decides behaviour; this document decides bytes. It builds on the Switch wire format ([`spec/wire-format.md`](https://github.com/pubky/pubky-switch/blob/28562dc9095d09e1d9b28d1fe7faa9c0f4d676e3/spec/wire-format.md) of the pubky-switch repository, at commit `28562dc9095d09e1d9b28d1fe7faa9c0f4d676e3`, the commit the spec builds on), which defines every format Paykit uses but its own: identities, certificates, app records, envelopes and the message frame, operations, the HTTP API and the rest. It settles every wire detail of Paykit's own that the spec leaves open, taking the phase 2 prototype, the reference prototype, as the source of truth for what it implements, so that a second team can build an interoperable implementation of the defined portions without reading the prototype. The incomplete paths below have no interoperable positive wire contract yet. Where this document had to choose something the prototype doesn't fix, Appendix A says so.
 
-**Test vectors.** `specs/v0.2/vectors/` holds Paykit's test vectors for its encodings, signatures, derivations, messages and record values; its `README.md` lists the files. They use the Switch's algorithms, not its vector set: every key, certificate, app record, policy, record key and sealed value in them is Paykit's own, from the fixed seeds of its `README.md`: identities alice and bob, alice's apps `wallet`, `phone` and `executor`, bob's apps `shop` and `cap`. Every example in this document comes from those files, but 5.7's, whose vectors come with the code that implements settlement marks. `paykit-lib` on this repository's `v0.2` branch generates the stored values as that branch holds them (`specs/v0.2/vectors/README.md`, How the files were generated). In `allowance_usage.json`, `/description`, `/cases/2`, `/cases/3`, `/cases/6`, `/cases/7` and `/compaction` are stale and excluded from current conformance requirements: their failed-release expectations contradict 5.5's default-spent rule and lack the durable never-dispatched evidence it requires. Reproducing them does not certify current accounting. The other cases and term-format checks remain normative. The runtime, generator and replacement cases implementing that distinction must land before release; the vectors README gives the exact scope.
+**Test vectors.** `specs/v0.2/vectors/` holds Paykit's test vectors for its encodings, signatures, derivations, messages and record values; its `README.md` lists the files. They use the Switch's algorithms, not its vector set: every key, certificate, app record, policy, record key and sealed value in them is Paykit's own, from the fixed seeds of its `README.md`: identities alice and bob, alice's apps `wallet`, `phone` and `executor`, bob's apps `shop` and `cap`. Examples for the Private Payment List version pair (4.10, 4.13 and 4.14), publication records (5.8) and settlement marks (5.7) describe the required formats; their vectors come with the code that implements them. Other examples come from those files. Stored vector cases containing a Private Payment List version, its request hint, proof or used entry do not yet establish conformance to the pair: their generator and replacement cases must land on `v0.2` before they are copied here. Unaffected rules and cases remain normative. `paykit-lib` on this repository's `v0.2` branch generates the stored values as that branch holds them (`specs/v0.2/vectors/README.md`, How the files were generated). In `allowance_usage.json`, `/description`, `/cases/2`, `/cases/3`, `/cases/6`, `/cases/7` and `/compaction` are stale and excluded from current conformance requirements: their failed-release expectations contradict 5.5's default-spent rule and lack the durable never-dispatched evidence it requires. Reproducing them does not certify current accounting. The other cases and term-format checks remain normative. The runtime, generator and replacement cases implementing that distinction must land before release; the vectors README gives the exact scope.
 
 **Choices.** Where the spec is silent, Appendix A records the choice this document made.
 
@@ -16,6 +16,7 @@
   |---|---|
   | `amount` | decimal amount string (1.2) |
   | `uuid` | UUID v4 string (Switch wire 1.7) |
+  | `list-version` | required positive `generation` and `counter` integers, ordered lexicographically (4.13) |
 
   The other types are the Switch's (Switch wire, Conventions).
 - **Absent and null.** "Req: no" means the member may be missing. Writers omit absent optional members, except where a table says the member is always written, and except in the shared record values of Section 5, whose writers may write every member with `null` for absent (the prototype does). Readers treat `null` like a missing member, unless the table says `null` has its own meaning.
@@ -28,7 +29,7 @@
 
 Paykit's documents follow the JSON rules of the Switch (Switch wire 1.1). What Paykit adds:
 
-- **Integers** follow the Switch's rule (Switch wire 1.1), outside the opaque members below. Paykit documents carry no other numbers. Times are never integers on the wire, except the Private Payment List `version` (Unix milliseconds) and period starts inside derivations.
+- **Integers** follow the Switch's rule (Switch wire 1.1), outside the opaque members below. Paykit documents carry no other numbers. Times are never integers on the wire; period starts inside derivations use the specified integer encoding. A Private Payment List version is an ordering pair (4.13), and neither member is a time.
 - **Opaque members** of Paykit's message bodies, besides the Switch's:
   - a message body's `metadata` (Switch wire 5.1, Sections 4.5 and 4.11);
   - the `proof` of a `paykit.payment_proof` body (4.10);
@@ -82,6 +83,7 @@ Paykit's identifiers, beside the Switch's (Switch wire 1.7):
 | `payer_activity` | payment without a request | `lp(own identity, attempt ID)` |
 | `payee_activity` | payment without a request | `lp(Payment Endpoint Identifier text, settlement ID)`, below |
 | `payment_lists` | one per payee app | `lp(payee identity, publishing app ID (16 bytes))` |
+| `private_list_publications` | one per publishing app, recipient and generation | `lp(publishing app ID (16 bytes), recipient identity (32 bytes), u64(publishing identity generation))` |
 | `allowances`, `allowance_ledgers` | one per Allowance | `lp(counterparty identity, allowance_id text)` |
 | `block_floor` | the one record | `lp(own identity)` |
 | `settlements` | one per bucket of settlements | `lp(u64(bucket))`, the bucket a number from 0 to 1023, below |
@@ -99,7 +101,7 @@ Paykit's identifiers, beside the Switch's (Switch wire 1.7):
   The vectors' payment without a request uses `bitcoin-txid` (`identifiers.json`).
 - **Settlement tags and buckets** (5.7): a settlement's tag is `derive("paykit/v1/settlement", "tag", blind(lp(settlement ID)))`. Its bucket is `u16_be(tag[0..2]) >> 6`, 0 to 1023, and a mark stores bytes 2 to 13; bits 10 to 15 are unused. An occurrence's tag is the first 8 bytes of `derive("paykit/v1/settlement", "occurrence", blind(natural key))`, the natural key of the occurrence's `payee_activity` record (above), which is the same under every label's policy. Both are blinded under the naming key, so no payer can aim a settlement at a bucket or a tag, and no app that can't name a settlement or an occurrence can tell which a tag is.
 
-Vectors: `identifiers.json` `request_hash`, `obligations` with the blinded inputs of each, and `terms_hash`. The record keys of these natural keys are `identifiers.json` `record_keys`. Settlement tags and buckets have no vectors yet: they come with the code that implements them (5.7).
+Vectors: `identifiers.json` `request_hash`, `obligations` with the blinded inputs of each, and `terms_hash`. The record keys of these natural keys are `identifiers.json` `record_keys`. Settlement tags/buckets (5.7) and publication keys, bindings and protected policies (5.8) have no vectors yet: they come with the code that implements them.
 
 ## 2. Signatures
 
@@ -431,7 +433,7 @@ The payee's details for one Billing Period of a recurring request (spec 8.2).
 | `billing_period` | Billing Period | for a recurring request | | |
 | `payment_endpoint_identifier` | string | yes | the identifier paid | |
 | `payment_app_id` | app-id | yes | the payee app whose endpoint was paid | |
-| `list_version` | int | when paid to a Private Payment List | that list's `version` | |
+| `list_version` | list-version | when paid to a Private Payment List | the exact pair of that list (4.13), bound to its publishing app and this payer | |
 | `amount` | Amount | for a payment without a request | | a request's amount comes from the request |
 | `allowance_id` | uuid | for a payment under an Allowance | | omitted for every other payment, whether or not the user confirmed it (spec 8.2) |
 | `label` | string | for a labelled request | the request's `label` (4.5) | absent for an unlabelled request and a payment without one |
@@ -482,7 +484,7 @@ Without a request:
     "value": "0.0015"
   },
   "attempt_id": "mAFdg5_0tVNjmrgiTUZW4g",
-  "list_version": 1767225960000,
+  "list_version": { "generation": 7, "counter": 12 },
   "payment_app_id": "brrz3m6g5rci6iqnzke44q4djc",
   "payment_endpoint_identifier": "btc-bitcoin-p2wpkh",
   "proof": {
@@ -569,13 +571,13 @@ By request and Billing Period (`messages.json` `resend_request_period`):
 
 ### 4.13 `private_payment_list`
 
-The latest list of one publishing app (spec 8.4).
+The latest list of one publishing app for one recipient identity (spec 8.4).
 
 | Field | Type | Req | Constraints | Notes |
 |---|---|---|---|---|
-| `version` | int | yes | Unix milliseconds of publishing, higher than every earlier version from this app, even after a restore; while the app's lists wait for its host after a restore, above the later of the publishing time and the highest service time it verified by more than twice the clock tolerance (spec 8.4, Withdrawing a list) | |
+| `version` | list-version | yes | the pair reserved for this publishing app and recipient (spec 8.4.1); strictly greater than every earlier reservation of that tuple | neither member is a time |
 | `payment_endpoints` | object | yes | Payment Endpoint Identifier to endpoint | |
-| `expires_at` | time | yes | chosen by the publishing app from its current time, not from `version`; the prototype sets 30 days after publishing | a list without it, or with one that doesn't parse, is dropped (Switch wire 5.1 check 10). Payers use a list only until the earlier of `expires_at` and 30 days after its inbox accepted it (`accepted_at`), on their clock; past that it has expired, and they ask for a newer one (4.14) |
+| `expires_at` | time | yes | chosen by the publishing app from actual current time, not from either version member; 30 days after publishing is recommended | a list without it, or with one that doesn't parse, is dropped (Switch wire 5.1 check 10). Payers use a list only until the earlier of `expires_at` and 30 days after its inbox accepted it (`accepted_at`), on their clock; past that it has expired, and they ask for a newer one (4.14) |
 
 An endpoint:
 
@@ -584,7 +586,13 @@ An endpoint:
 | `payload` | string | yes | non-empty |
 | `single_use` | bool | no | default `false`, omitted when `false`; paying it consumes this list version |
 
-A list with a lower or equal `version` than one held from the same app is ignored (Switch spec 8.2). An expired list is treated as missing (spec 8.4): the payer sends `private_payment_list_request`.
+A `list-version` is a JSON object with required `generation` and `counter`, each a Switch integer from 1 through 9007199254740991. Writers write the members in that order. Compare generation first, then counter, numerically; do not pack the pair into a number or compare JSON text. Generation is the publishing identity's verified `identity.json.generation`, not its document version, data epoch, the recipient inbox generation or a local recovery number. Changing either member changes the version.
+
+After the ordinary authentication, certificate/scope, signature, recipient, duplicate and body checks, the receiver establishes a verified sender identity document with generation at least the advertised generation. If its copy is behind it fetches/revalidates the current document; failure holds the message and installs no list. An app-signed numerical claim is not identity-generation evidence. A legitimate queued message may have a lower generation than the current document: its ordinary certificate-at-acceptance and expiry checks still apply.
+
+For the same publisher identity, publisher App ID and recipient identity, a greater pair replaces the held list, a lower pair does not, and the same pair with the same message hash is a duplicate. The same pair with another message hash is an equivocation: reject it, report the authenticated writer, and retain the held message. An empty greater list leaves no payable endpoint. Keep its highest pair and message hash even when empty or expired, and keep every `used` entry when replacing it (5.4). Expiry permits a request for a newer list (spec 8.4); it does not erase ordering or consumption evidence. Existing record-loss/deletion holds still apply when that evidence is unavailable. The recipient does not read the publisher's private counter or origin receipt.
+
+`created_at`, `expires_at`, accepted-at age and replay deadlines remain actual-time checks. A new UUID, changed expiry, renewal, changed endpoints or newly constructed withdrawal is a new publication and consumes another reservation; an unchanged retry keeps its pair and exact signed bytes. Pair fields impose no future-time exception. The required generation exposure and pair verifiers are not implemented by the present dependency; spec 8.4.1 states the adoption boundary.
 
 **Renewal** (Switch spec 4.2): the same rule as for records (3.2). Once less than half a list's lifetime (publishing to `expires_at`) remains, the publishing app sends the counterparty a newer list at its next run, with a higher `version` and a new `expires_at`; like any newer list it carries fresh single-use endpoints (spec 8.4). A list with more than half its lifetime left is not sent again.
 
@@ -600,7 +608,7 @@ A list with a lower or equal `version` than one held from the same app is ignore
     }
   },
   "expires_at": "2026-01-31T00:06:00.000Z",
-  "version": 1767225960000
+  "version": { "generation": 7, "counter": 12 }
 }
 ```
 
@@ -608,15 +616,17 @@ A list with a lower or equal `version` than one held from the same app is ignore
 
 | Field | Type | Req | Notes |
 |---|---|---|---|
-| `held_version` | `int \| null` | no, always written | the `version` the sender holds, `null` when none |
+| `held_version` | `list-version \| null` | yes, always written | the complete pair the sender holds, `null` when none |
 | `app_id` | app-id | no | the publishing app asked about |
 
 ```json
 {
   "app_id": "brrz3m6g5rci6iqnzke44q4djc",
-  "held_version": 1767225960000
+  "held_version": { "generation": 7, "counter": 12 }
 }
 ```
+
+A `held_version` is a hint from the requester, never authority to advance the publisher's counter or choose a generation. An unexpectedly greater hint is held and reconciled with the actual signed offered message; it does not reset or fast-forward the publication record.
 
 ### 4.15 `allowance_proposal`
 
@@ -761,6 +771,7 @@ Until a complete generic Switch contract is defined, implemented and pinned here
 | `payee_activity` | `paykit_request` | `["paykit_request"]` | |
 | `payee_activity`, a request sent under a label | `paykit_request:<label>` | `["paykit_request:<label>"]` | `identifiers.json` `policies` (`shop1`) |
 | `payment_lists` | `paykit_pay` | `["paykit_pay"]` | |
+| `private_list_publications` | `paykit_request` | `["paykit_request"]` | protected origin with `birth_generation` (5.8); vectors accompany implementation |
 | `allowances` | `paykit_allowance` | `["paykit_allowance"]` | |
 | `allowance_ledgers` | `paykit_allowance` | `["paykit_allowance_execute"]` | |
 | `block_floor` | `paykit_pay` | `["paykit_pay"]` | |
@@ -808,7 +819,7 @@ One message per role (spec 6).
 | `manual_only` | bool | no | `true` or absent: a payer's request record, or a payer's period record; no app pays the occurrence automatically, an executor or an app paying a Billing Period without its user's confirmation; the batch of an attempt its user started by hand writes it too, on the occurrence's record, creating a period record the period lacks; and while the request record of a recurring request holds it no executor accepts that request and no app pays one of its Billing Periods automatically (spec 8.2, 8.3) |
 | `lost_to_delete` | `b64(32)` | no | the item hash of the delete a write-back from an older copy answered (Section 5, Put back over a delete) |
 
-`unrequested`: `{ "app_id": app-id, "endpoint_id": string, "payload": string, "source": "request" | "list" | "public", "list_version": int (for a list), "single_use": bool, "amount": Amount }`. `list_version` is present for a list and absent otherwise, and the stored proof's `list_version` is the same (4.10). `amount` is the asset and amount being paid: every app writes it with the `attempt`, and the stored proof's `amount` is the same.
+`unrequested`: `{ "app_id": app-id, "endpoint_id": string, "payload": string, "source": "request" | "list" | "public", "list_version": list-version (for a list), "single_use": bool, "amount": Amount }`. `list_version` is present for a list and absent otherwise, and the stored proof's complete pair is the same (4.10). The payer journal destination, consumed-list keys and proof lookup retain both members with the publisher identity/App ID and recipient binding; equal counters from another generation or recipient do not identify the same destination. `amount` is the asset and amount being paid: every app writes it with the `attempt`, and the stored proof's `amount` is the same.
 
 `request_hash`, `billing_period` and `earlier_details` appear only in a period record, `attempt_id` and `unrequested` only in that of a payment without a request, and `allowance_id` and `reassociations` only in a payer's request record, each by the record's binding (below), and `manual_only` only where the table says; a record that carries one anywhere else is invalid (vectors: `sealed.json` `activity_records`).
 
@@ -886,7 +897,7 @@ Example (alice's `payer_activity` record of bob's request, certificate and plain
 | `payee` | pubky | yes | |
 | `app_id` | app-id | yes | the publishing app |
 | `list` | Stored message | yes | the latest `private_payment_list` |
-| `used` | `array<object>` | no | single-use endpoints used: `{ "version": int, "endpoint": string, "attempt_id": b64(16) }`, each written in the batch of the `attempt` that pays it, whatever it pays: a request, a Billing Period, an automatic payment or none (spec 7.2) |
+| `used` | `array<object>` | no | single-use endpoints used: `{ "version": list-version, "endpoint": string, "attempt_id": b64(16) }`, each written in the batch of the `attempt` that pays it, whatever it pays: a request, a Billing Period, an automatic payment or none (spec 7.2) |
 | `msg_ids` | `array<uuid>` | no | bounded as in 5.3: the list's own and the 16 newest others |
 | `lost_to_delete` | `b64(32)` | no | the item hash of the delete a write-back from an older copy answered (Section 5, Put back over a delete) |
 
@@ -894,6 +905,8 @@ Example (alice's `payer_activity` record of bob's request, certificate and plain
 
 - the key is the one derived from `payee` and `app_id`;
 - the stored list verifies, addressed to this identity, its sender identity is `payee` and its sender app is `app_id`.
+
+A `used` entry consumes the entire pair for this publishing app and recipient, not merely its named endpoint. The pair comparison of 4.13 also governs every held-to-later and loss-floor comparison of these versions.
 
 **Seen lists** (Switch spec 8.2; Section 4.13): a reader that holds a `payment_lists` record ignores, and shows with its writer, a later write whose list has a lower `version`, or the same `version` and another hash, and one that drops a `used` entry it saw, whatever the newer list's `version`: a newer list doesn't reset `used`.
 
@@ -1150,6 +1163,47 @@ Example (a bucket holding two marks, a one-time request's and a Billing Period's
 ```
 
 Vectors: none yet. They come with the code that implements this section, with `paykit-lib`'s checks of it (spec 18).
+
+### 5.8 `private_list_publications`
+
+The publisher's own current reservation authority for one App ID, recipient identity and verified publishing identity generation (spec 8.4.1). It uses the generic standalone protected origin of Pubky Switch `spec/record-origins.md`, not a service-allocated protocol counter. Its positive path remains unavailable until the generic contract and implementing Switch pin required by spec 8.4.1 exist.
+
+For App ID A (16 decoded bytes), recipient R (32 decoded bytes), and positive generation g:
+
+```text
+natural_key = lp(A, R, u64(g))
+blinded_key = blind(natural_key)
+policy = { read_scope: "paykit_request",
+           write_scopes: ["paykit_request"],
+           protection: { kind: "origin", birth_generation: g } }
+collection_id = derive("pubky-switch/v1/collection",
+                       "private_list_publications", own_identity)
+record_key = derive("pubky-switch/v1/record", "private_list_publications",
+                    blinded_key, protected_policy_hash(policy))
+origin.binding = hash(lp("paykit/v1/private-list-publication",
+                         own_identity, collection_id, record_key,
+                         blinded_key, u64(g)))
+origin.child = null
+```
+
+`protected_policy_hash` and the origin/lineage encodings are exclusively the generic Switch contract's. Birth generation participates in that hash and must equal the actual first application generation. The naming key is the publisher identity's stable naming key. The collection, scopes, encoding and inputs are fixed: a fresh salt, alternate policy/collection or local epoch cannot create another namespace for this tuple. The service verifies `id_inputs`; Paykit also recomputes the natural key and every binding from the opened value. No recipient, natural key or unkeyed recipient hash is placed in cleartext policy or service metadata. The unlabelled `paykit_request` scope already authorizes publication; a labelled-only selling scope does not.
+
+| Field | Type | Req | Notes |
+|---|---|---|---|
+| `v` | int | yes | 1 |
+| `publisher` | app-id | yes | this publishing App ID, also the authenticated writer |
+| `recipient` | pubky | yes | the message recipient and natural-key recipient |
+| `generation` | int | yes | positive through 9007199254740991; key/policy birth generation and prepared message generation |
+| `counter` | int | yes | positive through 9007199254740991; the exact reserved message counter |
+| `grant_id` | `b64(16) \| null` | yes | null for withdrawal; otherwise the per-recipient host authorization of spec 8.4.1 |
+| `message_id` | uuid | yes | the prepared message's UUID v4 |
+| `message_hash` | `b64(32)` | yes | `hash(exact prepared message JSON bytes)`, excluding its detached signature |
+
+Writers use this compact member order. Required null is meaningful here, not an omitted member. The prepared message's complete body, sender identity/App ID, recipient, pair, hash and grant/withdrawal intent must agree with this value. The publisher signs its original and every subsequent counter write with that App ID. Read-time authority requires the dated current operation's signature by that App ID and the complete generic evidence of spec 8.4.1, not a retained transcript of every earlier writer. Another scope-authorized current writer or retained contradictory writer evidence is a hold and is reported. Current service evidence authenticates the exact application, origin and lineage; a local value or equal counter supplies none of it. The receiver does not require access to this private record.
+
+The known fields occupy at most 321 compact JSON bytes. The complete preserved value, unknown members included, MUST fit 508 bytes; otherwise publication holds without truncation. Always seal it in the 512-byte padded plaintext bucket, 528 ciphertext bytes including its authentication tag. A shorter withdrawal uses the same bucket. Endpoints and full offer history do not belong here; they stay in their bounded local/journal stores.
+
+The original carries the binding above, `child: null`, `id_inputs`, zero ordinary expected version and its successful strict `record_absent` condition. Subsequent writes omit `origin` and carry unchanged policy, exact ordinary expected version and generic `record_current` condition on the exact current application/lineage. A no-op is never evidence that those conditions held. The protected origin slot is permanent and non-recycling in its uninterrupted account history, including after ordinary value deletion/forgetting and cooperative transfer. Retired, recovered, unknown, divergent, unreadable or deleted authority holds; absence never becomes permission to reset. Spec 8.4.1 defines durable preparation, application proof, signing, queueing and generation changes, and forbids same-generation repair from a backup. These are required formats and integration rules; their positive and rejection vectors accompany the implementing library/SDK.
 
 ## Appendix A. Choices this document made
 
