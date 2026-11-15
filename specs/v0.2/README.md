@@ -16,6 +16,10 @@ The design is still open to review. It may change before it is frozen. The spec'
 | [`wire-format.md`](wire-format.md) | The wire format. It decides bytes: Paykit's encodings, derivations, signature, certificate and record checks, messages and shared record values, so that a second team can build a compatible implementation. |
 | [`vectors/`](vectors/) | Test vectors for the wire format, as JSON files. Its `README.md` lists the files and how they were made. They are self-contained: Paykit's own fixed keys, certificates and records, built with the Switch's algorithms. |
 
+## Settlement implementation status
+
+The settlement bucket and deletion-boundary rules in wire 5.7 are requirements for the implementation. Boundary-only buckets, monotonic boundary merging, authenticated absence at creation, exact delete-incarnation checks at put-back, provenance checks by later readers, authenticated delete application and evidence order, publication before the service acknowledges a delete, and the corresponding runtime and conformance tests are not implemented here. The pinned Switch needs generic support for the publication-time distinction and authenticated incarnation evidence, as well as the client's durable publication and acknowledgment hold. A prior read, zero-version condition, local notification or queued repair does not provide those guarantees. Publication before acknowledgment uses existing atomic batch and cursor semantics; the additional creation and provenance support is a release requirement, not a Switch wire format defined here. The specification's Section 18 lists the required scenarios, and Section 13 states the retention and availability limits.
+
 ## Shared separately
 
 The reference prototype, its results and an independent implementation aren't in this folder. They are shared separately. The documents name them but give no paths.
