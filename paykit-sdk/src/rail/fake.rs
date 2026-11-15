@@ -73,6 +73,7 @@ struct Inner {
     max_fee: Option<paykit_lib::Decimal>,
     next_fees: VecDeque<Option<paykit_lib::Decimal>>,
     selections: Vec<(Vec<PaymentEndpointCandidate>, Option<PaymentAmount>)>,
+    proof_checks: Vec<ProofCheck>,
 }
 
 /// An in-memory payment rail shared by payers and payees. Tests only.
@@ -172,6 +173,11 @@ impl FakeRail {
     /// the order of the calls.
     pub fn selections(&self) -> Vec<(Vec<PaymentEndpointCandidate>, Option<PaymentAmount>)> {
         self.lock().selections.clone()
+    }
+
+    /// Every proof handed to [`Rail::verify`], in the order of the calls.
+    pub fn proof_checks(&self) -> Vec<ProofCheck> {
+        self.lock().proof_checks.clone()
     }
 
     /// The identifiers it pays, in its order.
@@ -447,7 +453,8 @@ impl Rail for FakeRail {
     }
 
     fn verify(&self, check: ProofCheck) -> BoxFuture<'_, Result<Option<u64>, RailError>> {
-        let inner = self.lock();
+        let mut inner = self.lock();
+        inner.proof_checks.push(check.clone());
         let answer = inner.payments.get(&check.attempt_id).and_then(|paid| {
             let RailOutcome::Paid(RailPaid {
                 proof, paid_at_ms, ..

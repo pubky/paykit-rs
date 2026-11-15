@@ -16,7 +16,7 @@ use pubky_switch_core::time::rfc3339;
 use serde_json::{Map, Value};
 
 use crate::allowances::AllowanceTerms;
-use crate::amount::{Asset, Decimal, PaymentAmount, Rate};
+use crate::amount::{is_conversion_segment, Asset, Decimal, PaymentAmount, Rate};
 use crate::derive::settlement_id;
 use crate::error::{ensure, invalid, Error, Result};
 use crate::identifiers::{
@@ -139,15 +139,6 @@ fn selector_asset(selector: &str) -> &str {
     selector.split('-').next().unwrap_or(selector)
 }
 
-/// Whether `text` is one segment of the conversion convention: non-empty, lower-case ASCII
-/// letters and digits (Paykit wire 4.4, `specs/payment-conversion.md`).
-fn is_conversion_segment(text: &str) -> bool {
-    !text.is_empty()
-        && text
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-}
-
 /// The constraints of conversion terms (Paykit wire 4.4, `specs/payment-conversion.md`), for
 /// a request in `asset` whose accepted endpoints are `accepted`, already in the form
 /// `<asset>-<rail>-<format>` (Paykit wire 1.4):
@@ -186,10 +177,6 @@ fn check_conversion_terms(
 fn check_rate_selectors(rates: &[Rate], visible: &[&PaymentEndpointIdentifier]) -> Result<()> {
     for rate in rates {
         let selector: Vec<&str> = rate.asset().as_str().split('-').collect();
-        ensure(
-            (1..=2).contains(&selector.len()) && selector.iter().all(|s| is_conversion_segment(s)),
-            "Paykit wire 4.4: a rate's asset is <asset> or <asset>-<rail>, each segment lower-case letters and digits",
-        )?;
         let matches = |id: &&PaymentEndpointIdentifier| {
             let segments: Vec<&str> = id.as_str().split('-').collect();
             segments.get(..selector.len()) == Some(&selector[..])
@@ -1909,6 +1896,10 @@ mod tests {
 
     #[test]
     fn test_request_writer_refuses_what_check_10_drops() {
+        assert!(matches!(
+            Rate::new(Asset::new("BTC").unwrap(), Decimal::new("1").unwrap()),
+            Err(Error::Validation(_))
+        ));
         let good = PaymentRequest::from_body(&body(request())).unwrap();
         let written = good.to_body().unwrap();
         assert_eq!(PaymentRequest::from_body(&written).unwrap(), good);
@@ -1999,13 +1990,6 @@ mod tests {
                 "a rate selector twice",
                 PaymentRequest {
                     conversion: Some(Conversion::Fixed(vec![rate("btc"), rate("btc")])),
-                    ..good.clone()
-                },
-            ),
-            (
-                "a rate selector in upper case",
-                PaymentRequest {
-                    conversion: Some(Conversion::Fixed(vec![rate("BTC")])),
                     ..good.clone()
                 },
             ),

@@ -230,21 +230,29 @@ pub struct Rate {
 }
 
 impl Rate {
-    /// A rate the caller supplies, whose value must be above zero (Paykit wire 1.2).
+    /// A rate the caller supplies: its selector is `<asset>` or `<asset>-<rail>`, each
+    /// segment lower-case letters and digits, and its value is above zero (Paykit wire 4.4).
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] for a zero value.
+    /// [`Error::Validation`] for a malformed selector or a zero value.
     pub fn new(asset: Asset, value: Decimal) -> Result<Self> {
         Self::read(asset, value).map_err(Error::into_validation)
     }
 
-    /// A rate read from a document (Paykit wire 1.2).
+    /// A rate read from a document (Paykit wire 1.2, 4.4).
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] for a zero value.
+    /// [`Error::Invalid`] for a malformed selector or a zero value.
     pub(crate) fn read(asset: Asset, value: Decimal) -> Result<Self> {
+        let selector: Vec<&str> = asset.as_str().split('-').collect();
+        if !(1..=2).contains(&selector.len()) || !selector.iter().all(|s| is_conversion_segment(s))
+        {
+            return invalid(
+                "Paykit wire 4.4: a rate's asset is <asset> or <asset>-<rail>, each segment lower-case letters and digits",
+            );
+        }
         if value.is_zero() {
             return invalid("Paykit wire 1.2: a rate is above zero");
         }
@@ -260,6 +268,15 @@ impl Rate {
     pub fn value(&self) -> &Decimal {
         &self.value
     }
+}
+
+/// Whether `text` is one segment of the conversion convention: non-empty, lower-case ASCII
+/// letters and digits (Paykit wire 4.4, `specs/payment-conversion.md`).
+pub(crate) fn is_conversion_segment(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
 }
 
 /// The amount to pay to an endpoint (Paykit spec 7.2 step 1, Paykit wire 4.4, 4.9,
@@ -288,8 +305,8 @@ impl Rate {
 /// # Errors
 ///
 /// [`Error::Validation`] for an `endpoint` not of the form `<asset>-<rail>-<format>`,
-/// `fraction_digits` above 18, a rate selector given twice, or an amount to pay whose value
-/// times 10^18 isn't below 2^128.
+/// `fraction_digits` above 18, explicit rates that are empty or repeat a selector, or an
+/// amount to pay whose value times 10^18 isn't below 2^128.
 ///
 /// # Examples
 ///
@@ -330,6 +347,9 @@ pub fn amount_for_endpoint(
         return validation(
             "Paykit wire 1.2: an endpoint's smallest unit has at most 18 fraction digits",
         );
+    }
+    if rates.is_some_and(<[Rate]>::is_empty) {
+        return validation("Paykit wire 4.4: rates are non-empty when present");
     }
     let rates = rates.unwrap_or_default();
     for (i, rate) in rates.iter().enumerate() {

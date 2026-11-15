@@ -822,8 +822,9 @@ impl Paykit {
     /// endpoint is the one in valid period details the proof names, or else the request's;
     /// with per-period endpoints a later period is paid only to the destination of the
     /// details its proof names, so one paid elsewhere is `None`. An identifier absent from
-    /// the selected endpoints, or excluded by the request, is refused before the method's
-    /// check. Without fixed endpoints, the method verifies the destination itself.
+    /// the selected endpoints, excluded by the request, or naming an app other than that
+    /// source's signed owner is refused before the method's check. Without fixed endpoints,
+    /// the method verifies the destination itself.
     ///
     /// **One payment, one occurrence**, as in v0.1: a payment whose settlement this app has
     /// credited to another request, Billing Period or payment without a request of the same
@@ -870,7 +871,7 @@ impl Paykit {
         let request_record = self.payee_request_record(&target, &bound).await?;
         let id = &proof.payment_endpoint_identifier;
         let (amount, payload) = match request_record.as_ref().and_then(request_of) {
-            Some((_, request)) => {
+            Some((stored_request, request)) => {
                 if request
                     .accepted_payment_endpoint_identifiers
                     .as_ref()
@@ -885,13 +886,17 @@ impl Paykit {
                         .into_iter()
                         .find_map(|d| match d.body() {
                             Body::PaymentPeriodDetails(details) if d.hash() == *hash => {
-                                Some(details)
+                                Some((d.message().from.app_id, details))
                             }
                             _ => None,
                         })
                 });
-                let from_details =
-                    named_details.and_then(|details| details.payment_endpoints.as_ref());
+                let from_details = named_details.and_then(|(owner, details)| {
+                    details
+                        .payment_endpoints
+                        .as_ref()
+                        .map(|endpoints| (owner, endpoints))
+                });
                 // With per-period endpoints, the request's own serve only its first Billing
                 // Period: a later one is credited only for a payment to the destination of
                 // the period details its proof names (Paykit spec 8.2).
@@ -907,12 +912,15 @@ impl Paykit {
                 if later_period && from_details.is_none() {
                     return Ok(None);
                 }
-                // Choose the destination source before looking up the identifier: an
-                // endpoint absent from that source is refused, never taken from another.
+                // An endpoint map and its signed owner are one destination source (Paykit
+                // wire 4.4). Select them together before looking up the identifier; neither
+                // an absent identifier nor another app falls back to another source.
                 let endpoints = match from_details {
                     Some(endpoints) => Some(endpoints),
                     None => match &request.destination {
-                        RequestDestination::Endpoints(endpoints) => Some(endpoints),
+                        RequestDestination::Endpoints(endpoints) => {
+                            Some((stored_request.message().from.app_id, endpoints))
+                        }
                         RequestDestination::RequiredApp(app) if *app != proof.payment_app_id => {
                             return Ok(None);
                         }
@@ -920,10 +928,15 @@ impl Paykit {
                     },
                 };
                 let payload = match endpoints {
-                    Some(endpoints) => match endpoints.get(id) {
-                        Some(payload) => Some(payload.clone()),
-                        None => return Ok(None),
-                    },
+                    Some((owner, endpoints)) => {
+                        if owner != proof.payment_app_id {
+                            return Ok(None);
+                        }
+                        match endpoints.get(id) {
+                            Some(payload) => Some(payload.clone()),
+                            None => return Ok(None),
+                        }
+                    }
                     None => None,
                 };
                 (request.amount.clone(), payload)

@@ -70,6 +70,10 @@ fn body_round_trips(body: &Body, refs: usize, name: &str) -> bool {
 
 /// Requests changed member by member, from one valid request.
 fn request_variants(base: &PaymentRequest) -> Vec<(String, PaymentRequest)> {
+    assert!(matches!(
+        Rate::new(Asset::new("BTC").unwrap(), Decimal::new("1").unwrap()),
+        Err(paykit_lib::Error::Validation(_))
+    ));
     let id = |s: &str| PaymentEndpointIdentifier::parse(s).unwrap();
     let rate = |s: &str| Rate::new(Asset::parse(s).unwrap(), Decimal::parse("1").unwrap()).unwrap();
     let recurrence = paykit_lib::periods::Recurrence::from_json(&json!({
@@ -105,7 +109,6 @@ fn request_variants(base: &PaymentRequest) -> Vec<(String, PaymentRequest)> {
         Some(Conversion::Fixed(Vec::new())),
         Some(Conversion::Fixed(vec![rate("btc")])),
         Some(Conversion::Fixed(vec![rate("btc-lightning")])),
-        Some(Conversion::Fixed(vec![rate("BTC")])),
         Some(Conversion::Fixed(vec![rate("eth")])),
         Some(Conversion::Fixed(vec![rate("btc"), rate("btc")])),
     ];
