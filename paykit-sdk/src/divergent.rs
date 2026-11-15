@@ -2261,7 +2261,11 @@ mod tests {
     fn test_divergent_kept_proof_of_another_settlement_than_the_rails_points_elsewhere() {
         let alice =
             crate::testkit::Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
-        let bob = crate::testkit::Party::new("bob", "shop", &["paykit_request"]);
+        let bob = crate::testkit::Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
         let proof = alice.message(
             &bob,
             "paykit.payment_proof",
@@ -2278,7 +2282,7 @@ mod tests {
             record: RECORD,
             role: WriteRole::Proof,
             seen: view(true, 3).version,
-            settlement: Some(pubky_switch_core::enc::b64(b"t1")),
+            settlement: Some(pubky_switch_core::enc::b64(b"fake:t1")),
             message: KeptMessage::taken(&proof, 0),
         };
         let rail = |proof: &serde_json::Map<String, serde_json::Value>| {
@@ -2312,7 +2316,11 @@ mod tests {
     fn test_divergent_kept_after_keeps_the_first_and_the_newest_others_in_acceptance_order() {
         let alice =
             crate::testkit::Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
-        let bob = crate::testkit::Party::new("bob", "shop", &["paykit_request"]);
+        let bob = crate::testkit::Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
         let reply = || {
             alice.message(
                 &bob,
@@ -2363,7 +2371,11 @@ mod tests {
         // it can't be ordered, and a restore refuses it.
         let alice =
             crate::testkit::Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
-        let bob = crate::testkit::Party::new("bob", "shop", &["paykit_request"]);
+        let bob = crate::testkit::Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
         let reply = alice.message(
             &bob,
             "paykit.payment_request_acceptance",
@@ -2421,7 +2433,11 @@ mod tests {
             crate::testkit::Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
         let carol =
             crate::testkit::Party::new("carol", "wallet", &["paykit_pay", "paykit_contacts"]);
-        let bob = crate::testkit::Party::new("bob", "shop", &["paykit_request"]);
+        let bob = crate::testkit::Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
         let reply = |from: &crate::testkit::Party| {
             from.message(
                 &bob,
@@ -2445,7 +2461,11 @@ mod tests {
 
     #[test]
     fn test_divergent_kept_after_caps_all_senders_together() {
-        let bob = crate::testkit::Party::new("bob", "shop", &["paykit_request"]);
+        let bob = crate::testkit::Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
         let reply = |from: &crate::testkit::Party| {
             from.message(
                 &bob,
@@ -2506,7 +2526,11 @@ mod tests {
         ] {
             let alice =
                 crate::testkit::Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
-            let bob = crate::testkit::Party::new("bob", "shop", &["paykit_request"]);
+            let bob = crate::testkit::Party::new(
+                "bob",
+                "shop",
+                &["paykit_request", "paykit_settlements", "paykit_contacts"],
+            );
             let stop = alice.message(
                 &bob,
                 kind,

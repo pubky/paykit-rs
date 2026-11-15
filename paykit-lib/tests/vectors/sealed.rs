@@ -1,22 +1,27 @@
 //! `sealed.json`: record values a reader binds to their keys, the rejections, the labelled
-//! payee record and the activity records a reader takes or refuses (Paykit wire 5, 5.1, 5.3,
-//! 5.4, 5.5).
+//! payee record, the activity records a reader takes or refuses and the settlement marks
+//! (Paykit wire 5, 5.1, 5.3, 5.4, 5.5, 5.7).
 
 use paykit_lib::collections::Collection;
-use paykit_lib::derive::{natural_key, request_hash};
-use paykit_lib::records::{
-    bind_ledger, ActivityRecord, ActivitySide, AllowanceRecord, PaymentListRecord,
+use paykit_lib::derive::{
+    mark_settlement_tag, natural_key, occurrence_tag, request_hash, settlement_bucket,
+    settlement_tag,
 };
-use paykit_lib::scopes::{Label, PaykitScope, ScopeName};
+use paykit_lib::identifiers::PaymentEndpointIdentifier;
+use paykit_lib::records::{
+    bind_ledger, ActivityRecord, ActivitySide, AllowanceRecord, OccurrenceKind, PaymentListRecord,
+    SeenMerge, SettlementBoundary, SettlementBucket, SettlementMark, MAX_SETTLEMENT_MARKS,
+};
+use paykit_lib::scopes::{Label, PaykitScope, ScopeName, SETTLEMENTS};
 use pubky_switch_core::enc::b64;
-use pubky_switch_core::ident::key_of_scope;
+use pubky_switch_core::ident::{key_of_scope, Policy};
 use pubky_switch_core::records::AppCert;
 use pubky_switch_core::sealed::{aad, pad, RecordValue, SealedValue};
 use serde_json::Value;
 
 use crate::common::{
     arr, b64n, generated, hex, message_json, paykit, pubky, quoted, recertified, st, unhex32,
-    writing, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
+    writing, Keys, Place, ALICE, ALLOWANCE_ID, BOB, UNREQUESTED_TXID,
 };
 
 #[test]
@@ -40,6 +45,7 @@ pub(crate) fn check() {
     check_later_writes(&keys, &v);
     check_msg_ids_bounds(&keys, &v);
     check_allowance_records(&keys, &v);
+    check_settlement_marks(&keys, &v["settlement_marks"]);
 }
 
 /// Own cases on activity records (Paykit wire 5.3), built from the vectors' messages: the
@@ -1308,6 +1314,7 @@ pub(crate) fn generate(keys: &Keys) {
         (Place::Member("/activity_records"), member),
         (Place::Member("/msg_ids_bounds"), msg_ids_bounds(keys)),
         (Place::Member("/allowance_records"), allowance_records(keys)),
+        (Place::Member("/settlement_marks"), settlement_marks(keys)),
     ];
     cases.extend(binding_cases(keys));
     cases.extend(labelled_cases(keys));
@@ -3928,4 +3935,594 @@ fn test_activity_record_attempted_entry_naming_no_period_drops_without_a_claim()
             .unwrap(),
         [between, start]
     );
+}
+
+const SETTLEMENT_MARKS_DESCRIPTION: &str = "Wire 1.5, 5.7, spec 6: settlement bucket \
+values, their derivations and sealed encodings. accepted holds bob's one-time request, \
+Billing Period and payment-without-request marks, followed by the last mark with one known \
+delete restriction. The delete hash and put-back nonce use the seeds \
+sealed/settlement_marks/put_back/delete and sealed/settlement_marks/put_back/nonce. Each \
+settlement ID is the lower-case hex seed sealed/settlement_marks/<kind>/txid, except kind 3 \
+which uses identifiers.json's bitcoin-txid settlement. The occurrence keys refer to the \
+requests in messages.json; kind 2 uses the February period starting at 1772236800. Bucket, \
+record key and mark tags follow wire 1.5 under bob's naming key. The fixed policy reads and \
+writes paykit_settlements. Values are sealed at data epoch 1 with its key from keys.json, \
+the nonce seed sealed/settlement_marks/<kind>/nonce cut to 24 bytes, and the Switch sealed \
+AAD. Neither paykit_request nor its shop1 key opens them. example reproduces wire 5.7. \
+refused contains malformed marks and the wrong collection policy, with the library's exact \
+error. boundaries covers zero-mark known and unknown values, canonical hash sets, malformed \
+current boundaries conservatively retained as unknown, and monotone merges including \
+128-hash saturation. These are format and merge vectors; they grant no credit authority and \
+do not establish authenticated creation, delete application or continuity.";
+
+/// The seed label of the nonce of the bucket `settlement_marks` puts back over a delete.
+const PUT_BACK_NONCE_LABEL: &str = "sealed/settlement_marks/put_back/nonce";
+
+/// The data epoch of bob's `paykit_settlements` key the buckets are sealed at.
+const SETTLEMENTS_EPOCH: u64 = 1;
+
+/// One credited settlement of `settlement_marks`: its case name, kind, settlement ID and the
+/// natural key of the occurrence it was credited to.
+struct Credited {
+    name: &'static str,
+    kind: OccurrenceKind,
+    settlement_id: String,
+    occurrence: Vec<u8>,
+}
+
+/// The seed label of a `settlement_marks` value of `kind`, by its use (`txid` or `nonce`).
+fn settlement_seed_label(kind: OccurrenceKind, what: &str) -> String {
+    format!("sealed/settlement_marks/{}/{what}", kind.code())
+}
+
+/// The settlements `settlement_marks` credits, one of each kind.
+fn credited() -> [Credited; 3] {
+    let bob = pubky(BOB);
+    let txid = |kind| hex(&crate::common::seed(&settlement_seed_label(kind, "txid")));
+    [
+        Credited {
+            name: "a one-time request's mark",
+            kind: OccurrenceKind::OneTimeRequest,
+            settlement_id: txid(OccurrenceKind::OneTimeRequest),
+            occurrence: natural_key::request_record(
+                &bob,
+                &request_hash(&message_json("payment_request")),
+            ),
+        },
+        Credited {
+            name: "a Billing Period's mark",
+            kind: OccurrenceKind::BillingPeriod,
+            settlement_id: txid(OccurrenceKind::BillingPeriod),
+            occurrence: natural_key::period_record(
+                &bob,
+                &request_hash(&message_json("payment_request_recurring")),
+                1_772_236_800,
+            ),
+        },
+        Credited {
+            name: "a payment without a request's mark",
+            kind: OccurrenceKind::PaymentWithoutRequest,
+            settlement_id: UNREQUESTED_TXID.to_owned(),
+            occurrence: natural_key::payee_payment_record(
+                &PaymentEndpointIdentifier::parse("btc-bitcoin-p2wpkh").unwrap(),
+                UNREQUESTED_TXID.as_bytes(),
+            ),
+        },
+    ]
+}
+
+/// The bucket and mark of a credited settlement, under bob's naming key.
+fn credited_mark(keys: &Keys, c: &Credited) -> (u16, SettlementMark) {
+    let nk = keys.identity(&pubky(BOB)).naming_key();
+    let tag = settlement_tag(&nk, c.settlement_id.as_bytes());
+    let mark = SettlementMark::new(&tag, c.kind, occurrence_tag(&nk, &c.occurrence));
+    (settlement_bucket(&tag), mark)
+}
+
+/// A mark as `settlement_marks` lists it.
+fn mark_json(mark: &SettlementMark) -> Value {
+    serde_json::json!({
+        "kind": mark.kind.code(),
+        "occurrence_tag_hex": hex(&mark.occurrence),
+        "settlement_tag_hex": hex(&mark.settlement),
+    })
+}
+
+/// A bucket value of raw mark bytes, as no reader takes it.
+fn raw_bucket(bytes: &[u8]) -> String {
+    format!(r#"{{"v":1,"marks":"{}"}}"#, b64(bytes))
+}
+
+/// The value of wire 5.7's example.
+const SETTLEMENT_MARKS_EXAMPLE: &str =
+    r#"{"v":1,"marks":"fMwzZXxKU-r3TUswAdLhLnFb3qh7uLRaxJvmJjPm0NJwAoHqru5D8S_X"}"#;
+
+/// `settlement_marks` (Paykit wire 5.7): bob's buckets of a settlement of each kind, sealed and
+/// opened; wire 5.7's example; and the values a reader refuses.
+fn settlement_marks(keys: &Keys) -> Value {
+    use serde_json::json;
+    let bob = pubky(BOB);
+    let identity = keys.identity(&bob);
+    let nk = identity.naming_key();
+    let scope_key = identity.scope_key(SETTLEMENTS_EPOCH, SETTLEMENTS);
+    let policy = Collection::Settlements.fixed_policy();
+    let mut accepted = Vec::new();
+    let mut marks = Vec::new();
+    // Each credited settlement's bucket, then a value retaining one delete restriction.
+    let [one_time, period, unrequested] = credited();
+    let put_back = Credited {
+        name: "a payment without a request's mark, put back over a delete with lost_to_delete",
+        ..credited().into_iter().nth(2).unwrap()
+    };
+    for (c, lost, nonce_label) in [
+        (
+            one_time,
+            false,
+            settlement_seed_label(OccurrenceKind::OneTimeRequest, "nonce"),
+        ),
+        (
+            period,
+            false,
+            settlement_seed_label(OccurrenceKind::BillingPeriod, "nonce"),
+        ),
+        (
+            unrequested,
+            false,
+            settlement_seed_label(OccurrenceKind::PaymentWithoutRequest, "nonce"),
+        ),
+        (put_back, true, PUT_BACK_NONCE_LABEL.to_owned()),
+    ] {
+        let (bucket, mark) = credited_mark(keys, &c);
+        if !lost {
+            marks.push(mark);
+        }
+        let mut value = SettlementBucket::from_marks(vec![mark]).unwrap();
+        value.lost_to_delete = lost.then(|| {
+            SettlementBoundary::known(vec![crate::common::seed(
+                "sealed/settlement_marks/put_back/delete",
+            )])
+            .unwrap()
+        });
+        let plaintext = value.to_json().unwrap();
+        let record_key = SettlementBucket::record_key(bucket, &nk).unwrap();
+        let nonce: [u8; 24] = crate::common::seed(&nonce_label)[..24].try_into().unwrap();
+        let sealed = SealedValue::seal_with_nonce(
+            &scope_key,
+            &bob,
+            SETTLEMENTS_EPOCH,
+            SETTLEMENTS,
+            &record_key,
+            &plaintext,
+            &nonce,
+        )
+        .unwrap();
+        assert_eq!(
+            SettlementBucket::bind(&plaintext, bucket, &nk, &record_key).unwrap(),
+            value,
+            "{}",
+            c.name
+        );
+        accepted.push(json!({
+            "aad_hex": hex(&aad(&bob, SETTLEMENTS, &record_key)),
+            "bucket": bucket,
+            "lost_to_delete": value.lost_to_delete,
+            "marks": [mark_json(&mark)],
+            "name": c.name,
+            "nonce_hex": hex(&nonce),
+            "occurrence_natural_key_hex": hex(&c.occurrence),
+            "padded_len": pad(&plaintext).unwrap().len(),
+            "plaintext": String::from_utf8(plaintext).unwrap(),
+            "record_key": b64(&record_key),
+            "sealed": serde_json::to_value(&sealed).unwrap(),
+            "settlement_id": c.settlement_id,
+        }));
+    }
+    let example = SettlementBucket::read(SETTLEMENT_MARKS_EXAMPLE.as_bytes()).unwrap();
+    assert_eq!(
+        example.to_json().unwrap(),
+        SETTLEMENT_MARKS_EXAMPLE.as_bytes()
+    );
+
+    // The refused values, from the accepted marks.
+    marks.sort();
+    let (low, high) = (marks[0].to_bytes(), marks[1].to_bytes());
+    // The lower settlement's mark beside one naming the other settlement's occurrence.
+    let mut twice = [marks[0], marks[0]];
+    twice[1].kind = marks[1].kind;
+    twice[1].occurrence = marks[1].occurrence;
+    twice.sort();
+    let with_kind = |kind: u8| {
+        let mut bytes = low;
+        bytes[12] = kind;
+        bytes
+    };
+    let one_time = credited_mark(keys, &credited()[0]).1;
+    let over: Vec<u8> = (0..=MAX_SETTLEMENT_MARKS as u128)
+        .flat_map(|i| {
+            let mut settlement = [0; 12];
+            settlement.copy_from_slice(&i.to_be_bytes()[4..]);
+            SettlementMark {
+                settlement,
+                kind: OccurrenceKind::OneTimeRequest,
+                occurrence: one_time.occurrence,
+            }
+            .to_bytes()
+        })
+        .collect();
+    let values: [(&str, String); 7] = [
+        ("a bucket with neither mark nor boundary", raw_bucket(&[])),
+        ("marks out of order", raw_bucket(&[high, low].concat())),
+        (
+            "a settlement twice",
+            raw_bucket(&[twice[0].to_bytes(), twice[1].to_bytes()].concat()),
+        ),
+        (
+            "a length that isn't a whole number of marks",
+            raw_bucket(&[&low[..], &high[..20]].concat()),
+        ),
+        ("a mark of kind 0", raw_bucket(&with_kind(0))),
+        ("a mark of kind 4", raw_bucket(&with_kind(4))),
+        ("9,001 marks", raw_bucket(&over)),
+    ];
+    let mut refused: Vec<Value> = values
+        .iter()
+        .map(|(name, value)| {
+            let error = SettlementBucket::read(value.as_bytes())
+                .expect_err(name)
+                .to_string();
+            json!({ "name": name, "reason": quoted(&error), "value": value })
+        })
+        .collect();
+    let unrequested = credited_mark(keys, &credited()[2]);
+    let other = Collection::PayeeActivity.fixed_policy();
+    assert_eq!(Collection::Settlements.policy_label(&other), None);
+    let other_key = naming_record_key(&nk, unrequested.0, &other);
+    let value = SettlementBucket::from_marks(vec![unrequested.1])
+        .unwrap()
+        .to_json()
+        .unwrap();
+    let error = SettlementBucket::bind(&value, unrequested.0, &nk, &other_key)
+        .unwrap_err()
+        .to_string();
+    refused.push(json!({
+        "bucket": unrequested.0,
+        "name": "the payment without a request's bucket under payee_activity's policy",
+        "policy_hash": b64(&other.hash().unwrap()),
+        "read_scope": other.read_scope,
+        "reason": quoted(&error),
+        "record_key": b64(&other_key),
+        "value": String::from_utf8(value).unwrap(),
+        "write_scopes": other.write_scopes,
+    }));
+    json!({
+        "accepted": accepted,
+        "boundaries": settlement_boundaries(&marks[0]),
+        "data_epoch": SETTLEMENTS_EPOCH,
+        "description": SETTLEMENT_MARKS_DESCRIPTION,
+        "example": {
+            "marks": example.marks().iter().map(mark_json).collect::<Vec<_>>(),
+            "name": "wire 5.7's example: a one-time request's mark and a Billing Period's",
+            "value": SETTLEMENT_MARKS_EXAMPLE,
+        },
+        "identity_hex": hex(&bob),
+        "policy_hash": b64(&policy.hash().unwrap()),
+        "read_scope": policy.read_scope,
+        "refused": refused,
+        "scope_key_hex": hex(&scope_key),
+        "write_scopes": policy.write_scopes,
+    })
+}
+
+/// Boundary values and merges of wire 5.7, independent of credit authorization.
+fn settlement_boundaries(mark: &SettlementMark) -> Value {
+    use serde_json::json;
+    let known = |hashes: Vec<[u8; 32]>| SettlementBoundary::known(hashes).unwrap();
+    let mut marked = SettlementBucket::from_marks(vec![*mark]).unwrap();
+    marked.lost_to_delete = Some(SettlementBoundary::unknown());
+    let accepted: Vec<_> = [
+        (
+            "known boundary without marks",
+            SettlementBucket::with_boundary(known(vec![[0; 32]])),
+        ),
+        (
+            "unknown boundary without marks",
+            SettlementBucket::with_boundary(SettlementBoundary::unknown()),
+        ),
+        (
+            "128 known deletes without marks",
+            SettlementBucket::with_boundary(known((0..128).map(|n| [n; 32]).collect())),
+        ),
+        ("unknown boundary with a mark", marked),
+    ]
+    .into_iter()
+    .map(|(name, bucket)| {
+        json!({
+            "name": name,
+            "value": String::from_utf8(bucket.to_json().unwrap()).unwrap(),
+            "boundary": bucket.lost_to_delete,
+            "marks": json_marks(&bucket),
+        })
+    })
+    .collect();
+    let hashes = |bytes: Vec<[u8; 32]>| bytes.iter().map(|hash| b64(hash)).collect::<Vec<_>>();
+    let malformed = [
+        ("known boundary without deletes", json!({"kind": "known"})),
+        (
+            "empty known deletes",
+            json!({"kind": "known", "deletes": []}),
+        ),
+        (
+            "duplicate delete hash",
+            json!({"kind": "known", "deletes": hashes(vec![[0; 32], [0; 32]])}),
+        ),
+        (
+            "delete hashes out of decoded order",
+            json!({"kind": "known", "deletes": hashes(vec![[1; 32], [0; 32]])}),
+        ),
+        (
+            "short delete hash",
+            json!({"kind": "known", "deletes": [b64(&[0; 31])]}),
+        ),
+        (
+            "padded delete hash",
+            json!({"kind": "known", "deletes": [format!("{}=", b64(&[0; 32]))]}),
+        ),
+        (
+            "129 known deletes",
+            json!({"kind": "known", "deletes": hashes((0..=128).map(|n| [n; 32]).collect())}),
+        ),
+        (
+            "unknown boundary with deletes",
+            json!({"kind": "unknown", "deletes": []}),
+        ),
+        (
+            "unknown boundary with null deletes",
+            json!({"kind": "unknown", "deletes": null}),
+        ),
+        (
+            "boundary without kind",
+            json!({"deletes": hashes(vec![[0; 32]])}),
+        ),
+        ("unrecognized boundary kind", json!({"kind": "other"})),
+    ];
+    let refused: Vec<_> = malformed
+        .into_iter()
+        .map(|(name, boundary)| {
+            let value = json!({"v": 1, "marks": b64(&mark.to_bytes()), "lost_to_delete": boundary}).to_string();
+            let error = SettlementBucket::read(value.as_bytes()).expect_err(name);
+            assert_eq!(SettlementBucket::read_boundary(value.as_bytes()).unwrap(), Some(SettlementBoundary::unknown()));
+            json!({"name": name, "value": value, "reason": quoted(&error.to_string()), "retained_boundary": {"kind": "unknown"}})
+        })
+        .collect();
+    let mut current = SettlementBucket::from_marks(vec![*mark]).unwrap();
+    let mut merges = Vec::new();
+    for (name, left, right, expected) in [
+        (
+            "absence contributes no restriction",
+            None,
+            known(vec![[0; 32]]),
+            known(vec![[0; 32]]),
+        ),
+        (
+            "known union deduplicates and sorts",
+            Some(known(vec![[0; 32], [2; 32]])),
+            known(vec![[1; 32], [2; 32]]),
+            known(vec![[0; 32], [1; 32], [2; 32]]),
+        ),
+        (
+            "129 distinct deletes become unknown",
+            Some(known((0..128).map(|n| [n; 32]).collect())),
+            known(vec![[128; 32]]),
+            SettlementBoundary::unknown(),
+        ),
+        (
+            "unknown is absorbing",
+            Some(SettlementBoundary::unknown()),
+            known(vec![[0; 32]]),
+            SettlementBoundary::unknown(),
+        ),
+    ] {
+        current.lost_to_delete = left;
+        let seen = SettlementBucket::with_boundary(right);
+        let result = match current.merged_with(&seen) {
+            SeenMerge::Holds { twice } => {
+                assert!(twice.is_empty());
+                current.clone()
+            }
+            SeenMerge::WriteBack { bucket, twice } => {
+                assert!(twice.is_empty());
+                bucket
+            }
+            SeenMerge::Full { .. } => panic!("{name}: a one-mark union cannot be full"),
+        };
+        assert_eq!(result.lost_to_delete, Some(expected));
+        current.check_later_write(&result).unwrap();
+        seen.check_later_write(&result).unwrap();
+        merges.push(json!({
+            "name": name,
+            "current": String::from_utf8(current.to_json().unwrap()).unwrap(),
+            "seen": String::from_utf8(seen.to_json().unwrap()).unwrap(),
+            "merged": String::from_utf8(result.to_json().unwrap()).unwrap(),
+        }));
+    }
+    json!({"accepted": accepted, "refused": refused, "merges": merges})
+}
+
+/// Read every boundary case and recompute its monotone merge from the encoded inputs.
+fn check_settlement_boundaries(cases: &Value) {
+    for case in arr(cases, "accepted") {
+        let value = st(case, "value").as_bytes();
+        let bucket = SettlementBucket::read(value).unwrap();
+        assert_eq!(bucket.to_json().unwrap(), value);
+        assert_eq!(serde_json::json!(bucket.lost_to_delete), case["boundary"]);
+        assert_eq!(json_marks(&bucket), case["marks"]);
+        assert_eq!(
+            SettlementBucket::read_boundary(value).unwrap(),
+            bucket.lost_to_delete
+        );
+    }
+    for case in arr(cases, "refused") {
+        let value = st(case, "value").as_bytes();
+        let error = SettlementBucket::read(value).unwrap_err();
+        assert_eq!(quoted(&error.to_string()), st(case, "reason"));
+        assert_eq!(
+            serde_json::json!(SettlementBucket::read_boundary(value).unwrap()),
+            case["retained_boundary"]
+        );
+    }
+    for case in arr(cases, "merges") {
+        let current = SettlementBucket::read(st(case, "current").as_bytes()).unwrap();
+        let seen = SettlementBucket::read(st(case, "seen").as_bytes()).unwrap();
+        let result = match current.merged_with(&seen) {
+            SeenMerge::Holds { twice } => {
+                assert!(twice.is_empty());
+                current.clone()
+            }
+            SeenMerge::WriteBack { bucket, twice } => {
+                assert!(twice.is_empty());
+                bucket
+            }
+            SeenMerge::Full { .. } => panic!("{}", st(case, "name")),
+        };
+        assert_eq!(result.to_json().unwrap(), st(case, "merged").as_bytes());
+        current.check_later_write(&result).unwrap();
+        seen.check_later_write(&result).unwrap();
+    }
+}
+
+/// The record key of bucket `bucket` under `policy`, with `naming_key` (Switch wire 1.5).
+fn naming_record_key(
+    naming_key: &pubky_switch_core::ident::NamingKey,
+    bucket: u16,
+    policy: &pubky_switch_core::ident::Policy,
+) -> [u8; 32] {
+    naming_key.record_key(
+        Collection::Settlements.name(),
+        &natural_key::settlement_bucket(bucket),
+        &policy.hash().unwrap(),
+    )
+}
+
+/// `settlement_marks` (Paykit wire 5.7): each accepted bucket is its settlement's, its mark
+/// that settlement's and its occurrence's, sealed byte for byte under bob's
+/// `paykit_settlements` key, which alone of bob's keys opens it, and bound at its bucket's key;
+/// the example reads with its marks; and every refused value is refused.
+fn check_settlement_marks(keys: &Keys, m: &Value) {
+    let bob = pubky(BOB);
+    assert_eq!(unhex32(st(m, "identity_hex")), bob);
+    let identity = keys.identity(&bob);
+    let nk = identity.naming_key();
+    let epoch = m["data_epoch"].as_u64().unwrap();
+    let scope_key = identity.scope_key(epoch, SETTLEMENTS);
+    assert_eq!(hex(&scope_key), st(m, "scope_key_hex"));
+    let policy = Collection::Settlements.fixed_policy();
+    assert_eq!(policy.read_scope, st(m, "read_scope"));
+    assert_eq!(b64(&policy.hash().unwrap()), st(m, "policy_hash"));
+    let root = identity.switch_root();
+    let accepted = arr(m, "accepted");
+    let kinds: Vec<u64> = accepted
+        .iter()
+        .map(|c| arr(c, "marks")[0]["kind"].as_u64().unwrap())
+        .collect();
+    assert_eq!(kinds, [1, 2, 3, 3]);
+    for case in accepted {
+        let name = st(case, "name");
+        let id = st(case, "settlement_id").as_bytes();
+        let tag = settlement_tag(&nk, id);
+        let bucket = settlement_bucket(&tag);
+        assert_eq!(
+            case["bucket"].as_u64().unwrap(),
+            u64::from(bucket),
+            "{name}"
+        );
+        let record_key = SettlementBucket::record_key(bucket, &nk).unwrap();
+        assert_eq!(b64(&record_key), st(case, "record_key"), "{name}");
+        let plaintext = st(case, "plaintext").as_bytes();
+        let read = SettlementBucket::bind(plaintext, bucket, &nk, &record_key).unwrap();
+        assert_eq!(read.to_json().unwrap(), plaintext, "{name}: writes back");
+        let mark = read.find(&mark_settlement_tag(&tag)).copied().unwrap();
+        let occurrence = crate::common::unhex(st(case, "occurrence_natural_key_hex"));
+        assert_eq!(mark.occurrence, occurrence_tag(&nk, &occurrence), "{name}");
+        assert_eq!(json_marks(&read), case["marks"], "{name}");
+        assert_eq!(
+            serde_json::json!(read.lost_to_delete),
+            case["lost_to_delete"],
+            "{name}"
+        );
+        let nonce: [u8; 24] = crate::common::unhex(st(case, "nonce_hex"))
+            .try_into()
+            .unwrap();
+        let sealed = SealedValue::seal_with_nonce(
+            &scope_key,
+            &bob,
+            epoch,
+            SETTLEMENTS,
+            &record_key,
+            plaintext,
+            &nonce,
+        )
+        .unwrap();
+        let want: SealedValue = serde_json::from_value(case["sealed"].clone()).unwrap();
+        assert_eq!(sealed, want, "{name}");
+        assert_eq!(
+            sealed.open(&scope_key, &bob, &record_key).unwrap(),
+            RecordValue::Json(plaintext.to_vec()),
+            "{name}"
+        );
+        for other in [
+            key_of_scope(&root, epoch, "paykit_request"),
+            key_of_scope(&root, epoch, "paykit_request:shop1"),
+        ] {
+            assert!(sealed.open(&other, &bob, &record_key).is_err(), "{name}");
+        }
+    }
+    check_settlement_boundaries(&m["boundaries"]);
+    let example = &m["example"];
+    let read = SettlementBucket::read(st(example, "value").as_bytes()).unwrap();
+    assert_eq!(json_marks(&read), example["marks"]);
+    let refused = arr(m, "refused");
+    assert_eq!(refused.len(), 8);
+    assert_eq!(
+        arr(m, "accepted")
+            .iter()
+            .filter(|c| c["lost_to_delete"]["kind"] == "known")
+            .count(),
+        1
+    );
+    for case in refused {
+        let name = st(case, "name");
+        let value = st(case, "value").as_bytes();
+        let error = match case.get("record_key") {
+            None => SettlementBucket::read(value).unwrap_err(),
+            Some(key) => {
+                let policy = Policy::new(st(case, "read_scope"), &strings(&case["write_scopes"]));
+                assert_eq!(
+                    Collection::Settlements.policy_label(&policy),
+                    None,
+                    "{name}"
+                );
+                let bucket = case["bucket"].as_u64().unwrap() as u16;
+                let key = b64n::<32>(key.as_str().unwrap());
+                assert_eq!(key, naming_record_key(&nk, bucket, &policy), "{name}");
+                // The value reads, and binds only at its bucket's key.
+                SettlementBucket::read(value).unwrap();
+                SettlementBucket::bind(value, bucket, &nk, &key).unwrap_err()
+            }
+        };
+        assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
+    }
+}
+
+/// A bucket's marks as `settlement_marks` lists them.
+fn json_marks(bucket: &SettlementBucket) -> Value {
+    Value::Array(bucket.marks().iter().map(mark_json).collect())
+}
+
+/// A JSON array of strings.
+fn strings(v: &Value) -> Vec<&str> {
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect()
 }

@@ -1853,7 +1853,7 @@ async fn test_stored_proof_from_another_identity_never_written_into_a_settlement
         pubky_switch_client::app::Collection::new(collection.name(), collection.policy(None)),
         &paykit_lib::derive::natural_key::payee_payment_record(
             &crate::common::endpoint("btc-lightning-bolt12"),
-            b"t1",
+            b"fake:t1",
         ),
     );
     let record = shop.app().record_key(&target).unwrap();

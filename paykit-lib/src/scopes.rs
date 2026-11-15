@@ -41,6 +41,9 @@ pub const REQUEST: &str = "paykit_request";
 pub const ALLOWANCE: &str = "paykit_allowance";
 /// `paykit_allowance_execute`: act as an Allowance executor (Paykit spec 3.1).
 pub const ALLOWANCE_EXECUTE: &str = "paykit_allowance_execute";
+/// `paykit_settlements`: read and write `settlements`, the marks of the settlements the
+/// identity's payee apps have credited (Paykit spec 3.1, 6).
+pub const SETTLEMENTS: &str = "paykit_settlements";
 /// `paykit_contacts`: read the contacts, conversation entries and deny list (Paykit spec 3.1).
 pub const CONTACTS: &str = "paykit_contacts";
 /// `paykit_manage_contacts`: change the contacts and the deny list (Paykit spec 3.1).
@@ -55,9 +58,10 @@ pub const EXTENSION_PREFIX_START: &str = "paykit-";
 /// The names of Paykit's scopes of spec 3.1, without sub-scopes: the roots the signer knows
 /// for Paykit (Paykit spec 3.1, 3.2). Paykit's roots are more ([`is_paykit_root`]): a name of
 /// one of them that isn't here is Paykit's and ignored.
-pub const PAYKIT_SCOPE_NAMES: [&str; 7] = [
+pub const PAYKIT_SCOPE_NAMES: [&str; 8] = [
     PAY,
     REQUEST,
+    SETTLEMENTS,
     ALLOWANCE,
     ALLOWANCE_EXECUTE,
     CONTACTS,
@@ -191,10 +195,16 @@ pub enum PaykitScope {
     /// `paykit_pay`: act as payer; requires `paykit_contacts`, so a paying app reads the deny
     /// list.
     Pay,
-    /// `paykit_request`: act as payee, under every label.
+    /// `paykit_request`: act as payee, under every label; requires `paykit_settlements`, so a
+    /// payee app marks every settlement it credits, and `paykit_contacts`, so it reads the
+    /// lists.
     Request,
-    /// `paykit_request:<label>`: act as payee under one label only.
+    /// `paykit_request:<label>`: act as payee under one label only; requires
+    /// `paykit_settlements` and `paykit_contacts`.
     RequestLabel(Label),
+    /// `paykit_settlements`: read and write the identity's settlement marks; it has keys of its
+    /// own and no switch permission.
+    Settlements,
     /// `paykit_allowance`: Allowance messages and records.
     Allowance,
     /// `paykit_allowance_execute`: act as an Allowance executor; requires `paykit_allowance`,
@@ -238,6 +248,7 @@ impl PaykitScope {
             Self::Pay => PAY.into(),
             Self::Request => REQUEST.into(),
             Self::RequestLabel(label) => label.scope(),
+            Self::Settlements => SETTLEMENTS.into(),
             Self::Allowance => ALLOWANCE.into(),
             Self::AllowanceExecute => ALLOWANCE_EXECUTE.into(),
             Self::Contacts => CONTACTS.into(),
@@ -264,6 +275,7 @@ impl PaykitScope {
         match name {
             PAY => ScopeName::Paykit(Self::Pay),
             REQUEST => ScopeName::Paykit(Self::Request),
+            SETTLEMENTS => ScopeName::Paykit(Self::Settlements),
             ALLOWANCE => ScopeName::Paykit(Self::Allowance),
             ALLOWANCE_EXECUTE => ScopeName::Paykit(Self::AllowanceExecute),
             CONTACTS => ScopeName::Paykit(Self::Contacts),
@@ -291,7 +303,7 @@ impl PaykitScope {
             }
             Self::Contacts => &[Permission::ListsRead],
             Self::ManageContacts => &[Permission::ListsManage],
-            Self::AllowanceExecute => &[],
+            Self::AllowanceExecute | Self::Settlements => &[],
         }
     }
 
@@ -330,7 +342,8 @@ pub fn holds_other_protocol(scopes: &[String]) -> bool {
 /// `paykit_ext:paykit`), more than 8 extension scopes, more than 8 labelled selling scopes,
 /// and a scope without the scopes it requires: `paykit_pay` without `paykit_contacts`,
 /// `paykit_allowance_execute` without `paykit_allowance`, `paykit_pay` and `paykit_contacts`,
-/// and `paykit_manage_contacts` without `paykit_contacts`. Its bounds count only its own
+/// `paykit_manage_contacts` without `paykit_contacts`, and `paykit_request` or a labelled
+/// selling scope without `paykit_settlements` or without `paykit_contacts`. Its bounds count only its own
 /// scopes, whatever another protocol's scopes beside them (Switch wire 3.1 "Several
 /// protocols"). It ignores other names it doesn't know.
 ///
@@ -372,6 +385,22 @@ pub fn check_scopes(scopes: &[String]) -> Result<()> {
     }
     if has(MANAGE_CONTACTS) && !has(CONTACTS) {
         return invalid("Paykit spec 3.1: paykit_manage_contacts requires paykit_contacts");
+    }
+    // Paykit spec 3.1: every payee app, a labelled one included, reads and writes the one
+    // mark of each settlement the identity credits, so no two own apps credit it twice.
+    if (has(REQUEST) || labels > 0) && !has(SETTLEMENTS) {
+        return invalid(
+            "Paykit spec 3.1: paykit_request and every paykit_request:<label> require \
+             paykit_settlements",
+        );
+    }
+    // Paykit spec 3.1: every app that receives as payee holds the lists, so the spam rule
+    // binds it and it pauses the Private Payment Lists it sends a blocked counterparty.
+    if (has(REQUEST) || labels > 0) && !has(CONTACTS) {
+        return invalid(
+            "Paykit spec 3.1: paykit_request and every paykit_request:<label> require \
+             paykit_contacts",
+        );
     }
     Ok(())
 }
@@ -612,8 +641,17 @@ mod tests {
             "paykit_contacts",
         ]))
         .unwrap();
-        let labels: Vec<String> = (1..=8).map(|i| format!("paykit_request:shop{i}")).collect();
+        let mut labels: Vec<String> = (1..=8).map(|i| format!("paykit_request:shop{i}")).collect();
+        labels.push(SETTLEMENTS.into());
+        labels.push(CONTACTS.into());
         check_scopes(&labels).unwrap();
+        check_scopes(&owned(&[
+            "paykit_request",
+            "paykit_settlements",
+            "paykit_contacts",
+        ]))
+        .unwrap();
+        check_scopes(&owned(&["paykit_settlements"])).unwrap();
         let exts: Vec<String> = (1..=8).map(|i| format!("paykit_ext:paykit-e{i}")).collect();
         check_scopes(&exts).unwrap();
         check_scopes(&owned(&["future_scope"])).unwrap();
@@ -672,13 +710,114 @@ mod tests {
     }
 
     #[test]
+    fn test_scopes_payee_without_settlements_refused() {
+        let rule = "paykit_request and every paykit_request:<label> require paykit_settlements";
+        for scopes in [
+            owned(&["paykit_request"]),
+            owned(&["paykit_request", "paykit_allowance"]),
+            owned(&["paykit_request:shop1"]),
+            owned(&["paykit_request:shop1", "paykit_request:shop2"]),
+            owned(&["paykit_pay", "paykit_contacts", "paykit_request"]),
+            owned(&["paykit_request", "chat"]),
+        ] {
+            let error = check_scopes(&scopes).unwrap_err().to_string();
+            assert!(error.contains(rule), "{scopes:?}: {error}");
+        }
+        // A malformed label requires nothing: the scope is refused for its name.
+        let error = check_scopes(&owned(&["paykit_request:Shop1"]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("malformed"), "{error}");
+    }
+
+    #[test]
+    fn test_scopes_payee_requirements_are_independent() {
+        for payee in ["paykit_request", "paykit_request:shop1"] {
+            let complete = owned(&[payee, "paykit_contacts", "paykit_settlements"]);
+            check_scopes(&complete).unwrap();
+            check_requested_scopes(&complete).unwrap();
+            for missing in ["paykit_contacts", "paykit_settlements"] {
+                let incomplete: Vec<_> = complete
+                    .iter()
+                    .filter(|name| *name != missing)
+                    .cloned()
+                    .collect();
+                assert!(
+                    check_scopes(&incomplete).is_err(),
+                    "{payee}: missing {missing}"
+                );
+                assert!(
+                    check_requested_scopes(&incomplete).is_err(),
+                    "{payee}: missing {missing}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_scopes_payee_without_contacts_refused() {
+        let rule = "paykit_request and every paykit_request:<label> require paykit_contacts";
+        for scopes in [
+            owned(&["paykit_request", "paykit_settlements"]),
+            owned(&["paykit_request", "paykit_settlements", "paykit_allowance"]),
+            owned(&["paykit_request:shop1", "paykit_settlements"]),
+            owned(&["paykit_request", "paykit_settlements", "chat"]),
+        ] {
+            let error = check_scopes(&scopes).unwrap_err().to_string();
+            assert!(error.contains(rule), "{scopes:?}: {error}");
+            let error = check_requested_scopes(&scopes).unwrap_err().to_string();
+            assert!(error.contains(rule), "{scopes:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn test_scopes_settlements_is_keyed_without_permissions() {
+        assert_eq!(
+            PaykitScope::classify("paykit_settlements"),
+            ScopeName::Paykit(PaykitScope::Settlements)
+        );
+        assert_eq!(PaykitScope::Settlements.name(), SETTLEMENTS);
+        assert!(PAYKIT_SCOPE_NAMES.contains(&SETTLEMENTS));
+        assert!(PaykitScope::Settlements.has_keys());
+        assert!(PaykitScope::Settlements.permissions().is_empty());
+        assert_eq!(
+            names(&permissions_for(&owned(&[
+                "paykit_request:shop1",
+                "paykit_settlements"
+            ]))),
+            vec!["conversation.add"]
+        );
+        assert_eq!(
+            keyed_scopes(&owned(&["paykit_request:shop1", "paykit_settlements"])),
+            owned(&["paykit_request:shop1", "paykit_settlements"])
+        );
+        // A sub-scope of it is Paykit's name with no meaning, and no label key.
+        assert_eq!(
+            PaykitScope::classify("paykit_settlements:x"),
+            ScopeName::Unknown
+        );
+        // Not a sub-scope of paykit_request: holding paykit_request doesn't hold it.
+        assert!(!holds(
+            &owned(&["paykit_request"]),
+            &PaykitScope::Settlements
+        ));
+        assert!(!acts_as_payee(&owned(&["paykit_settlements"])));
+    }
+
+    #[test]
     fn test_scopes_requested_refuses_unknown_names_and_request_beside_a_label() {
         check_requested_scopes(&owned(&[
             "paykit_request:shop1",
+            "paykit_settlements",
             "paykit_pay",
             "paykit_contacts",
         ]))
         .unwrap();
+        assert!(check_requested_scopes(&owned(&["paykit_request:shop1"])).is_err());
+        assert!(
+            check_requested_scopes(&owned(&["paykit_request:shop1", "paykit_settlements"]))
+                .is_err()
+        );
         assert!(check_requested_scopes(&owned(&["future_scope"])).is_err());
         assert!(check_requested_scopes(&owned(&["paykit_pay:x"])).is_err());
         assert!(
@@ -714,6 +853,17 @@ mod tests {
         assert!(acts_as_payee(&owned(&["paykit_request:shop2"])));
         assert!(!acts_as_payee(&owned(&["paykit_pay"])));
     }
+
+    /// A payee app's scopes: `paykit_request` and the scopes it requires.
+    const PAYEE: [&str; 3] = ["paykit_request", "paykit_settlements", "paykit_contacts"];
+
+    /// A payee app's scopes beside another protocol's.
+    const PAYEE_AND_CHAT: [&str; 4] = [
+        "paykit_request",
+        "paykit_settlements",
+        "paykit_contacts",
+        "chat",
+    ];
 
     fn cert(scopes: &[&str], permissions: &[Permission]) -> AppCert {
         let identity = IdentityKey::from_secret([6; 32]);
@@ -788,15 +938,20 @@ mod tests {
 
     #[test]
     fn test_scopes_certificate_with_another_protocol_holding_paykit_permissions_accepted() {
-        // A payee that also chats: Paykit's conversation.add, and the chat's lists.read.
-        check_certificate(&cert(&["paykit_request", "chat"], &[LISTS_READ, ADD])).unwrap();
+        // A payee that also chats: Paykit's lists.read and conversation.add, and the chat's
+        // lists.manage.
+        check_certificate(&cert(
+            &PAYEE_AND_CHAT,
+            &[LISTS_READ, Permission::ListsManage, ADD],
+        ))
+        .unwrap();
         // Exactly Paykit's list is still enough.
-        check_certificate(&cert(&["paykit_request", "chat"], &[ADD])).unwrap();
+        check_certificate(&cert(&PAYEE_AND_CHAT, &[LISTS_READ, ADD])).unwrap();
     }
 
     #[test]
     fn test_scopes_certificate_with_another_protocol_missing_a_paykit_permission_refused() {
-        let error = check_certificate(&cert(&["paykit_request", "chat"], &[LISTS_READ]))
+        let error = check_certificate(&cert(&PAYEE_AND_CHAT, &[LISTS_READ]))
             .unwrap_err()
             .to_string();
         assert!(
@@ -818,24 +973,42 @@ mod tests {
 
     #[test]
     fn test_scopes_paykit_only_certificate_with_an_extra_permission_refused() {
-        let error = check_certificate(&cert(&["paykit_request"], &[LISTS_READ, ADD]))
+        let extra = [Permission::ClaimsRead, LISTS_READ, ADD];
+        let error = check_certificate(&cert(&PAYEE, &extra))
             .unwrap_err()
             .to_string();
         assert!(error.contains("exactly what"), "{error}");
         // `paykit_pay:x` and a plain `paykit_ext` are Paykit's names, not another protocol's: they
         // don't let the list hold more.
         assert!(check_certificate(&cert(
-            &["paykit_request", "paykit_pay:x"],
-            &[LISTS_READ, ADD]
+            &[
+                "paykit_request",
+                "paykit_settlements",
+                "paykit_contacts",
+                "paykit_pay:x"
+            ],
+            &extra
         ))
         .is_err());
-        assert!(
-            check_certificate(&cert(&["paykit_request", "paykit_ext"], &[LISTS_READ, ADD]))
-                .is_err()
-        );
+        assert!(check_certificate(&cert(
+            &[
+                "paykit_request",
+                "paykit_settlements",
+                "paykit_contacts",
+                "paykit_ext"
+            ],
+            &extra,
+        ))
+        .is_err());
         check_certificate(&cert(
-            &["paykit_request", "paykit_pay:x", "paykit_ext"],
-            &[ADD],
+            &[
+                "paykit_request",
+                "paykit_settlements",
+                "paykit_contacts",
+                "paykit_pay:x",
+                "paykit_ext",
+            ],
+            &[LISTS_READ, ADD],
         ))
         .unwrap();
     }
@@ -931,6 +1104,7 @@ mod tests {
             &[
                 "paykit_pay",
                 "paykit_request",
+                "paykit_settlements",
                 "paykit_contacts",
                 "paykit_manage_contacts",
             ],
@@ -943,17 +1117,19 @@ mod tests {
 
     #[test]
     fn test_scopes_bounds_count_only_paykit_scopes() {
-        // Eight labels, eight extension scopes and other protocols' scopes beside them: within
-        // Paykit's bounds, and the Switch's 32 in all.
+        // Eight labels with the scope they require, eight extension scopes and other
+        // protocols' scopes beside them: within Paykit's bounds, and the Switch's 32 in all.
         let mut scopes: Vec<String> = (1..=8).map(|i| format!("paykit_request:shop{i}")).collect();
+        scopes.push(SETTLEMENTS.into());
+        scopes.push(CONTACTS.into());
         scopes.extend((1..=8).map(|i| format!("paykit_ext:paykit-e{i}")));
-        scopes.extend((1..=16).map(|i| format!("chat{i}")));
+        scopes.extend((1..=14).map(|i| format!("chat{i}")));
         assert_eq!(scopes.len(), 32);
         let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
         check_certificate(&cert(&names, &[LISTS_READ, ADD])).unwrap();
         // One more is over the Switch's total, whoever's it is.
         let mut over = names.clone();
-        over.push("chat17");
+        over.push("chat15");
         assert!(switch_scopes::check_scopes(&owned(&over)).is_err());
     }
 
@@ -1043,11 +1219,17 @@ mod tests {
                 "{unknown}"
             );
         }
-        let scopes = owned(&["paykit_request", "paykit", "paykit_future"]);
+        let scopes = owned(&[
+            "paykit_request",
+            "paykit_settlements",
+            "paykit_contacts",
+            "paykit",
+            "paykit_future",
+        ]);
         check_scopes(&scopes).unwrap();
         assert_eq!(
             names(&permissions_for(&scopes)),
-            ["conversation.add"],
+            ["lists.read", "conversation.add"],
             "{scopes:?}"
         );
         assert!(!holds_other_protocol(&scopes));

@@ -191,6 +191,7 @@ mod tests {
             "paykit_pay",
             "paykit_request",
             "paykit_request:shop1",
+            "paykit_settlements",
             "paykit_allowance",
             "paykit_allowance_execute",
             "paykit_contacts",
@@ -209,6 +210,7 @@ mod tests {
             "paykit_pay",
             "paykit_request",
             "paykit_request:shop1",
+            "paykit_settlements",
             "paykit_allowance",
             "paykit_allowance_execute",
             "paykit_contacts",
@@ -220,6 +222,7 @@ mod tests {
         let scopes = [
             "paykit_pay",
             "paykit_request",
+            "paykit_settlements",
             "paykit_contacts",
             "paykit_ext:paykit-cap",
         ];
@@ -236,6 +239,7 @@ mod tests {
             &[
                 "paykit_pay",
                 "paykit_request",
+                "paykit_settlements",
                 "paykit_contacts",
                 "paykit_manage_contacts",
             ][..],
@@ -247,9 +251,20 @@ mod tests {
             ],
             &["paykit_pay", "paykit_allowance", "paykit_contacts"],
             &["paykit_pay", "paykit_contacts"],
-            &["paykit_request:shop1", "paykit_request:shop2"],
+            &[
+                "paykit_request:shop1",
+                "paykit_request:shop2",
+                "paykit_settlements",
+                "paykit_contacts",
+            ],
             &["paykit_contacts"],
-            &["paykit_ext:paykit-cap", "paykit_request"],
+            &["paykit_settlements"],
+            &[
+                "paykit_ext:paykit-cap",
+                "paykit_request",
+                "paykit_settlements",
+                "paykit_contacts",
+            ],
         ] {
             let terms = terms(&protocols, scopes);
             assert_eq!(
@@ -288,6 +303,10 @@ mod tests {
             names(&["paykit_ext:paykit"]),
             names(&["paykit_pay:x"]),
             names(&["paykit_pay", "paykit_contacts", "paykit_ext"]),
+            names(&["paykit_request"]),
+            names(&["paykit_request:shop1"]),
+            names(&["paykit_request", "paykit_settlements"]),
+            names(&["paykit_request:shop1", "paykit_settlements"]),
             extensions,
             labels,
         ] {
@@ -325,7 +344,15 @@ mod tests {
     fn test_signer_protocol_offers_the_paykit_profile_and_its_files() {
         let protocols = Protocols::new(vec![Arc::new(PaykitProtocol), Arc::new(Chat)]).unwrap();
         let paths = protocols
-            .grant_paths(&[3; 16], &names(&["paykit_request:shop1", "chat"]))
+            .grant_paths(
+                &[3; 16],
+                &names(&[
+                    "paykit_request:shop1",
+                    "paykit_settlements",
+                    "paykit_contacts",
+                    "chat",
+                ]),
+            )
             .unwrap();
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[0].path, "/pub/paykit/profile.json");

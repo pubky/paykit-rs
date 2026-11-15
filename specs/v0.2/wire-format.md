@@ -101,7 +101,7 @@ Paykit's identifiers, beside the Switch's (Switch wire 1.7):
   The vectors' payment without a request uses `bitcoin-txid` (`identifiers.json`).
 - **Settlement tags and buckets** (5.7): a settlement's tag is `derive("paykit/v1/settlement", "tag", blind(lp(settlement ID)))`. Its bucket is `u16_be(tag[0..2]) >> 6`, 0 to 1023, and a mark stores bytes 2 to 13; bits 10 to 15 are unused. An occurrence's tag is the first 8 bytes of `derive("paykit/v1/settlement", "occurrence", blind(natural key))`, the natural key of the occurrence's `payee_activity` record (above), which is the same under every label's policy. Both are blinded under the naming key, so no payer can aim a settlement at a bucket or a tag, and no app that can't name a settlement or an occurrence can tell which a tag is.
 
-Vectors: `identifiers.json` `request_hash`, `obligations` with the blinded inputs of each, and `terms_hash`. The record keys of these natural keys are `identifiers.json` `record_keys`. Settlement tags/buckets (5.7) and publication keys, bindings and protected policies (5.8) have no vectors yet: they come with the code that implements them.
+Vectors: `identifiers.json` `request_hash`, `obligations` with the blinded inputs of each, and `terms_hash`. The record keys of these natural keys are `identifiers.json` `record_keys`. Settlement tags, bucket derivation and the settlement policy are included in `identifiers.json` `record_keys` and `policies`; payee scope requirements are covered by `documents.json` `payee_certificates` (3.1, 5.7). Publication keys, bindings and protected policies (5.8) have no vectors yet: they come with the code that implements them.
 
 ## 2. Signatures
 
@@ -1162,7 +1162,7 @@ Example (a bucket holding two marks, a one-time request's and a Billing Period's
 }
 ```
 
-Vectors: none yet. They come with the code that implements this section, with `paykit-lib`'s checks of it (spec 18).
+Vectors: `sealed.json` `settlement_marks` covers bucket encodings, sealed values and pure deletion-boundary merges, including boundary-only values and saturation. `identifiers.json` covers the derivations and fixed policy; `documents.json` `payee_certificates` covers payee scope requirements. These format and pure-merge checks do not implement authenticated creation, continuity, delete application, cursor holds or settlement-credit enforcement; those runtime checks remain pending (spec 18).
 
 ### 5.8 `private_list_publications`
 

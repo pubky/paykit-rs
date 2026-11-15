@@ -15,6 +15,14 @@ Every failed attempt counts immediately, while its claim remains and after it is
 
 The other cases, `/cases/0`, `/cases/1`, `/cases/4`, `/cases/5` and `/cases/8`, and `period_limit_spellings` and `period_limit_members` remain normative. The runtime accounting, generator and replacement cases for default-spent failures and the durable never-dispatched exception are required before release. The implementation change on `v0.2` must update the generator and its checks before regenerating these cases; the regenerated files then replace these exclusions.
 
+## Settlement marks
+
+`sealed.json` `settlement_marks` covers wire 5.7's bucket values, record keys, sealed
+encodings and deletion-boundary merges. Its `boundaries` cases include zero-mark values,
+canonical known hash sets, malformed boundaries retained as unknown, and union saturation.
+These cases check formats and pure merge rules. They do not test authenticated creation,
+delete application, continuity, cursor holds or the evidence required to credit a settlement.
+
 ## Files
 
 | File | Holds | Wire section |

@@ -1452,7 +1452,10 @@ async fn test_replies_proof_over_an_unread_settlement_record_writes_nothing() {
     let collection = Collection::PayeeActivity;
     let target = RecordTarget::new(
         SwitchCollection::new(collection.name(), collection.policy(None)),
-        &natural_key::payee_payment_record(&crate::common::endpoint("btc-lightning-bolt12"), b"t1"),
+        &natural_key::payee_payment_record(
+            &crate::common::endpoint("btc-lightning-bolt12"),
+            b"fake:t1",
+        ),
     );
     let record = till.app().record_key(&target).unwrap();
     let good = shop
@@ -1561,7 +1564,7 @@ async fn test_replies_proof_over_an_unread_settlement_record_from_a_blocked_send
     let op = till
         .app_mut()
         .record_op(
-            &target(b"t1"),
+            &target(b"fake:t1"),
             Some(crate::outcome_record::INVALID),
             Vec::new(),
         )
@@ -1579,7 +1582,7 @@ async fn test_replies_proof_over_an_unread_settlement_record_from_a_blocked_send
     w.clock.advance_ms(1);
     proof_of_settlement(&w, &w.alice, "wallet", &shop, "t2");
     shop.receive(None).await.unwrap();
-    let t2 = shop.app().record_key(&target(b"t2")).unwrap();
+    let t2 = shop.app().record_key(&target(b"fake:t2")).unwrap();
     let t2_held = shop.app().shared_record(&t2).await.unwrap().is_some();
     let counted = shop.spam_count(&w.carol_id()).await.unwrap();
     w.clock.advance_ms(DAY_MS + 1);

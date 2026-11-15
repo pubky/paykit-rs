@@ -1,14 +1,16 @@
 //! Paykit's derivations (Paykit spec 7.1, 10; Paykit wire 1.5): message, request and terms
-//! hashes, obligation IDs, natural keys and settlement IDs.
+//! hashes, obligation IDs, natural keys, settlement IDs and the tags of settlement marks.
 //!
 //! They use the Switch's `hash()`, `derive()`, `lp()` and blinding (Switch wire 1.4, 1.5).
-//! Paykit's own derivation, the obligation ID, uses the label `paykit/v1/obligation`, never a
-//! `pubky-switch/v1/` one (Switch spec 1).
+//! Paykit's own derivations, the obligation ID and the settlement and occurrence tags, use the
+//! labels `paykit/v1/obligation` and `paykit/v1/settlement`, never a `pubky-switch/v1/` one
+//! (Switch spec 1).
 //!
-//! Security: obligation IDs and record keys are blinded with the naming key of the identity
-//! whose switch holds them, so the service can't tell which counterparty or request they
-//! name. The obligation of a payment without a request is the one exception: it derives from
-//! the attempt ID alone and names no payee.
+//! Security: obligation IDs, record keys and settlement and occurrence tags are blinded with
+//! the naming key of the identity whose switch holds them, so the service can't tell which
+//! counterparty, request or settlement they name, and no payer can aim a settlement at a
+//! bucket or a tag. The obligation of a payment without a request is the one exception: it
+//! derives from the attempt ID alone and names no payee.
 
 use pubky_switch_core::enc::{derive, hash, lp, u64be};
 use pubky_switch_core::ident::NamingKey;
@@ -18,6 +20,19 @@ use crate::identifiers::{AllowanceId, AttemptId, PaymentEndpointIdentifier};
 
 /// The label of Paykit's obligation IDs (Paykit wire 1.5).
 pub const OBLIGATION_LABEL: &str = "paykit/v1/obligation";
+
+/// The label of Paykit's settlement and occurrence tags (Paykit wire 1.5).
+pub const SETTLEMENT_LABEL: &str = "paykit/v1/settlement";
+
+/// How many buckets of settlement marks there are (Paykit wire 1.5, 5.7): a bucket is a number
+/// from 0 to 1023.
+pub const SETTLEMENT_BUCKETS: u16 = 1024;
+
+/// How many bytes of a settlement's tag a mark stores: bytes 2 to 13 (Paykit wire 1.5, 5.7).
+pub const SETTLEMENT_TAG_LEN: usize = 12;
+
+/// How many bytes an occurrence's tag has: the first 8 of its derivation (Paykit wire 1.5).
+pub const OCCURRENCE_TAG_LEN: usize = 8;
 
 /// A message hash, as `refs` and request hashes name messages: `hash(message JSON bytes)`
 /// (Paykit wire 1.5, Switch wire 5.1).
@@ -155,7 +170,64 @@ pub mod natural_key {
     pub fn allowance(counterparty: &[u8; 32], allowance_id: &AllowanceId) -> Vec<u8> {
         lp(&[counterparty, allowance_id.as_str().as_bytes()])
     }
+
+    /// A `settlements` bucket record: `lp(u64(bucket))`, the bucket a number from 0 to 1023
+    /// ([`super::settlement_bucket`]).
+    pub fn settlement_bucket(bucket: u16) -> Vec<u8> {
+        lp(&[&u64be(u64::from(bucket))])
+    }
 }
+
+/// The input blinded into a settlement's tag: `lp(settlement ID)` (Paykit wire 1.5).
+pub fn settlement_tag_material(settlement_id: &[u8]) -> Vec<u8> {
+    lp(&[settlement_id])
+}
+
+/// A settlement's tag (Paykit wire 1.5): `derive("paykit/v1/settlement", "tag",
+/// blind(lp(settlement ID)))`, blinded with the naming key of the payee, whose switch holds
+/// the marks. It derives from the settlement ID alone, whatever the endpoint, the counterparty
+/// or the occurrence, so one settlement has one tag and one mark (Paykit spec 8.1 step 4).
+pub fn settlement_tag(naming_key: &NamingKey, settlement_id: &[u8]) -> [u8; 32] {
+    settlement_tag_blinded(&naming_key.blind(&settlement_tag_material(settlement_id)))
+}
+
+/// [`settlement_tag`] from its input already blinded with the payee's naming key,
+/// `blind(lp(settlement ID))`. For an app that blinds through its Switch client and never
+/// holds the naming key itself.
+pub fn settlement_tag_blinded(blinded: &[u8; 32]) -> [u8; 32] {
+    derive(SETTLEMENT_LABEL, &[b"tag", blinded])
+}
+
+/// A settlement's bucket (Paykit wire 1.5): `u16_be(tag[0..2]) >> 6`, a number from 0 to
+/// 1023. Bits 10 to 15 of the tag are unused.
+pub fn settlement_bucket(tag: &[u8; 32]) -> u16 {
+    u16::from_be_bytes([tag[0], tag[1]]) >> 6
+}
+
+/// The part of a settlement's tag its mark stores: bytes 2 to 13 (Paykit wire 1.5, 5.7).
+pub fn mark_settlement_tag(tag: &[u8; 32]) -> [u8; SETTLEMENT_TAG_LEN] {
+    let mut out = [0; SETTLEMENT_TAG_LEN];
+    out.copy_from_slice(&tag[2..2 + SETTLEMENT_TAG_LEN]);
+    out
+}
+
+/// An occurrence's tag (Paykit wire 1.5): the first 8 bytes of `derive("paykit/v1/settlement",
+/// "occurrence", blind(natural key))`, `natural key` being that of the occurrence's
+/// `payee_activity` record ([`natural_key`]), which is the same under every label's policy.
+pub fn occurrence_tag(naming_key: &NamingKey, natural_key: &[u8]) -> [u8; OCCURRENCE_TAG_LEN] {
+    occurrence_tag_blinded(&naming_key.blind(natural_key))
+}
+
+/// [`occurrence_tag`] from the natural key already blinded with the payee's naming key.
+pub fn occurrence_tag_blinded(blinded: &[u8; 32]) -> [u8; OCCURRENCE_TAG_LEN] {
+    let tag = derive(SETTLEMENT_LABEL, &[b"occurrence", blinded]);
+    let mut out = [0; OCCURRENCE_TAG_LEN];
+    out.copy_from_slice(&tag[..OCCURRENCE_TAG_LEN]);
+    out
+}
+
+/// Prefix of the fake rail's settlement IDs (Paykit wire 1.5).
+pub const FAKE_RAIL_PREFIX: &str = "fake:";
 
 /// A reader of a payment proof's `proof` object that gives its settlement ID (Paykit wire
 /// 1.5), as [`settlement_id`] does for the methods this crate knows: a payment method's
@@ -167,15 +239,16 @@ pub type SettlementIdReader<'a> = dyn Fn(&Map<String, Value>) -> Option<Vec<u8>>
 ///
 /// The methods the wire format fixes are `bitcoin-txid`, whose settlement ID is its `txid`,
 /// 64 lower-case hex characters, as its UTF-8 text; and the prototype's fake rail,
-/// `{ "rail": "fake", "tx": ... }` without a `type`, whose settlement ID is its `tx` text,
-/// not empty. `None` for a proof in another spelling, or of a method this crate doesn't
+/// `{ "rail": "fake", "tx": ... }` without a `type`, whose settlement ID is `fake:` followed by
+/// its `tx` text, `tx` not empty, so it never equals another method's: a settlement's mark
+/// derives from its settlement ID alone. `None` for a proof in another spelling, or of a method this crate doesn't
 /// know: such a proof isn't credited as a payment without a request.
 pub fn settlement_id(proof: &Map<String, Value>) -> Option<Vec<u8>> {
     // A `null` type reads as a missing one (Paykit wire, Conventions).
     let typed = proof.get("type").filter(|t| !t.is_null());
     if typed.is_none() && proof.get("rail").and_then(Value::as_str) == Some("fake") {
         let tx = proof.get("tx")?.as_str()?;
-        return (!tx.is_empty()).then(|| tx.as_bytes().to_vec());
+        return (!tx.is_empty()).then(|| [FAKE_RAIL_PREFIX.as_bytes(), tx.as_bytes()].concat());
     }
     match typed?.as_str()? {
         "bitcoin-txid" => {
@@ -211,10 +284,16 @@ mod tests {
     #[test]
     fn test_settlement_id_of_the_fake_rail() {
         let id = settlement_id(&proof(json!({ "rail": "fake", "tx": "t1" })));
-        assert_eq!(id, Some(b"t1".to_vec()));
+        assert_eq!(id, Some(b"fake:t1".to_vec()));
         // A null type reads as none.
         let id = settlement_id(&proof(json!({ "type": null, "rail": "fake", "tx": "t1" })));
-        assert_eq!(id, Some(b"t1".to_vec()));
+        assert_eq!(id, Some(b"fake:t1".to_vec()));
+        // A tx spelled as a txid still names another settlement than that txid.
+        let txid = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b";
+        assert_ne!(
+            settlement_id(&proof(json!({ "rail": "fake", "tx": txid }))),
+            settlement_id(&proof(json!({ "type": "bitcoin-txid", "txid": txid })))
+        );
         for bad in [
             json!({ "rail": "fake" }),
             json!({ "rail": "fake", "tx": "" }),
@@ -263,6 +342,103 @@ mod tests {
         assert_eq!(blinded, request_obligation(&nk, &[1; 32], &[2; 32], 5));
         // Unblinded inputs give another obligation.
         assert_ne!(request_obligation_blinded(&[1; 32], &[2; 32], 5), blinded);
+    }
+
+    const TXID: &str = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b";
+
+    #[test]
+    fn test_settlement_tag_derives_from_the_settlement_id_alone() {
+        let nk = NamingKey::from_bytes([7; 32]);
+        let tag = settlement_tag(&nk, TXID.as_bytes());
+        assert_eq!(
+            tag,
+            derive(
+                SETTLEMENT_LABEL,
+                &[b"tag", &nk.blind(&lp(&[TXID.as_bytes()]))]
+            )
+        );
+        assert_eq!(
+            settlement_tag_blinded(&nk.blind(&settlement_tag_material(TXID.as_bytes()))),
+            tag
+        );
+        // Blinded under another identity's naming key, or unblinded, it is another tag.
+        assert_ne!(
+            settlement_tag(&NamingKey::from_bytes([8; 32]), TXID.as_bytes()),
+            tag
+        );
+        assert_ne!(settlement_tag_blinded(&hash(TXID.as_bytes())), tag);
+        assert_ne!(settlement_tag(&nk, b"another settlement"), tag);
+    }
+
+    #[test]
+    fn test_settlement_tag_is_one_across_endpoints() {
+        // One transaction paid to two endpoints names two payee records but one settlement,
+        // so its mark is one (Paykit wire 1.5).
+        let nk = NamingKey::from_bytes([7; 32]);
+        let id = settlement_id(&proof(json!({ "type": "bitcoin-txid", "txid": TXID }))).unwrap();
+        let (a, b) = (
+            PaymentEndpointIdentifier::parse("btc-bitcoin-p2wpkh").unwrap(),
+            PaymentEndpointIdentifier::parse("btc-bitcoin-p2tr").unwrap(),
+        );
+        assert_ne!(
+            natural_key::payee_payment_record(&a, &id),
+            natural_key::payee_payment_record(&b, &id)
+        );
+        let vout = settlement_id(&proof(
+            json!({ "type": "bitcoin-txid", "txid": TXID, "vout": 3 }),
+        ))
+        .unwrap();
+        assert_eq!(settlement_tag(&nk, &vout), settlement_tag(&nk, &id));
+    }
+
+    #[test]
+    fn test_settlement_bucket_is_the_first_ten_bits() {
+        let mut tag = [0u8; 32];
+        assert_eq!(settlement_bucket(&tag), 0);
+        tag[0] = 0xff;
+        tag[1] = 0xc0;
+        assert_eq!(settlement_bucket(&tag), SETTLEMENT_BUCKETS - 1);
+        // Bits 10 to 15 are unused.
+        tag[1] = 0xff;
+        assert_eq!(settlement_bucket(&tag), SETTLEMENT_BUCKETS - 1);
+        tag[0] = 0x00;
+        tag[1] = 0x40;
+        assert_eq!(settlement_bucket(&tag), 1);
+        tag[1] = 0x3f;
+        assert_eq!(settlement_bucket(&tag), 0);
+        let tag: [u8; 32] = std::array::from_fn(|i| i as u8);
+        assert_eq!(
+            mark_settlement_tag(&tag),
+            [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+        );
+    }
+
+    #[test]
+    fn test_settlement_bucket_record_natural_key() {
+        assert_eq!(
+            natural_key::settlement_bucket(1023),
+            lp(&[&[0, 0, 0, 0, 0, 0, 3, 0xff]])
+        );
+        assert_ne!(
+            natural_key::settlement_bucket(0),
+            natural_key::settlement_bucket(1)
+        );
+    }
+
+    #[test]
+    fn test_occurrence_tag_is_the_first_eight_bytes() {
+        let nk = NamingKey::from_bytes([7; 32]);
+        let natural = natural_key::request_record(&[1; 32], &[2; 32]);
+        let full = derive(SETTLEMENT_LABEL, &[b"occurrence", &nk.blind(&natural)]);
+        let tag = occurrence_tag(&nk, &natural);
+        assert_eq!(tag[..], full[..8]);
+        assert_eq!(occurrence_tag_blinded(&nk.blind(&natural)), tag);
+        assert_ne!(
+            occurrence_tag(&nk, &natural_key::period_record(&[1; 32], &[2; 32], 0)),
+            tag
+        );
+        // The settlement's tag of the same bytes is another derivation.
+        assert_ne!(settlement_tag(&nk, &natural)[..8], tag[..]);
     }
 
     fn blake3_derive(material: &[u8]) -> [u8; 32] {

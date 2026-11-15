@@ -141,7 +141,8 @@ pub struct AppSeed {
 }
 
 /// The apps of the set: alice's wallet, phone and executor, and bob's shop, his extension
-/// app `cap` and his `hosted` app, which sells under the label `shop1`.
+/// app `cap` and his `hosted` app, which sells under the label `shop1`. Bob's apps are payee
+/// apps, so each holds `paykit_settlements`, which every payee scope requires (Paykit spec 3.1).
 pub const APPS: [AppSeed; 6] = [
     AppSeed {
         name: "wallet",
@@ -164,25 +165,43 @@ pub const APPS: [AppSeed; 6] = [
     AppSeed {
         name: "shop",
         owner: "bob",
-        scopes: &["paykit_request", "paykit_allowance"],
+        scopes: &[
+            "paykit_request",
+            "paykit_allowance",
+            "paykit_settlements",
+            "paykit_contacts",
+        ],
         expires_at: "2026-12-01T00:00:00.000Z",
     },
     AppSeed {
         name: "cap",
         owner: "bob",
-        scopes: &["paykit_request", "paykit_ext:paykit-cap"],
+        scopes: &[
+            "paykit_request",
+            "paykit_ext:paykit-cap",
+            "paykit_settlements",
+            "paykit_contacts",
+        ],
         expires_at: "2026-12-01T00:00:00.000Z",
     },
     AppSeed {
         name: "hosted",
         owner: "bob",
-        scopes: &["paykit_request:shop1"],
+        scopes: &[
+            "paykit_request:shop1",
+            "paykit_settlements",
+            "paykit_contacts",
+        ],
         expires_at: "2026-12-01T00:00:00.000Z",
     },
 ];
 
 /// The extension kind bob's `cap` app accepts, under its scope `paykit_ext:paykit-cap`.
 pub const CAP_EXTENSION_KIND: &str = "paykit-cap.offer";
+
+/// The `bitcoin-txid` settlement of the vectors' payment without a request (Paykit wire 1.5).
+pub const UNREQUESTED_TXID: &str =
+    "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b";
 
 /// The label of bob's labelled selling scope, which his `hosted` app holds.
 pub const SHOP1: &str = "shop1";
@@ -496,6 +515,17 @@ pub fn reissued(keys: &Keys, app: &str, scopes: &[&str], permissions: &[Permissi
     body.scopes = scopes.iter().map(|s| (*s).to_owned()).collect();
     body.permissions = pubky_switch_core::scopes::permission_names(permissions);
     AppCert::issue(keys.identity(&app.identity), body).unwrap()
+}
+
+/// The permissions of a certificate that none of its Paykit scopes needs (Paykit wire 3.1):
+/// those only another protocol's scopes bring.
+pub fn beyond_paykit(c: &AppCert) -> Vec<Permission> {
+    let needed = paykit_lib::scopes::permissions_for(c.scopes());
+    c.permissions()
+        .iter()
+        .copied()
+        .filter(|p| !needed.contains(p))
+        .collect()
 }
 
 /// A refusal's reason as the files quote it: without the section it starts with (README

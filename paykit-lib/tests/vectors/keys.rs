@@ -2,6 +2,7 @@
 //! 1.5), with the scopes and permissions of each app's certificate in `documents.json`
 //! `certificates` (Paykit wire 3.1).
 
+use paykit_lib::scopes::SETTLEMENTS;
 use pubky_switch_core::enc::{b64, lp, pubky_id, u64be};
 use pubky_switch_core::scopes::permission_names;
 use serde_json::{json, Value};
@@ -46,15 +47,17 @@ this set. apps holds each app with its signing and bundle keys, its App ID and t
 switch permissions of its certificate in documents.json certificates: the executor's and \
 the phone's hold paykit_contacts. scope_keys are derive(\"pubky-switch/v1/scope-key\", root, \
 u64(data_epoch), scope), key_material_hex being the input after the label: alice's paykit_pay key \
-under which sealed.json's values are sealed, and bob's paykit_request key and the key of his label \
-shop1, which seals sealed.json's labelled record.";
+under which sealed.json's values are sealed, bob's paykit_request key and the key of his label \
+shop1, which seals sealed.json's labelled record, and bob's paykit_settlements key, which seals \
+sealed.json's settlement_marks. Bob's apps, payee apps, each hold paykit_settlements.";
 
 /// The scope keys this set uses, by identity name, data epoch and scope.
-fn scope_key_cases() -> [(&'static str, u64, String); 3] {
+fn scope_key_cases() -> [(&'static str, u64, String); 4] {
     [
         ("alice", 2, "paykit_pay".to_owned()),
         ("bob", 1, "paykit_request".to_owned()),
         ("bob", 1, format!("paykit_request:{SHOP1}")),
+        ("bob", 1, SETTLEMENTS.to_owned()),
     ]
 }
 
