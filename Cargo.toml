@@ -24,3 +24,6 @@ pubky-switch-signer = { git = "https://github.com/pubky/pubky-switch", rev = "28
 
 [patch.crates-io]
 rustls-platform-verifier-android = { path = "vendor/rustls-platform-verifier-android" }
+
+[profile.dev.package."*"]
+opt-level = 2
