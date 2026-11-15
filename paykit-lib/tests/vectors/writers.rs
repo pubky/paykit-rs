@@ -357,7 +357,7 @@ fn writers_refuse_every_rejection_case() {
         let message = Message::parse(json.as_bytes(), OPAQUE_MEMBERS).unwrap();
         message.body
     };
-    let rates_of = |body: &serde_json::Map<String, Value>, conversion: bool| -> Vec<Rate> {
+    let rates_of = |body: &serde_json::Map<String, Value>, conversion: bool| {
         let rates = if conversion {
             &body["conversion"]["rates"]
         } else {
@@ -372,9 +372,8 @@ fn writers_refuse_every_rejection_case() {
                     Asset::parse(st(r, "asset")).unwrap(),
                     Decimal::parse(st(r, "value")).unwrap(),
                 )
-                .unwrap()
             })
-            .collect()
+            .collect::<paykit_lib::Result<Vec<Rate>>>()
     };
     for case in arr(&m["conversion_terms"], "refused") {
         let name = st(case, "name");
@@ -383,25 +382,31 @@ fn writers_refuse_every_rejection_case() {
             Body::parse(&Message::parse(&message_json(st(case, "base")), OPAQUE_MEMBERS).unwrap())
                 .unwrap();
         let refused = match base {
-            Body::PaymentRequest(base) => PaymentRequest {
-                amount: paykit_lib::amount::PaymentAmount {
-                    asset: Asset::parse(st(&body["amount"], "asset")).unwrap(),
-                    ..base.amount.clone()
-                },
-                conversion: Some(Conversion::Fixed(rates_of(&body, true))),
-                ..base
-            }
-            .to_body()
-            .is_err(),
-            Body::PaymentPeriodDetails(base) => PeriodDetails {
-                rates: Some(rates_of(&body, false)),
-                ..base
-            }
-            .to_body_for(&conversion_request(
-                "payment_request_recurring",
-                case.get("request_conversion"),
-            ))
-            .is_err(),
+            Body::PaymentRequest(base) => rates_of(&body, true)
+                .and_then(|rates| {
+                    PaymentRequest {
+                        amount: paykit_lib::amount::PaymentAmount {
+                            asset: Asset::parse(st(&body["amount"], "asset")).unwrap(),
+                            ..base.amount.clone()
+                        },
+                        conversion: Some(Conversion::Fixed(rates)),
+                        ..base
+                    }
+                    .to_body()
+                })
+                .is_err(),
+            Body::PaymentPeriodDetails(base) => rates_of(&body, false)
+                .and_then(|rates| {
+                    PeriodDetails {
+                        rates: Some(rates),
+                        ..base
+                    }
+                    .to_body_for(&conversion_request(
+                        "payment_request_recurring",
+                        case.get("request_conversion"),
+                    ))
+                })
+                .is_err(),
             _ => panic!("{name}: a request or period details"),
         };
         assert!(refused, "{name}: the writer writes it");
