@@ -16,7 +16,7 @@ use pubky_switch_core::time::rfc3339;
 use serde_json::{Map, Value};
 
 use crate::allowances::AllowanceTerms;
-use crate::amount::{Asset, Decimal, PaymentAmount, Rate};
+use crate::amount::{is_conversion_segment, Asset, Decimal, PaymentAmount, Rate};
 use crate::derive::settlement_id;
 use crate::error::{ensure, invalid, Error, Result};
 use crate::identifiers::{
@@ -139,15 +139,6 @@ fn selector_asset(selector: &str) -> &str {
     selector.split('-').next().unwrap_or(selector)
 }
 
-/// Whether `text` is one segment of the conversion convention: non-empty, lower-case ASCII
-/// letters and digits (Paykit wire 4.4, `specs/payment-conversion.md`).
-fn is_conversion_segment(text: &str) -> bool {
-    !text.is_empty()
-        && text
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-}
-
 /// The constraints of conversion terms (Paykit wire 4.4, `specs/payment-conversion.md`), for
 /// a request in `asset` whose accepted endpoints are `accepted`, already in the form
 /// `<asset>-<rail>-<format>` (Paykit wire 1.4):
@@ -186,10 +177,6 @@ fn check_conversion_terms(
 fn check_rate_selectors(rates: &[Rate], visible: &[&PaymentEndpointIdentifier]) -> Result<()> {
     for rate in rates {
         let selector: Vec<&str> = rate.asset().as_str().split('-').collect();
-        ensure(
-            (1..=2).contains(&selector.len()) && selector.iter().all(|s| is_conversion_segment(s)),
-            "Paykit wire 4.4: a rate's asset is <asset> or <asset>-<rail>, each segment lower-case letters and digits",
-        )?;
         let matches = |id: &&PaymentEndpointIdentifier| {
             let segments: Vec<&str> = id.as_str().split('-').collect();
             segments.get(..selector.len()) == Some(&selector[..])
@@ -783,12 +770,13 @@ impl PeriodDetails {
     }
 
     /// The checks that need the request (Paykit wire 4.9): the period is one of the
-    /// request's; the rates are cross-asset only, with no rate for the requested asset, bare
-    /// (`usdt`) or rail-qualified (`usdt-polygon`), so a same-asset payment of a period stays
-    /// 1:1 whatever its details say (`specs/payment-conversion.md`); and each rate matches an
-    /// endpoint the details or the request name, when they name any: the details'
-    /// `payment_endpoints`, the request's `accepted_payment_endpoint_identifiers` and its
-    /// `payment_endpoints`.
+    /// request's; rates come only for a request with `per_period` conversion terms, never for
+    /// one with fixed rates or without conversion terms; the rates are cross-asset only, with
+    /// no rate for the requested asset, bare (`usdt`) or rail-qualified (`usdt-polygon`), so a
+    /// same-asset payment of a period stays 1:1 whatever its details say
+    /// (`specs/payment-conversion.md`); and each rate matches an endpoint the details or the
+    /// request name, when they name any: the details' `payment_endpoints`, the request's
+    /// `accepted_payment_endpoint_identifiers` and its `payment_endpoints`.
     ///
     /// # Errors
     ///
@@ -797,6 +785,10 @@ impl PeriodDetails {
         // Details built in code are held to check 10's rules first (Paykit wire 4.9).
         self.to_body()?;
         let period = request.named_period(&self.billing_period)?;
+        ensure(
+            self.rates.is_none() || request.conversion == Some(Conversion::PerPeriod),
+            "Paykit wire 4.9: period details carry rates only for a request with per_period conversion terms",
+        )?;
         let mut visible: Vec<&PaymentEndpointIdentifier> = self
             .payment_endpoints
             .iter()
@@ -1904,6 +1896,10 @@ mod tests {
 
     #[test]
     fn test_request_writer_refuses_what_check_10_drops() {
+        assert!(matches!(
+            Rate::new(Asset::new("BTC").unwrap(), Decimal::new("1").unwrap()),
+            Err(Error::Validation(_))
+        ));
         let good = PaymentRequest::from_body(&body(request())).unwrap();
         let written = good.to_body().unwrap();
         assert_eq!(PaymentRequest::from_body(&written).unwrap(), good);
@@ -1994,13 +1990,6 @@ mod tests {
                 "a rate selector twice",
                 PaymentRequest {
                     conversion: Some(Conversion::Fixed(vec![rate("btc"), rate("btc")])),
-                    ..good.clone()
-                },
-            ),
-            (
-                "a rate selector in upper case",
-                PaymentRequest {
-                    conversion: Some(Conversion::Fixed(vec![rate("BTC")])),
                     ..good.clone()
                 },
             ),
@@ -2280,6 +2269,48 @@ mod tests {
         for same in ["usdt", "usdt-polygon", "usdt-ethereum"] {
             let error = details(same).check_against(&request).unwrap_err();
             assert!(error.to_string().contains("cross-asset only"), "{same}");
+        }
+    }
+
+    #[test]
+    fn test_period_details_rates_need_per_period_conversion() {
+        let recurring = |conversion: Option<Value>| {
+            let mut r = request();
+            r["amount"] = json!({ "asset": "usd", "value": "10" });
+            r["payment_deadline"] = json!({ "type": "period_start", "seconds": 86400 });
+            r["recurrence"] = json!({ "anchor": "2026-01-31T00:00:00.000Z", "every": 1,
+                "unit": "month", "starts_at": "2026-01-31T00:00:00.000Z", "ends_at": null });
+            if let Some(conversion) = conversion {
+                r["conversion"] = conversion;
+            }
+            PaymentRequest::from_body(&body(r)).unwrap()
+        };
+        let per_period = recurring(Some(json!({ "type": "per_period" })));
+        let fixed = recurring(Some(
+            json!({ "type": "fixed", "rates": [{ "asset": "btc", "value": "0.00001234" }] }),
+        ));
+        let none = recurring(None);
+        let period = json!({ "starts_at": "2026-01-31T00:00:00.000Z",
+            "ends_at": "2026-02-28T00:00:00.000Z" });
+        let with_rates = PeriodDetails::from_body(&body(json!({ "billing_period": period,
+            "expires_at": "2026-02-01T00:00:00.000Z",
+            "rates": [{ "asset": "btc", "value": "0.00001234" }] })))
+        .unwrap();
+        with_rates.check_against(&per_period).unwrap();
+        for request in [&fixed, &none] {
+            let error = with_rates.check_against(request).unwrap_err();
+            assert!(matches!(error, Error::Invalid(_)), "{error}");
+            assert!(error.to_string().contains("per_period"), "{error}");
+            let error = with_rates.to_body_for(request).unwrap_err();
+            assert!(matches!(error, Error::Validation(_)), "{error}");
+        }
+        // Details with only a destination stay valid whatever the conversion terms.
+        let endpoints_only = PeriodDetails::from_body(&body(json!({ "billing_period": period,
+            "expires_at": "2026-02-01T00:00:00.000Z",
+            "payment_endpoints": { "btc-lightning-bolt11": "lnbc2" } })))
+        .unwrap();
+        for request in [&per_period, &fixed, &none] {
+            endpoints_only.check_against(request).unwrap();
         }
     }
 

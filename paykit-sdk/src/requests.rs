@@ -790,8 +790,11 @@ impl Paykit {
                             .is_ok_and(|b| matches!(b, RecordBinding::Period { .. })) => {}
                 Ok((_, record)) => {
                     let mut view = payee_view(held.key, &record, None);
-                    if let Some(hash) = view.request_hash {
-                        view.periods = periods.remove(&hash).unwrap_or_default();
+                    if let (Some(hash), Some((_, request))) =
+                        (view.request_hash, request_of(&record))
+                    {
+                        let held = periods.remove(&hash).unwrap_or_default();
+                        view.periods = crate::periods::period_views(held, request);
                     }
                     // Shown divergent when its record, or one of its period records, is
                     // paused or its latest view divergent (Paykit spec 6).
@@ -816,9 +819,12 @@ impl Paykit {
 
     /// The payee's own check of the proof in `record` (Paykit spec 8.1 step 4): the verified
     /// payment time, or `None` when the payment method doesn't confirm it. A Billing Period's
-    /// endpoint is the one in the period details the proof names, or else the request's;
+    /// endpoint is the one in valid period details the proof names, or else the request's;
     /// with per-period endpoints a later period is paid only to the destination of the
-    /// details its proof names, so one paid elsewhere is `None`.
+    /// details its proof names, so one paid elsewhere is `None`. An identifier absent from
+    /// the selected endpoints, excluded by the request, or naming an app other than that
+    /// source's signed owner is refused before the method's check. Without fixed endpoints,
+    /// the method verifies the destination itself.
     ///
     /// **One payment, one occurrence**, as in v0.1: a payment whose settlement this app has
     /// credited to another request, Billing Period or payment without a request of the same
@@ -863,18 +869,41 @@ impl Paykit {
         // endpoint paid is in the period details the proof names, or else the request's
         // (Paykit spec 8.2).
         let request_record = self.payee_request_record(&target, &bound).await?;
-        let named_details = proof_stored.message().refs.get(1).and_then(|hash| {
-            bound.details().into_iter().find_map(|d| match d.body() {
-                Body::PaymentPeriodDetails(details) if d.hash() == *hash => {
-                    details.payment_endpoints.clone()
-                }
-                _ => None,
-            })
-        });
         let id = &proof.payment_endpoint_identifier;
         let (amount, payload) = match request_record.as_ref().and_then(request_of) {
-            Some((_, request)) => {
-                let from_details = named_details.as_ref().and_then(|e| e.get(id).cloned());
+            Some((stored_request, request)) => {
+                if request
+                    .accepted_payment_endpoint_identifiers
+                    .as_ref()
+                    .is_some_and(|accepted| !accepted.contains(id))
+                {
+                    return Ok(None);
+                }
+                // Named period endpoints do not relax the request's required app
+                // (Paykit wire 4.5); this restriction applies to every destination source.
+                if matches!(&request.destination, RequestDestination::RequiredApp(app)
+                    if *app != proof.payment_app_id)
+                {
+                    return Ok(None);
+                }
+                // Invalid details have no effect (Paykit wire 4.9, 5.3). The request
+                // still supplies a destination where its period rules permit it.
+                let named_details = proof_stored.message().refs.get(1).and_then(|hash| {
+                    crate::periods::valid_details(&bound, request)
+                        .into_iter()
+                        .find_map(|d| match d.body() {
+                            Body::PaymentPeriodDetails(details) if d.hash() == *hash => {
+                                Some((d.message().from.app_id, details))
+                            }
+                            _ => None,
+                        })
+                });
+                let from_details = named_details.and_then(|(owner, details)| {
+                    details
+                        .payment_endpoints
+                        .as_ref()
+                        .map(|endpoints| (owner, endpoints))
+                });
                 // With per-period endpoints, the request's own serve only its first Billing
                 // Period: a later one is credited only for a payment to the destination of
                 // the period details its proof names (Paykit spec 8.2).
@@ -890,11 +919,31 @@ impl Paykit {
                 if later_period && from_details.is_none() {
                     return Ok(None);
                 }
-                let from_request = match &request.destination {
-                    RequestDestination::Endpoints(endpoints) => endpoints.get(id).cloned(),
-                    _ => None,
+                // An endpoint map and its signed owner are one destination source (Paykit
+                // wire 4.4). Select them together before looking up the identifier; neither
+                // an absent identifier nor another app falls back to another source.
+                let endpoints = match from_details {
+                    Some(endpoints) => Some(endpoints),
+                    None => match &request.destination {
+                        RequestDestination::Endpoints(endpoints) => {
+                            Some((stored_request.message().from.app_id, endpoints))
+                        }
+                        RequestDestination::RequiredApp(_) | RequestDestination::Any => None,
+                    },
                 };
-                (request.amount.clone(), from_details.or(from_request))
+                let payload = match endpoints {
+                    Some((owner, endpoints)) => {
+                        if owner != proof.payment_app_id {
+                            return Ok(None);
+                        }
+                        match endpoints.get(id) {
+                            Some(payload) => Some(payload.clone()),
+                            None => return Ok(None),
+                        }
+                    }
+                    None => None,
+                };
+                (request.amount.clone(), payload)
             }
             // A period record whose request record the app holds but can't open or bind yet,
             // sealed under a scope key it doesn't hold or a value that doesn't read: not now,
@@ -1461,11 +1510,12 @@ impl Paykit {
         &self,
         record_key: [u8; 32],
         record: &ActivityRecord,
-        periods: Vec<PeriodView>,
+        periods: Vec<([u8; 32], ActivityRecord)>,
     ) -> Result<Option<RequestView>> {
         let Some((stored, request)) = request_of(record) else {
             return Ok(None);
         };
+        let periods = crate::periods::period_views(periods, request);
         let payee = record.counterparty;
         let hash = stored.hash();
         let mut status = self.request_status(record, request, &payee, &hash).await?;

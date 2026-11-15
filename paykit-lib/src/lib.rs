@@ -40,7 +40,7 @@ pub mod scopes;
 #[cfg(feature = "signer")]
 pub mod signer;
 
-pub use amount::{Asset, Decimal, PaymentAmount, Rate};
+pub use amount::{amount_for_endpoint, Asset, Decimal, PaymentAmount, Rate};
 pub use bodies::Body;
 pub use collections::Collection;
 pub use error::{Error, Result};
