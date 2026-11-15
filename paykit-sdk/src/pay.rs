@@ -3500,8 +3500,8 @@ impl Paykit {
     ///    before the floor, an Allowance not in force ([`Paykit::allowance_read_now`]), a read
     ///    that fails, or a second read that shows another write, holds it
     ///    ([`FinalCheck::Hold`], Paykit spec 8.1, 8.3, `crate::floor`); an automatic repeat
-    ///    makes that check after this one, holding on an Allowance ended or rejected
-    ///    ([`Paykit::repeat_allowance_read_now`]);
+    ///    makes that check after this one, holding on an Allowance ended, rejected or
+    ///    unknown ([`Paykit::repeat_allowance_read_now`]);
     /// 1. a switch lookup kept for the payee whose answer has come is taken, so a late
     ///    answer that removes the destination's app is acted on (Switch spec 4.3), and one
     ///    the client refuses, such as an equivocation, stops the payment
@@ -3673,8 +3673,8 @@ impl Paykit {
         // A first dispatch needs its Allowance in force. A repeat finishes a payment already
         // dispatched, which a handoff or a conflict since doesn't cancel (Paykit spec 8.3,
         // "Conflicted", "Handoff"), but a crash can leave `Paying` journaled for a dispatch
-        // stopped before any call: an end or a rejection the record shows holds it
-        // ([`Paykit::repeat_allowance_read_now`]), and only that is judged at each read.
+        // stopped before any call: an end, a rejection or an unknown-state hold stops it
+        // at every read ([`Paykit::repeat_allowance_read_now`]).
         let allowance = match (first, entry.allowance()?) {
             (true, Some(allowance_id)) => {
                 match Box::pin(self.allowance_read_now(entry, &allowance_id)).await {
@@ -3997,7 +3997,7 @@ impl Paykit {
             // with the same idempotency key: a handoff or a conflict since cancels no
             // payment already started (Paykit spec 8.3, "Conflicted", "Handoff"), so it is
             // made then too, while an end or a rejection the record read now shows, and what
-            // holds while unknown, still hold it ([`Paykit::repeat_under_allowance_held`]):
+            // holds while unknown, still hold it ([`Paykit::repeat_allowance_read_now`]):
             // the entry may be `Paying` from a dispatch stopped before any call. A first
             // dispatch checks the
             // Allowance in force here as held, and again as the switch holds it at the final
@@ -4005,7 +4005,7 @@ impl Paykit {
             // ([`Paykit::allowance_read_now`]): the copy held may predate an end written
             // after the executor's batch.
             let refused = if repeat {
-                self.repeat_under_allowance_held(&record).await?.err()
+                self.repeat_allowance_read_now(&record).await?.err()
             } else {
                 self.allowance_gate(&record, false).await?.err()
             };

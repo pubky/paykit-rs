@@ -62,7 +62,7 @@ impl StateStore for NoSeenMarks {
     }
 
     fn commit(&self, batch: WriteBatch) -> Result<(), StoreError> {
-        let queues = batch.writes.iter().any(|write| {
+        let queues = batch.writes().iter().any(|write| {
             matches!(write, pubky_switch_client::store::Write::Put { key, .. } if key.starts_with(b"out/"))
         });
         if queues && self.refuse_queue.load(Ordering::SeqCst) {
@@ -491,13 +491,12 @@ async fn test_outcome_record_batch_refused_when_sent_again_is_written_again() {
 
 #[tokio::test]
 async fn test_outcome_record_kept_after_a_refusal_about_the_caller_stays_unwritten() {
-    // The outcome's batch is signed and kept, and the service time read before its first
-    // send is refused `403 not_current`. The batch still goes once the app is current, so
-    // the entry isn't finished as unreportable: when the switch then refuses the batch for
-    // good, the entry is still there for a resume.
+    // After a day without a service answer, the first send needs a fresh service time.
+    // Its read is refused `403 not_current`, leaving the signed batch kept. A later
+    // permanent refusal must leave the journal available for another resume.
     let w = World::new();
     let (mut wallet, _phone, request, attempt_id) = in_flight(&w).await;
-    w.clock.advance_ms(11 * 60_000);
+    w.clock.advance_ms(24 * 60 * 60_000 + 1);
     let not_current = pubky_switch_client::testing::Fault::Error {
         path: "/feed".into(),
         code: pubky_switch_core::http::ErrorCode::NotCurrent,

@@ -41,8 +41,8 @@
 //!   same cadence, only once the app holds every key those messages waited for. A copy
 //!   sent again is processed as a new message.
 //!
-//! **Taken at first sight.** The SDK acts on each such event the first time a receive sees
-//! it, and keeps a mark of it (`p/dt/<event ID>`) in the same commit as what the event says,
+//! **Taken at first sight.** The SDK acts on each such event the first time it takes
+//! it, during receive or before judging a retained divergence, and keeps a mark of it (`p/dt/<event ID>`) in the same commit as what the event says,
 //! so a crash before that commit leaves the event to be taken again, and a later sight does
 //! nothing twice, whoever acknowledges it and whenever. A mark goes once its event is
 //! acknowledged. An event whose message the SDK can't keep, such as one whose entry is
@@ -52,6 +52,7 @@
 //! don't pile up for a host that acknowledges only its own: housekeeping, which decides
 //! nothing.
 
+use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
 use paykit_lib::records::{ActivityRecord, StoredMessage};
 use paykit_lib::Body;
@@ -338,6 +339,30 @@ impl Paykit {
             });
         }
         Ok(out)
+    }
+
+    /// Persist the client's retained divergence observations before deciding from current
+    /// records. A failed local commit may reload a view whose newer write cleared the flag;
+    /// the durable duty still records what this app saw. Inspection neither delivers nor
+    /// acknowledges duties, and only Paykit records are taken here. The normal receive
+    /// retains responsibility for ordered delivery, acknowledgment and taken-mark cleanup.
+    pub(crate) async fn take_pending_divergence(&mut self) -> Result<()> {
+        for event in self.app.pending_duty_events().await? {
+            let AppEvent::RecordDivergent { key: record, id } = &event else {
+                continue;
+            };
+            let Some(held) = self.app.shared_record(record).await? else {
+                continue;
+            };
+            if Collection::from_name(&held.collection).is_none() {
+                continue;
+            }
+            let mark = key::taken(id);
+            if self.local_get::<bool>(&mark).await?.is_none() {
+                Box::pin(self.take_stored_event(&event, &mark)).await?;
+            }
+        }
+        Ok(())
     }
 
     /// Take the duty events about stored entries the client hasn't had acknowledged,

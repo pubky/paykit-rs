@@ -2743,10 +2743,21 @@ mod durable_event {
         let mut wallet = w
             .load_on_clock(&w.alice, Arc::clone(&base), app_id, Arc::clone(&w.clock))
             .await;
-        assert!(wallet.app().protocol_scan(b"dv/").await.unwrap().is_empty());
+        assert!(wallet
+            .divergent_records()
+            .await
+            .unwrap()
+            .iter()
+            .any(|shown| shown.record == record && shown.paused));
         let summary = wallet.receive(None).await.unwrap();
+        // Loading already persisted the pause; receive still delivers the duty, without
+        // reporting the same pause as newly set a second time.
+        assert!(summary.divergent.is_empty(), "{summary:?}");
         assert!(
-            summary.divergent.iter().any(|r| r.record == record),
+            summary.report.events.iter().any(|event| matches!(
+                event,
+                pubky_switch_client::app::AppEvent::RecordDivergent { key, .. } if *key == record
+            )),
             "{summary:?}"
         );
         let refused = wallet
@@ -3044,6 +3055,139 @@ mod durable_event {
         assert!(shop.confirm_payment(&paid).await.unwrap().is_some());
     }
 
+    #[tokio::test]
+    async fn test_divergent_payment_keeps_pause_after_failed_commit_and_client_read() {
+        let w = World::new();
+        let failing = Arc::new(crate::executor::FailPauseStore::default());
+        let mut wallet =
+            Box::pin(w.wallet_on("wallet", Arc::clone(&failing) as Arc<dyn StateStore>)).await;
+        let mut phone = Box::pin(w.wallet("phone")).await;
+        let mut shop = Box::pin(w.shop()).await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        let record = wallet.request(&request).await.unwrap().record;
+        let target = crate::outcome_record::payer_record(&request);
+        w.alice
+            .switch()
+            .make_divergent(UPLOADER, record, [1; 32])
+            .unwrap();
+        wallet.app_mut().read_record_fresh(&target).await.unwrap();
+        failing.arm();
+        let failed = Box::pin(wallet.pay_request(&request, PayOptions::default()))
+            .await
+            .unwrap_err();
+        assert!(failing.failed(), "{failed:?}");
+        phone.receive(None).await.unwrap();
+        let value = phone
+            .app()
+            .shared_record(&record)
+            .await
+            .unwrap()
+            .unwrap()
+            .content
+            .value()
+            .unwrap()
+            .to_vec();
+        phone
+            .app_mut()
+            .put_record(&target, &value, Vec::new())
+            .await
+            .unwrap();
+        // The client's next call reloads after the failed protocol commit and reads the
+        // clean rewrite; Paykit has not received or confirmed anything in between.
+        wallet.app_mut().read_record_fresh(&target).await.unwrap();
+        assert!(
+            !wallet
+                .app()
+                .shared_record(&record)
+                .await
+                .unwrap()
+                .unwrap()
+                .divergent
+        );
+        let refused = Box::pin(wallet.pay_request(&request, PayOptions::default()))
+            .await
+            .unwrap_err();
+        assert_eq!(refused_records(&refused), vec![(record, true, false)]);
+        assert!(w.rail.all_executions().is_empty());
+        confirm_refused(&mut wallet, &refused).await;
+        let paid = Box::pin(wallet.pay_request(&request, PayOptions::default()))
+            .await
+            .unwrap();
+        assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    }
+
+    #[tokio::test]
+    async fn test_divergent_credit_keeps_pause_after_failed_commit_and_client_read() {
+        let w = World::new();
+        let failing = Arc::new(crate::executor::FailPauseStore::default());
+        let mut shop = Box::pin(shop_on(&w, Arc::clone(&failing) as Arc<dyn StateStore>)).await;
+        let mut wallet = Box::pin(w.wallet("wallet")).await;
+        let mut till =
+            Box::pin(w.join(&w.bob, "till", AppScopes::new().request().build().unwrap())).await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        Box::pin(wallet.pay_request(&request, PayOptions::default()))
+            .await
+            .unwrap();
+        shop.receive(None).await.unwrap();
+        let record = sale(&shop, &request).await.record;
+        let collection = Collection::PayeeActivity;
+        let target = RecordTarget::new(
+            SwitchCollection::new(collection.name(), collection.policy(None)),
+            &natural_key::request_record(&w.bob_id(), &request.request_hash),
+        );
+        w.bob
+            .switch()
+            .make_divergent(UPLOADER, record, [1; 32])
+            .unwrap();
+        shop.app_mut().read_record_fresh(&target).await.unwrap();
+        failing.arm();
+        let failed = Box::pin(shop.confirm_payment(&record)).await.unwrap_err();
+        assert!(failing.failed(), "{failed:?}");
+        till.receive(None).await.unwrap();
+        let value = till
+            .app()
+            .shared_record(&record)
+            .await
+            .unwrap()
+            .unwrap()
+            .content
+            .value()
+            .unwrap()
+            .to_vec();
+        till.app_mut()
+            .put_record(&target, &value, Vec::new())
+            .await
+            .unwrap();
+        shop.app_mut().read_record_fresh(&target).await.unwrap();
+        assert!(
+            !shop
+                .app()
+                .shared_record(&record)
+                .await
+                .unwrap()
+                .unwrap()
+                .divergent
+        );
+        let refused = Box::pin(shop.confirm_payment(&record)).await.unwrap_err();
+        assert_eq!(refused_records(&refused), vec![(record, true, false)]);
+        assert!(shown_for_a_credit(&refused));
+        let held = shop.app().shared_record(&record).await.unwrap().unwrap();
+        let value = paykit_lib::records::ActivityRecord::read(
+            held.content.value().unwrap(),
+            &shop.identity(),
+            ActivitySide::Payee,
+        )
+        .unwrap();
+        assert!(value.receipt.is_none());
+        confirm_refused(&mut shop, &refused).await;
+        assert!(Box::pin(shop.confirm_payment(&record))
+            .await
+            .unwrap()
+            .is_some());
+    }
+
     /// A store whose next commit that counts a duty event taken (`p/dt/`) fails once armed:
     /// the app stops between a report's mark and the commit that counts it taken, so the
     /// client delivers the report again.
@@ -3074,7 +3218,7 @@ mod durable_event {
         }
 
         fn commit(&self, batch: WriteBatch) -> Result<(), pubky_switch_client::error::StoreError> {
-            let taken = batch.writes.iter().any(|write| {
+            let taken = batch.writes().iter().any(|write| {
                 matches!(write, pubky_switch_client::store::Write::Put { key, .. } if key.starts_with(b"p/dt/"))
             });
             if taken && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {

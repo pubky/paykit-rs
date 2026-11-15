@@ -555,6 +555,7 @@ impl Paykit {
     /// never "gone". Any other failure (a store failure, an alarm, the switch's refusal for
     /// good) is that error: the call is refused all the same.
     pub(crate) async fn records_known(&mut self) -> Result<()> {
+        self.take_pending_divergence().await?;
         self.refuse_while_scope_keys_missing().await?;
         if self.unlisted().await?.is_none() {
             return Ok(());
@@ -589,6 +590,7 @@ impl Paykit {
         self.refuse_while_scope_keys_missing().await?;
         let signed = self.app.cert().signed().clone();
         self.app.list_collections().await?;
+        self.take_pending_divergence().await?;
         let mut tx = Tx::default();
         tx.delete(key::RECORDS_UNLISTED);
         tx.delete(key::MISSED_UNLISTED);

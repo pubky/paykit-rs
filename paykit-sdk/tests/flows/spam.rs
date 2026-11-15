@@ -490,7 +490,7 @@ async fn counted_wallet(w: &World) -> (Paykit, Arc<CountingAllow>) {
 }
 
 #[tokio::test]
-async fn test_spam_lists_read_at_most_every_ten_minutes() {
+async fn test_spam_lists_refresh_at_most_every_ten_minutes() {
     let w = World::new();
     let (mut wallet, transport) = counted_wallet(&w).await;
 
@@ -499,11 +499,13 @@ async fn test_spam_lists_read_at_most_every_ten_minutes() {
     w.clock.advance_ms(LISTS_REFRESH_MS - 1);
     wallet.receive(None).await.unwrap();
     assert_eq!(transport.reads.load(Ordering::SeqCst), 0);
-    // Then the next receive reads them, once.
+    // The next receive refreshes the SDK's copy. The client also reads the deny-list
+    // gap that replacing its copy created (Switch spec 8.3); a second receive does neither.
     w.clock.advance_ms(1);
     wallet.receive(None).await.unwrap();
+    assert_eq!(transport.reads.load(Ordering::SeqCst), 2);
     wallet.receive(None).await.unwrap();
-    assert_eq!(transport.reads.load(Ordering::SeqCst), 1);
+    assert_eq!(transport.reads.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

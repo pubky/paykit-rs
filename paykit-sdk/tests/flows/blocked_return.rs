@@ -1954,11 +1954,11 @@ impl StateStore for PayingStore {
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
         const PAYING: &[u8] = b"\"stage\":\"paying\"";
-        let paying = batch.writes.iter().any(|write| {
+        let paying = batch.writes().iter().any(|write| {
             matches!(write, pubky_switch_client::store::Write::Put { key, value, .. }
                 if key.starts_with(b"p/j/") && value.windows(PAYING.len()).any(|w| w == PAYING))
         });
-        let deny_list = batch.writes.iter().any(|write| {
+        let deny_list = batch.writes().iter().any(|write| {
             matches!(write, pubky_switch_client::store::Write::Put { key, .. } if key == b"p/dl")
         });
         self.inner.commit(batch)?;

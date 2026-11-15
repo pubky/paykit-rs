@@ -18,9 +18,9 @@ thiserror = "2"
 
 # The Pubky Switch crates, as git dependencies pinned to one commit of pubky/pubky-switch.
 # Moving the pin is its own change, which says what changed in the crates Paykit uses.
-pubky-switch-core = { git = "https://github.com/pubky/pubky-switch", rev = "28562dc9095d09e1d9b28d1fe7faa9c0f4d676e3" }
-pubky-switch-client = { git = "https://github.com/pubky/pubky-switch", rev = "28562dc9095d09e1d9b28d1fe7faa9c0f4d676e3" }
-pubky-switch-signer = { git = "https://github.com/pubky/pubky-switch", rev = "28562dc9095d09e1d9b28d1fe7faa9c0f4d676e3" }
+pubky-switch-core = { git = "https://github.com/pubky/pubky-switch", rev = "a5f8a7010f2c9c07aa1e2a99390961c6255a32de" }
+pubky-switch-client = { git = "https://github.com/pubky/pubky-switch", rev = "a5f8a7010f2c9c07aa1e2a99390961c6255a32de" }
+pubky-switch-signer = { git = "https://github.com/pubky/pubky-switch", rev = "a5f8a7010f2c9c07aa1e2a99390961c6255a32de" }
 
 [patch.crates-io]
 rustls-platform-verifier-android = { path = "vendor/rustls-platform-verifier-android" }

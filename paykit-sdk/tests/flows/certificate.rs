@@ -360,7 +360,7 @@ impl StateStore for Recording {
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
         let mut keys = self.keys.lock().unwrap();
-        for write in &batch.writes {
+        for write in batch.writes() {
             let key = match write {
                 pubky_switch_client::store::Write::Put { key, .. }
                 | pubky_switch_client::store::Write::Delete { key, .. } => key,

@@ -38,11 +38,11 @@
 //! - **A repeat finishes a payment already dispatched** (Paykit spec 8.3, "Conflicted",
 //!   "Handoff"): at a resume it is made after a handoff or a conflict too, through the
 //!   method's repeat with the same idempotency key, while what holds while unknown still
-//!   holds it ([`Paykit::repeat_under_allowance_held`]). The Allowance record is read from
+//!   holds it ([`Paykit::repeat_allowance_read_now`]). The Allowance record is read from
 //!   the switch again for it, before the final payment check and after it, and an end or a
-//!   rejection it shows, or a read that fails, holds the repeat: a crash can leave `Paying`
-//!   journaled for a dispatch the final payment check stopped before any call, so a repeat
-//!   may be the first call ([`Paykit::repeat_allowance_read_now`]).
+//!   rejection it shows, an unknown-state hold, or a read that fails, holds the repeat:
+//!   a crash can leave `Paying` journaled for a dispatch the final payment check stopped
+//!   before any call, so a repeat may be the first call ([`Paykit::repeat_allowance_read_now`]).
 //! - **Immediately before the dispatch** (Paykit spec 8.1, 8.3): the deny list, the request
 //!   record, the block floor and the Allowance record are read from the switch again, twice,
 //!   before the attempt's `Paying` commit and after it, and the dispatch holds on a block, a
@@ -878,55 +878,6 @@ impl Paykit {
         }))
     }
 
-    /// What holds the repeat of a payment the executor already dispatched under the
-    /// Allowance at `record` (Paykit spec 8.3): the record read from the switch now
-    /// ([`Paykit::repeat_allowance_read_now`]: ended, rejected, or not read), then the rest as
-    /// that read leaves it held. A repeat finishes that payment, so the Allowance handed off or
-    /// conflicted since doesn't stop it ("Conflicted", "Handoff"), and neither does its consent
-    /// removed for those. What can't be known holds it: the record not held or not binding,
-    /// its view or its ledger's divergent or seen so and not confirmed (Paykit spec 6), its
-    /// current write one the app ignores and the user hasn't confirmed or a removed app's
-    /// after its `distrust_from`, its consent to be confirmed again after a restore or a
-    /// `missed` item, or no consent entry at all.
-    pub(crate) async fn repeat_under_allowance_held(
-        &mut self,
-        record: &[u8; 32],
-    ) -> Result<std::result::Result<(), Refusal>> {
-        if let Err(refusal) = self.repeat_allowance_read_now(record).await? {
-            return Ok(Err(refusal));
-        }
-        let refuse = |why: &str| Ok(Err(Refusal::NotAutomatic(why.into())));
-        let Some(allowance) = self.held_allowance(record).await? else {
-            return refuse("the Allowance record isn't held as one that binds");
-        };
-        let Some(shared) = self.app.shared_record(record).await? else {
-            return refuse("the Allowance record isn't held as one that binds");
-        };
-        let pause = self.pause_of(&shared).await?;
-        if shared.divergent || shared.doubtful || pause.blocks_automatic() {
-            return refuse("the Allowance record was seen divergent and isn't confirmed");
-        }
-        if shared.flagged && !self.ignored_write_confirmed(record).await? {
-            return refuse("the Allowance record's current write is one this app ignores");
-        }
-        if written_by_removed_app(self.app.own_identity(), &shared) {
-            return refuse(
-                "the Allowance record's write is a removed app's after its distrust_from",
-            );
-        }
-        let ledger = self.app.record_key(&ledger_target(
-            &allowance.counterparty,
-            &allowance.allowance_id,
-        ))?;
-        if self.pause_at(&ledger).await?.blocks_automatic() {
-            return refuse("the ledger is divergent, or was seen so and isn't confirmed");
-        }
-        if self.consent_to_confirm_again(record).await? {
-            return refuse("the consent list holds it to be confirmed again");
-        }
-        Ok(Ok(()))
-    }
-
     /// The Allowance at `record` as the switch holds it now, judged for the repeat of a
     /// payment the executor dispatched under it (Paykit spec 7.2, 8.3). A repeat may be the
     /// first call: a first dispatch the final payment check stopped after its `Paying` commit
@@ -936,10 +887,12 @@ impl Paykit {
     /// from the switch now, or one that doesn't bind does: nothing is dispatched, and the
     /// attempt stays open, reserved in the ledger, its outcome not known. A handoff or a
     /// conflict doesn't hold it: they cancel no payment already started ("Handoff",
-    /// "Conflicted"). A current write the app ignores leaves the copy it trusts to be judged,
-    /// and [`Paykit::repeat_under_allowance_held`] holds the repeat until the user confirms
-    /// it. Read before the final payment check, and again after its last await
-    /// (`Paykit::automatic_dispatch_held`).
+    /// "Conflicted"). Every read also enforces the unknown-state holds: a divergent or
+    /// doubtful view, an unconfirmed pause on the Allowance or ledger, an ignored write
+    /// not confirmed, a removed app's write after its distrust_from, or consent waiting
+    /// for confirmation. A current grant and unconflicted terms are not required to finish
+    /// an already dispatched payment. Read before the final payment check, and again after
+    /// its last await (`Paykit::automatic_dispatch_held`).
     ///
     /// # Errors
     ///
@@ -981,6 +934,31 @@ impl Paykit {
         let Some(allowance) = self.held_allowance(record).await? else {
             return refuse("the Allowance record isn't held as one that binds");
         };
+        let Some(shared) = self.app.shared_record(record).await? else {
+            return refuse("the Allowance record isn't held as one that binds");
+        };
+        let pause = self.pause_of(&shared).await?;
+        if shared.divergent || shared.doubtful || pause.blocks_automatic() {
+            return refuse("the Allowance record was seen divergent and isn't confirmed");
+        }
+        if shared.flagged && !self.ignored_write_confirmed(record).await? {
+            return refuse("the Allowance record's current write is one this app ignores");
+        }
+        if written_by_removed_app(self.app.own_identity(), &shared) {
+            return refuse(
+                "the Allowance record's write is a removed app's after its distrust_from",
+            );
+        }
+        let ledger = self.app.record_key(&ledger_target(
+            &allowance.counterparty,
+            &allowance.allowance_id,
+        ))?;
+        if self.pause_at(&ledger).await?.blocks_automatic() {
+            return refuse("the ledger is divergent, or was seen so and isn't confirmed");
+        }
+        if self.consent_to_confirm_again(record).await? {
+            return refuse("the consent list holds it to be confirmed again");
+        }
         if allowance.end.is_some() || self.allowance_stopped(record).await? {
             return Ok(Err(Refusal::AllowanceEnded));
         }
@@ -1412,7 +1390,8 @@ impl Paykit {
     /// [`Refusal::AllowanceEnded`] or [`Refusal::Rejected`]; [`Refusal::Usage`] for an
     /// Allowance not accepted, one this identity is the allowee of, or one that left the
     /// consent list for good; [`Refusal::AllowanceConflicted`] for a conflicted one;
-    /// [`Refusal::NotNow`] while the record is divergent or flagged, or can't be read from
+    /// [`Refusal::NotNow`] while the record is divergent, seen so but unconfirmed or flagged,
+    /// or can't be read from
     /// the switch now, or the records aren't listed; [`PaykitError::Conflict`] when the
     /// record kept changing; the client's errors.
     pub async fn grant_executor(
@@ -1472,11 +1451,12 @@ impl Paykit {
             }
             _ => return Err(PaykitError::corrupt()),
         };
-        self.pause_of(&shared).await?;
-        if shared.divergent || shared.flagged {
-            return Err(
-                Refusal::NotNow("the Allowance record is divergent or flagged".into()).into(),
-            );
+        let pause = self.pause_of(&shared).await?;
+        if shared.divergent || shared.doubtful || shared.flagged || pause.blocks_automatic() {
+            return Err(Refusal::NotNow(
+                "the Allowance record is divergent, unconfirmed or flagged".into(),
+            )
+            .into());
         }
         let held = self
             .held_allowance(record)

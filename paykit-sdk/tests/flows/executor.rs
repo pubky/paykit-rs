@@ -2557,7 +2557,7 @@ impl StateStore for PayingStore {
         const PAYING: &[u8] = b"\"stage\":\"paying\"";
         const ATTEMPTED: &[u8] = b"\"stage\":\"attempted\"";
         let journals = |stage: &[u8]| {
-            batch.writes.iter().any(|write| {
+            batch.writes().iter().any(|write| {
                 matches!(write, pubky_switch_client::store::Write::Put { key, value, .. }
                     if key.starts_with(b"p/j/") && value.windows(stage.len()).any(|w| w == stage))
             })
@@ -4157,4 +4157,406 @@ async fn test_executor_repeat_retains_allowance_divergence_until_confirmation() 
         .unwrap();
     Box::pin(wallet.resume_payments()).await.unwrap();
     assert_eq!(w.rail.pay_calls(&attempt), 2);
+}
+
+#[derive(Default)]
+pub(crate) struct FailPauseStore {
+    inner: pubky_switch_client::store::MemoryStore,
+    armed: std::sync::atomic::AtomicBool,
+    fired: std::sync::atomic::AtomicBool,
+}
+
+impl FailPauseStore {
+    pub(crate) fn arm(&self) {
+        self.fired.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn failed(&self) -> bool {
+        self.fired.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl StateStore for FailPauseStore {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        self.inner.get(ns, key)
+    }
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        let pause = batch.writes().iter().any(|write| matches!(write, pubky_switch_client::store::Write::Put { key, .. } if key.starts_with(b"p/dv/")));
+        if pause && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.fired.store(true, std::sync::atomic::Ordering::SeqCst);
+            return Err(pubky_switch_client::error::StoreError::Unavailable);
+        }
+        self.inner.commit(batch)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PauseAction {
+    Direct,
+    Grant,
+    Repeat,
+    Restore,
+}
+
+async fn failed_pause_call(
+    wallet: &mut Paykit,
+    request: &RequestRef,
+    record: &[u8; 32],
+    action: PauseAction,
+) -> Result<(), PaykitError> {
+    match action {
+        PauseAction::Direct => Box::pin(wallet.pay_under_allowance(request, record))
+            .await
+            .map(|_| ()),
+        PauseAction::Grant => Box::pin(wallet.grant_executor(record, UserConfirmed::new()))
+            .await
+            .map(|_| ()),
+        PauseAction::Repeat => Box::pin(wallet.resume_payments()).await.map(|_| ()),
+        PauseAction::Restore => Box::pin(wallet.reconcile()).await.map(|_| ()),
+    }
+}
+
+async fn failed_pause_retry(action: PauseAction, reload: bool, retries: usize) {
+    let w = World::new();
+    if action != PauseAction::Restore {
+        w.rail.set_declaration(
+            paykit_sdk::rail::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+                .with_idempotent(true),
+        );
+    }
+    let failing = Arc::new(FailPauseStore::default());
+    let base = Arc::clone(&failing) as Arc<dyn StateStore>;
+    let (mut shop, mut wallet, record) = Box::pin(set_up_on(&w, Arc::clone(&base))).await;
+    let mut other = Box::pin(executor_wallet(&w, "other")).await;
+    let backup = wallet.backup().await.unwrap();
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    let attempt = if matches!(action, PauseAction::Repeat | PauseAction::Restore) {
+        w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+        let PayOutcome::Pending { attempt_id, .. } =
+            Box::pin(wallet.pay_under_allowance(&request, &record))
+                .await
+                .unwrap()
+        else {
+            panic!("in flight")
+        };
+        Some(attempt_id)
+    } else {
+        None
+    };
+    let (failing, base) = if action == PauseAction::Restore {
+        w.rail.settle(&attempt.unwrap(), true);
+        drop(wallet);
+        let failing = Arc::new(FailPauseStore::default());
+        let base = Arc::clone(&failing) as Arc<dyn StateStore>;
+        wallet = Box::pin(Paykit::restore(
+            w.env(&w.alice, Arc::clone(&base)),
+            paykit_sdk::PaykitConfig::default(),
+            &backup,
+            Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+            w.timer(),
+        ))
+        .await
+        .unwrap();
+        (failing, base)
+    } else {
+        (failing, base)
+    };
+    w.alice
+        .switch()
+        .make_divergent(UPLOADER, record, [1; 32])
+        .unwrap();
+    failing
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    if action == PauseAction::Repeat {
+        w.clock.advance_ms(60_000);
+    }
+    let error = Box::pin(failed_pause_call(&mut wallet, &request, &record, action))
+        .await
+        .unwrap_err();
+    assert!(
+        failing.fired.load(std::sync::atomic::Ordering::SeqCst),
+        "{error:?}"
+    );
+    assert!(format!("{error:?}").contains("Unavailable"), "{error:?}");
+    other.receive(None).await.unwrap();
+    let (allowance, _) = held(&other, &record).await;
+    other
+        .app_mut()
+        .put_record(
+            &allowances_target(&allowance),
+            &allowance.to_json().unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    for _ in 0..retries {
+        failing
+            .fired
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        failing
+            .armed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let error = Box::pin(failed_pause_call(&mut wallet, &request, &record, action))
+            .await
+            .unwrap_err();
+        assert!(
+            failing.fired.load(std::sync::atomic::Ordering::SeqCst),
+            "{error:?}"
+        );
+        assert!(format!("{error:?}").contains("Unavailable"), "{error:?}");
+    }
+    if reload {
+        let id = wallet.app_id();
+        drop(wallet);
+        wallet = Box::pin(Paykit::load(
+            w.env(&w.alice, base),
+            paykit_sdk::PaykitConfig::default(),
+            id,
+            Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+            w.timer(),
+        ))
+        .await
+        .unwrap();
+    }
+    match action {
+        PauseAction::Direct | PauseAction::Grant => {
+            if action == PauseAction::Grant {
+                let refused = Box::pin(wallet.grant_executor(&record, UserConfirmed::new()))
+                    .await
+                    .unwrap_err();
+                assert!(
+                    matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+                    "{refused:?}"
+                );
+            }
+            let second = Box::pin(wallet.pay_under_allowance(&request, &record)).await;
+            assert!(
+                second.as_ref().err().is_some_and(not_automatic),
+                "paid after a failed pause commit: {second:?}"
+            );
+            assert!(w.rail.all_executions().is_empty());
+        }
+        PauseAction::Repeat => {
+            Box::pin(wallet.resume_payments()).await.unwrap();
+            assert_eq!(
+                w.rail.pay_calls(&attempt.unwrap()),
+                1,
+                "repeated after a failed pause commit"
+            );
+        }
+        PauseAction::Restore => {
+            let second = Box::pin(wallet.reconcile()).await.unwrap();
+            assert!(
+                second.resolved.is_empty(),
+                "resolved after a failed pause commit: {second:?}"
+            );
+            assert!(
+                second
+                    .doubtful
+                    .iter()
+                    .any(|d| d.attempts.contains(&attempt.unwrap())),
+                "{second:?}"
+            );
+        }
+    }
+    crate::divergent::confirm(&mut wallet, &record)
+        .await
+        .unwrap();
+    match action {
+        PauseAction::Direct | PauseAction::Grant => {
+            if action == PauseAction::Grant {
+                Box::pin(wallet.grant_executor(&record, UserConfirmed::new()))
+                    .await
+                    .unwrap();
+            }
+            let confirmed = Box::pin(wallet.pay_under_allowance(&request, &record)).await;
+            assert!(
+                matches!(confirmed, Ok(PayOutcome::Paid { .. })),
+                "{confirmed:?}"
+            );
+        }
+        PauseAction::Repeat => {
+            Box::pin(wallet.resume_payments()).await.unwrap();
+            assert_eq!(w.rail.pay_calls(&attempt.unwrap()), 2);
+        }
+        PauseAction::Restore => {
+            let confirmed = Box::pin(wallet.reconcile()).await.unwrap();
+            assert!(
+                matches!(confirmed.resolved.as_slice(), [PayOutcome::Paid { .. }]),
+                "{confirmed:?}"
+            );
+            assert_eq!(w.rail.executions(&attempt.unwrap()), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_executor_direct_failed_pause_retry() {
+    Box::pin(failed_pause_retry(PauseAction::Direct, false, 0)).await;
+}
+#[tokio::test]
+async fn test_executor_grant_failed_pause_retry() {
+    Box::pin(failed_pause_retry(PauseAction::Grant, false, 0)).await;
+}
+#[tokio::test]
+async fn test_executor_repeat_failed_pause_retry() {
+    Box::pin(failed_pause_retry(PauseAction::Repeat, false, 0)).await;
+}
+#[tokio::test]
+async fn test_executor_restore_failed_pause_retry() {
+    Box::pin(failed_pause_retry(PauseAction::Restore, false, 0)).await;
+}
+#[tokio::test]
+async fn test_executor_direct_failed_pause_reload() {
+    Box::pin(failed_pause_retry(PauseAction::Direct, true, 0)).await;
+}
+#[tokio::test]
+async fn test_executor_grant_failed_pause_reload() {
+    Box::pin(failed_pause_retry(PauseAction::Grant, true, 0)).await;
+}
+#[tokio::test]
+async fn test_executor_repeat_failed_pause_reload() {
+    Box::pin(failed_pause_retry(PauseAction::Repeat, true, 0)).await;
+}
+#[tokio::test]
+async fn test_executor_restore_failed_pause_reload() {
+    Box::pin(failed_pause_retry(PauseAction::Restore, true, 0)).await;
+}
+
+#[tokio::test]
+async fn test_executor_direct_failed_pause_repeated_retry() {
+    Box::pin(failed_pause_retry(PauseAction::Direct, false, 2)).await;
+}
+
+#[tokio::test]
+async fn test_executor_grant_failed_pause_repeated_retry() {
+    Box::pin(failed_pause_retry(PauseAction::Grant, false, 2)).await;
+}
+
+#[tokio::test]
+async fn test_executor_repeat_failed_pause_repeated_retry() {
+    Box::pin(failed_pause_retry(PauseAction::Repeat, false, 2)).await;
+}
+
+#[tokio::test]
+async fn test_executor_restore_failed_pause_repeated_retry() {
+    Box::pin(failed_pause_retry(PauseAction::Restore, false, 2)).await;
+}
+
+#[tokio::test]
+async fn test_executor_repeat_divergence_at_final_read() {
+    let w = Arc::new(World::new());
+    w.rail.set_declaration(
+        paykit_sdk::rail::RailDeclaration::new(paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS)
+            .with_idempotent(true),
+    );
+    let reads = Arc::new(ReadHook::new(Arc::clone(&w.router)));
+    let (mut shop, mut wallet, record) = Box::pin(set_up_through(
+        &w,
+        crate::common::store(),
+        Arc::clone(&reads) as Arc<dyn Transport>,
+    ))
+    .await;
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } =
+        Box::pin(wallet.pay_under_allowance(&request, &record))
+            .await
+            .unwrap()
+    else {
+        panic!("in flight")
+    };
+    let world = Arc::clone(&w);
+    reads.after_read(
+        &format!("/records/{}", pubky_switch_core::enc::b64(&record)),
+        move || {
+            world
+                .alice
+                .switch()
+                .make_divergent(UPLOADER, record, [1; 32])
+                .unwrap();
+        },
+    );
+    w.clock.advance_ms(60_000);
+    Box::pin(wallet.resume_payments()).await.unwrap();
+    assert!(reads.fired());
+    let shared = wallet.app().shared_record(&record).await.unwrap().unwrap();
+    assert!(shared.divergent, "the final read must have seen divergence");
+    assert_eq!(
+        w.rail.pay_calls(&attempt_id),
+        1,
+        "repeated despite freshly observed divergence"
+    );
+}
+
+#[tokio::test]
+async fn test_executor_pending_divergence_preserves_other_duties_and_delivery() {
+    use pubky_switch_client::app::AppEvent;
+
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(&w, terms_with(json!({})))).await;
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    // An unrelated request's refused effect is delivered to the host but remains owed.
+    request_from(&mut shop, w.alice_id(), draft("0.3", w.clock.now_ms())).await;
+    crate::common::refuse_writes(&w.alice, 1);
+    wallet.app_mut().receive(None).await.unwrap();
+    let before = wallet.app_mut().pending_duty_events().await.unwrap();
+    let unrelated: Vec<_> = before
+        .iter()
+        .filter_map(|event| match event {
+            AppEvent::EffectRefused { id, .. } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert!(!unrelated.is_empty(), "{before:?}");
+    w.alice
+        .switch()
+        .make_divergent(UPLOADER, record, [1; 32])
+        .unwrap();
+    let refused = Box::pin(wallet.pay_under_allowance(&request, &record)).await;
+    assert!(
+        refused.as_ref().err().is_some_and(not_automatic),
+        "{refused:?}"
+    );
+    let after = wallet.app_mut().pending_duty_events().await.unwrap();
+    for id in unrelated {
+        assert!(
+            after.iter().any(|event| event.id().as_ref() == Some(&id)),
+            "{after:?}"
+        );
+    }
+    let divergence = after
+        .iter()
+        .find_map(|event| match event {
+            AppEvent::RecordDivergent { id, key } if key == &record => Some(*id),
+            _ => None,
+        })
+        .expect("the divergence duty remains unacknowledged");
+    let delivered = wallet.app_mut().take_events();
+    assert!(
+        delivered
+            .iter()
+            .any(|event| event.id().as_ref() == Some(&divergence)),
+        "{delivered:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
 }

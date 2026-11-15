@@ -848,10 +848,9 @@ async fn kept_request(w: &World, shop: &mut paykit_sdk::Paykit) -> (String, [u8;
 
 #[tokio::test]
 async fn test_one_time_request_kept_reads_as_kept_after_a_store_failure_and_a_reload() {
-    // The call's commits are the client's own: the one that keeps the request's batch,
-    // indexing its message, and its send's. The store fails the first commit after them,
-    // as it would fail a write of the SDK's own, and the reloaded shop still reads the
-    // request kept. Its next flush sends it.
+    // The client keeps the request's batch and stamps its first send. The transport
+    // cannot connect, then the commit clearing the unsent stamp fails. The reloaded shop
+    // still reads the request as kept, and its next flush sends it.
     let w = World::new();
     let _wallet = w.wallet("wallet").await;
     let base = crate::common::store();
@@ -881,7 +880,7 @@ async fn test_one_time_request_kept_reads_as_kept_after_a_store_failure_and_a_re
         .await;
     assert_eq!(fault.commits(), 0, "a load commits nothing here");
     let (msg_id, batch_id) = kept_request(&w, &mut shop).await;
-    assert_eq!(fault.commits(), 2);
+    assert_eq!(fault.commits(), 3, "the unsent-stamp commit failed");
     assert_eq!(
         shop.message_delivery(&msg_id).await.unwrap(),
         Some(MessageDelivery::Kept { batch_id })

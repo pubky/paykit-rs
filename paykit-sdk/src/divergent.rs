@@ -1284,6 +1284,7 @@ impl Paykit {
 
     /// Take the view of `held`, keeping the mark it sets, and tell what it allows.
     pub(crate) async fn pause_of(&mut self, held: &SharedRecord) -> Result<Pause> {
+        self.take_pending_divergence().await?;
         let Some(view) = View::of(held) else {
             return Ok(Pause::default());
         };
@@ -1299,6 +1300,7 @@ impl Paykit {
         match self.app.shared_record(record).await? {
             Some(held) => self.pause_of(&held).await,
             None => {
+                self.take_pending_divergence().await?;
                 let marked = self.marked(record, None).await?;
                 self.pause_with(record, &marked, None).await
             }
@@ -1497,6 +1499,7 @@ impl Paykit {
     /// Take the view of every record of Paykit's collections the app holds, once at a load:
     /// a flag a crash left before a receive's events were taken still pauses its record.
     pub(crate) async fn sweep_divergent(&mut self) -> Result<()> {
+        self.take_pending_divergence().await?;
         for collection in divergent_collections() {
             for held in self.app.records_of(collection).await? {
                 if held.divergent {
@@ -1881,6 +1884,7 @@ impl Paykit {
         _confirmed: UserConfirmed,
     ) -> Result<()> {
         self.refresh_own()?;
+        self.take_pending_divergence().await?;
         let record = &shown.record;
         let (marked, view) = self.mark_and_view(record).await?;
         if marked == Marked::Clear && !view.is_some_and(|view| view.divergent) {

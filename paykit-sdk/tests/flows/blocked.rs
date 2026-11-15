@@ -596,7 +596,7 @@ impl pubky_switch_client::store::StateStore for FailingDenyCopy {
         &self,
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
-        let copy = batch.writes.iter().any(|write| {
+        let copy = batch.writes().iter().any(|write| {
             matches!(write, pubky_switch_client::store::Write::Put { key, .. } if key == b"p/dl")
         });
         if copy && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
@@ -833,14 +833,14 @@ impl pubky_switch_client::store::StateStore for FailAfterBlock {
     ) -> Result<(), pubky_switch_client::error::StoreError> {
         use pubky_switch_client::store::Write;
         use std::sync::atomic::Ordering;
-        let ours = batch.writes.iter().any(|write| {
+        let ours = batch.writes().iter().any(|write| {
             matches!(write, Write::Put { key, .. } | Write::Delete { key, .. } if key.starts_with(b"p/"))
         });
         if ours && self.armed.swap(false, Ordering::SeqCst) {
             return Err(pubky_switch_client::error::StoreError::Unavailable);
         }
         let blocked = batch
-            .writes
+            .writes()
             .iter()
             .any(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"lc/deny/")));
         self.inner.commit(batch)?;
@@ -1059,7 +1059,7 @@ impl pubky_switch_client::store::StateStore for UnknownBlockCommit {
         use pubky_switch_client::store::Write;
         use std::sync::atomic::Ordering;
         let blocked = batch
-            .writes
+            .writes()
             .iter()
             .any(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"lc/deny/")));
         self.inner.commit(batch)?;
@@ -1161,7 +1161,7 @@ impl pubky_switch_client::store::StateStore for FailNextKeep {
         use pubky_switch_client::store::Write;
         use std::sync::atomic::Ordering;
         let keeps = batch
-            .writes
+            .writes()
             .iter()
             .any(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"opq/")));
         if keeps && self.armed.swap(false, Ordering::SeqCst) {
@@ -1243,7 +1243,7 @@ impl pubky_switch_client::store::StateStore for CountsQueued {
     ) -> Result<(), pubky_switch_client::error::StoreError> {
         use pubky_switch_client::store::Write;
         let queues = batch
-            .writes
+            .writes()
             .iter()
             .filter(|write| {
                 matches!(write, Write::Put { key, .. }
@@ -1251,7 +1251,7 @@ impl pubky_switch_client::store::StateStore for CountsQueued {
             })
             .count();
         let outbox = batch
-            .writes
+            .writes()
             .iter()
             .filter(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"out/")))
             .count();

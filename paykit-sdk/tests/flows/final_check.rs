@@ -113,7 +113,7 @@ impl StateStore for HookedStore {
         const SIGNED: &[u8] = b"\"acceptance_msg_id\":\"";
         const PAYING: &[u8] = b"\"stage\":\"paying\"";
         let journals = |marker: &[u8]| {
-            batch.writes.iter().any(|write| match write {
+            batch.writes().iter().any(|write| match write {
                 Write::Put { key, value, .. } => {
                     key.starts_with(b"p/j/") && value.windows(marker.len()).any(|w| w == marker)
                 }
@@ -123,7 +123,7 @@ impl StateStore for HookedStore {
         let signed = journals(SIGNED);
         let paying = journals(PAYING);
         let attempted = journals(b"\"stage\":\"attempted\"");
-        for write in &batch.writes {
+        for write in batch.writes() {
             if let Write::Put { key, value, .. } = write {
                 if !key.starts_with(b"p/j/") {
                     continue;
@@ -143,7 +143,7 @@ impl StateStore for HookedStore {
             return Err(StoreError::Unavailable);
         }
         const ACCEPTANCE: &[u8] = b"paykit.payment_request_acceptance";
-        let queues_acceptance = batch.writes.iter().any(|write| {
+        let queues_acceptance = batch.writes().iter().any(|write| {
             matches!(write, Write::Put { key, value, .. }
                 if key.starts_with(b"out/")
                     && value.windows(ACCEPTANCE.len()).any(|w| w == ACCEPTANCE))
@@ -156,7 +156,7 @@ impl StateStore for HookedStore {
             return Err(StoreError::Unavailable);
         }
         let queues = batch
-            .writes
+            .writes()
             .iter()
             .any(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"out/")));
         if queues
