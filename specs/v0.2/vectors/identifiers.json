@@ -88,15 +88,6 @@
         ]
       },
       {
-        "hashed_bytes_hex": "000000167075626b792d7377697463682f76312f706f6c696379000000127061796b69745f736574746c656d656e7473000000080000000000000001000000127061796b69745f736574746c656d656e7473",
-        "name": "settlements",
-        "policy_hash": "xIm4ilTz_ofcF_9A-qDIpXcSgID4e9E1N-HigTb5EW8",
-        "read_scope": "paykit_settlements",
-        "write_scopes": [
-          "paykit_settlements"
-        ]
-      },
-      {
         "hashed_bytes_hex": "000000167075626b792d7377697463682f76312f706f6c696379000000147061796b69745f726571756573743a73686f7031000000080000000000000001000000147061796b69745f726571756573743a73686f7031",
         "name": "payee_activity of a request labelled shop1",
         "policy_hash": "kOUpHiW1iwDTjHMrFv8KmpwX0z3CvHCfZ8S77MHLSis",
@@ -106,7 +97,7 @@
         ]
       }
     ],
-    "description": "Wire 1.5, Switch wire 1.5: the policies of Paykit's collections, each with its read scope, its write scopes and its policy hash, hash(lp(\"pubky-switch/v1/policy\", read_scope, u64(n), write_scope_1, ..., write_scope_n)), hashed_bytes_hex being the bytes hashed: the fixed policy of each collection, by its name, settlements' the one policy of every payee app's bucket writes, labelled or not, and, last, payee_activity's policy for a request labelled shop1."
+    "description": "Wire 1.5, Switch wire 1.5: the policies of Paykit's collections, each with its read scope, its write scopes and its policy hash, hash(lp(\"pubky-switch/v1/policy\", read_scope, u64(n), write_scope_1, ..., write_scope_n)), hashed_bytes_hex being the bytes hashed: the fixed policy of each collection, by its name, and, last, payee_activity's policy for a request labelled shop1."
   },
   "record_keys": {
     "cases": [
@@ -208,29 +199,9 @@
         "natural_key_hex": "00000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc070000002073b2ceaed7ed5a32b7565f94d50f2b939d04a83d67660cd331731c7fe58512e1",
         "policy_hash": "kOUpHiW1iwDTjHMrFv8KmpwX0z3CvHCfZ8S77MHLSis",
         "record_key": "jey89IAaoSsF95QP0gUzWioWM1PO4bhc8eWa5v50NFI"
-      },
-      {
-        "blinded_natural_key": "aH4rwLbjPWeS28sDrJCJD87wBANJbVG6S9Z-vvqDGPE",
-        "blinded_settlement_tag_input": "AMMyZeHh7O7h7RcvtAw5-xjVGpxuGTU3nrJP6bWji7U",
-        "bucket": 280,
-        "collection": "settlements",
-        "identity": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
-        "key_material_hex": "0000000b736574746c656d656e747300000020687e2bc0b6e33d6792dbcb03ac90890fcef00403496d51ba4bd67ebefa8318f100000020c489b88a54f3fe87dc17ff40faa0c8a577128080f87bd13537e1e28136f9116f",
-        "mark_settlement_tag_hex": "a2d2cb72f49c902268dbf518",
-        "name": "settlements bucket of the bitcoin-txid settlement of the payment without a request",
-        "natural_key": "AAAACAAAAAAAAAEY",
-        "natural_key_hex": "000000080000000000000118",
-        "occurrence": "payee record of a payment without a request",
-        "occurrence_blinded_natural_key": "JVNwdjURbbfCCchdYlyZIT4i3Hh4suyojt__of39bt4",
-        "occurrence_tag_hex": "cf7d6f998b468bb4",
-        "policy_hash": "xIm4ilTz_ofcF_9A-qDIpXcSgID4e9E1N-HigTb5EW8",
-        "record_key": "kzIEgCng4k4ZOo90JXE2dktXxNLMtTTkjm47UGTVFjc",
-        "settlement_id": "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b",
-        "settlement_tag_hex": "4632a2d2cb72f49c902268dbf5181bcec64c26d1fc999c3f3362345c20925219",
-        "settlement_tag_input_hex": "0000004034613565316534626161623839663361333235313861383863333162633837663631386637363637336532636337376162323132376237616664656461333362"
       }
     ],
-    "description": "Wire 1.5, Switch wire 1.5: the record keys of Paykit's natural keys, each in its collection under its policy, blinded with the naming key of the identity whose switch holds it (identity, keys.json): natural_key (and natural_key_hex) is the natural key, blinded_natural_key its blind, derive(\"pubky-switch/v1/name\", naming_key, natural_key), key_material_hex the input of the record key, lp(collection, blinded_natural_key, policy_hash), and record_key derive(\"pubky-switch/v1/record\", collection, blinded_natural_key, policy_hash). The request hashes are those of messages.json's payment_request, payment_request_recurring (its February period, 1772236800) and payment_request_labelled, whose payee record is under the policy of its label shop1. The last is the settlements bucket of the bitcoin-txid settlement of the payment without a request, its settlement_id, held at bob's switch: settlement_tag_input_hex is lp(settlement ID), blinded_settlement_tag_input its blind, settlement_tag_hex the settlement's tag, derive(\"paykit/v1/settlement\", \"tag\", blinded_settlement_tag_input), bucket u16_be(tag[0..2]) >> 6, mark_settlement_tag_hex bytes 2 to 13 of the tag, which its mark stores, and natural_key lp(u64(bucket)); occurrence_tag_hex is the first 8 bytes of derive(\"paykit/v1/settlement\", \"occurrence\", occurrence_blinded_natural_key), the blind of the natural key of the occurrence it was credited to, bob's payee record of that payment."
+    "description": "Wire 1.5, Switch wire 1.5: the record keys of Paykit's natural keys, each in its collection under its policy, blinded with the naming key of the identity whose switch holds it (identity, keys.json): natural_key (and natural_key_hex) is the natural key, blinded_natural_key its blind, derive(\"pubky-switch/v1/name\", naming_key, natural_key), key_material_hex the input of the record key, lp(collection, blinded_natural_key, policy_hash), and record_key derive(\"pubky-switch/v1/record\", collection, blinded_natural_key, policy_hash). The request hashes are those of messages.json's payment_request, payment_request_recurring (its February period, 1772236800) and payment_request_labelled, whose payee record is under the policy of its label shop1."
   },
   "request_hash": [
     {

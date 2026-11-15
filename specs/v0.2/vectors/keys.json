@@ -81,14 +81,11 @@
       "name": "shop",
       "permissions": [
         "claims.read",
-        "lists.read",
         "conversation.add"
       ],
       "scopes": [
         "paykit_request",
-        "paykit_allowance",
-        "paykit_settlements",
-        "paykit_contacts"
+        "paykit_allowance"
       ],
       "signing_public": "D9vXhyOi76BsSuPscqj3tU8t_i5rcRkdOkqPyMy1WWM",
       "signing_secret_hex": "7b76ff58f1291242cef22f34ca9e428be511bb2b3799abeaf7b0af302c9dc9e2",
@@ -103,14 +100,11 @@
       "identity": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
       "name": "cap",
       "permissions": [
-        "lists.read",
         "conversation.add"
       ],
       "scopes": [
         "paykit_request",
-        "paykit_ext:paykit-cap",
-        "paykit_settlements",
-        "paykit_contacts"
+        "paykit_ext:paykit-cap"
       ],
       "signing_public": "-n6_hkQIUSztrFP_1eY8bKLkUd-Qs2h4kVekkOpmGvs",
       "signing_secret_hex": "95844dec84ef19d35d31c4ff01664a365e7dc03da039cf4d57146dc539e23979",
@@ -125,20 +119,17 @@
       "identity": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
       "name": "hosted",
       "permissions": [
-        "lists.read",
         "conversation.add"
       ],
       "scopes": [
-        "paykit_request:shop1",
-        "paykit_settlements",
-        "paykit_contacts"
+        "paykit_request:shop1"
       ],
       "signing_public": "vtgs3-ir2M6ybOE-DN6ERGO2KRzE8FdmBzU-bWuQIJs",
       "signing_secret_hex": "505b8c416a7d115f8bbaec5445aceb77f00da01410a09cd7c1445af589ece305",
       "signing_seed_label": "bob/hosted/signing"
     }
   ],
-  "description": "The fixed keys every other file of this set uses (Switch wire 1.3, 1.5, 3.1). Each secret is BLAKE3(\"paykit/v1/test-vectors/\" + seed label); X25519 secrets (bundle keys) are then clamped as RFC 7748 requires, and Ed25519 secrets are 32-byte seeds. identities holds alice, the payer, and bob, the payee, with their Pubky IDs, their Switch roots, derive(\"pubky-switch/v1/scope-root\", identity secret), and their naming keys, derive(\"pubky-switch/v1/naming\", root), which blind every record key and claim input of this set. apps holds each app with its signing and bundle keys, its App ID and the scopes and switch permissions of its certificate in documents.json certificates: the executor's and the phone's hold paykit_contacts. scope_keys are derive(\"pubky-switch/v1/scope-key\", root, u64(data_epoch), scope), key_material_hex being the input after the label: alice's paykit_pay key under which sealed.json's values are sealed, bob's paykit_request key and the key of his label shop1, which seals sealed.json's labelled record, and bob's paykit_settlements key, which seals sealed.json's settlement_marks. Bob's apps, payee apps, each hold paykit_settlements.",
+  "description": "The fixed keys every other file of this set uses (Switch wire 1.3, 1.5, 3.1). Each secret is BLAKE3(\"paykit/v1/test-vectors/\" + seed label); X25519 secrets (bundle keys) are then clamped as RFC 7748 requires, and Ed25519 secrets are 32-byte seeds. identities holds alice, the payer, and bob, the payee, with their Pubky IDs, their Switch roots, derive(\"pubky-switch/v1/scope-root\", identity secret), and their naming keys, derive(\"pubky-switch/v1/naming\", root), which blind every record key and claim input of this set. apps holds each app with its signing and bundle keys, its App ID and the scopes and switch permissions of its certificate in documents.json certificates: the executor's and the phone's hold paykit_contacts. scope_keys are derive(\"pubky-switch/v1/scope-key\", root, u64(data_epoch), scope), key_material_hex being the input after the label: alice's paykit_pay key under which sealed.json's values are sealed, and bob's paykit_request key and the key of his label shop1, which seals sealed.json's labelled record.",
   "identities": [
     {
       "name": "alice",
@@ -180,13 +171,6 @@
       "key_hex": "b9a83669747b0f685b996e7b986c08bec2c7ae42930d811a7ec6d20a17146560",
       "key_material_hex": "000000201832075ee5bef0026fcda26c57cb8a67b6cfffdf8d43bbcce2107d6cf97f8176000000080000000000000001000000147061796b69745f726571756573743a73686f7031",
       "scope": "paykit_request:shop1"
-    },
-    {
-      "data_epoch": 1,
-      "identity": "bob",
-      "key_hex": "906bff749f13ec8ac78b7a2147bd35290f1cc167cd1f8fa7dad236c83663f767",
-      "key_material_hex": "000000201832075ee5bef0026fcda26c57cb8a67b6cfffdf8d43bbcce2107d6cf97f8176000000080000000000000001000000127061796b69745f736574746c656d656e7473",
-      "scope": "paykit_settlements"
     }
   ]
 }
