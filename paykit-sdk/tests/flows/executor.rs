@@ -1375,7 +1375,7 @@ async fn test_executor_pays_inside_its_limits_until_ended_through_a_restore() {
 /// a request for 0.5 btc paid under it and the dispatch left in flight. Returns bob's shop,
 /// the wallet, the wallet's record key and the attempt.
 async fn executor_in_flight(w: &World) -> (Paykit, Paykit, [u8; 32], paykit_lib::AttemptId) {
-    let (shop, wallet, record, attempt, _) = executor_in_flight_on(w, true).await;
+    let (shop, wallet, record, attempt, _) = Box::pin(executor_in_flight_on(w, true)).await;
     (shop, wallet, record, attempt)
 }
 
@@ -3988,4 +3988,173 @@ async fn test_executor_restore_manual_attempt_uses_validated_ledger_absence() {
 #[tokio::test]
 async fn test_executor_restore_unauthorized_ledger_cannot_attribute_manual_attempt() {
     Box::pin(restored_manual_attempt_is_not_attributed(true)).await;
+}
+
+#[tokio::test]
+async fn test_executor_restore_retains_allowance_divergence_until_confirmation() {
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(&w, terms_with(json!({})))).await;
+    let mut other = Box::pin(executor_wallet(&w, "other")).await;
+    let backup = wallet.backup().await.unwrap();
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } =
+        Box::pin(wallet.pay_under_allowance(&request, &record))
+            .await
+            .unwrap()
+    else {
+        panic!("in flight")
+    };
+    w.rail.settle(&attempt_id, true);
+    drop(wallet);
+    let mut wallet = Box::pin(Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    w.alice
+        .switch()
+        .make_divergent(UPLOADER, record, [1; 32])
+        .unwrap();
+    let first = Box::pin(wallet.reconcile()).await.unwrap();
+    assert!(first.resolved.is_empty(), "{first:?}");
+    assert!(
+        first
+            .doubtful
+            .iter()
+            .any(|d| d.attempts.contains(&attempt_id)),
+        "{first:?}"
+    );
+    other.receive(None).await.unwrap();
+    let (allowance, _) = held(&other, &record).await;
+    other
+        .app_mut()
+        .put_record(
+            &allowances_target(&allowance),
+            &allowance.to_json().unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let second = Box::pin(wallet.reconcile()).await.unwrap();
+    assert!(
+        second.resolved.is_empty(),
+        "resolved after an unconfirmed divergent view: {second:?}"
+    );
+    assert!(
+        second
+            .doubtful
+            .iter()
+            .any(|d| d.attempts.contains(&attempt_id)),
+        "{second:?}"
+    );
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+    crate::divergent::confirm(&mut wallet, &record)
+        .await
+        .unwrap();
+    let confirmed = Box::pin(wallet.reconcile()).await.unwrap();
+    assert!(
+        matches!(confirmed.resolved.as_slice(), [PayOutcome::Paid { .. }]),
+        "{confirmed:?}"
+    );
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}
+
+async fn payment_keeps_observed_allowance_pause(at_grant: bool) {
+    let w = World::new();
+    let (mut shop, mut wallet, record) = Box::pin(set_up(&w, terms_with(json!({})))).await;
+    let mut other = Box::pin(executor_wallet(&w, "other")).await;
+    let request = Box::pin(request(&w, &mut shop, &mut wallet, "0.5")).await;
+    w.alice
+        .switch()
+        .make_divergent(UPLOADER, record, [1; 32])
+        .unwrap();
+    if at_grant {
+        let first = Box::pin(wallet.grant_executor(&record, UserConfirmed::new())).await;
+        assert!(
+            matches!(
+                first.as_ref().err().and_then(PaykitError::refusal),
+                Some(Refusal::NotNow(_))
+            ),
+            "{first:?}"
+        );
+    } else {
+        let first = Box::pin(wallet.pay_under_allowance(&request, &record)).await;
+        assert!(first.as_ref().err().is_some_and(not_automatic), "{first:?}");
+    }
+    other.receive(None).await.unwrap();
+    let (allowance, _) = held(&other, &record).await;
+    other
+        .app_mut()
+        .put_record(
+            &allowances_target(&allowance),
+            &allowance.to_json().unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let second = Box::pin(wallet.pay_under_allowance(&request, &record)).await;
+    assert!(
+        second.as_ref().err().is_some_and(not_automatic),
+        "paid after an unconfirmed divergent view: {second:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    crate::divergent::confirm(&mut wallet, &record)
+        .await
+        .unwrap();
+    let confirmed = Box::pin(wallet.pay_under_allowance(&request, &record)).await;
+    assert!(
+        matches!(confirmed, Ok(PayOutcome::Paid { .. })),
+        "{confirmed:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_executor_direct_payment_retains_allowance_divergence_until_confirmation() {
+    Box::pin(payment_keeps_observed_allowance_pause(false)).await;
+}
+
+#[tokio::test]
+async fn test_executor_grant_retains_allowance_divergence_until_confirmation() {
+    Box::pin(payment_keeps_observed_allowance_pause(true)).await;
+}
+
+#[tokio::test]
+async fn test_executor_repeat_retains_allowance_divergence_until_confirmation() {
+    let w = World::new();
+    let (_shop, mut wallet, record, attempt) = Box::pin(executor_in_flight(&w)).await;
+    let mut other = Box::pin(executor_wallet(&w, "other")).await;
+    w.alice
+        .switch()
+        .make_divergent(UPLOADER, record, [1; 32])
+        .unwrap();
+    w.clock.advance_ms(60_000);
+    Box::pin(wallet.resume_payments()).await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt), 1);
+    other.receive(None).await.unwrap();
+    let (allowance, _) = held(&other, &record).await;
+    other
+        .app_mut()
+        .put_record(
+            &allowances_target(&allowance),
+            &allowance.to_json().unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    Box::pin(wallet.resume_payments()).await.unwrap();
+    assert_eq!(
+        w.rail.pay_calls(&attempt),
+        1,
+        "repeated after an unconfirmed divergent view"
+    );
+    crate::divergent::confirm(&mut wallet, &record)
+        .await
+        .unwrap();
+    Box::pin(wallet.resume_payments()).await.unwrap();
+    assert_eq!(w.rail.pay_calls(&attempt), 2);
 }

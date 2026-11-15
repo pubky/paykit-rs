@@ -450,11 +450,12 @@ impl Paykit {
                 "the attempt's Allowance isn't read from the switch now",
             ));
         };
+        let pause = self.pause_of(&shared).await?;
         if shared.divergent
             || shared.flagged
             || shared.doubtful
             || written_by_removed_app(self.app.own_identity(), &shared)
-            || self.pause_of(&shared).await?.blocks_automatic()
+            || pause.blocks_automatic()
         {
             return Err(not_automatic("the attempt's Allowance record is untrusted"));
         }
@@ -754,6 +755,9 @@ impl Paykit {
             shared
         };
         let refuse = |why: &str| Ok(Err(Refusal::NotAutomatic(why.into())));
+        // Keep every divergent view before a refusal: a later clean write cannot lift
+        // the pause without the user's confirmation (Paykit spec 6).
+        let pause = self.pause_of(&shared).await?;
         if shared.divergent || shared.doubtful {
             return refuse("the Allowance record is divergent or untrusted");
         }
@@ -761,7 +765,7 @@ impl Paykit {
         // view, or messages kept over it still wait to be written (Paykit spec 6): the
         // upload may hold an end, a rejection or a `conflicted` message the current write
         // lacks. The view just read is taken, so a record divergent now is marked.
-        if self.pause_of(&shared).await?.blocks_automatic() {
+        if pause.blocks_automatic() {
             return refuse(
                 "the Allowance record was seen divergent and the user hasn't confirmed it",
             );
@@ -898,7 +902,8 @@ impl Paykit {
         let Some(shared) = self.app.shared_record(record).await? else {
             return refuse("the Allowance record isn't held as one that binds");
         };
-        if shared.divergent || shared.doubtful || self.pause_of(&shared).await?.blocks_automatic() {
+        let pause = self.pause_of(&shared).await?;
+        if shared.divergent || shared.doubtful || pause.blocks_automatic() {
             return refuse("the Allowance record was seen divergent and isn't confirmed");
         }
         if shared.flagged && !self.ignored_write_confirmed(record).await? {
@@ -1467,6 +1472,7 @@ impl Paykit {
             }
             _ => return Err(PaykitError::corrupt()),
         };
+        self.pause_of(&shared).await?;
         if shared.divergent || shared.flagged {
             return Err(
                 Refusal::NotNow("the Allowance record is divergent or flagged".into()).into(),
