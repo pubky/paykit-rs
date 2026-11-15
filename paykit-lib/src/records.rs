@@ -3043,10 +3043,12 @@ impl SettlementBucket {
 
     /// The held-to-later rule of a `settlements` bucket (Paykit wire 5.7, Seen marks; Switch
     /// spec 8.2): a reader that holds `self` ignores, and shows with its writer, a later write
-    /// that drops one of its marks or changes it to a higher mark of the same settlement. A
-    /// later write that adds marks is taken, and so is one that replaces a mark with a lower
-    /// mark of the same settlement, as no change: the higher mark still counts as seen. A later
-    /// write that drops `lost_to_delete` is ignored as one that drops a mark.
+    /// that drops or narrows a retained deletion boundary, or changes a seen mark to a higher
+    /// mark of the same settlement. Missing seen marks are also refused unless `later` carries
+    /// `lost_to_delete`: that write is merged over without naming its writer. The caller
+    /// retains every seen mark and boundary and uses [`Self::merged_with`] to restore them.
+    /// A later write that adds marks is taken, and so is one that replaces a mark with a
+    /// lower mark of the same settlement, as no change: the higher mark still counts as seen.
     ///
     /// # Errors
     ///
@@ -3063,6 +3065,7 @@ impl SettlementBucket {
         }
         for mark in &self.marks {
             match later.find(&mark.settlement) {
+                None if later.lost_to_delete.is_some() => {}
                 None => return invalid("Paykit wire 5.7: a later write drops a mark seen"),
                 Some(held) if held > mark => {
                     return invalid("Paykit wire 5.7: a later write changes a mark seen");
