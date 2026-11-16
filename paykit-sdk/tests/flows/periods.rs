@@ -1451,9 +1451,12 @@ async fn test_periods_accept_held_after_restore_waits_for_the_user() {
         RequestStatus::Held
     );
     let refused = app.accept_subscription(&request).await.unwrap_err();
-    assert_eq!(refusal(&refused), Refusal::HeldAfterRestore);
+    assert!(matches!(
+        refusal(&refused),
+        Refusal::HeldAfterRestore { .. }
+    ));
     let options = paykit_sdk::AcceptOptions::default()
-        .with_possibly_cancelled_confirmed(pubky_switch_client::app::UserConfirmed::new());
+        .with_possibly_cancelled_confirmed(crate::common::held(&app, &request).await);
     app.accept_subscription_with(&request, options)
         .await
         .unwrap();
@@ -2901,7 +2904,7 @@ async fn test_periods_acceptance_stays_after_a_restore() {
     app.resume_payments().await.unwrap();
     app.receive(None).await.unwrap();
     let options = paykit_sdk::AcceptOptions::default()
-        .with_possibly_cancelled_confirmed(pubky_switch_client::app::UserConfirmed::new());
+        .with_possibly_cancelled_confirmed(crate::common::held(&app, &request).await);
     let refused = app
         .accept_subscription_with(&request, options)
         .await

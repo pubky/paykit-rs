@@ -331,6 +331,7 @@ impl Paykit {
                 recurring: request.is_recurring(),
                 recurrence: request.recurrence,
                 status: RequestStatus::Unrecorded,
+                held: None,
                 divergent: false,
                 receipt: None,
                 manual_only: self.came_back_from_block(&stored).await?,
