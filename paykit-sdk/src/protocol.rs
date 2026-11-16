@@ -362,8 +362,8 @@ pub const BACKUP_NAME: &str = "paykit";
 /// without content: nothing is written. Pure: it is called at backup time too.
 ///
 /// The layer's schema is closed (`state::StateKey`): a key no builder of the SDK writes is
-/// refused, every key is parsed whole, and every value is read as its family's and bound
-/// to what its key names.
+/// refused, every key occurs once and is parsed whole, and every value is read as its
+/// family's and bound to what its key names.
 ///
 /// Every message another party signed that the layer keeps is verified again for `own`, as
 /// its later use verifies it, and bound to the record key it is kept under, from `blind`,
@@ -398,6 +398,10 @@ pub(crate) fn restore_paykit_layer(
     };
     let state = decode_local_state(&layer.data)
         .ok_or_else(|| String::from("Paykit's layer doesn't read as local state"))?;
+    let keys: std::collections::BTreeSet<_> = state.iter().map(|(key, _)| key).collect();
+    if keys.len() != state.len() {
+        return Err("Paykit's local state in the backup repeats a key".into());
+    }
     let mut open = std::collections::BTreeSet::new();
     let mut journaled = std::collections::BTreeSet::new();
     let mut acknowledged = Vec::new();
@@ -741,7 +745,7 @@ pub(crate) fn restore_paykit_layer(
 /// step writes the boundary of the loss the client follows, in the commit that follows it,
 /// so no run keeps one above it, and one above would leave every later loss's step writing
 /// nothing ([`crate::loss::loss_writes`]). Checked before the restore writes anything. A
-/// layer or value that doesn't read is left to the layer's own check
+/// layer with repeated keys or a value that doesn't read is left to the layer's own check
 /// ([`restore_paykit_layer`]), which refuses it.
 ///
 /// The client offers no reading of the generation a backup's client follows before the

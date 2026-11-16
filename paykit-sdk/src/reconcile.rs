@@ -318,15 +318,26 @@ impl Paykit {
             }
         }
         for (claim_key, doubt) in self.app.doubtful_claims().await? {
-            if report.doubtful.iter().any(|d| d.obligation == claim_key) {
-                continue;
-            }
-            let attempts = doubt
+            let mut attempts: Vec<_> = doubt
                 .unknown
                 .iter()
                 .chain(doubt.orphaned.iter())
                 .map(|a| AttemptId::from_bytes(*a))
                 .collect();
+            attempts.sort_unstable();
+            attempts.dedup();
+            if let Some(row) = report
+                .doubtful
+                .iter_mut()
+                .find(|d| d.obligation == claim_key)
+            {
+                for attempt in attempts {
+                    if !row.attempts.contains(&attempt) {
+                        row.attempts.push(attempt);
+                    }
+                }
+                continue;
+            }
             report.doubtful.push(Doubtful {
                 obligation: claim_key,
                 attempts,

@@ -1105,3 +1105,102 @@ async fn test_provider_loss_false_statement_in_saved_backup_is_refused() {
     assert!(is_refused(&error), "{error:?}");
     nothing_restored(&w, at, id).await;
 }
+
+async fn duplicate_loss_entry_is_refused(prefix: &[u8], future: bool) {
+    let (w, mut wallet, _, _) = loss_with_statement().await;
+    let id = wallet.app_id();
+    let backup: serde_json::Value =
+        serde_json::from_slice(&wallet.backup().await.unwrap().to_bytes().unwrap()).unwrap();
+    let followed = backup["meta"]["generation"].as_u64().unwrap();
+    let mut layer = layer_of(&backup);
+    let mut duplicate = layer
+        .iter()
+        .find(|(key, _)| key.starts_with(prefix))
+        .unwrap()
+        .clone();
+    if future {
+        duplicate.1["d"]["generation"] = serde_json::json!(followed + 1);
+    }
+    layer.push(duplicate);
+    let at = store();
+    let error = refused_restore(&w, with_layer(&backup, layer), at.clone()).await;
+    assert!(is_refused(&error), "{error:?}");
+    nothing_restored(&w, at, id).await;
+}
+
+#[tokio::test]
+async fn test_provider_loss_duplicate_boundary_in_backup_is_refused() {
+    duplicate_loss_entry_is_refused(b"pl", true).await;
+}
+
+#[tokio::test]
+async fn test_provider_loss_identical_boundaries_in_backup_are_refused() {
+    duplicate_loss_entry_is_refused(b"pl", false).await;
+}
+
+#[tokio::test]
+async fn test_provider_loss_duplicate_statements_in_backup_are_refused() {
+    duplicate_loss_entry_is_refused(b"pn/", false).await;
+}
+
+async fn journaled_orphan_report(after_loss: bool) {
+    let w = World::new();
+    w.rail.set_declaration(RailDeclaration::new(
+        paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS,
+    ));
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    let obligation = wallet.payments().await.unwrap().remove(0).obligation;
+    w.clock.advance_ms(2 * 3_600_000);
+    if after_loss {
+        declare_loss(&w);
+        follow_loss(&mut wallet).await;
+    }
+    wallet.app_mut().read_claim(&obligation).await.unwrap();
+    let client_doubt = wallet
+        .app()
+        .claim_doubt(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        client_doubt.orphaned.contains(&attempt_id.to_bytes()),
+        "{client_doubt:?}"
+    );
+    let report = wallet.reconcile().await.unwrap();
+    let doubtful = report
+        .doubtful
+        .iter()
+        .find(|d| d.obligation == obligation)
+        .expect("an orphaned attempt must be reported");
+    assert_eq!(doubtful.before_loss.is_some(), after_loss);
+    assert_eq!(doubtful.attempts, [attempt_id], "{report:?}");
+    if after_loss {
+        assert_eq!(doubtful.before_loss, Some(kept_loss(&wallet).await));
+        assert_eq!(doubtful.payee, Some(request.payee));
+        assert_eq!(doubtful.request_hash, Some(request.request_hash));
+    }
+    let again = wallet.reconcile().await.unwrap();
+    assert_eq!(again.doubtful, report.doubtful);
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_provider_loss_reconcile_retains_journaled_orphan_after_loss() {
+    journaled_orphan_report(true).await;
+}
+
+#[tokio::test]
+async fn test_provider_loss_reconcile_retains_journaled_orphan_without_loss() {
+    journaled_orphan_report(false).await;
+}
