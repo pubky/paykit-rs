@@ -137,36 +137,43 @@ async function reload() {
 
 // ---------------------------------------------------------------------------
 async function freeze() {
-  if (engine !== "chromium") throw new Error("freeze needs Chrome DevTools Protocol");
+  // Page.setWebLifecycleState {state: "frozen"} returns {} but is a no-op in
+  // headless Chrome 157 (timers keep firing, no freeze event; pages stay
+  // "visible" even behind another tab or when minimized; see
+  // probe-freeze*.log). So a frozen tab is EMULATED by blocking the page's
+  // main thread with a busy loop: no timer, promise reaction, fetch
+  // completion or wasm task runs, and on return performance.now() and
+  // Date.now() have both advanced. Not emulated: OS sleep (clocks that stop)
+  // and discarding. Works in every engine.
   const ctx = await browser.newContext();
   const db = `lc-freeze-${Date.now()}`;
   const A = await lcPage(ctx, "A");
   out("A signUp", await ev(A, (db) => lc.signUp("lc-freeze-app", db), db));
   const B = await lcPage(ctx, "B");
   out("B open (separate grant via sign_in, same IndexedDB)", await ev(B, (db) => lc.open(db, false), db));
-  const cdp = await ctx.newCDPSession(A);
   const freezeFor = async (ms, during) => {
     const before = await ev(A, () => lc.clocks());
-    await cdp.send("Page.setWebLifecycleState", { state: "frozen" });
+    const blocked = A.evaluate((ms) => { const end = performance.now() + ms; while (performance.now() < end) { /* frozen */ } return true; }, ms);
     const frozenAt = Date.now();
+    await sleep(200);
+    // B must stay responsive (A and B must not share a main thread).
+    const bAlive = await Promise.race([ev(B, () => performance.now()).then(() => true), sleep(2000).then(() => false)]);
     const duringResult = during ? await during(frozenAt) : null;
-    const rest = ms - (Date.now() - frozenAt);
-    if (rest > 0) await sleep(rest);
-    await cdp.send("Page.setWebLifecycleState", { state: "active" });
+    await blocked;
     const after = await ev(A, () => lc.clocks());
     out("A clocks across the freeze", {
-      frozenMs: Date.now() - frozenAt,
+      frozenMs: Date.now() - frozenAt, bResponsiveWhileAFrozen: bAlive,
       leaseClockAdvancedMs: Math.round(after.leaseClockMs - before.leaseClockMs),
       performanceNowAdvancedMs: Math.round(after.performanceNowMs - before.performanceNowMs),
       wallAdvancedMs: after.wallMs - before.wallMs,
     });
     return duringResult;
   };
-  // Is the page really frozen? A timer must not fire while frozen.
+  // A timer must not fire while frozen.
   await ev(A, () => { globalThis.ticks = 0; globalThis.tickTimer = setInterval(() => globalThis.ticks++, 100); });
   await freezeFor(3000);
   const ticks = await ev(A, () => { clearInterval(globalThis.tickTimer); return globalThis.ticks; });
-  out("A 100 ms interval ticks during a 3 s freeze (plus a few before/after)", ticks);
+  out("A 100 ms interval ticks across a 3 s freeze", ticks);
 
   // d1. Paykit with_write_lock: holder frozen past its 60 s lock.
   await ev(A, () => lc.start("hold", "debugHoldWriteLock", "lk1", 5000, "A-value"));

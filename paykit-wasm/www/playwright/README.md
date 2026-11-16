@@ -23,4 +23,8 @@ and (for the timeout steps) `python3 -I paykit-wasm/www/blackhole.py 15490`:
 - `node probe-sse.mjs <engine> <user>`: when `fetch()` resolves for an event
   stream whose first body bytes arrive late.
 - `node lifecycle.mjs <engine> <multitab|reload|freeze|panic>`: the lifecycle
-  experiments in `www/lifecycle.js` (`freeze` needs Chrome DevTools Protocol).
+  experiments in `www/lifecycle.js`. `freeze` emulates a frozen tab with a
+  main-thread busy loop, because CDP `Page.setWebLifecycleState` is a no-op
+  in headless Chrome (`probe-freeze.mjs`, `probe-freeze2.mjs` show that).
+- `node probe-features.mjs <engine>`: Web Locks, BroadcastChannel,
+  SharedWorker, IndexedDB durability and WebDAV `LOCK` CORS preflight.
