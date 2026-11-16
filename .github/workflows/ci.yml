@@ -37,6 +37,11 @@ jobs:
       - name: Install native build deps
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev cmake
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # THROWAWAY (#411): --all-features turns on paykit-ffi's `web` feature,
+      # which removes grant logout and the tokio async runtime from the FFI
+      # surface. Lint the default (mobile) paykit-ffi build separately so the
+      # shipped flavour stays covered.
+      - run: cargo clippy -p paykit-ffi --all-targets -- -D warnings
 
   test:
     name: Tests
@@ -53,6 +58,10 @@ jobs:
       - name: Install native build deps
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev cmake
       - run: cargo test --workspace --all-features
+      # THROWAWAY (#411): --all-features builds paykit-ffi with `web`, which
+      # skips the grant logout tests and the tokio-backed async exports. Run the
+      # default (mobile) paykit-ffi build too.
+      - run: cargo test -p paykit-ffi
 
   doc:
     name: Docs
