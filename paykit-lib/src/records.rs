@@ -34,7 +34,7 @@ use crate::derive::{
     SETTLEMENT_BUCKETS, SETTLEMENT_TAG_LEN,
 };
 use crate::error::{ensure, invalid, Error, Result};
-use crate::grant::ExecutorGrant;
+use crate::grant::{ExecutorGrant, LedgerHandoff};
 use crate::identifiers::{
     AllowanceId, AttemptId, PaymentEndpointIdentifier, PaymentEndpointPayload,
 };
@@ -588,6 +588,30 @@ static ALLOWANCE_SHAPE: Shape = Shape {
         ("grant", Member::Object(&CURRENT_GRANT)),
         ("grants", Member::Array(&GRANT_ENTRY)),
         ("msg_ids", Member::Leaf),
+        ("ledger_handoff", Member::Object(&LEDGER_HANDOFF)),
+    ],
+};
+
+static RECORD_VERSION: Shape = Shape {
+    name: "record version",
+    id: &[],
+    carried: false,
+    members: &[("generation", Member::Leaf), ("version", Member::Leaf)],
+};
+
+/// A ledger handoff (Paykit wire 5.4), found by the origin it carries: a later handoff
+/// replaces it with one of its own, which gets none of its members.
+static LEDGER_HANDOFF: Shape = Shape {
+    name: "ledger handoff",
+    id: &[],
+    carried: true,
+    members: &[
+        ("app_id", Member::Leaf),
+        ("grant", Member::Object(&RECORD_VERSION)),
+        ("ledger", Member::Object(&RECORD_VERSION)),
+        ("item_hash", Member::Leaf),
+        ("cert", Member::Object(&SIGNED_DOC)),
+        ("sig", Member::Leaf),
     ],
 };
 
@@ -3150,6 +3174,16 @@ pub struct GrantEntry {
     pub origin: Origin,
 }
 
+/// The grant a `ledger_handoff` that doesn't read as one names, when its `grant` member
+/// reads as a record version (Paykit wire 5.4): where it sits in the grant history.
+fn unread_handoff_grant(unread: &Value) -> Option<RecordVersion> {
+    let grant = unread.get("grant")?;
+    Some(RecordVersion {
+        generation: grant.get("generation")?.as_u64()?,
+        version: grant.get("version")?.as_u64()?,
+    })
+}
+
 /// An `allowances` record value (Paykit wire 5.4), on either side of an Allowance.
 #[derive(Clone, Debug)]
 pub struct AllowanceRecord {
@@ -3174,6 +3208,13 @@ pub struct AllowanceRecord {
     pub grants: Vec<GrantEntry>,
     /// The `msg_id`s the record reflects.
     pub msg_ids: Vec<String>,
+    /// The previous executor's ledger handoff, for the grant that handed the Allowance on
+    /// (Paykit spec 8.3, "Handoff"): at most one, which a later handoff replaces.
+    pub ledger_handoff: Option<LedgerHandoff>,
+    /// A `ledger_handoff` that doesn't read as one, as read: it doesn't affect whether the
+    /// record is valid, counts for nothing, and every writer keeps it as read until a later
+    /// handoff's replaces it (Paykit wire 5.4).
+    pub ledger_handoff_unread: Option<Value>,
     /// The members the writer doesn't know, kept as read (Paykit wire 5).
     pub unknown: UnknownMembers,
 }
@@ -3201,6 +3242,9 @@ struct AllowanceOut<'a> {
     grant: Option<Value>,
     grants: Vec<Value>,
     msg_ids: &'a [String],
+    // Writers leave it out when absent (Paykit wire 5.4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ledger_handoff: Option<Value>,
 }
 
 /// Read a stored message of an `allowances` record (Paykit wire 5.4 "Binding"): between
@@ -3349,6 +3393,21 @@ impl AllowanceRecord {
                 origin: origins.at("/grant"),
                 ..g
             });
+        // A `ledger_handoff` doesn't affect whether the record is valid (Paykit wire 5.4): one
+        // that doesn't read is kept as read, counting for nothing.
+        let (ledger_handoff, ledger_handoff_unread) = match obj.opt("ledger_handoff") {
+            None => (None, None),
+            Some(value) => match LedgerHandoff::from_json(value) {
+                Ok(handoff) => (
+                    Some(LedgerHandoff {
+                        origin: origins.at("/ledger_handoff"),
+                        ..handoff
+                    }),
+                    None,
+                ),
+                Err(_) => (None, Some(value.clone())),
+            },
+        };
         let record = Self {
             counterparty,
             allowance_id,
@@ -3359,6 +3418,8 @@ impl AllowanceRecord {
             msg_ids,
             grant,
             grants,
+            ledger_handoff,
+            ledger_handoff_unread,
             unknown,
         };
         record.check()?;
@@ -3477,6 +3538,9 @@ impl AllowanceRecord {
                     "Paykit wire 4.16: an end before any response is the proposal's withdrawal by its sender",
                 )?,
             }
+        }
+        if let Some(handoff) = &self.ledger_handoff {
+            handoff.check()?;
         }
         Ok(())
     }
@@ -3616,12 +3680,137 @@ impl AllowanceRecord {
             .and_then(|e| self.valid_entry(own, e).map(|cert| cert.app_id())))
     }
 
+    /// The ledger handoff that counts (Paykit spec 8.3, "Handoff"; Paykit wire 5.4, "Ledger
+    /// handoff"): the record's `ledger_handoff`, when it verifies
+    /// ([`AllowanceRecord::check_ledger_handoff`]), the history is usable and every entry
+    /// after the one it answers names the same app as that entry, so the handoff is the one to
+    /// the current executor. `Ok(None)` for none, and for one of an earlier handoff, which
+    /// counts for nothing. Whether its app has since been removed is the caller's check
+    /// (Switch spec 12.2).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] or [`Error::Switch`] for one that doesn't verify: the reader
+    /// ignores it and flags it.
+    pub fn ledger_handoff_counts(&self, own: &[u8; 32]) -> Result<Option<&LedgerHandoff>> {
+        if self.ledger_handoff_unread.is_some() {
+            return invalid("Paykit wire 5.4: ledger_handoff doesn't read as one");
+        }
+        let Some(handoff) = &self.ledger_handoff else {
+            return Ok(None);
+        };
+        let at = self.check_ledger_handoff(own, handoff)?;
+        let Some(answered) = self.grants.get(at) else {
+            return Ok(None);
+        };
+        let current = self.history_usable()
+            && self
+                .grants
+                .iter()
+                .skip(at + 1)
+                .all(|entry| entry.grant.app_id == answered.grant.app_id);
+        Ok(current.then_some(handoff))
+    }
+
+    /// Whether `handoff` verifies where it sits (Paykit wire 5.4, "Ledger handoff"): its
+    /// certificate and signature ([`LedgerHandoff::verify`]), and its `grant` the version of a
+    /// grant history entry after the first, valid, naming another app than `app_id`, with the
+    /// entry just before it valid and naming `app_id`. Returns the position of the entry it
+    /// answers.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] or [`Error::Switch`] naming the rule: the reader ignores it and
+    /// flags it.
+    pub fn check_ledger_handoff(&self, own: &[u8; 32], handoff: &LedgerHandoff) -> Result<usize> {
+        handoff.verify(own, &self.counterparty, &self.allowance_id)?;
+        let Some(at) = self
+            .grants
+            .iter()
+            .position(|entry| entry.built_on == handoff.grant)
+            .filter(|at| *at >= 1)
+        else {
+            return invalid(
+                "Paykit wire 5.4: ledger_handoff's grant isn't a later entry of the grant history",
+            );
+        };
+        let named = |entry: Option<&GrantEntry>| {
+            entry
+                .and_then(|entry| self.valid_entry(own, entry))
+                .map(|cert| cert.app_id())
+        };
+        let (Some(new), Some(previous)) = (
+            named(self.grants.get(at)),
+            named(at.checked_sub(1).and_then(|before| self.grants.get(before))),
+        ) else {
+            return invalid(
+                "Paykit wire 5.4: ledger_handoff answers a grant whose history entries don't verify",
+            );
+        };
+        ensure(
+            previous == handoff.app_id,
+            "Paykit wire 5.4: ledger_handoff's app isn't the executor just before the grant it answers",
+        )?;
+        ensure(
+            new != handoff.app_id,
+            "Paykit wire 5.4: ledger_handoff answers a grant of the same app, which is no handoff",
+        )?;
+        Ok(at)
+    }
+
+    /// "Ledger handoff" (Paykit wire 5.4, Switch spec 8.2): a later write of the Allowance
+    /// record keeps a `ledger_handoff` a reader has seen, or replaces it by one that verifies
+    /// where it sits ([`AllowanceRecord::check_ledger_handoff`]) and is for a later grant of
+    /// the later write's grant history; one that drops it, or replaces it by one for the same
+    /// or an earlier grant, is ignored and flagged. Whether a handoff counts for the current
+    /// grant is [`AllowanceRecord::ledger_handoff_counts`]'s question, not this one's: a
+    /// reader that skipped versions sees a later write whose handoff was for a grant since
+    /// followed by another. A `ledger_handoff` seen that doesn't read is placed by its `grant`
+    /// member; one that can't be placed is replaced by none, so a reader holding it takes no
+    /// handoff until it reads one it can place.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] or [`Error::Switch`] naming the rule `later` breaks.
+    pub fn check_later_handoff(&self, later: &AllowanceRecord, own: &[u8; 32]) -> Result<()> {
+        if later.ledger_handoff == self.ledger_handoff
+            && later.ledger_handoff_unread == self.ledger_handoff_unread
+        {
+            return Ok(());
+        }
+        if later.ledger_handoff_unread.is_some() {
+            return invalid("Paykit wire 5.4: a later write's ledger_handoff doesn't read as one");
+        }
+        let Some(handoff) = &later.ledger_handoff else {
+            return invalid("Paykit wire 5.4: a later write drops the ledger_handoff seen");
+        };
+        let at = later.check_ledger_handoff(own, handoff)?;
+        let seen = match (&self.ledger_handoff, &self.ledger_handoff_unread) {
+            (Some(seen), _) => Some(Some(seen.grant)),
+            (None, Some(unread)) => Some(unread_handoff_grant(unread)),
+            (None, None) => None,
+        };
+        let Some(seen) = seen else {
+            return Ok(());
+        };
+        let seen_at = seen.and_then(|grant| {
+            later
+                .grants
+                .iter()
+                .position(|entry| entry.built_on == grant)
+        });
+        ensure(
+            seen_at.is_some_and(|seen_at| at > seen_at),
+            "Paykit wire 5.4: a later write replaces the ledger_handoff seen by one that isn't for a later grant",
+        )
+    }
+
     /// "Seen roles" of an Allowance record (Paykit spec 6, Paykit wire 5.4, Switch spec 8.2):
     /// a reader that holds `self` ignores, and shows with its writer, a later write of the
     /// record that drops or replaces the proposal, the response, the end or the conflicting
-    /// proposal it saw, by hash, so a conflict is never cleared, or whose grant history
-    /// doesn't start with the one it saw
-    /// ([`AllowanceRecord::check_later_history`]). No message of these roles replaces
+    /// proposal it saw, by hash, so a conflict is never cleared, whose current grant isn't the
+    /// last entry of its grant history, or whose grant history doesn't start with the one it
+    /// saw ([`AllowanceRecord::check_later_history`]). No message of these roles replaces
     /// another, so a tie never decides.
     ///
     /// # Errors
@@ -3640,6 +3829,13 @@ impl AllowanceRecord {
                 && kept(self.end.as_ref(), later.end.as_ref())
                 && kept(self.conflicted.as_ref(), later.conflicted.as_ref()),
             "Paykit wire 5.4: a later write drops or replaces a message in a role seen",
+        )?;
+        // A writer only appends to the grant history and writes its last entry as the current
+        // grant: a write that drops it, or names an earlier entry's, would leave readers that
+        // missed it with another current grant than the history gives.
+        ensure(
+            later.grant.as_ref() == later.grants.last().map(|entry| &entry.grant),
+            "Paykit wire 5.4: a later write's current grant isn't the last entry of its grant history",
         )?;
         self.check_later_history(later)
     }
@@ -3711,12 +3907,20 @@ impl AllowanceRecord {
                 })
                 .collect(),
             msg_ids: &msg_ids,
+            ledger_handoff: self
+                .ledger_handoff
+                .as_ref()
+                .map(LedgerHandoff::to_json)
+                .or_else(|| self.ledger_handoff_unread.clone()),
         };
         let json = serde_json::to_vec(&out)
             .map_err(|_| Error::Invalid(format!("{ALLOWANCES}: can't be written")))?;
         let mut origins: Vec<(String, Origin)> = Vec::new();
         if let Some(grant) = &self.grant {
             origins.push(("/grant".into(), grant.origin));
+        }
+        if let Some(handoff) = &self.ledger_handoff {
+            origins.push(("/ledger_handoff".into(), handoff.origin));
         }
         for (i, entry) in self.grants.iter().enumerate() {
             origins.push((format!("/grants/{i}"), entry.origin));
