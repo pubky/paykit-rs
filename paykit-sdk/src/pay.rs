@@ -800,10 +800,13 @@ pub(crate) fn own_deadline(deadline: Option<u64>) -> ObligationDeadline {
 /// spec 8.4): whom it asked, the version it named, and when. The payee and app repeat the
 /// key's, so a restore binds the value to its key.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ListAsk {
     #[serde(with = "pubky_switch_core::enc::serde_b64")]
     pub(crate) payee: [u8; 32],
+    #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) app_id: Option<[u8; 16]>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) held_version: Option<u64>,
     pub(crate) asked_at_ms: u64,
 }
@@ -4475,5 +4478,81 @@ mod tests {
                 status: 404
             })),
         }));
+    }
+
+    fn discovery_ask() -> serde_json::Value {
+        serde_json::to_value(ListAsk {
+            payee: [3; 32],
+            app_id: None,
+            held_version: None,
+            asked_at_ms: 7,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn test_discovery_state_ask_unknown_member() {
+        let mut value = discovery_ask();
+        value["extra"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ListAsk>(value).is_err());
+    }
+
+    #[test]
+    fn test_discovery_state_ask_requires_app_member() {
+        let mut value = discovery_ask();
+        value.as_object_mut().unwrap().remove("app_id").unwrap();
+        assert!(serde_json::from_value::<ListAsk>(value).is_err());
+    }
+
+    #[test]
+    fn test_discovery_state_ask_requires_version_member() {
+        let mut value = discovery_ask();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("held_version")
+            .unwrap();
+        assert!(serde_json::from_value::<ListAsk>(value).is_err());
+    }
+
+    #[test]
+    fn test_discovery_state_ask_current_structure() {
+        for (app_id, held_version) in [
+            (None, None),
+            (Some([4; 16]), None),
+            (Some([4; 16]), Some(9)),
+        ] {
+            let value = ListAsk {
+                payee: [3; 32],
+                app_id,
+                held_version,
+                asked_at_ms: 7,
+            };
+            let bytes = serde_json::to_vec(&value).unwrap();
+            assert_eq!(serde_json::from_slice::<ListAsk>(&bytes).unwrap(), value);
+            let raw = String::from_utf8(bytes).unwrap();
+            for (member, duplicate) in [
+                ("app_id", "null"),
+                ("held_version", "null"),
+                ("asked_at_ms", "7"),
+            ] {
+                let twice = raw.replacen("{", &format!("{{\"{member}\":{duplicate},"), 1);
+                assert!(serde_json::from_str::<ListAsk>(&twice).is_err());
+            }
+        }
+        for (member, bad) in [
+            ("app_id", serde_json::json!("not-an-array")),
+            ("held_version", serde_json::json!(-1)),
+            ("asked_at_ms", serde_json::Value::Null),
+        ] {
+            let mut value = discovery_ask();
+            value[member] = bad;
+            assert!(serde_json::from_value::<ListAsk>(value).is_err());
+        }
+        for member in ["payee", "asked_at_ms"] {
+            let mut value = discovery_ask();
+            value.as_object_mut().unwrap().remove(member).unwrap();
+            assert!(serde_json::from_value::<ListAsk>(value).is_err());
+        }
     }
 }

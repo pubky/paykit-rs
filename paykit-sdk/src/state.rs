@@ -578,11 +578,14 @@ impl Stored for SeenRecords {
 impl sealed::Sealed for ListAsk {}
 
 /// A list request asked: of the payee, and the app or none, its key names.
+/// A held version names the app whose list was held (Paykit spec 8.4).
 impl Stored for ListAsk {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
             StateKey::ListAsk { payee, app_id }
-                if self.payee == *payee && self.app_id == *app_id =>
+                if self.payee == *payee
+                    && self.app_id == *app_id
+                    && (self.held_version.is_none() || self.app_id.is_some()) =>
             {
                 Ok(())
             }
@@ -2393,6 +2396,43 @@ mod tests {
             "en/not-a-uuid",
         ] {
             assert_eq!(StateKey::parse(key.as_bytes()), None, "{key}");
+        }
+    }
+
+    #[test]
+    fn test_discovery_state_ask_version_requires_named_app() {
+        let value = serde_json::to_value(ListAsk {
+            payee: [3; 32],
+            app_id: None,
+            held_version: Some(9),
+            asked_at_ms: 7,
+        })
+        .unwrap();
+        assert!(!reads::<ListAsk>(&key::list_ask(&[3; 32], None), value));
+    }
+
+    #[test]
+    fn test_discovery_state_ask_current_bindings() {
+        for (app_id, held_version) in [
+            (None, None),
+            (Some([4; 16]), None),
+            (Some([4; 16]), Some(9)),
+        ] {
+            let value = serde_json::to_value(ListAsk {
+                payee: [3; 32],
+                app_id,
+                held_version,
+                asked_at_ms: u64::MAX,
+            })
+            .unwrap();
+            assert!(reads::<ListAsk>(
+                &key::list_ask(&[3; 32], app_id.as_ref()),
+                value.clone()
+            ));
+            assert!(!reads::<ListAsk>(
+                &key::list_ask(&[5; 32], app_id.as_ref()),
+                value
+            ));
         }
     }
 }

@@ -144,6 +144,7 @@ const SEEN_RECORDS: usize = 64;
 /// in order, they rebuild the core's [`RecordView`]; kept, they survive a restart, so a
 /// copy older than one seen, or one conflicting with it, is never used after a reload.
 #[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SeenRecords {
     records: Vec<SignedDoc>,
 }
@@ -168,13 +169,15 @@ impl SeenRecords {
         self.records.drain(..excess.min(droppable));
     }
 
-    /// Whether every kept record is `payee`'s, verified as its signer signed it, and of its
-    /// app `app_id`: what [`SeenRecords::view`] requires, checked before a restore installs
+    /// Whether the kept records are nonempty and each is `payee`'s, verified as its signer
+    /// signed it, and of app `app_id`: checked before a restore installs
     /// a copy (`p/ar/<payee>/<app>`), so none can fail every later read of the payee.
     pub(crate) fn verifies(&self, payee: &[u8; 32], app_id: &[u8; 16]) -> bool {
-        self.records.iter().all(|signed| {
-            AppRecord::verify(signed, payee).is_ok_and(|record| record.cert().app_id() == *app_id)
-        })
+        !self.records.is_empty()
+            && self.records.iter().all(|signed| {
+                AppRecord::verify(signed, payee)
+                    .is_ok_and(|record| record.cert().app_id() == *app_id)
+            })
     }
 
     /// The view the records give, at the reader's clock `now`. A kept record that no longer
@@ -511,5 +514,61 @@ mod tests {
         let bytes = record_bytes(&wallet, tip_jar(), NOW, Some(NOW + DAY_MS));
         let doc = bob.doc(&[&wallet]);
         assert!(usable_bytes(&bob.id(), &wallet.app_id(), &bytes, &doc, NOW + 1).is_none());
+    }
+
+    fn discovery_records() -> (Party, SeenRecords) {
+        let bob = Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
+        let bytes = record_bytes(&bob, tip_jar(), NOW, Some(NOW + DAY_MS));
+        let record =
+            AppRecord::verify(&serde_json::from_slice(&bytes).unwrap(), &bob.id()).unwrap();
+        let mut records = SeenRecords::default();
+        records.keep(&record, &[]);
+        (bob, records)
+    }
+
+    #[test]
+    fn test_discovery_state_records_unknown_member() {
+        let (_, records) = discovery_records();
+        let mut value = serde_json::to_value(records).unwrap();
+        value["extra"] = json!(true);
+        assert!(serde_json::from_value::<SeenRecords>(value).is_err());
+    }
+
+    #[test]
+    fn test_discovery_state_records_empty_is_not_persisted() {
+        let (bob, _) = discovery_records();
+        let records: SeenRecords = serde_json::from_value(json!({"records": []})).unwrap();
+        assert!(!records.verifies(&bob.id(), &bob.app_id()));
+    }
+
+    #[test]
+    fn test_discovery_state_records_current_structure() {
+        let (bob, records) = discovery_records();
+        let bytes = serde_json::to_vec(&records).unwrap();
+        let read: SeenRecords = serde_json::from_slice(&bytes).unwrap();
+        assert!(read.verifies(&bob.id(), &bob.app_id()));
+        assert!(!read.verifies(&[9; 32], &bob.app_id()));
+        assert!(!read.verifies(&bob.id(), &[9; 16]));
+        assert!(SeenRecords::default()
+            .view(&bob.id(), NOW)
+            .unwrap()
+            .0
+            .used()
+            .is_none());
+        for value in [
+            json!({}),
+            json!({"records": null}),
+            json!({"records": false}),
+        ] {
+            assert!(serde_json::from_value::<SeenRecords>(value).is_err());
+        }
+        let raw = String::from_utf8(bytes)
+            .unwrap()
+            .replacen("{", "{\"records\":[],", 1);
+        assert!(serde_json::from_str::<SeenRecords>(&raw).is_err());
     }
 }
