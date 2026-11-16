@@ -807,6 +807,241 @@ struct FailAfterBlock {
     used: std::sync::atomic::AtomicBool,
 }
 
+#[derive(Clone, Copy)]
+enum BlockMarkValue {
+    Unanswered,
+    KeptBlock,
+    KeptUnblock,
+}
+
+async fn wallet_with_block_mark(
+    w: &World,
+    value: BlockMarkValue,
+) -> (
+    Paykit,
+    std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+) {
+    let storage: std::sync::Arc<dyn pubky_switch_client::store::StateStore> = match value {
+        BlockMarkValue::Unanswered => std::sync::Arc::new(FailAfterBlock::default()),
+        _ => store(),
+    };
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            std::sync::Arc::clone(&storage),
+        )
+        .await;
+    match value {
+        BlockMarkValue::Unanswered => {
+            let error = wallet.block(&w.bob_id()).await.unwrap_err();
+            assert!(matches!(
+                error,
+                paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Store(
+                    pubky_switch_client::error::StoreError::Unavailable
+                ))
+            ));
+        }
+        BlockMarkValue::KeptBlock => {
+            keep_ops(w, 1);
+            wallet.block(&w.bob_id()).await.unwrap();
+        }
+        BlockMarkValue::KeptUnblock => {
+            wallet.block(&w.bob_id()).await.unwrap();
+            keep_ops(w, 1);
+            wallet.unblock(&w.bob_id()).await.unwrap();
+        }
+    }
+    let marks = wallet.app().protocol_scan(b"bk/").await.unwrap();
+    assert_eq!(marks.len(), 1);
+    let mark: serde_json::Value = serde_json::from_slice(&marks[0].1).unwrap();
+    assert_eq!(mark["v"], 1);
+    assert_eq!(
+        mark["d"]["blocked"],
+        !matches!(value, BlockMarkValue::KeptUnblock)
+    );
+    assert!(mark["d"].as_object().unwrap().contains_key("batch"));
+    match value {
+        BlockMarkValue::Unanswered => assert!(mark["d"]["batch"].is_null()),
+        _ => assert_eq!(mark["d"]["batch"].as_array().unwrap().len(), 16),
+    }
+    (wallet, storage)
+}
+
+async fn block_mark_refused_after_reload(alter: fn(&mut serde_json::Value)) {
+    use pubky_switch_client::app::{AppError, LocalWrite};
+    use pubky_switch_client::error::StoreError;
+    use pubky_switch_client::store::{Fault as StoreFault, FaultStore, StateStore};
+    let w = World::new();
+    let (mut wallet, storage) = wallet_with_block_mark(&w, BlockMarkValue::KeptBlock).await;
+    let (key, bytes) = wallet.app().protocol_scan(b"bk/").await.unwrap().remove(0);
+    let mut value = serde_json::from_slice(&bytes).unwrap();
+    alter(&mut value);
+    wallet
+        .app_mut()
+        .protocol_commit(&[LocalWrite::Put {
+            key,
+            value: serde_json::to_vec(&value).unwrap(),
+        }])
+        .await
+        .unwrap();
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let observed = std::sync::Arc::new(FaultStore::new(storage, StoreFault::None));
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            std::sync::Arc::clone(&observed) as std::sync::Arc<dyn StateStore>,
+            app_id,
+            std::sync::Arc::clone(&w.clock),
+        )
+        .await;
+    // Load stays lazy; the public block call must reject before rewriting or sending.
+    let before = wallet.app().protocol_scan(b"").await.unwrap();
+    let commits = observed.commits();
+    let error = wallet.block(&w.bob_id()).await.unwrap_err();
+    assert!(matches!(
+        error,
+        paykit_sdk::PaykitError::Client(AppError::Store(StoreError::Corrupt))
+    ));
+    assert_eq!(observed.commits(), commits);
+    assert_eq!(wallet.app().protocol_scan(b"").await.unwrap(), before);
+    assert!(!wallet
+        .app_mut()
+        .allow_list()
+        .await
+        .unwrap()
+        .deny
+        .contains(&w.bob_id()));
+}
+
+#[tokio::test]
+async fn test_local_state_block_refuses_unknown_envelope_after_reload() {
+    block_mark_refused_after_reload(|value| value["extra"] = serde_json::json!({"nested": [7]}))
+        .await;
+}
+
+#[tokio::test]
+async fn test_local_state_block_refuses_unknown_member_after_reload() {
+    block_mark_refused_after_reload(|value| value["d"]["extra"] = serde_json::json!(7)).await;
+}
+
+#[tokio::test]
+async fn test_local_state_block_refuses_missing_batch_after_reload() {
+    block_mark_refused_after_reload(|value| {
+        value["d"].as_object_mut().unwrap().remove("batch");
+    })
+    .await;
+}
+
+async fn restore_block_mark(alter: fn(&mut serde_json::Value)) {
+    use pubky_switch_client::store::{Fault as StoreFault, FaultStore, StateStore};
+    let w = World::new();
+    let (mut wallet, _) = wallet_with_block_mark(&w, BlockMarkValue::KeptBlock).await;
+    let app_id = wallet.app_id();
+    let good = serde_json::from_slice(&wallet.backup().await.unwrap().to_bytes().unwrap()).unwrap();
+    let mut layer = crate::restore::layer_of(&good);
+    let (_, value) = layer
+        .iter_mut()
+        .find(|(key, _)| key.starts_with(b"bk/"))
+        .unwrap();
+    alter(value);
+    let bytes = serde_json::to_vec(&crate::restore::with_layer(&good, layer)).unwrap();
+    let backup = paykit_sdk::PaykitBackup::from_bytes(&bytes).unwrap();
+    let target = std::sync::Arc::new(FaultStore::new(store(), StoreFault::None));
+    let result = Paykit::restore(
+        w.env(
+            &w.alice,
+            std::sync::Arc::clone(&target) as std::sync::Arc<dyn StateStore>,
+        ),
+        PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await;
+    let Err(error) = result else {
+        panic!("a malformed block mark was restored")
+    };
+    assert!(matches!(
+        error,
+        paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::InvalidData(_))
+    ));
+    assert_eq!(target.commits(), 0);
+    let loaded = Paykit::load(
+        w.env(&w.alice, target),
+        PaykitConfig::default(),
+        app_id,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await;
+    assert!(loaded.is_err());
+}
+
+#[tokio::test]
+async fn test_local_state_restore_refuses_unknown_envelope() {
+    restore_block_mark(|value| value["extra"] = serde_json::json!({"nested": [7]})).await;
+}
+
+#[tokio::test]
+async fn test_local_state_restore_refuses_unknown_block_member() {
+    restore_block_mark(|value| value["d"]["extra"] = serde_json::json!(7)).await;
+}
+
+#[tokio::test]
+async fn test_local_state_restore_refuses_missing_block_batch() {
+    restore_block_mark(|value| {
+        value["d"].as_object_mut().unwrap().remove("batch");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_local_state_current_block_values_reload_and_restore() {
+    for value in [
+        BlockMarkValue::Unanswered,
+        BlockMarkValue::KeptBlock,
+        BlockMarkValue::KeptUnblock,
+    ] {
+        let w = World::new();
+        let (wallet, storage) = wallet_with_block_mark(&w, value).await;
+        let app_id = wallet.app_id();
+        let marks = wallet.app().protocol_scan(b"bk/").await.unwrap();
+        drop(wallet);
+        let mut wallet = w
+            .load_on_clock(&w.alice, storage, app_id, std::sync::Arc::clone(&w.clock))
+            .await;
+        assert_eq!(wallet.app().protocol_scan(b"bk/").await.unwrap(), marks);
+        let backup = wallet.backup().await.unwrap();
+        let restored = Paykit::restore(
+            w.env(&w.alice, store()),
+            PaykitConfig::default(),
+            &backup,
+            std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+            w.timer(),
+        )
+        .await
+        .unwrap();
+        let kept = restored.app().protocol_scan(b"bk/").await.unwrap();
+        if matches!(value, BlockMarkValue::KeptUnblock) {
+            assert!(kept.is_empty());
+        } else {
+            assert_eq!(kept, marks);
+        }
+        wallet.block(&w.bob_id()).await.unwrap();
+        assert!(wallet
+            .app_mut()
+            .allow_list()
+            .await
+            .unwrap()
+            .deny
+            .contains(&w.bob_id()));
+    }
+}
+
 impl pubky_switch_client::store::StateStore for FailAfterBlock {
     fn get(
         &self,
