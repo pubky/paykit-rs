@@ -233,7 +233,12 @@ fn social_v1_pubky_reference(uri: &str) -> Result<()> {
         Some((host, path)) => (host, Some(path)),
         None => (rest, None),
     };
-    PubkyPublicKey::new(host).map_err(|_| invalid())?;
+    // The host is the key itself: no userinfo or port, already in canonical z-base32.
+    if host.contains(['@', ':'])
+        || PubkyPublicKey::new(host).map_err(|_| invalid())?.as_str() != host
+    {
+        return Err(invalid());
+    }
     let Some(path) = path else {
         return Ok(());
     };
@@ -567,6 +572,9 @@ mod tests {
             format!("pubky://{key}/pub//files/A.jpg"),
             format!("pubky://{key}/pub/../priv/A.jpg"),
             "pubky://not-a-key/pub/social/v1/files/A.jpg".into(),
+            format!("pubky://user@{key}/pub/social/v1/files/A.jpg"),
+            format!("pubky://{key}:443/pub/social/v1/files/A.jpg"),
+            format!("pubky://{}/pub/social/v1/files/A.jpg", key.to_uppercase()),
             "https:///a.png".into(),
         ] {
             assert!(
