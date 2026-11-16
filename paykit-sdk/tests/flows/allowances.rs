@@ -3452,6 +3452,8 @@ async fn test_allowances_answer_dropped_for_the_bound_taken_again_from_a_resend_
         conflicted: None,
         grant: None,
         grants: Vec::new(),
+        ledger_handoff: None,
+        ledger_handoff_unread: None,
         msg_ids: Vec::new(),
         unknown: Default::default(),
     };
@@ -3993,6 +3995,8 @@ async fn wallet_answer_dropped_then_recorded(
         conflicted: None,
         grant: None,
         grants: Vec::new(),
+        ledger_handoff: None,
+        ledger_handoff_unread: None,
         msg_ids: Vec::new(),
         unknown: Default::default(),
     };
@@ -4294,6 +4298,8 @@ async fn test_allowances_kept_answer_waits_through_a_renewal_without_keys_then_p
         conflicted: None,
         grant: None,
         grants: Vec::new(),
+        ledger_handoff: None,
+        ledger_handoff_unread: None,
         msg_ids: Vec::new(),
         unknown: Default::default(),
     };
@@ -5053,6 +5059,8 @@ async fn test_allowances_answers_of_one_millisecond_placed_in_acceptance_order()
         conflicted: None,
         grant: None,
         grants: Vec::new(),
+        ledger_handoff: None,
+        ledger_handoff_unread: None,
         msg_ids: Vec::new(),
         unknown: Default::default(),
     };
@@ -5616,6 +5624,8 @@ async fn answer_kept_then_recorded_divergent(
         conflicted: None,
         grant: None,
         grants: Vec::new(),
+        ledger_handoff: None,
+        ledger_handoff_unread: None,
         msg_ids: Vec::new(),
         unknown: Default::default(),
     };
@@ -5712,6 +5722,8 @@ async fn records_proposal(
         conflicted: None,
         grant: None,
         grants: Vec::new(),
+        ledger_handoff: None,
+        ledger_handoff_unread: None,
         msg_ids: Vec::new(),
         unknown: Default::default(),
     };
