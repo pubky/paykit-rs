@@ -10,7 +10,9 @@ mod types;
 use crate::{FfiPaykitSdk, PaykitFfiError};
 pub use types::*;
 
-#[uniffi::export(async_runtime = "tokio")]
+// THROWAWAY (#411): no tokio runtime in the browser build (see `web` in lib.rs).
+#[cfg_attr(not(feature = "web"), uniffi::export(async_runtime = "tokio"))]
+#[cfg_attr(feature = "web", uniffi::export)]
 impl FfiPaykitSdk {
     /// Return durable accounting, or None only when no accounting state exists.
     ///

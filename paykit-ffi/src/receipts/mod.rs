@@ -254,7 +254,9 @@ pub fn generate_receipt_id() -> String {
     ReceiptId::new_v4().to_string()
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+// THROWAWAY (#411): no tokio runtime in the browser build (see `web` in lib.rs).
+#[cfg_attr(not(feature = "web"), uniffi::export(async_runtime = "tokio"))]
+#[cfg_attr(feature = "web", uniffi::export)]
 impl FfiPaykitSdk {
     /// Prepare a receipt issuance and persist it before network side effects.
     pub async fn prepare_receipt_issuance(

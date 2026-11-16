@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use paykit_lib::{
     AllowanceId, BillingPeriod, ConversionRate, EventId, PaykitAppId, PaymentAmount,
@@ -200,7 +200,8 @@ impl TryFrom<FfiPaymentRequestTerms> for PaymentRequestTerms {
                                 paykit_lib::PaymentEndpointPayload::new(payload),
                             ))
                         })
-                        .collect::<Result<HashMap<_, _>, PaykitFfiError>>()
+                        // THROWAWAY (#411): Paykit's hasher (std's on native).
+                        .collect::<Result<paykit_lib::collections::HashMap<_, _>, PaykitFfiError>>()
                 })
                 .transpose()?,
         )
@@ -223,7 +224,10 @@ impl TryFrom<PaymentRequestTermsRecord> for FfiPaymentRequestTerms {
             proposal_expires_at: value.proposal_expires_at,
             recurrence: value.recurrence.map(Into::into),
             accepted_payment_endpoint_identifiers: value.accepted_payment_endpoint_identifiers,
-            payment_endpoints: value.payment_endpoints,
+            // THROWAWAY (#411): convert the wasm32 Paykit hasher map to a std map for UniFFI.
+            payment_endpoints: value
+                .payment_endpoints
+                .map(|endpoints| endpoints.into_iter().collect()),
             required_app_id: value.required_app_id.map(|app_id| app_id.to_string()),
             conversion: value.conversion.map(Into::into),
             payment_deadline: value.payment_deadline.map(Into::into),

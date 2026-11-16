@@ -73,7 +73,10 @@ pub(crate) fn payment_endpoint_reservation_from_parts(
             payload,
         },
         expires_at: expires_at.map(parse_rfc3339_utc).transpose()?,
-        attribution,
+        // THROWAWAY (#411): paykit-lib maps use a getrandom-seeded hasher on
+        // wasm32, so std maps from UniFFI are re-collected. On native both are
+        // the same std type and this is only a copy.
+        attribution: attribution.into_iter().collect(),
     })
 }
 
@@ -120,7 +123,10 @@ impl From<PrivatePaymentEndpointReservationCancellation>
             counterparty: app_public_key(&value.counterparty),
             identifier: value.identifier,
             payload_hash: value.payload_hash,
-            attribution: Arc::new(FfiReservationAttribution::new(value.attribution)),
+            // THROWAWAY (#411): convert the wasm32 Paykit hasher map to a std map for UniFFI.
+            attribution: Arc::new(FfiReservationAttribution::new(
+                value.attribution.into_iter().collect(),
+            )),
         }
     }
 }

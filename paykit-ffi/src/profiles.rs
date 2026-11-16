@@ -275,7 +275,9 @@ impl fmt::Debug for FfiContactRecord {
     }
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+// THROWAWAY (#411): no tokio runtime in the browser build (see `web` in lib.rs).
+#[cfg_attr(not(feature = "web"), uniffi::export(async_runtime = "tokio"))]
+#[cfg_attr(feature = "web", uniffi::export)]
 impl FfiPaykitSdk {
     /// Publish this identity's Paykit Profile at an expected revision.
     ///

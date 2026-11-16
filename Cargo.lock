@@ -3525,6 +3525,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "console_error_panic_hook",
  "hex",
  "http-relay",
  "jni",

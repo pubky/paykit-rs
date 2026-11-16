@@ -357,7 +357,9 @@ pub(crate) struct FfiSdkPaymentAdapterAdapter {
     pub(crate) adapter: Arc<dyn FfiSdkPaymentAdapter>,
 }
 
-#[async_trait]
+// THROWAWAY (#411): browser futures are !Send; match paykit-sdk's wasm32 ?Send traits.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl PaymentAdapter for FfiSdkPaymentAdapterAdapter {
     async fn current_public_receiving_details(
         &self,
@@ -573,7 +575,9 @@ impl FfiSdkPaymentAdapter for FfiNoopSdkPaymentAdapter {
     }
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+// THROWAWAY (#411): no tokio runtime in the browser build (see `web` in lib.rs).
+#[cfg_attr(not(feature = "web"), uniffi::export(async_runtime = "tokio"))]
+#[cfg_attr(feature = "web", uniffi::export)]
 impl FfiPaykitSdk {
     /// Publish current public receiving details and remove stale SDK-managed endpoints.
     ///

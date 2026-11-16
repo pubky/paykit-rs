@@ -231,7 +231,9 @@ impl fmt::Debug for FfiPrivatePaymentListSyncChange {
     }
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+// THROWAWAY (#411): no tokio runtime in the browser build (see `web` in lib.rs).
+#[cfg_attr(not(feature = "web"), uniffi::export(async_runtime = "tokio"))]
+#[cfg_attr(feature = "web", uniffi::export)]
 impl FfiPaykitSdk {
     /// Return the latest valid Private Payment List views for a counterparty.
     pub async fn current_private_payment_lists(

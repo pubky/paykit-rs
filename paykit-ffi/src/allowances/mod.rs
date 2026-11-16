@@ -401,7 +401,9 @@ pub enum FfiPendingAllowanceAcceptance {
     Unknown,
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+// THROWAWAY (#411): no tokio runtime in the browser build (see `web` in lib.rs).
+#[cfg_attr(not(feature = "web"), uniffi::export(async_runtime = "tokio"))]
+#[cfg_attr(feature = "web", uniffi::export)]
 impl FfiPaykitSdk {
     /// Return Allowances matching a local SDK filter, newest first by local record time (presentation order only).
     ///

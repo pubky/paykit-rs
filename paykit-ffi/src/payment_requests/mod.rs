@@ -392,7 +392,9 @@ impl fmt::Debug for FfiPaymentProofSubmission {
     }
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+// THROWAWAY (#411): no tokio runtime in the browser build (see `web` in lib.rs).
+#[cfg_attr(not(feature = "web"), uniffi::export(async_runtime = "tokio"))]
+#[cfg_attr(feature = "web", uniffi::export)]
 impl FfiPaykitSdk {
     /// Read current identity and counterparty requests before a payment check.
     ///

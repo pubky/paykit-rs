@@ -18,6 +18,10 @@ mod app_registry;
 mod config;
 mod conversions_common;
 mod errors;
+// THROWAWAY (#411): grant logout builds strict native reqwest clients (timeouts,
+// no redirects, platform TLS verifier) that wasm reqwest cannot express, and
+// paykit-sdk only exports it off wasm32. The browser API lacks it for now.
+#[cfg(not(feature = "web"))]
 mod grant_logout;
 mod grant_observation;
 mod json;
@@ -42,6 +46,7 @@ pub use allowances::*;
 pub use app_registry::*;
 pub use config::*;
 pub use errors::PaykitFfiError;
+#[cfg(not(feature = "web"))]
 pub use grant_logout::*;
 pub use grant_observation::*;
 pub use json::*;
@@ -59,6 +64,28 @@ pub use session::*;
 pub use storage::*;
 
 uniffi::setup_scaffolding!();
+
+// THROWAWAY (#411): the `web` cargo feature builds the browser (ubrn web flavor)
+// variant of this crate. It must be a cargo feature, not a target_arch cfg,
+// because ubrn 0.29 reads UniFFI metadata from a native build of the crate and
+// then generates a wasm shim that calls the same exports by symbol name, so
+// both builds must export the same set. Under `web`:
+// - async exports drop `async_runtime = "tokio"`: async-compat would spawn a
+//   std thread on first use, which panics on wasm32-unknown-unknown;
+// - grant logout is not exported (see above);
+// - `web_install_panic_hook` and the async storage/session callbacks exist.
+// Native builds without `web` export exactly what they did before.
+
+/// Browser build only: route Rust panics to `console.error`.
+///
+/// THROWAWAY (#411): without it a panic shows up only as
+/// `RuntimeError: unreachable`.
+#[cfg(feature = "web")]
+#[uniffi::export]
+pub fn web_install_panic_hook() {
+    #[cfg(target_arch = "wasm32")]
+    console_error_panic_hook::set_once();
+}
 
 pub(crate) const SDK_BACKUP_BLOB_VERSION: u32 = 2;
 pub(crate) const DEFAULT_PUBKY_REQUEST_TIMEOUT_SECS: u64 = 30;

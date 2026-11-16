@@ -74,7 +74,9 @@ pub struct FfiPubkyGrantLogout {
 
 impl_redacted_debug!(FfiPubkyGrantLogout);
 
-#[uniffi::export(async_runtime = "tokio")]
+// THROWAWAY (#411): no tokio runtime in the browser build (see `web` in lib.rs).
+#[cfg_attr(not(feature = "web"), uniffi::export(async_runtime = "tokio"))]
+#[cfg_attr(feature = "web", uniffi::export)]
 impl FfiPubkyGrantLogout {
     /// Original non-secret binding to retain with the confirmation and marker.
     pub fn binding(&self) -> FfiPubkyGrantLogoutReceipt {
@@ -124,7 +126,9 @@ pub struct FfiPubkyGrantLogoutAttempt {
 
 impl_redacted_debug!(FfiPubkyGrantLogoutAttempt);
 
-#[uniffi::export(async_runtime = "tokio")]
+// THROWAWAY (#411): no tokio runtime in the browser build (see `web` in lib.rs).
+#[cfg_attr(not(feature = "web"), uniffi::export(async_runtime = "tokio"))]
+#[cfg_attr(feature = "web", uniffi::export)]
 impl FfiPubkyGrantLogoutAttempt {
     /// Recheck original provider/admission, then execute this attempt once.
     /// No platform erase callback is invoked, even after remote acknowledgement.
@@ -150,7 +154,9 @@ impl FfiPubkyGrantLogoutAttempt {
     }
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+// THROWAWAY (#411): no tokio runtime in the browser build (see `web` in lib.rs).
+#[cfg_attr(not(feature = "web"), uniffi::export(async_runtime = "tokio"))]
+#[cfg_attr(feature = "web", uniffi::export)]
 impl FfiPaykitSdk {
     /// Capture the original provider's existing live grant without authentication.
     /// The caller must already admit the original owner and recheck its lifecycle

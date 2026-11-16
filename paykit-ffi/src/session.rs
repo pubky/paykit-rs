@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
 use paykit_sdk::{
@@ -436,6 +436,8 @@ impl FfiSdkPubkySessionProviderAdapter {
         }
     }
 
+    // THROWAWAY (#411): grant logout is native-only (see lib.rs).
+    #[cfg(not(feature = "web"))]
     pub(crate) async fn capture_grant_logout(
         &self,
         expected_owner: &PubkyPublicKey,
@@ -467,7 +469,7 @@ impl FfiSdkPubkySessionProviderAdapter {
         }
         let logout = paykit_sdk::PubkyGrantLogout::capture(
             &session,
-            Duration::from_secs(self.pubky_client.request_timeout_secs),
+            std::time::Duration::from_secs(self.pubky_client.request_timeout_secs),
         )
         .await?;
         if !self.matches_session_access(&fingerprint)? {
@@ -476,6 +478,8 @@ impl FfiSdkPubkySessionProviderAdapter {
         Ok((logout, fingerprint))
     }
 
+    // THROWAWAY (#411): only grant logout uses this; the `web` build has no grant logout.
+    #[cfg(not(feature = "web"))]
     pub(crate) fn matches_session_access(
         &self,
         fingerprint: &[u8; 32],
@@ -487,6 +491,8 @@ impl FfiSdkPubkySessionProviderAdapter {
     }
 }
 
+// THROWAWAY (#411): only grant logout uses this; the `web` build has no grant logout.
+#[cfg(not(feature = "web"))]
 pub(crate) fn session_access_fingerprint(access: &FfiPubkySessionAccess) -> [u8; 32] {
     fn field(hash: &mut Sha256, value: Option<&[u8]>) {
         hash.update([u8::from(value.is_some())]);
@@ -530,7 +536,9 @@ pub(crate) fn session_access_fingerprint(access: &FfiPubkySessionAccess) -> [u8;
     hash.finalize().into()
 }
 
-#[async_trait]
+// THROWAWAY (#411): browser futures are !Send; match paykit-sdk's wasm32 ?Send traits.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl PubkySessionProvider for FfiSdkPubkySessionProviderAdapter {
     async fn load_session_access(&self) -> paykit_sdk::Result<Option<PubkySessionAccess>> {
         let Some(access) = self
@@ -672,7 +680,9 @@ pub struct FfiPubkySessionBootstrap {
     pubky_client: FfiPubkyClientConfig,
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+// THROWAWAY (#411): no tokio runtime in the browser build (see `web` in lib.rs).
+#[cfg_attr(not(feature = "web"), uniffi::export(async_runtime = "tokio"))]
+#[cfg_attr(feature = "web", uniffi::export)]
 impl FfiPubkySessionBootstrap {
     /// Create a Pubky session bootstrap helper.
     ///
@@ -921,7 +931,9 @@ pub struct FfiPubkyAuthRequest {
     pubky_client: FfiPubkyClientConfig,
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+// THROWAWAY (#411): no tokio runtime in the browser build (see `web` in lib.rs).
+#[cfg_attr(not(feature = "web"), uniffi::export(async_runtime = "tokio"))]
+#[cfg_attr(feature = "web", uniffi::export)]
 impl FfiPubkyAuthRequest {
     /// Return the auth URL to show as a deeplink or QR code.
     pub async fn authorization_url(&self) -> Result<String, PaykitFfiError> {
@@ -1053,7 +1065,12 @@ pub(crate) fn pubky_from_config(config: &FfiPubkyClientConfig) -> Result<Pubky, 
         validate_local_testnet_host(host)?;
         builder.testnet_with_host(host);
     }
-    builder.request_timeout(Duration::from_secs(config.request_timeout_secs));
+    // THROWAWAY (#411): pubky deprecates `request_timeout` on wasm32 because it
+    // never had an effect there, so `request_timeout_secs` is validated but
+    // ignored in the browser build. Browser callers must bound calls themselves
+    // (AbortSignal on the generated async methods, or a fetch wrapper).
+    #[cfg(not(target_arch = "wasm32"))]
+    builder.request_timeout(std::time::Duration::from_secs(config.request_timeout_secs));
     builder
         .build()
         .map(Pubky::with_client)

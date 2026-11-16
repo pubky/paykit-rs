@@ -88,7 +88,9 @@ impl FfiSdkStorageAdapter {
     }
 }
 
-#[async_trait]
+// THROWAWAY (#411): browser futures are !Send; match paykit-sdk's wasm32 ?Send traits.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl StorageAdapter for FfiSdkStorageAdapter {
     async fn run_operation_erased<'a>(
         &self,
@@ -200,7 +202,9 @@ impl FfiSdkStorage {
     }
 }
 
-#[async_trait]
+// THROWAWAY (#411): browser futures are !Send; match paykit-sdk's wasm32 ?Send traits.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl StorageAdapter for FfiSdkStorage {
     async fn transaction_erased<'a>(
         &self,
