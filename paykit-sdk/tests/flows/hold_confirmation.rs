@@ -65,6 +65,8 @@ async fn test_hold_confirmation_payment_rejects_a_second_missed_item_at_the_same
         wallet.request(&request).await.unwrap().status,
         RequestStatus::Held
     );
+    assert!(wallet.app().protocol_scan(b"hc/").await.unwrap().is_empty());
+    assert!(wallet.payments().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -88,6 +90,7 @@ async fn test_hold_confirmation_explicit_rejects_a_second_missed_item_at_the_sam
         RequestStatus::Held
     );
     assert!(w.rail.all_executions().is_empty());
+    assert!(wallet.app().protocol_scan(b"hc/").await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -119,6 +122,11 @@ async fn test_hold_confirmation_subscription_rejects_a_second_missed_item_at_the
         RequestStatus::Held
     );
     assert!(w.rail.all_executions().is_empty());
+    assert!(wallet.app().protocol_scan(b"hc/").await.unwrap().is_empty());
+    shop.receive(None).await.unwrap();
+    let activity = shop.payee_activity().await.unwrap();
+    assert_eq!(activity.len(), 1);
+    assert_eq!(activity[0].status, paykit_sdk::PayeeStatus::Requested);
 }
 
 #[tokio::test]
@@ -145,6 +153,7 @@ async fn test_hold_confirmation_rejects_another_restore_of_the_same_backup() {
         RequestStatus::Held
     );
     assert!(w.rail.all_executions().is_empty());
+    assert!(second.app().protocol_scan(b"hc/").await.unwrap().is_empty());
 }
 
 #[tokio::test]
