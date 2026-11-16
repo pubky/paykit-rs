@@ -1,0 +1,14 @@
+<!doctype html>
+<!-- THROWAWAY (#411): runs the generated paykit-web bindings e2e on the main thread. -->
+<html><head><meta charset="utf-8"><title>e2e-running</title></head>
+<body><pre id="out">running</pre>
+<script>Error.stackTraceLimit = 200;</script>
+<script type="module">
+import { runE2e } from "./dist/e2e.js";
+const out = document.getElementById("out");
+const lines = [];
+runE2e((line) => { lines.push(line); out.textContent = lines.join("\n"); console.log(line); })
+  .catch((e) => { lines.push(`FAIL uncaught: ${e}`); out.textContent = lines.join("\n"); })
+  .finally(() => { document.title = "e2e-done"; });
+</script>
+</body></html>

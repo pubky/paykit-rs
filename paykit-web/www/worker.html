@@ -1,0 +1,15 @@
+<!doctype html>
+<!-- THROWAWAY (#411): runs the generated paykit-web bindings e2e in a dedicated worker. -->
+<html><head><meta charset="utf-8"><title>e2e-running</title></head>
+<body><pre id="out">running</pre>
+<script type="module">
+const out = document.getElementById("out");
+const lines = [];
+const worker = new Worker(new URL("./dist/worker.js", import.meta.url), { type: "module" });
+worker.onmessage = (ev) => {
+  if (ev.data.line) { lines.push(ev.data.line); out.textContent = lines.join("\n"); console.log(ev.data.line); }
+  if (ev.data.done) document.title = "e2e-done";
+};
+worker.onerror = (ev) => { lines.push(`FAIL worker error: ${ev.message}`); out.textContent = lines.join("\n"); document.title = "e2e-done"; };
+</script>
+</body></html>

@@ -1,0 +1,6 @@
+# THROWAWAY (#411): everything ubrn and build.sh generate.
+node_modules
+rust_modules/
+src/generated/
+src/index.web.ts
+www/dist/

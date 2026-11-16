@@ -1,0 +1,18 @@
+# THROWAWAY (#411): merged by ubrn into the generated rust_modules/wasm/Cargo.toml.
+#
+# The generated crate is a standalone workspace, so it misses three things the
+# repo workspace provides:
+# - resolver 2: the template is edition 2018 (resolver 1), which unifies
+#   paykit-sdk's native-only tokio features (net, rt-multi-thread) into the
+#   wasm build and fails in mio;
+# - the repo's [patch.crates-io] (vendored snow and pubky-noise wasm fixes);
+# - the repo Cargo.lock: build.sh copies it in before ubrn runs, otherwise
+#   wasm-bindgen floats to a version the 0.2.115 CLI cannot read.
+# Paths are relative to rust_modules/wasm/.
+[workspace]
+resolver = "2"
+
+[patch.crates-io]
+snow = { path = "../../../vendor/snow" }
+pubky-noise = { path = "../../../vendor/pubky-noise" }
+rustls-platform-verifier-android = { path = "../../../vendor/rustls-platform-verifier-android" }

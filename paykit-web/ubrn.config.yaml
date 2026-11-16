@@ -1,0 +1,21 @@
+# THROWAWAY (#411): uniffi-bindgen-react-native 0.29.3-1 "web" flavor config.
+# Generates TypeScript with the same public API as the React Native package
+# (paykit-react-native), backed by a wasm-bindgen build of paykit-ffi with the
+# `web` cargo feature. Run ./build.sh, not ubrn directly: it also seeds the
+# generated crate's Cargo.lock and bundles the browser test page.
+rust:
+  directory: ../paykit-ffi
+  manifestPath: Cargo.toml
+bindings:
+  ts: src/generated
+web:
+  # Generated wasm-bindgen shim crate (gitignored). It is its own workspace,
+  # so cargo-patch.toml restores what the repo workspace would provide.
+  manifestPath: rust_modules/wasm/Cargo.toml
+  manifestPatchFile: cargo-patch.toml
+  wasmCrateName: paykit-web-wasm
+  # The same feature must be on for the native metadata build and the wasm
+  # build, or the generated shim and the checksums do not match.
+  features:
+    - web
+  ts: src/generated

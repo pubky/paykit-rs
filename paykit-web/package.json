@@ -1,0 +1,20 @@
+{
+  "name": "@synonymdev/paykit-web",
+  "version": "0.0.0-throwaway.411",
+  "private": true,
+  "description": "THROWAWAY (#411): browser (wasm) bindings for paykit-ffi, generated with the uniffi-bindgen-react-native web flavor",
+  "type": "module",
+  "browser": "src/index.web.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pubky/paykit-rs.git",
+    "directory": "paykit-web"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "prettier": "3.9.10",
+    "typescript": "5.8.3",
+    "uniffi-bindgen-react-native": "0.29.3-1"
+  }
+}
