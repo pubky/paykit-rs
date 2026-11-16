@@ -18,6 +18,7 @@ mod discovery_state;
 mod divergent;
 mod erasure;
 mod final_check;
+mod hold_confirmation;
 mod labels;
 mod local_state;
 mod mixed_versions;

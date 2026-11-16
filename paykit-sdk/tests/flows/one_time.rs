@@ -2207,9 +2207,55 @@ async fn test_one_time_confirming_a_request_over_a_sealed_record_refused_as_not_
     let mut wallet = w.wallet("wallet").await;
     let mut phone = w.wallet("phone").await;
     let mut shop = w.shop().await;
-    let (requests, _) = sealed_requests(&w, &mut wallet, &mut phone, &mut shop, 1).await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let now = w.clock.now_ms();
+    w.alice.switch().push_missed(1, now - 1_000, now);
+    wallet.receive(None).await.unwrap();
+    let held = crate::common::held(&wallet, &request).await;
+    // A later key rotation makes this same request unreadable to the wallet.
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    crate::unrequested::store_bundle(&w, phone.app_id(), &phone.app().cert().clone());
+    phone.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let value = crate::outcome_record::record_value(&mut phone, &request)
+        .await
+        .unwrap();
+    crate::outcome_record::phone_writes(
+        &mut phone,
+        &request,
+        Some(&serde_json::to_vec(&value).unwrap()),
+    )
+    .await;
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let cert = wallet.app().cert().clone();
+    crate::unrequested::store_bundle_from(&w, wallet.app_id(), &cert, newest);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    let key = wallet
+        .app()
+        .record_key(&crate::outcome_record::payer_record(&request))
+        .unwrap();
+    assert!(matches!(
+        wallet
+            .app()
+            .shared_record(&key)
+            .await
+            .unwrap()
+            .unwrap()
+            .content,
+        pubky_switch_client::app::RecordContent::Unreadable(
+            pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+        )
+    ));
     let refused = wallet
-        .confirm_possibly_cancelled(&requests[0], pubky_switch_client::app::UserConfirmed::new())
+        .confirm_possibly_cancelled(
+            &request,
+            &held,
+            pubky_switch_client::app::UserConfirmed::new(),
+        )
         .await
         .unwrap_err();
     assert!(

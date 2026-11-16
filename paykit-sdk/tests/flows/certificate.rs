@@ -1057,13 +1057,9 @@ async fn test_certificate_restore_without_pay_attempts_nothing_until_a_reconcile
     list(&w, me, &reduced, &regranted);
     restored.receive(None).await.unwrap();
     assert_eq!(restored.app().cert().hash(), regranted.hash());
-    let confirmed = || {
-        paykit_sdk::PayOptions::default()
-            .with_possibly_cancelled_confirmed(pubky_switch_client::app::UserConfirmed::new())
-    };
     for request in [&paid, &other] {
         let refused = restored
-            .pay_request(request, confirmed())
+            .pay_request(request, crate::common::over_hold(&restored, request).await)
             .await
             .unwrap_err();
         assert!(payer_pass_owed(&refused), "{refused:?}");
@@ -1077,9 +1073,15 @@ async fn test_certificate_restore_without_pay_attempts_nothing_until_a_reconcile
         matches!(report.resolved.as_slice(), [paykit_sdk::PayOutcome::Paid { attempt_id: a, .. }] if *a == attempt_id),
         "{report:?}"
     );
-    assert!(restored.pay_request(&paid, confirmed()).await.is_err());
+    assert!(restored
+        .pay_request(&paid, crate::common::over_hold(&restored, &paid).await)
+        .await
+        .is_err());
     w.rail.next(paykit_sdk::rail::Behaviour::Succeed);
-    let outcome = restored.pay_request(&other, confirmed()).await.unwrap();
+    let outcome = restored
+        .pay_request(&other, crate::common::over_hold(&restored, &other).await)
+        .await
+        .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
         "{outcome:?}"
@@ -1117,12 +1119,11 @@ async fn test_certificate_restore_ended_without_reconcile_pays_nothing_until_one
         .end_reconcile(pubky_switch_client::app::UserConfirmed::new())
         .await
         .unwrap();
-    let confirmed = || {
-        paykit_sdk::PayOptions::default()
-            .with_possibly_cancelled_confirmed(pubky_switch_client::app::UserConfirmed::new())
-    };
     let refused = restored
-        .pay_request(&request, confirmed())
+        .pay_request(
+            &request,
+            crate::common::over_hold(&restored, &request).await,
+        )
         .await
         .unwrap_err();
     assert!(payer_pass_owed(&refused), "{refused:?}");
@@ -1130,7 +1131,13 @@ async fn test_certificate_restore_ended_without_reconcile_pays_nothing_until_one
     let report = restored.reconcile().await.unwrap();
     assert!(!report.payer_skipped, "{report:?}");
     w.rail.next(paykit_sdk::rail::Behaviour::Succeed);
-    let outcome = restored.pay_request(&request, confirmed()).await.unwrap();
+    let outcome = restored
+        .pay_request(
+            &request,
+            crate::common::over_hold(&restored, &request).await,
+        )
+        .await
+        .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
         "{outcome:?}"

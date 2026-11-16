@@ -35,6 +35,7 @@ use pubky_switch_client::app::{
     AppError, Collection as SwitchCollection, PolicyFamily, RecordContent,
     Refusal as ClientRefusal, Unopened,
 };
+use pubky_switch_core::enc::serde_b64;
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::records::{AppCert, CLOCK_TOLERANCE_MS};
 use pubky_switch_core::scopes::Permission;
@@ -45,6 +46,37 @@ use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
 use crate::requests::{cancelled, rejected, RequestStatus};
 use crate::state::{key, Tx};
+
+/// The request and hold shown to the user before an explicit confirmation (Paykit spec
+/// 7.2, "What a restore loses", and 9). Return this value through the payment or
+/// subscription options, or [`Paykit::confirm_possibly_cancelled`]. A newer restore or
+/// missed item requires a new confirmation, even when its times are the same.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldRequest {
+    record: [u8; 32],
+    epoch: HoldEpoch,
+    restored: bool,
+    missed_bound_ms: Option<u64>,
+    missed_end_unknown: bool,
+    newest_missed_item_ms: Option<u64>,
+}
+
+impl HeldRequest {
+    /// The request's activity record key.
+    pub fn record(&self) -> [u8; 32] {
+        self.record
+    }
+}
+
+/// Identifies the restore or missed item that most recently established a hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct HoldEpoch(#[serde(with = "serde_b64")] [u8; 16]);
+
+impl HoldEpoch {
+    pub(crate) fn new() -> pubky_switch_core::Result<Self> {
+        pubky_switch_core::enc::random_bytes().map(Self)
+    }
+}
 
 /// The hold a restore set (`p/rh`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -388,6 +420,56 @@ impl Paykit {
             .is_none())
     }
 
+    /// The current hold's identity, bound to its request. Read only for a held request.
+    pub(crate) async fn held_request(&self, record_key: &[u8; 32]) -> Result<HeldRequest> {
+        Ok(HeldRequest {
+            record: *record_key,
+            epoch: self
+                .local_get(key::HOLD_EPOCH)
+                .await?
+                .ok_or_else(PaykitError::corrupt)?,
+            restored: self
+                .local_get::<RestoreHold>(key::RESTORE_HOLD)
+                .await?
+                .is_some(),
+            missed_bound_ms: self
+                .local_get::<MissedHold>(key::MISSED_HOLD)
+                .await?
+                .map(|hold| hold.bound_ms),
+            missed_end_unknown: self
+                .local_get::<bool>(key::MISSED_END_UNKNOWN)
+                .await?
+                .is_some(),
+            newest_missed_item_ms: self
+                .local_scan::<crate::protocol::MissedItemMark>(key::MISSED_ITEMS)
+                .await?
+                .iter()
+                .map(|(_, mark)| mark.from_ms)
+                .max(),
+        })
+    }
+
+    /// Check the exact hold shown before any effect that ends it (Paykit spec 7.2, 9).
+    /// Returns the record key to confirm, or none when the request isn't held.
+    pub(crate) async fn pass_hold(
+        &self,
+        record_key: &[u8; 32],
+        record: &ActivityRecord,
+        confirmed: Option<&HeldRequest>,
+    ) -> Result<Option<[u8; 32]>> {
+        if !self.held(record_key, record).await? {
+            return Ok(None);
+        }
+        let held = self.held_request(record_key).await?;
+        if confirmed != Some(&held) {
+            return Err(Refusal::HeldAfterRestore {
+                held: Box::new(held),
+            }
+            .into());
+        }
+        Ok(Some(*record_key))
+    }
+
     /// Bound the hold of a `missed` item whose end isn't known (`mu`), at a receive whose
     /// read completed: by the highest service time the app verified (Switch spec 10.1), no
     /// earlier than any acceptance time of the entries the item stands for, since the
@@ -426,30 +508,34 @@ impl Paykit {
     /// [`crate::PayOptions::possibly_cancelled_confirmed`] ends it, so a dispatch made before
     /// the hold is repeated at a later resume (Paykit spec 7.2). It never overrides a
     /// cancellation the record shows or the app keeps. A later `missed` item holds the
-    /// request again.
+    /// request again. `held` must be the exact value the user saw, from
+    /// [`crate::RequestView::held`] or [`Refusal::HeldAfterRestore`].
     ///
     /// # Errors
     ///
     /// [`Refusal::NotNow`] while the app can't tell whether it holds the request: its record
     /// is sealed under a scope key the app doesn't hold yet, or a value that doesn't read, or
     /// it is missing from a copy that may lack records; [`Refusal::NotFound`] when the copy
-    /// holds no record of it. A later restore holds the request again all the same. A store
-    /// failure.
+    /// holds no record of it. [`Refusal::HeldAfterRestore`] with the current hold when
+    /// `held` differs; nothing is confirmed. A store failure.
     pub async fn confirm_possibly_cancelled(
         &mut self,
         request: &crate::requests::RequestRef,
+        held: &HeldRequest,
         _confirmed: pubky_switch_client::app::UserConfirmed,
     ) -> Result<()> {
         self.refresh_own()?;
         let target = crate::activity::ActivityTarget::payer(
             paykit_lib::derive::natural_key::request_record(&request.payee, &request.request_hash),
         );
-        if self.held_activity(&target).await?.is_none() {
+        let Some(record) = self.held_activity(&target).await? else {
             return Err(self.request_record_refusal(&target).await?);
-        }
+        };
         let record_key = self.activity_key(&target)?;
-        self.local_put(&key::hold_confirmed(&record_key), &true)
-            .await
+        if let Some(key) = self.pass_hold(&record_key, &record, Some(held)).await? {
+            self.local_put(&key::hold_confirmed(&key), &true).await?;
+        }
+        Ok(())
     }
 
     /// A restored time above the backup's highest verified service time plus the clock
