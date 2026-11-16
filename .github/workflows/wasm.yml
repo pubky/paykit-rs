@@ -1,0 +1,152 @@
+# THROWAWAY (#411): browser (wasm32-unknown-unknown) CI for the WASM spike.
+# This branch is never pushed, so this workflow has never run; it records what
+# production CI needs. Validated locally with actionlint only.
+#
+# Why each crate is checked in its own `cargo check --lib` call:
+# Cargo's resolver 2 unifies features across every package and target selected
+# in one invocation. Dev-dependencies (and paykit-wasm-tests' deps) enable
+# features such as chrono/wasmbind, getrandom/wasm_js and uuid/js. If one of
+# those is checked together with paykit-lib or paykit-sdk, a feature the
+# library itself forgot is silently supplied, the build passes, and the real
+# browser build panics (round 1 hit exactly this with chrono wasmbind:
+# `Utc::now()` -> `SystemTime::now()` panics on wasm32). One package per call,
+# `--lib` only, means only that crate's normal dependency features count. The
+# `cargo tree -e normal` asserts then pin the features we know we need.
+name: WASM
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  wasm-check:
+    name: wasm32 check (no dev-dependency features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: wasm32
+
+      # .cargo/config.toml sets `--cfg getrandom_backend="wasm_js"` for
+      # wasm32. Setting RUSTFLAGS in this job would replace it, so do not.
+      - name: cargo check, one library per invocation
+        run: |
+          set -euo pipefail
+          for crate in paykit-lib paykit-sdk paykit-wasm; do
+            echo "::group::cargo check -p ${crate} --lib"
+            cargo check --locked -p "${crate}" --lib --target wasm32-unknown-unknown
+            echo "::endgroup::"
+          done
+
+      - name: Assert browser features come from normal dependencies
+        run: |
+          set -euo pipefail
+          tree() {
+            cargo tree --locked -p "$1" --target wasm32-unknown-unknown -e normal,features -i "$2"
+          }
+          # SystemTime::now() panics on wasm32; chrono must read js Date.
+          tree paykit-sdk chrono | grep -q 'chrono feature "wasmbind"'
+          # Every getrandom major in the tree needs its browser backend.
+          tree paykit-lib getrandom@0.2.17 | grep -q 'getrandom feature "js"'
+          tree paykit-lib getrandom@0.3.4 | grep -q 'getrandom feature "wasm_js"'
+          tree paykit-lib uuid | grep -q 'uuid feature "js"'
+          # tokio on wasm32 only supports sync, macros, io-util, rt and time.
+          if tree paykit-sdk tokio | grep -Eq 'tokio feature "(net|fs|process|signal|rt-multi-thread)"'; then
+            echo "tokio has a feature that cannot build for wasm32" >&2
+            exit 1
+          fi
+
+      - name: clippy (wasm32, libraries only)
+        run: >-
+          cargo clippy --locked -p paykit-lib -p paykit-sdk -p paykit-wasm --lib
+          --target wasm32-unknown-unknown -- -D warnings
+
+      # paykit-lib's wasm-compatible unit tests must keep compiling; the runner
+      # has no #[wasm_bindgen_test] functions there yet, so build only.
+      - name: Build paykit-lib unit tests for wasm32
+        run: cargo test --locked -p paykit-lib --lib --target wasm32-unknown-unknown --no-run
+
+  wasm-test:
+    name: wasm-bindgen-test (${{ matrix.env }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - env: node
+            mode: ''
+          - env: chrome
+            mode: WASM_BINDGEN_USE_BROWSER
+          - env: chrome-worker
+            mode: WASM_BINDGEN_USE_DEDICATED_WORKER
+          - env: firefox
+            mode: WASM_BINDGEN_USE_BROWSER
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: wasm32-test
+
+      # The CLI must be the exact wasm-bindgen version in Cargo.lock: the
+      # runner refuses a wasm file built by a different wasm-bindgen.
+      - name: Read wasm-bindgen version from Cargo.lock
+        id: wasm-bindgen
+        run: |
+          set -euo pipefail
+          versions="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print }' Cargo.lock)"
+          if [ "$(printf '%s\n' "${versions}" | wc -l)" -ne 1 ] || [ -z "${versions}" ]; then
+            echo "expected exactly one wasm-bindgen in Cargo.lock, got: ${versions}" >&2
+            exit 1
+          fi
+          echo "version=${versions}" >> "${GITHUB_OUTPUT}"
+
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: wasm-bindgen@${{ steps.wasm-bindgen.outputs.version }}
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: matrix.env == 'node'
+        with:
+          node-version: '24'
+
+      # ubuntu-latest ships Chrome + chromedriver and Firefox + geckodriver and
+      # exports their directories as CHROMEWEBDRIVER / GECKOWEBDRIVER. Pointing
+      # the runner at exactly one driver picks the browser.
+      - name: Select browser driver
+        if: matrix.env != 'node'
+        env:
+          BROWSER: ${{ matrix.env }}
+          MODE: ${{ matrix.mode }}
+        run: |
+          set -euo pipefail
+          case "${BROWSER}" in
+            chrome|chrome-worker) echo "CHROMEDRIVER=${CHROMEWEBDRIVER}/chromedriver" >> "${GITHUB_ENV}" ;;
+            firefox) echo "GECKODRIVER=${GECKOWEBDRIVER}/geckodriver" >> "${GITHUB_ENV}" ;;
+          esac
+          echo "${MODE}=1" >> "${GITHUB_ENV}"
+
+      - name: Run paykit-wasm-tests
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        run: cargo test --locked -p paykit-wasm-tests --target wasm32-unknown-unknown
