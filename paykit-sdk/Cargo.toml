@@ -58,3 +58,7 @@ getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 uuid = { version = "1", features = ["js"] }
+# THROWAWAY (#411): without `wasmbind`, chrono's Utc::now() calls
+# std::time::SystemTime::now(), which panics on wasm32-unknown-unknown.
+# `wasmbind` makes it read js_sys::Date instead.
+chrono = { version = "0.4.44", default-features = false, features = ["clock", "wasmbind"] }
