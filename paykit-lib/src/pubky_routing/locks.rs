@@ -561,7 +561,7 @@ fn lock_failure_context(context: &str, source: &pubky::Error) -> String {
         pubky::Error::Request(RequestError::Transport(error)) if error.is_timeout() => {
             "request timeout"
         }
-        pubky::Error::Request(RequestError::Transport(error)) if error.is_connect() => {
+        pubky::Error::Request(RequestError::Transport(error)) if is_connect_error(error) => {
             "connection failure"
         }
         pubky::Error::Request(RequestError::Transport(_)) => "transport failure",
@@ -570,6 +570,19 @@ fn lock_failure_context(context: &str, source: &pubky::Error) -> String {
         _ => "Pubky client failure",
     };
     format!("{context} ({category})")
+}
+
+// THROWAWAY (#411): wasm reqwest has no `Error::is_connect()`; the browser's
+// fetch does not expose connect vs. other network failures, so wasm32 reports
+// these as the generic "transport failure" category. FFI-safe either way.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_connect_error(error: &reqwest::Error) -> bool {
+    error.is_connect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn is_connect_error(_error: &reqwest::Error) -> bool {
+    false
 }
 
 #[cfg(test)]

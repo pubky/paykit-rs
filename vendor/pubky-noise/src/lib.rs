@@ -1591,7 +1591,7 @@ impl PubkyNoiseEncryptor {
             Err(error) => return Err(map_homeserver_read_error(error)),
         }
 
-        let mut response = storage.get(&path).await.map_err(|err| match err {
+        let response = storage.get(&path).await.map_err(|err| match err {
             Error::Request(RequestError::Server { status, .. })
                 if status == StatusCode::NOT_FOUND || status == StatusCode::GONE =>
             {

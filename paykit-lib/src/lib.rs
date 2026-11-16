@@ -18,6 +18,7 @@ mod payment_request;
 mod private_payment_list;
 mod pubky_routing;
 mod receipt;
+mod response_chunks;
 mod shared_wire;
 mod validation;
 
@@ -32,6 +33,9 @@ pub use allowance::{
     AllowancePeriodLimit, AllowancePeriodUnit, AllowancePeriodWindow, AllowanceProposal,
     AllowanceRejection, AllowanceRole, AllowanceTerms, AllowanceTermsBuilder, AllowanceUsageEntry,
 };
+// THROWAWAY (#411): shared with paykit-sdk so every bounded read works on wasm32.
+#[doc(hidden)]
+pub use response_chunks::{ResponseChunk, ResponseChunks};
 #[doc(inline)]
 pub use app::PaykitAppId;
 #[doc(inline)]

@@ -641,9 +641,7 @@ async fn fetch_text_with_budget(
 ) -> Result<Option<String>> {
     trace!("fetching text resource");
     match storage.get(&addr).await {
-        Ok(mut resp) => {
-            read_text_response(&mut resp, label, max_bytes, remaining_payload_bytes).await
-        }
+        Ok(resp) => read_text_response(resp, label, max_bytes, remaining_payload_bytes).await,
         Err(err) if is_not_found(&err) => {
             debug!("resource not found (404/GONE)");
             Ok(None)
@@ -661,15 +659,18 @@ async fn fetch_text_with_budget(
 /// Read a response with a hard streaming bound, including when Content-Length
 /// is absent or inaccurate. Outbox bodies are also untrusted homeserver data.
 pub(crate) async fn read_bounded_body(
-    mut response: reqwest::Response,
+    response: reqwest::Response,
     max_bytes: usize,
     label: &str,
 ) -> Result<Vec<u8>> {
-    read_response_body(&mut response, label, max_bytes).await
+    read_response_body(response, label, max_bytes).await
 }
 
+// THROWAWAY (#411): the body readers below take the response by value (was
+// `&mut`) so they can wrap it in `ResponseChunks`, which on wasm32 must own
+// the response to call `bytes_stream()`. Every caller already owned it.
 async fn read_response_body(
-    response: &mut reqwest::Response,
+    response: reqwest::Response,
     label: &str,
     max_bytes: usize,
 ) -> Result<Vec<u8>> {
@@ -678,7 +679,7 @@ async fn read_response_body(
 }
 
 async fn read_response_revision(
-    mut response: reqwest::Response,
+    response: reqwest::Response,
     max_bytes: usize,
     label: &str,
 ) -> Result<String> {
@@ -693,8 +694,9 @@ async fn read_response_revision(
             None,
         ));
     }
-    while let Some(chunk) = response
-        .chunk()
+    let mut chunks = crate::ResponseChunks::new(response);
+    while let Some(chunk) = chunks
+        .next_chunk()
         .await
         .map_err(|error| PaykitError::Transport {
             context: label.into(),
@@ -713,7 +715,7 @@ async fn read_response_revision(
 }
 
 async fn read_response_body_with_budget(
-    response: &mut reqwest::Response,
+    response: reqwest::Response,
     label: &str,
     max_bytes: usize,
     remaining_payload_bytes: &mut usize,
@@ -727,7 +729,8 @@ async fn read_response_body_with_budget(
         }
     }
     let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|err| {
+    let mut chunks = crate::ResponseChunks::new(response);
+    while let Some(chunk) = chunks.next_chunk().await.map_err(|err| {
         error!("failed to read response bytes");
         PaykitError::Transport {
             context: label.to_string(),
@@ -747,7 +750,7 @@ async fn read_response_body_with_budget(
 }
 
 async fn read_text_response(
-    response: &mut reqwest::Response,
+    response: reqwest::Response,
     label: &str,
     max_bytes: Option<usize>,
     remaining_payload_bytes: &mut usize,

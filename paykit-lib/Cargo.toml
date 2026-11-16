@@ -18,6 +18,8 @@ anyhow = "1.0.103"
 base64 = "0.22"
 hex = "0.4"
 blake3 = "1"
+# THROWAWAY (#411): named so ResponseChunks can return reqwest's chunk type.
+bytes = "1"
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 chrono = { version = "0.4.44", default-features = false, features = ["std"] }
 pubky = "0.16.2"
@@ -40,3 +42,17 @@ pubky-noise = { version = "=0.1.0", features = ["test-utils"] }
 pubky-testnet = { version = "0.16.2", features = ["docker-postgres"] }
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "test-util"] }
 tracing-subscriber = "0.3"
+
+# THROWAWAY (#411): browser randomness backends for every getrandom major in the
+# paykit-lib tree, so `cargo check -p paykit-lib --target wasm32-unknown-unknown`
+# works on its own (paykit-sdk repeats these for its own extra deps).
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+uuid = { version = "1", features = ["js"] }
+
+# THROWAWAY (#411): wasm reqwest has no Response::chunk(); ResponseChunks streams instead.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+reqwest = { version = "0.13", default-features = false, features = ["stream"] }
