@@ -10,13 +10,17 @@ pub use contact_records::{ContactRecord, ContactUpdate};
 pub use profiles::{
     PaykitProfile, PaykitProfileRecord, ProfileResolution, ProfileSource, PubkyProfile,
     PubkyProfileLink, PubkyProfileRecord, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
+    SOCIAL_V1_FOLLOWS_PATH_PREFIX, SOCIAL_V1_PROFILE_PATH,
 };
 pub(crate) use pubky_app::{
-    merge_pubky_profile_json, pubky_app_avatar_file_json, pubky_app_blob_id, pubky_app_timestamp_id,
+    merge_pubky_profile_json, pubky_app_avatar_file_json, pubky_app_blob_id,
+    pubky_app_timestamp_id, social_v1_file_name, SocialVersion,
+    SOCIAL_V1_MIGRATION_FLAG_CAPABILITY,
 };
 pub use pubky_app::{
     validate_pubky_app_profile, PubkyProfileSnapshot, PubkyProfileUpdate,
     PUBKY_APP_BLOB_PATH_PREFIX, PUBKY_APP_FILE_PATH_PREFIX, PUBKY_APP_PROFILE_SESSION_CAPABILITIES,
+    SOCIAL_V1_FILE_PATH_PREFIX, SOCIAL_V1_MIGRATION_FLAG_PATH,
 };
 
 pub(crate) use blobs::{

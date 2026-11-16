@@ -39,7 +39,7 @@ use crate::{
         pubky_follow_keys_from_follow_entries, public_contact_json, public_contact_path,
         ContactRecord, ContactUpdate, PaykitBlobRecord, PaykitProfile, PaykitProfileRecord,
         ProfileResolution, PubkyProfileRecord, PAYKIT_PROFILE_BLOB_PATH_PREFIX,
-        PAYKIT_PROFILE_PATH, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
+        PAYKIT_PROFILE_PATH, PUBKY_PROFILE_PATH,
     },
     domain::endpoint_reservations::{
         expired_outbound_reservation_cancellations_in_transaction,

@@ -9,6 +9,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Added
 
+- Pubky app profile, follows and avatar reads and writes follow Pubky social v1 (`/pub/social/v1/`) once pubky.app migrated the identity, and `pubky_app_profile_session_capabilities` adds the social v1 scopes.
 - `issued_receipt` in Rust returns the decrypted Receipt of a local issuance record, Receipt Metadata included, so an App can read a Receipt another App on the identity issued, such as a wallet's Receipt for a request a merchant App proposed.
 - Issued receipts report Receipt Access delivery (`AccessSent`, `AccessFailed`) in Rust, Swift and Kotlin.
 - Pubky app profile writes: `fetch_pubky_profile_with_revision`, `publish_pubky_profile`, `upload_pubky_app_avatar`, `delete_pubky_profile` and `pubky_app_profile_session_capabilities` let an app edit the shared `/pub/pubky.app/profile.json` and its avatar.

@@ -403,10 +403,28 @@ impl TestUser {
         app_id: PaykitAppId,
         display_name: &str,
     ) -> TestUser {
+        self.additional_app_with_capabilities(
+            testnet,
+            app_id,
+            display_name,
+            PAYKIT_SESSION_CAPABILITIES,
+        )
+        .await
+    }
+
+    /// Build another application runtime for this identity and shared state,
+    /// signed in with `capabilities`.
+    pub async fn additional_app_with_capabilities(
+        &self,
+        testnet: &EphemeralTestnet,
+        app_id: PaykitAppId,
+        display_name: &str,
+        capabilities: &str,
+    ) -> TestUser {
         let storage = self.storage.clone();
         let adapter = TestnetPaymentAdapter::default();
         let result = session_bootstrap(testnet, &format!("{app_id}.test"))
-            .sign_in(&self.identity_secret, PAYKIT_SESSION_CAPABILITIES)
+            .sign_in(&self.identity_secret, capabilities)
             .await
             .expect("shared application sign-in should succeed");
         let session_secret = result

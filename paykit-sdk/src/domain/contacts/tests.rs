@@ -474,6 +474,21 @@ fn test_pubky_follow_keys_from_follow_entries_keeps_direct_valid_keys_only() {
 }
 
 #[test]
+fn test_pubky_follow_keys_from_social_v1_entries_strip_json_suffix() {
+    let owner = pubky::Keypair::random().public_key();
+    let alice = pubky::Keypair::random().public_key().z32();
+    let bob = pubky::Keypair::random().public_key().z32();
+    let resource = |path: String| pubky::PubkyResource::new(owner.clone(), path).unwrap();
+
+    let contacts = pubky_follow_keys_from_follow_entries(vec![
+        resource(format!("{SOCIAL_V1_FOLLOWS_PATH_PREFIX}{bob}.json")),
+        resource(format!("{SOCIAL_V1_FOLLOWS_PATH_PREFIX}{alice}")),
+    ]);
+
+    assert_eq!(contacts, vec![PubkyPublicKey::new(bob).unwrap()]);
+}
+
+#[test]
 fn test_pubky_paths_use_pubky_app_namespace() {
     assert_eq!(PUBKY_PROFILE_PATH, "/pub/pubky.app/profile.json");
     assert_eq!(PUBKY_FOLLOWS_PATH_PREFIX, "/pub/pubky.app/follows/");
