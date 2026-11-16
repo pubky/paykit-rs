@@ -942,27 +942,63 @@ pub enum ClaimState {
 pub enum Counting {
     /// Held against the limits until its outcome is known.
     Reserved,
-    /// Paid.
+    /// Counted as spent, including a failed attempt without never-dispatched evidence.
     Spent,
-    /// Freed.
+    /// Freed by durable evidence that dispatch never started and cannot start.
     Released,
 }
 
-/// How an entry counts (Paykit spec 8.3, Paykit wire 5.5): its own `done` spends; its own
-/// `failed` releases unless its claim now shows `done`, which spends. Without an `outcome`,
-/// by its claim: `open` and `unknown` reserve, `done` spends, `failed` releases only when the
-/// attempt's owner wrote it and otherwise reserves until the user releases it, and an entry
-/// whose claim is gone, or doesn't hold the attempt (`None`), spends.
-pub fn counts(entry: &LedgerEntry, claim: Option<ClaimState>) -> Counting {
-    match (entry.outcome, claim) {
-        (Some(EntryOutcome::Done), _) => Counting::Spent,
-        (Some(EntryOutcome::Failed), Some(ClaimState::Done)) => Counting::Spent,
-        (Some(EntryOutcome::Failed), _) => Counting::Released,
-        (None, None) => Counting::Spent,
-        (None, Some(ClaimState::Open | ClaimState::Unknown)) => Counting::Reserved,
-        (None, Some(ClaimState::Done)) => Counting::Spent,
-        (None, Some(ClaimState::Failed { by_owner: true })) => Counting::Released,
-        (None, Some(ClaimState::Failed { by_owner: false })) => Counting::Reserved,
+/// Evidence used to count an attempt (Paykit spec 8.3, Paykit wire 5.5).
+/// Claim state alone never proves a failed payment was not dispatched. Callers must
+/// validate and bind this evidence to the entry's attempt, obligation, Allowance,
+/// amount, asset and owner before using it to count usage.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AttemptEvidence {
+    /// The attempt's current claim state, absent when the claim or attempt is gone.
+    pub claim: Option<ClaimState>,
+    /// The payer's validated proof or durable journal shows the attempt was paid.
+    pub paid: bool,
+    /// The executor's durable journal proves the attempt ended before the payment
+    /// method's call and can never dispatch. A restored journal, user confirmation or
+    /// reported failure is insufficient. This evidence must bind to this attempt.
+    pub never_dispatched: bool,
+}
+
+impl From<ClaimState> for AttemptEvidence {
+    fn from(claim: ClaimState) -> Self {
+        Self {
+            claim: Some(claim),
+            ..Self::default()
+        }
+    }
+}
+
+/// How an entry counts (Paykit spec 8.3, Paykit wire 5.5). A paid outcome, claim or
+/// proof spends. Every failed attempt spends unless durable never-dispatched evidence
+/// releases it. Without an outcome, open and unknown reserve, and a missing claim spends.
+pub fn counts(entry: &LedgerEntry, evidence: AttemptEvidence) -> Counting {
+    counting(entry.outcome, evidence)
+}
+
+fn counting(outcome: Option<EntryOutcome>, evidence: AttemptEvidence) -> Counting {
+    if outcome == Some(EntryOutcome::Done)
+        || evidence.claim == Some(ClaimState::Done)
+        || evidence.paid
+    {
+        return Counting::Spent;
+    }
+    if outcome == Some(EntryOutcome::Failed)
+        || matches!(evidence.claim, Some(ClaimState::Failed { .. }))
+    {
+        return if evidence.never_dispatched {
+            Counting::Released
+        } else {
+            Counting::Spent
+        };
+    }
+    match evidence.claim {
+        Some(ClaimState::Open | ClaimState::Unknown) => Counting::Reserved,
+        _ => Counting::Spent,
     }
 }
 
@@ -1056,9 +1092,9 @@ fn in_limit(period: &LimitPeriod, entry_at: u64, t: u64) -> Result<bool> {
 }
 
 /// Usage at time `t` (Paykit spec 8.3, Paykit wire 5.5): every entry counted by
-/// [`counts`] with its attempt's claim from `claims`, for every period limit and the lifetime
-/// amount. A `totals.failed` item counts like an entry's own `failed`, in the lifetime amount
-/// only: it adds its value while its claim shows `done`.
+/// [`counts`] with its attempt's `evidence`, for every period limit and the lifetime
+/// amount. Missing evidence never releases capacity. A `totals.failed` item counts by
+/// the same failed-attempt rule, in the lifetime amount only.
 ///
 /// # Errors
 ///
@@ -1067,7 +1103,7 @@ fn in_limit(period: &LimitPeriod, entry_at: u64, t: u64) -> Result<bool> {
 pub fn usage(
     terms: &AllowanceTerms,
     ledger: &Ledger,
-    claims: &HashMap<AttemptId, ClaimState>,
+    evidence: &HashMap<AttemptId, AttemptEvidence>,
     t: u64,
 ) -> Result<Usage> {
     ledger.check_valid(terms)?;
@@ -1089,12 +1125,19 @@ pub fn usage(
     let mut periods = vec![(0u128, 0u64); terms.period_limits.len()];
     let (mut reserved, mut spent, mut released) = (0u64, 0u64, 0u64);
     for item in &ledger.failed {
-        if claims.get(&item.attempt_id) == Some(&ClaimState::Done) {
+        if counting(
+            Some(EntryOutcome::Failed),
+            evidence.get(&item.attempt_id).copied().unwrap_or_default(),
+        ) != Counting::Released
+        {
             lifetime = add(lifetime, item.value.scaled())?;
         }
     }
     for entry in &ledger.entries {
-        match counts(entry, claims.get(&entry.attempt_id).copied()) {
+        match counts(
+            entry,
+            evidence.get(&entry.attempt_id).copied().unwrap_or_default(),
+        ) {
             // Counts of the ledger's entries, informational: a ledger holds fewer entries than
             // a u64 counts, so these never saturate; the limits use the checked sums below.
             Counting::Reserved => reserved = reserved.saturating_add(1),
@@ -1387,6 +1430,19 @@ mod tests {
     use pubky_switch_core::time::parse_rfc3339;
     use serde_json::json;
 
+    fn usage(
+        terms: &AllowanceTerms,
+        ledger: &Ledger,
+        claims: &HashMap<AttemptId, ClaimState>,
+        at: u64,
+    ) -> Result<Usage> {
+        let evidence = claims
+            .iter()
+            .map(|(id, state)| (*id, (*state).into()))
+            .collect();
+        super::usage(terms, ledger, &evidence, at)
+    }
+
     fn t(text: &str) -> u64 {
         parse_rfc3339(text).unwrap()
     }
@@ -1652,24 +1708,140 @@ mod tests {
             (Some(ClaimState::Open), Counting::Reserved),
             (Some(ClaimState::Unknown), Counting::Reserved),
             (Some(ClaimState::Done), Counting::Spent),
-            (
-                Some(ClaimState::Failed { by_owner: true }),
-                Counting::Released,
-            ),
+            (Some(ClaimState::Failed { by_owner: true }), Counting::Spent),
             (
                 Some(ClaimState::Failed { by_owner: false }),
-                Counting::Reserved,
+                Counting::Spent,
             ),
             (None, Counting::Spent),
         ] {
-            assert_eq!(counts(&open, claim), want, "{claim:?}");
+            assert_eq!(
+                counts(
+                    &open,
+                    AttemptEvidence {
+                        claim,
+                        ..AttemptEvidence::default()
+                    }
+                ),
+                want,
+                "{claim:?}"
+            );
         }
         let failed = LedgerEntry {
             outcome: Some(EntryOutcome::Failed),
             ..open
         };
-        assert_eq!(counts(&failed, Some(ClaimState::Done)), Counting::Spent);
-        assert_eq!(counts(&failed, None), Counting::Released);
+        assert_eq!(counts(&failed, ClaimState::Done.into()), Counting::Spent);
+        assert_eq!(counts(&failed, AttemptEvidence::default()), Counting::Spent);
+    }
+
+    #[test]
+    fn test_allowance_failed_attempts_spend_without_dispatch_evidence() {
+        let mut attempt = entry(1, "0.01", "2026-02-01T00:00:00.000Z", None);
+        for claim in [
+            None,
+            Some(ClaimState::Open),
+            Some(ClaimState::Unknown),
+            Some(ClaimState::Failed { by_owner: true }),
+            Some(ClaimState::Failed { by_owner: false }),
+        ] {
+            for outcome in [None, Some(EntryOutcome::Failed)] {
+                attempt.outcome = outcome;
+                let failed = outcome.is_some() || matches!(claim, Some(ClaimState::Failed { .. }));
+                let expected =
+                    if !failed && matches!(claim, Some(ClaimState::Open | ClaimState::Unknown)) {
+                        Counting::Reserved
+                    } else {
+                        Counting::Spent
+                    };
+                let evidence = AttemptEvidence {
+                    claim,
+                    ..AttemptEvidence::default()
+                };
+                assert_eq!(counts(&attempt, evidence), expected);
+                let never = AttemptEvidence {
+                    never_dispatched: true,
+                    ..evidence
+                };
+                assert_eq!(
+                    counts(&attempt, never),
+                    if failed { Counting::Released } else { expected }
+                );
+                assert_eq!(
+                    counts(
+                        &attempt,
+                        AttemptEvidence {
+                            paid: true,
+                            ..never
+                        }
+                    ),
+                    Counting::Spent
+                );
+                assert_eq!(
+                    counts(
+                        &attempt,
+                        AttemptEvidence {
+                            claim: Some(ClaimState::Done),
+                            ..never
+                        }
+                    ),
+                    Counting::Spent
+                );
+            }
+        }
+        attempt.outcome = Some(EntryOutcome::Done);
+        assert_eq!(
+            counts(
+                &attempt,
+                AttemptEvidence {
+                    never_dispatched: true,
+                    ..AttemptEvidence::default()
+                }
+            ),
+            Counting::Spent
+        );
+    }
+
+    #[test]
+    fn test_allowance_compacted_failure_needs_the_same_dispatch_evidence() {
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let mut l = ledger(Vec::new());
+        let attempt = AttemptId::from_bytes([8; 16]);
+        l.failed.push(CompactedFailed {
+            obligation: [8; 32],
+            attempt_id: attempt,
+            value: Decimal::parse("0.01").unwrap(),
+        });
+        let at = t("2026-03-01T00:00:00.000Z");
+        for claim in [
+            None,
+            Some(ClaimState::Failed { by_owner: true }),
+            Some(ClaimState::Failed { by_owner: false }),
+        ] {
+            for never_dispatched in [false, true] {
+                let mut evidence = HashMap::from([(
+                    attempt,
+                    AttemptEvidence {
+                        claim,
+                        never_dispatched,
+                        paid: false,
+                    },
+                )]);
+                let used = super::usage(&terms, &l, &evidence, at).unwrap();
+                assert_eq!(
+                    used.lifetime().as_str(),
+                    if never_dispatched { "0" } else { "0.01" }
+                );
+                evidence.get_mut(&attempt).unwrap().paid = true;
+                assert_eq!(
+                    super::usage(&terms, &l, &evidence, at)
+                        .unwrap()
+                        .lifetime()
+                        .as_str(),
+                    "0.01"
+                );
+            }
+        }
     }
 
     #[test]
