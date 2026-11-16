@@ -15,6 +15,647 @@ use crate::common::{
 };
 use pubky_switch_core::records::DAY_MS;
 
+#[derive(Clone, Copy)]
+enum MarkDamage {
+    Unknown,
+    MissingAsked,
+    MissingQueued,
+    DuplicateTime,
+    UnknownQueued,
+}
+
+async fn wallet_with_drop_mark(
+    w: &World,
+    key_wait: bool,
+) -> (
+    Paykit,
+    Paykit,
+    Arc<dyn pubky_switch_client::store::StateStore>,
+    paykit_sdk::RequestRef,
+) {
+    let storage = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&storage)).await;
+    let mut shop = w.shop().await;
+    let request = if key_wait {
+        let (request, _, at) = waiting_for_the_current_key(w, &mut wallet, &mut shop).await;
+        past_the_key_wait(w, &mut wallet, at).await;
+        request
+    } else {
+        dropped_unverified(w, &mut wallet, &mut shop).await.0
+    };
+    let prefix = if key_wait { b"kw/" } else { b"ud/" };
+    let marks = wallet.app().protocol_scan(prefix).await.unwrap();
+    assert_eq!(marks.len(), 1);
+    let mark: serde_json::Value = serde_json::from_slice(&marks[0].1).unwrap();
+    let body = mark["d"].as_object().unwrap();
+    assert!(body.contains_key("asked_at_ms"));
+    assert!(body.contains_key("queued"));
+    assert!(!body.contains_key("pending_forget"));
+    assert!(!body.contains_key("speculative"));
+    assert!(!body.contains_key("late_told"));
+    assert_eq!(body.contains_key("epochs"), key_wait);
+    assert!(!body.contains_key("mark"));
+    (wallet, shop, storage, request)
+}
+
+fn damage_mark(bytes: &[u8], damage: MarkDamage) -> Vec<u8> {
+    let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+    let body = value["d"].as_object_mut().unwrap();
+    match damage {
+        MarkDamage::Unknown => {
+            body.insert("extra".into(), serde_json::json!({"nested": [7]}));
+        }
+        MarkDamage::MissingAsked => {
+            body.remove("asked_at_ms").unwrap();
+        }
+        MarkDamage::MissingQueued => {
+            body.remove("queued").unwrap();
+        }
+        MarkDamage::DuplicateTime => {
+            let at = body["earliest_ms"].as_u64().unwrap();
+            return String::from_utf8(bytes.to_vec())
+                .unwrap()
+                .replacen("\"d\":{", &format!("\"d\":{{\"earliest_ms\":{at},"), 1)
+                .into_bytes();
+        }
+        MarkDamage::UnknownQueued => {
+            body.get_mut("queued")
+                .unwrap()
+                .as_object_mut()
+                .expect("the real sender retained its queued request")
+                .insert("extra".into(), serde_json::json!({"nested": [7]}));
+        }
+    }
+    serde_json::to_vec(&value).unwrap()
+}
+
+async fn refuse_mark_backup(w: &World, wallet: &mut Paykit, key: &[u8], bad: Vec<u8>) {
+    use pubky_switch_client::app::AppError;
+    use pubky_switch_client::store::{Fault as StoreFault, FaultStore, StateStore};
+    let app_id = wallet.app_id();
+    let mut backup: serde_json::Value =
+        serde_json::from_slice(&wallet.backup().await.unwrap().to_bytes().unwrap()).unwrap();
+    let layer =
+        pubky_switch_core::enc::unb64(backup["protocol"]["data"].as_str().unwrap()).unwrap();
+    let mut layer = pubky_switch_client::app::decode_local_state(&layer).unwrap();
+    layer.iter_mut().find(|(k, _)| k == key).unwrap().1 = bad;
+    backup["protocol"]["data"] = serde_json::Value::String(pubky_switch_core::enc::b64(
+        &pubky_switch_client::app::encode_local_state(&layer),
+    ));
+    let backup =
+        paykit_sdk::PaykitBackup::from_bytes(&serde_json::to_vec(&backup).unwrap()).unwrap();
+    let target = Arc::new(FaultStore::new(store(), StoreFault::None));
+    let result = Box::pin(Paykit::restore(
+        w.env(&w.alice, Arc::clone(&target) as Arc<dyn StateStore>),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    ))
+    .await;
+    let Err(error) = result else {
+        panic!("malformed recovery state was restored")
+    };
+    assert!(matches!(
+        error,
+        paykit_sdk::PaykitError::Client(AppError::InvalidData(_))
+    ));
+    assert_eq!(target.commits(), 0);
+    assert!(Paykit::load(
+        w.env(&w.alice, target),
+        PaykitConfig::default(),
+        app_id,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer()
+    )
+    .await
+    .is_err());
+}
+
+async fn refuse_mark_state(key_wait: bool, restore: bool, damage: MarkDamage) {
+    use pubky_switch_client::app::LocalWrite;
+    let w = World::new();
+    let (mut wallet, _, storage, _) = Box::pin(wallet_with_drop_mark(&w, key_wait)).await;
+    let prefix = if key_wait { b"kw/" } else { b"ud/" };
+    let (key, good) = wallet.app().protocol_scan(prefix).await.unwrap().remove(0);
+    let bad = damage_mark(&good, damage);
+    assert_ne!(bad, good);
+    if restore {
+        refuse_mark_backup(&w, &mut wallet, &key, bad).await;
+    } else {
+        wallet
+            .app_mut()
+            .protocol_commit(&[LocalWrite::Put {
+                key: key.clone(),
+                value: bad.clone(),
+            }])
+            .await
+            .unwrap();
+        let app_id = wallet.app_id();
+        let before = asked(&wallet, &w.bob_id()).await;
+        // Load already reads drop marks to clamp restored times; it must reject before
+        // rewriting the malformed value (Paykit spec 7.2, "What a restore loses").
+        let result = Paykit::load(
+            w.env(&w.alice, storage),
+            PaykitConfig::default(),
+            app_id,
+            Arc::clone(&w.rail) as Arc<dyn Rail>,
+            w.timer(),
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("a malformed drop mark was loaded")
+        };
+        assert!(crate::common::is_corrupt(&error), "{error:?}");
+        assert_eq!(wallet.app().protocol_get(&key).await.unwrap(), Some(bad));
+        assert_eq!(asked(&wallet, &w.bob_id()).await, before);
+    }
+}
+
+#[tokio::test]
+async fn test_mark_state_drop_unknown_after_reload() {
+    refuse_mark_state(false, false, MarkDamage::Unknown).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_drop_unknown_at_restore() {
+    refuse_mark_state(false, true, MarkDamage::Unknown).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_key_wait_unknown_after_reload() {
+    refuse_mark_state(true, false, MarkDamage::Unknown).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_key_wait_unknown_at_restore() {
+    refuse_mark_state(true, true, MarkDamage::Unknown).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_drop_missing_asked_after_reload() {
+    refuse_mark_state(false, false, MarkDamage::MissingAsked).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_drop_missing_queued_at_restore() {
+    refuse_mark_state(false, true, MarkDamage::MissingQueued).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_key_wait_missing_asked_after_reload() {
+    refuse_mark_state(true, false, MarkDamage::MissingAsked).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_key_wait_missing_queued_at_restore() {
+    refuse_mark_state(true, true, MarkDamage::MissingQueued).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_drop_duplicate_after_reload() {
+    refuse_mark_state(false, false, MarkDamage::DuplicateTime).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_key_wait_duplicate_at_restore() {
+    refuse_mark_state(true, true, MarkDamage::DuplicateTime).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_queued_unknown_after_reload() {
+    refuse_mark_state(false, false, MarkDamage::UnknownQueued).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_queued_unknown_at_restore() {
+    refuse_mark_state(false, true, MarkDamage::UnknownQueued).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_produced_marks_reload_restore_and_recover() {
+    for key_wait in [false, true] {
+        let w = World::new();
+        let (wallet, mut shop, storage, request) =
+            Box::pin(wallet_with_drop_mark(&w, key_wait)).await;
+        let prefix = if key_wait { b"kw/" } else { b"ud/" };
+        let held = wallet.app().protocol_scan(prefix).await.unwrap();
+        let app_id = wallet.app_id();
+        drop(wallet);
+        let mut wallet = w
+            .load_on_clock(&w.alice, storage, app_id, Arc::clone(&w.clock))
+            .await;
+        assert_eq!(wallet.app().protocol_scan(prefix).await.unwrap(), held);
+        let backup = wallet.backup().await.unwrap();
+        let restored = Box::pin(Paykit::restore(
+            w.env(&w.alice, store()),
+            PaykitConfig::default(),
+            &backup,
+            Arc::clone(&w.rail) as Arc<dyn Rail>,
+            w.timer(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(restored.app().protocol_scan(prefix).await.unwrap(), held);
+        drop(restored);
+        w.homeserver.set_down(false);
+        if key_wait {
+            crate::unrequested::store_bundle(&w, wallet.app_id(), wallet.app().cert());
+        }
+        wallet.receive(None).await.unwrap();
+        wallet.flush().await.unwrap();
+        assert_eq!(asked(&wallet, &w.bob_id()).await.len(), 1);
+        shop.receive(None).await.unwrap();
+        wallet.receive(None).await.unwrap();
+        assert_eq!(
+            wallet.request(&request).await.unwrap().status,
+            RequestStatus::Open
+        );
+    }
+}
+
+async fn wallet_with_kept_mark(
+    w: &World,
+) -> (Paykit, Arc<dyn pubky_switch_client::store::StateStore>) {
+    let storage = store();
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            Arc::clone(&storage),
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.app_mut().deny(&w.bob_id()).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.requests().await.unwrap().is_empty());
+    wallet.unblock(&w.bob_id()).await.unwrap();
+    w.clock.advance_ms(11 * 60_000);
+    w.alice.switch().fail_next(Fault::LoseAnswer {
+        path: "/ops".into(),
+    });
+    wallet.receive(None).await.unwrap();
+    let marks = wallet.app().protocol_scan(b"bd/").await.unwrap();
+    assert_eq!(marks.len(), 1);
+    let mark: serde_json::Value = serde_json::from_slice(&marks[0].1).unwrap();
+    assert_eq!(
+        mark["d"]["queued"]["kept_batch"].as_array().unwrap().len(),
+        16
+    );
+    assert!(mark["d"]["queued"]["msg_id"].is_string());
+    assert!(mark["d"]["queued"]["hash"].is_string());
+    (wallet, storage)
+}
+
+#[tokio::test]
+async fn test_mark_state_kept_batch_reload_restore_and_send() {
+    let w = World::new();
+    let (wallet, storage) = Box::pin(wallet_with_kept_mark(&w)).await;
+    let held = wallet.app().protocol_scan(b"bd/").await.unwrap();
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let mut wallet = w
+        .load_on_clock(&w.alice, storage, app_id, Arc::clone(&w.clock))
+        .await;
+    assert_eq!(wallet.app().protocol_scan(b"bd/").await.unwrap(), held);
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut restored = Box::pin(Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(restored.app().protocol_scan(b"bd/").await.unwrap(), held);
+    restored.receive(None).await.unwrap();
+    restored.receive(None).await.unwrap();
+    assert_eq!(asked(&restored, &w.bob_id()).await.len(), 1);
+}
+
+#[tokio::test]
+async fn test_mark_state_kept_reference_unknown_at_restore() {
+    let w = World::new();
+    let (mut wallet, _) = Box::pin(wallet_with_kept_mark(&w)).await;
+    let (key, good) = wallet.app().protocol_scan(b"bd/").await.unwrap().remove(0);
+    let bad = damage_mark(&good, MarkDamage::UnknownQueued);
+    refuse_mark_backup(&w, &mut wallet, &key, bad).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_kept_reference_unknown_after_reload() {
+    use pubky_switch_client::app::LocalWrite;
+    let w = World::new();
+    let (mut wallet, storage) = Box::pin(wallet_with_kept_mark(&w)).await;
+    let (key, good) = wallet.app().protocol_scan(b"bd/").await.unwrap().remove(0);
+    let bad = damage_mark(&good, MarkDamage::UnknownQueued);
+    wallet
+        .app_mut()
+        .protocol_commit(&[LocalWrite::Put {
+            key: key.clone(),
+            value: bad.clone(),
+        }])
+        .await
+        .unwrap();
+    let result = Paykit::load(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        wallet.app_id(),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await;
+    let Err(error) = result else {
+        panic!("a malformed kept request was loaded")
+    };
+    assert!(crate::common::is_corrupt(&error), "{error:?}");
+    assert_eq!(wallet.app().protocol_get(&key).await.unwrap(), Some(bad));
+}
+
+#[derive(Clone, Copy)]
+enum AskDamage {
+    Unknown,
+    MissingUntil,
+    MissingQueued,
+    DuplicateUntil,
+    UnknownReference,
+}
+
+#[derive(Default)]
+struct FailAskDelete {
+    inner: pubky_switch_client::store::MemoryStore,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl pubky_switch_client::store::StateStore for FailAskDelete {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        use pubky_switch_client::store::Write;
+        if batch
+            .writes
+            .iter()
+            .any(|write| matches!(write, Write::Delete { key, .. } if key.starts_with(b"p/ask/")))
+            && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(pubky_switch_client::error::StoreError::Unavailable);
+        }
+        self.inner.commit(batch)
+    }
+}
+
+async fn wallet_with_queued_ask(
+    w: &World,
+    bounded: bool,
+    with_request: bool,
+) -> (Paykit, Arc<dyn pubky_switch_client::store::StateStore>) {
+    let storage = Arc::new(FailAskDelete::default());
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().pay().manage_contacts().build().unwrap(),
+            PaykitConfig::default(),
+            Arc::clone(&storage) as Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let now = w.clock.now_ms();
+    // Feed items reach the public client callbacks; no local ask is inserted by the test
+    // (Paykit spec 9; Switch wire 7.4.4).
+    if bounded {
+        let mut phone = w.wallet("departing").await;
+        wallet.app_mut().receive(None).await.unwrap();
+        w.clock.advance_ms(1_000);
+        phone
+            .app_mut()
+            .leave(pubky_switch_client::app::LeaveMode::Immediate(
+                pubky_switch_client::app::UserConfirmed::new(),
+            ))
+            .await
+            .unwrap();
+        let seq = w.alice.switch().push_unreadable(w.bob_id(), now);
+        // Stop after the client has durably called the protocol, before Paykit sends its ask.
+        let report = wallet.app_mut().receive(None).await.unwrap();
+        assert!(
+            report.events.iter().any(|event| matches!(event,
+            AppEvent::Unreadable { seq: read, resend_asked: true } if *read == seq)),
+            "{report:?}"
+        );
+        wallet.block(&w.bob_id()).await.unwrap();
+    } else {
+        wallet.block(&w.bob_id()).await.unwrap();
+        w.alice.switch().push_missed(1, now - 1_000, now);
+        wallet.receive(None).await.unwrap();
+    }
+    let asks = wallet.app().protocol_scan(b"ask/").await.unwrap();
+    assert_eq!(asks.len(), 1);
+    let ask: serde_json::Value = serde_json::from_slice(&asks[0].1).unwrap();
+    assert_eq!(ask["d"]["until_ms"].is_u64(), bounded);
+    assert!(ask["d"].as_object().unwrap().contains_key("until_ms"));
+    assert!(ask["d"].as_object().unwrap().contains_key("queued"));
+    assert!(ask["d"]["queued"].is_null());
+    if with_request {
+        wallet.unblock(&w.bob_id()).await.unwrap();
+        storage
+            .armed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let error = wallet.receive(None).await.unwrap_err();
+        assert!(matches!(
+            error,
+            paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Store(
+                pubky_switch_client::error::StoreError::Unavailable
+            ))
+        ));
+        assert!(!storage.armed.load(std::sync::atomic::Ordering::SeqCst));
+        let asks = wallet.app().protocol_scan(b"ask/").await.unwrap();
+        assert_eq!(asks.len(), 1);
+        let ask: serde_json::Value = serde_json::from_slice(&asks[0].1).unwrap();
+        let queued = ask["d"]["queued"].as_object().unwrap();
+        assert!(queued["msg_id"].is_string());
+        assert!(queued["hash"].is_string());
+        assert!(!queued.contains_key("kept_batch"));
+    }
+    (wallet, storage)
+}
+
+async fn refuse_ask_state(bounded: bool, restore: bool, damage: AskDamage) {
+    use pubky_switch_client::app::LocalWrite;
+    let w = World::new();
+    let (mut wallet, storage) = Box::pin(wallet_with_queued_ask(
+        &w,
+        bounded,
+        matches!(damage, AskDamage::UnknownReference),
+    ))
+    .await;
+    let (key, good) = wallet.app().protocol_scan(b"ask/").await.unwrap().remove(0);
+    let mut value: serde_json::Value = serde_json::from_slice(&good).unwrap();
+    let body = value["d"].as_object_mut().unwrap();
+    let bad = match damage {
+        AskDamage::DuplicateUntil => String::from_utf8(good.clone())
+            .unwrap()
+            .replacen("\"d\":{", "\"d\":{\"until_ms\":null,", 1)
+            .into_bytes(),
+        _ => {
+            match damage {
+                AskDamage::Unknown => {
+                    body.insert("extra".into(), serde_json::json!({"nested": [7]}));
+                }
+                AskDamage::MissingUntil => {
+                    body.remove("until_ms").unwrap();
+                }
+                AskDamage::MissingQueued => {
+                    body.remove("queued").unwrap();
+                }
+                AskDamage::UnknownReference => {
+                    body.get_mut("queued")
+                        .unwrap()
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("extra".into(), serde_json::json!({"nested": [7]}));
+                }
+                AskDamage::DuplicateUntil => unreachable!(),
+            }
+            serde_json::to_vec(&value).unwrap()
+        }
+    };
+    assert_ne!(bad, good);
+    if restore {
+        refuse_mark_backup(&w, &mut wallet, &key, bad).await;
+    } else {
+        wallet
+            .app_mut()
+            .protocol_commit(&[LocalWrite::Put {
+                key: key.clone(),
+                value: bad.clone(),
+            }])
+            .await
+            .unwrap();
+        let app_id = wallet.app_id();
+        drop(wallet);
+        let mut wallet = w
+            .load_on_clock(&w.alice, storage, app_id, Arc::clone(&w.clock))
+            .await;
+        let error = wallet.receive(None).await.unwrap_err();
+        assert!(crate::common::is_corrupt(&error), "{error:?}");
+        assert_eq!(wallet.app().protocol_get(&key).await.unwrap(), Some(bad));
+    }
+}
+
+#[tokio::test]
+async fn test_mark_state_ask_unknown_after_reload() {
+    refuse_ask_state(true, false, AskDamage::Unknown).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_ask_unknown_at_restore() {
+    refuse_ask_state(false, true, AskDamage::Unknown).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_ask_missing_until_after_reload() {
+    refuse_ask_state(true, false, AskDamage::MissingUntil).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_ask_missing_until_at_restore() {
+    refuse_ask_state(false, true, AskDamage::MissingUntil).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_ask_missing_queued_after_reload() {
+    refuse_ask_state(false, false, AskDamage::MissingQueued).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_ask_missing_queued_at_restore() {
+    refuse_ask_state(true, true, AskDamage::MissingQueued).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_ask_reference_unknown_after_reload() {
+    refuse_ask_state(true, false, AskDamage::UnknownReference).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_ask_reference_unknown_at_restore() {
+    refuse_ask_state(false, true, AskDamage::UnknownReference).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_ask_duplicate_at_restore() {
+    refuse_ask_state(true, true, AskDamage::DuplicateUntil).await;
+}
+
+#[tokio::test]
+async fn test_mark_state_callback_asks_reload_restore_and_send() {
+    for bounded in [false, true] {
+        for with_request in [false, true] {
+            let w = World::new();
+            let (wallet, storage) =
+                Box::pin(wallet_with_queued_ask(&w, bounded, with_request)).await;
+            let held = wallet.app().protocol_scan(b"ask/").await.unwrap();
+            let app_id = wallet.app_id();
+            drop(wallet);
+            let mut wallet = w
+                .load_on_clock(&w.alice, storage, app_id, Arc::clone(&w.clock))
+                .await;
+            assert_eq!(wallet.app().protocol_scan(b"ask/").await.unwrap(), held);
+            let backup = wallet.backup().await.unwrap();
+            let restored = Box::pin(Paykit::restore(
+                w.env(&w.alice, store()),
+                PaykitConfig::default(),
+                &backup,
+                Arc::clone(&w.rail) as Arc<dyn Rail>,
+                w.timer(),
+            ))
+            .await
+            .unwrap();
+            assert_eq!(restored.app().protocol_scan(b"ask/").await.unwrap(), held);
+            drop(restored);
+            wallet.unblock(&w.bob_id()).await.unwrap();
+            wallet.receive(None).await.unwrap();
+            wallet.receive(None).await.unwrap();
+            assert!(wallet
+                .app()
+                .protocol_scan(b"ask/")
+                .await
+                .unwrap()
+                .is_empty());
+            assert_eq!(asked(&wallet, &w.bob_id()).await.len(), 1);
+        }
+    }
+}
+
 /// Whether `events` hold a duty event about an entry stored locally.
 fn about_stored(events: &[AppEvent]) -> bool {
     events.iter().any(|event| {

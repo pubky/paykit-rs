@@ -123,6 +123,7 @@ impl BlockedWindow {
 
 /// A mark of a sender's dropped messages (module docs).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct DropMark {
     /// The sender identity.
     #[serde(with = "serde_b64")]
@@ -138,8 +139,10 @@ pub(crate) struct DropMark {
     /// ([`KeyWaitMark`]).
     pub(crate) due: bool,
     /// When the outbox last delivered a request for this mark, on the device clock.
+    #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) asked_at_ms: Option<u64>,
     /// A request queued for this mark and not yet seen delivered.
+    #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) queued: Option<QueuedRequest>,
     /// For a block's mark: the messages counted whose processed pair is still to be
     /// forgotten, outside the receive step that counted them
@@ -170,6 +173,7 @@ pub const MAX_PENDING_FORGETS: usize = 64;
 /// answers its delivery by, and its hash, the proof that the message the outbox delivered
 /// under that `msg_id` is this request ([`Paykit::delivered_request`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct QueuedRequest {
     pub(crate) msg_id: String,
     #[serde(with = "serde_b64")]
@@ -251,6 +255,7 @@ impl DropMark {
 /// (`kw/<sender>`, module docs): a [`DropMark`] with the data epochs the messages waited
 /// for, ascending, each once.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct KeyWaitMark {
     #[serde(flatten)]
     pub(crate) mark: DropMark,
@@ -1223,6 +1228,160 @@ pub(crate) fn tell_lost_if_unasked(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn current_mark() -> DropMark {
+        count_dropped(None, &[], [1; 32], 7, true).put.unwrap()
+    }
+
+    fn current_key_wait() -> KeyWaitMark {
+        let mark = count_dropped(None, &[], [1; 32], 7, false).put.unwrap();
+        KeyWaitMark::with_epoch(mark, Vec::new(), 2)
+    }
+
+    fn without(value: impl Serialize, member: &str) -> serde_json::Value {
+        let mut value = serde_json::to_value(value).unwrap();
+        assert!(value.as_object_mut().unwrap().remove(member).is_some());
+        value
+    }
+
+    #[test]
+    fn test_mark_state_drop_keeps_null_and_omitted_members() {
+        let mark = current_mark();
+        let value = serde_json::to_value(&mark).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 6);
+        assert!(value.as_object().unwrap().contains_key("asked_at_ms"));
+        assert!(value.as_object().unwrap().contains_key("queued"));
+        assert!(value["asked_at_ms"].is_null());
+        assert!(value["queued"].is_null());
+        assert_eq!(serde_json::from_value::<DropMark>(value).unwrap(), mark);
+    }
+
+    #[test]
+    fn test_mark_state_drop_requires_asked_at() {
+        assert!(
+            serde_json::from_value::<DropMark>(without(current_mark(), "asked_at_ms")).is_err()
+        );
+    }
+
+    #[test]
+    fn test_mark_state_drop_requires_queued() {
+        assert!(serde_json::from_value::<DropMark>(without(current_mark(), "queued")).is_err());
+    }
+
+    #[test]
+    fn test_mark_state_drop_refuses_unknown_member() {
+        let mut value = serde_json::to_value(current_mark()).unwrap();
+        value["extra"] = serde_json::json!({"nested": [1]});
+        assert!(serde_json::from_value::<DropMark>(value).is_err());
+    }
+
+    #[test]
+    fn test_mark_state_drop_refuses_epochs() {
+        let value = serde_json::to_value(current_key_wait()).unwrap();
+        assert!(serde_json::from_value::<DropMark>(value).is_err());
+    }
+
+    #[test]
+    fn test_mark_state_key_wait_keeps_flat_members() {
+        let mark = current_key_wait();
+        let value = serde_json::to_value(&mark).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 7);
+        assert_eq!(value["epochs"], serde_json::json!([2]));
+        assert!(value.get("mark").is_none());
+        assert!(value.get("pending_forget").is_none());
+        assert!(value["asked_at_ms"].is_null());
+        assert!(value["queued"].is_null());
+        assert_eq!(serde_json::from_value::<KeyWaitMark>(value).unwrap(), mark);
+    }
+
+    #[test]
+    fn test_mark_state_key_wait_requires_asked_at() {
+        assert!(
+            serde_json::from_value::<KeyWaitMark>(without(current_key_wait(), "asked_at_ms"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_mark_state_key_wait_requires_queued() {
+        assert!(
+            serde_json::from_value::<KeyWaitMark>(without(current_key_wait(), "queued")).is_err()
+        );
+    }
+
+    #[test]
+    fn test_mark_state_key_wait_refuses_unknown_member() {
+        let mut value = serde_json::to_value(current_key_wait()).unwrap();
+        value["extra"] = serde_json::json!({"nested": [1]});
+        assert!(serde_json::from_value::<KeyWaitMark>(value).is_err());
+    }
+
+    #[test]
+    fn test_mark_state_key_wait_refuses_nested_mark() {
+        let mut value = serde_json::to_value(current_key_wait()).unwrap();
+        value["mark"] = serde_json::to_value(current_mark()).unwrap();
+        assert!(serde_json::from_value::<KeyWaitMark>(value).is_err());
+    }
+
+    #[test]
+    fn test_mark_state_refuses_duplicate_members() {
+        let mark = serde_json::to_string(&current_mark()).unwrap();
+        let mark = mark.replacen('{', "{\"earliest_ms\":7,", 1);
+        assert!(serde_json::from_str::<DropMark>(&mark).is_err());
+        let mark = serde_json::to_string(&current_key_wait()).unwrap();
+        let same = mark.replacen('{', "{\"earliest_ms\":7,", 1);
+        assert!(serde_json::from_str::<KeyWaitMark>(&same).is_err());
+        let same = mark.replacen('{', "{\"epochs\":[2],", 1);
+        assert!(serde_json::from_str::<KeyWaitMark>(&same).is_err());
+    }
+
+    fn queued_request(batch: Option<[u8; 16]>) -> QueuedRequest {
+        QueuedRequest {
+            msg_id: "123e4567-e89b-42d3-a456-426614174000".into(),
+            hash: [7; 32],
+            kept_batch: batch,
+        }
+    }
+
+    #[test]
+    fn test_mark_state_queued_request_keeps_current_batch_forms() {
+        for batch in [None, Some([3; 16])] {
+            let request = queued_request(batch);
+            let value = serde_json::to_value(&request).unwrap();
+            assert_eq!(value.get("kept_batch").is_some(), batch.is_some());
+            assert_eq!(
+                serde_json::from_value::<QueuedRequest>(value).unwrap(),
+                request
+            );
+        }
+    }
+
+    #[test]
+    fn test_mark_state_queued_request_refuses_unknown_member() {
+        let mut value = serde_json::to_value(queued_request(None)).unwrap();
+        value["extra"] = serde_json::json!({"nested": [1]});
+        assert!(serde_json::from_value::<QueuedRequest>(value).is_err());
+    }
+
+    #[test]
+    fn test_mark_state_queued_request_requires_identity_members() {
+        for member in ["msg_id", "hash"] {
+            assert!(
+                serde_json::from_value::<QueuedRequest>(without(queued_request(None), member))
+                    .is_err()
+            );
+        }
+        let mut value = serde_json::to_value(queued_request(None)).unwrap();
+        value["kept_batch"] = serde_json::json!([1, 2]);
+        assert!(serde_json::from_value::<QueuedRequest>(value).is_err());
+        let value = serde_json::to_string(&queued_request(None)).unwrap();
+        let duplicate = value.replacen(
+            '{',
+            "{\"msg_id\":\"123e4567-e89b-42d3-a456-426614174000\",",
+            1,
+        );
+        assert!(serde_json::from_str::<QueuedRequest>(&duplicate).is_err());
+    }
 
     fn mark(sender: u8, earliest_ms: u64, latest_ms: u64) -> DropMark {
         DropMark {
