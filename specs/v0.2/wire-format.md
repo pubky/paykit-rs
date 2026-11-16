@@ -1160,7 +1160,7 @@ Clearing every bucket boundary is necessary, not permission to ignore another ho
 
 **Collisions:** two settlements share a bucket and a tag with a chance of about n^2/2^107 for n marks, below 10^-18 for 10 million, and since the tags are blinded no payer can aim one. A collision only refuses a credit, which the user then sees; it never makes one. An occurrence tag only tells an app whether the credit it lost was of its own occurrence, and decides no credit.
 
-Example (a bucket holding two marks, a one-time request's and a Billing Period's; an illustration, since this section's vectors come with the code that implements it):
+Example (a bucket holding two marks, a one-time request's and a Billing Period's; stored in `sealed.json` as `settlement_marks.example`):
 
 ```json
 {
