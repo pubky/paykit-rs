@@ -277,7 +277,7 @@ async fn test_provider_loss_doubt_survives_a_restore_from_a_backup_after_the_los
     app.end_reconcile(UserConfirmed::new()).await.unwrap();
     // The restore holds the request until the user has seen the payee may have cancelled
     // it; the loss's doubt comes after that, carried by the backup.
-    let options = PayOptions::default().with_possibly_cancelled_confirmed(UserConfirmed::new());
+    let options = crate::common::over_hold(&app, &request).await;
     let again = app.pay_request(&request, options).await;
     assert!(doubt_of(&again).before_loss.is_some(), "{again:?}");
     assert_eq!(executions(&w), 0);
@@ -308,7 +308,7 @@ async fn test_provider_loss_restore_from_a_backup_before_the_loss_learns_it_agai
     assert_eq!(kept["d"]["declared_at_ms"], loss.declared_at_ms);
     assert_eq!(kept["d"]["uncertain_until_ms"], loss.uncertain_until_ms);
     app.receive(None).await.unwrap();
-    let options = PayOptions::default().with_possibly_cancelled_confirmed(UserConfirmed::new());
+    let options = crate::common::over_hold(&app, &request).await;
     let again = app.pay_request(&request, options).await;
     assert!(doubt_of(&again).before_loss.is_some(), "{again:?}");
     assert_eq!(executions(&w), 0);

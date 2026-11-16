@@ -36,7 +36,10 @@ pub enum Refusal {
     #[error(
         "Paykit spec 7.2: held after a restore or a missed item; the payee may have cancelled it"
     )]
-    HeldAfterRestore,
+    HeldAfterRestore {
+        /// The request and current hold to show before asking the user to confirm.
+        held: Box<crate::HeldRequest>,
+    },
     /// The request was cancelled by either side (Paykit spec 8.1).
     #[error("the request was cancelled")]
     Cancelled,

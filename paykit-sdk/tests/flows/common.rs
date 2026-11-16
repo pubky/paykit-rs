@@ -1004,3 +1004,20 @@ pub fn is_corrupt(error: &paykit_sdk::PaykitError) -> bool {
         ))
     )
 }
+
+/// The current hold of a readable request, as shown to the user.
+pub async fn held(app: &Paykit, request: &paykit_sdk::RequestRef) -> paykit_sdk::HeldRequest {
+    app.request(request)
+        .await
+        .unwrap()
+        .held
+        .expect("the request is held")
+}
+
+/// Options confirming the current hold when this request can be shown as held.
+pub async fn over_hold(app: &Paykit, request: &paykit_sdk::RequestRef) -> paykit_sdk::PayOptions {
+    match app.request(request).await.ok().and_then(|view| view.held) {
+        Some(held) => paykit_sdk::PayOptions::default().with_possibly_cancelled_confirmed(held),
+        None => paykit_sdk::PayOptions::default(),
+    }
+}

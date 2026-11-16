@@ -79,6 +79,7 @@ pub use conversion::{PricedPayment, RateSource};
 pub use destination::IDENTITY_GRACE_MS;
 pub use divergent::DivergentRecord;
 pub use error::{PaykitError, Refusal, Result};
+pub use hold::HeldRequest;
 pub use journal::{PaymentView, Stage};
 pub use loss::LossBoundary;
 pub use marks::MAX_DROPPED_MARKS;
@@ -221,6 +222,7 @@ mod tests {
                     recurring: false,
                     recurrence: None,
                     status: RequestStatus::Open,
+                    held: None,
                     divergent: false,
                     receipt: Some(ReceivedReceipt {
                         record: [5; 32],

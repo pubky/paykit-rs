@@ -1167,7 +1167,7 @@ async fn test_divergent_held_request_shows_held_and_divergent() {
     assert_eq!(view.status, RequestStatus::Held);
     assert!(view.divergent);
     restored
-        .confirm_possibly_cancelled(&request, UserConfirmed::new())
+        .confirm_possibly_cancelled(&request, &view.held.unwrap(), UserConfirmed::new())
         .await
         .unwrap();
     assert_eq!(

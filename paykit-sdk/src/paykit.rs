@@ -903,6 +903,7 @@ mod tests {
         draft: RequestDraft,
         payment: UnrequestedPayment,
         shown: crate::DivergentRecord,
+        held: crate::HeldRequest,
         role: crate::AllowanceRole,
         terms: paykit_lib::allowances::AllowanceTerms,
         details: paykit_lib::bodies::PeriodDetails,
@@ -956,7 +957,7 @@ mod tests {
         assert_send(&wallet.resume_payments());
         assert_send(&wallet.block(&key));
         assert_send(&wallet.unblock(&key));
-        assert_send(&wallet.confirm_possibly_cancelled(&request, confirmed));
+        assert_send(&wallet.confirm_possibly_cancelled(&request, &held, confirmed));
         assert_send(&wallet.notices());
         assert_send(&wallet.acknowledge_notice(""));
         assert_send(&wallet.receipts(ReceiptsOf::All));

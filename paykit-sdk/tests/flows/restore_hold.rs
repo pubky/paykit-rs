@@ -30,10 +30,6 @@ async fn restored(w: &World, backup: &PaykitBackup) -> Paykit {
     app
 }
 
-fn confirmed() -> PayOptions {
-    PayOptions::default().with_possibly_cancelled_confirmed(UserConfirmed::new())
-}
-
 /// The record of bob's shop app the wallet holds for `paykit_request`.
 async fn cancel(shop: &mut Paykit, request: &RequestRef) {
     let record = shop
@@ -81,7 +77,10 @@ async fn test_restore_hold_cancellation_resent_after_the_restore_stops_for_good(
         app.request(&request).await.unwrap().status,
         RequestStatus::Cancelled
     );
-    let refused = app.pay_request(&request, confirmed()).await.unwrap_err();
+    let refused = app
+        .pay_request(&request, crate::common::over_hold(&app, &request).await)
+        .await
+        .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
     assert!(w.rail.all_executions().is_empty());
 }
@@ -128,7 +127,9 @@ async fn test_restore_hold_kept_when_the_confirmed_payment_is_refused() {
     let refused = app
         .pay_request(
             &request,
-            confirmed().with_endpoint(crate::common::endpoint("btc-no-such-endpoint")),
+            crate::common::over_hold(&app, &request)
+                .await
+                .with_endpoint(crate::common::endpoint("btc-no-such-endpoint")),
         )
         .await
         .unwrap_err();
@@ -140,7 +141,10 @@ async fn test_restore_hold_kept_when_the_confirmed_payment_is_refused() {
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap_err();
-    assert_eq!(refused.refusal(), Some(&Refusal::HeldAfterRestore));
+    assert!(matches!(
+        refused.refusal(),
+        Some(Refusal::HeldAfterRestore { .. })
+    ));
     assert!(w.rail.all_executions().is_empty());
 }
 
@@ -163,10 +167,16 @@ async fn test_restore_hold_payee_silent_held_until_the_user_confirms() {
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap_err();
-    assert_eq!(refused.refusal(), Some(&Refusal::HeldAfterRestore));
+    assert!(matches!(
+        refused.refusal(),
+        Some(Refusal::HeldAfterRestore { .. })
+    ));
     assert!(w.rail.all_executions().is_empty());
     // Once the user has seen the payee may have cancelled it, a manual payment goes on.
-    let paid = app.pay_request(&request, confirmed()).await.unwrap();
+    let paid = app
+        .pay_request(&request, crate::common::over_hold(&app, &request).await)
+        .await
+        .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
 }
 
@@ -187,15 +197,24 @@ async fn test_restore_hold_backup_after_the_stop_keeps_it_and_holds_the_rest() {
     drop(wallet);
     let mut app = restored(&w, &backup).await;
     // R1 stays stopped, whatever the user confirms.
-    let refused = app.pay_request(&r1, confirmed()).await.unwrap_err();
+    let refused = app
+        .pay_request(&r1, crate::common::over_hold(&app, &r1).await)
+        .await
+        .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
     // R3 is held until the user confirms it.
     let refused = app
         .pay_request(&r3, PayOptions::default())
         .await
         .unwrap_err();
-    assert_eq!(refused.refusal(), Some(&Refusal::HeldAfterRestore));
-    let paid = app.pay_request(&r3, confirmed()).await.unwrap();
+    assert!(matches!(
+        refused.refusal(),
+        Some(Refusal::HeldAfterRestore { .. })
+    ));
+    let paid = app
+        .pay_request(&r3, crate::common::over_hold(&app, &r3).await)
+        .await
+        .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
     assert_eq!(w.rail.all_executions().len(), 1);
 }
@@ -223,7 +242,10 @@ async fn test_restore_hold_another_apps_record_write_stops_it() {
         app.request(&request).await.unwrap().status,
         RequestStatus::Cancelled
     );
-    let refused = app.pay_request(&request, confirmed()).await.unwrap_err();
+    let refused = app
+        .pay_request(&request, crate::common::over_hold(&app, &request).await)
+        .await
+        .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
     // The other is held, as every open request after a restore.
     assert_eq!(
@@ -255,8 +277,14 @@ async fn test_restore_hold_holds_a_request_first_seen_after_the_restore_until_co
         .pay_request(&after, PayOptions::default())
         .await
         .unwrap_err();
-    assert_eq!(refused.refusal(), Some(&Refusal::HeldAfterRestore));
-    let paid = app.pay_request(&after, confirmed()).await.unwrap();
+    assert!(matches!(
+        refused.refusal(),
+        Some(Refusal::HeldAfterRestore { .. })
+    ));
+    let paid = app
+        .pay_request(&after, crate::common::over_hold(&app, &after).await)
+        .await
+        .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
 }
 
@@ -344,7 +372,10 @@ async fn test_restore_hold_stop_kept_before_the_backup_stops_after_it() {
     let _ = wallet.receive(None).await;
     assert_eq!(wallet.app().protocol_scan(b"kc/").await.unwrap().len(), 1);
     let mut app = restored_from(&w, wallet).await;
-    let refused = app.pay_request(&request, confirmed()).await.unwrap_err();
+    let refused = app
+        .pay_request(&request, crate::common::over_hold(&app, &request).await)
+        .await
+        .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
     app.receive(None).await.unwrap();
     assert_eq!(
@@ -372,7 +403,10 @@ async fn test_restore_hold_stop_placed_before_the_backup_survives_the_request_se
         app.request(&request).await.unwrap().status,
         RequestStatus::Cancelled
     );
-    let refused = app.pay_request(&request, confirmed()).await.unwrap_err();
+    let refused = app
+        .pay_request(&request, crate::common::over_hold(&app, &request).await)
+        .await
+        .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
     assert!(w.rail.all_executions().is_empty());
 }
@@ -394,7 +428,10 @@ async fn test_restore_hold_rejected_request_stays_rejected_after_it_is_sent_agai
         app.request(&request).await.unwrap().status,
         RequestStatus::Rejected
     );
-    let refused = app.pay_request(&request, confirmed()).await.unwrap_err();
+    let refused = app
+        .pay_request(&request, crate::common::over_hold(&app, &request).await)
+        .await
+        .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::Rejected));
     assert!(w.rail.all_executions().is_empty());
 }
@@ -457,7 +494,10 @@ async fn test_restore_hold_confirmation_is_asked_again_after_another_restore() {
     wallet.receive(None).await.unwrap();
     let mut app = restored_from(&w, wallet).await;
     w.rail.next(paykit_sdk::rail::Behaviour::Refuse);
-    let failed = app.pay_request(&request, confirmed()).await.unwrap();
+    let failed = app
+        .pay_request(&request, crate::common::over_hold(&app, &request).await)
+        .await
+        .unwrap();
     assert!(matches!(failed, PayOutcome::Failed { .. }), "{failed:?}");
     assert_eq!(
         app.request(&request).await.unwrap().status,
@@ -512,9 +552,15 @@ async fn test_restore_hold_missed_item_holds_an_open_request_until_the_user_conf
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap_err();
-    assert_eq!(refused.refusal(), Some(&Refusal::HeldAfterRestore));
+    assert!(matches!(
+        refused.refusal(),
+        Some(Refusal::HeldAfterRestore { .. })
+    ));
     assert!(w.rail.all_executions().is_empty());
-    let paid = wallet.pay_request(&request, confirmed()).await.unwrap();
+    let paid = wallet
+        .pay_request(&request, crate::common::over_hold(&wallet, &request).await)
+        .await
+        .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
 }
 
@@ -529,9 +575,15 @@ async fn test_restore_hold_missed_item_holds_a_repeat_until_the_user_confirms() 
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
+    missed(&w);
+    wallet.receive(None).await.unwrap();
+    let earlier = crate::common::held(&wallet, &request).await;
     w.rail.next(paykit_sdk::rail::Behaviour::Hang);
     let PayOutcome::Pending { attempt_id, .. } = wallet
-        .pay_request(&request, PayOptions::default())
+        .pay_request(
+            &request,
+            PayOptions::default().with_possibly_cancelled_confirmed(earlier.clone()),
+        )
         .await
         .unwrap()
     else {
@@ -542,7 +594,7 @@ async fn test_restore_hold_missed_item_holds_a_repeat_until_the_user_confirms() 
             .with_idempotent(true),
     );
     wallet
-        .confirm_possibly_cancelled(&request, UserConfirmed::new())
+        .confirm_possibly_cancelled(&request, &earlier, UserConfirmed::new())
         .await
         .unwrap();
     missed(&w);
@@ -558,7 +610,11 @@ async fn test_restore_hold_missed_item_holds_a_repeat_until_the_user_confirms() 
         paykit_sdk::Stage::Paying
     );
     wallet
-        .confirm_possibly_cancelled(&request, UserConfirmed::new())
+        .confirm_possibly_cancelled(
+            &request,
+            &crate::common::held(&wallet, &request).await,
+            UserConfirmed::new(),
+        )
         .await
         .unwrap();
     // Repeated: the method is called again for the same attempt.
@@ -570,12 +626,18 @@ async fn test_restore_hold_missed_item_holds_a_repeat_until_the_user_confirms() 
 async fn test_restore_hold_confirming_a_request_not_held_refused_as_not_found() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    missed(&w);
+    wallet.receive(None).await.unwrap();
+    let held = crate::common::held(&wallet, &request).await;
     let unknown = RequestRef {
         payee: w.bob_id(),
         request_hash: [9; 32],
     };
     let refused = wallet
-        .confirm_possibly_cancelled(&unknown, UserConfirmed::new())
+        .confirm_possibly_cancelled(&unknown, &held, UserConfirmed::new())
         .await
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::NotFound));
@@ -589,14 +651,18 @@ async fn test_restore_hold_confirming_a_request_missing_from_a_copy_not_listed_r
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
+    let known = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
+    missed(&w);
+    wallet.receive(None).await.unwrap();
+    let held = crate::common::held(&wallet, &known).await;
     missed(&w);
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     fail_paykit_listing(&w);
     let got = wallet.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
     let refused = wallet
-        .confirm_possibly_cancelled(&request, UserConfirmed::new())
+        .confirm_possibly_cancelled(&request, &held, UserConfirmed::new())
         .await
         .unwrap_err();
     assert!(
@@ -969,7 +1035,11 @@ async fn test_restore_hold_missed_item_confirmed_is_held_again_by_a_restore() {
     missed(&w);
     wallet.receive(None).await.unwrap();
     wallet
-        .confirm_possibly_cancelled(&request, UserConfirmed::new())
+        .confirm_possibly_cancelled(
+            &request,
+            &crate::common::held(&wallet, &request).await,
+            UserConfirmed::new(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -1224,6 +1294,12 @@ async fn test_restore_hold_missed_end_not_known_holds_every_open_request_until_b
     wallet
         .app_mut()
         .protocol_commit(&[
+            pubky_switch_client::app::LocalWrite::Put {
+                key: b"he".to_vec(),
+                value: kept(serde_json::json!(pubky_switch_core::enc::b64(
+                    &pubky_switch_core::enc::random_bytes::<16>().unwrap()
+                ))),
+            },
             pubky_switch_client::app::LocalWrite::Put {
                 key: b"mh".to_vec(),
                 value: kept(serde_json::json!({ "bound_ms": 0 })),

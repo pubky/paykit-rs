@@ -428,6 +428,7 @@ pub(crate) fn restore_paykit_layer(
             // again changes nothing: a dropped entry's time is already in its sender's mark,
             // which asks on its own cadence (`marks.rs`).
             StateKey::RestoreHold
+            | StateKey::HoldEpoch
             | StateKey::MissedHold
             | StateKey::MissedEndUnknown
             | StateKey::HoldConfirmed(_)
@@ -690,6 +691,12 @@ pub(crate) fn restore_paykit_layer(
     }
     // Every open request is held after a restore, set in the restore's own commit (Paykit
     // spec 7.2, "What a restore loses"; `hold.rs`).
+    let epoch = crate::hold::HoldEpoch::new()
+        .map_err(|_| String::from("the restore's hold identifier can't be created"))?;
+    writes.push(
+        state::local_put(key::HOLD_EPOCH, &epoch)
+            .map_err(|_| String::from("the restore's hold identifier can't be written"))?,
+    );
     let hold = state::local_put(key::RESTORE_HOLD, &RestoreHold::of(cursor_time_ms))
         .map_err(|_| String::from("the restore's hold can't be written"))?;
     writes.push(hold);
@@ -1015,6 +1022,8 @@ impl Protocol for PaykitProtocol {
     /// restore (Paykit spec 8.3; `mc`, which `Paykit::confirm_consents_again` turns into each
     /// entry's mark after the receive): an end may be among the deleted entries.
     fn missed(&self, missed: &MissedEntries) -> Result<Vec<LocalWrite>, StoreFailure> {
+        let epoch = crate::hold::HoldEpoch::new()
+            .map_err(|_| StoreFailure::unavailable(StoreError::Unavailable))?;
         let hold = if missed.accepted_until_ms == u64::MAX {
             local_write(key::MISSED_END_UNKNOWN, &true)?
         } else {
@@ -1024,6 +1033,7 @@ impl Protocol for PaykitProtocol {
             )?
         };
         Ok(vec![
+            local_write(key::HOLD_EPOCH, &epoch)?,
             local_write(
                 &key::missed_item(missed.accepted_from_ms),
                 &MissedItemMark {

@@ -321,7 +321,11 @@ async fn test_blocked_restore_reads_the_deny_list_again_before_a_payment() {
         .await
         .unwrap();
     restored
-        .confirm_possibly_cancelled(&request, pubky_switch_client::app::UserConfirmed::new())
+        .confirm_possibly_cancelled(
+            &request,
+            &crate::common::held(&restored, &request).await,
+            pubky_switch_client::app::UserConfirmed::new(),
+        )
         .await
         .unwrap();
     let refused = restored
@@ -758,7 +762,7 @@ async fn test_blocked_own_block_kept_unanswered_survives_a_restore_and_is_writte
     assert!(lists.deny.contains(&w.bob_id()));
     // Past the restore's hold, which the user confirms, the block refuses the payment.
     let held = PayOptions::default()
-        .with_possibly_cancelled_confirmed(pubky_switch_client::app::UserConfirmed::new());
+        .with_possibly_cancelled_confirmed(crate::common::held(&wallet, &request).await);
     let refused = wallet.pay_request(&request, held).await.unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::Blocked { .. })),
@@ -1254,7 +1258,7 @@ async fn test_blocked_own_unblock_kept_unanswered_not_restored() {
     let lists = wallet.app_mut().allow_list().await.unwrap();
     assert!(lists.deny.contains(&w.bob_id()));
     let held = PayOptions::default()
-        .with_possibly_cancelled_confirmed(pubky_switch_client::app::UserConfirmed::new());
+        .with_possibly_cancelled_confirmed(crate::common::held(&wallet, &request).await);
     let error = wallet.pay_request(&request, held).await.unwrap_err();
     assert_eq!(shown(error).payee, w.bob_id());
 }

@@ -28,7 +28,7 @@ use paykit_lib::{
 };
 use pubky_switch_client::app::{
     claim_conflict, AppError, Delivery, KeptReason, OpBatch, RecordContent, RecordRead,
-    UndeliverableReason, UserConfirmed,
+    UndeliverableReason,
 };
 use pubky_switch_client::error::ClientError;
 use pubky_switch_core::claims::{ClaimStatus, Outcome};
@@ -347,8 +347,9 @@ pub struct AcceptOptions {
     /// The user has seen that the payee may have cancelled this request since the backup the
     /// app was restored from, and accepts it anyway ([`Refusal::HeldAfterRestore`]; Paykit
     /// spec 7.2, "What a restore loses"). It ends the request's hold; it never overrides a
-    /// cancellation the app holds.
-    pub possibly_cancelled_confirmed: Option<UserConfirmed>,
+    /// cancellation the app holds. The value must be the exact hold shown: another restore
+    /// or missed item requires a new confirmation.
+    pub possibly_cancelled_confirmed: Option<crate::HeldRequest>,
     /// The subscription of a blocked payee the user was shown and chose to accept, as a
     /// [`Refusal::Blocked`] gave it (Paykit spec 8.1): only that same request is accepted.
     pub blocked_confirmed: Option<BlockedPayment>,
@@ -358,7 +359,7 @@ impl AcceptOptions {
     /// The user has seen that the payee may have cancelled this request since the backup the
     /// app was restored from, and accepts it anyway ([`Refusal::HeldAfterRestore`]).
     #[must_use]
-    pub fn with_possibly_cancelled_confirmed(mut self, confirmed: UserConfirmed) -> Self {
+    pub fn with_possibly_cancelled_confirmed(mut self, confirmed: crate::HeldRequest) -> Self {
         self.possibly_cancelled_confirmed = Some(confirmed);
         self
     }
@@ -441,6 +442,9 @@ pub struct RequestView {
     pub recurrence: Option<Recurrence>,
     /// What the user sees.
     pub status: RequestStatus,
+    /// The current hold to show before confirmation. None for an unheld or unrecorded
+    /// request; a later restore or missed item requires showing its new hold.
+    pub held: Option<crate::HeldRequest>,
     /// Its request record is paused after a view showed it divergent, or its latest view
     /// shows it divergent (Paykit spec 6): shown whatever the status
     /// ([`Paykit::divergent_records`]).
@@ -477,6 +481,7 @@ impl std::fmt::Debug for RequestView {
             .field("recurring", &self.recurring)
             .field("recurrence", &self.recurrence)
             .field("status", &self.status)
+            .field("held", &self.held)
             .field("divergent", &self.divergent)
             .field("receipt", &self.receipt)
             .field("manual_only", &self.manual_only)
@@ -1614,9 +1619,14 @@ impl Paykit {
         // with a restore's hold, a block or a divergent record: none of them ends the request,
         // and the block floor holds an open one whatever its status shows.
         let open = live(&status);
-        if live(&status) && self.held(&record_key, record).await? {
-            status = RequestStatus::Held;
-        }
+        let held = if self.held(&record_key, record).await? {
+            if live(&status) {
+                status = RequestStatus::Held;
+            }
+            Some(self.held_request(&record_key).await?)
+        } else {
+            None
+        };
         if live(&status) && self.denied_as_last_read(&payee).await? {
             status = RequestStatus::Blocked;
         }
@@ -1644,6 +1654,7 @@ impl Paykit {
             recurring: request.is_recurring(),
             recurrence: request.recurrence,
             status,
+            held,
             divergent,
             receipt: received_receipt(record_key, record, Some(request)),
             manual_only,
@@ -2051,12 +2062,13 @@ impl Paykit {
             // kept messages wait, waits for the user's confirmation: the payee may have
             // cancelled it (Paykit spec 6). Refused naming the record, nothing recorded.
             Box::pin(self.refuse_while_paused(&[record_key])).await?;
-            if self.held(&record_key, &record).await? {
-                if options.possibly_cancelled_confirmed.is_none() {
-                    return Err(Refusal::HeldAfterRestore.into());
-                }
-                end_hold = Some(record_key);
-            }
+            end_hold = self
+                .pass_hold(
+                    &record_key,
+                    &record,
+                    options.possibly_cancelled_confirmed.as_ref(),
+                )
+                .await?;
             let shown = BlockedPayment {
                 payee: request.payee,
                 request: Some(*request),
