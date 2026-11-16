@@ -10,7 +10,9 @@ use paykit_lib::PaykitAppId;
 ///
 /// The provider is the boundary where the app or bindings expose current Pubky
 /// access from platform storage and auth flows.
-#[async_trait]
+// THROWAWAY (#411): wasm32 futures are !Send, so async_trait drops Send there.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait PubkySessionProvider: Send + Sync {
     /// Load live Pubky access for storage and Encrypted Link workflows.
     ///
@@ -47,7 +49,9 @@ pub trait PubkySessionProvider: Send + Sync {
 /// Paykit SDK routes endpoints and private messages, but payment execution,
 /// settlement detection, proof validation, balances, fees, and method-specific
 /// risk policy remain adapter or application responsibilities.
-#[async_trait]
+// THROWAWAY (#411): wasm32 futures are !Send, so async_trait drops Send there.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait PaymentAdapter: Send + Sync {
     /// Return receiving details intended for public Payment Endpoints.
     ///

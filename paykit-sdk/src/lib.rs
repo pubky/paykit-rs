@@ -14,6 +14,10 @@ mod runtime;
 pub mod storage;
 #[cfg(test)]
 mod test_utils;
+// THROWAWAY (#411): Send relaxation helpers for wasm32. Public only because
+// the public `StorageOperation` alias names `wasm_compat::BoxFuture`.
+#[doc(hidden)]
+pub mod wasm_compat;
 
 #[doc(inline)]
 pub use backup::{

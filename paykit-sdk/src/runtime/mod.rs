@@ -334,7 +334,8 @@ where
 
     async fn with_storage_operation<T: Send + 'static>(
         &self,
-        operation: std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + '_>>,
+        // THROWAWAY (#411): BoxFuture drops `+ Send` on wasm32 only.
+        operation: crate::wasm_compat::BoxFuture<'_, Result<T>>,
     ) -> Result<T> {
         let guard = self.session_read_guard().await?;
         self.with_guarded_storage_operation(guard, operation).await
@@ -343,7 +344,8 @@ where
     async fn with_guarded_storage_operation<T: Send + 'static>(
         &self,
         guard: Arc<OwnedRwLockReadGuard<()>>,
-        operation: std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + '_>>,
+        // THROWAWAY (#411): BoxFuture drops `+ Send` on wasm32 only.
+        operation: crate::wasm_compat::BoxFuture<'_, Result<T>>,
     ) -> Result<T> {
         // Acquire the session gate before storage. Nested session reads reuse
         // this guard so a waiting sign-out cannot deadlock the operation.
@@ -781,7 +783,7 @@ async fn fetch_public_file_uri(
 }
 
 async fn read_public_response(
-    mut response: reqwest::Response,
+    response: reqwest::Response,
     max_bytes: usize,
     context: &'static str,
 ) -> Result<Option<Vec<u8>>> {
@@ -798,8 +800,10 @@ async fn read_public_response(
     }
     require_response_size_within_limit(response.content_length(), max_bytes, context)?;
     let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
+    // THROWAWAY (#411): wasm reqwest has no Response::chunk().
+    let mut chunks = paykit_lib::ResponseChunks::new(response);
+    while let Some(chunk) = chunks
+        .next_chunk()
         .await
         .map_err(|err| PaykitSdkError::Transport {
             context: context.into(),

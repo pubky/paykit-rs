@@ -67,7 +67,9 @@ impl InMemoryStorage {
     }
 }
 
-#[async_trait]
+// THROWAWAY (#411): wasm32 futures are !Send, so async_trait drops Send there.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl StorageAdapter for InMemoryStorage {
     async fn load_local_identity_state(&self) -> Result<Option<IdentityState>> {
         self.load_identity_state().await

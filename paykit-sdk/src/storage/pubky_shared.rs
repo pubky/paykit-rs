@@ -376,7 +376,9 @@ impl PubkySharedStateStorage {
     }
 }
 
-#[async_trait]
+// THROWAWAY (#411): wasm32 futures are !Send, so async_trait drops Send there.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl StorageAdapter for PubkySharedStateStorage {
     async fn run_operation_erased<'a>(
         &self,
@@ -746,7 +748,7 @@ fn shared_state_conflict(error: PubkyError) -> PaykitSdkError {
 }
 
 async fn load_encrypted_blob(access: &PubkySessionAccess) -> Result<Option<EncryptedStateBlob>> {
-    let mut response = match access
+    let response = match access
         .session
         .storage()
         .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
@@ -768,8 +770,10 @@ async fn load_encrypted_blob(access: &PubkySessionAccess) -> Result<Option<Encry
         return Err(shared_state_size_error());
     }
     let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
+    // THROWAWAY (#411): wasm reqwest has no Response::chunk().
+    let mut chunks = paykit_lib::ResponseChunks::new(response);
+    while let Some(chunk) = chunks
+        .next_chunk()
         .await
         .map_err(|err| PaykitSdkError::Transport {
             context: "read encrypted Pubky shared-state bytes".into(),

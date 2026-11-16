@@ -45,7 +45,7 @@ pub(crate) async fn fetch_encrypted_receipt_json(
 ) -> Result<Option<String>> {
     let addr = format!("{}{}", issuer.to_public_key()?, location);
     match public_storage.get(addr).await {
-        Ok(mut response) => {
+        Ok(response) => {
             if response
                 .content_length()
                 .is_some_and(|length| length > paykit_lib::ENCRYPTED_RECEIPT_MAX_BYTES as u64)
@@ -53,9 +53,11 @@ pub(crate) async fn fetch_encrypted_receipt_json(
                 return Err(encrypted_receipt_size_error());
             }
             let mut bytes = Vec::new();
+            // THROWAWAY (#411): wasm reqwest has no Response::chunk().
+            let mut chunks = paykit_lib::ResponseChunks::new(response);
             while let Some(chunk) =
-                response
-                    .chunk()
+                chunks
+                    .next_chunk()
                     .await
                     .map_err(|err| PaykitSdkError::Transport {
                         context: "read encrypted receipt bytes".into(),

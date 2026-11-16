@@ -497,7 +497,8 @@ where
         counterparty: &PubkyPublicKey,
         session_access: &GuardedSessionAccess,
         checkpoint: Option<RecoveryObservationCheckpoint>,
-        load: impl std::future::Future<Output = U> + Send,
+        // THROWAWAY (#411): MaybeSend drops `Send` on wasm32 only.
+        load: impl std::future::Future<Output = U> + crate::wasm_compat::MaybeSend,
         project: impl FnOnce(&mut dyn StorageTransaction, RecoveryObservationCheckpoint, U) -> Result<T>
             + Send,
     ) -> Result<Option<T>> {

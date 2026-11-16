@@ -249,12 +249,14 @@ impl OriginalGrant {
         }
         let (client, request) = self.request(Method::GET, "/info").await?;
         let url = request.url().clone();
-        let mut response = client.execute(request).await.map_err(|_| unavailable())?;
+        let response = client.execute(request).await.map_err(|_| unavailable())?;
         if response.status() != StatusCode::OK {
             return Err(unavailable());
         }
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| unavailable())? {
+        // THROWAWAY (#411): wasm reqwest has no Response::chunk().
+        let mut chunks = paykit_lib::ResponseChunks::new(response);
+        while let Some(chunk) = chunks.next_chunk().await.map_err(|_| unavailable())? {
             if chunk.len() > MAX_INFO_BYTES - bytes.len() {
                 return Err(unavailable());
             }

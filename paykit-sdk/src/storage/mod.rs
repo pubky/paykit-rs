@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap, future::Future, pin::Pin, sync::Arc};
+use std::{any::Any, collections::HashMap, future::Future, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -85,8 +85,8 @@ pub type StorageTransactionCallback<'a> =
     Box<dyn FnOnce(&mut dyn StorageTransaction) -> Result<Box<dyn Any + Send>> + Send + 'a>;
 
 /// An asynchronous operation containing independently durable storage transactions.
-pub type StorageOperation<'a> =
-    Pin<Box<dyn Future<Output = Result<Box<dyn Any + Send>>> + Send + 'a>>;
+// THROWAWAY (#411): BoxFuture drops `+ Send` on wasm32 only.
+pub type StorageOperation<'a> = crate::wasm_compat::BoxFuture<'a, Result<Box<dyn Any + Send>>>;
 
 /// Erased storage callback used while rotating Paykit key material.
 pub type StorageKeyRotationCallback<'a> =
@@ -99,7 +99,9 @@ pub type StorageKeyRotationCallback<'a> =
 /// lease-aware writes. Apps sharing one Pubky identity must use the same
 /// logical state backing. The SDK assumes all mutation methods called inside
 /// one transaction either commit together or roll back together.
-#[async_trait]
+// THROWAWAY (#411): wasm32 futures are !Send, so async_trait drops Send there.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait StorageAdapter: Send + Sync {
     /// Share storage access across the transactions of one bounded operation.
     ///
@@ -123,7 +125,7 @@ pub trait StorageAdapter: Send + Sync {
     where
         Self: Sized,
         T: Send + 'static,
-        F: Future<Output = Result<T>> + Send,
+        F: Future<Output = Result<T>> + crate::wasm_compat::MaybeSend,
     {
         self.run_operation_erased(Box::pin(async move {
             Ok(Box::new(operation.await?) as Box<dyn Any + Send>)
@@ -305,7 +307,9 @@ where
     unreachable!("bounded storage transaction retry loop always returns")
 }
 
-#[async_trait]
+// THROWAWAY (#411): wasm32 futures are !Send, so async_trait drops Send there.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<T> StorageAdapter for Box<T>
 where
     T: StorageAdapter + ?Sized,
@@ -351,7 +355,9 @@ where
     }
 }
 
-#[async_trait]
+// THROWAWAY (#411): wasm32 futures are !Send, so async_trait drops Send there.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<T> StorageAdapter for Arc<T>
 where
     T: StorageAdapter + ?Sized,

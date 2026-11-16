@@ -33,9 +33,6 @@ pub use allowance::{
     AllowancePeriodLimit, AllowancePeriodUnit, AllowancePeriodWindow, AllowanceProposal,
     AllowanceRejection, AllowanceRole, AllowanceTerms, AllowanceTermsBuilder, AllowanceUsageEntry,
 };
-// THROWAWAY (#411): shared with paykit-sdk so every bounded read works on wasm32.
-#[doc(hidden)]
-pub use response_chunks::{ResponseChunk, ResponseChunks};
 #[doc(inline)]
 pub use app::PaykitAppId;
 #[doc(inline)]
@@ -128,6 +125,9 @@ pub use receipt::{
     ReceiptAccessEventMessage, ReceiptDecryptionKey, ReceiptDraft, ReceiptId,
     ENCRYPTED_RECEIPT_MAX_BYTES,
 };
+// THROWAWAY (#411): shared with paykit-sdk so every bounded read works on wasm32.
+#[doc(hidden)]
+pub use response_chunks::{ResponseChunk, ResponseChunks};
 
 /// Common result alias for Paykit operations.
 pub type Result<T> = std::result::Result<T, PaykitError>;

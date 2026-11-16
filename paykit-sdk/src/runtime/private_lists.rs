@@ -3,7 +3,6 @@ use super::payment_resolution::filter_private_views_by_authorized_apps;
 use super::*;
 use crate::domain::endpoint_reservations::queue_private_payment_list_with_reservations_in_transaction;
 use crate::PrivatePaymentListAcknowledgement;
-use futures_util::FutureExt;
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
@@ -239,15 +238,16 @@ where
         counterparty: PubkyPublicKey,
     ) -> Result<PrivatePaymentListDeliveryReport> {
         // Bound the composed future's stack size and type depth for FFI callers.
-        self.sync_private_payment_lists_with_reservations(
+        // THROWAWAY (#411): wasm_compat::boxed is `.boxed()` on native and
+        // `.boxed_local()` on wasm32.
+        crate::wasm_compat::boxed(self.sync_private_payment_lists_with_reservations(
             vec![PrivatePaymentListReservationUpdate {
                 counterparty,
                 reservations: Vec::new(),
             }],
             false,
             false,
-        )
-        .boxed()
+        ))
         .await
     }
 
@@ -407,12 +407,13 @@ where
         clear_unlisted_linked_peers: bool,
     ) -> Result<PrivatePaymentListDeliveryReport> {
         // Bound the composed future's stack size and type depth for FFI callers.
-        self.sync_private_payment_lists_with_reservations(
+        // THROWAWAY (#411): wasm_compat::boxed is `.boxed()` on native and
+        // `.boxed_local()` on wasm32.
+        crate::wasm_compat::boxed(self.sync_private_payment_lists_with_reservations(
             updates,
             clear_unlisted_linked_peers,
             true,
-        )
-        .boxed()
+        ))
         .await
     }
 

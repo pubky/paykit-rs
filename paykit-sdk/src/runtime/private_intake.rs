@@ -4,7 +4,7 @@ use crate::storage::{
     PrivateIntakeSupervisorLease,
 };
 use futures_util::StreamExt;
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 use tokio::sync::{watch, Mutex as AsyncMutex, Notify, RwLock as AsyncRwLock};
 
 const MAX_EVENT_STREAM_USERS: usize = crate::storage::PRIVATE_INTAKE_MAX_EVENT_STREAM_USERS;
@@ -569,8 +569,9 @@ async fn wait_private_intake_topology_trigger(
     }
 }
 
+// THROWAWAY (#411): BoxFuture drops `+ Send` on wasm32 only.
 type PrivateIntakeAcquisitionFuture =
-    Pin<Box<dyn Future<Output = Result<PrivatePacketAcquisition>> + Send>>;
+    crate::wasm_compat::BoxFuture<'static, Result<PrivatePacketAcquisition>>;
 type PrivateIntakeAcquire = Arc<
     dyn Fn(PubkyPublicKey, Option<PrivateIntakeCursorRecord>) -> PrivateIntakeAcquisitionFuture
         + Send
@@ -582,7 +583,8 @@ struct PrivateIntakeAuditOutcome {
     backpressured: bool,
 }
 
-type PrivateIntakeAuditFuture = Pin<Box<dyn Future<Output = PrivateIntakeAuditOutcome> + Send>>;
+// THROWAWAY (#411): BoxFuture drops `+ Send` on wasm32 only.
+type PrivateIntakeAuditFuture = crate::wasm_compat::BoxFuture<'static, PrivateIntakeAuditOutcome>;
 type PrivateIntakeAudit = Arc<dyn Fn() -> PrivateIntakeAuditFuture + Send + Sync>;
 
 async fn process_private_intake_event<F, Fut>(
@@ -684,10 +686,10 @@ where
 )]
 async fn run_connected_private_intake_stream(
     group: &SubscriptionGroup,
-    mut stream: Pin<
-        Box<
-            dyn futures_util::Stream<Item = std::result::Result<pubky::Event, pubky::Error>> + Send,
-        >,
+    // THROWAWAY (#411): BoxStream drops `+ Send` on wasm32 only.
+    mut stream: crate::wasm_compat::BoxStream<
+        'static,
+        std::result::Result<pubky::Event, pubky::Error>,
     >,
     audit_interval: Duration,
     audit_delay: Duration,
@@ -1039,7 +1041,8 @@ where
             let sdk = Arc::clone(self);
             let mut stop_rx = stop.subscribe();
             let stop_tx = stop.clone();
-            tasks.push(tokio::spawn(async move {
+            // THROWAWAY (#411): spawn_local on wasm32; see wasm_compat::spawn.
+            tasks.push(crate::wasm_compat::spawn(async move {
                 let mut confirmed_expires_at = lease.expires_at;
                 let mut renewal = tokio::time::interval(SUPERVISOR_LEASE_RENEW_INTERVAL);
                 renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1068,7 +1071,8 @@ where
             let sdk = Arc::clone(self);
             let stop_rx = stop.subscribe();
             let health = Arc::clone(&health);
-            tasks.push(tokio::spawn(async move {
+            // THROWAWAY (#411): spawn_local on wasm32; see wasm_compat::spawn.
+            tasks.push(crate::wasm_compat::spawn(async move {
                 sdk.clone()
                     .run_private_intake_topology(
                         topology,
@@ -1158,7 +1162,8 @@ where
                 let topology_changed = Arc::clone(&notifications.topology_changed);
                 let stop_rx = epoch_stop.subscribe();
                 // Avoid another async layer: its nested future layout exceeds rustc's query depth.
-                handles.push(tokio::spawn(sdk.run_private_intake_group(
+                // THROWAWAY (#411): spawn_local on wasm32; see wasm_compat::spawn.
+                handles.push(crate::wasm_compat::spawn(sdk.run_private_intake_group(
                     group,
                     config,
                     stop_rx,
