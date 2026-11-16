@@ -2665,6 +2665,32 @@ async fn test_restore_own_unblock_mark_without_its_batch_refused() {
     .await;
 }
 
+#[tokio::test]
+async fn test_local_state_restore_still_discards_unread_transient_values() {
+    let w = World::new();
+    let (good, _) = backup_with_a_payment(&w).await;
+    let mut layer = layer_of(&good);
+    layer.retain(|(key, _)| key != b"lr");
+    layer.push((
+        b"lr".to_vec(),
+        serde_json::json!({ "extra": {"not_read": true} }),
+    ));
+    layer.sort_by(|a, b| a.0.cmp(&b.0));
+    let bytes = serde_json::to_vec(&with_layer(&good, layer)).unwrap();
+    let backup = PaykitBackup::from_bytes(&bytes).unwrap();
+    let wallet = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert!(wallet.app().protocol_get(b"lr").await.unwrap().is_none());
+    assert_eq!(wallet.app().protocol_scan(b"j/").await.unwrap().len(), 1);
+}
+
 /// Bob's shop sends alice a request and cancels it, and is backed up then; after the backup
 /// another own app of bob's, the till, writes the shop's request record as a value no reader
 /// reads. Returns the request, the cancellation's `msg_id`, the record's value before, the

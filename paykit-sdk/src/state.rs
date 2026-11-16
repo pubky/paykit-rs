@@ -113,6 +113,7 @@ struct Out<'a, T: Serialize> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct In<T> {
     v: u32,
     d: T,
@@ -401,11 +402,13 @@ impl Stored for u64 {
 /// by a read of the lists (Paykit spec 8.1, "a block or unblock the app wrote counts at
 /// once", for payment decisions). The spam rule counts only its block.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct OwnBlockMark {
     /// A block (`true`) or an unblock.
     pub(crate) blocked: bool,
     /// The client's kept batch it rides on: `None` only for a block, not yet answered, or
     /// answered with no batch kept.
+    #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) batch: Option<[u8; 16]>,
 }
 
@@ -2069,6 +2072,80 @@ mod tests {
         assert_eq!(decode::<u64>(&bytes).unwrap(), 7);
         assert!(decode::<u64>(br#"{"v":2,"d":7}"#).is_err());
         assert!(decode::<u64>(b"not json").is_err());
+    }
+
+    #[test]
+    fn test_local_state_scalar_refuses_unknown_envelope_members() {
+        assert!(decode::<u64>(br#"{"v":1,"d":7,"extra":{"nested":[1]}}"#).is_err());
+    }
+
+    #[test]
+    fn test_local_state_envelope_requires_current_members() {
+        assert_eq!(decode::<u64>(&encode(&7u64).unwrap()).unwrap(), 7);
+        for bytes in [
+            br#"{"d":7}"#.as_slice(),
+            br#"{"v":1}"#,
+            br#"{"v":null,"d":7}"#,
+            br#"{"v":2,"d":7}"#,
+        ] {
+            assert!(decode::<u64>(bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn test_local_state_block_requires_batch_member() {
+        assert!(!reads::<OwnBlockMark>(
+            &key::own_block(&[1; 32]),
+            serde_json::json!({ "blocked": true }),
+        ));
+    }
+
+    #[test]
+    fn test_local_state_block_refuses_unknown_member() {
+        assert!(!reads::<OwnBlockMark>(
+            &key::own_block(&[1; 32]),
+            serde_json::json!({ "blocked": true, "batch": null, "extra": {"nested": [1]} }),
+        ));
+    }
+
+    #[test]
+    fn test_local_state_block_preserves_current_nullable_values() {
+        for mark in [
+            OwnBlockMark {
+                blocked: true,
+                batch: None,
+            },
+            OwnBlockMark {
+                blocked: true,
+                batch: Some([7; 16]),
+            },
+            OwnBlockMark {
+                blocked: false,
+                batch: Some([7; 16]),
+            },
+        ] {
+            let bytes = encode(&mark).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(value["d"].as_object().unwrap().contains_key("batch"));
+            assert_eq!(decode::<OwnBlockMark>(&bytes).unwrap(), mark);
+            assert!(reads::<OwnBlockMark>(
+                &key::own_block(&[1; 32]),
+                value["d"].clone()
+            ));
+        }
+    }
+
+    #[test]
+    fn test_local_state_block_refuses_invalid_current_values() {
+        let key = key::own_block(&[1; 32]);
+        for value in [
+            serde_json::json!({ "batch": null }),
+            serde_json::json!({ "blocked": false, "batch": null }),
+            serde_json::json!({ "blocked": true, "batch": vec![7; 15] }),
+            serde_json::json!({ "blocked": true, "batch": "invalid" }),
+        ] {
+            assert!(!reads::<OwnBlockMark>(&key, value));
+        }
     }
 
     #[test]
