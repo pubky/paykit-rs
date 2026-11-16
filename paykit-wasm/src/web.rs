@@ -9,6 +9,7 @@
 //!   plain HTTP on localhost.
 
 mod flows;
+mod lifecycle;
 
 pub use flows::PaykitWasmBackup;
 
@@ -124,6 +125,12 @@ impl JsBlobStorage {
             Some(bytes) => decode_storage_state_blob(bytes)?,
             None => Default::default(),
         };
+        // THROWAWAY (#411): panic-recovery experiment hook (see
+        // `lifecycle::arm_transaction_panic`): panic while `_guard` is held,
+        // as a bug inside a storage transaction would.
+        if lifecycle::take_transaction_panic() {
+            panic!("THROWAWAY (#411): debug panic inside a storage transaction");
+        }
         let (updated, value) = paykit_sdk::storage::run_storage_state_transaction(state, f)?;
         let after_bytes = encode_storage_state_blob(&updated)?;
         // THROWAWAY (#411): change detection by re-encoding; a real adapter
