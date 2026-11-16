@@ -118,6 +118,7 @@ impl From<paykit_lib::Error> for Fail {
 
 /// A `resend_request` received and still to be answered (`p/ans/<seq>/<msg_id>`).
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct QueuedAnswer {
     /// The `seq` and `msg_id` it was read at, which its key names.
     pub(crate) seq: u64,
@@ -3220,6 +3221,52 @@ pub(crate) fn unrequested_of(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn current_answer() -> QueuedAnswer {
+        let requester = crate::testkit::Party::new("alice", "wallet", &["paykit_pay"]);
+        let id = "123e4567-e89b-42d3-a456-426614174000";
+        QueuedAnswer {
+            seq: 1,
+            msg_id: id.into(),
+            requester: requester.id(),
+            cert: requester.cert.signed().clone(),
+            body: crate::testkit::object(serde_json::json!({"msg_ids": [id]})),
+        }
+    }
+
+    #[test]
+    fn test_answer_state_answer_unknown_member() {
+        let mut value = serde_json::to_value(current_answer()).unwrap();
+        value["extra"] = serde_json::json!({"nested": [7]});
+        assert!(serde_json::from_value::<QueuedAnswer>(value).is_err());
+    }
+
+    #[test]
+    fn test_answer_state_answer_current_structure() {
+        let value = serde_json::to_value(current_answer()).unwrap();
+        let decoded: QueuedAnswer = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+        for member in ["seq", "msg_id", "requester", "cert", "body"] {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(member).unwrap();
+            assert!(
+                serde_json::from_value::<QueuedAnswer>(missing).is_err(),
+                "{member}"
+            );
+            let duplicate = serde_json::to_string(&value).unwrap().replacen(
+                "{",
+                &format!("{{\"{member}\":{},", value[member]),
+                1,
+            );
+            assert!(
+                serde_json::from_str::<QueuedAnswer>(&duplicate).is_err(),
+                "{member}"
+            );
+        }
+        let mut wrong = value;
+        wrong["seq"] = serde_json::json!("1");
+        assert!(serde_json::from_value::<QueuedAnswer>(wrong).is_err());
+    }
 
     /// `n` replies from `sender`, accepted from `from` on.
     fn replies(sender: u8, n: usize, from: u64) -> Vec<CountedReply> {
