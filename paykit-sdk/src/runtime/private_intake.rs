@@ -1381,8 +1381,13 @@ where
                         break;
                     }
                 };
+            // THROWAWAY (#411): pubky-homeserver 0.16.2 treats an event-stream
+            // path filter without a trailing "/" as an exact file match, so
+            // "/pub/paykit/v0/private" selected no slot events and intake only
+            // saw new packets on its 60 s audit. A directory filter needs the
+            // trailing slash. Found by the browser e2e; affects native too.
             let stream = match builder
-                .path(paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX)
+                .path(format!("{}/", paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX))
                 .max_event_bytes(config.max_event_bytes)
                 .live()
                 .subscribe()

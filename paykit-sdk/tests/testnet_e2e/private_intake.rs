@@ -896,3 +896,29 @@ async fn test_buffered_receive_retention_refusal_keeps_packet_and_checkpoint() {
     );
     supervisor.stop().await;
 }
+
+// THROWAWAY (#411): regression test for the event-stream path filter. Found by
+// the browser end-to-end spike: pubky-homeserver 0.16.2 treats a path filter
+// without a trailing "/" as an exact file match, so intake subscribed with
+// "/pub/paykit/v0/private" never received slot events and only buffered new
+// packets on its 60 s healthy audit. This test waits past the first jittered
+// audit (at most 5 s), publishes, and requires buffering well before the next
+// audit, which only the live SSE hint can deliver.
+#[tokio::test]
+async fn test_private_intake_buffers_new_packet_from_live_event_stream() {
+    let pair = linked_two_party().await;
+    let sdk = Arc::new(PaykitSdk::new(
+        pair.alice.storage.clone(),
+        TestnetSessionProvider::new(pair.alice.access.clone()),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    ));
+    let supervisor = sdk
+        .start_private_intake(PrivateIntakeConfig::new(1).unwrap())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    publish_private_lists(&pair.bob, &pair.alice, 1).await;
+    wait_for_buffered(&pair.alice.storage, &pair.bob.public_key, 1).await;
+    supervisor.stop().await;
+}
