@@ -86,15 +86,18 @@ pub const HANDLED_KINDS: [Kind; 15] = [
 
 /// A re-send to ask of a sender (`p/ask/`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct QueuedAsk {
     #[serde(with = "serde_b64")]
     pub(crate) sender: [u8; 32],
     pub(crate) from_ms: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) until_ms: Option<u64>,
     /// The `resend_request` this app signed for the ask, kept before it is queued, and the
     /// batch the client keeps with it when the write that queues it wasn't answered: the
     /// next pass reads what became of it before it asks anew (`resend.rs`). `None` while
     /// none was signed for the ask as it stands.
+    #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) queued: Option<QueuedRequest>,
 }
 
@@ -1155,6 +1158,54 @@ pub(crate) fn writes_payee_label(scopes: &[String], label: Option<&Label>) -> bo
 mod tests {
 
     use super::*;
+
+    fn queued_ask_value() -> serde_json::Value {
+        serde_json::to_value(QueuedAsk {
+            sender: [1; 32],
+            from_ms: 7,
+            until_ms: None,
+            queued: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn test_mark_state_ask_keeps_nullable_members() {
+        let value = queued_ask_value();
+        assert_eq!(value.as_object().unwrap().len(), 4);
+        assert!(value.as_object().unwrap().contains_key("until_ms"));
+        assert!(value.as_object().unwrap().contains_key("queued"));
+        let read: QueuedAsk = serde_json::from_value(value).unwrap();
+        assert_eq!((read.until_ms, read.queued), (None, None));
+    }
+
+    #[test]
+    fn test_mark_state_ask_requires_until() {
+        let mut value = queued_ask_value();
+        value.as_object_mut().unwrap().remove("until_ms").unwrap();
+        assert!(serde_json::from_value::<QueuedAsk>(value).is_err());
+    }
+
+    #[test]
+    fn test_mark_state_ask_requires_queued() {
+        let mut value = queued_ask_value();
+        value.as_object_mut().unwrap().remove("queued").unwrap();
+        assert!(serde_json::from_value::<QueuedAsk>(value).is_err());
+    }
+
+    #[test]
+    fn test_mark_state_ask_refuses_unknown_member() {
+        let mut value = queued_ask_value();
+        value["extra"] = serde_json::json!({"nested": [1]});
+        assert!(serde_json::from_value::<QueuedAsk>(value).is_err());
+    }
+
+    #[test]
+    fn test_mark_state_ask_refuses_duplicate_members() {
+        let value = serde_json::to_string(&queued_ask_value()).unwrap();
+        let duplicate = value.replacen('{', "{\"until_ms\":null,", 1);
+        assert!(serde_json::from_str::<QueuedAsk>(&duplicate).is_err());
+    }
 
     fn protocol() -> PaykitProtocol {
         PaykitProtocol::new()
