@@ -1,6 +1,22 @@
 #![doc = include_str!("../README.md")]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+// THROWAWAY (#411): the wasm32 port assumes wasm32-unknown-unknown is
+// single-threaded. `paykit_lib::rt` spawns with `wasm_bindgen_futures::spawn_local`
+// (tasks never leave the JS thread that created them) and paykit-sdk drops the
+// `Send` bound on futures and adapter traits on wasm32 (`wasm_compat`,
+// `async_trait(?Send)`). With the `atomics` target feature (wasm threads over
+// SharedArrayBuffer) both assumptions break: `!Send` browser futures and JS
+// handles could be shared across Web Workers. Refuse to build rather than
+// silently compile something unsound. A threaded build needs `Send` audits,
+// a work-stealing-safe spawn, and a review of every `?Send` relaxation.
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+compile_error!(
+    "paykit-lib's wasm32 support assumes a single-threaded target: rt::spawn uses \
+     spawn_local and paykit-sdk relaxes Send on wasm32. Building with the `atomics` \
+     target feature (wasm threads) is not supported."
+);
+
 mod allowance;
 mod app;
 mod app_registry;

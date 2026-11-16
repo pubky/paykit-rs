@@ -2,6 +2,19 @@
 #![recursion_limit = "256"]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+// THROWAWAY (#411): see the matching guard in paykit-lib. `wasm_compat` drops
+// the `Send` bound on wasm32 (BoxFuture, BoxStream, MaybeSend and
+// `async_trait(?Send)` on StorageAdapter, PubkySessionProvider and
+// PaymentAdapter). That is only sound while wasm32 has exactly one thread. With
+// `atomics` a `!Send` future or JS handle could be moved to another Web Worker,
+// so refuse to build.
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+compile_error!(
+    "paykit-sdk's wasm32 support relaxes Send on the assumption that the target is \
+     single-threaded. Building with the `atomics` target feature (wasm threads) is not \
+     supported."
+);
+
 mod backup;
 mod config;
 mod domain;
