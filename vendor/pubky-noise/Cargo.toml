@@ -61,11 +61,22 @@ version = "0.9.0"
 [dependencies.reqwest]
 version = "0.13"
 default-features = false
+
+# THROWAWAY (#411): wasm32 reqwest has no Response::chunk(), so bounded body
+# reads go through bytes_stream() there (see BoundedBody in src/lib.rs). The
+# `stream` feature and futures-util are only needed on wasm32; native keeps the
+# original dependency set and the original Response::chunk() read loop.
+[target.'cfg(target_arch = "wasm32")'.dependencies.reqwest]
+version = "0.13"
+default-features = false
 features = ["stream"]
 
-[dependencies.futures-util]
+[target.'cfg(target_arch = "wasm32")'.dependencies.futures-util]
 version = "0.3"
 default-features = false
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.bytes]
+version = "1"
 
 [dependencies.sha2]
 version = "0.11.0"

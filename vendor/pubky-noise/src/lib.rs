@@ -78,6 +78,37 @@ async fn read_handshake_packet(
     decode_handshake_packet(&ciphertext).map(Some)
 }
 
+/// THROWAWAY (#411): wasm32 reqwest (browser `fetch`) has no
+/// `Response::chunk()`. On native this is the original `reqwest::Response`, so
+/// the read loops below still call `Response::chunk()` unchanged. On wasm32 it
+/// wraps `Response::bytes_stream()` (reqwest `stream` feature, enabled for
+/// wasm32 only) behind a `chunk()` method with the same signature, so the byte
+/// limit is still enforced chunk by chunk.
+#[cfg(not(target_arch = "wasm32"))]
+type BoundedBody = reqwest::Response;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn bounded_body(response: reqwest::Response) -> BoundedBody {
+    response
+}
+
+#[cfg(target_arch = "wasm32")]
+struct BoundedBody(
+    std::pin::Pin<Box<dyn futures_util::Stream<Item = reqwest::Result<bytes::Bytes>> + 'static>>,
+);
+
+#[cfg(target_arch = "wasm32")]
+impl BoundedBody {
+    async fn chunk(&mut self) -> reqwest::Result<Option<bytes::Bytes>> {
+        futures_util::StreamExt::next(&mut self.0).await.transpose()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn bounded_body(response: reqwest::Response) -> BoundedBody {
+    BoundedBody(Box::pin(response.bytes_stream()))
+}
+
 async fn read_bounded_packet(
     response: reqwest::Response,
     max_bytes: usize,
@@ -89,12 +120,11 @@ async fn read_bounded_packet(
         return Err(PubkyNoiseError::BadLengthCiphertext);
     }
     let mut body = Vec::new();
-    // THROWAWAY (#411): wasm reqwest has no Response::chunk(); use a byte stream so the
-    // bound is still enforced while reading.
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = futures_util::StreamExt::next(&mut stream)
+    // THROWAWAY (#411): `bounded_body` is the identity on native; see BoundedBody.
+    let mut response = bounded_body(response);
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .transpose()
         .map_err(|_| PubkyNoiseError::HomeserverResponseError)?
     {
         // Check before extending; Content-Length may be absent or untrustworthy.
@@ -1610,11 +1640,11 @@ impl PubkyNoiseEncryptor {
             }
         }
         let mut body = Vec::new();
-        // THROWAWAY (#411): see read_bounded_packet.
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = futures_util::StreamExt::next(&mut stream)
+        // THROWAWAY (#411): `bounded_body` is the identity on native; see BoundedBody.
+        let mut response = bounded_body(response);
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .transpose()
             .map_err(|_| PubkyNoiseError::HomeserverResponseError)?
         {
             if body.len() + chunk.len() > backup_crypto::MAX_BACKUP_RESPONSE_BYTES {
