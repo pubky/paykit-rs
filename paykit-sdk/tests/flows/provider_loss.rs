@@ -865,3 +865,243 @@ async fn test_provider_loss_statement_about_an_older_loss_refused_before_the_new
     assert_eq!(status(&wallet, &request).await, RequestStatus::MayBePaid);
     assert_eq!(executions(&w), 0);
 }
+
+/// A host store that stops exactly the loss callback's local commit.
+#[derive(Default)]
+struct LossCommitStore {
+    inner: pubky_switch_client::store::MemoryStore,
+    mode: std::sync::atomic::AtomicU8,
+    reached: std::sync::atomic::AtomicBool,
+}
+
+impl pubky_switch_client::store::StateStore for LossCommitStore {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        use pubky_switch_client::error::StoreError;
+        use pubky_switch_client::store::Write;
+        use std::sync::atomic::Ordering::SeqCst;
+        let loss = batch
+            .writes
+            .iter()
+            .any(|write| matches!(write, Write::Put { key, .. } if key == b"p/pl"));
+        if loss && self.mode.load(SeqCst) != 0 {
+            // The boundary and statements change in the same host transaction.
+            assert!(batch.writes.iter().any(
+                |write| matches!(write, Write::DeletePrefix { prefix, .. } if prefix == b"p/pn/")
+            ));
+            assert!(batch.writes.iter().any(
+                |write| matches!(write, Write::Put { key, .. } if key.starts_with(b"p/missed/"))
+            ));
+            self.reached.store(true, SeqCst);
+            match self.mode.swap(0, SeqCst) {
+                1 => return Err(StoreError::Unavailable),
+                2 => {
+                    self.inner.commit(batch)?;
+                    return Err(StoreError::Unknown);
+                }
+                _ => unreachable!(),
+            }
+        }
+        self.inner.commit(batch)
+    }
+}
+
+async fn loss_commit_reload(applied: bool) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let w = World::new();
+    let storage = Arc::new(LossCommitStore::default());
+    let mut wallet = w.wallet_on("wallet", storage.clone()).await;
+    let mut shop = w.shop().await;
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    follow_loss(&mut wallet).await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let old = kept_loss(&wallet).await;
+    let doubt = doubt_of(&wallet.pay_request(&request, PayOptions::default()).await);
+    wallet
+        .confirm_not_paid_before_loss(&doubt.obligation, &old, UserConfirmed::new())
+        .await
+        .unwrap();
+    let statement = wallet.app().protocol_scan(b"pn/").await.unwrap();
+    assert_eq!(statement.len(), 1);
+    let id = wallet.app_id();
+    w.clock.advance_ms(60_000);
+    declare_loss_of(&w, SWITCH_ORIGIN, LATER_SECRET);
+    storage.mode.store(if applied { 2 } else { 1 }, SeqCst);
+    let _ = wallet.app_mut().refresh_identity().await;
+    for _ in 0..4 {
+        if storage.reached.load(SeqCst) {
+            break;
+        }
+        let _ = wallet.receive(None).await;
+    }
+    assert!(
+        storage.reached.load(SeqCst),
+        "the loss commit fault must be reached"
+    );
+    drop(wallet);
+    let mut wallet = Paykit::load(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        id,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    let retained = kept_loss(&wallet).await;
+    let statements = wallet.app().protocol_scan(b"pn/").await.unwrap();
+    if applied {
+        assert!(retained.generation() > old.generation());
+        assert!(statements.is_empty());
+    } else {
+        assert_eq!(retained, old);
+        assert_eq!(statements, statement);
+    }
+    // The followed newer loss still decides before retrying its callback.
+    wallet
+        .confirm_not_paid_before_loss(&doubt.obligation, &old, UserConfirmed::new())
+        .await
+        .expect_err("an older statement must not be recorded after reload");
+    follow_loss(&mut wallet).await;
+    assert!(kept_loss(&wallet).await.generation() > old.generation());
+    assert!(wallet.app().protocol_scan(b"pn/").await.unwrap().is_empty());
+    assert_eq!(status(&wallet, &request).await, RequestStatus::MayBePaid);
+    assert_eq!(executions(&w), 0);
+}
+
+#[tokio::test]
+async fn test_provider_loss_failed_commit_retains_boundary_and_statements_for_retry() {
+    loss_commit_reload(false).await;
+}
+
+#[tokio::test]
+async fn test_provider_loss_applied_unknown_commit_reloads_boundary_and_cleared_statements() {
+    loss_commit_reload(true).await;
+}
+
+async fn loss_with_statement() -> (World, Paykit, RequestRef, Vec<(Vec<u8>, Vec<u8>)>) {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.clock.advance_ms(60_000);
+    declare_loss(&w);
+    follow_loss(&mut wallet).await;
+    let doubt = doubt_of(&wallet.pay_request(&request, PayOptions::default()).await);
+    wallet
+        .confirm_not_paid_before_loss(
+            &doubt.obligation,
+            &doubt.before_loss.unwrap(),
+            UserConfirmed::new(),
+        )
+        .await
+        .unwrap();
+    let statement = wallet.app().protocol_scan(b"pn/").await.unwrap();
+    assert_eq!(statement.len(), 1);
+    (w, wallet, request, statement)
+}
+
+#[tokio::test]
+async fn test_provider_loss_current_statement_and_boundary_survive_restore() {
+    let (w, mut wallet, request, statement) = loss_with_statement().await;
+    let boundary = kept_loss(&wallet).await;
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut restored = restored(&w, &backup).await;
+    assert_eq!(kept_loss(&restored).await, boundary);
+    assert_eq!(
+        restored.app().protocol_scan(b"pn/").await.unwrap(),
+        statement
+    );
+    restored.receive(None).await.unwrap();
+    restored.reconcile().await.unwrap();
+    restored.end_reconcile(UserConfirmed::new()).await.unwrap();
+    let options = crate::common::over_hold(&restored, &request).await;
+    let paid = restored.pay_request(&request, options).await.unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }));
+    assert_eq!(executions(&w), 1);
+}
+
+#[tokio::test]
+async fn test_provider_loss_unknown_current_boundary_refuses_read_and_backup() {
+    let (w, mut wallet, request, _) = loss_with_statement().await;
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&wallet.app().protocol_get(b"pl").await.unwrap().unwrap()).unwrap();
+    value["d"]["extra"] = serde_json::json!(true);
+    wallet
+        .app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
+            key: b"pl".to_vec(),
+            value: serde_json::to_vec(&value).unwrap(),
+        }])
+        .await
+        .unwrap();
+    wallet
+        .request(&request)
+        .await
+        .expect_err("the current typed boundary must refuse unknown members");
+    wallet
+        .backup()
+        .await
+        .expect_err("a retained corrupt boundary cannot be backed up");
+    assert_eq!(executions(&w), 0);
+}
+
+#[tokio::test]
+async fn test_provider_loss_unknown_boundary_in_saved_backup_is_refused() {
+    let (w, mut wallet, _, _) = loss_with_statement().await;
+    let id = wallet.app_id();
+    let backup: serde_json::Value =
+        serde_json::from_slice(&wallet.backup().await.unwrap().to_bytes().unwrap()).unwrap();
+    let mut layer = layer_of(&backup);
+    let value = &mut layer.iter_mut().find(|(key, _)| key == b"pl").unwrap().1;
+    value["d"]["extra"] = serde_json::json!(true);
+    let at = store();
+    let error = refused_restore(&w, with_layer(&backup, layer), at.clone()).await;
+    assert!(is_refused(&error), "{error:?}");
+    nothing_restored(&w, at, id).await;
+}
+
+#[tokio::test]
+async fn test_provider_loss_false_statement_in_saved_backup_is_refused() {
+    let (w, mut wallet, _, _) = loss_with_statement().await;
+    let id = wallet.app_id();
+    let backup: serde_json::Value =
+        serde_json::from_slice(&wallet.backup().await.unwrap().to_bytes().unwrap()).unwrap();
+    let mut layer = layer_of(&backup);
+    let value = &mut layer
+        .iter_mut()
+        .find(|(key, _)| key.starts_with(b"pn/"))
+        .unwrap()
+        .1;
+    value["d"] = serde_json::json!(false);
+    let at = store();
+    let error = refused_restore(&w, with_layer(&backup, layer), at.clone()).await;
+    assert!(is_refused(&error), "{error:?}");
+    nothing_restored(&w, at, id).await;
+}
