@@ -1,6 +1,7 @@
 //! Payment Endpoint Reservation records.
 
-use std::{collections::HashMap, fmt};
+use paykit_lib::collections::HashMap;
+use std::fmt;
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
@@ -395,7 +396,7 @@ fn build_reservation_records(
     Vec<PrivateReceivingDetail>,
     Vec<PaymentEndpointReservationRecordDraft>,
 )> {
-    let mut reservation_ids = HashMap::new();
+    let mut reservation_ids = HashMap::default();
     let mut records = Vec::with_capacity(reservations.len());
     let mut receiving_details = Vec::with_capacity(reservations.len());
 

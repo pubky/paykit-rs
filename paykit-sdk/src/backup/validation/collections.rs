@@ -35,7 +35,7 @@ where
     K: Eq + std::hash::Hash + fmt::Debug,
     F: Fn(&T) -> K,
 {
-    let mut keyed = HashMap::new();
+    let mut keyed = HashMap::default();
     for record in records {
         let key = key(&record);
         if keyed.insert(key, record).is_some() {
@@ -60,7 +60,7 @@ pub(in crate::backup) fn unique_outbound_messages_counting_links(
     mut records: Vec<OutboundPrivateMessageRecord>,
     mut link_counts: Option<&mut HashMap<PubkyPublicKey, usize>>,
 ) -> Result<Vec<OutboundPrivateMessageRecord>> {
-    let mut ids = HashSet::new();
+    let mut ids = HashSet::default();
     for record in &records {
         if let Some(counts) = link_counts.as_deref_mut() {
             *counts.entry(record.counterparty.clone()).or_insert(0) += 1;
@@ -91,7 +91,7 @@ pub(in crate::backup) fn unique_private_stream_items_counting_links(
     mut records: Vec<PrivateStreamItemRecord>,
     mut link_counts: Option<&mut HashMap<PubkyPublicKey, usize>>,
 ) -> Result<Vec<PrivateStreamItemRecord>> {
-    let mut ids = HashSet::new();
+    let mut ids = HashSet::default();
     for record in &records {
         if let Some(counts) = link_counts.as_deref_mut() {
             *counts.entry(record.counterparty.clone()).or_insert(0) += 1;

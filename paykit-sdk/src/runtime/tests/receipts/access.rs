@@ -336,7 +336,7 @@ async fn test_receipt_access_records_preserve_historical_app_authorization() {
                         "550e8400-e29b-41d4-a716-446655440000",
                     ),
                 );
-                tx.save_authorized_paykit_apps(counterparty, HashMap::new());
+                tx.save_authorized_paykit_apps(counterparty, HashMap::default());
                 Ok(())
             }
         })

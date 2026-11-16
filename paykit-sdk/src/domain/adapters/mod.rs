@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use paykit_lib::collections::HashMap;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fmt};
+use std::fmt;
 
 use crate::{identity::PubkyPublicKey, PaykitSdkError, PubkySessionAccess, Result};
 use paykit_lib::PaykitAppId;

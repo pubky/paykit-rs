@@ -1,4 +1,5 @@
-use std::{collections::HashMap, fmt};
+use crate::collections::HashMap;
+use std::fmt;
 
 use serde::{de, Deserialize, Serialize};
 use tracing::{debug, instrument};
@@ -119,7 +120,7 @@ where
         where
             A: de::MapAccess<'de>,
         {
-            let mut payment_endpoints = HashMap::new();
+            let mut payment_endpoints = HashMap::default();
 
             while let Some((key, value)) = map.next_entry::<String, String>()? {
                 if payment_endpoints.insert(key.clone(), value).is_some() {
@@ -158,7 +159,7 @@ pub fn parse_private_payment_list_json(json: &str) -> Result<PrivatePaymentList>
             Some(err.into()),
         )
     })?;
-    let mut payment_endpoints = HashMap::new();
+    let mut payment_endpoints = HashMap::default();
     for (key, value) in wire.payment_endpoints {
         let payment_endpoint_identifier = PaymentEndpointIdentifier::new(&key).map_err(|err| {
             // SECURITY / REDACTION: `key` is decrypted private-message
@@ -219,8 +220,8 @@ pub async fn set_private_payment_list(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collections::HashMap;
     use crate::{PaykitError, PaymentEndpointIdentifier, PaymentEndpointPayload};
-    use std::collections::HashMap;
 
     fn app_id() -> PaykitAppId {
         PaykitAppId::new("test-app").unwrap()
@@ -228,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_serialize_private_payment_list_json_uses_versioned_message() {
-        let mut payment_endpoints = HashMap::new();
+        let mut payment_endpoints = HashMap::default();
         payment_endpoints.insert(
             PaymentEndpointIdentifier::new("lightning").unwrap(),
             PaymentEndpointPayload::new("ln..."),
@@ -245,7 +246,7 @@ mod tests {
 
     #[test]
     fn test_private_payment_list_debug_redacts_payloads() {
-        let mut payment_endpoints = HashMap::new();
+        let mut payment_endpoints = HashMap::default();
         payment_endpoints.insert(
             PaymentEndpointIdentifier::new("lightning").unwrap(),
             PaymentEndpointPayload::new("ln-secret"),

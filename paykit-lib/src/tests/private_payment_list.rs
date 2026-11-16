@@ -24,7 +24,7 @@ async fn private_payment_list_round_trip() {
 
     let endpoint_identifier = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
     let payload = PaymentEndpointPayload::new("lnbc1...");
-    let mut payment_endpoints = HashMap::new();
+    let mut payment_endpoints = HashMap::default();
     payment_endpoints.insert(endpoint_identifier.clone(), payload.clone());
 
     set_private_payment_list(
@@ -56,7 +56,7 @@ async fn private_payment_list_multiple_endpoints() {
     let onchain = PaymentEndpointIdentifier::new("btc-bitcoin-p2tr").unwrap();
     let cashu = PaymentEndpointIdentifier::new("cashu-mint_id").unwrap();
 
-    let mut payment_endpoints = HashMap::new();
+    let mut payment_endpoints = HashMap::default();
     payment_endpoints.insert(lightning.clone(), PaymentEndpointPayload::new("ln..."));
     payment_endpoints.insert(onchain.clone(), PaymentEndpointPayload::new("bc1p..."));
     payment_endpoints.insert(
@@ -96,7 +96,7 @@ async fn private_payment_list_multiple_endpoints() {
 async fn private_payment_list_stream_exposes_multiple_updates() {
     let mut setup = PrivateTestSetup::new().await;
 
-    let mut payment_endpoints_v1 = HashMap::new();
+    let mut payment_endpoints_v1 = HashMap::default();
     payment_endpoints_v1.insert(
         PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
         PaymentEndpointPayload::new("v1"),
@@ -109,7 +109,7 @@ async fn private_payment_list_stream_exposes_multiple_updates() {
     .unwrap();
 
     let onchain = PaymentEndpointIdentifier::new("btc-bitcoin-p2tr").unwrap();
-    let mut payment_endpoints_v2 = HashMap::new();
+    let mut payment_endpoints_v2 = HashMap::default();
     payment_endpoints_v2.insert(onchain.clone(), PaymentEndpointPayload::new("v2"));
     set_private_payment_list(
         &mut setup.sender_link,
@@ -156,7 +156,7 @@ async fn private_payment_list_rejects_oversized_payload() {
 
     let endpoint_identifier = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
     let oversized_value = "x".repeat(1000);
-    let mut payment_endpoints = HashMap::new();
+    let mut payment_endpoints = HashMap::default();
     payment_endpoints.insert(
         endpoint_identifier,
         PaymentEndpointPayload::new(oversized_value),
@@ -234,7 +234,7 @@ async fn test_parallel_writer_reader_happy_path() {
 
         let mut link = drive_handshake_to_completion(handshake).await;
 
-        let mut payment_endpoints = HashMap::new();
+        let mut payment_endpoints = HashMap::default();
         payment_endpoints.insert(
             PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
             PaymentEndpointPayload::new("lnbcpriv..."),

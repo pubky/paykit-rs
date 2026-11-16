@@ -150,7 +150,7 @@ pub(in crate::backup) fn validate_event_dedup_records(
 }
 
 fn validate_event_dedup_membership(record: &EventDedupRecord) -> Result<()> {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     seen.insert(record.first_stream_item_id);
     for stream_item_id in record
         .duplicate_stream_item_ids

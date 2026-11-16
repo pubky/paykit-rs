@@ -1,9 +1,7 @@
 //! Identity-wide Paykit application registry.
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    fmt,
-};
+use crate::collections::HashMap;
+use std::{collections::BTreeMap, fmt};
 
 use serde::{de, Deserialize, Serialize};
 
@@ -105,9 +103,9 @@ impl PaykitAppRegistry {
         Self {
             key_generation: INITIAL_PAYKIT_KEY_GENERATION,
             noise_public_key,
-            apps: HashMap::new(),
+            apps: HashMap::default(),
             default_app_id: None,
-            default_apps_by_endpoint: HashMap::new(),
+            default_apps_by_endpoint: HashMap::default(),
         }
     }
 
@@ -620,7 +618,7 @@ where
         where
             A: de::MapAccess<'de>,
         {
-            let mut values = HashMap::new();
+            let mut values = HashMap::default();
             while let Some((key, value)) = map.next_entry::<String, V>()? {
                 if values.insert(key.clone(), value).is_some() {
                     return Err(de::Error::custom(format!("duplicate key '{key}'")));

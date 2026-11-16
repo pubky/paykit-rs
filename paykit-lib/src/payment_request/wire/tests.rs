@@ -234,7 +234,7 @@ fn test_payment_endpoints_wire_round_trip_and_absence() {
     assert_eq!(parse_payment_request_json(&raw).unwrap(), event);
 
     event.request.required_app_id = Some(app_id());
-    event.request.payment_endpoints = Some(HashMap::from([(
+    event.request.payment_endpoints = Some(HashMap::from_iter([(
         PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
         PaymentEndpointPayload::new("private-invoice"),
     )]));
@@ -293,7 +293,7 @@ fn test_payment_endpoints_wire_order_is_stable() {
         vec![lightning.clone(), onchain.clone()],
     )
     .required_app_id(Some(app_id()))
-    .payment_endpoints(Some(HashMap::from([
+    .payment_endpoints(Some(HashMap::from_iter([
         (onchain, PaymentEndpointPayload::new("private-address")),
         (lightning, PaymentEndpointPayload::new("private-invoice")),
     ])))

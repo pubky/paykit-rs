@@ -46,7 +46,7 @@ async fn test_app_removal_cleanup_rejects_replaced_lease_at_each_boundary() {
                         identifier: "btc-lightning-bolt11".into(),
                         payload_hash: reservation_payload_hash("one"),
                         outbound_message_id: 1,
-                        attribution: HashMap::new(),
+                        attribution: HashMap::default(),
                         expires_at: None,
                         cancellation_started_at: None,
                         created_at: FixedClock.now(),
@@ -88,7 +88,7 @@ async fn test_app_removal_cleanup_rejects_replaced_lease_at_each_boundary() {
                 counterparty: counterparty.clone(),
                 identifier: "btc-lightning-bolt11".into(),
                 payload_hash: reservation_payload_hash("one"),
-                attribution: HashMap::new(),
+                attribution: HashMap::default(),
             },
         };
         let cleanup = tokio::spawn(async move {
@@ -142,7 +142,7 @@ async fn test_unattempted_superseded_reservation_cleanup_cancels_without_claimed
                 payload: "one".into(),
             },
             expires_at: None,
-            attribution: HashMap::new(),
+            attribution: HashMap::default(),
         }],
         FixedClock.now(),
     )
@@ -159,7 +159,7 @@ async fn test_unattempted_superseded_reservation_cleanup_cancels_without_claimed
                 payload: "two".into(),
             },
             expires_at: None,
-            attribution: HashMap::new(),
+            attribution: HashMap::default(),
         }],
         FixedClock.now(),
     )
@@ -233,7 +233,7 @@ async fn test_terminal_private_list_reservation_cleanup_cancels_superseded_then_
                     payload: payload.into(),
                 },
                 expires_at: Some(FixedClock.now() - ChronoDuration::seconds(1)),
-                attribution: HashMap::new(),
+                attribution: HashMap::default(),
             }],
             FixedClock.now(),
         )
@@ -304,7 +304,7 @@ async fn test_reservation_cleanup_skips_reused_reservation_from_newer_outbound_m
                         identifier: "btc-lightning-bolt11".into(),
                         payload_hash: reservation_payload_hash("one"),
                         outbound_message_id: 2,
-                        attribution: HashMap::new(),
+                        attribution: HashMap::default(),
                         expires_at: None,
                         cancellation_started_at: None,
                         created_at: FixedClock.now(),
@@ -333,7 +333,7 @@ async fn test_reservation_cleanup_skips_reused_reservation_from_newer_outbound_m
             counterparty: counterparty.clone(),
             identifier: "btc-lightning-bolt11".into(),
             payload_hash: reservation_payload_hash("one"),
-            attribution: HashMap::new(),
+            attribution: HashMap::default(),
         },
     };
 
@@ -373,7 +373,7 @@ async fn test_reservation_cleanup_skips_another_apps_reservation() {
                         identifier: "btc-lightning-bolt11".into(),
                         payload_hash: reservation_payload_hash("one"),
                         outbound_message_id: 1,
-                        attribution: HashMap::new(),
+                        attribution: HashMap::default(),
                         expires_at: None,
                         cancellation_started_at: None,
                         created_at: FixedClock.now(),
@@ -402,7 +402,7 @@ async fn test_reservation_cleanup_skips_another_apps_reservation() {
             counterparty: counterparty.clone(),
             identifier: "btc-lightning-bolt11".into(),
             payload_hash: reservation_payload_hash("one"),
-            attribution: HashMap::new(),
+            attribution: HashMap::default(),
         },
     };
 
@@ -435,7 +435,7 @@ async fn test_reservation_cleanup_rejects_stale_peer_operation_lease_before_adap
                         identifier: "btc-lightning-bolt11".into(),
                         payload_hash: reservation_payload_hash("one"),
                         outbound_message_id: 1,
-                        attribution: HashMap::new(),
+                        attribution: HashMap::default(),
                         expires_at: None,
                         cancellation_started_at: None,
                         created_at: FixedClock.now(),
@@ -484,7 +484,7 @@ async fn test_reservation_cleanup_rejects_stale_peer_operation_lease_before_adap
             counterparty: counterparty.clone(),
             identifier: "btc-lightning-bolt11".into(),
             payload_hash: reservation_payload_hash("one"),
-            attribution: HashMap::new(),
+            attribution: HashMap::default(),
         },
     };
 
@@ -517,7 +517,7 @@ async fn test_reservation_cleanup_failure_keeps_cancellation_claim() {
                         identifier: "btc-lightning-bolt11".into(),
                         payload_hash: reservation_payload_hash("one"),
                         outbound_message_id: 1,
-                        attribution: HashMap::new(),
+                        attribution: HashMap::default(),
                         expires_at: None,
                         cancellation_started_at: Some(
                             FixedClock.now() - ChronoDuration::seconds(61),
@@ -545,7 +545,7 @@ async fn test_reservation_cleanup_failure_keeps_cancellation_claim() {
             counterparty: counterparty.clone(),
             identifier: "btc-lightning-bolt11".into(),
             payload_hash: reservation_payload_hash("one"),
-            attribution: HashMap::new(),
+            attribution: HashMap::default(),
         },
     };
 
@@ -584,7 +584,7 @@ async fn test_queue_error_cleanup_preserves_primary_error_without_reservation_id
         counterparty: counterparty.clone(),
         identifier: "btc-lightning-bolt11".into(),
         payload_hash: reservation_payload_hash("one"),
-        attribution: HashMap::new(),
+        attribution: HashMap::default(),
     };
 
     let error = sdk
@@ -623,7 +623,7 @@ async fn test_reservation_cleanup_removes_claimed_record_after_lease_changes() {
                         identifier: "btc-lightning-bolt11".into(),
                         payload_hash: reservation_payload_hash("one"),
                         outbound_message_id: 1,
-                        attribution: HashMap::new(),
+                        attribution: HashMap::default(),
                         expires_at: None,
                         cancellation_started_at: None,
                         created_at: FixedClock.now(),
@@ -660,7 +660,7 @@ async fn test_reservation_cleanup_removes_claimed_record_after_lease_changes() {
             counterparty: counterparty.clone(),
             identifier: "btc-lightning-bolt11".into(),
             payload_hash: reservation_payload_hash("one"),
-            attribution: HashMap::new(),
+            attribution: HashMap::default(),
         },
     };
 
@@ -693,7 +693,7 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
                 payload: "one".into(),
             },
             expires_at: None,
-            attribution: HashMap::new(),
+            attribution: HashMap::default(),
         }],
         FixedClock.now(),
     )
@@ -710,7 +710,7 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
                 payload: "two".into(),
             },
             expires_at: None,
-            attribution: HashMap::new(),
+            attribution: HashMap::default(),
         }],
         FixedClock.now(),
     )

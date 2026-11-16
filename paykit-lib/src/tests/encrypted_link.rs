@@ -505,7 +505,7 @@ async fn test_handshake_restore_and_complete() {
         panic!("responder must complete when it receives the final handshake message");
     };
 
-    let mut payment_endpoints = HashMap::new();
+    let mut payment_endpoints = HashMap::default();
     payment_endpoints.insert(
         PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
         PaymentEndpointPayload::new("lnrestored..."),
@@ -634,7 +634,7 @@ async fn test_encrypted_link_snapshot_serialize_roundtrip() {
     let mut setup = PrivateTestSetup::new().await;
 
     // Send a message to advance nonces beyond zero.
-    let mut payment_endpoints = HashMap::new();
+    let mut payment_endpoints = HashMap::default();
     payment_endpoints.insert(
         PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
         PaymentEndpointPayload::new("ln..."),
@@ -679,7 +679,7 @@ async fn test_encrypted_link_restore_and_continue() {
     let mut setup = PrivateTestSetup::new().await;
 
     // Send a message before snapshotting.
-    let mut payment_endpoints_v1 = HashMap::new();
+    let mut payment_endpoints_v1 = HashMap::default();
     payment_endpoints_v1.insert(
         PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
         PaymentEndpointPayload::new("lnv1..."),
@@ -728,7 +728,7 @@ async fn test_encrypted_link_restore_and_continue() {
             .unwrap();
 
     // Send a new message from the restored sender.
-    let mut payment_endpoints_v2 = HashMap::new();
+    let mut payment_endpoints_v2 = HashMap::default();
     payment_endpoints_v2.insert(
         PaymentEndpointIdentifier::new("btc-bitcoin-p2tr").unwrap(),
         PaymentEndpointPayload::new("bc1pv2..."),
@@ -763,7 +763,7 @@ async fn test_encrypted_link_restore_and_continue() {
 async fn test_receive_private_application_messages_returns_full_stream() {
     let mut setup = PrivateTestSetup::new().await;
 
-    let mut payment_endpoints = HashMap::new();
+    let mut payment_endpoints = HashMap::default();
     payment_endpoints.insert(
         PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
         PaymentEndpointPayload::new("ln..."),

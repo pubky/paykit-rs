@@ -150,7 +150,7 @@ where
             let mut derived = derive_records(&history, None)
                 .into_iter()
                 .map(|record| (record.allowance_id.clone(), record))
-                .collect::<std::collections::HashMap<_, _>>();
+                .collect::<paykit_lib::collections::HashMap<_, _>>();
             let records = accepted_ids
                 .iter()
                 .map(|allowance_id| {

@@ -137,7 +137,7 @@ async fn test_backup_round_trips_in_flight_private_intake_state() {
     };
     let state = StorageState {
         identity_state: Some(identity(local.clone())),
-        linked_peers: HashMap::from([(
+        linked_peers: HashMap::from_iter([(
             peer.clone(),
             LinkedPeerRecord {
                 counterparty: peer.clone(),
@@ -153,8 +153,8 @@ async fn test_backup_round_trips_in_flight_private_intake_state() {
                 noise_key_authorization: None,
             },
         )]),
-        private_intake_cursors: HashMap::from([(local, cursor.clone())]),
-        private_intake_peers: HashMap::from([(
+        private_intake_cursors: HashMap::from_iter([(local, cursor.clone())]),
+        private_intake_peers: HashMap::from_iter([(
             peer.clone(),
             crate::storage::PrivateIntakePeerRecord {
                 counterparty: peer.clone(),
@@ -288,7 +288,7 @@ async fn test_backup_restore_clears_receipt_app_authorization_cache() {
                 tx.save_identity_state(identity(public_key()));
                 tx.save_authorized_paykit_apps(
                     counterparty,
-                    HashMap::from([(
+                    HashMap::from_iter([(
                         app_id(),
                         paykit_lib::PaykitAppCapabilities {
                             private_payments: false,
@@ -803,7 +803,7 @@ async fn test_restore_backup_state_accepts_matching_identity_and_authorization_c
                 tx.save_identity_state(identity(local_public_key.clone()));
                 tx.save_authorized_paykit_apps(
                     local_public_key,
-                    HashMap::from([(
+                    HashMap::from_iter([(
                         app_id(),
                         paykit_lib::PaykitAppCapabilities {
                             private_payments: true,

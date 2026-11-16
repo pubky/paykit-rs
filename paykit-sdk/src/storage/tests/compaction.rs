@@ -25,9 +25,9 @@ async fn test_private_list_compaction_bounds_growth_and_preserves_views() {
         let list = paykit_lib::PrivatePaymentList::new(
             paykit_lib::PaykitAppId::new(app).unwrap(),
             if index >= 196 {
-                HashMap::new()
+                HashMap::default()
             } else {
-                HashMap::from([(
+                HashMap::from_iter([(
                     paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
                     paykit_lib::PaymentEndpointPayload::new(format!("invoice-{index}")),
                 )])
@@ -215,7 +215,7 @@ fn test_private_list_compaction_bounds_failed_lists_without_losing_recovery_inte
             for index in 0..20 {
                 let id = state.next_outbound_private_message_id;
                 state.next_outbound_private_message_id += 1;
-                let list = paykit_lib::PrivatePaymentList::new(app.clone(), HashMap::new());
+                let list = paykit_lib::PrivatePaymentList::new(app.clone(), HashMap::default());
                 let message = NewOutboundPrivateMessage::new(
                     peer.clone(),
                     app.clone(),

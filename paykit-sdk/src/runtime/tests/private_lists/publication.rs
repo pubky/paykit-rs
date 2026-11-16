@@ -47,7 +47,7 @@ async fn test_private_list_delivery_preflight_preserves_unready_work() {
                     payload: "ln-reserved".into(),
                 },
                 expires_at: None,
-                attribution: HashMap::new(),
+                attribution: HashMap::default(),
             }],
             FixedClock.now(),
         )
@@ -456,7 +456,7 @@ async fn test_sync_contact_private_payment_lists_reports_contact_and_clear_failu
         .iter()
         .map(|change| change.counterparty.clone())
         .collect::<HashSet<_>>();
-    assert_eq!(failed, HashSet::from([contact, unlisted]));
+    assert_eq!(failed, HashSet::from_iter([contact, unlisted]));
 }
 
 #[tokio::test]
@@ -483,7 +483,7 @@ async fn test_sync_private_payment_lists_with_reservations_reports_queue_failure
                         payload: "ln-reserved".into(),
                     },
                     expires_at: None,
-                    attribution: HashMap::from([("payment_hash".into(), "hash-1".into())]),
+                    attribution: HashMap::from_iter([("payment_hash".into(), "hash-1".into())]),
                 }],
             }],
             false,
@@ -524,7 +524,7 @@ async fn test_enqueue_private_payment_list_with_reservations_cancels_on_prefligh
                     payload: "ln-reserved".into(),
                 },
                 expires_at: None,
-                attribution: HashMap::new(),
+                attribution: HashMap::default(),
             }],
         )
         .await;
@@ -576,7 +576,7 @@ async fn test_reservation_preflight_failure_does_not_cancel_when_peer_lease_is_b
                     payload: "ln-reserved".into(),
                 },
                 expires_at: None,
-                attribution: HashMap::new(),
+                attribution: HashMap::default(),
             }],
         )
         .await;
@@ -613,7 +613,7 @@ async fn test_sync_private_payment_lists_with_reservations_reports_duplicate_upd
                             payload: "one".into(),
                         },
                         expires_at: None,
-                        attribution: HashMap::new(),
+                        attribution: HashMap::default(),
                     }],
                 },
                 PrivatePaymentListReservationUpdate {
@@ -625,7 +625,7 @@ async fn test_sync_private_payment_lists_with_reservations_reports_duplicate_upd
                             payload: "two".into(),
                         },
                         expires_at: None,
-                        attribution: HashMap::new(),
+                        attribution: HashMap::default(),
                     }],
                 },
             ],

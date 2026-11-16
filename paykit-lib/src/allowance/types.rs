@@ -1,4 +1,5 @@
-use std::{collections::HashSet, fmt, hash::Hash};
+use crate::collections::HashSet;
+use std::{fmt, hash::Hash};
 
 use super::amounts::compare_decimals;
 
@@ -948,7 +949,7 @@ fn validate_allowlist(identifiers: Option<&[PaymentEndpointIdentifier]>) -> Resu
 }
 
 fn all_unique<T: Eq + Hash>(items: &[T]) -> bool {
-    let mut seen = HashSet::with_capacity(items.len());
+    let mut seen = HashSet::with_capacity_and_hasher(items.len(), Default::default());
     items.iter().all(|item| seen.insert(item))
 }
 

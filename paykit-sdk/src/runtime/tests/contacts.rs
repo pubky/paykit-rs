@@ -182,7 +182,7 @@ async fn test_save_contacts_preserves_input_order_and_existing_metadata() {
             public_key: Some(local),
             initialized_at: earlier,
         }),
-        contact_records: HashMap::from([(first.clone(), existing.clone())]),
+        contact_records: HashMap::from_iter([(first.clone(), existing.clone())]),
         ..Default::default()
     });
     let transactions = Arc::new(AtomicUsize::new(0));
@@ -234,7 +234,7 @@ async fn test_save_contacts_preserves_input_order_and_existing_metadata() {
     );
     assert_eq!(
         inner.snapshot().unwrap().contact_records,
-        HashMap::from([(first, records[2].clone()), (second, records[1].clone())])
+        HashMap::from_iter([(first, records[2].clone()), (second, records[1].clone())])
     );
 }
 
@@ -676,7 +676,7 @@ async fn test_save_contacts_rejects_invalid_batch_before_mutation() {
                 public_key: Some(local.clone()),
                 initialized_at: FixedClock.now(),
             }),
-            contact_records: HashMap::from([(first.clone(), original)]),
+            contact_records: HashMap::from_iter([(first.clone(), original)]),
             ..Default::default()
         };
         let inner = InMemoryStorage::from_state(state.clone());

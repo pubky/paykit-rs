@@ -30,7 +30,7 @@ where
         let (stored_receipt, mut access_records, conflicted_access_records) = self
             .storage
             .transaction(|tx| {
-                let mut conflicts = HashMap::new();
+                let mut conflicts = HashMap::default();
                 let stored_receipt = tx.receipt_record(&counterparty, receipt_id);
                 let mut access_records = Vec::new();
                 let mut conflicted_access_records = Vec::new();
@@ -77,7 +77,7 @@ where
                             tx,
                             &record,
                             None,
-                            &mut HashMap::new(),
+                            &mut HashMap::default(),
                         )
                     }
                 })
@@ -192,7 +192,7 @@ where
                                     tx,
                                     &persisted_record,
                                     Some(&access_event_id),
-                                    &mut HashMap::new(),
+                                    &mut HashMap::default(),
                                 )?;
                                 let current = tx
                                     .receipt_access_records(&persisted_record.issuer)
@@ -263,7 +263,7 @@ where
             .await?;
         self.storage
             .transaction(|tx| {
-                let mut conflicts = HashMap::new();
+                let mut conflicts = HashMap::default();
                 let mut records = tx
                     .receipt_access_records(counterparty)
                     .into_iter()
@@ -316,7 +316,7 @@ where
                     .collect::<HashSet<_>>())
             })
             .await?;
-        let mut authorized_by_counterparty = HashMap::new();
+        let mut authorized_by_counterparty = HashMap::default();
         for counterparty in counterparties {
             let authorized = self.available_receipt_apps_for_peer(&counterparty).await?;
             self.persist_receipt_app_authorization(&counterparty, authorized.as_deref())
@@ -326,7 +326,7 @@ where
         self.storage
             .transaction(|tx| {
                 let snapshot = tx.export_storage_state();
-                let mut conflicts = HashMap::new();
+                let mut conflicts = HashMap::default();
                 let mut records = snapshot
                     .receipt_access_records
                     .into_values()
@@ -364,7 +364,7 @@ where
         self.ensure_peer_not_blocked(issuer).await?;
         self.storage
             .transaction(|tx| {
-                let mut conflicts = HashMap::new();
+                let mut conflicts = HashMap::default();
                 let mut records = tx
                     .export_storage_state()
                     .receipt_records
@@ -408,7 +408,7 @@ where
         local_public_key: &PubkyPublicKey,
     ) -> Vec<ReceiptRecord> {
         let snapshot = tx.export_storage_state();
-        let mut conflicts = HashMap::new();
+        let mut conflicts = HashMap::default();
         let mut records = snapshot
             .receipt_records
             .into_values()

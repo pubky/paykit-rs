@@ -142,8 +142,8 @@ fn pending_outbound_counterparties_from_snapshot(
     stale_before: DateTime<Utc>,
     failed_retry_after: DateTime<Utc>,
 ) -> Vec<PubkyPublicKey> {
-    let mut by_counterparty = HashMap::new();
-    let mut by_outbound_id = HashMap::new();
+    let mut by_counterparty = HashMap::default();
+    let mut by_outbound_id = HashMap::default();
     for message in snapshot.outbound_private_messages {
         by_outbound_id.insert(message.outbound_message_id, message.clone());
         by_counterparty
@@ -152,7 +152,7 @@ fn pending_outbound_counterparties_from_snapshot(
             .push(message);
     }
 
-    let mut message_candidates = HashSet::new();
+    let mut message_candidates = HashSet::default();
     for (counterparty, messages) in by_counterparty {
         if outbound_private_queue_head_is_claimable(
             &messages,
@@ -164,7 +164,7 @@ fn pending_outbound_counterparties_from_snapshot(
             message_candidates.insert(counterparty);
         }
     }
-    let mut cleanup_candidates = HashSet::new();
+    let mut cleanup_candidates = HashSet::default();
     for reservation in snapshot.payment_endpoint_reservations.values() {
         if &reservation.app_id == app_id
             && terminal_private_list_reservation_needs_cleanup(reservation, &by_outbound_id)

@@ -65,7 +65,7 @@ fn test_confirmation_metadata_requires_attempted_event() {
 
 #[test]
 fn test_retired_app_allows_confirmation_but_not_unconfirmed_event() {
-    let retired = HashSet::from([app_id()]);
+    let retired = HashSet::from_iter([app_id()]);
     let mut event = published_event();
     assert!(validate_retired_app_outbound_messages(&retired, &[event.clone()]).is_err());
     event.confirmed_at = Some(timestamp());
@@ -79,10 +79,10 @@ fn test_retired_app_allows_confirmation_but_not_unconfirmed_event() {
 #[test]
 fn test_restore_unconfirmed_publication_requires_recovery_without_checkpoint() {
     let mut events = vec![published_event()];
-    let mut peers = HashMap::new();
+    let mut peers = HashMap::default();
     let recovery = reconcile_restored_linked_peers(
         &mut peers,
-        &HashMap::new(),
+        &HashMap::default(),
         &events,
         RestoredLinkPolicy::Resume,
     )

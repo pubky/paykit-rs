@@ -449,13 +449,13 @@ fn test_private_candidate_batch_returns_complete_aggregate_after_update() {
         PrivatePaymentListView {
             app_id: paykit_lib::PaykitAppId::new("bitkit").unwrap(),
             latest_stream_item_id: Some(4),
-            payment_endpoints: HashMap::from([("btc".into(), "address".into())]),
+            payment_endpoints: HashMap::from_iter([("btc".into(), "address".into())]),
             last_refresh_at: Some(FixedClock.now()),
         },
         PrivatePaymentListView {
             app_id: paykit_lib::PaykitAppId::new("tether").unwrap(),
             latest_stream_item_id: Some(7),
-            payment_endpoints: HashMap::from([("usdt".into(), "account".into())]),
+            payment_endpoints: HashMap::from_iter([("usdt".into(), "account".into())]),
             last_refresh_at: Some(FixedClock.now()),
         },
     ];
@@ -483,13 +483,13 @@ fn test_private_candidate_batch_advances_for_empty_updated_app_list() {
         PrivatePaymentListView {
             app_id: paykit_lib::PaykitAppId::new("bitkit").unwrap(),
             latest_stream_item_id: Some(4),
-            payment_endpoints: HashMap::from([("btc".into(), "address".into())]),
+            payment_endpoints: HashMap::from_iter([("btc".into(), "address".into())]),
             last_refresh_at: Some(FixedClock.now()),
         },
         PrivatePaymentListView {
             app_id: paykit_lib::PaykitAppId::new("tether").unwrap(),
             latest_stream_item_id: Some(7),
-            payment_endpoints: HashMap::new(),
+            payment_endpoints: HashMap::default(),
             last_refresh_at: Some(FixedClock.now()),
         },
     ];
@@ -510,7 +510,7 @@ fn test_payment_request_constraints_filter_private_candidates() {
         PrivatePaymentListView {
             app_id: paykit_lib::PaykitAppId::new("bitkit").unwrap(),
             latest_stream_item_id: Some(6),
-            payment_endpoints: HashMap::from([(
+            payment_endpoints: HashMap::from_iter([(
                 "btc-lightning-bolt11".into(),
                 "bitkit-lightning".into(),
             )]),
@@ -519,7 +519,7 @@ fn test_payment_request_constraints_filter_private_candidates() {
         PrivatePaymentListView {
             app_id: paykit_lib::PaykitAppId::new("server").unwrap(),
             latest_stream_item_id: Some(7),
-            payment_endpoints: HashMap::from([
+            payment_endpoints: HashMap::from_iter([
                 ("btc-bitcoin-p2tr".into(), "server-onchain".into()),
                 ("btc-lightning-bolt11".into(), "server-lightning".into()),
             ]),
@@ -571,13 +571,13 @@ fn test_private_views_follow_authorized_app_membership() {
         PrivatePaymentListView {
             app_id: paykit_lib::PaykitAppId::new("bitkit").unwrap(),
             latest_stream_item_id: Some(4),
-            payment_endpoints: HashMap::new(),
+            payment_endpoints: HashMap::default(),
             last_refresh_at: Some(FixedClock.now()),
         },
         PrivatePaymentListView {
             app_id: paykit_lib::PaykitAppId::new("server").unwrap(),
             latest_stream_item_id: Some(5),
-            payment_endpoints: HashMap::new(),
+            payment_endpoints: HashMap::default(),
             last_refresh_at: Some(FixedClock.now()),
         },
     ];
@@ -593,7 +593,7 @@ fn test_private_views_require_authorized_app_cache() {
     let mut views = vec![PrivatePaymentListView {
         app_id: paykit_lib::PaykitAppId::new("bitkit").unwrap(),
         latest_stream_item_id: Some(4),
-        payment_endpoints: HashMap::new(),
+        payment_endpoints: HashMap::default(),
         last_refresh_at: Some(FixedClock.now()),
     }];
 
@@ -607,7 +607,7 @@ fn test_private_views_reject_apps_missing_from_authorized_cache() {
     let mut views = vec![PrivatePaymentListView {
         app_id: paykit_lib::PaykitAppId::new("bitkit").unwrap(),
         latest_stream_item_id: Some(4),
-        payment_endpoints: HashMap::new(),
+        payment_endpoints: HashMap::default(),
         last_refresh_at: Some(FixedClock.now()),
     }];
 

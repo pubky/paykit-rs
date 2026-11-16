@@ -4,7 +4,8 @@ use crate::storage::{
     PrivateIntakeSupervisorLease,
 };
 use futures_util::StreamExt;
-use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
+use paykit_lib::collections::HashMap;
+use std::{future::Future, sync::Arc, time::Duration};
 use tokio::sync::{watch, Mutex as AsyncMutex, Notify, RwLock as AsyncRwLock};
 
 const MAX_EVENT_STREAM_USERS: usize = crate::storage::PRIVATE_INTAKE_MAX_EVENT_STREAM_USERS;
@@ -304,7 +305,7 @@ fn group_private_intake_peers_by_homeserver(
     resolved: Vec<(String, paykit_lib::PublicKey, PubkyPublicKey)>,
 ) -> Vec<SubscriptionGroup> {
     let mut by_homeserver: HashMap<String, (paykit_lib::PublicKey, Vec<PubkyPublicKey>)> =
-        HashMap::new();
+        HashMap::default();
     for (homeserver_name, homeserver, peer) in resolved {
         by_homeserver
             .entry(homeserver_name)
@@ -387,7 +388,7 @@ fn apply_private_intake_topology_health(
     let streamed = || groups.iter().flat_map(|group| group.peers.iter());
     let supervised = streamed()
         .chain(unresolved)
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<paykit_lib::collections::HashSet<_>>();
     health.peers.retain(|peer, _| supervised.contains(peer));
     health
         .last_successful_audit_at
@@ -2216,7 +2217,7 @@ mod tests {
         );
         let audited_at = Utc::now();
         let mut health = PrivateIntakeHealth {
-            peers: HashMap::from([
+            peers: HashMap::from_iter([
                 (
                     caught_up_streamed.clone(),
                     PrivateIntakeTransportState::CaughtUp,
@@ -2225,7 +2226,7 @@ mod tests {
                 (removed.clone(), PrivateIntakeTransportState::CaughtUp),
             ]),
             reserved_streams: 3,
-            last_successful_audit_at: HashMap::from([
+            last_successful_audit_at: HashMap::from_iter([
                 (caught_up_streamed.clone(), audited_at),
                 (removed.clone(), audited_at),
             ]),
@@ -2251,7 +2252,7 @@ mod tests {
         assert!(!health.peers.contains_key(removed));
         assert_eq!(
             health.last_successful_audit_at,
-            HashMap::from([(caught_up_streamed.clone(), audited_at)])
+            HashMap::from_iter([(caught_up_streamed.clone(), audited_at)])
         );
 
         let (stop, _) = watch::channel(false);
@@ -2311,7 +2312,7 @@ mod tests {
     #[test]
     fn test_private_intake_admission_rejects_cross_homeserver_stream() {
         let peers = users(2);
-        let mut admissions = HashMap::from([(peers[0].clone(), "homeserver-a".to_owned())]);
+        let mut admissions = HashMap::from_iter([(peers[0].clone(), "homeserver-a".to_owned())]);
 
         let error = reserve_private_intake_admission(
             &mut admissions,
@@ -2328,7 +2329,7 @@ mod tests {
     #[test]
     fn test_private_intake_admission_rejects_topology_move_without_losing_old_coverage() {
         let peers = users(2);
-        let mut admissions = HashMap::from([
+        let mut admissions = HashMap::from_iter([
             (peers[0].clone(), "homeserver-a".to_owned()),
             (peers[1].clone(), "homeserver-a".to_owned()),
         ]);
@@ -2431,9 +2432,9 @@ mod tests {
         let previous = Utc::now() - chrono::Duration::minutes(1);
         let audited_at = Utc::now();
         let health = Arc::new(AsyncRwLock::new(PrivateIntakeHealth {
-            peers: HashMap::new(),
+            peers: HashMap::default(),
             reserved_streams: 1,
-            last_successful_audit_at: HashMap::from([(peer.clone(), previous)]),
+            last_successful_audit_at: HashMap::from_iter([(peer.clone(), previous)]),
         }));
 
         for (outcome, expected_state) in [
@@ -2550,18 +2551,18 @@ mod tests {
     #[tokio::test]
     async fn test_private_intake_lease_is_identity_wide_across_sdk_handles() {
         let storage = crate::storage::InMemoryStorage::new();
-        let first = claim_private_intake_lease(&storage, Utc::now(), 1, HashMap::new())
+        let first = claim_private_intake_lease(&storage, Utc::now(), 1, HashMap::default())
             .await
             .unwrap();
         let second =
-            claim_private_intake_lease(&storage.clone(), Utc::now(), 1, HashMap::new()).await;
+            claim_private_intake_lease(&storage.clone(), Utc::now(), 1, HashMap::default()).await;
         assert!(matches!(second, Err(PaykitSdkError::Policy { .. })));
 
         release_private_intake_lease(&storage, first.lease_id)
             .await
             .unwrap();
         assert!(
-            claim_private_intake_lease(&storage, Utc::now(), 1, HashMap::new())
+            claim_private_intake_lease(&storage, Utc::now(), 1, HashMap::default())
                 .await
                 .is_ok()
         );
@@ -2573,7 +2574,7 @@ mod tests {
         let peers = users(2);
         let claimed_at = Utc::now();
         let expires_at = claimed_at + SUPERVISOR_LEASE_TIMEOUT;
-        let original = HashMap::from([(peers[0].clone(), "homeserver-a".to_owned())]);
+        let original = HashMap::from_iter([(peers[0].clone(), "homeserver-a".to_owned())]);
         let lease = storage
             .transaction({
                 let original = original.clone();
@@ -2582,7 +2583,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let replacement = HashMap::from([(peers[1].clone(), "homeserver-b".to_owned())]);
+        let replacement = HashMap::from_iter([(peers[1].clone(), "homeserver-b".to_owned())]);
 
         assert!(!storage
             .transaction({
@@ -2635,7 +2636,7 @@ mod tests {
         let expires_at = claimed_at + SUPERVISOR_LEASE_TIMEOUT;
         let lease = inner
             .transaction(move |tx| {
-                tx.claim_private_intake_supervisor(claimed_at, expires_at, 1, HashMap::new())
+                tx.claim_private_intake_supervisor(claimed_at, expires_at, 1, HashMap::default())
             })
             .await
             .unwrap()
@@ -2667,7 +2668,7 @@ mod tests {
         assert!(task.await.unwrap().is_none());
         stopped.changed().await.unwrap();
         assert!(*stopped.borrow());
-        let contender = claim_private_intake_lease(&inner, expires_at, 1, HashMap::new())
+        let contender = claim_private_intake_lease(&inner, expires_at, 1, HashMap::default())
             .await
             .unwrap();
         assert_ne!(contender.lease_id, lease.lease_id);
@@ -2692,7 +2693,7 @@ mod tests {
             let inner = crate::storage::InMemoryStorage::new();
             let claimed_at = Utc::now();
             let expires_at = claimed_at + SUPERVISOR_LEASE_TIMEOUT;
-            let lease = claim_private_intake_lease(&inner, claimed_at, 1, HashMap::new())
+            let lease = claim_private_intake_lease(&inner, claimed_at, 1, HashMap::default())
                 .await
                 .unwrap();
             let storage = ScriptedTransactionStorage {
@@ -2719,7 +2720,7 @@ mod tests {
         let inner = crate::storage::InMemoryStorage::new();
         let claimed_at = Utc::now();
         let expires_at = claimed_at + SUPERVISOR_LEASE_TIMEOUT;
-        let lease = claim_private_intake_lease(&inner, claimed_at, 1, HashMap::new())
+        let lease = claim_private_intake_lease(&inner, claimed_at, 1, HashMap::default())
             .await
             .unwrap();
         let storage = ScriptedTransactionStorage {
@@ -2766,11 +2767,11 @@ mod tests {
         ] {
             let inner = crate::storage::InMemoryStorage::new();
             let now = Utc::now();
-            let lease = claim_private_intake_lease(&inner, now, 1, HashMap::new())
+            let lease = claim_private_intake_lease(&inner, now, 1, HashMap::default())
                 .await
                 .unwrap();
             let peer = users(1).remove(0);
-            let replacement = HashMap::from([(peer, "homeserver-a".to_owned())]);
+            let replacement = HashMap::from_iter([(peer, "homeserver-a".to_owned())]);
             let storage = ScriptedTransactionStorage {
                 inner: inner.clone(),
                 errors: Arc::new(StdMutex::new(VecDeque::from([error]))),
@@ -2799,7 +2800,7 @@ mod tests {
 
         let inner = crate::storage::InMemoryStorage::new();
         let now = Utc::now();
-        let lease = claim_private_intake_lease(&inner, now, 1, HashMap::new())
+        let lease = claim_private_intake_lease(&inner, now, 1, HashMap::default())
             .await
             .unwrap();
         let storage = ScriptedTransactionStorage {
@@ -2812,7 +2813,7 @@ mod tests {
             &storage,
             &MutableClock::new(now),
             lease.lease_id + 1,
-            HashMap::new(),
+            HashMap::default(),
             &mut stop_rx,
         )
         .await
@@ -2826,7 +2827,7 @@ mod tests {
         let peers = users(2);
         let claimed_at = Utc::now();
         let expires_at = claimed_at + SUPERVISOR_LEASE_TIMEOUT;
-        let original = HashMap::from([(peers[0].clone(), "homeserver-a".to_owned())]);
+        let original = HashMap::from_iter([(peers[0].clone(), "homeserver-a".to_owned())]);
         let lease = inner
             .transaction({
                 let original = original.clone();
@@ -2835,7 +2836,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let replacement = HashMap::from([(peers[1].clone(), "homeserver-b".to_owned())]);
+        let replacement = HashMap::from_iter([(peers[1].clone(), "homeserver-b".to_owned())]);
         let (storage, entered) = TransactionGateStorage::new(inner.clone());
         let clock = MutableClock::new(claimed_at + chrono::Duration::seconds(1));
         let task = tokio::spawn({
@@ -2881,7 +2882,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let supervisor = claim_private_intake_lease(&storage, now, 1, HashMap::new())
+        let supervisor = claim_private_intake_lease(&storage, now, 1, HashMap::default())
             .await
             .unwrap();
         assert_eq!(app_lease.lease_id, 0);
@@ -2936,14 +2937,14 @@ mod tests {
     async fn test_private_intake_topology_overflow_preserves_covered_topology() {
         let storage = crate::storage::InMemoryStorage::new();
         let peers = users(2);
-        let current = HashMap::from([
+        let current = HashMap::from_iter([
             (peers[0].clone(), "homeserver-a".to_owned()),
             (peers[1].clone(), "homeserver-a".to_owned()),
         ]);
         let lease = claim_private_intake_lease(&storage, Utc::now(), 1, current.clone())
             .await
             .unwrap();
-        let moved = HashMap::from([
+        let moved = HashMap::from_iter([
             (peers[0].clone(), "homeserver-a".to_owned()),
             (peers[1].clone(), "homeserver-b".to_owned()),
         ]);
@@ -3009,7 +3010,7 @@ mod tests {
             &storage,
             now,
             2,
-            HashMap::from([(streamed.clone(), "homeserver-1".to_owned())]),
+            HashMap::from_iter([(streamed.clone(), "homeserver-1".to_owned())]),
         )
         .await
         .unwrap();
@@ -3030,7 +3031,7 @@ mod tests {
             &storage,
             &MutableClock::new(now),
             lease.lease_id,
-            HashMap::from([(streamed.clone(), "homeserver-1".to_owned())]),
+            HashMap::from_iter([(streamed.clone(), "homeserver-1".to_owned())]),
             &mut stop_rx,
         )
         .await
@@ -3041,7 +3042,7 @@ mod tests {
                 .snapshot()
                 .unwrap()
                 .private_intake_admitted_homeservers,
-            HashMap::from([
+            HashMap::from_iter([
                 (streamed.clone(), "homeserver-1".to_owned()),
                 (pending.clone(), "homeserver-2".to_owned()),
             ])
@@ -3059,7 +3060,7 @@ mod tests {
             &storage,
             now,
             2,
-            HashMap::from([(streamed.clone(), "homeserver-1".to_owned())]),
+            HashMap::from_iter([(streamed.clone(), "homeserver-1".to_owned())]),
         )
         .await
         .unwrap();
@@ -3076,7 +3077,7 @@ mod tests {
             &storage,
             &MutableClock::new(now),
             lease.lease_id,
-            HashMap::from([
+            HashMap::from_iter([
                 (streamed.clone(), "homeserver-1".to_owned()),
                 (newcomer.clone(), "homeserver-3".to_owned()),
             ]),
@@ -3105,13 +3106,13 @@ mod tests {
             &storage,
             now,
             3,
-            HashMap::from([(streamed.clone(), "homeserver-1".to_owned())]),
+            HashMap::from_iter([(streamed.clone(), "homeserver-1".to_owned())]),
         )
         .await
         .unwrap();
         // The map a refresh pass computed from its peer snapshot, taken before
         // the late handshake existed.
-        let stale_replacement = HashMap::from([
+        let stale_replacement = HashMap::from_iter([
             (streamed.clone(), "homeserver-1".to_owned()),
             (newcomer.clone(), "homeserver-3".to_owned()),
         ]);
@@ -3142,7 +3143,7 @@ mod tests {
                 .snapshot()
                 .unwrap()
                 .private_intake_admitted_homeservers,
-            HashMap::from([
+            HashMap::from_iter([
                 (streamed.clone(), "homeserver-1".to_owned()),
                 (newcomer.clone(), "homeserver-3".to_owned()),
                 (late_handshake.clone(), "homeserver-2".to_owned()),
@@ -3165,12 +3166,12 @@ mod tests {
             tasks: AsyncMutex::new(vec![task]),
             task_handles,
             health: Arc::new(AsyncRwLock::new(PrivateIntakeHealth {
-                peers: HashMap::from([
+                peers: HashMap::from_iter([
                     (peers[0].clone(), PrivateIntakeTransportState::CaughtUp),
                     (peers[1].clone(), PrivateIntakeTransportState::Stale),
                 ]),
                 reserved_streams: 2,
-                last_successful_audit_at: HashMap::new(),
+                last_successful_audit_at: HashMap::default(),
             })),
             work: Arc::new(Notify::new()),
             capacity_released: Arc::new(Notify::new()),
@@ -3250,9 +3251,9 @@ mod tests {
             tasks: AsyncMutex::new(vec![first_task, second_task]),
             task_handles,
             health: Arc::new(AsyncRwLock::new(PrivateIntakeHealth {
-                peers: HashMap::from([(peer, PrivateIntakeTransportState::Stale)]),
+                peers: HashMap::from_iter([(peer, PrivateIntakeTransportState::Stale)]),
                 reserved_streams: 1,
-                last_successful_audit_at: HashMap::new(),
+                last_successful_audit_at: HashMap::default(),
             })),
             work: Arc::new(Notify::new()),
             capacity_released: Arc::new(Notify::new()),
@@ -4194,7 +4195,7 @@ mod tests {
             homeserver_name: "homeserver-a".into(),
             peers: peers.clone(),
         };
-        let fetches = Arc::new(StdMutex::new(HashMap::<PubkyPublicKey, usize>::new()));
+        let fetches = Arc::new(StdMutex::new(HashMap::<PubkyPublicKey, usize>::default()));
         let acquire: PrivateIntakeAcquire = Arc::new({
             let storage = storage.clone();
             let local = local.clone();

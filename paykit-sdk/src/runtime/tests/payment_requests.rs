@@ -189,7 +189,7 @@ async fn test_preparation_claim_preserves_execution_authority_checks() {
                             claimed_at: FixedClock.now(),
                         },
                     ),
-                    "origin" => tx.save_authorized_paykit_apps(peer.clone(), HashMap::new()),
+                    "origin" => tx.save_authorized_paykit_apps(peer.clone(), HashMap::default()),
                     _ => {}
                 }
                 Ok(())
@@ -1783,7 +1783,7 @@ async fn test_proof_correction_after_handoff_reaches_send_readiness() {
     .unwrap();
     storage
         .transaction(|tx| {
-            tx.save_authorized_paykit_apps(counterparty.clone(), HashMap::new());
+            tx.save_authorized_paykit_apps(counterparty.clone(), HashMap::default());
             Ok(())
         })
         .await
@@ -2079,7 +2079,7 @@ async fn test_payment_request_proposal_size_matches_issue_224_shape() {
         vec![lightning.clone(), onchain.clone()],
     )
     .required_app_id(Some(app_id()))
-    .payment_endpoints(Some(HashMap::from([
+    .payment_endpoints(Some(HashMap::from_iter([
         (
             lightning,
             paykit_lib::PaymentEndpointPayload::new(format!("lnbc1{}", "q".repeat(200))),

@@ -1,5 +1,6 @@
 use super::*;
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use paykit_lib::collections::{HashMap, HashSet};
+use std::collections::hash_map::Entry;
 
 /// Private-state loss invalidates every unissued handoff without releasing usage.
 pub(crate) fn invalidate_accounting(state: &mut AllowanceAccountingState) {

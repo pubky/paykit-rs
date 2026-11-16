@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, HashMap};
+use crate::collections::HashMap;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};

@@ -410,7 +410,7 @@ async fn test_block_and_relink_preserve_attempted_private_list_reservations() {
             payload: id.into(),
         },
         expires_at: None,
-        attribution: HashMap::new(),
+        attribution: HashMap::default(),
     };
     let queued = queue_private_payment_list_with_reservations(
         &storage,

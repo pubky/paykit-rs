@@ -23,32 +23,41 @@ struct StorageStateV1 {
     paykit_noise_public_key: Option<crate::PubkyPublicKey>,
     allowance_accounting: Option<crate::AllowanceAccountingState>,
     identity_state: Option<crate::IdentityState>,
-    linked_peers: std::collections::HashMap<crate::PubkyPublicKey, super::LinkedPeerRecord>,
-    contact_records:
-        std::collections::HashMap<crate::PubkyPublicKey, crate::domain::contacts::ContactRecord>,
-    authorized_paykit_apps: std::collections::HashMap<
+    linked_peers: paykit_lib::collections::HashMap<crate::PubkyPublicKey, super::LinkedPeerRecord>,
+    contact_records: paykit_lib::collections::HashMap<
         crate::PubkyPublicKey,
-        std::collections::HashMap<paykit_lib::PaykitAppId, paykit_lib::PaykitAppCapabilities>,
+        crate::domain::contacts::ContactRecord,
     >,
-    registered_paykit_apps: std::collections::HashSet<paykit_lib::PaykitAppId>,
-    registered_paykit_app_capabilities:
-        std::collections::HashMap<paykit_lib::PaykitAppId, paykit_lib::PaykitAppCapabilities>,
-    retired_paykit_apps: std::collections::HashSet<paykit_lib::PaykitAppId>,
-    public_endpoint_records:
-        std::collections::HashMap<(paykit_lib::PaykitAppId, String), super::PublicEndpointRecord>,
-    payment_endpoint_reservations: std::collections::HashMap<
+    authorized_paykit_apps: paykit_lib::collections::HashMap<
+        crate::PubkyPublicKey,
+        paykit_lib::collections::HashMap<
+            paykit_lib::PaykitAppId,
+            paykit_lib::PaykitAppCapabilities,
+        >,
+    >,
+    registered_paykit_apps: paykit_lib::collections::HashSet<paykit_lib::PaykitAppId>,
+    registered_paykit_app_capabilities: paykit_lib::collections::HashMap<
+        paykit_lib::PaykitAppId,
+        paykit_lib::PaykitAppCapabilities,
+    >,
+    retired_paykit_apps: paykit_lib::collections::HashSet<paykit_lib::PaykitAppId>,
+    public_endpoint_records: paykit_lib::collections::HashMap<
+        (paykit_lib::PaykitAppId, String),
+        super::PublicEndpointRecord,
+    >,
+    payment_endpoint_reservations: paykit_lib::collections::HashMap<
         (crate::PubkyPublicKey, paykit_lib::PaykitAppId, String),
         super::PaymentEndpointReservationRecord,
     >,
     encrypted_link_states:
-        std::collections::HashMap<crate::PubkyPublicKey, super::EncryptedLinkStateRecord>,
+        paykit_lib::collections::HashMap<crate::PubkyPublicKey, super::EncryptedLinkStateRecord>,
     peer_link_operation_leases:
-        std::collections::HashMap<crate::PubkyPublicKey, super::PeerLinkOperationLease>,
+        paykit_lib::collections::HashMap<crate::PubkyPublicKey, super::PeerLinkOperationLease>,
     next_peer_link_operation_lease_id: u64,
     paykit_app_operation_leases:
-        std::collections::HashMap<paykit_lib::PaykitAppId, super::PaykitAppOperationLease>,
+        paykit_lib::collections::HashMap<paykit_lib::PaykitAppId, super::PaykitAppOperationLease>,
     next_paykit_app_operation_lease_id: u64,
-    payment_request_execution_claims: std::collections::HashMap<
+    payment_request_execution_claims: paykit_lib::collections::HashMap<
         (crate::PubkyPublicKey, String),
         super::PaymentRequestExecutionClaim,
     >,
@@ -58,16 +67,16 @@ struct StorageStateV1 {
     next_receive_batch_id: u64,
     next_private_stream_item_id: u64,
     event_dedup_records:
-        std::collections::HashMap<(crate::PubkyPublicKey, String), super::EventDedupRecord>,
-    receipt_access_records: std::collections::HashMap<
+        paykit_lib::collections::HashMap<(crate::PubkyPublicKey, String), super::EventDedupRecord>,
+    receipt_access_records: paykit_lib::collections::HashMap<
         (crate::PubkyPublicKey, String),
         crate::domain::receipts::ReceiptAccessRecord,
     >,
-    receipt_records: std::collections::HashMap<
+    receipt_records: paykit_lib::collections::HashMap<
         (crate::PubkyPublicKey, String),
         crate::domain::receipts::ReceiptRecord,
     >,
-    receipt_issuance_records: std::collections::HashMap<
+    receipt_issuance_records: paykit_lib::collections::HashMap<
         (crate::PubkyPublicKey, String),
         crate::domain::receipts::ReceiptIssuanceRecord,
     >,
@@ -95,7 +104,7 @@ impl From<StorageStateV1> for StorageState {
             private_intake_supervisor_lease: None,
             next_private_intake_supervisor_lease_id: 0,
             private_intake_stream_capacity: None,
-            private_intake_admitted_homeservers: std::collections::HashMap::new(),
+            private_intake_admitted_homeservers: paykit_lib::collections::HashMap::default(),
             payment_request_execution_claims: state.payment_request_execution_claims,
             outbound_private_messages: state.outbound_private_messages,
             next_outbound_private_message_id: state.next_outbound_private_message_id,
@@ -106,8 +115,8 @@ impl From<StorageStateV1> for StorageState {
             receipt_access_records: state.receipt_access_records,
             receipt_records: state.receipt_records,
             receipt_issuance_records: state.receipt_issuance_records,
-            private_intake_cursors: std::collections::HashMap::new(),
-            private_intake_peers: std::collections::HashMap::new(),
+            private_intake_cursors: paykit_lib::collections::HashMap::default(),
+            private_intake_peers: paykit_lib::collections::HashMap::default(),
             link_record_index: Default::default(),
         }
     }

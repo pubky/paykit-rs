@@ -3,11 +3,8 @@
 //! Derived records can include Payment Request metadata. Treat them as private
 //! SDK state.
 
-use std::{
-    cmp::Reverse,
-    collections::{HashMap, HashSet},
-    fmt,
-};
+use paykit_lib::collections::{HashMap, HashSet};
+use std::{cmp::Reverse, fmt};
 
 use chrono::{DateTime, Utc};
 use paykit_lib::{

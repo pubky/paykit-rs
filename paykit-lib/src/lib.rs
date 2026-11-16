@@ -20,6 +20,8 @@ compile_error!(
 mod allowance;
 mod app;
 mod app_registry;
+// THROWAWAY (#411): HashMap/HashSet aliases with a getrandom-seeded hasher on wasm32.
+pub mod collections;
 mod delivery_confirmation;
 mod encrypted_link;
 mod encrypted_link_recovery;

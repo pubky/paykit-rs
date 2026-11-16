@@ -104,7 +104,7 @@ async fn test_private_contact_preparation_keeps_unsent_and_cleanup_fallbacks() {
                 payload: "private-invoice".into(),
             },
             expires_at: None,
-            attribution: HashMap::new(),
+            attribution: HashMap::default(),
         }],
         FixedClock.now(),
     )

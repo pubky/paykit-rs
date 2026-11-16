@@ -96,9 +96,9 @@ pub(crate) fn derive_payment_request_records_from_parts(
     now: DateTime<Utc>,
 ) -> Result<Vec<PaymentRequestRecord>> {
     let outbound_carriers = outbound_event_carriers(&outbound);
-    let mut records = HashMap::<String, PaymentRequestRecord>::new();
+    let mut records = HashMap::<String, PaymentRequestRecord>::default();
     let mut events = Vec::<StoredPaymentRequestEvent>::new();
-    let mut pre_invalid_request_ids = HashSet::<String>::new();
+    let mut pre_invalid_request_ids = HashSet::<String>::default();
     let mut tainted_event_seeds = Vec::<TaintedEventSeed>::new();
 
     items.sort_by_key(|item| item.stream_item_id);
@@ -256,7 +256,7 @@ pub(crate) fn derive_payment_request_records_from_parts(
         .iter()
         .map(|event| (event.event().event_id().as_str(), event))
         .collect();
-    let mut recovery_required = HashSet::new();
+    let mut recovery_required = HashSet::default();
     for event in &events {
         if outbound_status(event) == Some(OutboundPrivateMessageStatus::RecoveryRequired)
             && !matches!(event.event(), PaymentRequestEvent::ConversionQuote(_))
@@ -317,9 +317,9 @@ fn dedupe_stored_events(
     tainted_events: Vec<StoredPaymentRequestEvent>,
     tainted_event_seeds: Vec<TaintedEventSeed>,
 ) -> Vec<StoredPaymentRequestEvent> {
-    let mut first_by_event_id = HashMap::<String, StoredEventDedupeEntry>::new();
-    let mut conflicted_event_ids = HashSet::<String>::new();
-    let mut conflicted_request_ids = HashSet::<String>::new();
+    let mut first_by_event_id = HashMap::<String, StoredEventDedupeEntry>::default();
+    let mut conflicted_event_ids = HashSet::<String>::default();
+    let mut conflicted_request_ids = HashSet::<String>::default();
     let mut deduped = Vec::new();
 
     for event in tainted_events {

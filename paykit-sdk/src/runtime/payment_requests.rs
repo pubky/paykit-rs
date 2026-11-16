@@ -171,7 +171,7 @@ where
             .filter(|record| remote_payment_request_app(record).is_some())
             .map(|record| record.counterparty.clone())
             .collect::<HashSet<_>>();
-        let mut authorized_by_counterparty = HashMap::new();
+        let mut authorized_by_counterparty = HashMap::default();
         for counterparty in counterparties {
             let authorized = match self
                 .authorized_payment_request_apps_for_peer(&counterparty)
@@ -1159,7 +1159,7 @@ pub(super) fn filtered_payment_request_records(
         vec![counterparty.clone()]
     } else {
         let snapshot = tx.export_storage_state();
-        let mut peers = HashSet::new();
+        let mut peers = HashSet::default();
         for item in snapshot.private_stream_items {
             if is_payment_request_kind(item.parsed_kind.as_deref()) {
                 peers.insert(item.counterparty);

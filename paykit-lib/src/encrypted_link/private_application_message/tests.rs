@@ -1,9 +1,9 @@
 use super::*;
+use crate::collections::HashMap;
 use crate::{
     serialize_private_payment_list_json, PaykitAppId, PaymentEndpointIdentifier,
     PaymentEndpointPayload, PrivatePaymentList,
 };
-use std::collections::HashMap;
 
 fn app_id() -> PaykitAppId {
     PaykitAppId::new("test-app").unwrap()
@@ -138,7 +138,7 @@ fn test_private_application_message_size_validation_rejects_oversized_private_pa
     // Send-time validation is the documented enforcement point; there is
     // no construction-time size limit. The context string matches the real
     // send path (EncryptedLink::send_private_payment_list_message).
-    let mut payment_endpoints = HashMap::new();
+    let mut payment_endpoints = HashMap::default();
     for i in 0..20 {
         payment_endpoints.insert(
             PaymentEndpointIdentifier::new(format!("endpoint-{i:02}")).unwrap(),

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use paykit_lib::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use paykit_lib::{
@@ -217,7 +217,7 @@ struct InvalidEvidence<'a> {
 
 /// Return exact link scopes containing recognized Allowance activity.
 pub(crate) fn allowance_scopes(state: &StorageState) -> Vec<PubkyPublicKey> {
-    let mut scopes = HashSet::new();
+    let mut scopes = HashSet::default();
     for item in &state.private_stream_items {
         if item
             .known_paykit_kind
@@ -298,7 +298,7 @@ pub(super) fn derive_records(
         .map(String::as_str)
         .collect::<HashSet<_>>();
 
-    let mut events_by_allowance = HashMap::<String, Vec<StoredAllowanceEvent<'_>>>::new();
+    let mut events_by_allowance = HashMap::<String, Vec<StoredAllowanceEvent<'_>>>::default();
     for event in events {
         let allowance_id = event.allowance_id().as_str();
         if only_allowance_id.is_some_and(|only| only != allowance_id) {
@@ -309,7 +309,7 @@ pub(super) fn derive_records(
             .or_default()
             .push(event);
     }
-    let mut invalid_by_allowance = HashMap::<String, Vec<InvalidEvidence<'_>>>::new();
+    let mut invalid_by_allowance = HashMap::<String, Vec<InvalidEvidence<'_>>>::default();
     for evidence in invalid_evidence {
         invalid_by_allowance
             .entry(evidence.allowance_id.clone())
@@ -410,10 +410,10 @@ fn dedupe_and_taint_events<'a>(
     events: Vec<StoredAllowanceEvent<'a>>,
     mut invalid: Vec<InvalidEvidence<'a>>,
 ) -> (Vec<StoredAllowanceEvent<'a>>, Vec<InvalidEvidence<'a>>) {
-    let mut first_index_by_sender_and_id = HashMap::<(EventSourceKind, String), usize>::new();
+    let mut first_index_by_sender_and_id = HashMap::<(EventSourceKind, String), usize>::default();
     let mut payloads_by_sender_and_id =
-        HashMap::<(EventSourceKind, String), HashSet<&'a str>>::new();
-    let mut tainted_keys = HashSet::<(EventSourceKind, String)>::new();
+        HashMap::<(EventSourceKind, String), HashSet<&'a str>>::default();
+    let mut tainted_keys = HashSet::<(EventSourceKind, String)>::default();
     let mut deduped = Vec::new();
 
     for event in events {

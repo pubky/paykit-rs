@@ -4,7 +4,7 @@
 //! module centralizes public payment endpoint path construction and public
 //! storage access so call sites do not hard-code Pubky paths.
 
-use std::collections::HashMap;
+use crate::collections::HashMap;
 
 use pubky::{
     errors::RequestError, Error as PubkyError, PubkyResource, PubkySession, PublicKey,
@@ -295,7 +295,7 @@ pub async fn fetch_payment_list_with_budget(
         };
     }
 
-    let mut map = HashMap::new();
+    let mut map = HashMap::default();
     for resource in resources {
         let identifier_text = resource
             .path

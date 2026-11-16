@@ -68,7 +68,10 @@ async fn test_restore_blockers_allow_identity_authorization_cache_and_leases() {
             let local = local.clone();
             move |tx| {
                 tx.save_identity_state(identity(local.clone()));
-                tx.save_authorized_paykit_apps(local, HashMap::from([(app_id(), capabilities())]));
+                tx.save_authorized_paykit_apps(
+                    local,
+                    HashMap::from_iter([(app_id(), capabilities())]),
+                );
                 let expires_at = timestamp() + chrono::Duration::seconds(60);
                 tx.claim_peer_link_operation(&public_key(), timestamp(), expires_at)?;
                 tx.claim_paykit_app_operation(&app_id(), timestamp(), expires_at)?;

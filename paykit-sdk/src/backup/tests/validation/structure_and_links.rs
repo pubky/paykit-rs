@@ -119,7 +119,7 @@ async fn test_restore_backup_state_rejects_malformed_link_snapshot() {
 #[test]
 fn test_recovery_required_restore_state_drops_link_snapshots() {
     let counterparty = public_key();
-    let mut states = std::collections::HashMap::from([(
+    let mut states = paykit_lib::collections::HashMap::from_iter([(
         counterparty.clone(),
         EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
@@ -131,7 +131,7 @@ fn test_recovery_required_restore_state_drops_link_snapshots() {
         },
     )]);
 
-    let mut private_intake_peers = HashMap::new();
+    let mut private_intake_peers = HashMap::default();
     clear_recovery_required_link_snapshots(
         &mut states,
         &mut private_intake_peers,
@@ -586,7 +586,7 @@ fn test_restore_reconciliation_preserves_recovery_required_and_blocked_peers() {
     let authorization =
         paykit_lib::PaykitNoiseKeyAuthorization::sign(&signer, &[7; 32], 1).unwrap();
     for state in [LinkedPeerState::RecoveryRequired, LinkedPeerState::Blocked] {
-        let mut peers = std::collections::HashMap::from([(
+        let mut peers = paykit_lib::collections::HashMap::from_iter([(
             counterparty.clone(),
             LinkedPeerRecord {
                 counterparty: counterparty.clone(),
@@ -602,7 +602,7 @@ fn test_restore_reconciliation_preserves_recovery_required_and_blocked_peers() {
                 noise_key_authorization: Some(authorization.clone()),
             },
         )]);
-        let link_states = std::collections::HashMap::from([(
+        let link_states = paykit_lib::collections::HashMap::from_iter([(
             counterparty.clone(),
             link_checkpoint(
                 &counterparty,
@@ -632,7 +632,7 @@ fn test_restore_reconciliation_preserves_recovery_required_and_blocked_peers() {
 #[test]
 fn test_restore_reconciliation_marks_missing_checkpoint_recovery_required() {
     let counterparty = public_key();
-    let mut peers = std::collections::HashMap::from([(
+    let mut peers = paykit_lib::collections::HashMap::from_iter([(
         counterparty.clone(),
         LinkedPeerRecord {
             counterparty: counterparty.clone(),
@@ -648,7 +648,7 @@ fn test_restore_reconciliation_marks_missing_checkpoint_recovery_required() {
             noise_key_authorization: None,
         },
     )]);
-    let link_states = std::collections::HashMap::from([(
+    let link_states = paykit_lib::collections::HashMap::from_iter([(
         counterparty.clone(),
         EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
@@ -678,7 +678,7 @@ fn test_restore_reconciliation_marks_missing_checkpoint_recovery_required() {
 #[test]
 fn test_restore_reconciliation_marks_missing_link_state_recovery_required() {
     let counterparty = public_key();
-    let mut peers = std::collections::HashMap::from([(
+    let mut peers = paykit_lib::collections::HashMap::from_iter([(
         counterparty.clone(),
         LinkedPeerRecord {
             counterparty: counterparty.clone(),
@@ -694,7 +694,7 @@ fn test_restore_reconciliation_marks_missing_link_state_recovery_required() {
             noise_key_authorization: None,
         },
     )]);
-    let link_states = std::collections::HashMap::new();
+    let link_states = paykit_lib::collections::HashMap::default();
 
     let recovery_required = reconcile_restored_linked_peers(
         &mut peers,

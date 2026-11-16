@@ -1,4 +1,5 @@
-use std::{collections::HashSet, fmt};
+use crate::collections::HashSet;
+use std::fmt;
 
 use chrono::{DateTime, Datelike, FixedOffset, SecondsFormat, TimeDelta};
 use serde::{Deserialize, Serialize};
@@ -268,7 +269,7 @@ fn validate_rates(rates: &[ConversionRate]) -> Result<()> {
             "conversion rates must not be empty".into(),
         ));
     }
-    let mut selectors = HashSet::new();
+    let mut selectors = HashSet::default();
     for rate in rates {
         validate_decimal_text(&rate.value, "conversion rate.value")?;
         let mut segments = rate.asset.split('-');

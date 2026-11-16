@@ -1,6 +1,6 @@
 use super::*;
+use paykit_lib::collections::{HashMap, HashSet};
 use paykit_lib::{EventId, PaymentAmount, PaymentRequestId};
-use std::collections::{HashMap, HashSet};
 
 /// Borrowed (payer, counterparty, ID) key; the ID is a Payment Request ID or an Allowance ID.
 pub(super) type ScopeKey<'a> = (
@@ -109,7 +109,8 @@ pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()
     uuid(&state.epoch)?;
     // Watermarks are identity-wide, a linked counterparty can add rows, and every
     // storage transaction validates them, so cross-row checks are hash lookups.
-    let mut watermarks = HashMap::with_capacity(state.history.watermarks.len());
+    let mut watermarks =
+        HashMap::with_capacity_and_hasher(state.history.watermarks.len(), Default::default());
     for watermark in &state.history.watermarks {
         valid_time(watermark.evaluated_at)?;
         uuid(&watermark.allowance_id)?;
@@ -122,8 +123,9 @@ pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()
             return Err(protocol("Duplicate accounting watermark"));
         }
     }
-    let mut associations = HashMap::with_capacity(state.history.associations.len());
-    let mut authorizations = HashSet::new();
+    let mut associations =
+        HashMap::with_capacity_and_hasher(state.history.associations.len(), Default::default());
+    let mut authorizations = HashSet::default();
     for record in &state.history.associations {
         valid_scope(&record.request)?;
         if record.revisions.is_empty()
@@ -189,8 +191,9 @@ pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()
             }
         }
     }
-    let mut occurrences = HashSet::with_capacity(state.history.occurrences.len());
-    let mut attempt_ids = HashSet::new();
+    let mut occurrences =
+        HashSet::with_capacity_and_hasher(state.history.occurrences.len(), Default::default());
+    let mut attempt_ids = HashSet::default();
     for record in &state.history.occurrences {
         valid_scope(&record.key.request)?;
         disposition(&record.disposition)?;

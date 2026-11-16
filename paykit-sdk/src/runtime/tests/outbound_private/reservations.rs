@@ -17,7 +17,7 @@ async fn test_expired_private_reservation_recovers_only_after_allocating_noise_s
                     payload: "ln-private".into(),
                 },
                 expires_at: Some(FixedClock.now() - ChronoDuration::seconds(1)),
-                attribution: HashMap::new(),
+                attribution: HashMap::default(),
             }],
             FixedClock.now(),
         )
@@ -135,7 +135,7 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
                 payload: "one".into(),
             },
             expires_at: None,
-            attribution: HashMap::new(),
+            attribution: HashMap::default(),
         }],
         FixedClock.now(),
     )
@@ -152,7 +152,7 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
                 payload: "two".into(),
             },
             expires_at: None,
-            attribution: HashMap::new(),
+            attribution: HashMap::default(),
         }],
         FixedClock.now(),
     )
@@ -216,7 +216,7 @@ async fn test_enqueue_private_payment_list_keeps_existing_reservation_on_error()
                 payload: "existing".into(),
             },
             expires_at: None,
-            attribution: HashMap::new(),
+            attribution: HashMap::default(),
         }],
         FixedClock.now(),
     )

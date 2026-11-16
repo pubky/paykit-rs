@@ -1,6 +1,6 @@
+use paykit_lib::collections::{HashMap, HashSet};
 use std::{
     cmp::Reverse,
-    collections::{HashMap, HashSet},
     ops::Deref,
     sync::{Arc, Mutex},
 };
@@ -273,7 +273,7 @@ where
             identity_operation_in_progress: Arc::new(Mutex::new(false)),
             session_operation_gate: Arc::new(RwLock::new(())),
             last_identity_state: Mutex::new(None),
-            private_payment_list_publications: Mutex::new(HashMap::new()),
+            private_payment_list_publications: Mutex::new(HashMap::default()),
             private_intake_topology_changed: Arc::new(tokio::sync::Notify::new()),
         }
     }

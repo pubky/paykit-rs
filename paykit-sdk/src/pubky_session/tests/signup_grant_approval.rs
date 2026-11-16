@@ -8,8 +8,8 @@
 //! homeserver could. Both record what they receive, so each test asserts what
 //! was sent and what was not.
 
+use paykit_lib::collections::HashMap;
 use std::{
-    collections::HashMap,
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     sync::{Arc, Mutex},

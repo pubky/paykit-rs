@@ -303,7 +303,7 @@ where
                     });
                 }
                 let now = self.clock.now();
-                let mut seen = std::collections::HashSet::new();
+                let mut seen = paykit_lib::collections::HashSet::default();
                 let mut removed = Vec::new();
                 for public_key in public_keys {
                     if !seen.insert(public_key.clone()) {

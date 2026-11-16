@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use paykit_lib::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use paykit_lib::PrivateMessageKind;
@@ -105,7 +105,7 @@ pub(super) fn next_claimable_outbound_private_message(
                         | OutboundPrivateMessageStatus::Superseded
                 )
         })
-        .fold(HashMap::new(), |mut latest, message| {
+        .fold(HashMap::default(), |mut latest, message| {
             latest
                 .entry(message.app_id.clone())
                 .and_modify(|id: &mut u64| *id = (*id).max(message.outbound_message_id))
@@ -165,7 +165,7 @@ pub(super) fn supersede_outdated_private_payment_lists(
                         | OutboundPrivateMessageStatus::Superseded
                 )
         })
-        .fold(HashMap::new(), |mut latest, message| {
+        .fold(HashMap::default(), |mut latest, message| {
             latest
                 .entry(message.app_id.clone())
                 .and_modify(|id: &mut u64| *id = (*id).max(message.outbound_message_id))

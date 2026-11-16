@@ -8,7 +8,7 @@ fn bound_request(payload: &str) -> PaymentRequest {
         vec![identifier.clone()],
     )
     .required_app_id(Some(app_id()))
-    .payment_endpoints(Some(HashMap::from([(
+    .payment_endpoints(Some(HashMap::from_iter([(
         identifier,
         paykit_lib::PaymentEndpointPayload::new(payload),
     )])))
@@ -44,11 +44,11 @@ fn test_payment_endpoints_record_reconstruction_validates_bindings() {
     assert_eq!(request_from_record(&record).unwrap(), request);
 
     for endpoints in [
-        HashMap::new(),
-        HashMap::from([("btc-lightning-bolt11".into(), "".into())]),
-        HashMap::from([("private".into(), "private-invoice".into())]),
-        HashMap::from([("../btc".into(), "private-invoice".into())]),
-        HashMap::from([("eur-sepa-iban".into(), "private-iban".into())]),
+        HashMap::default(),
+        HashMap::from_iter([("btc-lightning-bolt11".into(), "".into())]),
+        HashMap::from_iter([("private".into(), "private-invoice".into())]),
+        HashMap::from_iter([("../btc".into(), "private-invoice".into())]),
+        HashMap::from_iter([("eur-sepa-iban".into(), "private-iban".into())]),
     ] {
         record.terms.as_mut().unwrap().payment_endpoints = Some(endpoints);
         assert!(request_from_record(&record).is_none());

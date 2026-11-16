@@ -372,7 +372,7 @@ async fn payment_request_events_share_ordered_stream_with_other_private_lanes() 
     };
     let request = payment_request();
     let endpoint = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
-    let mut payment_endpoints = HashMap::new();
+    let mut payment_endpoints = HashMap::default();
     payment_endpoints.insert(endpoint.clone(), PaymentEndpointPayload::new("lnbc1..."));
     let private_list = private_payment_list(&payment_endpoints);
 

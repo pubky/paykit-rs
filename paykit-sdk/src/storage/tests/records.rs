@@ -116,8 +116,8 @@ fn test_sensitive_storage_debug_is_redacted() {
         public_contact_last_error: Some("marker-secret".into()),
     };
     let storage_state = StorageState {
-        contact_records: HashMap::from([(contact_public_key.clone(), contact.clone())]),
-        public_endpoint_records: HashMap::from([(
+        contact_records: HashMap::from_iter([(contact_public_key.clone(), contact.clone())]),
+        public_endpoint_records: HashMap::from_iter([(
             (
                 public_endpoint.app_id.clone(),
                 public_endpoint.identifier.clone(),

@@ -18,7 +18,7 @@ pub(crate) fn received_payment_request_records_from_transaction(
     let items = tx.private_stream_items(counterparty);
     let outbound = tx.outbound_private_messages(counterparty);
     let outbound_carriers = outbound_event_carriers(&outbound);
-    let mut dedupe_records = HashMap::new();
+    let mut dedupe_records = HashMap::default();
     for item in &items {
         let Some(message) = payment_request_message_from_item(item) else {
             continue;
@@ -79,7 +79,7 @@ pub(crate) fn payment_request_records_from_transaction(
         .filter_map(|message| parse_payment_request_event_message(&message))
         .filter_map(|parsed| parsed.event_id().map(|id| id.as_str().to_owned()))
         .collect::<HashSet<_>>();
-    let mut dedupe_records = HashMap::new();
+    let mut dedupe_records = HashMap::default();
     for event_id in outbound_carriers
         .event_ids
         .iter()
@@ -116,7 +116,7 @@ fn derive_received_payment_request_records(
     now: DateTime<Utc>,
 ) -> Result<Vec<PaymentRequestRecord>> {
     items.sort_by_key(|item| item.stream_item_id);
-    let mut records = HashMap::<String, PaymentRequestRecord>::new();
+    let mut records = HashMap::<String, PaymentRequestRecord>::default();
 
     for item in items {
         let Some(message) = payment_request_message_from_item(&item) else {

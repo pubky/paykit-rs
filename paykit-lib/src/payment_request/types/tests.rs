@@ -38,7 +38,7 @@ fn bound_endpoints(
     identifier: &str,
     payload: &str,
 ) -> HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload> {
-    HashMap::from([(
+    HashMap::from_iter([(
         PaymentEndpointIdentifier::new(identifier).unwrap(),
         PaymentEndpointPayload::new(payload),
     )])
@@ -65,7 +65,7 @@ fn test_payment_endpoints_builder_preserves_immutable_subset() {
 #[test]
 fn test_payment_endpoints_builder_rejects_invalid_bindings() {
     for endpoints in [
-        HashMap::new(),
+        HashMap::default(),
         bound_endpoints("btc-lightning-bolt11", ""),
         bound_endpoints("eur-sepa-iban", "private-iban"),
     ] {

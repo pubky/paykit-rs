@@ -158,7 +158,7 @@ fn test_derive_private_payment_list_views_keeps_latest_list_per_app() {
 
 #[test]
 fn test_private_payment_list_view_debug_redacts_payloads() {
-    let mut payment_endpoints = HashMap::new();
+    let mut payment_endpoints = HashMap::default();
     payment_endpoints.insert("btc-lightning-bolt11".into(), "ln-private-secret".into());
     let view = PrivatePaymentListView {
         app_id: app_id(),
@@ -317,7 +317,7 @@ fn test_shared_private_payment_list_requires_confirmed_newer_clear() {
     ));
     assert_eq!(
         counterparties_with_shared_private_payment_lists(&messages, &app_id).unwrap(),
-        HashSet::from([counterparty.clone()])
+        HashSet::from_iter([counterparty.clone()])
     );
 
     messages.push(outbound_private_list(
@@ -330,7 +330,7 @@ fn test_shared_private_payment_list_requires_confirmed_newer_clear() {
     ));
     assert_eq!(
         counterparties_with_shared_private_payment_lists(&messages, &app_id).unwrap(),
-        HashSet::from([counterparty.clone()])
+        HashSet::from_iter([counterparty.clone()])
     );
 
     messages.push(outbound_private_list(
@@ -357,7 +357,7 @@ fn test_shared_private_payment_list_requires_confirmed_newer_clear() {
     ));
     assert_eq!(
         counterparties_with_shared_private_payment_lists(&messages, &app_id).unwrap(),
-        HashSet::from([counterparty])
+        HashSet::from_iter([counterparty])
     );
 }
 
@@ -377,7 +377,7 @@ fn test_attempted_empty_private_payment_list_blocks_until_confirmed() {
 
     assert_eq!(
         counterparties_with_shared_private_payment_lists(&messages, &app_id).unwrap(),
-        HashSet::from([counterparty.clone()])
+        HashSet::from_iter([counterparty.clone()])
     );
 
     messages.push(outbound_private_list(

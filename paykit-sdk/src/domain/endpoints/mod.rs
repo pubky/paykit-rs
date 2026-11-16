@@ -1,6 +1,6 @@
 //! Public Payment Endpoint sync records.
 
-use std::collections::HashMap;
+use paykit_lib::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use paykit_lib::{PaykitAppId, PaymentEndpointIdentifier, PaymentEndpointPayload};
@@ -38,7 +38,7 @@ pub struct EndpointSyncReport {
 pub(crate) fn normalize_receiving_details(
     details: Vec<PublicReceivingDetail>,
 ) -> Result<HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>> {
-    let mut desired = HashMap::with_capacity(details.len());
+    let mut desired = HashMap::with_capacity_and_hasher(details.len(), Default::default());
 
     for detail in details {
         if detail.payload.len() > paykit_lib::PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES {

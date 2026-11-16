@@ -126,7 +126,7 @@ async fn test_replaced_app_lease_rejects_lifecycle_mutations() {
                 identifier: "btc-lightning-bolt11".into(),
                 payload_hash: "payload-hash".into(),
                 outbound_message_id: message.outbound_message_id,
-                attribution: HashMap::new(),
+                attribution: HashMap::default(),
                 expires_at: None,
                 cancellation_started_at: None,
                 created_at: now,

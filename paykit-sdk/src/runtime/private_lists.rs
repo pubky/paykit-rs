@@ -336,8 +336,8 @@ where
             .await?;
         let mut report = delivery_report_from_sync_report(sync);
         let tracked_counterparties = private_list_delivery_counterparties(&report);
-        let mut runs = HashMap::new();
-        let mut failed_counterparties = HashSet::new();
+        let mut runs = HashMap::default();
+        let mut failed_counterparties = HashSet::default();
         let outbound = self.process_pending_private_messages().await?;
         for OutboundPrivateCounterpartySendReport {
             counterparty,
@@ -427,7 +427,7 @@ where
             .await?;
 
         updates.sort_by(|left, right| left.counterparty.as_str().cmp(right.counterparty.as_str()));
-        let mut update_counts = HashMap::new();
+        let mut update_counts = HashMap::default();
         for update in &updates {
             *update_counts
                 .entry(update.counterparty.clone())
@@ -1060,7 +1060,7 @@ mod delivery_report_tests {
         };
 
         let failures =
-            delivery_failures_from_send_report(counterparty, report, &HashSet::from([7]));
+            delivery_failures_from_send_report(counterparty, report, &HashSet::from_iter([7]));
 
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].outbound_message_id, Some(7));

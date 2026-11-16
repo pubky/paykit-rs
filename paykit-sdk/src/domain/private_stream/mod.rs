@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use std::collections::{HashMap, HashSet};
+use paykit_lib::collections::{HashMap, HashSet};
 
 #[cfg(test)]
 use crate::storage::{retry_storage_transaction, StorageAdapter};
@@ -804,7 +804,7 @@ pub(crate) struct OutboundEventCarriers {
 pub(crate) fn outbound_event_carriers(
     outbound: &[OutboundPrivateMessageRecord],
 ) -> OutboundEventCarriers {
-    let mut payloads_by_event_id = HashMap::<String, HashSet<&str>>::new();
+    let mut payloads_by_event_id = HashMap::<String, HashSet<&str>>::default();
     for message in outbound {
         if matches!(
             message.status,

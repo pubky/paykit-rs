@@ -1,4 +1,5 @@
-use std::{collections::HashMap, fmt};
+use paykit_lib::collections::HashMap;
+use std::fmt;
 
 use super::StorageState;
 use crate::PubkyPublicKey;
@@ -64,7 +65,7 @@ impl LinkRecordIndex {
     fn build(state: &StorageState) -> LinkRecordCounts {
         #[cfg(test)]
         LINK_RECORD_INDEX_REBUILDS.with(|rebuilds| rebuilds.set(rebuilds.get() + 1));
-        let mut per_link = HashMap::new();
+        let mut per_link = HashMap::default();
         let counterparties = state
             .private_stream_items
             .iter()

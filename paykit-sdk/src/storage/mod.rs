@@ -1,4 +1,5 @@
-use std::{any::Any, collections::HashMap, future::Future, sync::Arc};
+use paykit_lib::collections::HashMap;
+use std::{any::Any, future::Future, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -39,7 +40,7 @@ pub(crate) const PRIVATE_INTAKE_MAX_EVENT_STREAM_USERS: usize = 50;
 pub(crate) fn private_intake_stream_count(
     admitted_homeservers: &HashMap<PubkyPublicKey, String>,
 ) -> usize {
-    let mut users_per_homeserver = HashMap::<&str, usize>::new();
+    let mut users_per_homeserver = HashMap::<&str, usize>::default();
     for homeserver in admitted_homeservers.values() {
         *users_per_homeserver.entry(homeserver.as_str()).or_default() += 1;
     }

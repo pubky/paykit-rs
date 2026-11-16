@@ -1,11 +1,9 @@
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
+use paykit_lib::collections::HashMap;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
 };
 
 use super::*;
@@ -221,7 +219,7 @@ impl PaymentAdapter for ReservedPrivateListPaymentAdapter {
                 payload: "ln-reserved".into(),
             },
             expires_at: None,
-            attribution: HashMap::from([("contact".into(), "alice".into())]),
+            attribution: HashMap::from_iter([("contact".into(), "alice".into())]),
         }]))
     }
 
@@ -251,7 +249,7 @@ impl PaymentAdapter for InvalidReservedPrivateListPaymentAdapter {
                     payload: "one".into(),
                 },
                 expires_at: None,
-                attribution: HashMap::new(),
+                attribution: HashMap::default(),
             },
             PrivatePaymentEndpointReservation {
                 reservation_id: "reservation-2".into(),
@@ -260,7 +258,7 @@ impl PaymentAdapter for InvalidReservedPrivateListPaymentAdapter {
                     payload: "two".into(),
                 },
                 expires_at: None,
-                attribution: HashMap::new(),
+                attribution: HashMap::default(),
             },
         ]))
     }
@@ -358,7 +356,7 @@ impl PaymentAdapter for LeaseChangingInvalidReservedPrivateListPaymentAdapter {
                     payload: "one".into(),
                 },
                 expires_at: None,
-                attribution: HashMap::new(),
+                attribution: HashMap::default(),
             },
             PrivatePaymentEndpointReservation {
                 reservation_id: "reservation-2".into(),
@@ -367,7 +365,7 @@ impl PaymentAdapter for LeaseChangingInvalidReservedPrivateListPaymentAdapter {
                     payload: "two".into(),
                 },
                 expires_at: None,
-                attribution: HashMap::new(),
+                attribution: HashMap::default(),
             },
         ]))
     }
@@ -402,7 +400,7 @@ impl PaymentAdapter for MixedExistingReservedPrivateListPaymentAdapter {
                     payload: "existing".into(),
                 },
                 expires_at: None,
-                attribution: HashMap::new(),
+                attribution: HashMap::default(),
             },
             PrivatePaymentEndpointReservation {
                 reservation_id: "conflicting-reservation".into(),
@@ -411,7 +409,7 @@ impl PaymentAdapter for MixedExistingReservedPrivateListPaymentAdapter {
                     payload: "conflict".into(),
                 },
                 expires_at: None,
-                attribution: HashMap::new(),
+                attribution: HashMap::default(),
             },
         ]))
     }

@@ -838,7 +838,7 @@ async fn list_reflects_additions_and_removals() {
     let list = get_payment_list(&setup.public_storage, &setup.public_key, &app_id())
         .await
         .unwrap();
-    let mut expected = HashMap::new();
+    let mut expected = HashMap::default();
     expected.insert(onchain.clone(), onchain_data.clone());
     expected.insert(lightning.clone(), lightning_data.clone());
     assert_eq!(list.payment_endpoints, expected);
@@ -870,7 +870,7 @@ async fn list_reflects_additions_and_removals() {
 #[tokio::test]
 async fn list_fetches_multiple_pages() {
     let setup = TestSetup::new().await;
-    let mut expected = HashMap::new();
+    let mut expected = HashMap::default();
 
     for index in 0..105 {
         let identifier = PaymentEndpointIdentifier::new(format!("endpoint-{index:03}")).unwrap();

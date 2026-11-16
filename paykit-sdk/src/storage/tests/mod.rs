@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use paykit_lib::collections::HashMap;
 
 use chrono::{TimeZone, Utc};
 
@@ -151,7 +151,7 @@ fn payment_endpoint_reservation_record_for_app(
         identifier: "btc-lightning-bolt11".into(),
         payload_hash: "reserved-payload-hash".into(),
         outbound_message_id: 7,
-        attribution: HashMap::from([("contact".into(), "alice".into())]),
+        attribution: HashMap::from_iter([("contact".into(), "alice".into())]),
         expires_at: None,
         cancellation_started_at: None,
         created_at: timestamp(),

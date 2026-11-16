@@ -50,7 +50,7 @@ fn reservation(id: &str, payload: &str) -> PrivatePaymentEndpointReservation {
             payload: payload.into(),
         },
         expires_at: None,
-        attribution: HashMap::from([("contact".into(), "alice".into())]),
+        attribution: HashMap::from_iter([("contact".into(), "alice".into())]),
     }
 }
 
@@ -539,7 +539,7 @@ async fn test_queue_private_payment_list_with_reservations_preserves_existing_me
                 payload: "one".into(),
             },
             expires_at: Some(timestamp()),
-            attribution: HashMap::from([("contact".into(), "bob".into())]),
+            attribution: HashMap::from_iter([("contact".into(), "bob".into())]),
         }],
         timestamp(),
     )
@@ -718,7 +718,7 @@ async fn test_expired_outbound_reservation_cancellations() {
                 payload: "one".into(),
             },
             expires_at: Some(timestamp() + chrono::Duration::seconds(5)),
-            attribution: HashMap::new(),
+            attribution: HashMap::default(),
         }],
         timestamp(),
     )

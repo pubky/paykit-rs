@@ -196,7 +196,7 @@ pub(in crate::backup) fn validate_receipt_issuance_records(
         .iter()
         .map(|record| (record.outbound_message_id, record))
         .collect::<HashMap<_, _>>();
-    let mut receipt_ids = HashSet::new();
+    let mut receipt_ids = HashSet::default();
 
     for record in records.values() {
         if !receipt_ids.insert(record.receipt_id.clone()) {

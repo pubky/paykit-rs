@@ -1,9 +1,7 @@
 //! SDK backup and restore state.
 
-use std::{
-    collections::{HashMap, HashSet},
-    fmt,
-};
+use paykit_lib::collections::{HashMap, HashSet};
+use std::fmt;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -318,7 +316,7 @@ pub(crate) fn refresh_storage_state_classification(state: &mut StorageState) -> 
     // Validation already passes over both record lists, so it counts each
     // link's records on the way and the state gets its index without a
     // separate pass.
-    let mut link_counts = HashMap::new();
+    let mut link_counts = HashMap::default();
     validation::validate_storage_state_counting_links(state, Some(&mut link_counts))?;
     state.install_link_record_counts(link_counts);
     Ok(())
@@ -892,21 +890,21 @@ impl SdkBackupState {
             identity_state,
             linked_peers,
             contact_records,
-            authorized_paykit_apps: HashMap::new(),
-            registered_paykit_apps: HashSet::new(),
-            registered_paykit_app_capabilities: HashMap::new(),
+            authorized_paykit_apps: HashMap::default(),
+            registered_paykit_apps: HashSet::default(),
+            registered_paykit_app_capabilities: HashMap::default(),
             retired_paykit_apps,
             public_endpoint_records,
             payment_endpoint_reservations,
             encrypted_link_states,
-            peer_link_operation_leases: HashMap::new(),
+            peer_link_operation_leases: HashMap::default(),
             next_peer_link_operation_lease_id,
-            paykit_app_operation_leases: HashMap::new(),
+            paykit_app_operation_leases: HashMap::default(),
             next_paykit_app_operation_lease_id,
             private_intake_supervisor_lease: None,
             next_private_intake_supervisor_lease_id: 0,
             private_intake_stream_capacity: None,
-            private_intake_admitted_homeservers: HashMap::new(),
+            private_intake_admitted_homeservers: HashMap::default(),
             payment_request_execution_claims,
             outbound_private_messages,
             next_outbound_private_message_id,

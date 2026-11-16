@@ -43,7 +43,7 @@ async fn test_app_removal_retires_unattempted_private_lists_atomically() {
                 payload: "ln-private".into(),
             },
             expires_at: None,
-            attribution: HashMap::new(),
+            attribution: HashMap::default(),
         }],
         FixedClock.now(),
     )
@@ -83,7 +83,7 @@ async fn test_enqueue_private_payment_list_keeps_existing_reservation_on_error()
                 payload: "existing".into(),
             },
             expires_at: None,
-            attribution: HashMap::new(),
+            attribution: HashMap::default(),
         }],
         FixedClock.now(),
     )

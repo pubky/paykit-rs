@@ -444,7 +444,7 @@ async fn test_expired_request_execution_claim_can_be_released() {
             move |tx| {
                 tx.save_authorized_paykit_apps(
                     counterparty,
-                    HashMap::from([(app_id(), payment_request_capabilities())]),
+                    HashMap::from_iter([(app_id(), payment_request_capabilities())]),
                 );
                 Ok(())
             }
@@ -502,7 +502,7 @@ async fn test_targeted_request_can_be_claimed_by_another_payer_app_after_release
             move |tx| {
                 tx.save_authorized_paykit_apps(
                     counterparty,
-                    HashMap::from([(app_id(), payment_request_capabilities())]),
+                    HashMap::from_iter([(app_id(), payment_request_capabilities())]),
                 );
                 Ok(())
             }
@@ -565,7 +565,7 @@ async fn test_recurring_claim_handoff_preserves_completed_period() {
             move |tx| {
                 tx.save_authorized_paykit_apps(
                     counterparty,
-                    HashMap::from([(app_id(), payment_request_capabilities())]),
+                    HashMap::from_iter([(app_id(), payment_request_capabilities())]),
                 );
                 Ok(())
             }
@@ -819,7 +819,7 @@ async fn test_expired_proposal_cancellation_respects_existing_claim() {
             .transaction(|tx| {
                 tx.save_authorized_paykit_apps(
                     peer.clone(),
-                    HashMap::from([(app_id(), payment_request_capabilities())]),
+                    HashMap::from_iter([(app_id(), payment_request_capabilities())]),
                 );
                 Ok(())
             })
@@ -945,7 +945,7 @@ async fn test_checked_payment_request_action_rejects_newer_inbound_cancellation(
             move |tx| {
                 tx.save_authorized_paykit_apps(
                     counterparty,
-                    HashMap::from([(app_id(), payment_request_capabilities())]),
+                    HashMap::from_iter([(app_id(), payment_request_capabilities())]),
                 );
                 Ok(())
             }

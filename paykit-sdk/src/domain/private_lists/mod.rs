@@ -1,9 +1,7 @@
 //! Private Payment List latest-state records.
 
-use std::{
-    collections::{HashMap, HashSet},
-    fmt,
-};
+use paykit_lib::collections::{HashMap, HashSet};
+use std::fmt;
 
 use chrono::{DateTime, Utc};
 use paykit_lib::{
@@ -38,7 +36,7 @@ pub(crate) fn counterparties_with_shared_private_payment_lists(
         UncertainClear,
     }
 
-    let mut latest_state_by_counterparty = HashMap::new();
+    let mut latest_state_by_counterparty = HashMap::default();
     for message in messages.iter().filter(|message| {
         message.app_id == *app_id
             && message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
@@ -312,7 +310,7 @@ where
 pub(crate) fn normalize_private_receiving_details(
     details: Vec<PrivateReceivingDetail>,
 ) -> Result<HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>> {
-    let mut desired = HashMap::with_capacity(details.len());
+    let mut desired = HashMap::with_capacity_and_hasher(details.len(), Default::default());
 
     for detail in details {
         let identifier = PaymentEndpointIdentifier::new(detail.identifier)?;
@@ -336,7 +334,7 @@ pub(crate) fn derive_private_payment_list_views(
     mut items: Vec<PrivateStreamItemRecord>,
 ) -> Result<Vec<PrivatePaymentListView>> {
     items.sort_by_key(|item| item.stream_item_id);
-    let mut latest_by_app = HashMap::new();
+    let mut latest_by_app = HashMap::default();
     for item in items {
         if item.parse_status != PrivateStreamParseStatus::Valid
             || item.known_paykit_kind.as_deref()

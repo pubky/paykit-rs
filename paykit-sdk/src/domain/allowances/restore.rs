@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use paykit_lib::collections::HashSet;
 
 use super::derivation::canonical_allowance_id;
 use crate::{

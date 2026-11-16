@@ -121,7 +121,7 @@ async fn test_cancellation_retains_settled_payment_claim_after_origin_app_remova
                     ..Default::default()
                 },
             });
-            tx.save_authorized_paykit_apps(peer.clone(), HashMap::new());
+            tx.save_authorized_paykit_apps(peer.clone(), HashMap::default());
             Ok(())
         })
         .await

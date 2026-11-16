@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use paykit_lib::collections::{HashMap, HashSet};
 
 use paykit_lib::PrivateMessageKind;
 
@@ -8,10 +8,10 @@ use crate::{OutboundPrivateMessageStatus, PrivateStreamParseStatus, PubkyPublicK
 /// Discard only obsolete Latest-State payloads, never Event Message history.
 pub(super) fn compact_private_payment_lists(state: &mut StorageState) {
     let kind = PrivateMessageKind::PrivatePaymentList.as_str();
-    let mut published = HashMap::new();
-    let mut attempted = HashMap::new();
-    let mut latest = HashMap::new();
-    let mut recoverable = HashMap::new();
+    let mut published = HashMap::default();
+    let mut attempted = HashMap::default();
+    let mut latest = HashMap::default();
+    let mut recoverable = HashMap::default();
     for message in &state.outbound_private_messages {
         if message.kind != kind {
             continue;
@@ -69,7 +69,7 @@ pub(crate) fn compact_received_private_payment_lists(
     only: Option<&PubkyPublicKey>,
 ) {
     let kind = PrivateMessageKind::PrivatePaymentList.as_str();
-    let mut latest = HashMap::new();
+    let mut latest = HashMap::default();
     for item in &state.private_stream_items {
         if only.is_none_or(|counterparty| item.counterparty == *counterparty)
             && item.known_paykit_kind.as_deref() == Some(kind)

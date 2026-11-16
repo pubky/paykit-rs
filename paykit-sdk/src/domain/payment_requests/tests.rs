@@ -189,7 +189,7 @@ async fn persist_authorized_request(
         .transaction(move |tx| {
             tx.save_authorized_paykit_apps(
                 counterparty,
-                HashMap::from([(app_id(), payment_request_capabilities())]),
+                HashMap::from_iter([(app_id(), payment_request_capabilities())]),
             );
             Ok(())
         })

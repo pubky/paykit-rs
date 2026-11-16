@@ -376,7 +376,7 @@ fn validate_live_app_state(state: &StorageState) -> Result<()> {
 }
 
 fn validate_live_link_state(state: &StorageState) -> Result<()> {
-    let mut lease_ids = HashSet::new();
+    let mut lease_ids = HashSet::default();
     for lease in state.peer_link_operation_leases.values() {
         if !lease_ids.insert(lease.lease_id) {
             return Err(invalid_live_state(
@@ -395,7 +395,7 @@ fn validate_live_link_state(state: &StorageState) -> Result<()> {
         }
     }
 
-    let mut app_lease_ids = HashSet::new();
+    let mut app_lease_ids = HashSet::default();
     for lease in state.paykit_app_operation_leases.values() {
         if !app_lease_ids.insert(lease.lease_id) {
             return Err(invalid_live_state(

@@ -164,7 +164,7 @@ async fn test_pending_outbound_private_counterparties_includes_cleanup_only_work
                 payload: "one".into(),
             },
             expires_at: None,
-            attribution: HashMap::new(),
+            attribution: HashMap::default(),
         }],
         FixedClock.now(),
     )
@@ -256,7 +256,7 @@ async fn test_pending_outbound_private_counterparties_skips_other_app_cleanup() 
                 payload: "one".into(),
             },
             expires_at: None,
-            attribution: HashMap::new(),
+            attribution: HashMap::default(),
         }],
         FixedClock.now(),
     )

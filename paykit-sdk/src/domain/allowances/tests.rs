@@ -2037,8 +2037,8 @@ async fn test_pending_allowance_acceptance_reads_no_history_over_the_link_cap() 
 /// Per-link counts computed from the records themselves.
 fn counted_link_records(
     state: &crate::storage::StorageState,
-) -> std::collections::HashMap<PubkyPublicKey, usize> {
-    let mut counts = std::collections::HashMap::new();
+) -> paykit_lib::collections::HashMap<PubkyPublicKey, usize> {
+    let mut counts = paykit_lib::collections::HashMap::default();
     for counterparty in state
         .private_stream_items
         .iter()

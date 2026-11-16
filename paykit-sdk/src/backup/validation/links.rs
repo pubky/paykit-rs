@@ -7,7 +7,7 @@ pub(in crate::backup) fn reconcile_restored_linked_peers(
     outbound_private_messages: &[OutboundPrivateMessageRecord],
     link_policy: RestoredLinkPolicy,
 ) -> Result<Vec<PubkyPublicKey>> {
-    let mut recovery_required_peers = HashSet::new();
+    let mut recovery_required_peers = HashSet::default();
     for (counterparty, link_state) in encrypted_link_states {
         let restored_state = match link_policy {
             RestoredLinkPolicy::Resume => {

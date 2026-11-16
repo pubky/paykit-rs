@@ -74,7 +74,7 @@ async fn test_legacy_receive_conflicts_with_active_private_intake_ownership() {
                     FixedClock.now(),
                     FixedClock.now() + chrono::Duration::minutes(1),
                     1,
-                    HashMap::new(),
+                    HashMap::default(),
                 )?
                 .unwrap();
                 Ok(())
