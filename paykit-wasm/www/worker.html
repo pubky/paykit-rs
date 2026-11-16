@@ -5,7 +5,7 @@
 <script type="module">
 const out = document.getElementById("out");
 const lines = [];
-const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+const worker = new Worker(new URL("./worker.js" + location.search, import.meta.url), { type: "module" });
 worker.onmessage = (ev) => {
   if (ev.data.line) { lines.push(ev.data.line); out.textContent = lines.join("\n"); }
   if (ev.data.done) document.title = "e2e-done";
