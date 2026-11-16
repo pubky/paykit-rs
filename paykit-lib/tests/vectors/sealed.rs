@@ -2605,7 +2605,7 @@ fn handed_on_naming_no_write(keys: &Keys, handed: &AllowanceRecord) -> Allowance
 #[test]
 fn test_ledger_handoff_binds_and_writes_back() {
     // A record with a ledger_handoff binds at its key and writes it back as read, an unknown
-    // member in it included; one whose ledger_handoff isn't of its shape doesn't bind.
+    // member in it included; an unread handoff is retained without invalidating the record.
     let keys = Keys::from_seeds();
     let alice = pubky(ALICE);
     let nk = keys.identity(&alice).naming_key();
@@ -2647,6 +2647,108 @@ fn test_ledger_handoff_binds_and_writes_back() {
         ..handed.clone()
     };
     assert!(held.check_later_handoff(&read, &alice).is_err());
+}
+
+fn handoff_with_unknown_versions() -> (Keys, AllowanceRecord, Value) {
+    let keys = Keys::from_seeds();
+    let alice = pubky(ALICE);
+    let base = AllowanceRecord::read(&allowance_record_value(&keys), &alice).unwrap();
+    let handed = handed_on(&keys, &base);
+    let mut value: Value = serde_json::from_slice(&handed.to_json().unwrap()).unwrap();
+    value["ledger_handoff"]["grant"]["note"] = serde_json::json!({"grant": [1, 2, 3]});
+    value["ledger_handoff"]["ledger"]["note"] = serde_json::json!({"ledger": [4, 5, 6]});
+    value["ledger_handoff"]["cert"]["note"] = serde_json::json!({"certificate": true});
+    value["ledger_handoff"]["note"] = serde_json::json!({"handoff": true});
+    let nk = keys.identity(&alice).naming_key();
+    let key = handed.record_key(&nk).unwrap();
+    let read =
+        AllowanceRecord::bind(&serde_json::to_vec(&value).unwrap(), &alice, &nk, &key).unwrap();
+    assert!(read.ledger_handoff_counts(&alice).unwrap().is_some());
+    (keys, read, value)
+}
+
+#[test]
+fn test_ledger_handoff_preserves_unknown_grant_version_members() {
+    let (_, read, value) = handoff_with_unknown_versions();
+    let written: Value = serde_json::from_slice(&read.to_json().unwrap()).unwrap();
+    assert_eq!(
+        written["ledger_handoff"]["grant"],
+        value["ledger_handoff"]["grant"]
+    );
+}
+
+#[test]
+fn test_ledger_handoff_preserves_unknown_ledger_version_members() {
+    let (_, read, value) = handoff_with_unknown_versions();
+    let written: Value = serde_json::from_slice(&read.to_json().unwrap()).unwrap();
+    assert_eq!(
+        written["ledger_handoff"]["ledger"],
+        value["ledger_handoff"]["ledger"]
+    );
+}
+
+#[test]
+fn test_ledger_handoff_cloned_copy_preserves_all_unknown_members() {
+    let (_, read, value) = handoff_with_unknown_versions();
+    let copied = read.clone();
+    let json = copied.to_json().unwrap();
+    let written: Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(written["ledger_handoff"], value["ledger_handoff"]);
+    let reread = AllowanceRecord::read(&json, &pubky(ALICE)).unwrap();
+    assert!(reread
+        .ledger_handoff_counts(&pubky(ALICE))
+        .unwrap()
+        .is_some());
+    assert_eq!(reread.to_json().unwrap(), json);
+}
+
+#[test]
+fn test_ledger_handoff_replacement_does_not_inherit_nested_members() {
+    let (keys, read, _) = handoff_with_unknown_versions();
+    let (replacement, _) = handed_back(&keys, &read);
+    read.check_later_handoff(&replacement, &pubky(ALICE))
+        .unwrap();
+    let json = replacement.to_json().unwrap();
+    let written: Value = serde_json::from_slice(&json).unwrap();
+    for pointer in [
+        "/ledger_handoff",
+        "/ledger_handoff/grant",
+        "/ledger_handoff/ledger",
+        "/ledger_handoff/cert",
+    ] {
+        assert!(
+            written.pointer(pointer).unwrap().get("note").is_none(),
+            "{pointer}"
+        );
+    }
+    let reread = AllowanceRecord::read(&json, &pubky(ALICE)).unwrap();
+    assert!(reread
+        .ledger_handoff_counts(&pubky(ALICE))
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn test_ledger_handoff_unread_preserves_nested_version_members() {
+    let (keys, read, _) = handoff_with_unknown_versions();
+    let unread = handed_on_naming_no_write(&keys, &read);
+    let mut value: Value = serde_json::from_slice(&unread.to_json().unwrap()).unwrap();
+    value["ledger_handoff"]["grant"]["note"] = serde_json::json!({"grant": [1, 2, 3]});
+    value["ledger_handoff"]["ledger"]["note"] = serde_json::json!({"ledger": [4, 5, 6]});
+    let nk = keys.identity(&pubky(ALICE)).naming_key();
+    let key = read.record_key(&nk).unwrap();
+    let read = AllowanceRecord::bind(
+        &serde_json::to_vec(&value).unwrap(),
+        &pubky(ALICE),
+        &nk,
+        &key,
+    )
+    .unwrap();
+    assert!(read.ledger_handoff.is_none());
+    assert!(read.ledger_handoff_unread.is_some());
+    assert!(read.ledger_handoff_counts(&pubky(ALICE)).is_err());
+    let written: Value = serde_json::from_slice(&read.to_json().unwrap()).unwrap();
+    assert_eq!(written["ledger_handoff"], value["ledger_handoff"]);
 }
 
 #[test]

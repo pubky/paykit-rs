@@ -592,6 +592,13 @@ static ALLOWANCE_SHAPE: Shape = Shape {
     ],
 };
 
+static RECORD_VERSION: Shape = Shape {
+    name: "record version",
+    id: &[],
+    carried: false,
+    members: &[("generation", Member::Leaf), ("version", Member::Leaf)],
+};
+
 /// A ledger handoff (Paykit wire 5.4), found by the origin it carries: a later handoff
 /// replaces it with one of its own, which gets none of its members.
 static LEDGER_HANDOFF: Shape = Shape {
@@ -600,8 +607,8 @@ static LEDGER_HANDOFF: Shape = Shape {
     carried: true,
     members: &[
         ("app_id", Member::Leaf),
-        ("grant", Member::Leaf),
-        ("ledger", Member::Leaf),
+        ("grant", Member::Object(&RECORD_VERSION)),
+        ("ledger", Member::Object(&RECORD_VERSION)),
         ("item_hash", Member::Leaf),
         ("cert", Member::Object(&SIGNED_DOC)),
         ("sig", Member::Leaf),
