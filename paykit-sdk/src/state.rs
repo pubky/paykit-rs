@@ -1987,8 +1987,7 @@ mod tests {
         assert!(reads::<RestoreHold>(key::RESTORE_HOLD, hold.clone()));
         assert!(!reads::<RestoreHold>(key::CURSOR_TIME, hold));
         // A queued ask of the sender and time its key names.
-        let ask =
-            |from: u64| serde_json::json!({ "sender": sender, "from_ms": from, "until_ms": null });
+        let ask = |from: u64| serde_json::json!({ "sender": sender, "from_ms": from, "until_ms": null, "queued": null });
         assert!(reads::<QueuedAsk>(&key::ask(&pubky, 5), ask(5)));
         assert!(!reads::<QueuedAsk>(&key::ask(&pubky, 5), ask(6)));
         assert!(!reads::<QueuedAsk>(&key::ask(&[4; 32], 5), ask(5)));
