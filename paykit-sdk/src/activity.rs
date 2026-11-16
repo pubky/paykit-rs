@@ -77,6 +77,7 @@ pub(crate) enum SideTag {
 /// The side a cancellation was sent from, kept under `side/<msg_id>` with that `msg_id`, so a
 /// restore binds the value to its key and a reader takes it only for the message it names.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct KeptSide {
     pub(crate) msg_id: String,
     pub(crate) side: SideTag,
@@ -359,6 +360,47 @@ pub(crate) fn read(
 mod tests {
     use super::*;
     use paykit_lib::derive::natural_key;
+
+    #[test]
+    fn test_answer_state_side_unknown_member() {
+        let value = serde_json::json!({"msg_id":"123e4567-e89b-42d3-a456-426614174000", "side":"payer", "extra":{"nested":[7]}});
+        assert!(serde_json::from_value::<KeptSide>(value).is_err());
+    }
+
+    #[test]
+    fn test_answer_state_side_current_structure() {
+        for side in [SideTag::Payer, SideTag::Payee] {
+            let value = KeptSide {
+                msg_id: "123e4567-e89b-42d3-a456-426614174000".into(),
+                side,
+            };
+            let json = serde_json::to_value(&value).unwrap();
+            assert_eq!(
+                serde_json::from_value::<KeptSide>(json.clone()).unwrap(),
+                value
+            );
+            for member in ["msg_id", "side"] {
+                let mut missing = json.clone();
+                missing.as_object_mut().unwrap().remove(member).unwrap();
+                assert!(
+                    serde_json::from_value::<KeptSide>(missing).is_err(),
+                    "{member}"
+                );
+                let duplicate = serde_json::to_string(&json).unwrap().replacen(
+                    "{",
+                    &format!("{{\"{member}\":{},", json[member]),
+                    1,
+                );
+                assert!(
+                    serde_json::from_str::<KeptSide>(&duplicate).is_err(),
+                    "{member}"
+                );
+            }
+            let mut wrong = json;
+            wrong["side"] = serde_json::json!("both");
+            assert!(serde_json::from_value::<KeptSide>(wrong).is_err());
+        }
+    }
 
     #[test]
     fn test_activity_target_payee_label_takes_its_policy() {
