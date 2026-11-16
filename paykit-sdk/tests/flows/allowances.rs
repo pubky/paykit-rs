@@ -6693,3 +6693,341 @@ async fn test_allowances_answer_after_a_given_up_earlier_answer_never_takes_the_
         AllowanceStatus::Conflicted
     );
 }
+
+async fn consent_state_keeper(
+    w: &World,
+) -> (
+    std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+    Paykit,
+) {
+    let store = crate::common::store();
+    let mut app = w
+        .join_with(
+            &w.alice,
+            "keeper",
+            AppScopes::new()
+                .allowance_execute()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+            paykit_sdk::PaykitConfig::default(),
+            std::sync::Arc::clone(&store),
+        )
+        .await;
+    app.app_mut().invite(&w.bob_id()).await.unwrap();
+    (store, app)
+}
+
+async fn put_consent_state(app: &mut Paykit, key: &[u8], value: &Value) {
+    app.app_mut()
+        .protocol_commit(&[LocalWrite::Put {
+            key: key.to_vec(),
+            value: serde_json::to_vec(value).unwrap(),
+        }])
+        .await
+        .unwrap();
+}
+
+async fn consent_state_restore_refused(
+    w: &World,
+    app: &mut Paykit,
+    valid: &paykit_sdk::PaykitBackup,
+    key: &[u8],
+    value: &Value,
+) {
+    assert!(matches!(
+        app.backup().await,
+        Err(PaykitError::Client(
+            pubky_switch_client::app::AppError::InvalidData(_)
+        ))
+    ));
+    let valid: Value = serde_json::from_slice(&valid.to_bytes().unwrap()).unwrap();
+    let mut layer = crate::restore::layer_of(&valid);
+    let entry = layer.iter_mut().find(|(found, _)| found == key).unwrap();
+    entry.1 = value.clone();
+    let backup = paykit_sdk::PaykitBackup::from_bytes(
+        &serde_json::to_vec(&crate::restore::with_layer(&valid, layer)).unwrap(),
+    )
+    .unwrap();
+    let store = crate::common::store();
+    let result = Box::pin(Paykit::restore(
+        w.env(&w.alice, std::sync::Arc::clone(&store)),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await;
+    assert!(matches!(
+        result,
+        Err(PaykitError::Client(
+            pubky_switch_client::app::AppError::InvalidData(_)
+        ))
+    ));
+    let ns = pubky_switch_client::store::client_namespace(&app.app_id());
+    assert!(store.scan(&ns, b"", None, 1).unwrap().is_empty());
+}
+
+async fn removed_consent_unknown_member(nested: bool) {
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let (store, mut app) = Box::pin(consent_state_keeper(&w)).await;
+    let (_, mine) = Box::pin(proposed(&w, &mut shop, &mut app)).await;
+    app.accept_allowance(&mine).await.unwrap();
+    app.end_allowance(&mine).await.unwrap();
+    let (key, bytes) = app.app().protocol_scan(b"ac/").await.unwrap().remove(0);
+    let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        value["d"]["consent"],
+        json!({"removed": {"reason": "ended"}})
+    );
+    let backup = app.backup().await.unwrap();
+    let valid = Box::pin(restored_unreceived(&w, &backup)).await;
+    assert_eq!(valid.app().protocol_get(&key).await.unwrap(), Some(bytes));
+    drop(valid);
+    if nested {
+        value["d"]["consent"]["removed"]["unexpected"] = json!(true);
+    } else {
+        value["d"]["unexpected"] = json!(true);
+    }
+    Box::pin(put_consent_state(&mut app, &key, &value)).await;
+    let id = app.app_id();
+    drop(app);
+    let mut app = w
+        .load_on_clock(&w.alice, store, id, std::sync::Arc::clone(&w.clock))
+        .await;
+    assert_eq!(
+        app.app().protocol_get(&key).await.unwrap(),
+        Some(serde_json::to_vec(&value).unwrap())
+    );
+    let error = app.receive(None).await.unwrap_err();
+    assert!(error.to_string().contains("corrupt"), "{error:?}");
+    Box::pin(consent_state_restore_refused(
+        &w, &mut app, &backup, &key, &value,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_consent_state_removed_entry_unknown_member_is_lazy_and_refused() {
+    Box::pin(removed_consent_unknown_member(false)).await;
+}
+
+#[tokio::test]
+async fn test_consent_state_removed_branch_unknown_member_is_lazy_and_refused() {
+    Box::pin(removed_consent_unknown_member(true)).await;
+}
+
+#[tokio::test]
+async fn test_consent_state_supplied_held_values_restore_and_unknown_member_refuses() {
+    // `executed` supplies the signed grant and initial consent; it does not grant through
+    // an executor API. Both current Held values must survive the body reader.
+    let w = World::new();
+    let (_shop, _wallet, mut exec, _phone, _, mine) = Box::pin(executed(&w)).await;
+    let key = format!("ac/{}", pubky_switch_core::enc::b64(&mine)).into_bytes();
+    let bytes = exec.app().protocol_get(&key).await.unwrap().unwrap();
+    let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+    let backup = exec.backup().await.unwrap();
+    for confirmed in [false, true] {
+        value["d"]["consent"]["held"]["confirm_again"] = json!(confirmed);
+        Box::pin(put_consent_state(&mut exec, &key, &value)).await;
+        exec.receive(None).await.unwrap();
+        let restored = Box::pin(restored_unreceived(&w, &exec.backup().await.unwrap())).await;
+        assert_eq!(
+            Box::pin(consent_entry(&restored, &mine)).await,
+            Some(json!({"held": {"confirm_again": true}}))
+        );
+    }
+    value["d"]["consent"]["held"]["unexpected"] = json!(true);
+    Box::pin(put_consent_state(&mut exec, &key, &value)).await;
+    let error = exec.receive(None).await.unwrap_err();
+    assert!(error.to_string().contains("corrupt"), "{error:?}");
+    Box::pin(consent_state_restore_refused(
+        &w, &mut exec, &backup, &key, &value,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_consent_state_supplied_grant_notice_routes_and_unknown_member_refuses() {
+    // The grant is supplied by `executed`; ending the Allowance produces the target.
+    let w = World::new();
+    let (_shop, mut wallet, exec, _phone, _, mine) = Box::pin(executed(&w)).await;
+    wallet.end_allowance(&mine).await.unwrap();
+    let (key, bytes) = wallet.app().protocol_scan(b"en/").await.unwrap().remove(0);
+    let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+    let backup = wallet.backup().await.unwrap();
+    let restored = Box::pin(restored_unreceived(&w, &backup)).await;
+    assert_eq!(
+        restored.app().protocol_get(&key).await.unwrap(),
+        Some(bytes.clone())
+    );
+    drop(restored);
+    // The client routing call takes the decoded fields of the notice queued above.
+    let message = pubky_switch_core::message::Message {
+        kind: "paykit.executor_notice".into(),
+        msg_id: value["d"]["msg_id"].as_str().unwrap().to_owned(),
+        created_at_ms: w.clock.now_ms(),
+        from: pubky_switch_core::message::Sender {
+            identity: w.alice_id(),
+            app_id: wallet.app_id(),
+        },
+        to: w.alice_id(),
+        refs: vec![],
+        body: json!({"allowance_record": pubky_switch_core::enc::b64(&mine), "reason": "ended"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    };
+    assert_eq!(
+        wallet
+            .app_mut()
+            .recipients_for(&w.alice_id(), &message)
+            .await
+            .unwrap(),
+        vec![exec.app_id()]
+    );
+    value["d"]["unexpected"] = json!(true);
+    Box::pin(put_consent_state(&mut wallet, &key, &value)).await;
+    let error = wallet
+        .app_mut()
+        .recipients_for(&w.alice_id(), &message)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            pubky_switch_client::app::AppError::Refused(pubky_switch_client::app::Refusal::NotNow(
+                _
+            ))
+        ),
+        "{error:?}"
+    );
+    Box::pin(consent_state_restore_refused(
+        &w,
+        &mut wallet,
+        &backup,
+        &key,
+        &value,
+    ))
+    .await;
+    let error = wallet.receive(None).await.unwrap_err();
+    assert!(error.to_string().contains("corrupt"), "{error:?}");
+    wallet
+        .app_mut()
+        .protocol_commit(&[LocalWrite::Put { key, value: bytes }])
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_scan(b"en/").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_consent_state_real_owed_end_unknown_member_is_lazy_and_refused() {
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let (store, mut app) = Box::pin(consent_state_keeper(&w)).await;
+    let (_, mine) = Box::pin(crossing_while_held(
+        &w,
+        &mut shop,
+        &mut app,
+        SendsHeld::Blocked,
+    ))
+    .await;
+    assert!(Box::pin(ends_naming_both(&app, &mine)).await);
+    let (key, bytes) = app.app().protocol_scan(b"eo/").await.unwrap().remove(0);
+    let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+    app.receive(None).await.unwrap();
+    assert_eq!(app.app().protocol_get(&key).await.unwrap(), Some(bytes));
+    value["d"]["unexpected"] = json!(true);
+    Box::pin(put_consent_state(&mut app, &key, &value)).await;
+    let id = app.app_id();
+    drop(app);
+    let mut app = w
+        .load_on_clock(&w.alice, store, id, std::sync::Arc::clone(&w.clock))
+        .await;
+    assert_eq!(
+        app.app().protocol_get(&key).await.unwrap(),
+        Some(serde_json::to_vec(&value).unwrap())
+    );
+    let error = app.receive(None).await.unwrap_err();
+    assert!(error.to_string().contains("corrupt"), "{error:?}");
+    assert_eq!(
+        app.app().protocol_get(&key).await.unwrap(),
+        Some(serde_json::to_vec(&value).unwrap())
+    );
+    assert!(w.rail.all_executions().is_empty());
+    assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+}
+
+#[tokio::test]
+async fn test_consent_state_owed_end_body_discarded_restore_recovers_signed_end() {
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let mut app = Box::pin(keeper(&w)).await;
+    let (_, mine) = Box::pin(crossing_while_held(
+        &w,
+        &mut shop,
+        &mut app,
+        SendsHeld::Blocked,
+    ))
+    .await;
+    assert!(Box::pin(ends_naming_both(&app, &mine)).await);
+    let (key, bytes) = app.app().protocol_scan(b"eo/").await.unwrap().remove(0);
+    let owed: Value = serde_json::from_slice(&bytes).unwrap();
+    let original_id = owed["d"]["msg_id"].as_str().unwrap().to_owned();
+    let original = AllowanceRecord::read(
+        &serde_json::to_vec(&Box::pin(value(&app, &mine)).await).unwrap(),
+        &w.alice_id(),
+    )
+    .unwrap()
+    .end
+    .unwrap();
+    assert_eq!(original.message().msg_id, original_id);
+    // This body is intentionally not read at restore; the valid family key is counted.
+    app.app_mut()
+        .protocol_commit(&[LocalWrite::Put {
+            key,
+            value: b"unread body".to_vec(),
+        }])
+        .await
+        .unwrap();
+    let backup = app.backup().await.unwrap();
+    drop(app);
+    let mut restored = Box::pin(restored_unreceived(&w, &backup)).await;
+    assert!(restored
+        .app()
+        .protocol_scan(b"eo/")
+        .await
+        .unwrap()
+        .is_empty());
+    restored.receive(None).await.unwrap();
+    assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+    restored.unblock(&w.bob_id()).await.unwrap();
+    restored.receive(None).await.unwrap();
+    assert!(Box::pin(ends_naming_both(&restored, &mine)).await);
+    let summary = shop.receive(None).await.unwrap();
+    let delivered: Vec<_> = summary
+        .report
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            AppEvent::MessageReceived { kind, msg_id, .. } if kind == "paykit.allowance_end" => {
+                Some(msg_id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(delivered, vec![original_id]);
+    let recovered = AllowanceRecord::read(
+        &serde_json::to_vec(&Box::pin(value(&restored, &mine)).await).unwrap(),
+        &w.alice_id(),
+    )
+    .unwrap()
+    .end
+    .unwrap();
+    assert_eq!(recovered.hash(), original.hash());
+    assert_eq!(recovered.plaintext(), original.plaintext());
+    restored.receive(None).await.unwrap();
+    assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
+}
