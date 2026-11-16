@@ -634,11 +634,19 @@ async fn test_pubky_profile_follows_and_avatar_use_social_v1_once_migrated() {
         r#"{"name":"Alice","status":"away"}"#.into(),
     )
     .await;
-    put(
-        paykit_sdk::SOCIAL_V1_MIGRATION_FLAG_PATH.into(),
-        r#"{"migrated_at":1,"transform_rev":3,"skipped":[],"migrated":[]}"#.into(),
-    )
-    .await;
+    // The flag lists every migrated path, so an account with many follows writes well over 4 KiB.
+    let migrated: Vec<String> = (0..200)
+        .map(|i| format!("/pub/social/v1/follows/{i:052}.json"))
+        .collect();
+    let flag = serde_json::json!({
+        "migrated_at": 1,
+        "transform_rev": 3,
+        "skipped": [],
+        "migrated": migrated,
+    })
+    .to_string();
+    assert!(flag.len() > 8 * 1024);
+    put(paykit_sdk::SOCIAL_V1_MIGRATION_FLAG_PATH.into(), flag).await;
 
     let snapshot = bitkit
         .sdk

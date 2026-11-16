@@ -8,7 +8,8 @@ use crate::domain::contacts::{
 };
 
 const MAX_PUBKY_PROFILE_BYTES: usize = 256 * 1024;
-const MAX_MIGRATION_FLAG_BYTES: usize = 4 * 1024;
+// The flag lists every migrated object path; the pubky.app migrator reads it up to 64 MiB.
+const MAX_MIGRATION_FLAG_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PUBKY_APP_AVATAR_BYTES: usize = 5 * 1024 * 1024;
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>

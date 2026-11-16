@@ -461,6 +461,12 @@ mod tests {
             SocialVersion::V1
         );
         assert_eq!(flag(r#"{"transform_rev":4}"#), SocialVersion::V1);
+        let migrated: Vec<String> = (0..200)
+            .map(|i| format!("/pub/social/v1/follows/{i:052}.json"))
+            .collect();
+        let populated =
+            serde_json::json!({"transform_rev": 3, "skipped": [], "migrated": migrated});
+        assert_eq!(flag(&populated.to_string()), SocialVersion::V1);
         assert_eq!(
             SocialVersion::V1.profile_path(),
             "/pub/social/v1/profile.json"
