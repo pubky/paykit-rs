@@ -726,7 +726,7 @@ async fn remove_pending_write(storage: &pubky::SessionStorage, path: &str) -> Re
                     error,
                 ));
             }
-            Err(_) => tokio::time::sleep(Duration::from_millis(100 * (attempt + 1))).await,
+            Err(_) => paykit_lib::rt::sleep(Duration::from_millis(100 * (attempt + 1))).await,
         }
     }
     unreachable!("bounded marker removal attempts always return")

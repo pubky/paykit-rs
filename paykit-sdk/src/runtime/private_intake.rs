@@ -117,8 +117,8 @@ pub struct BufferedPrivateStreamIntakeReport {
 pub struct PrivateIntakeSupervisor {
     pub(super) lease_id: u64,
     stop: watch::Sender<bool>,
-    tasks: AsyncMutex<Vec<tokio::task::JoinHandle<()>>>,
-    task_handles: Vec<tokio::task::AbortHandle>,
+    tasks: AsyncMutex<Vec<paykit_lib::rt::JoinHandle<()>>>,
+    task_handles: Vec<paykit_lib::rt::AbortHandle>,
     health: Arc<AsyncRwLock<PrivateIntakeHealth>>,
     work: Arc<Notify>,
     capacity_released: Arc<Notify>,
@@ -140,7 +140,7 @@ impl PrivateIntakeSupervisor {
     pub fn is_finished(&self) -> bool {
         self.task_handles
             .iter()
-            .all(tokio::task::AbortHandle::is_finished)
+            .all(paykit_lib::rt::AbortHandle::is_finished)
     }
 
     /// Return current redacted transport health.
@@ -550,7 +550,7 @@ enum PrivateIntakeTopologyTrigger {
 }
 
 async fn wait_private_intake_topology_trigger(
-    refresh: &mut tokio::time::Interval,
+    refresh: &mut paykit_lib::rt::Interval,
     capacity_released: &Notify,
     topology_changed: &Notify,
     stop: &mut watch::Receiver<bool>,
@@ -701,13 +701,13 @@ async fn run_connected_private_intake_stream(
     mut handshake_pending: bool,
 ) -> PrivateIntakeEventLoopExit {
     let mut audit =
-        tokio::time::interval_at(tokio::time::Instant::now() + audit_delay, audit_interval);
-    audit.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut handshake_retry = tokio::time::interval_at(
-        tokio::time::Instant::now() + RECONNECT_DELAY,
+        paykit_lib::rt::interval_at(paykit_lib::rt::Instant::now() + audit_delay, audit_interval);
+    audit.set_missed_tick_behavior(paykit_lib::rt::MissedTickBehavior::Delay);
+    let mut handshake_retry = paykit_lib::rt::interval_at(
+        paykit_lib::rt::Instant::now() + RECONNECT_DELAY,
         RECONNECT_DELAY,
     );
-    handshake_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    handshake_retry.set_missed_tick_behavior(paykit_lib::rt::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             changed = stop.changed() => {
@@ -1041,11 +1041,11 @@ where
             let sdk = Arc::clone(self);
             let mut stop_rx = stop.subscribe();
             let stop_tx = stop.clone();
-            // THROWAWAY (#411): spawn_local on wasm32; see wasm_compat::spawn.
-            tasks.push(crate::wasm_compat::spawn(async move {
+            // THROWAWAY (#411): rt::spawn is tokio::spawn natively, spawn_local on wasm32.
+            tasks.push(paykit_lib::rt::spawn(async move {
                 let mut confirmed_expires_at = lease.expires_at;
-                let mut renewal = tokio::time::interval(SUPERVISOR_LEASE_RENEW_INTERVAL);
-                renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut renewal = paykit_lib::rt::interval(SUPERVISOR_LEASE_RENEW_INTERVAL);
+                renewal.set_missed_tick_behavior(paykit_lib::rt::MissedTickBehavior::Delay);
                 renewal.tick().await;
                 loop {
                     tokio::select! {
@@ -1071,8 +1071,8 @@ where
             let sdk = Arc::clone(self);
             let stop_rx = stop.subscribe();
             let health = Arc::clone(&health);
-            // THROWAWAY (#411): spawn_local on wasm32; see wasm_compat::spawn.
-            tasks.push(crate::wasm_compat::spawn(async move {
+            // THROWAWAY (#411): rt::spawn is tokio::spawn natively, spawn_local on wasm32.
+            tasks.push(paykit_lib::rt::spawn(async move {
                 sdk.clone()
                     .run_private_intake_topology(
                         topology,
@@ -1088,7 +1088,7 @@ where
         }
         let task_handles = tasks
             .iter()
-            .map(tokio::task::JoinHandle::abort_handle)
+            .map(paykit_lib::rt::JoinHandle::abort_handle)
             .collect();
         Ok(PrivateIntakeSupervisor {
             lease_id,
@@ -1114,8 +1114,8 @@ where
             mut groups,
             mut unresolved,
         } = topology;
-        let mut topology_refresh = tokio::time::interval(TOPOLOGY_REFRESH_INTERVAL);
-        topology_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut topology_refresh = paykit_lib::rt::interval(TOPOLOGY_REFRESH_INTERVAL);
+        topology_refresh.set_missed_tick_behavior(paykit_lib::rt::MissedTickBehavior::Delay);
         topology_refresh.tick().await;
         loop {
             if *stop.borrow() {
@@ -1162,8 +1162,8 @@ where
                 let topology_changed = Arc::clone(&notifications.topology_changed);
                 let stop_rx = epoch_stop.subscribe();
                 // Avoid another async layer: its nested future layout exceeds rustc's query depth.
-                // THROWAWAY (#411): spawn_local on wasm32; see wasm_compat::spawn.
-                handles.push(crate::wasm_compat::spawn(sdk.run_private_intake_group(
+                // THROWAWAY (#411): rt::spawn is tokio::spawn natively, spawn_local on wasm32.
+                handles.push(paykit_lib::rt::spawn(sdk.run_private_intake_group(
                     group,
                     config,
                     stop_rx,
@@ -1712,7 +1712,7 @@ async fn wait_retry_or_stop(stop: &mut watch::Receiver<bool>, delay: Duration) -
         return true;
     }
     tokio::select! {
-        _ = tokio::time::sleep(delay) => false,
+        _ = paykit_lib::rt::sleep(delay) => false,
         changed = stop.changed() => changed.is_err() || *stop.borrow(),
     }
 }

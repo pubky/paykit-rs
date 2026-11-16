@@ -297,7 +297,7 @@ where
                     && !shared_state_operation_active()
                     && attempt + 1 < CONCURRENT_UPDATE_MAX_ATTEMPTS =>
             {
-                tokio::time::sleep(std::time::Duration::from_millis(25 * (attempt as u64 + 1)))
+                paykit_lib::rt::sleep(std::time::Duration::from_millis(25 * (attempt as u64 + 1)))
                     .await;
                 continue;
             }

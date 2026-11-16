@@ -835,8 +835,10 @@ where
                     if paykit_lib::is_write_conflict(&err)
                         && attempt + 1 < APP_REGISTRY_UPDATE_MAX_ATTEMPTS =>
                 {
-                    tokio::time::sleep(std::time::Duration::from_millis(25 * (attempt as u64 + 1)))
-                        .await;
+                    paykit_lib::rt::sleep(std::time::Duration::from_millis(
+                        25 * (attempt as u64 + 1),
+                    ))
+                    .await;
                     continue;
                 }
                 Err(err) if paykit_lib::is_write_conflict(&err) => {

@@ -41,29 +41,5 @@ where
     Box::pin(future)
 }
 
-/// Spawn a background task.
-///
-/// Native: `tokio::spawn` (multi-thread capable, needs `Send`).
-/// wasm32: `tokio::task::spawn_local`. RUNTIME HAZARD: this panics unless it is
-/// called inside a `tokio::task::LocalSet`, and tokio's `time` driver needs a
-/// tokio runtime that wasm32-unknown-unknown cannot drive by itself. The
-/// runtime story (LocalSet vs. wasm_bindgen_futures::spawn_local plus a
-/// different JoinHandle/AbortHandle type) is owned by a later step.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>
-where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    tokio::spawn(future)
-}
-
-/// See the native variant.
-#[cfg(target_arch = "wasm32")]
-pub fn spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>
-where
-    F: Future + 'static,
-    F::Output: 'static,
-{
-    tokio::task::spawn_local(future)
-}
+// Task spawning and timers live in `paykit_lib::rt` (tokio on native,
+// spawn_local + setTimeout on wasm32).

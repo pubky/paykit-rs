@@ -413,7 +413,7 @@ where
         }
         // Lease-ID-fenced cleanup can retry once with fresh state. Never replay
         // an uncertain write or retry inside an invalidated storage operation.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        paykit_lib::rt::sleep(std::time::Duration::from_millis(50)).await;
         self.storage.transaction(operation()).await
     }
 
