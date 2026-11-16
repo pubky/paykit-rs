@@ -1,0 +1,12 @@
+<!doctype html>
+<!-- THROWAWAY (#411): HTTP cache staleness probe (see cache-probe.js). -->
+<html><head><meta charset="utf-8"><title>e2e-running</title></head>
+<body><pre id="out">running</pre>
+<script type="module">
+import { runProbe } from "./cache-probe.js";
+const out = document.getElementById("out");
+const lines = [];
+const log = (l) => { lines.push(l); out.textContent = lines.join("\n"); console.log(l); };
+runProbe(log).catch((e) => log(`FAIL ${e && e.message}\n${e && e.stack}`)).finally(() => { log("SUMMARY passed=0 failed=0"); document.title = "e2e-done"; });
+</script>
+</body></html>

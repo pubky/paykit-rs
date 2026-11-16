@@ -32,11 +32,19 @@ async function step(name, fn) {
     log(`PASS ${name} (${Math.round(performance.now() - started)} ms)${detail === undefined ? "" : ": " + detail}`);
     return true;
   } catch (e) {
-    log(`FAIL ${name} (${Math.round(performance.now() - started)} ms): ${e && (e.stack || e.message) || e}`);
+    log(`FAIL ${name} (${Math.round(performance.now() - started)} ms): ${errorText(e)}`);
     return false;
   }
 }
 function assert(cond, msg) { if (!cond) throw new Error(msg); }
+// Firefox and WebKit leave the message out of Error.stack (V8 puts it on the
+// first line), so log both when the stack does not already start with it.
+export function errorText(e) {
+  if (!e) return String(e);
+  const message = e.message ?? String(e);
+  if (!e.stack) return message;
+  return e.stack.includes(message) ? e.stack : `${message}\n${e.stack}`;
+}
 
 // ---------------------------------------------------------------------------
 // IndexedDB state stores
@@ -108,7 +116,7 @@ async function passLoadBarrier(dbName) {
 // IndexedDB-backed PaykitStateStore with the SDK state blob in plaintext.
 // THROWAWAY (#411): the blob holds Noise static and link secrets and
 // Receipt keys; see encryptedIdbStateStore for the WebCrypto-wrapped variant.
-function idbStateStore(dbName) {
+export function idbStateStore(dbName) {
   const dbPromise = openIdb(dbName);
   const stats = { loads: 0, saves: 0, conflicts: 0, lastBytes: 0 };
   return {
@@ -143,7 +151,7 @@ function idbStateStore(dbName) {
 // CryptoKey is stored in the same browser profile as the ciphertext, so
 // profile/disk theft gets both; rollback by replaying an older complete row
 // {revision, iv, ct} still decrypts (no monotonic counter outside the store).
-function encryptedIdbStateStore(dbName) {
+export function encryptedIdbStateStore(dbName) {
   const dbPromise = openIdb(dbName);
   // Get-or-create must be atomic across tabs/store objects: a naive
   // "get, generate if missing, put" lets two openers each install their own
@@ -222,11 +230,18 @@ function bytesContainAscii(bytes, text) {
 //   not arrive in time. Cleared once headers arrive, so long-lived event
 //   streams are not cut; a body that stalls after the headers is NOT bounded.
 // ---------------------------------------------------------------------------
-const fetchShim = { blackholeTo: null, headersTimeoutMs: null, rewrites: 0, headerTimeouts: 0, lastRewritten: null };
+// - noStore (page query `?nostore=1`): THROWAWAY (#411) send every request
+//   with `cache: "no-store"`. reqwest's wasm fetch uses the default cache
+//   mode, and the homeserver answers reads with `cache-control: private,
+//   must-revalidate` plus `last-modified` and no max-age, so a browser may
+//   serve a heuristically fresh cached copy (see www/cache-probe.js).
+const fetchShim = { blackholeTo: null, headersTimeoutMs: null, rewrites: 0, headerTimeouts: 0, lastRewritten: null,
+  noStore: new URLSearchParams(globalThis.location.search).get("nostore") === "1" };
 const realFetch = globalThis.fetch.bind(globalThis);
 globalThis.fetch = (input, init) => {
-  if (!fetchShim.blackholeTo && !fetchShim.headersTimeoutMs) return realFetch(input, init);
+  if (!fetchShim.blackholeTo && !fetchShim.headersTimeoutMs && !fetchShim.noStore) return realFetch(input, init);
   let req = new Request(input, init);
+  if (fetchShim.noStore) req = new Request(req, { cache: "no-store" });
   if (fetchShim.blackholeTo && /^https?:\/\/(localhost|127\.0\.0\.1):6286\//.test(req.url)) {
     const u = new URL(req.url);
     req = new Request(`http://127.0.0.1:${fetchShim.blackholeTo}${u.pathname}${u.search}`, req);
@@ -257,7 +272,7 @@ async function untilLinked(alice, bob) {
 
 async function run() {
   log(`INFO userAgent ${navigator.userAgent}`);
-  log(`INFO origin ${location.origin}; context ${typeof window === "undefined" ? "DedicatedWorkerGlobalScope" : "Window"}`);
+  log(`INFO origin ${location.origin}; context ${typeof window === "undefined" ? "DedicatedWorkerGlobalScope" : "Window"}; fetch cache no-store=${fetchShim.noStore}`);
   await step("load wasm module", async () => { await init(); });
 
   let alice, bob;
@@ -811,7 +826,7 @@ export async function runE2e(onLine) {
   try {
     await run();
   } catch (e) {
-    log(`FAIL driver: ${e && (e.stack || e.message) || e}`);
+    log(`FAIL driver: ${errorText(e)}`);
   }
   const failed = results.filter((l) => l.startsWith("FAIL")).length;
   const passed = results.filter((l) => l.startsWith("PASS")).length;
