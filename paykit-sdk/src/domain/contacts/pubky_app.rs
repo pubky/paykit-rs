@@ -197,32 +197,89 @@ fn validate_pubky_profile_update(
     Ok(())
 }
 
-/// Pubky social v1 accepts only `pubky://`, `http://` and `https://` images and
-/// `http://` and `https://` links, in lower case.
+/// Pubky social v1 stores an image as a canonical `pubky://`, `http://` or `https://`
+/// reference and a link as a canonical web URL, and a public profile never references a
+/// private object (pubky-social-specs `validate_reference`).
 fn validate_social_v1_update(profile: &PubkyProfile, update: &PubkyProfileUpdate) -> Result<()> {
-    const WEB: [&str; 2] = ["http://", "https://"];
     if update.image.is_some() {
         if let Some(image) = &profile.image {
-            if !["pubky://", WEB[0], WEB[1]]
-                .iter()
-                .any(|scheme| image.starts_with(scheme))
-            {
+            if image.starts_with("pubky") {
+                social_v1_pubky_reference(image)?;
+            } else if !is_social_v1_web_uri(image) {
                 return Err(protocol(
-                    "Pubky profile image must be a pubky, http or https URI".into(),
+                    "Pubky profile image must be a canonical pubky or web URI".into(),
                 ));
             }
         }
     }
     if update.links.is_some() {
         for link in profile.links.iter().flatten() {
-            if !WEB.iter().any(|scheme| link.url.starts_with(scheme)) {
+            if !is_social_v1_web_uri(&link.url) {
                 return Err(protocol(
-                    "Pubky profile link URL must be an http or https URL".into(),
+                    "Pubky profile link URL must be a canonical http or https URL".into(),
                 ));
             }
         }
     }
     Ok(())
+}
+
+/// `pubky://<public key>[/<path>]` with no empty, `.` or `..` segment and no `%`, `?`, `#`,
+/// control or whitespace character, outside the owner's `/priv` root.
+fn social_v1_pubky_reference(uri: &str) -> Result<()> {
+    let invalid = || protocol("Pubky profile image must be a canonical pubky or web URI".into());
+    let rest = uri.strip_prefix("pubky://").ok_or_else(invalid)?;
+    let (host, path) = match rest.split_once('/') {
+        Some((host, path)) => (host, Some(path)),
+        None => (rest, None),
+    };
+    PubkyPublicKey::new(host).map_err(|_| invalid())?;
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let canonical_segment = |seg: &str| {
+        !seg.is_empty()
+            && seg != "."
+            && seg != ".."
+            && !seg
+                .chars()
+                .any(|c| matches!(c, '%' | '?' | '#') || c.is_ascii_control() || c.is_whitespace())
+    };
+    if !path.split('/').all(canonical_segment) {
+        return Err(invalid());
+    }
+    if path == "priv" || path.starts_with("priv/") {
+        return Err(protocol(
+            "Pubky profile image must not reference a private object".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// An `http://` or `https://` URL with a host and no control or whitespace character.
+fn is_social_v1_web_uri(uri: &str) -> bool {
+    let Some(rest) = uri
+        .strip_prefix("http://")
+        .or_else(|| uri.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    if uri
+        .chars()
+        .any(|c| c.is_ascii_control() || c.is_whitespace())
+    {
+        return false;
+    }
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = if host_port.starts_with('[') {
+        host_port
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    !host.is_empty()
 }
 
 fn validate_name(name: &str) -> Result<()> {
@@ -502,6 +559,43 @@ mod tests {
             SocialVersion::V1
         )
         .is_ok());
+        let key = "o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo";
+        for bad in [
+            format!("pubky://{key}/priv/social/v1/files/A.jpg"),
+            format!("pubky://{key}/priv"),
+            format!("pubky{key}/pub/social/v1/files/A.jpg"),
+            format!("pubky://{key}/pub//files/A.jpg"),
+            format!("pubky://{key}/pub/../priv/A.jpg"),
+            "pubky://not-a-key/pub/social/v1/files/A.jpg".into(),
+            "https:///a.png".into(),
+        ] {
+            assert!(
+                merge_pubky_profile_json(None, &image(&bad), SocialVersion::V1).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(merge_pubky_profile_json(
+            None,
+            &image(&format!("pubky://{key}")),
+            SocialVersion::V1
+        )
+        .is_ok());
+        let private = merge_pubky_profile_json(
+            None,
+            &image(&format!("pubky://{key}/priv/social/v1/files/A.jpg")),
+            SocialVersion::V1,
+        )
+        .unwrap_err();
+        assert!(private.to_string().contains("private object"), "{private}");
+        assert!(merge_pubky_profile_json(
+            None,
+            &image(&format!("pubky://{key}/priv/social/v1/files/A.jpg")),
+            SocialVersion::V0
+        )
+        .is_ok());
+        assert!(
+            merge_pubky_profile_json(None, &link("https://x.com/a b"), SocialVersion::V1).is_err()
+        );
     }
 
     #[test]
