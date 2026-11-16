@@ -1036,8 +1036,9 @@ pub struct Usage {
 }
 
 impl Usage {
-    /// The lifetime amount: compacted totals, reserved and spent entries, and compacted
-    /// failed attempts whose claim now shows `done`.
+    /// The lifetime amount: compacted spent totals and counted entries, including
+    /// compacted failed attempts. Failures stay spent unless bound durable
+    /// never-dispatched evidence releases them; `done` or paid evidence always spends.
     pub fn lifetime(&self) -> &Decimal {
         &self.lifetime
     }
