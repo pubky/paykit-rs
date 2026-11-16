@@ -52,6 +52,7 @@ mod error;
 mod floor;
 mod hold;
 mod journal;
+mod loss;
 mod marks;
 mod notices;
 mod pay;
@@ -79,6 +80,7 @@ pub use destination::IDENTITY_GRACE_MS;
 pub use divergent::DivergentRecord;
 pub use error::{PaykitError, Refusal, Result};
 pub use journal::{PaymentView, Stage};
+pub use loss::LossBoundary;
 pub use marks::MAX_DROPPED_MARKS;
 pub use notices::{Notice, NoticeKind};
 pub use pay::{

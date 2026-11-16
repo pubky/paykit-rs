@@ -34,9 +34,10 @@ use paykit_lib::records::{
 use paykit_lib::scopes::{acts_as_payee, check_certificate, PaykitScope, ScopeName};
 use paykit_lib::{Label, PaykitKindRules};
 use pubky_switch_client::app::{
-    decode_local_state, Collection as SwitchCollection, Effect, LocalView, LocalWrite, LossActions,
-    MissedEntries, OpaqueRule, Outcome, Protocol, ProtocolLayer, ProviderLoss, ReceiveContext,
-    ReceivedMessage, ResendNeeded, RestoreContext, StoreFailure, WriteBase,
+    decode_local_state, AppBackup, AppError, Collection as SwitchCollection, Effect, LocalView,
+    LocalWrite, LossActions, MissedEntries, OpaqueRule, Outcome, Protocol, ProtocolLayer,
+    ProviderLoss, ReceiveContext, ReceivedMessage, ResendNeeded, RestoreContext, StoreFailure,
+    WriteBase,
 };
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
@@ -284,6 +285,18 @@ fn store_failure(error: pubky_switch_client::app::AppError) -> StoreFailure {
     }
 }
 
+/// A local read failure keeps its real store error; malformed protocol state is corrupt.
+pub(crate) fn view_failure(error: crate::PaykitError) -> StoreFailure {
+    match error {
+        crate::PaykitError::Client(error)
+            if error != pubky_switch_client::app::AppError::Store(StoreError::Corrupt) =>
+        {
+            store_failure(error)
+        }
+        _ => StoreFailure::of_entry(StoreError::Corrupt),
+    }
+}
+
 /// How many keys of each family whose size the runtime bounds a restored layer holds
 /// ([`restore_paykit_layer`]).
 #[derive(Default)]
@@ -449,6 +462,17 @@ pub(crate) fn restore_paykit_layer(
                 if mark.blocked() {
                     writes.push(LocalWrite::Put { key, value });
                 }
+                continue;
+            }
+            StateKey::LossBoundary => {
+                state::restored::<crate::LossBoundary>(&key, &value, &binder)
+                    .map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::NotPaidBeforeLoss(_) => {
+                state::restored::<bool>(&key, &value, &binder).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
                 continue;
             }
             StateKey::Journal(attempt) => attempt,
@@ -703,6 +727,71 @@ pub(crate) fn restore_paykit_layer(
     .map_err(|_| String::from("the restore's block widening can't be written"))?;
     writes.push(widening);
     Ok(writes)
+}
+
+/// Refuses `backup` when the provider loss its Paykit layer keeps (`pl`) was recovered at a
+/// later generation than the one its client follows (Paykit spec 7.3): the protocol's loss
+/// step writes the boundary of the loss the client follows, in the commit that follows it,
+/// so no run keeps one above it, and one above would leave every later loss's step writing
+/// nothing ([`crate::loss::loss_writes`]). Checked before the restore writes anything. A
+/// layer or value that doesn't read is left to the layer's own check
+/// ([`restore_paykit_layer`]), which refuses it.
+///
+/// The client offers no reading of the generation a backup's client follows before the
+/// restore's one commit, which writes Paykit's layer too, so this reads it from the
+/// backup's bytes as the client writes them (`meta`): a backup in which it can't be read
+/// is refused, never restored unchecked.
+///
+/// # Errors
+///
+/// [`pubky_switch_client::app::AppError::InvalidData`] for such a backup, and for one
+/// keeping a loss whose client's generation can't be read; the client's errors for one
+/// whose bytes don't read.
+pub(crate) fn check_restored_loss(backup: &AppBackup) -> crate::error::Result<()> {
+    /// The part of the client's backup this check reads: the identity and the generation
+    /// its client follows.
+    #[derive(Deserialize)]
+    struct Followed {
+        meta: FollowedMeta,
+    }
+    #[derive(Deserialize)]
+    struct FollowedMeta {
+        #[serde(with = "serde_b64")]
+        identity: [u8; 32],
+        generation: u64,
+    }
+    let Some(layer) = backup.protocol_layer()? else {
+        return Ok(());
+    };
+    let Some(state) = decode_local_state(&layer.data) else {
+        return Ok(());
+    };
+    let Some((at, value)) = state
+        .iter()
+        .find(|(at, _)| at.as_slice() == key::LOSS_BOUNDARY.as_bytes())
+    else {
+        return Ok(());
+    };
+    let followed: Followed = serde_json::from_slice(&backup.to_bytes()?).map_err(|_| {
+        AppError::InvalidData(
+            "the backup: Paykit spec 7.3: the generation its client follows can't be read, \
+             so its provider loss can't be checked"
+                .into(),
+        )
+    })?;
+    let binder = state::Binder::unblinded(followed.meta.identity);
+    let Ok(kept) = state::restored::<crate::loss::LossBoundary>(at, value, &binder) else {
+        return Ok(());
+    };
+    if kept.generation > followed.meta.generation {
+        return Err(AppError::InvalidData(
+            "the backup: Paykit spec 7.3: its provider loss is of a later generation than \
+             its client follows"
+                .into(),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 impl Protocol for PaykitProtocol {
@@ -982,14 +1071,7 @@ impl Protocol for PaykitProtocol {
     ) -> Result<LossActions, StoreFailure> {
         // A store that fails, or a peer key that doesn't read, is the step's failure, never
         // an empty list of counterparties: the recovery asks again.
-        let peers = state::view_scan::<u64>(view, key::PEERS).map_err(|error| match error {
-            crate::PaykitError::Client(error)
-                if error != pubky_switch_client::app::AppError::Store(StoreError::Corrupt) =>
-            {
-                store_failure(error)
-            }
-            _ => StoreFailure::of_entry(StoreError::Corrupt),
-        })?;
+        let peers = state::view_scan::<u64>(view, key::PEERS).map_err(view_failure)?;
         let mut conversations = Vec::with_capacity(peers.len());
         for (rest, _) in peers {
             let peer = unb64_array::<32>(&rest)
@@ -998,6 +1080,7 @@ impl Protocol for PaykitProtocol {
         }
         let mut actions = self.provider_lost(loss)?;
         actions.conversations = conversations;
+        actions.local.extend(crate::loss::loss_writes(loss, view)?);
         Ok(actions)
     }
 

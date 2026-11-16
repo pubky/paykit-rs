@@ -27,6 +27,7 @@ mod outcome_record;
 mod period_credit;
 mod periods;
 mod protocols;
+mod provider_loss;
 mod pruning;
 mod public;
 mod receipts;

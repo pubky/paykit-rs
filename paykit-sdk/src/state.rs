@@ -34,6 +34,8 @@
 //! | `ct` | the acceptance time of the last Paykit entry the receive step passed | |
 //! | `rh` | the hold a restore set on the open requests (`hold.rs`); never backed up | |
 //! | `hc/<record key>` | the user confirmed a held request; never backed up | |
+//! | `pl` | the latest provider-loss boundary followed, retained across restore (`loss.rs`, Paykit spec 7.3) | |
+//! | `pn/<obligation>` | the user states this obligation was not paid before the kept loss; a newer loss clears these statements | |
 //! | `mh` | the hold a `missed` item set on the open requests, bounded by a time: the item's last acceptance time, or, for an item whose end isn't known, a service time verified after the read that handed it (`hold.rs`); never restored | |
 //! | `mu` | set by a `missed` item whose end isn't known: every open request is held, as after a restore, until a read that completes bounds the hold by the service time verified then, into `mh`, and clears it (`hold.rs`); never restored | |
 //! | `ml` | set by a `missed` item: the shared records aren't listed by Paykit since, so a record's absence means nothing yet; cleared by Paykit's next listing (`hold.rs`); never restored | |
@@ -94,6 +96,7 @@ use crate::hold::MissedHold;
 use crate::hold::OwnResendOwed;
 use crate::hold::RestoreHold;
 use crate::journal::JournalEntry;
+use crate::loss::LossBoundary;
 use crate::marks::{DropMark, KeyWaitMark};
 use crate::notices::KeptNotice;
 use crate::pay::ListAsk;
@@ -260,7 +263,7 @@ impl<'a> Binder<'a> {
     }
 
     /// The binding of a reader without the certificate or the naming key, a [`LocalView`].
-    fn unblinded(own: [u8; 32]) -> Self {
+    pub(crate) fn unblinded(own: [u8; 32]) -> Self {
         Self {
             own,
             cert: None,
@@ -478,6 +481,7 @@ impl Stored for bool {
             | StateKey::MissedConsents
             | StateKey::PayerPassOwed
             | StateKey::HoldConfirmed(_)
+            | StateKey::NotPaidBeforeLoss(_)
             | StateKey::FloorOpened(_)
             | StateKey::Taken(_)
                 if *self =>
@@ -858,6 +862,19 @@ impl Stored for MissedHold {
     }
 }
 
+impl sealed::Sealed for LossBoundary {}
+
+/// The provider loss kept, which names nothing: recovered at a generation after another, its
+/// residual window ending no earlier than its declaration.
+impl Stored for LossBoundary {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::LossBoundary if self.valid() => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for OwnResendOwed {}
 
 /// The restore's re-send owed: a retained subset of waiting counterparties is nonempty,
@@ -1119,6 +1136,8 @@ pub(crate) mod key {
     pub(crate) const CURSOR_TIME: &str = "ct";
     pub(crate) const RESTORE_HOLD: &str = "rh";
     pub(crate) const MISSED_HOLD: &str = "mh";
+    pub(crate) const LOSS_BOUNDARY: &str = "pl";
+    pub(crate) const NOT_PAID_BEFORE_LOSS: &str = "pn/";
     /// A `missed` item's hold whose end isn't known yet (`Paykit::bound_missed_hold`).
     pub(crate) const MISSED_END_UNKNOWN: &str = "mu";
     pub(crate) const HOLD_CONFIRMED: &str = "hc/";
@@ -1369,6 +1388,10 @@ pub(crate) mod key {
         format!("spam/{}", b64(sender))
     }
 
+    pub(crate) fn not_paid_before_loss(obligation: &[u8; 32]) -> String {
+        format!("{NOT_PAID_BEFORE_LOSS}{}", b64(obligation))
+    }
+
     pub(crate) fn resent(requester: &[u8; 32], msg_id: &str) -> String {
         format!("rs/{}/{msg_id}", b64(requester))
     }
@@ -1408,6 +1431,10 @@ pub(crate) enum StateKey {
     KeptCancellation([u8; 32]),
     /// `ct`: the acceptance time of the last entry the cursor passed.
     CursorTime,
+    /// `pl`: the last provider loss followed.
+    LossBoundary,
+    /// `pn/<obligation>`: not paid before the kept loss.
+    NotPaidBeforeLoss([u8; 32]),
     /// `rh`: the hold a restore set.
     RestoreHold,
     /// `mh`: the hold a `missed` item set.
@@ -1549,6 +1576,7 @@ impl StateKey {
             "ct" => Self::CursorTime,
             "rh" => Self::RestoreHold,
             "mh" => Self::MissedHold,
+            "pl" => Self::LossBoundary,
             "mu" => Self::MissedEndUnknown,
             "nl" => Self::RecordsUnlisted,
             "ml" => Self::MissedUnlisted,
@@ -1591,6 +1619,7 @@ impl StateKey {
                     "kc" => Self::KeptCancellation(b64_32(rest)?),
                     "bk" => Self::OwnBlock(b64_32(rest)?),
                     "hc" => Self::HoldConfirmed(b64_32(rest)?),
+                    "pn" => Self::NotPaidBeforeLoss(b64_32(rest)?),
                     "fo" => Self::FloorOpened(b64_32(rest)?),
                     "lh" => Self::HeldList(b64_32(rest)?),
                     "side" => Self::Side(msg_id(rest)?),
@@ -1835,6 +1864,51 @@ mod tests {
     fn reads<T: Stored>(key: &str, value: serde_json::Value) -> bool {
         let bytes = serde_json::to_vec(&serde_json::json!({ "v": 1, "d": value })).unwrap();
         bound::<T>(key.as_bytes(), &bytes, &Binder::unblinded([1; 32])).is_ok()
+    }
+
+    #[test]
+    fn test_loss_current_boundary_and_statement_bind_to_their_keys() {
+        let loss = |generation, declared, until| {
+            serde_json::json!({
+                "generation": generation, "declared_at_ms": declared, "uncertain_until_ms": until
+            })
+        };
+        assert!(reads::<LossBoundary>(key::LOSS_BOUNDARY, loss(2, 5, 9)));
+        assert!(reads::<LossBoundary>(key::LOSS_BOUNDARY, loss(2, 5, 5)));
+        assert!(reads::<LossBoundary>(key::LOSS_BOUNDARY, loss(2, 0, 9)));
+        assert!(!reads::<LossBoundary>(key::LOSS_BOUNDARY, loss(2, 9, 5)));
+        assert!(!reads::<LossBoundary>(key::LOSS_BOUNDARY, loss(0, 5, 9)));
+        assert!(!reads::<LossBoundary>(key::MISSED_HOLD, loss(2, 5, 9)));
+        let statement = key::not_paid_before_loss(&[2; 32]);
+        assert!(reads::<bool>(&statement, serde_json::json!(true)));
+        assert!(!reads::<bool>(&statement, serde_json::json!(false)));
+    }
+
+    #[test]
+    fn test_loss_current_boundary_requires_exact_members() {
+        let loss = serde_json::json!({
+            "generation": 2, "declared_at_ms": 5, "uncertain_until_ms": 9
+        });
+        let mut unknown = loss.clone();
+        unknown["extra"] = serde_json::json!(true);
+        assert!(!reads::<LossBoundary>(key::LOSS_BOUNDARY, unknown));
+        for member in ["generation", "declared_at_ms", "uncertain_until_ms"] {
+            let mut missing = loss.clone();
+            missing.as_object_mut().unwrap().remove(member);
+            assert!(!reads::<LossBoundary>(key::LOSS_BOUNDARY, missing));
+            let mut null = loss.clone();
+            null[member] = serde_json::Value::Null;
+            assert!(!reads::<LossBoundary>(key::LOSS_BOUNDARY, null));
+            let bytes = format!(
+                r#"{{"v":1,"d":{{"generation":2,"declared_at_ms":5,"uncertain_until_ms":9,"{member}":7}}}}"#
+            );
+            assert!(bound::<LossBoundary>(
+                key::LOSS_BOUNDARY.as_bytes(),
+                bytes.as_bytes(),
+                &Binder::unblinded([1; 32])
+            )
+            .is_err());
+        }
     }
 
     #[test]
@@ -2286,6 +2360,11 @@ mod tests {
             (key::CURSOR_TIME.into(), StateKey::CursorTime),
             (key::RESTORE_HOLD.into(), StateKey::RestoreHold),
             (key::MISSED_HOLD.into(), StateKey::MissedHold),
+            (key::LOSS_BOUNDARY.into(), StateKey::LossBoundary),
+            (
+                key::not_paid_before_loss(&pubky),
+                StateKey::NotPaidBeforeLoss(pubky),
+            ),
             (key::MISSED_END_UNKNOWN.into(), StateKey::MissedEndUnknown),
             (key::RECORDS_UNLISTED.into(), StateKey::RecordsUnlisted),
             (key::MISSED_UNLISTED.into(), StateKey::MissedUnlisted),

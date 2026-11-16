@@ -481,6 +481,7 @@ impl Paykit {
         // whole journal (`PaykitProtocol::restore_layer`), before anything is written; then
         // both go in one commit: on an error, neither is in the store.
         check_orphan_window(&config, rail.as_ref())?;
+        crate::protocol::check_restored_loss(&backup.app)?;
         let protocol = Self::new_protocol(&rail);
         let app = App::restore(
             env.clone(),
