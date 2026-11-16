@@ -1,8 +1,9 @@
 [workspace]
 resolver = "2"
 # THROWAWAY (#411): paykit-wasm-tests holds offline smoke tests that run on
-# native and wasm32 (Node, headless Chrome, dedicated worker).
-members = ["paykit-lib", "paykit-ffi", "paykit-sdk", "paykit-wasm-tests"]
+# native and wasm32 (Node, headless Chrome, dedicated worker). paykit-wasm is
+# a thin wasm-bindgen facade for the browser end-to-end spike.
+members = ["paykit-lib", "paykit-ffi", "paykit-sdk", "paykit-wasm", "paykit-wasm-tests"]
 
 [patch.crates-io]
 rustls-platform-verifier-android = { path = "vendor/rustls-platform-verifier-android" }
