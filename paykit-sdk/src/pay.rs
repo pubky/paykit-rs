@@ -130,8 +130,9 @@ pub struct PayOptions {
     /// The user has seen that the payee may have cancelled this request since the backup the
     /// app was restored from, or a `missed` item, and pays it anyway
     /// ([`Refusal::HeldAfterRestore`]; Paykit spec 7.2, "What a restore loses"). It ends the
-    /// request's hold; it never overrides a cancellation the app holds.
-    pub possibly_cancelled_confirmed: Option<UserConfirmed>,
+    /// request's hold; it never overrides a cancellation the app holds. Return the exact
+    /// hold shown: another restore or missed item requires a new confirmation.
+    pub possibly_cancelled_confirmed: Option<crate::HeldRequest>,
     /// The payment of a request from a blocked payee the user was shown and chose to make,
     /// as a [`Refusal::Blocked`] gave it (Paykit spec 8.1): only that same payment is made.
     pub blocked_confirmed: Option<BlockedPayment>,
@@ -199,7 +200,7 @@ impl PayOptions {
     /// 7.2, "What a restore loses"). It ends the request's hold; it never overrides a
     /// cancellation the app holds.
     #[must_use]
-    pub fn with_possibly_cancelled_confirmed(mut self, confirmed: UserConfirmed) -> Self {
+    pub fn with_possibly_cancelled_confirmed(mut self, confirmed: crate::HeldRequest) -> Self {
         self.possibly_cancelled_confirmed = Some(confirmed);
         self
     }
@@ -922,14 +923,13 @@ impl Paykit {
             .await?;
             Box::pin(self.refuse_while_paused(&[record_key])).await?;
         }
-        let end_hold = if self.held(&record_key, &record).await? {
-            if options.possibly_cancelled_confirmed.is_none() {
-                return Err(Refusal::HeldAfterRestore.into());
-            }
-            Some(record_key)
-        } else {
-            None
-        };
+        let end_hold = self
+            .pass_hold(
+                &record_key,
+                &record,
+                options.possibly_cancelled_confirmed.as_ref(),
+            )
+            .await?;
         // A blocked payee's request is paid only once the user confirms it (Paykit spec 8.1).
         let blocked = self.denied_for_user(&request.payee).await?;
         let obligation = self.obligation(&request.payee, &request.request_hash, 0);

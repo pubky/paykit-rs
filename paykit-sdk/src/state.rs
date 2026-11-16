@@ -489,6 +489,17 @@ impl Stored for bool {
     }
 }
 
+impl sealed::Sealed for crate::hold::HoldEpoch {}
+
+impl Stored for crate::hold::HoldEpoch {
+    fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
+        match family {
+            StateKey::HoldEpoch => Ok(()),
+            _ => corrupt(),
+        }
+    }
+}
+
 impl sealed::Sealed for RestoreHold {}
 
 /// A restore's hold: counterparties already asked are ascending, each once, and cleared
@@ -1118,6 +1129,8 @@ pub(crate) mod key {
     pub(crate) const KEPT_CANCELLATIONS: &str = "kc/";
     pub(crate) const CURSOR_TIME: &str = "ct";
     pub(crate) const RESTORE_HOLD: &str = "rh";
+    /// The identity of the latest restore or missed hold.
+    pub(crate) const HOLD_EPOCH: &str = "he";
     pub(crate) const MISSED_HOLD: &str = "mh";
     /// A `missed` item's hold whose end isn't known yet (`Paykit::bound_missed_hold`).
     pub(crate) const MISSED_END_UNKNOWN: &str = "mu";
@@ -1410,6 +1423,8 @@ pub(crate) enum StateKey {
     CursorTime,
     /// `rh`: the hold a restore set.
     RestoreHold,
+    /// `he`: the identity of the latest restore or missed hold.
+    HoldEpoch,
     /// `mh`: the hold a `missed` item set.
     MissedHold,
     /// `mu`: a `missed` item's hold whose end isn't known yet.
@@ -1548,6 +1563,7 @@ impl StateKey {
         Some(match text {
             "ct" => Self::CursorTime,
             "rh" => Self::RestoreHold,
+            "he" => Self::HoldEpoch,
             "mh" => Self::MissedHold,
             "mu" => Self::MissedEndUnknown,
             "nl" => Self::RecordsUnlisted,
@@ -1835,6 +1851,21 @@ mod tests {
     fn reads<T: Stored>(key: &str, value: serde_json::Value) -> bool {
         let bytes = serde_json::to_vec(&serde_json::json!({ "v": 1, "d": value })).unwrap();
         bound::<T>(key.as_bytes(), &bytes, &Binder::unblinded([1; 32])).is_ok()
+    }
+
+    #[test]
+    fn test_hold_epoch_is_bound_to_its_key() {
+        let epoch = crate::hold::HoldEpoch::new().unwrap();
+        let body = serde_json::to_value(epoch).unwrap();
+        assert!(reads::<crate::hold::HoldEpoch>(
+            key::HOLD_EPOCH,
+            body.clone()
+        ));
+        assert!(!reads::<crate::hold::HoldEpoch>(key::RESTORE_HOLD, body));
+        assert!(!reads::<crate::hold::HoldEpoch>(
+            key::HOLD_EPOCH,
+            serde_json::json!("short")
+        ));
     }
 
     #[test]
@@ -2285,6 +2316,7 @@ mod tests {
             ),
             (key::CURSOR_TIME.into(), StateKey::CursorTime),
             (key::RESTORE_HOLD.into(), StateKey::RestoreHold),
+            (key::HOLD_EPOCH.into(), StateKey::HoldEpoch),
             (key::MISSED_HOLD.into(), StateKey::MissedHold),
             (key::MISSED_END_UNKNOWN.into(), StateKey::MissedEndUnknown),
             (key::RECORDS_UNLISTED.into(), StateKey::RecordsUnlisted),
