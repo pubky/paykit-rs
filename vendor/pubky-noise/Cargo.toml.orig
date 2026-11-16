@@ -1,0 +1,32 @@
+[package]
+name = "pubky-noise"
+description = "Fully-integrated Noise AE framework in pubky-sdk"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "MIT"
+repository = "https://github.com/pubky/pubky-noise"
+keywords = ["pubky", "noise"]
+categories = ["cryptography"]
+
+[features]
+test-utils = []
+
+[dependencies]
+pubky = "0.16.2"
+chacha20poly1305 = "0.10.1"
+ed25519-dalek = "3.0.0"
+curve25519-dalek = "5.0.0"
+snow = { version = "0.10.0", features = ["use-sha2"] }
+getrandom = "0.3"
+sha2 = "0.11.0"
+hex = "0.4"
+rand = "0.9.0"
+reqwest = { version = "0.13", default-features = false }
+
+[dev-dependencies]
+bytes = "1"
+h2 = "0.4"
+http = "1"
+reqwest = { version = "0.13", default-features = false, features = ["http2"] }
+tokio = { version = "1.47.1", features = ["macros", "rt", "net", "sync", "time"] }

@@ -4,3 +4,7 @@ members = ["paykit-lib", "paykit-ffi", "paykit-sdk"]
 
 [patch.crates-io]
 rustls-platform-verifier-android = { path = "vendor/rustls-platform-verifier-android" }
+# THROWAWAY (#411): snow 0.10.0's `std` feature enables `ring/std` without `?`,
+# which turns on the optional `ring` dependency. ring cannot build for wasm32.
+snow = { path = "vendor/snow" }
+pubky-noise = { path = "vendor/pubky-noise" }
