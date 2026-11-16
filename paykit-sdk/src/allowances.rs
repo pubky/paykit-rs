@@ -165,7 +165,7 @@ pub struct SentAllowance {
 
 /// An entry of the consent list (`ac/<record key>`, Paykit spec 8.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Consent {
     /// On the list: the executor may pay under it, unless `confirm_again`, set by a restore
     /// until the user confirms it again.
@@ -198,6 +198,7 @@ impl Consent {
 /// counterparty and Allowance ID, which derive the record key its key names, so a read
 /// proves the entry is that Allowance's (`state::Stored`), and its [`Consent`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ConsentEntry {
     #[serde(with = "serde_b64")]
     pub(crate) counterparty: [u8; 32],
@@ -250,6 +251,7 @@ pub(crate) enum ConsentEnd {
 /// The executor app an `executor_notice` is wrapped to (`en/<msg_id>`), kept with the batch
 /// that queues it; it names its message, so it is taken only for that one.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct NoticeTarget {
     pub(crate) msg_id: String,
     #[serde(with = "serde_b64")]
@@ -263,6 +265,7 @@ pub(crate) struct NoticeTarget {
 /// held ([`Paykit::send_owed_ends`]). Never restored: a restore queues the record's own end
 /// again itself, under the same gate (`hold.rs`, `queue_own_again`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct OwedEnd {
     #[serde(with = "serde_b64")]
     pub(crate) record: [u8; 32],
@@ -2794,5 +2797,214 @@ mod tests {
         let message = kept.stored(&alice.id()).unwrap();
         assert!(message.accepted_at().is_none());
         assert!(stale(&message, Some(u64::MAX)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod consent_state_tests {
+    use super::*;
+    use crate::testkit::Party;
+    use pubky_switch_core::enc::{b64, hash};
+    use serde_json::{json, Value};
+
+    const ID: &str = "d0efffb7-191b-4709-b6c7-e343af5500b4";
+
+    fn read<T: state::Stored>(key: &str, data: &Value) -> Result<T> {
+        let party = Party::new(
+            "alice",
+            "executor",
+            &[
+                "paykit_pay",
+                "paykit_allowance",
+                "paykit_contacts",
+                "paykit_allowance_execute",
+            ],
+        );
+        state::restored(
+            key.as_bytes(),
+            &serde_json::to_vec(&json!({"v": 1, "d": data})).unwrap(),
+            &state::Binder::new(party.id(), &party.cert, &hash),
+        )
+    }
+
+    fn consent(consent: Consent) -> (String, Value) {
+        let id = AllowanceId::parse(ID).unwrap();
+        let target = allowance_target(&[3; 32], &id);
+        let record = pubky_switch_core::ident::record_key_from_blinded(
+            &target.collection.name,
+            &hash(&target.natural_key),
+            &target.collection.policy.hash().unwrap(),
+        );
+        (
+            key::consent(&record),
+            serde_json::to_value(ConsentEntry::new([3; 32], &id, consent)).unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_consent_state_valid_variants_round_trip() {
+        for value in [
+            Consent::Held {
+                confirm_again: false,
+            },
+            Consent::Held {
+                confirm_again: true,
+            },
+            Consent::Removed {
+                reason: ConsentEnd::Ended,
+            },
+            Consent::Removed {
+                reason: ConsentEnd::Rejected,
+            },
+            Consent::Removed {
+                reason: ConsentEnd::HandedOff,
+            },
+            Consent::Removed {
+                reason: ConsentEnd::Conflicted,
+            },
+        ] {
+            let (key, data) = consent(value);
+            let entry = read::<ConsentEntry>(&key, &data).unwrap();
+            assert_eq!(entry.consent, value);
+            assert_eq!(serde_json::to_value(entry).unwrap(), data);
+            let expected = match value {
+                Consent::Held { .. } => Consent::Held {
+                    confirm_again: true,
+                },
+                removed => removed,
+            };
+            assert_eq!(value.confirm_again(), expected);
+        }
+    }
+
+    #[test]
+    fn test_consent_state_entry_unknown_member_refused() {
+        let (key, mut data) = consent(Consent::Held {
+            confirm_again: false,
+        });
+        assert!(read::<ConsentEntry>(&key, &data).is_ok());
+        data["unexpected"] = json!(true);
+        assert!(read::<ConsentEntry>(&key, &data).is_err());
+    }
+
+    #[test]
+    fn test_consent_state_held_unknown_member_refused() {
+        let (key, mut data) = consent(Consent::Held {
+            confirm_again: false,
+        });
+        assert!(read::<ConsentEntry>(&key, &data).is_ok());
+        data["consent"]["held"]["unexpected"] = json!(true);
+        assert!(read::<ConsentEntry>(&key, &data).is_err());
+    }
+
+    #[test]
+    fn test_consent_state_removed_unknown_member_refused() {
+        let (key, mut data) = consent(Consent::Removed {
+            reason: ConsentEnd::Ended,
+        });
+        assert!(read::<ConsentEntry>(&key, &data).is_ok());
+        data["consent"]["removed"]["unexpected"] = json!(true);
+        assert!(read::<ConsentEntry>(&key, &data).is_err());
+    }
+
+    #[test]
+    fn test_consent_state_notice_unknown_member_refused() {
+        let target = NoticeTarget {
+            msg_id: ID.to_owned(),
+            app_id: [4; 16],
+        };
+        let key = key::notice_target(ID);
+        let mut data = serde_json::to_value(&target).unwrap();
+        assert_eq!(
+            read::<NoticeTarget>(&key, &data).unwrap().app_id,
+            target.app_id
+        );
+        data["unexpected"] = json!(true);
+        assert!(read::<NoticeTarget>(&key, &data).is_err());
+    }
+
+    #[test]
+    fn test_consent_state_owed_end_unknown_member_refused() {
+        let end = OwedEnd {
+            record: [5; 32],
+            msg_id: ID.to_owned(),
+        };
+        let key = key::owed_end(&end.record);
+        let mut data = serde_json::to_value(&end).unwrap();
+        assert_eq!(read::<OwedEnd>(&key, &data).unwrap().msg_id, ID);
+        data["unexpected"] = json!(true);
+        assert!(read::<OwedEnd>(&key, &data).is_err());
+    }
+
+    #[test]
+    fn test_consent_state_required_members_and_bindings() {
+        let (key, data) = consent(Consent::Held {
+            confirm_again: false,
+        });
+        for field in ["counterparty", "allowance_id", "consent"] {
+            let mut missing = data.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(read::<ConsentEntry>(&key, &missing).is_err(), "{field}");
+            missing[field] = Value::Null;
+            assert!(read::<ConsentEntry>(&key, &missing).is_err(), "{field}");
+        }
+        for bad in [
+            json!({"held": {}}),
+            json!({"held": {"confirm_again": null}}),
+            json!({"held": {"confirm_again": "false"}}),
+            json!({"removed": {}}),
+            json!({"removed": {"reason": null}}),
+            json!({"removed": {"reason": "other"}}),
+        ] {
+            let mut bad_entry = data.clone();
+            bad_entry["consent"] = bad;
+            assert!(read::<ConsentEntry>(&key, &bad_entry).is_err());
+        }
+        assert!(read::<ConsentEntry>(&key::consent(&[8; 32]), &data).is_err());
+        let mut wrong = data;
+        wrong["counterparty"] = json!(b64(&[9; 32]));
+        assert!(read::<ConsentEntry>(&key, &wrong).is_err());
+        assert!(read::<NoticeTarget>(
+            &key::notice_target(ID),
+            &json!({"msg_id": ID, "app_id": b64(&[4; 15])})
+        )
+        .is_err());
+        assert!(read::<NoticeTarget>(
+            &key::notice_target(ID),
+            &json!({"msg_id": "123e4567-e89b-42d3-a456-426614174000", "app_id": b64(&[4; 16])})
+        )
+        .is_err());
+        assert!(read::<OwedEnd>(
+            &key::owed_end(&[5; 32]),
+            &json!({"record": b64(&[6; 32]), "msg_id": ID})
+        )
+        .is_err());
+        assert!(read::<OwedEnd>(
+            &key::owed_end(&[5; 32]),
+            &json!({"record": b64(&[5; 32]), "msg_id": "not-a-message-id"})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_consent_state_duplicate_members_refused() {
+        assert!(serde_json::from_str::<Consent>(
+            r#"{"held":{"confirm_again":false,"confirm_again":true}}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<Consent>(
+            r#"{"removed":{"reason":"ended","reason":"rejected"}}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<NoticeTarget>(&format!(
+            r#"{{"msg_id":"{ID}","msg_id":"{ID}","app_id":"{}"}}"#,
+            b64(&[4; 16])
+        ))
+        .is_err());
+        assert!(serde_json::from_str::<OwedEnd>(&format!(
+            r#"{{"record":"{}","msg_id":"{ID}","msg_id":"{ID}"}}"#,
+            b64(&[5; 32])
+        ))
+        .is_err());
     }
 }
