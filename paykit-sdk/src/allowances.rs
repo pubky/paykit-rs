@@ -328,6 +328,8 @@ fn opened(counterparty: [u8; 32], proposal: StoredMessage) -> Option<AllowanceRe
         conflicted: None,
         grant: None,
         grants: Vec::new(),
+        ledger_handoff: None,
+        ledger_handoff_unread: None,
         msg_ids: Vec::new(),
         unknown: Default::default(),
     };

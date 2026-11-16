@@ -1148,9 +1148,13 @@ impl PaykitProtocol {
                 let Ok(later) = AllowanceRecord::read(value, &own.identity) else {
                     return Some("Paykit wire 5.4: an allowances record that doesn't read".into());
                 };
-                // Wire 5.4 "Seen roles" and "Rewrites": the proposal, the response and the end
-                // seen are kept, and the grant history seen starts the later one.
-                held.check_later_write(&later).err().map(|e| e.to_string())
+                // Wire 5.4 "Seen roles" and "Rewrites": the roles and history seen stay;
+                // "Ledger handoff": a replacement verifies and answers a later grant,
+                // even when another grant has followed it (Paykit spec 8.3, "Handoff").
+                held.check_later_write(&later)
+                    .and_then(|()| held.check_later_handoff(&later, &own.identity))
+                    .err()
+                    .map(|e| e.to_string())
             }
             _ => None,
         }
@@ -1895,6 +1899,8 @@ mod receive_tests {
                 conflicted: None,
                 grant: None,
                 grants: Vec::new(),
+                ledger_handoff: None,
+                ledger_handoff_unread: None,
                 msg_ids: Vec::new(),
                 unknown: Default::default(),
             }
@@ -1915,6 +1921,229 @@ mod receive_tests {
         assert!(p
             .record_regression("allowances", &seen, Some(b"{}"))
             .is_some());
+    }
+
+    fn handoff_version(version: u64) -> pubky_switch_core::ops::RecordVersion {
+        pubky_switch_core::ops::RecordVersion {
+            generation: 1,
+            version,
+        }
+    }
+
+    fn append_handoff_grant(record: &mut AllowanceRecord, app: &Party, version: u64) {
+        let built_on = handoff_version(version);
+        let grant = paykit_lib::grant::ExecutorGrant::sign(
+            &app.keys,
+            app.cert.signed().clone(),
+            &app.id(),
+            &record.counterparty,
+            &record.allowance_id,
+            record.terms_hash().unwrap(),
+            1,
+            built_on,
+        );
+        record.grants.push(paykit_lib::records::GrantEntry {
+            built_on,
+            grant: grant.clone(),
+            origin: Default::default(),
+        });
+        record.grant = Some(grant);
+    }
+
+    fn signed_handoff(
+        record: &AllowanceRecord,
+        signer: &Party,
+        ledger: (u64, [u8; 32]),
+    ) -> paykit_lib::grant::LedgerHandoff {
+        paykit_lib::grant::LedgerHandoff::sign(
+            &signer.keys,
+            signer.cert.signed().clone(),
+            &signer.id(),
+            &record.counterparty,
+            &record.allowance_id,
+            record.grants.last().unwrap().built_on,
+            handoff_version(ledger.0),
+            ledger.1,
+        )
+    }
+
+    /// Two consecutive handoffs, with valid signed messages, grants and ledger tuples.
+    fn handoff_records() -> (Party, Party, AllowanceRecord, AllowanceRecord) {
+        let scopes = [
+            "paykit_pay",
+            "paykit_allowance",
+            "paykit_allowance_execute",
+            "paykit_contacts",
+        ];
+        let first = Party::new("alice", "first", &scopes);
+        let second = Party::new("alice", "second", &scopes);
+        let (_, bob, proposal, _) = allowance_end();
+        let Body::AllowanceProposal(body) = proposal.body() else {
+            panic!("an Allowance proposal");
+        };
+        let allowance_id = body.allowance_id.clone();
+        let response = first.message(
+            &bob,
+            "paykit.allowance_acceptance",
+            vec![proposal.hash()],
+            object(json!({ "allowance_id": allowance_id.as_str() })),
+        );
+        let mut handed = AllowanceRecord {
+            counterparty: bob.id(),
+            allowance_id,
+            proposal,
+            response: Some(response),
+            end: None,
+            conflicted: None,
+            grant: None,
+            grants: Vec::new(),
+            msg_ids: Vec::new(),
+            ledger_handoff: None,
+            ledger_handoff_unread: None,
+            unknown: Default::default(),
+        };
+        append_handoff_grant(&mut handed, &first, 1);
+        append_handoff_grant(&mut handed, &second, 3);
+        handed.ledger_handoff = Some(signed_handoff(&handed, &first, (2, [2; 32])));
+        let mut back = handed.clone();
+        append_handoff_grant(&mut back, &first, 5);
+        back.ledger_handoff = Some(signed_handoff(&back, &second, (4, [4; 32])));
+        for record in [&handed, &back] {
+            let read = AllowanceRecord::read(&record.to_json().unwrap(), &first.id()).unwrap();
+            assert!(read.current_grant(&first.id()).is_some());
+            assert!(read.ledger_handoff_counts(&first.id()).unwrap().is_some());
+        }
+        (first, second, handed, back)
+    }
+
+    /// A signed handoff whose only unread field is a ledger version no write gives.
+    fn unread_handoff(record: &AllowanceRecord, signer: &Party, grant: u64) -> AllowanceRecord {
+        use paykit_lib::grant::{handoff_fields, LedgerHandoff, LEDGER_HANDOFF_LABEL};
+        let signed = LedgerHandoff::sign(
+            &signer.keys,
+            signer.cert.signed().clone(),
+            &signer.id(),
+            &record.counterparty,
+            &record.allowance_id,
+            handoff_version(grant),
+            handoff_version(0),
+            [2; 32],
+        );
+        let fields = handoff_fields(
+            &signer.id(),
+            &record.counterparty,
+            &record.allowance_id,
+            signed.grant,
+            signed.ledger,
+            &signed.item_hash,
+        );
+        let refs: Vec<&[u8]> = fields.iter().map(Vec::as_slice).collect();
+        pubky_switch_core::sig::verify(
+            &signer.keys.signing_public(),
+            LEDGER_HANDOFF_LABEL,
+            &refs,
+            &signed.sig,
+        )
+        .unwrap();
+        let mut value: Value = serde_json::from_slice(&record.to_json().unwrap()).unwrap();
+        value["ledger_handoff"] = signed.to_json();
+        let read =
+            AllowanceRecord::read(&serde_json::to_vec(&value).unwrap(), &signer.id()).unwrap();
+        let unread = read.ledger_handoff_unread.as_ref().unwrap();
+        assert!(read.ledger_handoff.is_none());
+        assert_eq!(
+            LedgerHandoff::from_json(unread).unwrap_err().to_string(),
+            "invalid: Paykit wire 5.4: ledger_handoff names a ledger version a write gives"
+        );
+        read
+    }
+
+    fn handoff_regression(
+        own: &Party,
+        seen: &AllowanceRecord,
+        later: &AllowanceRecord,
+    ) -> Option<String> {
+        // Pass serialized records through the client callback and its parsing.
+        protocol_of(own).record_regression(
+            "allowances",
+            &seen.to_json().unwrap(),
+            Some(&later.to_json().unwrap()),
+        )
+    }
+
+    #[test]
+    fn test_protocol_handoff_regression_refuses_a_dropped_handoff() {
+        let (own, _, seen, _) = handoff_records();
+        let mut later = seen.clone();
+        later.ledger_handoff = None;
+        let reason = handoff_regression(&own, &seen, &later).unwrap();
+        assert!(reason.contains("drops the ledger_handoff"), "{reason}");
+        assert_eq!(handoff_regression(&own, &seen, &seen), None);
+        assert_eq!(handoff_regression(&own, &later, &later), None);
+    }
+
+    #[test]
+    fn test_protocol_handoff_regression_refuses_a_dropped_unread_handoff() {
+        let (own, _, handed, _) = handoff_records();
+        let seen = unread_handoff(&handed, &own, 3);
+        let mut later = seen.clone();
+        later.ledger_handoff_unread = None;
+        let reason = handoff_regression(&own, &seen, &later).unwrap();
+        assert!(reason.contains("drops the ledger_handoff"), "{reason}");
+        assert_eq!(handoff_regression(&own, &seen, &seen), None);
+    }
+
+    #[test]
+    fn test_protocol_handoff_regression_refuses_an_earlier_grant() {
+        let (own, _, handed, seen) = handoff_records();
+        let mut later = seen.clone();
+        later.ledger_handoff = handed.ledger_handoff;
+        later
+            .check_ledger_handoff(&own.id(), later.ledger_handoff.as_ref().unwrap())
+            .unwrap();
+        let reason = handoff_regression(&own, &seen, &later).unwrap();
+        assert!(reason.contains("isn't for a later grant"), "{reason}");
+    }
+
+    #[test]
+    fn test_protocol_handoff_regression_refuses_a_changed_same_grant() {
+        let (own, _, seen, _) = handoff_records();
+        for version in [1, 2, 3] {
+            let mut later = seen.clone();
+            later.ledger_handoff = Some(signed_handoff(&seen, &own, (version, [8; 32])));
+            assert!(later.ledger_handoff_counts(&own.id()).unwrap().is_some());
+            let reason = handoff_regression(&own, &seen, &later).unwrap();
+            assert!(reason.contains("isn't for a later grant"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn test_protocol_handoff_regression_takes_a_later_current_grant() {
+        let (own, _, seen, later) = handoff_records();
+        assert!(later.ledger_handoff_counts(&own.id()).unwrap().is_some());
+        assert_eq!(handoff_regression(&own, &seen, &later), None);
+        let unread = unread_handoff(&seen, &own, 3);
+        assert_eq!(handoff_regression(&own, &unread, &later), None);
+    }
+
+    #[test]
+    fn test_protocol_handoff_regression_takes_a_later_historical_grant() {
+        let (own, next, seen, mut later) = handoff_records();
+        append_handoff_grant(&mut later, &next, 7);
+        assert_eq!(later.ledger_handoff_counts(&own.id()).unwrap(), None);
+        assert_eq!(handoff_regression(&own, &seen, &later), None);
+        let mut none_seen = seen.clone();
+        none_seen.ledger_handoff = None;
+        assert_eq!(handoff_regression(&own, &none_seen, &later), None);
+    }
+
+    #[test]
+    fn test_protocol_handoff_regression_keeps_an_unplaced_unread_handoff() {
+        let (own, _, handed, later) = handoff_records();
+        let seen = unread_handoff(&handed, &own, 9);
+        let reason = handoff_regression(&own, &seen, &later).unwrap();
+        assert!(reason.contains("isn't for a later grant"), "{reason}");
+        assert_eq!(handoff_regression(&own, &seen, &seen), None);
     }
 
     #[test]
