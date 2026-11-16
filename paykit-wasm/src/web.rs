@@ -8,8 +8,13 @@
 //! - The facade talks to a local testnet only (`Pubky::testnet()`), over
 //!   plain HTTP on localhost.
 
+mod flows;
+
+pub use flows::PaykitWasmBackup;
+
 use std::{
     any::Any,
+    cell::Cell,
     collections::BTreeMap,
     sync::{Arc, Mutex},
     time::Duration,
@@ -270,7 +275,7 @@ fn parse_details(json_text: &str) -> Result<Vec<(String, String)>, JsError> {
 
 /// `Box<dyn StorageAdapter>` (the SDK implements the trait for boxes) lets
 /// one client type pick in-memory, JS-backed or Pubky shared-state storage.
-type Sdk = PaykitSdk<Box<dyn StorageAdapter>, WasmSessionProvider, WasmPaymentAdapter>;
+pub(crate) type Sdk = PaykitSdk<Box<dyn StorageAdapter>, WasmSessionProvider, WasmPaymentAdapter>;
 
 /// One signed-up testnet identity with an initialized Paykit SDK runtime.
 #[wasm_bindgen]
@@ -283,6 +288,30 @@ pub struct PaykitWasmClient {
     public_key: PubkyPublicKey,
     app_id: PaykitAppId,
     intake: Option<PrivateIntakeSupervisor>,
+    /// THROWAWAY (#411): facade-level call deadline (see `with_deadline`).
+    deadline_ms: Cell<Option<u32>>,
+}
+
+/// Build the storage backing for `mode` (see `signUpOnTestnet`).
+fn make_storage(
+    mode: &str,
+    store: Option<JsStateStore>,
+    provider: &WasmSessionProvider,
+) -> Result<Box<dyn StorageAdapter>, JsError> {
+    Ok(match (mode, store) {
+        ("memory", None) => Box::new(InMemoryStorage::new()),
+        ("js", Some(store)) => Box::new(JsBlobStorage {
+            store,
+            serialize: tokio::sync::Mutex::new(()),
+        }),
+        ("shared", None) => Box::new(PubkySharedStateStorage::new(provider.clone())),
+        (mode, store) => {
+            return Err(JsError::new(&format!(
+                "unsupported storage mode {mode:?} (store given: {})",
+                store.is_some()
+            )))
+        }
+    })
 }
 
 #[wasm_bindgen]
@@ -331,20 +360,7 @@ impl PaykitWasmClient {
             access: Arc::new(Mutex::new(Some(access.clone()))),
             session_secret: Arc::new(session_secret),
         };
-        let storage: Box<dyn StorageAdapter> = match (storage_mode.as_str(), store) {
-            ("memory", None) => Box::new(InMemoryStorage::new()),
-            ("js", Some(store)) => Box::new(JsBlobStorage {
-                store,
-                serialize: tokio::sync::Mutex::new(()),
-            }),
-            ("shared", None) => Box::new(PubkySharedStateStorage::new(provider.clone())),
-            (mode, store) => {
-                return Err(JsError::new(&format!(
-                    "unsupported storage mode {mode:?} (store given: {})",
-                    store.is_some()
-                )))
-            }
-        };
+        let storage = make_storage(&storage_mode, store, &provider)?;
         let config = PaykitSdkConfig::new(app_id.clone()).map_err(|e| js_err("config", e))?;
         let sdk = Arc::new(PaykitSdk::new(
             storage,
@@ -388,6 +404,7 @@ impl PaykitWasmClient {
             public_key: result.public_key,
             app_id,
             intake: None,
+            deadline_ms: Cell::new(None),
         })
     }
 
@@ -414,16 +431,7 @@ impl PaykitWasmClient {
         sdk.initialize()
             .await
             .map_err(|e| js_err("initialize (reopened)", e))?;
-        Ok(PaykitWasmClient {
-            sdk,
-            adapter: self.adapter.clone(),
-            provider: self.provider.clone(),
-            storage_mode: self.storage_mode.clone(),
-            access: self.access.clone(),
-            public_key: self.public_key.clone(),
-            app_id: self.app_id.clone(),
-            intake: None,
-        })
+        Ok(self.sibling(sdk, &self.storage_mode))
     }
 
     /// Linked Peer states as `{publicKey: state}` JSON.
@@ -483,10 +491,13 @@ impl PaykitWasmClient {
     #[wasm_bindgen(js_name = syncPublicEndpoints)]
     pub async fn sync_public_endpoints(&self) -> Result<String, JsError> {
         let report = self
-            .sdk
-            .sync_public_endpoints()
-            .await
-            .map_err(|e| js_err("sync_public_endpoints", e))?;
+            .with_deadline("sync_public_endpoints", async {
+                self.sdk
+                    .sync_public_endpoints()
+                    .await
+                    .map_err(|e| flows::sdk_err("sync_public_endpoints", e))
+            })
+            .await?;
         Ok(json!({
             "published": report.published.len(),
             "removed": report.removed.len(),
@@ -508,9 +519,13 @@ impl PaykitWasmClient {
             .map_err(|e| js_err("payee", e))?;
         let app_id = PaykitAppId::new(app_id).map_err(|e| js_err("app id", e))?;
         let storage = self.access.outbox_client.public_storage();
-        let list = paykit_lib::get_payment_list(&storage, &payee, &app_id)
-            .await
-            .map_err(|e| js_err("get_payment_list", e))?;
+        let list = self
+            .with_deadline("get_payment_list", async {
+                paykit_lib::get_payment_list(&storage, &payee, &app_id)
+                    .await
+                    .map_err(|e| js_err("get_payment_list", e))
+            })
+            .await?;
         let map: BTreeMap<String, String> = list
             .payment_endpoints
             .iter()
@@ -522,11 +537,15 @@ impl PaykitWasmClient {
     /// `resolve_public_contact_payment`; returns status and target payloads.
     #[wasm_bindgen(js_name = resolvePublicContactPayment)]
     pub async fn resolve_public_contact_payment(&self, payee: String) -> Result<String, JsError> {
+        let payee = parse_key(&payee)?;
         let resolution = self
-            .sdk
-            .resolve_public_contact_payment(parse_key(&payee)?, None)
-            .await
-            .map_err(|e| js_err("resolve_public_contact_payment", e))?;
+            .with_deadline("resolve_public_contact_payment", async {
+                self.sdk
+                    .resolve_public_contact_payment(payee, None)
+                    .await
+                    .map_err(|e| flows::sdk_err("resolve_public_contact_payment", e))
+            })
+            .await?;
         let payloads: Vec<&str> = resolution
             .payable_endpoints
             .iter()

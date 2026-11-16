@@ -3632,6 +3632,7 @@ name = "paykit-wasm"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "console_error_panic_hook",
  "futures-util",
  "getrandom 0.3.4",
@@ -3639,6 +3640,7 @@ dependencies = [
  "paykit-lib",
  "paykit-sdk",
  "pubky",
+ "serde",
  "serde_json",
  "tokio",
  "wasm-bindgen",
