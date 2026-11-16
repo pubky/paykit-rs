@@ -15,7 +15,12 @@
 //! auth relay at a closed loopback port, and
 //! `test_bounded_fetch_read_over_loopback` fetches from a loopback server.
 
-use std::{collections::HashMap, time::Duration};
+use std::{hash::BuildHasher, time::Duration};
+
+// THROWAWAY (#411): on wasm32 Paykit's public maps use a getrandom-seeded
+// hasher, so callers must build them with these aliases (see
+// paykit_lib::collections). Natively they are the std types.
+use paykit_lib::collections::{HashMap, RandomState as PaykitRandomState};
 
 use paykit_lib::{
     derive_paykit_noise_public_key, derive_paykit_noise_secret_key,
@@ -195,6 +200,40 @@ async fn test_rt_lease_clock_is_monotonic_and_advances() {
 }
 
 // ---------------------------------------------------------------------------
+// HashDoS hardening (paykit_lib::collections)
+// ---------------------------------------------------------------------------
+
+smoke_test! {
+    async fn test_paykit_hashers_are_independently_keyed() {
+        // Two fresh builders must hash the same key differently, and a map
+        // built on them must behave like a normal HashMap.
+        let probe = "pubky-peer-or-event-id";
+        let first = PaykitRandomState::default();
+        let second = PaykitRandomState::default();
+        assert_ne!(first.hash_one(probe), second.hash_one(probe));
+        assert_eq!(first.hash_one(probe), first.hash_one(probe));
+
+        let mut map: HashMap<String, usize> = HashMap::default();
+        for i in 0..1_000 {
+            map.insert(format!("event-{i}"), i);
+        }
+        assert_eq!(map.len(), 1_000);
+        assert_eq!(map.get("event-777"), Some(&777));
+    }
+}
+
+/// std seeds `RandomState` from 32-bit linear-memory addresses on
+/// wasm32-unknown-unknown, so the high halves of both keys are always zero.
+/// Paykit's builder must carry real entropy there.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen_test]
+async fn test_paykit_hasher_seed_is_not_address_derived() {
+    for _ in 0..4 {
+        assert!(PaykitRandomState::new().seed_has_high_bits());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Validation and serialization
 // ---------------------------------------------------------------------------
 
@@ -211,7 +250,7 @@ smoke_test! {
 
 smoke_test! {
     async fn test_private_payment_list_round_trip_and_size() {
-        let mut endpoints = HashMap::new();
+        let mut endpoints = HashMap::default();
         endpoints.insert(
             PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
             PaymentEndpointPayload::new("lnbc1smoke"),
@@ -366,7 +405,7 @@ smoke_test! {
         let mut bob = bob.into_transport_mode().unwrap();
         let plaintext = serialize_private_payment_list_json(&PrivatePaymentList::new(
             app_id(),
-            HashMap::new(),
+            HashMap::default(),
         ))
         .unwrap();
         let n = alice.write_message(plaintext.as_bytes(), &mut buf).unwrap();
