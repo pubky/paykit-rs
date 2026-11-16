@@ -56,3 +56,10 @@ uuid = { version = "1", features = ["js"] }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 reqwest = { version = "0.13", default-features = false, features = ["stream"] }
+# THROWAWAY (#411): browser runtime shim (src/rt.rs): setTimeout timers,
+# performance.now()/Date.now() clocks, spawn_local, and tokio::sync oneshot.
+gloo-timers = { version = "0.3", features = ["futures"] }
+js-sys = "0.3"
+wasm-bindgen-futures = "0.4"
+web-time = "1.1"
+tokio = { version = "1", features = ["macros", "sync", "time"] }

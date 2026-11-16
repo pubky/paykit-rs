@@ -19,6 +19,9 @@ mod private_payment_list;
 mod pubky_routing;
 mod receipt;
 mod response_chunks;
+// THROWAWAY (#411): portable runtime shim shared with paykit-sdk.
+#[doc(hidden)]
+pub mod rt;
 mod shared_wire;
 mod validation;
 

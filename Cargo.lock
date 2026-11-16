@@ -3529,7 +3529,9 @@ dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "getrandom 0.4.2",
+ "gloo-timers",
  "hex",
+ "js-sys",
  "libc",
  "proptest",
  "pubky",
@@ -3543,6 +3545,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wasm-bindgen-futures",
+ "web-time",
  "zeroize",
 ]
 

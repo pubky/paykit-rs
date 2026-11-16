@@ -165,7 +165,7 @@ where
     let storage = session.storage();
     let mut attempt = 1;
     let (lock, acquired_at, lease_started_at) = loop {
-        let requested_at = tokio::time::Instant::now();
+        let requested_at = crate::rt::Instant::now();
         let lease_started_at = now().map_err(|error| E::from(lost_lock(error.into())))?;
         match storage.lock(path, timeout).await {
             Ok(lock) => break (lock, requested_at, lease_started_at),
@@ -173,7 +173,7 @@ where
                 if status == pubky::StatusCode::LOCKED
                     && attempt < LOCK_ACQUISITION_MAX_ATTEMPTS =>
             {
-                tokio::time::sleep(Duration::from_millis(50 * attempt)).await;
+                crate::rt::sleep(Duration::from_millis(50 * attempt)).await;
                 attempt += 1;
             }
             Err(source) => return Err(E::from(lock_error("acquire Pubky write lock", source))),
@@ -220,7 +220,7 @@ where
                 return error;
             }
             loop {
-                let requested_at = tokio::time::Instant::now();
+                let requested_at = crate::rt::Instant::now();
                 let lease_started_at = match now() {
                     Ok(value) => value,
                     Err(error) => return error.into(),
@@ -230,13 +230,13 @@ where
                     Ok(value) => value,
                     Err(error) => return error,
                 };
-                match tokio::time::timeout_at(
+                match crate::rt::timeout_at(
                     attempt_deadline,
                     storage.refresh_lock(&mut renewed, timeout),
                 )
                 .await
                 {
-                    Ok(Ok(())) if tokio::time::Instant::now() < attempt_deadline => {
+                    Ok(Ok(())) if crate::rt::Instant::now() < attempt_deadline => {
                         // A response cannot revive a lease that expired while the device slept.
                         if let Err(error) = check_lease() {
                             return error;
@@ -276,14 +276,14 @@ where
                             Err(error) => return error,
                         };
                         let Some(retry_at) =
-                            tokio::time::Instant::now().checked_add(Duration::from_secs(1))
+                            crate::rt::Instant::now().checked_add(Duration::from_secs(1))
                         else {
                             return anyhow::anyhow!("Pubky write lock deadline overflow");
                         };
                         if retry_at >= deadline {
                             return error.into();
                         }
-                        tokio::time::sleep_until(retry_at).await;
+                        crate::rt::sleep_until(retry_at).await;
                     }
                     Ok(Err(error)) => return anyhow::Error::from(error),
                     Ok(Ok(())) | Err(_) => {
@@ -424,7 +424,7 @@ impl LeaseDeadline {
 
 async fn wait_for_renewal(
     lease: &Mutex<LeaseDeadline>,
-    valid_until: tokio::time::Instant,
+    valid_until: crate::rt::Instant,
     now: &impl Fn() -> std::io::Result<Duration>,
     wakeup: &Notify,
 ) -> anyhow::Result<()> {
@@ -440,16 +440,16 @@ async fn wait_for_renewal(
     // A suspended runtime cannot execute renewal. Once it runs again, silent
     // operations still need a bounded native-clock check without an operation wake.
     let interval = Duration::from_secs(1);
-    let first_check = tokio::time::Instant::now()
+    let first_check = crate::rt::Instant::now()
         .checked_add(interval)
         .ok_or_else(|| anyhow::anyhow!("Pubky write lock deadline overflow"))?;
-    let mut clock_checks = tokio::time::interval_at(first_check, interval);
-    clock_checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut clock_checks = crate::rt::interval_at(first_check, interval);
+    clock_checks.set_missed_tick_behavior(crate::rt::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             // Either monotonic clock may make renewal due. A ready normal timer
             // is sufficient; it must not spin waiting for a later native reading.
-            _ = tokio::time::sleep_until(renew_at) => return Ok(()),
+            _ = crate::rt::sleep_until(renew_at) => return Ok(()),
             _ = clock_checks.tick() => {},
             _ = wakeup.notified() => {},
         }
@@ -467,9 +467,9 @@ async fn wait_for_renewal(
 
 fn refresh_deadline(
     lease: &Mutex<LeaseDeadline>,
-    valid_until: tokio::time::Instant,
+    valid_until: crate::rt::Instant,
     now: Duration,
-) -> anyhow::Result<tokio::time::Instant> {
+) -> anyhow::Result<crate::rt::Instant> {
     let remaining = {
         let deadline = lease
             .lock()
@@ -477,7 +477,7 @@ fn refresh_deadline(
         deadline.check(now)?;
         deadline.expires_at - now
     };
-    let scheduler_now = tokio::time::Instant::now();
+    let scheduler_now = crate::rt::Instant::now();
     if scheduler_now >= valid_until {
         anyhow::bail!("Pubky write lock expired before renewal was confirmed");
     }
@@ -508,7 +508,12 @@ fn lease_time() -> std::io::Result<Duration> {
     Ok(Duration::new(value.tv_sec as u64, value.tv_nsec as u32))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_arch = "wasm32"
+)))]
 fn lease_time() -> std::io::Result<Duration> {
     // Preserve the existing monotonic behavior on other targets. The explicit
     // suspend-inclusive guarantee applies to the native platforms mapped above.
@@ -516,15 +521,29 @@ fn lease_time() -> std::io::Result<Duration> {
     Ok(START.get_or_init(std::time::Instant::now).elapsed())
 }
 
+// THROWAWAY (#411): browsers have no suspend-inclusive monotonic clock, and
+// std::time::Instant panics on wasm32-unknown-unknown. This accumulates, per
+// reading, the larger forward step of `performance.now()` (monotonic, but
+// whether it advances during OS sleep or tab freezing is browser-defined) and
+// `Date.now()` (wall clock, advances through sleep but the user can change it).
+// Backward wall-clock steps contribute nothing, so the result never decreases
+// and never runs slower than performance.now(); a forward wall-clock jump only
+// expires leases early. NEEDS SECURITY REVIEW before production: it is only as
+// good as "at least one of the two clocks counted the time the tab slept".
+#[cfg(target_arch = "wasm32")]
+fn lease_time() -> std::io::Result<Duration> {
+    crate::rt::lease_clock()
+}
+
 fn confirmed_lease_deadline(
-    requested_at: tokio::time::Instant,
+    requested_at: crate::rt::Instant,
     timeout: Duration,
-) -> Result<tokio::time::Instant> {
+) -> Result<crate::rt::Instant> {
     let lifetime = safe_lease_lifetime(timeout).map_err(lost_lock)?;
     let deadline = requested_at
         .checked_add(lifetime)
         .ok_or_else(|| lost_lock(anyhow::anyhow!("Pubky write lock deadline overflow")))?;
-    if tokio::time::Instant::now() >= deadline {
+    if crate::rt::Instant::now() >= deadline {
         return Err(PaykitError::Transport {
             context: "Pubky write lock response arrived after its safe lease expired".into(),
             source: anyhow::anyhow!("expired Pubky write lock response"),
