@@ -491,11 +491,17 @@ impl Stored for bool {
 
 impl sealed::Sealed for RestoreHold {}
 
-/// A restore's hold, which names nothing.
+/// A restore's hold: counterparties already asked are ascending, each once, and cleared
+/// when all asks are queued (Paykit spec 7.2; `Paykit::queue_restore_asks`).
 impl Stored for RestoreHold {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
-            StateKey::RestoreHold => Ok(()),
+            StateKey::RestoreHold
+                if (!self.asks_queued || self.asked.is_empty())
+                    && self.asked.windows(2).all(|pair| pair[0] < pair[1]) =>
+            {
+                Ok(())
+            }
             _ => corrupt(),
         }
     }
@@ -854,16 +860,16 @@ impl Stored for MissedHold {
 
 impl sealed::Sealed for OwnResendOwed {}
 
-/// The restore's re-send owed: the counterparties still waiting, if a pass ran, ascending,
-/// each once, and the restore's time, which name no key.
+/// The restore's re-send owed: a retained subset of waiting counterparties is nonempty,
+/// ascending, each once; the mark is deleted once none remain (Paykit spec 7.2;
+/// `Paykit::queue_own_again`). Neither the counterparties nor the restore's time name a key.
 impl Stored for OwnResendOwed {
     fn bind(&self, _: &str, family: &StateKey, _: &Binder<'_>) -> Result<()> {
         match family {
             StateKey::OwnResendOwed
-                if self
-                    .waiting
-                    .as_ref()
-                    .is_none_or(|waiting| waiting.windows(2).all(|pair| pair[0] < pair[1])) =>
+                if self.waiting.as_ref().is_none_or(|waiting| {
+                    !waiting.is_empty() && waiting.windows(2).all(|pair| pair[0] < pair[1])
+                }) =>
             {
                 Ok(())
             }
@@ -1829,6 +1835,74 @@ mod tests {
     fn reads<T: Stored>(key: &str, value: serde_json::Value) -> bool {
         let bytes = serde_json::to_vec(&serde_json::json!({ "v": 1, "d": value })).unwrap();
         bound::<T>(key.as_bytes(), &bytes, &Binder::unblinded([1; 32])).is_ok()
+    }
+
+    #[test]
+    fn test_recovery_checkpoint_empty_waiting_refused() {
+        assert!(!reads::<OwnResendOwed>(
+            key::OWN_RESEND_OWED,
+            serde_json::json!({ "waiting": [], "restored_at_ms": null })
+        ));
+    }
+
+    #[test]
+    fn test_recovery_checkpoint_completed_asked_refused() {
+        assert!(!reads::<RestoreHold>(
+            key::RESTORE_HOLD,
+            serde_json::json!({ "resend_from_ms": 1, "asks_queued": true, "asked": [vec![1u8; 32]] })
+        ));
+    }
+
+    #[test]
+    fn test_recovery_checkpoint_duplicate_asked_refused() {
+        assert!(!reads::<RestoreHold>(
+            key::RESTORE_HOLD,
+            serde_json::json!({ "resend_from_ms": 1, "asks_queued": false, "asked": [vec![1u8; 32], vec![1u8; 32]] })
+        ));
+    }
+
+    #[test]
+    fn test_recovery_checkpoint_descending_asked_refused() {
+        assert!(!reads::<RestoreHold>(
+            key::RESTORE_HOLD,
+            serde_json::json!({ "resend_from_ms": 1, "asks_queued": false, "asked": [vec![2u8; 32], vec![1u8; 32]] })
+        ));
+    }
+
+    #[test]
+    fn test_recovery_checkpoint_optional_time_and_waiting_preserved() {
+        for waiting in [None, Some(vec![[1; 32]]), Some(vec![[1; 32], [2; 32]])] {
+            for restored_at_ms in [None, Some(7)] {
+                assert!(reads::<OwnResendOwed>(
+                    key::OWN_RESEND_OWED,
+                    serde_json::to_value(OwnResendOwed {
+                        waiting: waiting.clone(),
+                        restored_at_ms,
+                    })
+                    .unwrap()
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn test_recovery_checkpoint_partial_and_completed_asks_preserved() {
+        for (asks_queued, asked) in [
+            (false, vec![]),
+            (false, vec![[1; 32]]),
+            (false, vec![[1; 32], [2; 32]]),
+            (true, vec![]),
+        ] {
+            assert!(reads::<RestoreHold>(
+                key::RESTORE_HOLD,
+                serde_json::to_value(RestoreHold {
+                    resend_from_ms: 1,
+                    asks_queued,
+                    asked,
+                })
+                .unwrap()
+            ));
+        }
     }
 
     #[test]
