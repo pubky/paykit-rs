@@ -30,6 +30,7 @@ mod public;
 mod receipts;
 mod receive_faults;
 mod recovery;
+mod recovery_state;
 mod recurring;
 mod replies;
 mod resend;
