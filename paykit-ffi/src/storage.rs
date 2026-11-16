@@ -73,10 +73,60 @@ pub(crate) struct FfiSdkStorage {
     pub(crate) transaction_lock: Arc<Mutex<()>>,
 }
 
+/// Browser build only: Promise-returning variant of `FfiSdkStateBlobStore`.
+///
+/// THROWAWAY (#411): browser durable storage (IndexedDB), WebCrypto and fetch
+/// are Promise-only, and a synchronous JS callback cannot await them. This
+/// trait has the same contract as `FfiSdkStateBlobStore`, including the
+/// compare-and-swap and globally unique revision rules, but each method is
+/// async, so the generated TypeScript interface returns Promises. It exists
+/// only with the `web` cargo feature, so Swift, Kotlin and React Native do
+/// not see it. A production design would decide whether every platform moves
+/// to async storage callbacks instead.
+///
+/// The SDK awaits these callbacks while holding its per-handle async storage
+/// lock. Do not call back into the same SDK handle from a callback.
+#[cfg(feature = "web")]
+#[uniffi::export(with_foreign)]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait FfiSdkAsyncStateBlobStore: Send + Sync {
+    /// Load the current SDK state blob, when one exists.
+    async fn load_state_blob(&self) -> Result<Option<FfiSdkStateBlobSnapshot>, PaykitFfiError>;
+
+    /// Atomically save a new SDK state blob; see
+    /// `FfiSdkStateBlobStore::save_state_blob_atomically`.
+    async fn save_state_blob_atomically(
+        &self,
+        blob: Arc<FfiSdkStateBlob>,
+        expected_revision: Option<String>,
+    ) -> Result<String, PaykitFfiError>;
+}
+
+/// THROWAWAY (#411): callback storage over `FfiSdkAsyncStateBlobStore`.
+///
+/// Same transaction shape as `FfiSdkStorage` (load, run the synchronous SDK
+/// callback in memory, compare-and-swap save), but the lock is an async mutex:
+/// it is held across the awaited callbacks, and on wasm32 a contended std
+/// mutex panics instead of blocking.
+#[cfg(feature = "web")]
+#[derive(Clone)]
+pub(crate) struct FfiSdkAsyncStorage {
+    pub(crate) store: Arc<dyn FfiSdkAsyncStateBlobStore>,
+    pub(crate) transaction_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Last revision this handle loaded or saved. `state_revision()` is a
+    /// synchronous export and cannot await the store, so for async storage it
+    /// reports this observation, as Pubky shared-state storage already does.
+    pub(crate) last_revision: Arc<Mutex<Option<String>>>,
+}
+
 #[derive(Clone)]
 pub(crate) enum FfiSdkStorageAdapter {
     Callback(FfiSdkStorage),
     PubkyShared(PubkySharedStateStorage),
+    // THROWAWAY (#411): browser-only async callback storage.
+    #[cfg(feature = "web")]
+    AsyncCallback(FfiSdkAsyncStorage),
 }
 
 impl FfiSdkStorageAdapter {
@@ -84,6 +134,8 @@ impl FfiSdkStorageAdapter {
         match self {
             Self::Callback(storage) => storage.state_revision(),
             Self::PubkyShared(storage) => storage.last_revision().map_err(Into::into),
+            #[cfg(feature = "web")]
+            Self::AsyncCallback(storage) => storage.state_revision(),
         }
     }
 }
@@ -99,6 +151,8 @@ impl StorageAdapter for FfiSdkStorageAdapter {
         match self {
             Self::Callback(storage) => storage.run_operation_erased(operation).await,
             Self::PubkyShared(storage) => storage.run_operation_erased(operation).await,
+            #[cfg(feature = "web")]
+            Self::AsyncCallback(storage) => storage.run_operation_erased(operation).await,
         }
     }
 
@@ -119,6 +173,12 @@ impl StorageAdapter for FfiSdkStorageAdapter {
                     .recover_shared_state_from_backup(current_key, replacement_key, state)
                     .await
             }
+            #[cfg(feature = "web")]
+            Self::AsyncCallback(storage) => {
+                storage
+                    .recover_shared_state_from_backup(current_key, replacement_key, state)
+                    .await
+            }
         }
     }
 
@@ -128,6 +188,8 @@ impl StorageAdapter for FfiSdkStorageAdapter {
         match self {
             Self::Callback(storage) => storage.load_identity_state().await,
             Self::PubkyShared(_) => Ok(None),
+            #[cfg(feature = "web")]
+            Self::AsyncCallback(storage) => storage.load_identity_state().await,
         }
     }
 
@@ -138,6 +200,8 @@ impl StorageAdapter for FfiSdkStorageAdapter {
         match self {
             Self::Callback(storage) => storage.transaction_erased(f).await,
             Self::PubkyShared(storage) => storage.transaction_erased(f).await,
+            #[cfg(feature = "web")]
+            Self::AsyncCallback(storage) => storage.transaction_erased(f).await,
         }
     }
 
@@ -154,6 +218,12 @@ impl StorageAdapter for FfiSdkStorageAdapter {
                     .await
             }
             Self::PubkyShared(storage) => {
+                storage
+                    .rotate_paykit_identity_key_erased(current_key, replacement_key, f)
+                    .await
+            }
+            #[cfg(feature = "web")]
+            Self::AsyncCallback(storage) => {
                 storage
                     .rotate_paykit_identity_key_erased(current_key, replacement_key, f)
                     .await
@@ -250,6 +320,104 @@ impl StorageAdapter for FfiSdkStorage {
                     source: None,
                 });
             }
+        }
+
+        Ok(result)
+    }
+}
+
+#[cfg(feature = "web")]
+impl FfiSdkAsyncStorage {
+    pub(crate) fn new(store: Arc<dyn FfiSdkAsyncStateBlobStore>) -> Self {
+        Self {
+            store,
+            transaction_lock: Arc::new(tokio::sync::Mutex::new(())),
+            last_revision: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn state_revision(&self) -> Result<Option<String>, PaykitFfiError> {
+        self.last_revision
+            .lock()
+            .map(|revision| revision.clone())
+            .map_err(|_| {
+                storage_error(
+                    "state_revision_lock_poisoned",
+                    "SDK state revision lock poisoned",
+                )
+            })
+    }
+
+    fn observe_revision(&self, revision: Option<String>) {
+        if let Ok(mut last) = self.last_revision.lock() {
+            *last = revision;
+        }
+    }
+
+    async fn load_validated_state(&self) -> paykit_sdk::Result<Option<(String, StorageState)>> {
+        let snapshot = self
+            .store
+            .load_state_blob()
+            .await
+            .map_err(|err| ffi_error_to_sdk(err, "load SDK state blob"))?;
+        let loaded = snapshot
+            .map(|snapshot| {
+                let state =
+                    decode_state_blob_snapshot(&snapshot.revision, &snapshot.blob.export_bytes())
+                        .map_err(|err| ffi_error_to_sdk(err, "load SDK state blob"))?;
+                Ok::<_, PaykitSdkError>((snapshot.revision, state))
+            })
+            .transpose()?;
+        self.observe_revision(loaded.as_ref().map(|(revision, _)| revision.clone()));
+        Ok(loaded)
+    }
+}
+
+#[cfg(feature = "web")]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl StorageAdapter for FfiSdkAsyncStorage {
+    async fn transaction_erased<'a>(
+        &self,
+        f: StorageTransactionCallback<'a>,
+    ) -> paykit_sdk::Result<Box<dyn Any + Send>> {
+        // Same steps and checks as `FfiSdkStorage::transaction_erased`.
+        let _guard = self.transaction_lock.lock().await;
+        let snapshot = self.load_validated_state().await?;
+        let (expected_revision, initial_state) = match snapshot {
+            Some((revision, state)) => (Some(revision), state),
+            None => (None, StorageState::default()),
+        };
+
+        let (updated_state, result) = run_storage_state_transaction(initial_state.clone(), f)?;
+
+        if updated_state != initial_state {
+            drop(initial_state);
+            validate_storage_state(&updated_state).map_err(|_| PaykitSdkError::Storage {
+                context: INVALID_STATE_BLOB_CONTEXT.into(),
+                source: None,
+            })?;
+            let blob = Arc::new(FfiSdkStateBlob::new(
+                encode_storage_state(&updated_state)
+                    .map_err(|err| ffi_error_to_sdk(err, "encode SDK state blob"))?,
+            ));
+            let previous_revision = expected_revision.clone();
+            let new_revision = self
+                .store
+                .save_state_blob_atomically(blob, expected_revision)
+                .await
+                .map_err(|err| ffi_error_to_sdk(err, "save SDK state blob"))?;
+            if new_revision.is_empty()
+                || previous_revision.as_deref() == Some(new_revision.as_str())
+            {
+                return Err(PaykitSdkError::Storage {
+                    context:
+                        "state blob store returned an unchanged or empty revision after a write"
+                            .into(),
+                    source: None,
+                });
+            }
+            self.observe_revision(Some(new_revision));
         }
 
         Ok(result)

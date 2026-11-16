@@ -356,6 +356,70 @@ pub trait FfiSdkPubkySessionProvider: Send + Sync {
     fn clear_session_access(&self) -> Result<(), PaykitFfiError>;
 }
 
+/// Browser build only: Promise-returning variant of `FfiSdkPubkySessionProvider`.
+///
+/// THROWAWAY (#411): a browser keeps session material in IndexedDB, possibly
+/// wrapped with a non-extractable WebCrypto key, and both are Promise-only.
+/// `load_session_access` and `clear_session_access` therefore await; a
+/// synchronous clear could only drop an in-memory copy and leave the grant
+/// secret on disk after sign-out. `public_storage_available` stays
+/// synchronous: it is a policy answer that needs no I/O. Same contract as
+/// `FfiSdkPubkySessionProvider` otherwise.
+#[cfg(feature = "web")]
+#[uniffi::export(with_foreign)]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait FfiSdkAsyncPubkySessionProvider: Send + Sync {
+    /// Load current live Pubky session access, when available.
+    async fn load_session_access(
+        &self,
+    ) -> Result<Option<Arc<FfiPubkySessionAccess>>, PaykitFfiError>;
+
+    /// Report whether unauthenticated public Pubky storage can be used.
+    fn public_storage_available(&self) -> Result<bool, PaykitFfiError>;
+
+    /// Clear Pubky session access from local platform storage.
+    async fn clear_session_access(&self) -> Result<(), PaykitFfiError>;
+}
+
+/// Platform session callbacks: the synchronous trait every binding has, or
+/// (browser build only) the async one.
+#[derive(Clone)]
+pub(crate) enum PlatformSessionProvider {
+    Sync(Arc<dyn FfiSdkPubkySessionProvider>),
+    // THROWAWAY (#411): browser-only async callbacks.
+    #[cfg(feature = "web")]
+    Async(Arc<dyn FfiSdkAsyncPubkySessionProvider>),
+}
+
+impl PlatformSessionProvider {
+    async fn load_session_access(
+        &self,
+    ) -> Result<Option<Arc<FfiPubkySessionAccess>>, PaykitFfiError> {
+        match self {
+            Self::Sync(provider) => provider.load_session_access(),
+            #[cfg(feature = "web")]
+            Self::Async(provider) => provider.load_session_access().await,
+        }
+    }
+
+    fn public_storage_available(&self) -> Result<bool, PaykitFfiError> {
+        match self {
+            Self::Sync(provider) => provider.public_storage_available(),
+            #[cfg(feature = "web")]
+            Self::Async(provider) => provider.public_storage_available(),
+        }
+    }
+
+    async fn clear_session_access(&self) -> Result<(), PaykitFfiError> {
+        match self {
+            Self::Sync(provider) => provider.clear_session_access(),
+            #[cfg(feature = "web")]
+            Self::Async(provider) => provider.clear_session_access().await,
+        }
+    }
+}
+
 struct CachedPubkySession {
     session_secret_fingerprint: [u8; 32],
     session: pubky::PubkySession,
@@ -363,7 +427,7 @@ struct CachedPubkySession {
 
 #[derive(Clone)]
 pub(crate) struct FfiSdkPubkySessionProviderAdapter {
-    provider: Arc<dyn FfiSdkPubkySessionProvider>,
+    provider: PlatformSessionProvider,
     pubky: Pubky,
     pubky_client: FfiPubkyClientConfig,
     cached_session: Arc<AsyncMutex<Option<CachedPubkySession>>>,
@@ -372,6 +436,14 @@ pub(crate) struct FfiSdkPubkySessionProviderAdapter {
 impl FfiSdkPubkySessionProviderAdapter {
     pub(crate) fn new(
         provider: Arc<dyn FfiSdkPubkySessionProvider>,
+        pubky: Pubky,
+        pubky_client: FfiPubkyClientConfig,
+    ) -> Self {
+        Self::with_platform_provider(PlatformSessionProvider::Sync(provider), pubky, pubky_client)
+    }
+
+    pub(crate) fn with_platform_provider(
+        provider: PlatformSessionProvider,
         pubky: Pubky,
         pubky_client: FfiPubkyClientConfig,
     ) -> Self {
@@ -395,7 +467,8 @@ impl FfiSdkPubkySessionProviderAdapter {
         };
         let access = self
             .provider
-            .load_session_access()?
+            .load_session_access()
+            .await?
             .ok_or_else(unavailable)?;
         let session = self
             .existing_session(&access)
@@ -450,7 +523,8 @@ impl FfiSdkPubkySessionProviderAdapter {
         };
         let access = self
             .provider
-            .load_session_access()?
+            .load_session_access()
+            .await?
             .ok_or_else(unavailable)?;
         let fingerprint = session_access_fingerprint(&access);
         // The ordinary session cache can contain credentials restored after
@@ -484,8 +558,9 @@ impl FfiSdkPubkySessionProviderAdapter {
         &self,
         fingerprint: &[u8; 32],
     ) -> Result<bool, PaykitFfiError> {
-        Ok(self
-            .provider
+        // Without `web` the provider is always the synchronous trait.
+        let PlatformSessionProvider::Sync(provider) = &self.provider;
+        Ok(provider
             .load_session_access()?
             .is_some_and(|access| session_access_fingerprint(&access) == *fingerprint))
     }
@@ -544,6 +619,7 @@ impl PubkySessionProvider for FfiSdkPubkySessionProviderAdapter {
         let Some(access) = self
             .provider
             .load_session_access()
+            .await
             .map_err(|err| ffi_error_to_sdk(err, "load Pubky session access"))?
         else {
             *self.cached_session.lock().await = None;
@@ -620,6 +696,7 @@ impl PubkySessionProvider for FfiSdkPubkySessionProviderAdapter {
         let provider_access = self
             .provider
             .load_session_access()
+            .await
             .map_err(|err| ffi_error_to_sdk(err, "load Pubky session access for revocation"))?
             .ok_or_else(|| PaykitSdkError::Identity {
                 context: "cannot revoke Pubky grant without persisted session access".into(),
@@ -647,6 +724,7 @@ impl PubkySessionProvider for FfiSdkPubkySessionProviderAdapter {
     async fn clear_session_access(&self) -> paykit_sdk::Result<()> {
         self.provider
             .clear_session_access()
+            .await
             .map_err(|err| ffi_error_to_sdk(err, "clear Pubky session access"))?;
         *self.cached_session.lock().await = None;
         Ok(())

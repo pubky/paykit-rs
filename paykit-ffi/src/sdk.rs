@@ -285,6 +285,8 @@ impl FfiPaykitSdk {
     ) -> Result<Option<FfiObservedBackupStateRevision>, PaykitFfiError> {
         match &self.storage {
             FfiSdkStorageAdapter::Callback(_) => Ok(None),
+            #[cfg(feature = "web")]
+            FfiSdkStorageAdapter::AsyncCallback(_) => Ok(None),
             FfiSdkStorageAdapter::PubkyShared(storage) => Ok(storage
                 .observed_backup_state_revision()?
                 .map(|observed| FfiObservedBackupStateRevision {
@@ -459,6 +461,54 @@ impl FfiPaykitSdk {
             .map_err(|err| validation_error(format!("invalid SDK backup string: {err}")))?;
         self.restore_backup_state(Arc::new(FfiSdkBackupBlob::new(bytes)), link_policy)
             .await
+    }
+}
+
+/// THROWAWAY (#411): browser-only constructors over the async callback traits.
+#[cfg(feature = "web")]
+#[uniffi::export]
+impl FfiPaykitSdk {
+    /// Browser build only: create an SDK runtime whose storage and session
+    /// callbacks return Promises (for IndexedDB and WebCrypto).
+    ///
+    /// The payment adapter stays synchronous in this prototype.
+    #[uniffi::constructor]
+    pub fn with_async_callbacks(
+        state_store: Arc<dyn crate::storage::FfiSdkAsyncStateBlobStore>,
+        session_provider: Arc<dyn crate::session::FfiSdkAsyncPubkySessionProvider>,
+        payment_adapter: Arc<dyn FfiSdkPaymentAdapter>,
+        config: FfiPaykitSdkConfig,
+        pubky_client: FfiPubkyClientConfig,
+    ) -> Result<Self, PaykitFfiError> {
+        let session_provider = FfiSdkPubkySessionProviderAdapter::with_platform_provider(
+            crate::session::PlatformSessionProvider::Async(session_provider),
+            pubky_from_config(&pubky_client)?,
+            pubky_client,
+        );
+        let storage = FfiSdkStorageAdapter::AsyncCallback(crate::storage::FfiSdkAsyncStorage::new(
+            state_store,
+        ));
+        build_sdk(storage, session_provider, payment_adapter, config)
+    }
+
+    /// Browser build only: Pubky shared-state runtime with an async session
+    /// provider. No platform state store is involved.
+    #[uniffi::constructor]
+    pub fn with_async_session_provider_and_pubky_shared_state(
+        session_provider: Arc<dyn crate::session::FfiSdkAsyncPubkySessionProvider>,
+        payment_adapter: Arc<dyn FfiSdkPaymentAdapter>,
+        config: FfiPaykitSdkConfig,
+        pubky_client: FfiPubkyClientConfig,
+    ) -> Result<Self, PaykitFfiError> {
+        let session_provider = FfiSdkPubkySessionProviderAdapter::with_platform_provider(
+            crate::session::PlatformSessionProvider::Async(session_provider),
+            pubky_from_config(&pubky_client)?,
+            pubky_client,
+        );
+        let storage = FfiSdkStorageAdapter::PubkyShared(PubkySharedStateStorage::new(
+            session_provider.clone(),
+        ));
+        build_sdk(storage, session_provider, payment_adapter, config)
     }
 }
 
