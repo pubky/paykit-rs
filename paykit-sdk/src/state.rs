@@ -1955,7 +1955,7 @@ mod tests {
         ));
         assert!(!reads::<bool>(&key::peer(&pubky), serde_json::json!(true)));
         // The restore's re-send owed at its key only, its waiting counterparties ascending.
-        let owed = |waiting: serde_json::Value| serde_json::json!({ "waiting": waiting });
+        let owed = |waiting: serde_json::Value| serde_json::json!({ "waiting": waiting, "restored_at_ms": null });
         assert!(reads::<OwnResendOwed>(
             key::OWN_RESEND_OWED,
             owed(serde_json::Value::Null)

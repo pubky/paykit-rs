@@ -48,6 +48,7 @@ use crate::state::{key, Tx};
 
 /// The hold a restore set (`p/rh`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RestoreHold {
     /// From when the counterparties are asked to re-send: the acceptance time of the last
     /// entry the backup's cursor passed, less the clock tolerance.
@@ -74,6 +75,7 @@ impl RestoreHold {
 /// The hold a `missed` item set (`p/mh`), bounded. An item whose end isn't known sets `p/mu`
 /// instead, which holds every open request until [`Paykit::bound_missed_hold`] writes this.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct MissedHold {
     /// No earlier than the acceptance time of any entry the items told of: an item's last
     /// acceptance time (`MissedEntries::accepted_until_ms`), or, for one whose end isn't
@@ -1184,6 +1186,7 @@ impl Paykit {
 /// restored, gone once every message it covers was queued again or refused
 /// ([`Paykit::queue_own_again`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct OwnResendOwed {
     /// `None` while no pass ran, or after a pass that found an activity record it couldn't
     /// read (a value that doesn't open for good, read or bind), which names no counterparty,
@@ -1193,6 +1196,7 @@ pub(crate) struct OwnResendOwed {
     /// while the copy of the deny list isn't known, and those with period details whose
     /// request record couldn't show yet whether a later stop covers them
     /// ([`DetailsStop::Unknown`]).
+    #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) waiting: Option<Vec<[u8; 32]>>,
     /// The restore's time, on [`Paykit::window_now`], written by [`Paykit::restore`] right
     /// after the client's restore commit and kept for the life of the mark: 30 days after it
@@ -1200,6 +1204,7 @@ pub(crate) struct OwnResendOwed {
     /// be read keeps the re-send owed past it. `None`, after a restore that stopped before
     /// writing it, fails closed: the first pass that finds a record it can't read sets it to
     /// its own time, which is later.
+    #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) restored_at_ms: Option<u64>,
 }
 
@@ -1260,6 +1265,7 @@ enum AnswerRecord {
 /// through a restart and carried in backups; after a restore the record is the source, as
 /// for the restore's re-send.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct HeldAnswer {
     /// The payee it goes to.
     #[serde(with = "pubky_switch_core::enc::serde_b64")]
@@ -1393,6 +1399,162 @@ mod tests {
     use pubky_switch_client::error::{ClientError, StoreError, TransportError};
 
     use super::*;
+
+    fn extra<T: serde::de::DeserializeOwned + Serialize>(value: T) {
+        let mut value = serde_json::to_value(value).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("extra".into(), serde_json::json!({"nested": [7]}));
+        assert!(serde_json::from_value::<T>(value).is_err());
+    }
+
+    #[test]
+    fn test_recovery_state_restore_hold_rejects_unknown() {
+        extra(RestoreHold::of(300_000));
+    }
+
+    #[test]
+    fn test_recovery_state_restore_hold_round_trip() {
+        let value = RestoreHold::of(300_000);
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let read: RestoreHold = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(read, value);
+    }
+
+    #[test]
+    fn test_recovery_state_missed_hold_rejects_unknown() {
+        extra(MissedHold::bounded_by(300_000));
+    }
+
+    #[test]
+    fn test_recovery_state_missed_hold_round_trip() {
+        let value = MissedHold::bounded_by(300_000);
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let read: MissedHold = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(read, value);
+    }
+
+    #[test]
+    fn test_recovery_state_own_resend_rejects_unknown() {
+        extra(OwnResendOwed::default());
+    }
+
+    #[test]
+    fn test_recovery_state_own_resend_round_trip() {
+        let value = OwnResendOwed::default();
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let read: OwnResendOwed = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(read, value);
+    }
+
+    #[test]
+    fn test_recovery_state_held_answer_rejects_unknown() {
+        extra(HeldAnswer {
+            payee: [7; 32],
+            msg_id: "223e4567-e89b-42d3-a456-426614174000".into(),
+            request_hash: [8; 32],
+        });
+    }
+
+    #[test]
+    fn test_recovery_state_held_answer_round_trip() {
+        let value = HeldAnswer {
+            payee: [7; 32],
+            msg_id: "223e4567-e89b-42d3-a456-426614174000".into(),
+            request_hash: [8; 32],
+        };
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let read: HeldAnswer = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(read, value);
+    }
+
+    #[test]
+    fn test_recovery_state_own_resend_requires_waiting() {
+        assert!(serde_json::from_value::<OwnResendOwed>(
+            serde_json::json!({"restored_at_ms": null})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_recovery_state_own_resend_requires_time() {
+        assert!(
+            serde_json::from_value::<OwnResendOwed>(serde_json::json!({"waiting": null})).is_err()
+        );
+    }
+
+    #[test]
+    fn test_recovery_state_own_resend_preserves_nullable_values() {
+        for waiting in [None, Some(vec![]), Some(vec![[1; 32], [2; 32]])] {
+            for restored_at_ms in [None, Some(300_000)] {
+                let owed = OwnResendOwed {
+                    waiting: waiting.clone(),
+                    restored_at_ms,
+                };
+                let value = serde_json::to_value(&owed).unwrap();
+                assert!(value.get("waiting").is_some());
+                assert!(value.get("restored_at_ms").is_some());
+                let read: OwnResendOwed = serde_json::from_value(value).unwrap();
+                assert_eq!(read, owed);
+            }
+        }
+    }
+
+    #[test]
+    fn test_recovery_state_duplicate_members_refused() {
+        assert!(serde_json::from_str::<RestoreHold>(
+            r#"{"resend_from_ms":1,"resend_from_ms":1,"asks_queued":false,"asked":[]}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<MissedHold>(r#"{"bound_ms":1,"bound_ms":1}"#).is_err());
+        assert!(serde_json::from_str::<OwnResendOwed>(
+            r#"{"waiting":null,"waiting":null,"restored_at_ms":null}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<OwnResendOwed>(
+            r#"{"waiting":null,"restored_at_ms":null,"restored_at_ms":null}"#
+        )
+        .is_err());
+        let answer = HeldAnswer {
+            payee: [7; 32],
+            msg_id: "223e4567-e89b-42d3-a456-426614174000".into(),
+            request_hash: [8; 32],
+        };
+        let text = serde_json::to_string(&answer).unwrap().replacen(
+            "{",
+            &format!("{{\"msg_id\":\"{}\",", answer.msg_id),
+            1,
+        );
+        assert!(serde_json::from_str::<HeldAnswer>(&text).is_err());
+    }
+
+    #[test]
+    fn test_recovery_state_wrong_types_refused() {
+        assert!(serde_json::from_value::<RestoreHold>(serde_json::json!({
+            "resend_from_ms": 1, "asks_queued": "false", "asked": []
+        }))
+        .is_err());
+        assert!(
+            serde_json::from_value::<MissedHold>(serde_json::json!({"bound_ms": null})).is_err()
+        );
+        assert!(serde_json::from_value::<OwnResendOwed>(serde_json::json!({
+            "waiting": false, "restored_at_ms": null
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<OwnResendOwed>(serde_json::json!({
+            "waiting": null, "restored_at_ms": "1"
+        }))
+        .is_err());
+        let answer = HeldAnswer {
+            payee: [7; 32],
+            msg_id: "223e4567-e89b-42d3-a456-426614174000".into(),
+            request_hash: [8; 32],
+        };
+        let mut value = serde_json::to_value(answer).unwrap();
+        value["request_hash"] = serde_json::json!([]);
+        assert!(serde_json::from_value::<HeldAnswer>(value).is_err());
+    }
 
     fn switch(code: ErrorCode) -> PaykitError {
         PaykitError::Client(AppError::Switch(ClientError::Switch {

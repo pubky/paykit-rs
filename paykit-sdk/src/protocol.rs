@@ -105,6 +105,7 @@ pub(crate) struct QueuedAsk {
 /// counterparties asked already for it, kept while a record whose counterparty it may still
 /// have to ask is sealed under a scope key the app doesn't hold yet (`resend.rs`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct MissedItemMark {
     pub(crate) from_ms: u64,
     /// In increasing order, each once.
@@ -1156,6 +1157,40 @@ pub(crate) fn writes_payee_label(scopes: &[String], label: Option<&Label>) -> bo
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_recovery_state_missed_item_wrong_types_refused() {
+        assert!(serde_json::from_value::<super::MissedItemMark>(
+            serde_json::json!({"from_ms":1,"asked":null})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_recovery_state_missed_item_round_trip() {
+        let mark = super::MissedItemMark {
+            from_ms: 300_000,
+            asked: vec![[1; 32], [2; 32]],
+        };
+        let bytes = serde_json::to_vec(&mark).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<super::MissedItemMark>(&bytes).unwrap(),
+            mark
+        );
+    }
+
+    #[test]
+    fn test_recovery_state_missed_item_rejects_unknown() {
+        let value = serde_json::json!({"from_ms":300_000,"asked":[],"extra":{"nested":[7]}});
+        assert!(serde_json::from_value::<super::MissedItemMark>(value).is_err());
+    }
+
+    #[test]
+    fn test_recovery_state_missed_item_rejects_duplicates() {
+        assert!(serde_json::from_str::<super::MissedItemMark>(
+            r#"{"from_ms":1,"from_ms":1,"asked":[]}"#
+        )
+        .is_err());
+    }
 
     use super::*;
 
