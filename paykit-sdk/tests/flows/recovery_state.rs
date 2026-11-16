@@ -6,6 +6,7 @@ use std::sync::{
     Arc,
 };
 
+use paykit_lib::records::{ActivityRecord, ActivitySide, StoredMessage};
 use paykit_sdk::{AppScopes, Paykit, PaykitBackup, PaykitConfig, Rail};
 use pubky_switch_client::app::{AppError, LocalWrite};
 use pubky_switch_client::clock::Clock;
@@ -13,6 +14,7 @@ use pubky_switch_client::error::StoreError;
 use pubky_switch_client::store::{
     Fault, FaultStore, KeyValue, MemoryStore, StateStore, Write, WriteBatch,
 };
+use pubky_switch_client::testing::{Seeds, TestIdentity, TestSigner};
 use serde_json::{json, Value};
 
 use crate::common::{draft, request_from, store, World};
@@ -528,4 +530,395 @@ async fn test_recovery_state_restore_retains_sorted_waiting_counterparties() {
         delivered
     );
     assert!(w.rail.all_executions().is_empty());
+}
+
+async fn checkpoint_reload(w: &World, wallet: Paykit, storage: Arc<dyn StateStore>) -> Paykit {
+    let app_id = wallet.app_id();
+    drop(wallet);
+    Paykit::load(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        app_id,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .expect("a current cursor leaves the checkpoints for their ordinary readers")
+}
+
+async fn checkpoint_put(wallet: &mut Paykit, key: &[u8], value: &Value) -> Vec<u8> {
+    let bytes = serde_json::to_vec(value).unwrap();
+    wallet
+        .app_mut()
+        .protocol_commit(&[LocalWrite::Put {
+            key: key.to_vec(),
+            value: bytes.clone(),
+        }])
+        .await
+        .unwrap();
+    bytes
+}
+
+async fn checkpoint_value(wallet: &Paykit, key: &[u8]) -> Value {
+    serde_json::from_slice(&wallet.app().protocol_get(key).await.unwrap().unwrap()).unwrap()
+}
+
+async fn checkpoint_own_request(w: &World) -> (Paykit, Arc<dyn StateStore>, StoredMessage) {
+    let mut shop = w
+        .join(
+            &w.alice,
+            "shop",
+            AppScopes::new()
+                .request()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+        )
+        .await;
+    let mut wallet = w
+        .join(&w.bob, "wallet", AppScopes::new().pay().build().unwrap())
+        .await;
+    wallet.app_mut().invite(&w.alice_id()).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let mut request = draft("1", w.clock.now_ms());
+    request.proposal_expires_at_ms = None;
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::LoseAnswer {
+            path: "/ops".into(),
+        });
+    let sent = shop.send_request(w.bob_id(), request).await.unwrap();
+    assert!(matches!(
+        sent.delivery,
+        paykit_sdk::MessageDelivery::Kept { .. }
+    ));
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.requests().await.unwrap().is_empty());
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let storage = store();
+    let mut shop = restore(w, Arc::clone(&storage), &backup).await;
+    shop.block(&w.bob_id()).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let activity = shop.payee_activity().await.unwrap();
+    assert_eq!(activity.len(), 1);
+    let held = shop
+        .app()
+        .shared_record(&activity[0].record)
+        .await
+        .unwrap()
+        .unwrap();
+    let record = ActivityRecord::read(
+        held.content.value().unwrap(),
+        &w.alice_id(),
+        ActivitySide::Payee,
+    )
+    .unwrap();
+    let original = record.request.unwrap();
+    assert_eq!(original.message().msg_id, sent.msg_id);
+    assert_eq!(
+        activity[0].request_hash,
+        Some(sent.request.unwrap().request_hash)
+    );
+    assert_eq!(original.sender(), w.alice_id());
+    assert_eq!(original.cert().app_id(), shop.app_id());
+    assert_eq!(original.message().kind, "paykit.payment_request");
+    assert!(shop
+        .app()
+        .delivery(&original.message().msg_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(shop.app().protocol_scan(b"ha/").await.unwrap().is_empty());
+    assert_eq!(
+        checkpoint_value(&shop, b"ro").await["d"]["waiting"],
+        json!([w.bob_id()])
+    );
+    (shop, storage, original)
+}
+
+#[tokio::test]
+async fn test_recovery_checkpoint_empty_waiting_after_reload_refused() {
+    let w = World::new();
+    let (mut shop, storage, original) = Box::pin(checkpoint_own_request(&w)).await;
+    let mut value = checkpoint_value(&shop, b"ro").await;
+    value["d"]["waiting"] = json!([]);
+    let bad = checkpoint_put(&mut shop, b"ro", &value).await;
+    let mut shop = checkpoint_reload(&w, shop, storage).await;
+    shop.unblock(&w.bob_id()).await.unwrap();
+    let error = shop
+        .receive(None)
+        .await
+        .expect_err("an empty retained resend subset was read");
+    assert!(crate::common::is_corrupt(&error), "{error:?}");
+    assert_eq!(shop.app().protocol_get(b"ro").await.unwrap(), Some(bad));
+    assert!(shop
+        .app()
+        .delivery(&original.message().msg_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(shop.app().protocol_scan(b"ha/").await.unwrap().is_empty());
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_recovery_checkpoint_own_request_resumes_same_signed_message() {
+    let w = World::new();
+    let (shop, storage, original) = Box::pin(checkpoint_own_request(&w)).await;
+    let mut shop = checkpoint_reload(&w, shop, storage).await;
+    shop.receive(None).await.unwrap();
+    assert!(shop
+        .app()
+        .delivery(&original.message().msg_id)
+        .await
+        .unwrap()
+        .is_none());
+    shop.unblock(&w.bob_id()).await.unwrap();
+    shop.receive(None).await.unwrap();
+    let sent = shop.app().sent_to(&w.bob_id(), 0, u64::MAX).await.unwrap();
+    let sent = sent
+        .iter()
+        .find(|sent| sent.msg_id == original.message().msg_id)
+        .unwrap();
+    assert_eq!(&sent.plaintext, original.plaintext());
+    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    let before = w.bob.switch().entries_from(&w.alice_id());
+    shop.receive(None).await.unwrap();
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
+    assert!(w.rail.all_executions().is_empty());
+}
+
+struct PartialAsks {
+    wallet: Paykit,
+    storage: Arc<dyn StateStore>,
+    asked: Vec<[u8; 32]>,
+    missing: [u8; 32],
+}
+
+async fn checkpoint_partial_asks(w: &World) -> PartialAsks {
+    let dave = TestSigner::at(
+        TestIdentity::new(&Seeds::default(), "dave"),
+        "https://dave-switch.example",
+        Arc::clone(&w.clock),
+        Arc::clone(&w.homeserver),
+        crate::common::spec(),
+    );
+    w.router.add_switch(dave.origin(), dave.switch());
+    let missing = dave.identity().public();
+    let mut wallet = w.wallet("wallet").await;
+    wallet.app_mut().invite(&w.carol_id()).await.unwrap();
+    wallet.app_mut().invite(&missing).await.unwrap();
+    let mut phone = w.wallet("phone").await;
+    let mut shops = vec![
+        w.shop().await,
+        w.join(
+            &w.carol,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+        )
+        .await,
+        w.join(&dave, "shop", AppScopes::new().request().build().unwrap())
+            .await,
+    ];
+    let mut requests = Vec::new();
+    for shop in &mut shops {
+        requests.push(request_from(shop, w.alice_id(), draft("1", w.clock.now_ms())).await);
+    }
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.requests().await.unwrap().len(), 3);
+    phone.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    let app_id = wallet.app_id();
+    let cert = wallet.app().cert().clone();
+    drop(wallet);
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    crate::unrequested::store_bundle(w, phone.app_id(), &phone.app().cert().clone());
+    phone.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let value = crate::outcome_record::record_value(&mut phone, &requests[2])
+        .await
+        .unwrap();
+    crate::outcome_record::phone_writes(
+        &mut phone,
+        &requests[2],
+        Some(&serde_json::to_vec(&value).unwrap()),
+    )
+    .await;
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    let newest = w.alice.switch().identity_doc().unwrap().data_epoch();
+    crate::unrequested::store_bundle_from(w, app_id, &cert, newest);
+    let storage = store();
+    let mut wallet = restore(w, Arc::clone(&storage), &backup).await;
+    for _ in 0..2 {
+        wallet.receive(None).await.unwrap();
+    }
+    let key = wallet
+        .app()
+        .record_key(&crate::outcome_record::payer_record(&requests[2]))
+        .unwrap();
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    assert!(matches!(
+        held.content,
+        pubky_switch_client::app::RecordContent::Unreadable(
+            pubky_switch_client::app::Unopened::KeyNotHeld { .. }
+        )
+    ));
+    let mut asked = vec![w.bob_id(), w.carol_id()];
+    asked.sort();
+    let hold = checkpoint_value(&wallet, b"rh").await;
+    assert_eq!(hold["d"]["asks_queued"], false);
+    assert_eq!(hold["d"]["asked"], json!(asked));
+    for peer in &asked {
+        assert_eq!(crate::common::asked(&wallet, peer).await.len(), 1);
+    }
+    assert!(crate::common::asked(&wallet, &missing).await.is_empty());
+    PartialAsks {
+        wallet,
+        storage,
+        asked,
+        missing,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AskedDamage {
+    Completed,
+    Duplicate,
+    Descending,
+}
+
+fn checkpoint_damage_asks(value: &mut Value, how: AskedDamage) {
+    match how {
+        AskedDamage::Completed => value["d"]["asks_queued"] = json!(true),
+        AskedDamage::Duplicate => {
+            let asked = value["d"]["asked"].as_array_mut().unwrap();
+            asked.insert(1, asked[0].clone());
+        }
+        AskedDamage::Descending => value["d"]["asked"].as_array_mut().unwrap().reverse(),
+    }
+}
+
+async fn checkpoint_refuse_asks(how: AskedDamage) {
+    let w = World::new();
+    let PartialAsks {
+        mut wallet,
+        storage,
+        asked,
+        missing,
+    } = Box::pin(checkpoint_partial_asks(&w)).await;
+    let mut value = checkpoint_value(&wallet, b"rh").await;
+    checkpoint_damage_asks(&mut value, how);
+    let bad = checkpoint_put(&mut wallet, b"rh", &value).await;
+    let wallet = checkpoint_reload(&w, wallet, storage).await;
+    let error = wallet
+        .requests()
+        .await
+        .expect_err("an inconsistent restore checkpoint was read");
+    assert!(crate::common::is_corrupt(&error), "{error:?}");
+    assert_eq!(wallet.app().protocol_get(b"rh").await.unwrap(), Some(bad));
+    for peer in asked {
+        assert_eq!(crate::common::asked(&wallet, &peer).await.len(), 1);
+    }
+    assert!(crate::common::asked(&wallet, &missing).await.is_empty());
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_recovery_checkpoint_completed_asked_after_reload_refused() {
+    Box::pin(checkpoint_refuse_asks(AskedDamage::Completed)).await;
+}
+
+#[tokio::test]
+async fn test_recovery_checkpoint_duplicate_asked_after_reload_refused() {
+    Box::pin(checkpoint_refuse_asks(AskedDamage::Duplicate)).await;
+}
+
+#[tokio::test]
+async fn test_recovery_checkpoint_descending_asked_after_reload_refused() {
+    Box::pin(checkpoint_refuse_asks(AskedDamage::Descending)).await;
+}
+
+#[tokio::test]
+async fn test_recovery_checkpoint_partial_asks_finish_after_reload() {
+    let w = World::new();
+    let PartialAsks {
+        wallet,
+        storage,
+        asked,
+        missing,
+    } = Box::pin(checkpoint_partial_asks(&w)).await;
+    let original = wallet.app().protocol_get(b"rh").await.unwrap().unwrap();
+    let mut wallet = checkpoint_reload(&w, wallet, storage).await;
+    assert_eq!(
+        wallet.app().protocol_get(b"rh").await.unwrap(),
+        Some(original)
+    );
+    wallet.receive(None).await.unwrap();
+    for peer in &asked {
+        assert_eq!(crate::common::asked(&wallet, peer).await.len(), 1);
+    }
+    crate::unrequested::store_bundle(&w, wallet.app_id(), &wallet.app().cert().clone());
+    for _ in 0..3 {
+        wallet.receive(None).await.unwrap();
+    }
+    let hold = checkpoint_value(&wallet, b"rh").await;
+    assert_eq!(hold["d"]["asks_queued"], true);
+    assert_eq!(hold["d"]["asked"], json!([]));
+    for peer in asked.into_iter().chain([missing]) {
+        assert_eq!(crate::common::asked(&wallet, &peer).await.len(), 1);
+    }
+    assert!(w.rail.all_executions().is_empty());
+}
+
+async fn checkpoint_regenerated(w: &World, backup: &PaykitBackup) {
+    let mut wallet = restore(w, store(), backup).await;
+    let hold = checkpoint_value(&wallet, b"rh").await;
+    assert_eq!(hold["d"]["asks_queued"], false);
+    assert_eq!(hold["d"]["asked"], json!([]));
+    let owed = checkpoint_value(&wallet, b"ro").await;
+    assert!(owed["d"]["waiting"].is_null());
+    assert!(owed["d"]["restored_at_ms"].is_u64());
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_recovery_checkpoint_malformed_live_transients_remain_backable() {
+    let w = World::new();
+    let (mut wallet, _, _, _) = Box::pin(produced(&w, Family::RestoreHold)).await;
+    let mut hold = checkpoint_value(&wallet, b"rh").await;
+    hold["d"]["asks_queued"] = json!(true);
+    hold["d"]["asked"] = json!([w.bob_id()]);
+    let rh = checkpoint_put(&mut wallet, b"rh", &hold).await;
+    let mut owed = checkpoint_value(&wallet, b"ro").await;
+    owed["d"]["waiting"] = json!([]);
+    let ro = checkpoint_put(&mut wallet, b"ro", &owed).await;
+    let backup = wallet.backup().await.unwrap();
+    let value: Value = serde_json::from_slice(&backup.to_bytes().unwrap()).unwrap();
+    let data = pubky_switch_core::enc::unb64(value["protocol"]["data"].as_str().unwrap()).unwrap();
+    let layer = pubky_switch_client::app::decode_local_state(&data).unwrap();
+    for (key, bytes) in [(b"rh", rh), (b"ro", ro)] {
+        assert_eq!(layer.iter().find(|(k, _)| k == key).unwrap().1, bytes);
+    }
+    Box::pin(checkpoint_regenerated(&w, &backup)).await;
+}
+
+#[tokio::test]
+async fn test_recovery_checkpoint_malformed_saved_transients_regenerate() {
+    let w = World::new();
+    let (mut wallet, _, _, _) = Box::pin(produced(&w, Family::RestoreHold)).await;
+    let backup = wallet.backup().await.unwrap();
+    let mut hold = checkpoint_value(&wallet, b"rh").await;
+    hold["d"]["asked"] = json!([w.carol_id(), w.bob_id(), w.bob_id()]);
+    let mut owed = checkpoint_value(&wallet, b"ro").await;
+    owed["d"]["waiting"] = json!([]);
+    let changed = replace(
+        &backup,
+        &[
+            (b"rh".to_vec(), serde_json::to_vec(&hold).unwrap()),
+            (b"ro".to_vec(), serde_json::to_vec(&owed).unwrap()),
+        ],
+    );
+    Box::pin(checkpoint_regenerated(&w, &changed)).await;
 }
