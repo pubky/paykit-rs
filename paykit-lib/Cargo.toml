@@ -37,11 +37,21 @@ zeroize = "1"
 libc = "0.2"
 
 [dev-dependencies]
-proptest = "1"
 pubky-noise = { version = "=0.1.0", features = ["test-utils"] }
+tracing-subscriber = "0.3"
+
+# THROWAWAY (#411): pubky-testnet (homeserver + sqlx + tokio net/mio) and
+# tokio's multi-thread runtime cannot build for wasm32; gate them to native so
+# `cargo test -p paykit-lib --target wasm32-unknown-unknown` can at least build.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+proptest = "1"
 pubky-testnet = { version = "0.16.2", features = ["docker-postgres"] }
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "test-util"] }
-tracing-subscriber = "0.3"
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+# proptest's default `fork` feature pulls rusty-fork/wait-timeout (process APIs).
+proptest = { version = "1", default-features = false, features = ["std"] }
+tokio = { version = "1.48.0", features = ["macros", "rt", "test-util"] }
 
 # THROWAWAY (#411): browser randomness backends for every getrandom major in the
 # paykit-lib tree, so `cargo check -p paykit-lib --target wasm32-unknown-unknown`

@@ -22,7 +22,8 @@ mod locks;
 pub use locks::{
     delete_resource_if_revision, is_write_conflict, put_resource_if_revision, with_write_lock,
 };
-#[cfg(test)]
+// THROWAWAY (#411): only the native-only test modules use these.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) use locks::{with_write_lock_clock, with_write_lock_timeout};
 
 /// Content fingerprint used to detect an application-level stale edit.
@@ -885,5 +886,6 @@ pub(crate) fn is_not_found(err: &PubkyError) -> bool {
     )
 }
 
-#[cfg(test)]
+// THROWAWAY (#411): needs pubky-testnet, a native TCP server or tokio's paused clock; native only.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;

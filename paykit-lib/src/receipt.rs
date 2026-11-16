@@ -16,8 +16,10 @@ pub use wire::{
     parse_receipt_access_event_message, parse_receipt_access_json, serialize_receipt_access_json,
 };
 
-#[cfg(test)]
+// THROWAWAY (#411): only the native-only test modules use these.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 use wire::{EncryptedReceiptWire, ReceiptWire};
 
-#[cfg(test)]
+// THROWAWAY (#411): needs pubky-testnet, a native TCP server or tokio's paused clock; native only.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;

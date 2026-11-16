@@ -135,5 +135,6 @@ pub use response_chunks::{ResponseChunk, ResponseChunks};
 /// Common result alias for Paykit operations.
 pub type Result<T> = std::result::Result<T, PaykitError>;
 
-#[cfg(test)]
+// THROWAWAY (#411): needs pubky-testnet, a native TCP server or tokio's paused clock; native only.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;

@@ -604,7 +604,8 @@ fn is_connect_error(_error: &reqwest::Error) -> bool {
     false
 }
 
-#[cfg(test)]
+// THROWAWAY (#411): needs pubky-testnet, a native TCP server or tokio's paused clock; native only.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 
