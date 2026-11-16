@@ -9,11 +9,9 @@ them byte for byte, subject to the conformance exclusions below.
 
 ## Allowance usage conformance
 
-The following JSON pointers in `allowance_usage.json` are stale and excluded from current conformance requirements: `/description`, `/cases/2`, `/cases/3`, `/cases/6`, `/cases/7`, and `/compaction`. These cases release failed attempts without durable evidence that they were never dispatched, or omit them from compacted usage, contrary to wire 5.5 and spec 8.3. Their names, descriptions, expected usage, candidate verdicts and compaction results MUST NOT be used as current accounting requirements. Reproducing those stale expectations does not establish conformance to failed-attempt accounting.
+`allowance_usage.json` checks the counting and limit rules of wire 5.5 and spec 8.3, including failed attempts and compacted `totals.failed` items. Every failed attempt counts immediately, while its claim remains and after it is gone, unless durable journal evidence proves that it ended before dispatch and cannot dispatch later. A `done` or matching paid proof always spends.
 
-Every failed attempt counts immediately, while its claim remains and after it is gone, unless durable journal evidence proves that it ended before dispatch and cannot dispatch later. A `done` or matching paid proof always spends. The excluded cases have no input for that evidence and cannot test this distinction.
-
-The other cases, `/cases/0`, `/cases/1`, `/cases/4`, `/cases/5` and `/cases/8`, and `period_limit_spellings` and `period_limit_members` remain normative. The runtime accounting, generator and replacement cases for default-spent failures and the durable never-dispatched exception are required before release. The implementation change on `v0.2` must update the generator and its checks before regenerating these cases; the regenerated files then replace these exclusions.
+The `failure_evidence` cases supply already validated counting evidence to the pure library. Callers must bind that evidence to the attempt, obligation, Allowance, amount, asset and owner. These cases do not establish the SDK's authority to obtain or persist the evidence, reconstruct a ledger, release a reservation, or dispatch a payment. The generator checks exact expected lifetime amounts before regenerating the vectors.
 
 ## Settlement marks
 
