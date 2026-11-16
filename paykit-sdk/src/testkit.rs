@@ -101,6 +101,33 @@ impl Party {
         body: Map<String, Value>,
         edit: impl FnOnce(&mut Message),
     ) -> Result<StoredMessage, paykit_lib::error::Error> {
+        self.stored_as(to, kind, refs, body, edit, Some(NOW))
+    }
+
+    /// A message of `kind` to `to` signed as created at `created_at_ms`, stored as accepted
+    /// at `accepted_at`.
+    pub(crate) fn message_accepted(
+        &self,
+        to: &Party,
+        kind: &str,
+        body: Map<String, Value>,
+        created_at_ms: u64,
+        accepted_at: Option<u64>,
+    ) -> StoredMessage {
+        let edit = |message: &mut Message| message.created_at_ms = created_at_ms;
+        self.stored_as(to, kind, vec![], body, edit, accepted_at)
+            .unwrap()
+    }
+
+    fn stored_as(
+        &self,
+        to: &Party,
+        kind: &str,
+        refs: Vec<[u8; 32]>,
+        body: Map<String, Value>,
+        edit: impl FnOnce(&mut Message),
+        accepted_at: Option<u64>,
+    ) -> Result<StoredMessage, paykit_lib::error::Error> {
         let mut message = Message::new(
             kind,
             Sender::of_app(self.id(), &self.keys),
@@ -116,7 +143,7 @@ impl Party {
             self.id(),
             self.cert.signed(),
             plaintext,
-            Some(NOW),
+            accepted_at,
             &to.id(),
         )
     }

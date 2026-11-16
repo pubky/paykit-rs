@@ -343,23 +343,13 @@ mod tests {
             "payment_reference": "order-1",
             "proposal_expires_at": null
         }));
-        let message = pubky_switch_core::message::Message::new(
+        bob.message_accepted(
+            &alice,
             "paykit.payment_request",
-            pubky_switch_core::message::Sender::of_app(bob.id(), &bob.keys),
-            alice.id(),
-            created_at_ms,
-            vec![],
             body,
-        )
-        .unwrap();
-        StoredMessage::new(
-            bob.id(),
-            bob.cert.signed(),
-            message.sign(&bob.keys).unwrap(),
+            created_at_ms,
             accepted_at,
-            &alice.id(),
         )
-        .unwrap()
     }
 
     #[test]
