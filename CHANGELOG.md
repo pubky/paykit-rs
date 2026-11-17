@@ -101,6 +101,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Fixed
 
+- FFI-created Pubky clients use their configured HTTP PKARR relays without
+  direct DHT waits, reducing mobile profile signup latency. Initial identity
+  refresh runs in the existing app-publication storage operation. Signup,
+  publication, capability checks and their failures remain awaited.
 - `sync_private_payment_lists_with_reservations_and_process_outbound` in Rust
   and `syncPrivatePaymentListsWithReservationsAndProcessOutbound` in Swift and
   Kotlin no longer republish every unchanged Private Payment List after an SDK
