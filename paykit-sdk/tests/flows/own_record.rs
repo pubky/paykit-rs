@@ -938,3 +938,34 @@ async fn test_own_record_renewal_during_clock_rollback_stays_payable() {
     shop.update_own_record().await.unwrap();
     assert_eq!(shop.app().record(), &signed);
 }
+
+#[tokio::test]
+async fn test_own_record_completed_read_renews_after_clock_rollback() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let clock = Arc::new(PublisherClock::new(w.clock.now_ms()));
+    let mut shop = Box::pin(shop_on_clock(&w, Arc::clone(&clock))).await;
+    let id = endpoint("btc-lightning-bolt12");
+    shop.set_public_endpoint(id.clone(), payload("lno1tips"))
+        .await
+        .unwrap();
+    let first = held(&shop, w.bob_id());
+    w.clock.advance_ms(31 * DAY_MS);
+    *clock.times.lock().unwrap() = (first.updated_at() - 40 * DAY_MS, None);
+    shop.receive(None).await.unwrap();
+    assert!(shop.app().highest_service_time().unwrap() >= w.clock.now_ms());
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(read.endpoints.len(), 1, "{read:?}");
+    assert!(read.failures.is_empty(), "{read:?}");
+    assert_eq!(read.endpoints[0].payload, payload("lno1tips"));
+    let renewed = on_homeserver(&w, &shop).unwrap();
+    assert!(renewed.updated_at() >= w.clock.now_ms());
+    assert_eq!(renewed.signed(), shop.app().record());
+    assert_eq!(
+        renewed.expires_at(),
+        Some(renewed.updated_at() + RECORD_LIFETIME_MS)
+    );
+    let signed = shop.app().record().clone();
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.app().record(), &signed);
+}
