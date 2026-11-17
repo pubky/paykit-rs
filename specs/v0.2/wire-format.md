@@ -16,7 +16,7 @@
   |---|---|
   | `amount` | decimal amount string (1.2) |
   | `uuid` | UUID v4 string (Switch wire 1.7) |
-  | `list-version` | required positive `generation` and `counter` integers, ordered lexicographically (4.13) |
+  | `list-version` | required positive `generation` and `counter` integers, compared generation first, then counter (4.13) |
 
   The other types are the Switch's (Switch wire, Conventions).
 - **Absent and null.** "Req: no" means the member may be missing. Writers omit absent optional members, except where a table says the member is always written, and except in the shared record values of Section 5, whose writers may write every member with `null` for absent (the prototype does). Readers treat `null` like a missing member, unless the table says `null` has its own meaning, and except `lost_to_delete`, whose writers always omit it when absent and whose `null` is a present member that isn't a valid value (5, Deletion data that doesn't read).
@@ -588,7 +588,7 @@ An endpoint:
 | `payload` | string | yes | non-empty |
 | `single_use` | bool | no | default `false`, omitted when `false`; paying it consumes this list version |
 
-A `list-version` is a JSON object with required `generation` and `counter`, each a Switch integer from 1 through 9007199254740991. Writers write the members in that order. Compare generation first, then counter, numerically; do not pack the pair into a number or compare JSON text. Generation is the publishing identity's verified `identity.json.generation`, not its document version, data epoch, the recipient inbox generation or a local recovery number. Changing either member changes the version.
+A `list-version` is a JSON object with required `generation` and `counter`, each a Switch integer from 1 through 9007199254740991. Like every member of a Paykit document, they may be written in any order (Switch wire 1.1). Compare generation first, then counter, numerically; do not pack the pair into a number or compare JSON text. Generation is the publishing identity's verified `identity.json.generation`, not its document version, data epoch, the recipient inbox generation or a local recovery number. Changing either member changes the version.
 
 After the ordinary authentication, certificate/scope, signature, recipient, duplicate and body checks, the receiver establishes a verified sender identity document with generation at least the advertised generation. If its copy is behind it fetches/revalidates the current document; failure holds the message and installs no list. An app-signed numerical claim is not identity-generation evidence. A legitimate queued message may have a lower generation than the current document: its ordinary certificate-at-acceptance and expiry checks still apply.
 
