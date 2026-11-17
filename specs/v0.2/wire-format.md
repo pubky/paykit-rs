@@ -1230,7 +1230,7 @@ The original carries the binding above, `child: null`, `id_inputs`, zero ordinar
 
 ### 5.9 Allowance permanent records and initial ledger
 
-These formats rely on the Switch's permanent record policy, strict zero and `record_current` as the pinned `spec/record-lineage.md` defines it, without its lineage member, none of which an adopted Switch revision specifies yet (spec 8.3.1, Required Switch support). The permanent policy is the policy member `"permanent": {"generation": null}` as the Switch defines it (Pubky Switch spec, Section 10.3.1, permanent policies; not yet adopted); generated vectors come with the adopting revision and the implementing Paykit code.
+These formats rely on the Switch's permanent record policy, strict zero and `record_current` as the pinned `spec/record-lineage.md` defines it, without its lineage member, none of which an adopted Switch revision specifies yet (spec 8.3.1, Required Switch support). The permanent policy is the policy member `"permanent": {"generation": null}` as the Switch's permanent record policy defines it, which no adopted Switch revision specifies yet (the pinned Switch's Section 10.3.1 is another rule); generated vectors come with the adopting revision and the implementing Paykit code.
 
 **Keys and policies.** Use the own identity naming key and the natural key `lp(counterparty identity, allowance_id text)` for `allowance_proposals`, `allowances` and `allowance_ledgers`, each under its policy of 5.1. `allowances` and `allowance_ledgers` use the permanent policy with no policy generation, the same on the Allower's and Allowee's accounts and for either proposer role; the proposal's generation selects no other policy or key. `allowance_proposals` uses an ordinary policy.
 
