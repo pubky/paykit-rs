@@ -1136,7 +1136,7 @@ impl Paykit {
             self.local_commit(tx).await?;
             return Ok(Placed::Done);
         }
-        submitted(self.app.submit_batch(batch.locals(tx.into_writes())).await)
+        submitted(self.submit(batch.locals(tx.into_writes())).await)
     }
 
     /// Write `stored` into its record at `target`, in its role or, when `reflect_only`, by
@@ -1176,8 +1176,7 @@ impl Paykit {
             return Ok(Placed::Done);
         };
         submitted(
-            self.app
-                .submit_batch(OpBatch::new().entry(entry).locals(tx.into_writes()))
+            self.submit(OpBatch::new().entry(entry).locals(tx.into_writes()))
                 .await,
         )
     }

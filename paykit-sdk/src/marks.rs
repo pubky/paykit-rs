@@ -899,7 +899,7 @@ impl Paykit {
             ) {
                 // Queued, it is tried again now; one that fails stays queued for the next
                 // receive.
-                let _ = self.app.flush_message(msg_id).await;
+                let _ = self.send_message(msg_id).await;
             }
             match self.app.delivery(msg_id).await? {
                 Some(Delivery::Queued { .. }) => return Ok(0),
@@ -987,7 +987,7 @@ impl Paykit {
             }
             Err(error) => return Err(error),
         }
-        let _ = self.app.flush_message(&msg_id).await;
+        let _ = self.send_message(&msg_id).await;
         if matches!(
             self.app.delivery(&msg_id).await?,
             Some(Delivery::Accepted { .. })

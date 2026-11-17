@@ -50,7 +50,11 @@ async fn test_restore_hold_cancellation_resent_after_the_restore_stops_for_good(
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
-    let mut backup = wallet.backup().await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    let backup = PaykitBackup::from_bytes(&backup.to_bytes().unwrap()).unwrap();
+    // The restored copy has read and asked for re-sends before the later cancellation.
+    // Otherwise its first read may take the cancellation directly and need no re-send.
+    let mut app = restored(&w, &backup).await;
     // The payee cancels after the backup; the device that got it is lost before it could
     // write it into the record: its placement is refused, the one write its read makes, so
     // no refusal is left for the restored app's writes.
@@ -65,9 +69,7 @@ async fn test_restore_hold_cancellation_resent_after_the_restore_stops_for_good(
             });
     }
     let _ = wallet.receive(None).await;
-    backup = PaykitBackup::from_bytes(&backup.to_bytes().unwrap()).unwrap();
     drop(wallet);
-    let mut app = restored(&w, &backup).await;
     // The restore asked bob to re-send from its backup's cursor time, and bob answers;
     // the cancellation stops the request for good (Paykit spec 7.2, 8.1).
     let answered = shop.receive(None).await.unwrap();

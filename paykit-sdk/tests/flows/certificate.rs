@@ -7,7 +7,7 @@ use std::sync::Arc;
 use paykit_sdk::{
     AppScopes, Paykit, PaykitBackup, PaykitConfig, PaykitError, Rail, Refusal, RequestedScopes,
 };
-use pubky_switch_client::app::AppEvent;
+use pubky_switch_client::app::{AppError, AppEvent, Refusal as ClientRefusal};
 use pubky_switch_client::clock::Clock;
 use pubky_switch_client::store::{Fault, FaultStore, StateStore};
 use pubky_switch_client::testing::{issue_cert, AppSpec};
@@ -2356,8 +2356,8 @@ async fn test_certificate_restore_unlisted_with_payee_keys_awaited_resumes_nothi
     // The backup holds a payment in flight, which the wallet then finishes; the wallet is
     // renewed to read `paykit_request` too. The restored app's first read takes that renewal from
     // its record, then reads no feed: its copy counts as unlisted since the restore, and the
-    // listing waits for the payee's keys. The resume treats the payer's side as waiting too:
-    // it journals what the method says and sends nothing, no acceptance again among it.
+    // listing waits for the payee's keys. The resume preserves the journal and sends nothing
+    // until the first feed read, no acceptance again among it.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let me = wallet.app_id();
@@ -2413,14 +2413,15 @@ async fn test_certificate_restore_unlisted_with_payee_keys_awaited_resumes_nothi
     );
     assert_eq!(restored.app().cert().hash(), wider.hash());
     let before = w.router.log().len();
-    let resumed = restored.resume_payments().await.unwrap();
-    assert!(
-        matches!(
-            resumed.as_slice(),
-            [paykit_sdk::PayOutcome::PaidOutcomeUnwritten { .. }]
-        ),
-        "{resumed:?}"
-    );
+    let journal = restored.app().protocol_scan(b"j/").await.unwrap();
+    assert_eq!(journal.len(), 1);
+    let error = restored.resume_payments().await.unwrap_err();
+    assert!(matches!(
+        error,
+        PaykitError::Client(AppError::Refused(ClientRefusal::NotNow(_)))
+    ));
+    assert_eq!(restored.app().restore_held_cursor(), None);
+    assert_eq!(restored.app().protocol_scan(b"j/").await.unwrap(), journal);
     let writes: Vec<String> = w.router.log()[before..]
         .iter()
         .filter(|line| line.contains("/ops"))
@@ -3112,4 +3113,97 @@ async fn test_certificate_refused_before_any_listing_of_paykit_reads_nothing() {
     assert!(wallet.app().protocol_get(b"lc").await.unwrap().is_none());
     let error = wallet.requests().await.unwrap_err();
     assert!(is_not_now(&error), "{error:?}");
+}
+
+async fn restored_queued_reply_before_wider_keys(keys_present: bool) {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = crate::common::request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::common::draft("1", w.clock.now_ms()),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    for _ in 0..2 {
+        w.bob
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "inbox".into(),
+                code: pubky_switch_core::http::ErrorCode::Unavailable,
+                current: serde_json::Value::Null,
+            });
+    }
+    let msg_id = wallet.reject_request(&request, None).await.unwrap();
+    assert!(matches!(
+        wallet.message_delivery(&msg_id).await.unwrap(),
+        Some(paykit_sdk::MessageDelivery::Queued { .. })
+    ));
+    let me = wallet.app_id();
+    let backup = wallet.backup().await.unwrap();
+    let old = wallet.app().cert().clone();
+    let wider = renew(
+        &w,
+        me,
+        &AppScopes::new().pay().request().build().unwrap(),
+        1_000,
+    );
+    wallet.receive(None).await.unwrap();
+    list(&w, me, &old, &wider);
+    wallet.receive(None).await.unwrap();
+    drop(wallet);
+    if keys_present {
+        store_bundle(&w, me, &wider);
+    }
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(restored.app().restore_held_cursor(), None);
+    let result = restored.flush().await;
+    assert_eq!(restored.app().cert().hash(), wider.hash());
+    let verdict = restored.app().restore_held_cursor();
+    if keys_present {
+        assert!(verdict.is_some(), "{result:?}");
+    } else {
+        assert_eq!(verdict, None, "expected the actual client key/listing wait");
+    }
+    let summary = shop.receive(None).await.unwrap();
+    assert_eq!(summary.applied.contains(&msg_id), keys_present, "queued reply delivery before first feed verdict; keys={keys_present}, flush={result:?}, verdict={verdict:?}");
+    if !keys_present {
+        assert!(matches!(
+            result.unwrap_err(),
+            PaykitError::Client(AppError::Refused(ClientRefusal::NotNow(_)))
+        ));
+        let error = restored.block(&w.bob_id()).await.unwrap_err();
+        assert!(matches!(
+            error,
+            PaykitError::Client(AppError::Refused(ClientRefusal::NotNow(_)))
+        ));
+        let marks = restored.app().protocol_scan(b"bk/").await.unwrap();
+        assert_eq!(marks.len(), 1);
+        let mark: serde_json::Value = serde_json::from_slice(&marks[0].1).unwrap();
+        assert_eq!(mark["d"]["blocked"], true);
+        assert!(mark["d"]["batch"].is_null());
+        assert!(matches!(
+            restored.message_delivery(&msg_id).await.unwrap(),
+            Some(paykit_sdk::MessageDelivery::Queued { .. })
+        ));
+    }
+}
+
+#[tokio::test]
+async fn test_restore_first_read_listing_key_wait_holds_the_queued_reply() {
+    Box::pin(restored_queued_reply_before_wider_keys(false)).await;
+}
+
+#[tokio::test]
+async fn test_restore_first_read_listing_with_keys_sends_the_queued_reply() {
+    Box::pin(restored_queued_reply_before_wider_keys(true)).await;
 }

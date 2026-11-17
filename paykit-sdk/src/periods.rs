@@ -465,6 +465,8 @@ impl Paykit {
         details: PeriodDetails,
     ) -> Result<SentMessage> {
         self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
+        self.refresh_own()?;
         self.records_known().await?;
         self.require_payee()?;
         // Period details go to no payer whose sends are held (Paykit spec 8.1, "Blocked

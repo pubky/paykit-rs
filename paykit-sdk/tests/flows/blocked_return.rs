@@ -1000,6 +1000,12 @@ async fn test_blocked_return_restore_owed_lost_notice_delivered_after_the_restor
     .await
     .unwrap();
     assert_eq!(lost_owed(&restored).await, 1);
+    // This host delivers before the SDK's notice-settlement pass. It first confirms the
+    // own identity and reads the restored client's page; a raw flush must not skip those.
+    restored.app_mut().refresh_identity().await.unwrap();
+    restored.app_mut().receive(None).await.unwrap();
+    assert!(restored.app().restore_held_cursor().is_some());
+    assert_eq!(lost_owed(&restored).await, 1);
     restored
         .app_mut()
         .release_queued(&w.bob_id())

@@ -2322,7 +2322,7 @@ impl Paykit {
                 let batch = pubky_switch_client::app::OpBatch::new()
                     .entry(op)
                     .locals(tx.into_writes());
-                let _ = self.app.submit_batch(batch).await;
+                let _ = self.submit(batch).await;
             }
             None => self.local_commit(tx).await?,
         }
@@ -2819,6 +2819,8 @@ impl Paykit {
     /// As [`Paykit::block`].
     pub async fn unblock(&mut self, pubky: &[u8; 32]) -> crate::error::Result<()> {
         self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
+        self.refresh_own()?;
         self.list_own(pubky, false).await
     }
 
@@ -2832,7 +2834,7 @@ impl Paykit {
         if blocked {
             return self.block_own(pubky).await;
         }
-        let sent = self.app.undeny(pubky).await;
+        let sent = self.undeny_at_switch(pubky).await;
         let mut tx = Tx::default();
         match sent {
             Ok(()) => {
@@ -2870,8 +2872,23 @@ impl Paykit {
         )?;
         self.copy_denied(&mut tx, pubky, true).await?;
         self.local_commit(tx).await?;
+        // The user's block counts before receiving can recover any old replies. Only the
+        // client's read runs here; the SDK's outgoing recovery follows the block below.
+        let first_read = if self.first_read_pending() {
+            let read = Box::pin(self.read_before_effects(None)).await?;
+            self.refresh_own()?;
+            if self.first_read_pending() {
+                // Preserve the block intent and report while keys or the listing wait.
+                Box::pin(self.finish_first_read(read)).await?;
+                self.require_first_read()?;
+                return Ok(());
+            }
+            Some(read)
+        } else {
+            None
+        };
         let mut tx = Tx::default();
-        match self.app.deny(pubky).await {
+        match self.deny_at_switch(pubky).await {
             Ok(()) => {
                 tx.delete(&mark);
             }
@@ -2899,19 +2916,41 @@ impl Paykit {
                 return Err(error.into());
             }
             Err(error) => {
-                match held {
-                    Some(held) => tx.put(&mark, &held)?,
-                    None => tx.delete(&mark),
-                };
-                match copy {
-                    Some(copy) => tx.put(key::DENIED, &copy)?,
-                    None => tx.delete(key::DENIED),
-                };
+                if first_read.is_some() {
+                    // The read may have taken a newer deny list. Restore only this call's
+                    // unchanged provisional mark and its counterparty; never overwrite
+                    // unrelated new blocks or a mark the authenticated list settled.
+                    let current = self.local_get::<OwnBlockMark>(&mark).await?;
+                    if current
+                        .as_ref()
+                        .is_some_and(|m| m.blocked() && m.batch().is_none())
+                    {
+                        match held {
+                            Some(held) => tx.put(&mark, &held)?,
+                            None => tx.delete(&mark),
+                        };
+                        self.copy_denied(&mut tx, pubky, copy.is_some_and(|d| d.contains(pubky)))
+                            .await?;
+                    }
+                } else {
+                    match held {
+                        Some(held) => tx.put(&mark, &held)?,
+                        None => tx.delete(&mark),
+                    };
+                    match copy {
+                        Some(copy) => tx.put(key::DENIED, &copy)?,
+                        None => tx.delete(key::DENIED),
+                    };
+                }
                 self.local_commit(tx).await?;
                 return Err(error.into());
             }
         }
-        self.local_commit(tx).await
+        self.local_commit(tx).await?;
+        if let Some(read) = first_read {
+            Box::pin(self.finish_first_read(read)).await?;
+        }
+        Ok(())
     }
 
     /// Write again, at a receive, each block this app counts (`bk/`) that may not reach the
@@ -3056,6 +3095,8 @@ impl Paykit {
         _confirmed: pubky_switch_client::app::UserConfirmed,
     ) -> crate::error::Result<()> {
         self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
+        self.refresh_own()?;
         self.records_known().await?;
         let own = self.identity();
         let target = list_target(payee, app_id);
@@ -3093,7 +3134,7 @@ impl Paykit {
         let batch = pubky_switch_client::app::OpBatch::new()
             .entry(op)
             .locals(tx.into_writes());
-        if let Err(error) = self.app.submit_batch(batch).await {
+        if let Err(error) = self.submit(batch).await {
             if error.code() == Some(pubky_switch_core::http::ErrorCode::Conflict) {
                 self.app.read_record(&target).await?;
                 return Err(crate::error::PaykitError::Conflict(

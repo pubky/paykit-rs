@@ -334,7 +334,7 @@ impl Paykit {
                 return Ok(msg_id);
             }
         }
-        match self.app.submit_batch(batch).await {
+        match self.submit(batch).await {
             Ok(_) => Ok(msg_id),
             Err(error) => {
                 if error.code() == Some(ErrorCode::Conflict) {
@@ -385,11 +385,7 @@ impl Paykit {
             self.app.protocol_commit(&local).await?;
             return Ok(msg_id);
         };
-        match self
-            .app
-            .submit_batch(OpBatch::new().locals(local).entry(entry))
-            .await
-        {
+        match self.submit(OpBatch::new().locals(local).entry(entry)).await {
             Ok(_) => Ok(msg_id),
             Err(error) => {
                 if error.code() == Some(ErrorCode::Conflict) {
