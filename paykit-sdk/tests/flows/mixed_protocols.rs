@@ -172,6 +172,55 @@ fn register(p: Arc<PaykitProtocol>) -> Result<ProtocolSet, AppError> {
     ProtocolSet::new(vec![p, Arc::new(Chat)])
 }
 
+/// A chat item from Bob's chat app to Alice's app `id`. Returns its `msg_id`.
+fn chat_item(w: &World, id: [u8; 16]) -> String {
+    w.inject(
+        &w.bob,
+        "chat",
+        &w.alice,
+        &[id],
+        "chat.item",
+        Vec::new(),
+        serde_json::Map::new(),
+    )
+}
+
+/// A payment request from Bob's shop to Alice's app `id` under `reference`. Returns its
+/// `msg_id`.
+fn payment_request(w: &World, id: [u8; 16], reference: &str) -> String {
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[id],
+        "paykit.payment_request",
+        Vec::new(),
+        serde_json::json!({"amount":{"asset":"btc","value":"1"}, "payment_reference":reference,
+        "proposal_expires_at":null,"payment_endpoints":{"btc-lightning-bolt11":"lnbc1invoice"}})
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+}
+
+/// Chat kept the item `msg_id` in its own state, and Paykit kept nothing under it.
+async fn chat_took(app: &Paykit, msg_id: &str) {
+    assert_eq!(
+        app.app()
+            .protocol_get("chat", msg_id.as_bytes())
+            .await
+            .unwrap(),
+        Some(b"chat".to_vec())
+    );
+    assert_eq!(
+        app.app()
+            .protocol_get("paykit", msg_id.as_bytes())
+            .await
+            .unwrap(),
+        None
+    );
+}
+
 fn bad_registration(p: Arc<PaykitProtocol>, case: u8) -> Result<ProtocolSet, AppError> {
     match case {
         0 => ProtocolSet::single(Arc::new(Chat)),
@@ -213,60 +262,54 @@ async fn test_mixed_protocols_join_requires_the_supplied_paykit() {
 }
 
 #[tokio::test]
-async fn test_mixed_protocols_load_requires_the_supplied_paykit() {
+async fn test_mixed_protocols_load_and_restore_require_the_supplied_paykit() {
+    // Each bad registration, then (`None`) the Paykit-only constructor, for an app that
+    // also owns chat: refused, with nothing written.
     let w = world();
     let fault = Arc::new(FaultStore::new(store(), Fault::None));
-    let app = client(&w, Arc::clone(&fault) as Arc<dyn StateStore>).await;
+    let mut app = client(&w, Arc::clone(&fault) as Arc<dyn StateStore>).await;
     let id = app.app_id();
-    drop(app);
-    for case in 0..3 {
-        let commits = fault.commits();
-        usage(
-            Paykit::load_with_protocols(
-                w.env(&w.alice, Arc::clone(&fault) as Arc<dyn StateStore>),
-                PaykitConfig::default(),
-                id,
-                Arc::clone(&w.rail) as Arc<dyn Rail>,
-                w.timer(),
-                |p| bad_registration(p, case),
-            )
-            .await,
-        );
-        assert_eq!(fault.commits(), commits);
-    }
-    usage(
-        Paykit::load(
-            w.env(&w.alice, fault),
-            PaykitConfig::default(),
-            id,
-            Arc::clone(&w.rail) as Arc<dyn Rail>,
-            w.timer(),
-        )
-        .await,
-    );
-}
-
-#[tokio::test]
-async fn test_mixed_protocols_restore_requires_the_supplied_paykit() {
-    let w = world();
-    let mut app = client(&w, store()).await;
     let backup =
         PaykitBackup::from_bytes(&app.backup_layered().await.unwrap().to_bytes().unwrap()).unwrap();
     drop(app);
-    for case in 0..3 {
-        let fault = Arc::new(FaultStore::new(store(), Fault::None));
-        usage(
-            Paykit::restore_with_protocols(
-                w.env(&w.alice, Arc::clone(&fault) as Arc<dyn StateStore>),
-                PaykitConfig::default(),
-                &backup,
-                Arc::clone(&w.rail) as Arc<dyn Rail>,
-                w.timer(),
-                |p| bad_registration(p, case),
-            )
-            .await,
-        );
-        assert_eq!(fault.commits(), 0);
+    for case in [Some(0), Some(1), Some(2), None] {
+        let commits = fault.commits();
+        let env = w.env(&w.alice, Arc::clone(&fault) as Arc<dyn StateStore>);
+        let rail = Arc::clone(&w.rail) as Arc<dyn Rail>;
+        usage(match case {
+            Some(case) => {
+                Paykit::load_with_protocols(
+                    env,
+                    PaykitConfig::default(),
+                    id,
+                    rail,
+                    w.timer(),
+                    |p| bad_registration(p, case),
+                )
+                .await
+            }
+            None => Paykit::load(env, PaykitConfig::default(), id, rail, w.timer()).await,
+        });
+        assert_eq!(fault.commits(), commits, "load case {case:?}");
+
+        let restored = Arc::new(FaultStore::new(store(), Fault::None));
+        let env = w.env(&w.alice, Arc::clone(&restored) as Arc<dyn StateStore>);
+        let rail = Arc::clone(&w.rail) as Arc<dyn Rail>;
+        usage(match case {
+            Some(case) => {
+                Paykit::restore_with_protocols(
+                    env,
+                    PaykitConfig::default(),
+                    &backup,
+                    rail,
+                    w.timer(),
+                    |p| bad_registration(p, case),
+                )
+                .await
+            }
+            None => Paykit::restore(env, PaykitConfig::default(), &backup, rail, w.timer()).await,
+        });
+        assert_eq!(restored.commits(), 0, "restore case {case:?}");
     }
 }
 
@@ -316,43 +359,10 @@ async fn test_mixed_protocols_callbacks_and_layers_survive_load_and_restore() {
     let _shop = w.shop().await;
     let keys = w.bob.identity().app_keys("chat");
     w.bob.register_app(&keys, &AppSpec::new(&["chat"])).unwrap();
-    let chat_id = w.inject(
-        &w.bob,
-        "chat",
-        &w.alice,
-        &[id],
-        "chat.item",
-        Vec::new(),
-        serde_json::Map::new(),
-    );
-    let request_id = w.inject(
-        &w.bob,
-        "shop",
-        &w.alice,
-        &[id],
-        "paykit.payment_request",
-        Vec::new(),
-        serde_json::json!({"amount":{"asset":"btc","value":"1"}, "payment_reference":"mixed",
-        "proposal_expires_at":null,"payment_endpoints":{"btc-lightning-bolt11":"lnbc1invoice"}})
-        .as_object()
-        .unwrap()
-        .clone(),
-    );
+    let chat_id = chat_item(&w, id);
+    let request_id = payment_request(&w, id, "mixed");
     app.receive(None).await.unwrap();
-    assert_eq!(
-        app.app()
-            .protocol_get("chat", chat_id.as_bytes())
-            .await
-            .unwrap(),
-        Some(b"chat".to_vec())
-    );
-    assert_eq!(
-        app.app()
-            .protocol_get("paykit", chat_id.as_bytes())
-            .await
-            .unwrap(),
-        None
-    );
+    chat_took(&app, &chat_id).await;
     assert_eq!(
         app.app()
             .protocol_get("chat", request_id.as_bytes())
@@ -378,6 +388,13 @@ async fn test_mixed_protocols_callbacks_and_layers_survive_load_and_restore() {
         chat_state
     );
     assert_eq!(app.requests().await.unwrap().len(), 1);
+    // After the load, Paykit takes a payment request and chat its item from the same read.
+    let loaded_chat = chat_item(&w, id);
+    payment_request(&w, id, "after-load");
+    app.receive(None).await.unwrap();
+    chat_took(&app, &loaded_chat).await;
+    assert_eq!(app.requests().await.unwrap().len(), 2);
+    let chat_state = app.app().protocol_scan("chat", b"").await.unwrap();
     let backup = app.backup().await.unwrap();
     let layers = AppBackup::from_bytes(&backup.to_bytes().unwrap())
         .unwrap()
@@ -408,31 +425,13 @@ async fn test_mixed_protocols_callbacks_and_layers_survive_load_and_restore() {
     app.receive(None).await.unwrap();
     app.reconcile().await.unwrap();
     app.end_reconcile(UserConfirmed::new()).await.unwrap();
-    assert_eq!(app.requests().await.unwrap().len(), 1);
-    let second = w.inject(
-        &w.bob,
-        "chat",
-        &w.alice,
-        &[id],
-        "chat.item",
-        Vec::new(),
-        serde_json::Map::new(),
-    );
+    assert_eq!(app.requests().await.unwrap().len(), 2);
+    // After the restore too, each owner takes its own message from the same read.
+    let restored_chat = chat_item(&w, id);
+    payment_request(&w, id, "after-restore");
     app.receive(None).await.unwrap();
-    assert_eq!(
-        app.app()
-            .protocol_get("chat", second.as_bytes())
-            .await
-            .unwrap(),
-        Some(b"chat".to_vec())
-    );
-    assert_eq!(
-        app.app()
-            .protocol_get("paykit", second.as_bytes())
-            .await
-            .unwrap(),
-        None
-    );
+    chat_took(&app, &restored_chat).await;
+    assert_eq!(app.requests().await.unwrap().len(), 3);
     assert!(matches!(
         app.app().protocol_get("absent", b"anything").await,
         Err(AppError::Refused(Refusal::Usage(_)))
@@ -447,7 +446,7 @@ async fn test_mixed_protocols_callbacks_and_layers_survive_load_and_restore() {
         .await
         .unwrap()
         .is_empty());
-    assert_eq!(app.requests().await.unwrap().len(), 1);
+    assert_eq!(app.requests().await.unwrap().len(), 3);
 }
 
 #[tokio::test]
