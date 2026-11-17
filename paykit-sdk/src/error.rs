@@ -63,7 +63,8 @@ pub enum Refusal {
     BeingHandledByOtherWallet,
     /// The obligation may already be paid: an `unknown` or orphaned attempt, a next attempt
     /// that would be flagged `possibly_duplicate`, a pinned deadline other than the app's own,
-    /// or an attempt a restore left unresolved. Only a user who has seen "may already be
+    /// an attempt a restore left unresolved, or an obligation payable before a provider
+    /// loss (Paykit spec 7.3). Only a user who has seen "may already be
     /// paid" pays it (Paykit spec 7.1, 7.2). `doubt`, when there is one, is what the user
     /// is shown and may pay over: paying anyway carries it back
     /// ([`crate::PayOptions::with_may_be_paid_confirmed`]), and only that same doubt is
@@ -76,6 +77,16 @@ pub enum Refusal {
         /// What the user may pay over.
         doubt: Option<Box<crate::PaymentDoubt>>,
     },
+    /// The user's answer names a provider loss that no longer decides the doubt it answers
+    /// (Paykit spec 7.3): a newer loss is kept, or followed before its step has run, since
+    /// the doubt was shown. `decisive` is the loss that decides now, `None` for none; the
+    /// host shows the doubt again under it. Nothing was written.
+    #[error("Paykit spec 7.3: the provider loss shown no longer decides the doubt")]
+    LossChanged {
+        /// The loss that decides the doubt now.
+        decisive: Option<crate::LossBoundary>,
+    },
+
     /// The attempt's deadline has passed, or the request's proposal expired (Paykit spec 7.1).
     #[error("Paykit spec 7.1: the deadline has passed")]
     DeadlinePassed,

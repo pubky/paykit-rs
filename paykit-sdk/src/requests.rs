@@ -1843,6 +1843,18 @@ impl Paykit {
                 }
             }
         }
+        // A loss can leave no claim at the new service while another app paid before it
+        // (Paykit spec 7.3).
+        if self
+            .in_doubt_after_loss(
+                &obligation,
+                request_of(record).map(|(stored, _)| stored),
+                None,
+            )
+            .await?
+        {
+            return Ok(RequestStatus::MayBePaid);
+        }
         // Expired once the deadline is at or before the highest service time verified (Paykit
         // spec 7.1): a one-time request's attempt deadline.
         if self.reached(expiry_deadline(record, request)) {

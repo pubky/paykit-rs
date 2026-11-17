@@ -374,7 +374,7 @@ pub(crate) fn with_layer(
 }
 
 /// Restore from `backup` on `store`: the error, or a panic if it was taken.
-async fn refused_restore(
+pub(crate) async fn refused_restore(
     w: &World,
     backup: serde_json::Value,
     store: Arc<dyn pubky_switch_client::store::StateStore>,
@@ -395,7 +395,7 @@ async fn refused_restore(
 }
 
 /// Nothing of the app is in `store`: it doesn't load.
-async fn nothing_restored(
+pub(crate) async fn nothing_restored(
     w: &World,
     store: Arc<dyn pubky_switch_client::store::StateStore>,
     app_id: [u8; 16],
@@ -411,7 +411,7 @@ async fn nothing_restored(
     assert!(loaded.is_err(), "the app's state was written");
 }
 
-fn is_refused(error: &paykit_sdk::PaykitError) -> bool {
+pub(crate) fn is_refused(error: &paykit_sdk::PaykitError) -> bool {
     matches!(
         error,
         paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::InvalidData(_))
