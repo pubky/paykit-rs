@@ -3329,3 +3329,384 @@ async fn test_stored_key_drop_duty_requires_its_owner_and_survives_reload() {
         .iter()
         .any(|event| event.id() == Some(id)));
 }
+
+mod admission {
+    use super::*;
+    use pubky_switch_client::app::{
+        App, Collection, LocalWrite, MissedEntries, OpaqueRule, Outcome, ParkReason, Protocol,
+        ReceiveContext, ReceivedMessage, ResendNeeded, StoreFailure,
+    };
+    use pubky_switch_core::message::Message;
+    use pubky_switch_core::records::AppCert;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A client custody fixture: normal Paykit checks, but one request is not admitted.
+    /// The SDK itself has no producer of this outcome.
+    struct Waiting {
+        inner: Arc<paykit_sdk::PaykitProtocol>,
+        msg_id: String,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Protocol for Waiting {
+        fn name(&self) -> String {
+            self.inner.name()
+        }
+
+        fn opaque_members(&self) -> Vec<OpaqueRule> {
+            self.inner.opaque_members()
+        }
+
+        fn has_keys(&self, scope: &str) -> bool {
+            self.inner.has_keys(scope)
+        }
+
+        fn sent_between_own_apps(&self, kind: &str) -> bool {
+            self.inner.sent_between_own_apps(kind)
+        }
+
+        fn check_scopes(
+            &self,
+            message: &Message,
+            sender: &AppCert,
+            own: &AppCert,
+        ) -> Result<(), String> {
+            self.inner.check_scopes(message, sender, own)
+        }
+
+        fn accepts(&self, cert: &AppCert) -> Vec<String> {
+            self.inner.accepts(cert)
+        }
+
+        fn check_body(&self, message: &ReceivedMessage) -> Result<(), String> {
+            self.inner.check_body(message)
+        }
+
+        fn receive(&self, message: &ReceivedMessage, cx: &mut ReceiveContext<'_>) -> Outcome {
+            if message.message.msg_id == self.msg_id {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Outcome::AwaitAdmission
+            } else {
+                self.inner.receive(message, cx)
+            }
+        }
+
+        fn resend_needed(&self, needed: &ResendNeeded) -> Result<Vec<LocalWrite>, StoreFailure> {
+            self.inner.resend_needed(needed)
+        }
+
+        fn missed(&self, missed: &MissedEntries) -> Result<Vec<LocalWrite>, StoreFailure> {
+            self.inner.missed(missed)
+        }
+
+        fn collections(&self) -> Vec<Collection> {
+            self.inner.collections()
+        }
+
+        fn record_seen(
+            &self,
+            collection: &str,
+            seen: Option<&[u8]>,
+            value: Option<&[u8]>,
+        ) -> Option<Vec<u8>> {
+            self.inner.record_seen(collection, seen, value)
+        }
+    }
+
+    async fn keep_waiting(
+        w: &World,
+        wallet: &mut Paykit,
+        storage: Arc<dyn pubky_switch_client::store::StateStore>,
+        msg_id: &str,
+        calls: Arc<AtomicUsize>,
+    ) {
+        let protocol = Arc::new(Waiting {
+            inner: Arc::clone(wallet.protocol()),
+            msg_id: msg_id.to_owned(),
+            calls,
+        });
+        let app = App::load(
+            w.env(&w.alice, storage),
+            protocol,
+            PaykitConfig::default().app,
+            wallet.app_id(),
+        )
+        .await
+        .unwrap();
+        // Keep this test-only callback installed while the SDK handles its real duties.
+        // No call is made through the superseded handle after the new owner is acquired.
+        drop(std::mem::replace(wallet.app_mut(), app));
+    }
+
+    #[tokio::test]
+    async fn test_stored_admission_custody_and_drop_do_not_authorize_a_later_write() {
+        use pubky_switch_client::app::WaitingReason;
+
+        let w = World::new();
+        let storage = store();
+        let mut wallet = w.wallet_on("wallet", Arc::clone(&storage)).await;
+        let app_id = wallet.app_id();
+        let ns = pubky_switch_client::store::client_namespace(&app_id);
+        let mut shop = w.shop().await;
+        let accepted = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        wallet.receive(None).await.unwrap();
+        assert_eq!(
+            wallet.request(&accepted).await.unwrap().status,
+            RequestStatus::Open
+        );
+        let processed = storage.scan(&ns, b"proc/", None, 100).unwrap();
+        assert!(!processed.is_empty());
+        assert!(kept(&wallet, "se/").await.is_empty());
+        assert!(kept(&wallet, "dt/").await.is_empty());
+
+        let mut proposal = draft("2", w.clock.now_ms());
+        proposal.proposal_expires_at_ms = None;
+        let sent = shop.send_request(w.alice_id(), proposal).await.unwrap();
+        let request = sent.request.unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        keep_waiting(
+            &w,
+            &mut wallet,
+            Arc::clone(&storage),
+            &sent.msg_id,
+            Arc::clone(&calls),
+        )
+        .await;
+        let report = wallet.app_mut().receive(None).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let stored_id = report
+            .events
+            .iter()
+            .find_map(|event| match event {
+                AppEvent::Parked {
+                    id: None,
+                    stored_id,
+                    reason: ParkReason::AwaitingAdmission,
+                    ..
+                } => Some(*stored_id),
+                _ => None,
+            })
+            .expect("the client reported informational admission custody");
+        let entry = wallet
+            .app_mut()
+            .parked_entry(stored_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.plaintext.hash(), request.request_hash);
+        assert_eq!(entry.message.as_ref().unwrap().msg_id, sent.msg_id);
+        let accepted_at = entry.accepted_at_ms;
+        assert!(wallet
+            .app_mut()
+            .unacknowledged_events_for("paykit")
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(storage.scan(&ns, b"proc/", None, 100).unwrap(), processed);
+
+        for pass in 0..2 {
+            if pass == 1 {
+                drop(wallet);
+                wallet = w
+                    .load_with(
+                        &w.alice,
+                        Arc::clone(&storage),
+                        app_id,
+                        Arc::clone(&w.clock),
+                        PaykitConfig::default(),
+                    )
+                    .await;
+                keep_waiting(
+                    &w,
+                    &mut wallet,
+                    Arc::clone(&storage),
+                    &sent.msg_id,
+                    Arc::clone(&calls),
+                )
+                .await;
+            }
+            wallet.receive(None).await.unwrap();
+            assert!(
+                kept(&wallet, "se/").await.is_empty(),
+                "custody must not create a later-write note"
+            );
+            assert!(kept(&wallet, "dt/").await.is_empty());
+            assert!(wallet
+                .app_mut()
+                .unacknowledged_events_for("paykit")
+                .await
+                .unwrap()
+                .is_empty());
+            let entry = wallet
+                .app_mut()
+                .parked_entry(stored_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(entry.reason, ParkReason::AwaitingAdmission);
+            assert_eq!(entry.plaintext.hash(), request.request_hash);
+            assert_eq!(storage.scan(&ns, b"proc/", None, 100).unwrap(), processed);
+            assert!(wallet.request(&request).await.is_err());
+            assert_eq!(
+                wallet.request(&accepted).await.unwrap().status,
+                RequestStatus::Open
+            );
+        }
+        assert!(calls.load(Ordering::SeqCst) >= 3);
+
+        // A verified service time, not the host clock alone, expires the real custody.
+        w.clock
+            .set_ms(accepted_at + pubky_switch_client::app::MAX_UNVERIFIED_AGE_MS + DAY_MS);
+        wallet.app_mut().receive(None).await.unwrap();
+        wallet.app_mut().receive(None).await.unwrap();
+        let duties = wallet
+            .app_mut()
+            .unacknowledged_events_for("paykit")
+            .await
+            .unwrap();
+        let dropped = duties
+            .iter()
+            .find(|event| {
+                matches!(event,
+                    AppEvent::StoredEntryDropped { waiting: WaitingReason::Admission, message, .. }
+                    if message.msg_id == sent.msg_id
+                )
+            })
+            .expect("expiry creates the owned admission drop duty");
+        let drop_id = dropped.id().unwrap();
+        assert_eq!(wallet.app().event_owners(drop_id).unwrap(), ["paykit"]);
+        assert!(wallet
+            .app_mut()
+            .parked_entry(stored_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(storage.scan(&ns, b"proc/", None, 100).unwrap(), processed);
+        wallet.receive(None).await.unwrap();
+        assert!(
+            kept(&wallet, "ud/").await.is_empty(),
+            "an admission drop is not an unverified sender loss"
+        );
+        assert!(kept(&wallet, "kw/").await.is_empty());
+        assert!(kept(&wallet, "se/").await.is_empty());
+        assert!(kept(&wallet, "dt/").await.is_empty());
+        assert!(wallet
+            .app_mut()
+            .unacknowledged_events_for("paykit")
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| event.id() == Some(drop_id)));
+
+        // A later supported duty is taken once, but cannot acknowledge past the earlier
+        // admission drop. The request and the refused effect are both genuine producers.
+        let later = request_from(&mut shop, w.alice_id(), draft("3", w.clock.now_ms())).await;
+        refuse_writes(&w.alice, 1);
+        wallet.app_mut().receive(None).await.unwrap();
+        let duties = wallet
+            .app_mut()
+            .unacknowledged_events_for("paykit")
+            .await
+            .unwrap();
+        let (refused_id, refused_stored) = duties
+            .iter()
+            .find_map(|event| match event {
+                AppEvent::EffectRefused { id, stored_id, .. } => Some((*id, *stored_id)),
+                _ => None,
+            })
+            .expect("the later record effect was refused");
+        let parked_id = duties
+            .iter()
+            .find_map(|event| match event {
+                AppEvent::Parked {
+                    id: Some(id),
+                    stored_id,
+                    reason: ParkReason::Refused,
+                    ..
+                } if *stored_id == refused_stored => Some(*id),
+                _ => None,
+            })
+            .expect("the refused effect also reports its stored entry");
+        let refused_entry = wallet
+            .app_mut()
+            .parked_entry(refused_stored)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(refused_entry.plaintext.hash(), later.request_hash);
+        let later_msg_id = refused_entry.message.as_ref().unwrap().msg_id.clone();
+        assert_eq!(
+            drop_id.cmp_same_store(&refused_id),
+            Some(std::cmp::Ordering::Less)
+        );
+        wallet.receive(None).await.unwrap();
+        assert_eq!(
+            wallet.request(&later).await.unwrap().status,
+            RequestStatus::Open
+        );
+        let target = wallet.request(&later).await.unwrap().record;
+        let record = wallet.app().shared_record(&target).await.unwrap().unwrap();
+        let marks = wallet.app().protocol_scan("paykit", b"dt/").await.unwrap();
+        let mut expected_marks = [
+            format!("dt/{parked_id}").into_bytes(),
+            format!("dt/{refused_id}").into_bytes(),
+        ];
+        expected_marks.sort();
+        assert_eq!(
+            marks.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>(),
+            expected_marks
+        );
+        // Its duty cannot be acknowledged past the admission drop, so the supported
+        // entry and its placed note remain without repeating the successful write.
+        let notes = wallet.app().protocol_scan("paykit", b"se/").await.unwrap();
+        assert_eq!(notes.len(), 1);
+        let note: serde_json::Value = serde_json::from_slice(&notes[0].1).unwrap();
+        assert_eq!(note["d"]["msg_id"], later_msg_id);
+        assert_eq!(note["d"]["stored_id"], refused_stored);
+        assert_eq!(note["d"]["placed"], true);
+        let processed_after = storage.scan(&ns, b"proc/", None, 100).unwrap();
+        assert_eq!(processed_after, processed);
+        for pass in 0..2 {
+            if pass == 1 {
+                drop(wallet);
+                wallet = w
+                    .load_with(
+                        &w.alice,
+                        Arc::clone(&storage),
+                        app_id,
+                        Arc::clone(&w.clock),
+                        PaykitConfig::default(),
+                    )
+                    .await;
+            }
+            wallet.receive(None).await.unwrap();
+            let duties = wallet
+                .app_mut()
+                .unacknowledged_events_for("paykit")
+                .await
+                .unwrap();
+            assert!(duties.iter().any(|event| event.id() == Some(drop_id)));
+            assert!(duties.iter().any(|event| event.id() == Some(refused_id)));
+            assert!(duties.iter().any(|event| event.id() == Some(parked_id)));
+            assert_eq!(
+                wallet.app().protocol_scan("paykit", b"dt/").await.unwrap(),
+                marks
+            );
+            assert_eq!(
+                wallet.app().shared_record(&target).await.unwrap().unwrap(),
+                record
+            );
+            assert_eq!(
+                wallet.app().protocol_scan("paykit", b"se/").await.unwrap(),
+                notes
+            );
+            assert!(kept(&wallet, "ud/").await.is_empty());
+            assert_eq!(
+                storage.scan(&ns, b"proc/", None, 100).unwrap(),
+                processed_after
+            );
+            assert!(wallet.request(&request).await.is_err());
+        }
+    }
+}

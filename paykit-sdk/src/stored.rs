@@ -29,8 +29,9 @@
 //!   nothing. A copy of the entry the host released after that is declined, its message
 //!   processed, so its effect isn't applied twice (`PaykitProtocol`'s receive step).
 //! - **A released entry that ran as a duplicate** (`ReleasedDuplicate`): its note goes.
-//! - **An input awaiting protocol admission:** its parked and dropped notices stay owed.
-//!   Custody alone does not authorize a later record write (Switch spec 8.2).
+//! - **An input awaiting protocol admission:** its informational parked notice creates no
+//!   later-write note. Its unsupported admission-drop duty stays owed; custody alone does
+//!   not authorize a later record write (Switch spec 8.2).
 //! - **An entry dropped unverified** (`StoredEntryDropped`): it counts in its sender's mark
 //!   of entries dropped unverified (`ud/<sender>`, `marks.rs`), and the sender is asked at
 //!   once to send again what its inbox accepted from the mark's earliest time to its latest,
