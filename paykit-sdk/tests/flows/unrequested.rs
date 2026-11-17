@@ -452,7 +452,7 @@ async fn written_by_the_phone(
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(pubky_switch_client::app::OpBatch::new().entry(entry))
+        .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(entry))
         .await
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -526,7 +526,7 @@ async fn test_unrequested_list_over_a_record_that_doesnt_read_keeps_single_use_m
         .await
         .unwrap();
     tool.app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
 
@@ -576,7 +576,7 @@ async fn test_unrequested_list_after_a_delete_is_held_until_placed_without_marks
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -802,7 +802,7 @@ async fn test_unrequested_list_over_a_value_awaiting_its_epoch_key_keeps_single_
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(pubky_switch_client::app::OpBatch::new().entry(op))
+        .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -910,7 +910,12 @@ async fn test_unrequested_receipt_from_another_identity_refused() {
     assert!(got.applied.contains(&from_carol), "{got:?}");
     assert!(wallet.payments().await.unwrap()[0].receipt.is_none());
     assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
-    assert!(wallet.app().protocol_scan(b"se/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"se/")
+        .await
+        .unwrap()
+        .is_empty());
     // Bob's receipt of the same payment goes beside the proof.
     w.inject(
         &w.bob,

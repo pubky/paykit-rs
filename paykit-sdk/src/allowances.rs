@@ -1338,7 +1338,7 @@ impl Paykit {
             .await?;
         let mut tx = Tx::default();
         self.note_peer(&mut tx, &to)?;
-        let batch = OpBatch::new()
+        let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .entry(write)
             .queue(signed)
             .locals(tx.into_writes());
@@ -1616,7 +1616,9 @@ impl Paykit {
             .app
             .record_op(target, Some(&next.to_json()?), Vec::new())
             .await?;
-        let mut batch = OpBatch::new().entry(write).locals(locals);
+        let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
+            .entry(write)
+            .locals(locals);
         for message in queue {
             batch = batch.queue(message);
         }
@@ -2094,7 +2096,11 @@ impl Paykit {
                 key: stop.as_bytes().to_vec(),
             }];
             if held.conflicted.is_some() {
-                Box::pin(self.app.protocol_commit(&locals)).await?;
+                Box::pin(
+                    self.app
+                        .protocol_commit(crate::protocol::BACKUP_NAME, &locals),
+                )
+                .await?;
                 continue;
             }
             // A kept message the record doesn't conflict with stays the stop for good: a
@@ -2333,7 +2339,11 @@ impl Paykit {
             consent.as_ref(),
             self.holds("paykit_allowance_execute"),
         )?);
-        Ok(Box::pin(self.app.protocol_commit(&locals)).await?)
+        Ok(Box::pin(
+            self.app
+                .protocol_commit(crate::protocol::BACKUP_NAME, &locals),
+        )
+        .await?)
     }
 
     /// A stored entry's proposal, acceptance or rejection (`stored.rs`), read from the feed
@@ -2448,7 +2458,11 @@ impl Paykit {
                     if misreferenced(&held, &stored)
                         && !reflects(&held, &stored.message().msg_id) =>
                 {
-                    Box::pin(self.app.protocol_commit(&locals)).await?;
+                    Box::pin(
+                        self.app
+                            .protocol_commit(crate::protocol::BACKUP_NAME, &locals),
+                    )
+                    .await?;
                     return Ok(Placed::Done);
                 }
                 Some(held) if held.conflicted.is_none() && conflicts(&held, &stored) => {
@@ -2488,7 +2502,11 @@ impl Paykit {
                 }
                 Some(mut held) => {
                     if !place(&mut held, stored) {
-                        Box::pin(self.app.protocol_commit(&locals)).await?;
+                        Box::pin(
+                            self.app
+                                .protocol_commit(crate::protocol::BACKUP_NAME, &locals),
+                        )
+                        .await?;
                         return Ok(Placed::Done);
                     }
                     Some(held)

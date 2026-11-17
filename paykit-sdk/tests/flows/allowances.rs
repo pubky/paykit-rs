@@ -125,7 +125,7 @@ async fn accept_elsewhere(app: &mut Paykit, record: &[u8; 32]) -> StoredMessage 
         .unwrap();
     let msg_id = signed.msg_id().to_owned();
     app.app_mut()
-        .submit_batch(OpBatch::new().entry(op).queue(signed))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op).queue(signed))
         .await
         .unwrap();
     app.app_mut().flush_message(&msg_id).await.unwrap();
@@ -161,7 +161,7 @@ async fn place_elsewhere(
         .await
         .unwrap();
     app.app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
 }
@@ -258,7 +258,7 @@ async fn acceptance_refused(
     other: &mut Paykit,
 ) {
     let writes = w.record_writes(signer, record);
-    let local = app.app().protocol_scan(b"").await.unwrap();
+    let local = app.app().protocol_scan("paykit", b"").await.unwrap();
     let error = app.accept_allowance(record).await.unwrap_err();
     assert!(
         matches!(
@@ -272,7 +272,7 @@ async fn acceptance_refused(
         "refused: Paykit spec 8.3.1: accepting an Allowance is unavailable in this version"
     );
     assert_eq!(w.record_writes(signer, record), writes);
-    assert_eq!(app.app().protocol_scan(b"").await.unwrap(), local);
+    assert_eq!(app.app().protocol_scan("paykit", b"").await.unwrap(), local);
     assert_eq!(
         app.allowance(record).await.unwrap().status,
         AllowanceStatus::Proposed
@@ -347,7 +347,7 @@ async fn test_allowances_received_acceptance_kept_unplaced_then_given_up_with_a_
     for _ in 0..2 {
         assert_eq!(w.record_writes(&w.bob, &theirs), writes);
         assert!(Box::pin(value(&shop, &theirs)).await["response"].is_null());
-        assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+        assert_eq!(shop.app().protocol_scan("paykit", b"pr/").await.unwrap().len(), 1);
         let view = shop.allowance(&theirs).await.unwrap();
         assert_eq!(view.status, AllowanceStatus::Proposed);
         assert!(!view.consented);
@@ -360,7 +360,7 @@ async fn test_allowances_received_acceptance_kept_unplaced_then_given_up_with_a_
     shop.receive(None).await.unwrap();
     assert_eq!(w.record_writes(&w.bob, &theirs), writes);
     assert!(Box::pin(value(&shop, &theirs)).await["response"].is_null());
-    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert!(shop.app().protocol_scan("paykit", b"pr/").await.unwrap().is_empty());
     let notices = shop.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
@@ -388,7 +388,7 @@ async fn test_allowances_accepted_record_written_elsewhere_reports_no_authority(
     assert_eq!(view.executor_app_id, None);
     assert!(!view.consented);
     assert_eq!(w.record_writes(&w.alice, &mine), writes);
-    assert!(wallet.app().protocol_scan(b"ac/").await.unwrap().is_empty());
+    assert!(wallet.app().protocol_scan("paykit", b"ac/").await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -496,7 +496,12 @@ async fn test_allowances_counterparty_end_kept_as_the_stop_then_recorded() {
     );
     let end = Box::pin(value(&wallet, &mine)).await["end"].clone();
     assert!(!end.is_null());
-    assert!(wallet.app().protocol_scan(b"ae/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"ae/")
+        .await
+        .unwrap()
+        .is_empty());
     let error = wallet.end_allowance(&mine).await.unwrap_err();
     assert!(
         matches!(refusal(&error), Some(Refusal::AllowanceEnded)),
@@ -532,7 +537,12 @@ async fn test_allowances_end_naming_another_proposal_dropped() {
         wallet.allowance(&mine).await.unwrap().status,
         AllowanceStatus::Accepted
     );
-    assert!(wallet.app().protocol_scan(b"ae/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"ae/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -612,7 +622,12 @@ async fn test_allowances_end_for_a_record_not_listed_yet_is_held_until_listed() 
     let summary = wallet.receive(None).await.unwrap();
     assert!(!received(&summary, "paykit.allowance_end"), "{summary:?}");
     assert_eq!(summary.report.cursor, before);
-    assert!(wallet.app().protocol_scan(b"ae/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"ae/")
+        .await
+        .unwrap()
+        .is_empty());
     let unlisted = wallet.allowances().await.unwrap_err();
     assert!(is_not_now(&unlisted), "{unlisted:?}");
     store_bundle(&w, me, &wider);
@@ -654,12 +669,24 @@ async fn test_allowances_answer_before_its_record_kept_then_given_up() {
         received(&summary, "paykit.allowance_acceptance"),
         "{summary:?}"
     );
-    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(shop.allowances().await.unwrap().is_empty());
     w.clock.advance_ms(31 * 24 * HOUR_MS);
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert!(shop
+        .app()
+        .protocol_scan("paykit", b"pr/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 /// Alice's executor app, holding `paykit_allowance_execute`, writes its grant into the accepted
@@ -698,7 +725,7 @@ async fn grant(w: &World, exec: &mut Paykit, record: &[u8; 32]) {
         .await
         .unwrap();
     exec.app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     Box::pin(consent(exec, record)).await;
@@ -719,10 +746,13 @@ async fn consent(app: &mut Paykit, record: &[u8; 32]) {
         },
     });
     app.app_mut()
-        .protocol_commit(&[LocalWrite::Put {
-            key: key.into_bytes(),
-            value: serde_json::to_vec(&entry).unwrap(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key: key.into_bytes(),
+                value: serde_json::to_vec(&entry).unwrap(),
+            }],
+        )
         .await
         .unwrap();
 }
@@ -731,7 +761,7 @@ async fn consent(app: &mut Paykit, record: &[u8; 32]) {
 async fn consent_entry(app: &Paykit, record: &[u8; 32]) -> Option<Value> {
     let key = format!("ac/{}", pubky_switch_core::enc::b64(record));
     app.app()
-        .protocol_get(key.as_bytes())
+        .protocol_get("paykit", key.as_bytes())
         .await
         .unwrap()
         .map(|v| serde_json::from_slice::<Value>(&v).unwrap()["d"]["consent"].clone())
@@ -902,7 +932,15 @@ async fn test_allowances_kept_stop_refuses_an_answer_before_it_is_recorded() {
             .unwrap(),
     );
     wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"ae/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ae/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(Box::pin(value(&wallet, &mine)).await["end"].is_null());
     assert_eq!(
         wallet.allowance(&mine).await.unwrap().status,
@@ -1117,13 +1155,29 @@ async fn test_allowances_end_while_its_record_awaits_its_key_stops_it_past_30_da
     let got = wallet.receive(None).await.unwrap();
     assert!(got.key_epochs_awaited.is_empty(), "{got:?}");
     assert!(received(&got, "paykit.allowance_end"), "{got:?}");
-    assert_eq!(wallet.app().protocol_scan(b"ae/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ae/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     w.clock
         .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
     for _ in 0..2 {
         wallet.receive(None).await.unwrap();
     }
-    assert_eq!(wallet.app().protocol_scan(b"ae/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ae/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(wallet.notices().await.unwrap().is_empty());
     crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
     for _ in 0..3 {
@@ -1134,7 +1188,12 @@ async fn test_allowances_end_while_its_record_awaits_its_key_stops_it_past_30_da
         AllowanceStatus::Ended
     );
     assert!(!Box::pin(value(&wallet, &mine)).await["end"].is_null());
-    assert!(wallet.app().protocol_scan(b"ae/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"ae/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -1160,12 +1219,25 @@ async fn test_allowances_end_kept_while_sealed_goes_once_it_opens_naming_another
     );
     let got = wallet.receive(None).await.unwrap();
     assert!(got.key_epochs_awaited.is_empty(), "{got:?}");
-    assert_eq!(wallet.app().protocol_scan(b"ae/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ae/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
     for _ in 0..3 {
         wallet.receive(None).await.unwrap();
     }
-    assert!(wallet.app().protocol_scan(b"ae/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"ae/")
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(
         wallet.allowance(&mine).await.unwrap().status,
         AllowanceStatus::Accepted
@@ -1193,7 +1265,12 @@ fn end_unknown(w: &World, wallet: &Paykit, i: usize) {
 async fn stops(wallet: &Paykit) -> usize {
     let mut n = 0;
     for prefix in [&b"kc/"[..], &b"ae/"[..]] {
-        n += wallet.app().protocol_scan(prefix).await.unwrap().len();
+        n += wallet
+            .app()
+            .protocol_scan("paykit", prefix)
+            .await
+            .unwrap()
+            .len();
     }
     n
 }
@@ -1223,7 +1300,7 @@ async fn ends_kept_at(wallet: &Paykit, record: &[u8; 32]) -> usize {
     let stops = format!("ae/{}/", pubky_switch_core::enc::b64(record));
     wallet
         .app()
-        .protocol_scan(stops.as_bytes())
+        .protocol_scan("paykit", stops.as_bytes())
         .await
         .unwrap()
         .len()
@@ -1261,7 +1338,12 @@ async fn test_allowances_stops_for_allowances_not_held_bounded_with_cancellation
     wallet.receive(None).await.unwrap();
     assert_eq!(Box::pin(stops(&wallet)).await, all);
     assert_eq!(
-        wallet.app().protocol_scan(b"kc/").await.unwrap().len(),
+        wallet
+            .app()
+            .protocol_scan("paykit", b"kc/")
+            .await
+            .unwrap()
+            .len(),
         half - 1
     );
     assert!(Box::pin(keeps_end(&w, &wallet, 0)).await);
@@ -1351,10 +1433,13 @@ async fn test_allowances_missed_item_keeps_removals_and_consents_nothing_before_
     assert!(phone.allowance(&mine).await.unwrap().consented);
     phone
         .app_mut()
-        .protocol_commit(&[LocalWrite::Put {
-            key: b"mc".to_vec(),
-            value: br#"{"v":1,"d":true}"#.to_vec(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key: b"mc".to_vec(),
+                value: br#"{"v":1,"d":true}"#.to_vec(),
+            }],
+        )
         .await
         .unwrap();
     assert!(!phone.allowance(&mine).await.unwrap().consented);
@@ -1378,18 +1463,39 @@ async fn test_allowances_stored_proposal_waiting_for_the_current_epochs_key_give
         .unwrap();
     refuse_writes(&w, 2);
     wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"se/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"se/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
     wallet.receive(None).await.unwrap();
     let day = pubky_switch_core::records::DAY_MS;
     w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - day);
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"se/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"se/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(wallet.notices().await.unwrap().is_empty());
     w.clock.advance_ms(2 * day);
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_scan(b"se/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"se/")
+        .await
+        .unwrap()
+        .is_empty());
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
@@ -1430,7 +1536,15 @@ async fn stop_with_a_stored_proposal(w: &World, wallet: &mut Paykit) {
     refuse_writes(w, 2);
     wallet.receive(None).await.unwrap();
     assert!(Box::pin(keeps_end(w, wallet, 0)).await);
-    assert_eq!(wallet.app().protocol_scan(b"se/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"se/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -1447,7 +1561,15 @@ async fn test_allowances_stop_kept_past_30_days_while_a_stored_message_waits() {
     wallet.receive(None).await.unwrap();
     w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS - HOUR_MS);
     wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"se/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"se/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(Box::pin(keeps_end(&w, &wallet, 0)).await);
 }
 
@@ -1515,7 +1637,7 @@ async fn answer_after_a_value_that_doesnt_read(
         .await
         .unwrap();
     tool.app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     if phone_reads_first {
@@ -1585,7 +1707,7 @@ async fn test_allowances_answer_over_a_record_that_doesnt_read_kept_then_written
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     w.clock.advance_ms(HOUR_MS);
@@ -1860,7 +1982,12 @@ async fn test_allowances_second_proposal_conflicts_and_is_recorded() {
     assert!(received(&got, "paykit.allowance_proposal"), "{got:?}");
     // The step wrote nothing at the switch; the later write placed the conflict.
     assert_eq!(w.record_writes(&w.alice, &mine), writes + 1);
-    assert!(wallet.app().protocol_scan(b"cf/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"cf/")
+        .await
+        .unwrap()
+        .is_empty());
     assert!(!Box::pin(value(&wallet, &mine)).await["conflicted"].is_null());
     assert_eq!(
         wallet.allowance(&mine).await.unwrap().status,
@@ -1992,7 +2119,12 @@ async fn test_allowances_conflict_over_a_sealed_record_waits_for_its_key() {
     propose_as(&w, &[wallet.app_id()], id.as_str(), "0.20");
     let got = wallet.receive(None).await.unwrap();
     assert!(!received(&got, "paykit.allowance_proposal"), "{got:?}");
-    assert!(wallet.app().protocol_scan(b"cf/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"cf/")
+        .await
+        .unwrap()
+        .is_empty());
     crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
     for _ in 0..3 {
         wallet.receive(None).await.unwrap();
@@ -2047,7 +2179,12 @@ async fn test_allowances_end_over_a_rejected_record_is_reflected() {
             .any(|id| id == &json!(withdrawal)),
         "{held}"
     );
-    assert!(wallet.app().protocol_scan(b"ae/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"ae/")
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(
         wallet.allowance(&mine).await.unwrap().status,
         AllowanceStatus::Rejected
@@ -2116,7 +2253,15 @@ async fn test_allowances_end_naming_another_acceptance_kept_30_days_and_consent_
     );
     phone.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
-    assert_eq!(phone.app().protocol_scan(b"ae/").await.unwrap().len(), 1);
+    assert_eq!(
+        phone
+            .app()
+            .protocol_scan("paykit", b"ae/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(
         Box::pin(consent_entry(&phone, &mine)).await,
         Some(json!({ "held": { "confirm_again": false } }))
@@ -2130,7 +2275,12 @@ async fn test_allowances_end_naming_another_acceptance_kept_30_days_and_consent_
         .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
     phone.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
-    assert!(phone.app().protocol_scan(b"ae/").await.unwrap().is_empty());
+    assert!(phone
+        .app()
+        .protocol_scan("paykit", b"ae/")
+        .await
+        .unwrap()
+        .is_empty());
     assert!(phone.allowance(&mine).await.unwrap().consented);
     assert_eq!(
         wallet.allowance(&mine).await.unwrap().status,
@@ -2174,7 +2324,12 @@ async fn test_allowances_end_from_a_blocked_sender_keeps_no_stop() {
     wallet.app_mut().deny(&w.bob_id()).await.unwrap();
     end_unknown(&w, &wallet, 0);
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_scan(b"ae/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"ae/")
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 1);
 }
 
@@ -2186,14 +2341,35 @@ async fn test_allowances_kept_answer_over_a_record_that_doesnt_read_given_up_wit
     let w = World::new();
     let (mut phone, record, _) = Box::pin(answer_after_a_value_that_doesnt_read(&w, false)).await;
     phone.receive(None).await.unwrap();
-    assert_eq!(phone.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    assert_eq!(
+        phone
+            .app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     phone.receive(None).await.unwrap();
-    assert_eq!(phone.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    assert_eq!(
+        phone
+            .app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(phone.notices().await.unwrap().is_empty());
     w.clock
         .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
     phone.receive(None).await.unwrap();
-    assert!(phone.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert!(phone
+        .app()
+        .protocol_scan("paykit", b"pr/")
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(
         Box::pin(raw(&phone, &record)).await,
         b"{\"not\":\"an allowance record\"}"
@@ -2271,7 +2447,14 @@ async fn test_allowances_kept_answer_past_30_days_kept_while_unlisted() {
             .unwrap(),
     );
     shop.receive(None).await.unwrap();
-    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     w.clock
         .advance_ms(paykit_sdk::KEPT_MESSAGE_MS + pubky_switch_core::records::DAY_MS);
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
@@ -2280,10 +2463,22 @@ async fn test_allowances_kept_answer_past_30_days_kept_while_unlisted() {
     fail_paykit_listing(&w.bob, SHOP_COLLECTIONS);
     let got = shop.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
-    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     shop.receive(None).await.unwrap();
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert!(shop
+        .app()
+        .protocol_scan("paykit", b"pr/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -2298,11 +2493,27 @@ async fn test_allowances_stored_proposal_neither_opened_nor_given_up_while_unlis
         .unwrap();
     refuse_writes(&w, 2);
     wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"se/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"se/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     missed_and_listing_fails(&w);
     let got = wallet.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
-    assert_eq!(wallet.app().protocol_scan(b"se/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"se/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(wallet.notices().await.unwrap().is_empty());
     wallet.receive(None).await.unwrap();
     assert_eq!(wallet.allowances().await.unwrap().len(), 1);
@@ -2335,19 +2546,27 @@ async fn test_allowances_stop_under_another_record_key_is_corrupt() {
     let mut wallet = Box::pin(wallet(&w)).await;
     end_unknown(&w, &wallet, 0);
     wallet.receive(None).await.unwrap();
-    let (key, value) = wallet.app().protocol_scan(b"ae/").await.unwrap().remove(0);
+    let (key, value) = wallet
+        .app()
+        .protocol_scan("paykit", b"ae/")
+        .await
+        .unwrap()
+        .remove(0);
     let msg_id = String::from_utf8(key.clone()).unwrap();
     let msg_id = msg_id.rsplit_once('/').unwrap().1;
     let other = format!("ae/{}/{msg_id}", pubky_switch_core::enc::b64(&[3; 32]));
     wallet
         .app_mut()
-        .protocol_commit(&[
-            LocalWrite::Delete { key },
-            LocalWrite::Put {
-                key: other.into_bytes(),
-                value,
-            },
-        ])
+        .protocol_commit(
+            "paykit",
+            &[
+                LocalWrite::Delete { key },
+                LocalWrite::Put {
+                    key: other.into_bytes(),
+                    value,
+                },
+            ],
+        )
         .await
         .unwrap();
     let error = wallet.receive(None).await.unwrap_err();
@@ -2359,10 +2578,13 @@ async fn test_allowances_missed_mark_other_than_true_is_corrupt() {
     let w = World::new();
     let (_shop, _wallet, mut exec, _phone, _, mine) = Box::pin(executed(&w)).await;
     exec.app_mut()
-        .protocol_commit(&[LocalWrite::Put {
-            key: b"mc".to_vec(),
-            value: br#"{"v":1,"d":false}"#.to_vec(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key: b"mc".to_vec(),
+                value: br#"{"v":1,"d":false}"#.to_vec(),
+            }],
+        )
         .await
         .unwrap();
     let error = exec.allowance(&mine).await.unwrap_err();
@@ -2374,10 +2596,13 @@ async fn test_allowances_consent_under_a_key_not_its_spelling_is_corrupt() {
     let w = World::new();
     let (_shop, _wallet, mut exec, _phone, _, _) = Box::pin(executed(&w)).await;
     exec.app_mut()
-        .protocol_commit(&[LocalWrite::Put {
-            key: b"ac/not-a-record-key".to_vec(),
-            value: br#"{"v":1,"d":{"held":{"confirm_again":false}}}"#.to_vec(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key: b"ac/not-a-record-key".to_vec(),
+                value: br#"{"v":1,"d":{"held":{"confirm_again":false}}}"#.to_vec(),
+            }],
+        )
         .await
         .unwrap();
     let error = exec.receive(None).await.unwrap_err();
@@ -2397,7 +2622,15 @@ async fn test_allowances_conflict_kept_as_the_stop_though_its_record_write_fails
     refuse_writes(&w, 2);
     let got = wallet.receive(None).await.unwrap();
     assert!(Box::pin(value(&wallet, &mine)).await["conflicted"].is_null());
-    assert_eq!(wallet.app().protocol_scan(b"cf/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"cf/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     // The step wrote nothing at the switch, so no effect of it was refused.
     assert!(
         !got.report
@@ -2504,7 +2737,15 @@ async fn test_allowances_kept_answer_refused_past_30_days_given_up_with_a_notice
     let (mut phone, record, written) =
         Box::pin(answer_after_a_value_that_doesnt_read(&w, false)).await;
     phone.receive(None).await.unwrap();
-    assert_eq!(phone.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    assert_eq!(
+        phone
+            .app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     let target = pubky_switch_client::app::RecordTarget::new(
         pubky_switch_client::app::Collection::new(
             "allowances",
@@ -2524,7 +2765,7 @@ async fn test_allowances_kept_answer_refused_past_30_days_given_up_with_a_notice
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     w.clock
@@ -2534,7 +2775,12 @@ async fn test_allowances_kept_answer_refused_past_30_days_given_up_with_a_notice
     phone.app_mut().flush_cursor().await.unwrap();
     refuse_writes(&w, 1);
     phone.receive(None).await.unwrap();
-    assert!(phone.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert!(phone
+        .app()
+        .protocol_scan("paykit", b"pr/")
+        .await
+        .unwrap()
+        .is_empty());
     let notices = phone.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
@@ -2551,16 +2797,19 @@ async fn test_allowances_consent_under_another_records_key_is_corrupt() {
     let key = format!("ac/{}", pubky_switch_core::enc::b64(&mine));
     let value = exec
         .app()
-        .protocol_get(key.as_bytes())
+        .protocol_get("paykit", key.as_bytes())
         .await
         .unwrap()
         .unwrap();
     let other = format!("ac/{}", pubky_switch_core::enc::b64(&[3; 32]));
     exec.app_mut()
-        .protocol_commit(&[LocalWrite::Put {
-            key: other.into_bytes(),
-            value,
-        }])
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key: other.into_bytes(),
+                value,
+            }],
+        )
         .await
         .unwrap();
     let error = exec.receive(None).await.unwrap_err();
@@ -2575,9 +2824,22 @@ async fn test_allowances_notice_target_goes_once_its_notice_is_accepted() {
     let w = World::new();
     let (_shop, mut wallet, _exec, _phone, _, mine) = Box::pin(executed(&w)).await;
     wallet.end_allowance(&mine).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"en/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"en/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_scan(b"en/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"en/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -2587,16 +2849,24 @@ async fn test_allowances_notice_target_naming_another_notice_is_corrupt() {
     let w = World::new();
     let (_shop, mut wallet, _exec, _phone, _, mine) = Box::pin(executed(&w)).await;
     wallet.end_allowance(&mine).await.unwrap();
-    let (key, value) = wallet.app().protocol_scan(b"en/").await.unwrap().remove(0);
+    let (key, value) = wallet
+        .app()
+        .protocol_scan("paykit", b"en/")
+        .await
+        .unwrap()
+        .remove(0);
     wallet
         .app_mut()
-        .protocol_commit(&[
-            LocalWrite::Delete { key },
-            LocalWrite::Put {
-                key: b"en/123e4567-e89b-42d3-a456-426614174000".to_vec(),
-                value,
-            },
-        ])
+        .protocol_commit(
+            "paykit",
+            &[
+                LocalWrite::Delete { key },
+                LocalWrite::Put {
+                    key: b"en/123e4567-e89b-42d3-a456-426614174000".to_vec(),
+                    value,
+                },
+            ],
+        )
         .await
         .unwrap();
     let error = wallet.receive(None).await.unwrap_err();
@@ -2715,7 +2985,7 @@ async fn delete_allowance_record(w: &World, id: &paykit_lib::AllowanceId) {
         .await
         .unwrap();
     tool.app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
 }
@@ -2748,7 +3018,15 @@ async fn test_allowances_proposal_over_a_deleted_record_is_conflicted_after_a_re
     propose_as(&w, &[restored.app_id()], id.as_str(), "0.10");
     restored.receive(None).await.unwrap();
     assert!(Box::pin(held_deleted(&restored, &mine)).await);
-    assert_eq!(restored.app().protocol_scan(b"cf/").await.unwrap().len(), 1);
+    assert_eq!(
+        restored
+            .app()
+            .protocol_scan("paykit", b"cf/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(restored.reject_allowance(&mine).await.is_err());
     // The host is shown it conflicted, from the kept proposal, with nothing consented.
     let view = restored.allowance(&mine).await.unwrap();
@@ -2778,7 +3056,15 @@ async fn test_allowances_proposal_over_a_deleted_record_is_conflicted_at_a_secon
     propose_as(&w, &[phone.app_id()], id.as_str(), "0.10");
     phone.receive(None).await.unwrap();
     assert!(Box::pin(held_deleted(&phone, &mine)).await);
-    assert_eq!(phone.app().protocol_scan(b"cf/").await.unwrap().len(), 1);
+    assert_eq!(
+        phone
+            .app()
+            .protocol_scan("paykit", b"cf/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(
         Box::pin(consent_entry(&phone, &mine)).await,
         Some(json!({ "removed": { "reason": "conflicted" } }))
@@ -2800,7 +3086,15 @@ async fn test_allowances_kept_end_survives_a_restore_and_its_resent_copy() {
     refuse_writes(&w, 2);
     wallet.receive(None).await.unwrap();
     assert!(Box::pin(value(&wallet, &mine)).await["end"].is_null());
-    assert_eq!(wallet.app().protocol_scan(b"ae/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ae/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     let mut restored = Box::pin(restored_and_resent(&w, &mut shop, wallet)).await;
     assert_eq!(
         restored.allowance(&mine).await.unwrap().status,
@@ -2867,7 +3161,12 @@ async fn test_allowances_end_held_past_the_bounded_wait_still_taken() {
         wallet.receive(None).await.unwrap();
     }
     let status = wallet.allowance(&mine).await.unwrap().status;
-    let ends = wallet.app().protocol_scan(b"ae/").await.unwrap().len();
+    let ends = wallet
+        .app()
+        .protocol_scan("paykit", b"ae/")
+        .await
+        .unwrap()
+        .len();
     let end = Box::pin(value(&wallet, &mine)).await["end"].clone();
     assert!(
         status == AllowanceStatus::Ended,
@@ -2905,7 +3204,7 @@ async fn test_allowances_write_back_after_a_delete_without_what_was_seen_ignored
         .await
         .unwrap();
     tool.app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     wallet.app_mut().read_record(&target).await.unwrap();
@@ -2917,7 +3216,7 @@ async fn test_allowances_write_back_after_a_delete_without_what_was_seen_ignored
         .await
         .unwrap();
     tool.app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     wallet.app_mut().read_record(&target).await.unwrap();
@@ -2949,7 +3248,7 @@ async fn write_record(
         .await
         .unwrap();
     app.app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
 }
@@ -3004,7 +3303,15 @@ async fn test_allowances_stored_proposal_over_a_record_deleted_since_is_conflict
         wallet.receive(None).await.unwrap();
     }
     assert!(Box::pin(held_deleted(&wallet, &mine)).await);
-    assert_eq!(wallet.app().protocol_scan(b"cf/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"cf/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(w.record_writes(&w.alice, &mine), writes);
     let views = wallet.allowances().await.unwrap();
     assert_eq!(views.len(), 1);
@@ -3030,10 +3337,23 @@ async fn test_allowances_end_over_a_deleted_record_kept_as_a_stop_once_listed() 
     missed_and_listing_fails(&w);
     shop.end_allowance(&theirs).await.unwrap();
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_scan(b"ae/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"ae/")
+        .await
+        .unwrap()
+        .is_empty());
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"ae/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ae/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(wallet.end_allowance(&mine).await.is_err());
 }
 
@@ -3066,7 +3386,14 @@ async fn test_allowances_answer_over_a_deleted_record_kept_before_its_record() {
     let writes = w.record_writes(&w.bob, &theirs);
     shop.receive(None).await.unwrap();
     assert!(Box::pin(held_deleted(&shop, &theirs)).await);
-    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(w.record_writes(&w.bob, &theirs), writes);
 }
 
@@ -3173,7 +3500,15 @@ async fn test_allowances_conflict_over_a_delete_not_cleared_by_the_record_coming
     shop.receive(None).await.unwrap();
     restored.receive(None).await.unwrap();
     assert!(Box::pin(held_deleted(&restored, &mine)).await);
-    assert_eq!(restored.app().protocol_scan(b"cf/").await.unwrap().len(), 1);
+    assert_eq!(
+        restored
+            .app()
+            .protocol_scan("paykit", b"cf/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(
         restored.allowance(&mine).await.unwrap().status,
         AllowanceStatus::Conflicted
@@ -3193,7 +3528,15 @@ async fn test_allowances_conflict_over_a_delete_not_cleared_by_the_record_coming
     restored.receive(None).await.unwrap();
     restored.receive(None).await.unwrap();
     assert!(!Box::pin(held_deleted(&restored, &mine)).await);
-    assert_eq!(restored.app().protocol_scan(b"cf/").await.unwrap().len(), 1);
+    assert_eq!(
+        restored
+            .app()
+            .protocol_scan("paykit", b"cf/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(
         restored.allowance(&mine).await.unwrap().status,
         AllowanceStatus::Conflicted
@@ -3242,7 +3585,15 @@ async fn test_allowances_conflict_by_a_response_over_a_record_deleted_since_stil
     );
     refuse_writes(&w, 1);
     wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"cf/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"cf/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(Box::pin(value(&wallet, &sent.record)).await["conflicted"].is_null());
     Box::pin(delete_allowance_record(&w, &sent.allowance_id)).await;
     wallet.receive(None).await.unwrap();
@@ -3547,8 +3898,21 @@ async fn crossing_end_held(how: SendsHeld) {
         AllowanceStatus::Ended
     );
     assert!(Box::pin(ends_naming_both(&wallet, &mine)).await, "{how:?}");
-    assert!(wallet.app().protocol_scan(b"ae/").await.unwrap().is_empty());
-    assert_eq!(wallet.app().protocol_scan(b"eo/").await.unwrap().len(), 1);
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"ae/")
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"eo/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     wallet.app_mut().flush_outbox().await.unwrap();
     assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
     if let SendsHeld::Blocked = how {
@@ -3558,7 +3922,12 @@ async fn crossing_end_held(how: SendsHeld) {
     }
     Box::pin(release_sends(&w, &mut wallet, how)).await;
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_scan(b"eo/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"eo/")
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 1);
     wallet.receive(None).await.unwrap();
     assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
@@ -3601,11 +3970,16 @@ async fn test_allowances_crossing_end_recorded_while_blocked_sent_once_after_a_r
     }
     assert!(restored
         .app()
-        .protocol_scan(b"eo/")
+        .protocol_scan("paykit", b"eo/")
         .await
         .unwrap()
         .is_empty());
-    assert!(restored.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert!(restored
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_some());
     assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
     restored.unblock(&w.bob_id()).await.unwrap();
     restored.receive(None).await.unwrap();
@@ -3666,7 +4040,14 @@ async fn test_allowances_answer_dropped_for_the_bound_taken_again_from_a_resend_
     let mine = wallet.allowances().await.unwrap()[0].record;
     let rejected = wallet.reject_allowance(&mine).await.unwrap();
     shop.receive(None).await.unwrap();
-    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(shop.allowances().await.unwrap().is_empty());
     w.clock.advance_ms(1);
     let bound = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
@@ -3685,7 +4066,14 @@ async fn test_allowances_answer_dropped_for_the_bound_taken_again_from_a_resend_
         );
     }
     shop.receive(None).await.unwrap();
-    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), bound);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        bound
+    );
     // The shop's record of the Allowance is written, as the other app's batch would write it.
     let proposal = paykit_lib::records::StoredMessage::new(
         w.bob_id(),
@@ -3716,7 +4104,7 @@ async fn test_allowances_answer_dropped_for_the_bound_taken_again_from_a_resend_
         .await
         .unwrap();
     shop.app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     assert_eq!(shop.receive(None).await.unwrap().resends, 1);
@@ -3795,7 +4183,12 @@ async fn answer_queued_again(kind: &str, status: AllowanceStatus) {
     drop(wallet);
     let mut wallet = Box::pin(restored_unreceived(&w, &backup)).await;
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(Box::pin(taken(&mut shop, kind)).await, 1);
     assert_eq!(shop.allowance(&theirs).await.unwrap().status, status);
     // Once: a later receive queues nothing more.
@@ -3848,10 +4241,20 @@ async fn rejection_queued_again_once_sends_go(how: SendsHeld) {
         wallet.receive(None).await.unwrap();
     }
     assert_eq!(Box::pin(taken(&mut shop, kind)).await, 0, "{how:?}");
-    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_some());
     Box::pin(release_sends(&w, &mut wallet, how)).await;
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(Box::pin(taken(&mut shop, kind)).await, 1);
     wallet.receive(None).await.unwrap();
     assert_eq!(Box::pin(taken(&mut shop, kind)).await, 0);
@@ -3931,12 +4334,22 @@ async fn test_allowances_restore_own_rejection_in_a_record_sealed_under_a_key_no
         sealed.content
     );
     assert_eq!(Box::pin(taken(&mut shop, kind)).await, 0);
-    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_some());
     crate::unrequested::store_bundle(&w, wallet_app, &cert);
     for _ in 0..3 {
         wallet.receive(None).await.unwrap();
     }
-    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(Box::pin(taken(&mut shop, kind)).await, 1);
     assert_eq!(
         shop.allowance(&theirs).await.unwrap().status,
@@ -4000,9 +4413,22 @@ async fn test_allowances_restore_sends_nothing_under_a_kept_conflict() {
         refuse_writes(w, 4);
     }))
     .await;
-    assert_eq!(restored.app().protocol_scan(b"cf/").await.unwrap().len(), 1);
+    assert_eq!(
+        restored
+            .app()
+            .protocol_scan("paykit", b"cf/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(Box::pin(value(&restored, &mine)).await["conflicted"].is_null());
-    assert!(restored.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(restored
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(
         Box::pin(taken(&mut shop, "paykit.allowance_rejection")).await,
         0
@@ -4019,7 +4445,12 @@ async fn test_allowances_restore_sends_nothing_for_a_conflicted_record() {
     }))
     .await;
     assert!(!Box::pin(value(&restored, &mine)).await["conflicted"].is_null());
-    assert!(restored.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(restored
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(
         Box::pin(taken(&mut shop, "paykit.allowance_rejection")).await,
         0
@@ -4070,7 +4501,12 @@ async fn test_allowances_restore_sends_no_proposal_after_the_counterpartys_answe
     restored.receive(None).await.unwrap();
     restored.receive(None).await.unwrap();
     assert!(!Box::pin(value(&restored, &sent.record)).await["response"].is_null());
-    assert!(restored.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(restored
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(
         Box::pin(taken_or_duplicate(&mut shop, "paykit.allowance_proposal")).await,
         0
@@ -4113,7 +4549,15 @@ async fn test_allowances_end_dropped_for_the_bound_taken_again_from_a_resend() {
     assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
     assert!(!Box::pin(keeps_end(&w, &wallet, first)).await);
     assert_eq!(Box::pin(stops(&wallet)).await, bound);
-    assert_eq!(wallet.app().protocol_scan(b"pd/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"pd/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
     shop.receive(None).await.unwrap();
     let got = wallet.receive(None).await.unwrap();
@@ -4138,7 +4582,12 @@ async fn test_allowances_proposal_over_a_deleted_record_from_a_blocked_sender_ke
     wallet.block(&w.bob_id()).await.unwrap();
     propose_as(&w, &[wallet.app_id()], id.as_str(), "0.20");
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_scan(b"cf/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"cf/")
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 1);
 }
 
@@ -4175,7 +4624,15 @@ async fn wallet_answer_dropped_then_recorded(
     let theirs = shop.allowances().await.unwrap()[0].record;
     let rejected = shop.reject_allowance(&theirs).await.unwrap();
     wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     w.clock.advance_ms(1);
     let bound = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
     for i in 0..bound {
@@ -4194,10 +4651,23 @@ async fn wallet_answer_dropped_then_recorded(
     }
     wallet.receive(None).await.unwrap();
     assert_eq!(
-        wallet.app().protocol_scan(b"pr/").await.unwrap().len(),
+        wallet
+            .app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
         bound
     );
-    assert_eq!(wallet.app().protocol_scan(b"pd/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"pd/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     before(w, wallet, shop).await;
     let proposal = paykit_lib::records::StoredMessage::new(
         w.alice_id(),
@@ -4229,7 +4699,7 @@ async fn wallet_answer_dropped_then_recorded(
         .unwrap();
     wallet
         .app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     let mine = wallet.app().record_key(&target).unwrap();
@@ -4317,7 +4787,15 @@ async fn test_allowances_owed_crossing_end_not_sent_once_the_allowance_is_confli
         SendsHeld::Blocked,
     ))
     .await;
-    assert_eq!(wallet.app().protocol_scan(b"eo/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"eo/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     let id = wallet.allowance(&mine).await.unwrap().allowance_id;
     propose_as(&w, &[wallet.app_id()], id.as_str(), "0.20");
     wallet.receive(None).await.unwrap();
@@ -4327,7 +4805,12 @@ async fn test_allowances_owed_crossing_end_not_sent_once_the_allowance_is_confli
     );
     wallet.unblock(&w.bob_id()).await.unwrap();
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_scan(b"eo/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"eo/")
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
 }
 
@@ -4350,7 +4833,12 @@ async fn test_allowances_owed_crossing_end_dropped_with_its_deleted_record() {
     Box::pin(delete_allowance_record(&w, &id)).await;
     wallet.receive(None).await.unwrap();
     assert!(Box::pin(held_deleted(&wallet, &mine)).await);
-    assert!(wallet.app().protocol_scan(b"eo/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"eo/")
+        .await
+        .unwrap()
+        .is_empty());
     wallet.unblock(&w.bob_id()).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
@@ -4390,14 +4878,35 @@ async fn test_allowances_owed_crossing_end_kept_through_a_store_failure_and_sent
         SendsHeld::Blocked,
     ))
     .await;
-    assert_eq!(wallet.app().protocol_scan(b"eo/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"eo/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     wallet.unblock(&w.bob_id()).await.unwrap();
     fault.fail_put_once(b"out/");
     assert!(wallet.receive(None).await.is_err());
-    assert_eq!(wallet.app().protocol_scan(b"eo/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"eo/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 0);
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_scan(b"eo/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"eo/")
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(Box::pin(taken(&mut shop, "paykit.allowance_end")).await, 1);
 }
 
@@ -4489,7 +4998,15 @@ async fn test_allowances_kept_answer_waits_through_a_renewal_without_keys_then_p
     let theirs = shop.allowances().await.unwrap()[0].record;
     shop.reject_allowance(&theirs).await.unwrap();
     wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     let old = wallet.app().cert().clone();
     let wider = renew(
         &w,
@@ -4532,14 +5049,22 @@ async fn test_allowances_kept_answer_waits_through_a_renewal_without_keys_then_p
         .unwrap();
     wallet
         .app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     let mine = wallet.app().record_key(&target).unwrap();
     for _ in 0..2 {
         let summary = wallet.receive(None).await.unwrap();
         assert!(summary.scope_keys_awaited, "{summary:?}");
-        assert_eq!(wallet.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+        assert_eq!(
+            wallet
+                .app()
+                .protocol_scan("paykit", b"pr/")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(Box::pin(value(&wallet, &mine)).await["response"].is_null());
     }
     assert!(wallet.notices().await.unwrap().is_empty());
@@ -4547,7 +5072,12 @@ async fn test_allowances_kept_answer_waits_through_a_renewal_without_keys_then_p
     for _ in 0..3 {
         wallet.receive(None).await.unwrap();
     }
-    assert!(wallet.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"pr/")
+        .await
+        .unwrap()
+        .is_empty());
     assert!(!Box::pin(value(&wallet, &mine)).await["response"].is_null());
     assert_eq!(
         wallet.allowance(&mine).await.unwrap().status,
@@ -4597,10 +5127,20 @@ async fn test_allowances_restore_own_rejection_over_a_record_left_unreadable_sen
         wallet.receive(None).await.unwrap();
     }
     assert_eq!(Box::pin(taken(&mut shop, kind)).await, 0);
-    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_some());
     Box::pin(crate::periods::writes_value(&mut phone, &target, &good)).await;
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(Box::pin(taken(&mut shop, kind)).await, 1);
     wallet.receive(None).await.unwrap();
     assert_eq!(Box::pin(taken(&mut shop, kind)).await, 0);
@@ -4824,7 +5364,15 @@ async fn test_allowances_second_end_over_an_unreadable_record_dropped_for_the_bo
     }
     assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
     assert_eq!(Box::pin(ends_kept_at(&wallet, &mine)).await, 1);
-    assert_eq!(wallet.app().protocol_scan(b"pd/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"pd/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     shop.receive(None).await.unwrap();
     let got = wallet.receive(None).await.unwrap();
     assert!(received(&got, "paykit.allowance_end"), "{got:?}");
@@ -4856,21 +5404,37 @@ async fn test_allowances_owed_end_naming_another_end_is_corrupt() {
         SendsHeld::Blocked,
     ))
     .await;
-    let (key, value) = wallet.app().protocol_scan(b"eo/").await.unwrap().remove(0);
+    let (key, value) = wallet
+        .app()
+        .protocol_scan("paykit", b"eo/")
+        .await
+        .unwrap()
+        .remove(0);
     let mut owed: Value = serde_json::from_slice(&value).unwrap();
     owed["d"]["msg_id"] = json!("0d6f5b9e-3c1a-4e8b-9f2d-7a4c1e5b8d30");
     wallet
         .app_mut()
-        .protocol_commit(&[LocalWrite::Put {
-            key: key.clone(),
-            value: serde_json::to_vec(&owed).unwrap(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key: key.clone(),
+                value: serde_json::to_vec(&owed).unwrap(),
+            }],
+        )
         .await
         .unwrap();
     wallet.unblock(&w.bob_id()).await.unwrap();
     let error = wallet.receive(None).await.unwrap_err();
     assert!(error.to_string().contains("corrupt"), "{error:?}");
-    assert_eq!(wallet.app().protocol_scan(b"eo/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"eo/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(Box::pin(ends_naming_both(&wallet, &mine)).await);
 }
 
@@ -5011,7 +5575,15 @@ async fn test_allowances_two_senders_answers_with_one_msg_id_kept_apart() {
         );
     }
     wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"pr/").await.unwrap().len(), 2);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
     drop(shop);
 }
 
@@ -5100,7 +5672,12 @@ async fn test_allowances_recipient_end_naming_the_proposal_alone_leaves_consent(
     );
     assert!(exec.allowance(&mine).await.unwrap().consented);
     assert!(Box::pin(value(&exec, &mine)).await["end"].is_null());
-    assert!(exec.app().protocol_scan(b"ae/").await.unwrap().is_empty());
+    assert!(exec
+        .app()
+        .protocol_scan("paykit", b"ae/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -5123,7 +5700,12 @@ async fn test_allowances_second_response_naming_another_proposal_keeps_no_confli
     exec.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     for app in [&exec, &wallet] {
-        assert!(app.app().protocol_scan(b"cf/").await.unwrap().is_empty());
+        assert!(app
+            .app()
+            .protocol_scan("paykit", b"cf/")
+            .await
+            .unwrap()
+            .is_empty());
         assert!(Box::pin(value(app, &mine)).await["conflicted"].is_null());
         assert_eq!(
             app.allowance(&mine).await.unwrap().status,
@@ -5164,7 +5746,7 @@ async fn test_allowances_restored_end_acceptance_time_ahead_is_clamped() {
     let bound = w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS;
     let (_, value) = restored
         .app()
-        .protocol_scan(b"ae/")
+        .protocol_scan("paykit", b"ae/")
         .await
         .unwrap()
         .remove(0);
@@ -5270,7 +5852,15 @@ async fn test_allowances_answers_of_one_millisecond_placed_in_acceptance_order()
         );
     }
     wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"pr/").await.unwrap().len(), 2);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
     let record = AllowanceRecord {
         counterparty: w.bob_id(),
         allowance_id: id.clone(),
@@ -5357,7 +5947,7 @@ fn send(
 /// Whether `app` keeps a message `msg_id` under `prefix`.
 async fn keeps(app: &Paykit, prefix: &[u8], msg_id: &str) -> bool {
     app.app()
-        .protocol_scan(prefix)
+        .protocol_scan("paykit", prefix)
         .await
         .unwrap()
         .iter()
@@ -5418,7 +6008,14 @@ async fn test_allowances_reply_pool_drops_the_first_accepted_of_one_millisecond_
     let bound = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
     let (allowance, request) = replies_tied_then(&w, &shop, bound - 2);
     shop.receive(None).await.unwrap();
-    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), bound);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        bound
+    );
     w.clock.advance_ms(1);
     send(
         &w,
@@ -5431,7 +6028,14 @@ async fn test_allowances_reply_pool_drops_the_first_accepted_of_one_millisecond_
         json!({}),
     );
     shop.receive(None).await.unwrap();
-    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), bound);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        bound
+    );
     assert!(!Box::pin(keeps(&shop, b"pr/", &allowance)).await);
     assert!(Box::pin(keeps(&shop, b"pr/", &request)).await);
 }
@@ -5473,7 +6077,14 @@ async fn test_allowances_reply_pool_drops_the_first_accepted_of_one_millisecond_
     }
     shop.receive(None).await.unwrap();
     let all = paykit_sdk::MAX_KEPT_REPLIES;
-    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), all);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        all
+    );
     w.clock.advance_ms(1);
     send(
         &w,
@@ -5486,7 +6097,14 @@ async fn test_allowances_reply_pool_drops_the_first_accepted_of_one_millisecond_
         json!({}),
     );
     shop.receive(None).await.unwrap();
-    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), all);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        all
+    );
     assert!(!Box::pin(keeps(&shop, b"pr/", &allowance)).await);
     assert!(Box::pin(keeps(&shop, b"pr/", &request)).await);
 }
@@ -5542,7 +6160,12 @@ async fn test_allowances_stop_pool_drops_the_first_accepted_of_one_millisecond_p
     wallet.receive(None).await.unwrap();
     assert_eq!(Box::pin(stops(&wallet)).await, bound);
     assert!(!Box::pin(keeps(&wallet, b"ae/", &end)).await);
-    assert!(!wallet.app().protocol_scan(b"kc/").await.unwrap().is_empty());
+    assert!(!wallet
+        .app()
+        .protocol_scan("paykit", b"kc/")
+        .await
+        .unwrap()
+        .is_empty());
     let _ = cancellation;
 }
 
@@ -5581,7 +6204,12 @@ async fn test_allowances_stop_pool_drops_the_first_accepted_of_one_millisecond_i
     wallet.receive(None).await.unwrap();
     assert_eq!(Box::pin(stops(&wallet)).await, all);
     assert!(!Box::pin(keeps(&wallet, b"ae/", &end)).await);
-    assert!(!wallet.app().protocol_scan(b"kc/").await.unwrap().is_empty());
+    assert!(!wallet
+        .app()
+        .protocol_scan("paykit", b"kc/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 /// An app of alice's, `name`, with `scopes`, on `store`; she admits bob.
@@ -5783,7 +6411,7 @@ async fn records_proposal(
         .unwrap();
     wallet
         .app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     wallet.app().record_key(&target).unwrap()
@@ -5832,7 +6460,11 @@ async fn response_and_conflicted(
 
 /// How many messages `app` keeps under `prefix`.
 async fn kept_under(app: &Paykit, prefix: &[u8]) -> usize {
-    app.app().protocol_scan(prefix).await.unwrap().len()
+    app.app()
+        .protocol_scan("paykit", prefix)
+        .await
+        .unwrap()
+        .len()
 }
 
 /// Bob's acceptance of alice's proposal is kept before its record, under the `msg_id` that
@@ -6380,7 +7012,7 @@ async fn writes_value(
         .await
         .unwrap();
     app.app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
 }
@@ -6709,7 +7341,7 @@ async fn test_allowances_answer_after_a_given_up_earlier_answer_never_takes_the_
     wallet.receive(None).await.unwrap();
     assert_eq!(Box::pin(kept_under(&wallet, b"cf/")).await, 1);
     assert!(Box::pin(keeps(&wallet, b"cf/", &b64_of(&mine))).await);
-    let stop = wallet.app().protocol_scan(b"cf/").await.unwrap();
+    let stop = wallet.app().protocol_scan("paykit", b"cf/").await.unwrap();
     assert_eq!(
         Box::pin(response_and_conflicted(&w, &wallet, &mine)).await,
         (None, None)
@@ -6744,7 +7376,10 @@ async fn test_allowances_answer_after_a_given_up_earlier_answer_never_takes_the_
         (None, None)
     );
     assert_eq!(Box::pin(kept_under(&wallet, b"cf/")).await, 1);
-    assert_eq!(wallet.app().protocol_scan(b"cf/").await.unwrap(), stop);
+    assert_eq!(
+        wallet.app().protocol_scan("paykit", b"cf/").await.unwrap(),
+        stop
+    );
     assert_eq!(Box::pin(kept_under(&wallet, b"pr/")).await, 0);
     assert_eq!(
         wallet.allowance(&mine).await.unwrap().status,
@@ -6778,10 +7413,13 @@ async fn consent_state_keeper(
 
 async fn put_consent_state(app: &mut Paykit, key: &[u8], value: &Value) {
     app.app_mut()
-        .protocol_commit(&[LocalWrite::Put {
-            key: key.to_vec(),
-            value: serde_json::to_vec(value).unwrap(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key: key.to_vec(),
+                value: serde_json::to_vec(value).unwrap(),
+            }],
+        )
         .await
         .unwrap();
 }
@@ -6833,7 +7471,12 @@ async fn removed_consent_unknown_member(nested: bool) {
     let (_, mine) = Box::pin(proposed(&w, &mut shop, &mut app)).await;
     Box::pin(accept_elsewhere(&mut app, &mine)).await;
     app.end_allowance(&mine).await.unwrap();
-    let (key, bytes) = app.app().protocol_scan(b"ac/").await.unwrap().remove(0);
+    let (key, bytes) = app
+        .app()
+        .protocol_scan("paykit", b"ac/")
+        .await
+        .unwrap()
+        .remove(0);
     let mut value: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
         value["d"]["consent"],
@@ -6841,7 +7484,10 @@ async fn removed_consent_unknown_member(nested: bool) {
     );
     let backup = app.backup().await.unwrap();
     let valid = Box::pin(restored_unreceived(&w, &backup)).await;
-    assert_eq!(valid.app().protocol_get(&key).await.unwrap(), Some(bytes));
+    assert_eq!(
+        valid.app().protocol_get("paykit", &key).await.unwrap(),
+        Some(bytes)
+    );
     drop(valid);
     if nested {
         value["d"]["consent"]["removed"]["unexpected"] = json!(true);
@@ -6855,7 +7501,7 @@ async fn removed_consent_unknown_member(nested: bool) {
         .load_on_clock(&w.alice, store, id, std::sync::Arc::clone(&w.clock))
         .await;
     assert_eq!(
-        app.app().protocol_get(&key).await.unwrap(),
+        app.app().protocol_get("paykit", &key).await.unwrap(),
         Some(serde_json::to_vec(&value).unwrap())
     );
     let error = app.receive(None).await.unwrap_err();
@@ -6883,7 +7529,12 @@ async fn test_consent_state_supplied_held_values_restore_and_unknown_member_refu
     let w = World::new();
     let (_shop, _wallet, mut exec, _phone, _, mine) = Box::pin(executed(&w)).await;
     let key = format!("ac/{}", pubky_switch_core::enc::b64(&mine)).into_bytes();
-    let bytes = exec.app().protocol_get(&key).await.unwrap().unwrap();
+    let bytes = exec
+        .app()
+        .protocol_get("paykit", &key)
+        .await
+        .unwrap()
+        .unwrap();
     let mut value: Value = serde_json::from_slice(&bytes).unwrap();
     let backup = exec.backup().await.unwrap();
     for confirmed in [false, true] {
@@ -6912,12 +7563,17 @@ async fn test_consent_state_supplied_grant_notice_routes_and_unknown_member_refu
     let w = World::new();
     let (_shop, mut wallet, exec, _phone, _, mine) = Box::pin(executed(&w)).await;
     wallet.end_allowance(&mine).await.unwrap();
-    let (key, bytes) = wallet.app().protocol_scan(b"en/").await.unwrap().remove(0);
+    let (key, bytes) = wallet
+        .app()
+        .protocol_scan("paykit", b"en/")
+        .await
+        .unwrap()
+        .remove(0);
     let mut value: Value = serde_json::from_slice(&bytes).unwrap();
     let backup = wallet.backup().await.unwrap();
     let restored = Box::pin(restored_unreceived(&w, &backup)).await;
     assert_eq!(
-        restored.app().protocol_get(&key).await.unwrap(),
+        restored.app().protocol_get("paykit", &key).await.unwrap(),
         Some(bytes.clone())
     );
     drop(restored);
@@ -6973,11 +7629,16 @@ async fn test_consent_state_supplied_grant_notice_routes_and_unknown_member_refu
     assert!(error.to_string().contains("corrupt"), "{error:?}");
     wallet
         .app_mut()
-        .protocol_commit(&[LocalWrite::Put { key, value: bytes }])
+        .protocol_commit("paykit", &[LocalWrite::Put { key, value: bytes }])
         .await
         .unwrap();
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_scan(b"en/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"en/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -6993,10 +7654,18 @@ async fn test_consent_state_real_owed_end_unknown_member_is_lazy_and_refused() {
     ))
     .await;
     assert!(Box::pin(ends_naming_both(&app, &mine)).await);
-    let (key, bytes) = app.app().protocol_scan(b"eo/").await.unwrap().remove(0);
+    let (key, bytes) = app
+        .app()
+        .protocol_scan("paykit", b"eo/")
+        .await
+        .unwrap()
+        .remove(0);
     let mut value: Value = serde_json::from_slice(&bytes).unwrap();
     app.receive(None).await.unwrap();
-    assert_eq!(app.app().protocol_get(&key).await.unwrap(), Some(bytes));
+    assert_eq!(
+        app.app().protocol_get("paykit", &key).await.unwrap(),
+        Some(bytes)
+    );
     value["d"]["unexpected"] = json!(true);
     Box::pin(put_consent_state(&mut app, &key, &value)).await;
     let id = app.app_id();
@@ -7005,13 +7674,13 @@ async fn test_consent_state_real_owed_end_unknown_member_is_lazy_and_refused() {
         .load_on_clock(&w.alice, store, id, std::sync::Arc::clone(&w.clock))
         .await;
     assert_eq!(
-        app.app().protocol_get(&key).await.unwrap(),
+        app.app().protocol_get("paykit", &key).await.unwrap(),
         Some(serde_json::to_vec(&value).unwrap())
     );
     let error = app.receive(None).await.unwrap_err();
     assert!(error.to_string().contains("corrupt"), "{error:?}");
     assert_eq!(
-        app.app().protocol_get(&key).await.unwrap(),
+        app.app().protocol_get("paykit", &key).await.unwrap(),
         Some(serde_json::to_vec(&value).unwrap())
     );
     assert!(w.rail.all_executions().is_empty());
@@ -7031,7 +7700,12 @@ async fn test_consent_state_owed_end_body_discarded_restore_recovers_signed_end(
     ))
     .await;
     assert!(Box::pin(ends_naming_both(&app, &mine)).await);
-    let (key, bytes) = app.app().protocol_scan(b"eo/").await.unwrap().remove(0);
+    let (key, bytes) = app
+        .app()
+        .protocol_scan("paykit", b"eo/")
+        .await
+        .unwrap()
+        .remove(0);
     let owed: Value = serde_json::from_slice(&bytes).unwrap();
     let original_id = owed["d"]["msg_id"].as_str().unwrap().to_owned();
     let original = AllowanceRecord::read(
@@ -7044,10 +7718,13 @@ async fn test_consent_state_owed_end_body_discarded_restore_recovers_signed_end(
     assert_eq!(original.message().msg_id, original_id);
     // This body is intentionally not read at restore; the valid family key is counted.
     app.app_mut()
-        .protocol_commit(&[LocalWrite::Put {
-            key,
-            value: b"unread body".to_vec(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key,
+                value: b"unread body".to_vec(),
+            }],
+        )
         .await
         .unwrap();
     let backup = app.backup().await.unwrap();
@@ -7055,7 +7732,7 @@ async fn test_consent_state_owed_end_body_discarded_restore_recovers_signed_end(
     let mut restored = Box::pin(restored_unreceived(&w, &backup)).await;
     assert!(restored
         .app()
-        .protocol_scan(b"eo/")
+        .protocol_scan("paykit", b"eo/")
         .await
         .unwrap()
         .is_empty());
