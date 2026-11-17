@@ -20,12 +20,17 @@
 //!
 //! Of one app's records, the one used is the one the Switch's comparison rules pick (Switch
 //! spec 4.2, Switch wire 3.2 "Equal times"), through the core's `RecordView`: the newest
-//! seen; during a conflict, two bodies at one `updated_at`, the earlier one held, if any,
-//! until a strictly later record ends it. The records that took part are kept in the
-//! store, so the comparison survives a restart. The record served now is judged on its own:
-//! one refused, made ahead of the payer's clock, or in conflict is the app's failure even
-//! when the earlier record held still supplies the app's endpoints, and the read reports
-//! both.
+//! seen, so a record served that is older than one seen is answered from the newest seen,
+//! checked as any record used. The records that took part are kept in the store, so the
+//! comparison survives a restart; a refused record never displaces one kept.
+//!
+//! The record served now is judged on its own (Paykit spec 4): one refused, made ahead of
+//! the payer's clock, in conflict with one seen (two bodies at one `updated_at`, until a
+//! strictly later record ends it), or that can't be kept for the comparison is the app's
+//! failure, and the app offers no endpoints in that read, not even those of an earlier
+//! record kept: the newer record that can't be used may be the one that withdrew an
+//! endpoint. Discovery ([`Paykit::public_endpoints`]) and a public payment apply this one
+//! rule.
 //!
 //! A record that fails any of these is never paid. Each app's failure is that app's own
 //! (Paykit spec 4): a record the Homeserver can't serve now, one the reader refuses,
@@ -96,17 +101,16 @@ pub struct PublicPaymentList {
     /// The public endpoints that may be paid now, app by app in the order of the payee's
     /// `identity.json`, then by Payment Endpoint Identifier.
     pub endpoints: Vec<PublicEndpoint>,
-    /// The apps whose public endpoints couldn't be used, in the same order. An app with no
-    /// record has no public endpoints and isn't one of them. An app whose record served now
-    /// fails while an earlier record it held is used is one of them, and that earlier
-    /// record's endpoints are in [`Self::endpoints`]; when that earlier record fails too, its
-    /// failure follows.
+    /// The apps whose public endpoints couldn't be used, in the same order, each once. An
+    /// app with no record has no public endpoints and isn't one of them. An app here has no
+    /// endpoints in [`Self::endpoints`], not even those of an earlier record the reader kept
+    /// (module docs).
     pub failures: Vec<PublicAppFailure>,
 }
 
 /// A payee app whose public endpoints couldn't be used in one read (Paykit spec 4): its
 /// failure is its own, and the other apps' usable endpoints stay available.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PublicAppFailure {
     /// The payee app.
@@ -116,7 +120,7 @@ pub struct PublicAppFailure {
 }
 
 /// Why a payee app's public endpoints couldn't be used (Paykit spec 4).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PublicAppFailureReason {
     /// The payee's Homeserver couldn't serve the app's record now. A later read may.
@@ -379,7 +383,9 @@ impl Paykit {
     /// The payee's app records that may be used now (module docs), of `app` only when given,
     /// and the apps whose records couldn't be used: in the order of the payee's
     /// `identity.json`, within the read's bound. `Err` inside holds the refusal of the payee's
-    /// `identity.json`.
+    /// `identity.json`. The one rule of discovery ([`Paykit::public_endpoints`]) and of a
+    /// public payment: an app whose record served now fails gives its failure and no
+    /// endpoints (Paykit spec 4).
     pub(crate) async fn public_records(
         &mut self,
         payee: &[u8; 32],
@@ -471,7 +477,7 @@ impl Paykit {
                 if takes_part(&record, &held, &view, now) {
                     // A record the reader can't keep for the comparison is never used, nor
                     // is an earlier one in its place, which it may withdraw: the app's
-                    // failure, and the other apps' reads go on (Paykit spec 4).
+                    // failure, and the other apps' reads go on (Paykit spec 4, below).
                     if !seen.keep(&record, &held) {
                         out.failures
                             .push(fail(PublicAppFailureReason::Refused(format!(
@@ -499,15 +505,31 @@ impl Paykit {
                 Some(PublicAppFailureReason::Expired(
                     "Paykit spec 4: the record was made ahead of the payer's clock".into(),
                 ))
-            } else if view.in_conflict() || view.used().is_none() {
+            } else if view.in_conflict() {
                 Some(PublicAppFailureReason::Refused(
                     "Switch spec 4.2: the app's records conflict at one updated_at".into(),
+                ))
+            } else if view.used().is_none() {
+                // The view sets aside the records seen that are ahead of the clock, as after
+                // the payer's clock went back; the record served is older than one of them,
+                // so nothing is used until the clock passes them.
+                Some(PublicAppFailureReason::Expired(
+                    "Paykit spec 4: the app's newest record seen was made ahead of the \
+                     payer's clock"
+                        .into(),
                 ))
             } else {
                 None
             };
+            // Paykit spec 4: "One app's failure, a record it can't read, or one it refuses or
+            // that has expired, is reported as that app's, and the other apps' usable
+            // endpoints stay available"; "a request with `required_app_id` reads only that
+            // app's record, so that app's failure leaves the request with no public
+            // destination". So an app whose record served now fails offers nothing in this
+            // read, not even an earlier record kept, which only the comparison uses.
             if let Some(reason) = served_failure {
                 out.failures.push(fail(reason));
+                continue;
             }
             let Some(used) = view.used() else {
                 continue;
@@ -530,7 +552,8 @@ impl Paykit {
     /// current apps that may be paid now, read from their records on the payee's Homeserver
     /// and checked as the module docs say, and each app whose endpoints couldn't be used,
     /// with why: its record unreadable now, refused, expired, or over the read's bound. One
-    /// app's failure never fails the read. `confirmed` is the user's confirmation for a payee
+    /// app's failure never fails the read, and a failed app offers no endpoints in it, not
+    /// even those of an earlier record kept; a public payment reads by the same rule. `confirmed` is the user's confirmation for a payee
     /// whose switch couldn't confirm its apps ([`Refusal::IdentityUnconfirmed`]).
     ///
     /// # Errors

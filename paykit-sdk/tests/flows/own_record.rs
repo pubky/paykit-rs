@@ -399,6 +399,201 @@ async fn test_own_record_upkeep_without_publishing_withdraws_every_endpoint() {
     holds_none_published_two(&w, &shop);
 }
 
+/// A store whose next commit, once armed, is applied and then answers that its result is
+/// unknown, as a store that can't tell may.
+struct UnknownOnce {
+    inner: Arc<dyn pubky_switch_client::store::StateStore>,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl UnknownOnce {
+    fn after(
+        &self,
+        result: Result<
+            pubky_switch_client::store::CommitOutcome,
+            pubky_switch_client::error::StoreError,
+        >,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        let applied = result?;
+        if applied == pubky_switch_client::store::CommitOutcome::Applied
+            && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(pubky_switch_client::error::StoreError::Unknown);
+        }
+        Ok(applied)
+    }
+}
+
+impl pubky_switch_client::store::StateStore for UnknownOnce {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        let result = self
+            .inner
+            .commit(batch)
+            .map(|()| pubky_switch_client::store::CommitOutcome::Applied);
+        self.after(result).map(|_| ())
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.after(self.inner.commit_if(ns, owner, batch))
+    }
+}
+
+#[tokio::test]
+async fn test_own_record_edit_after_an_unknown_store_result_waits_for_a_load() {
+    let w = World::new();
+    let base = store();
+    let faulty = Arc::new(UnknownOnce {
+        inner: Arc::clone(&base),
+        armed: std::sync::atomic::AtomicBool::new(false),
+    });
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+            publishing(),
+            Arc::clone(&faulty) as Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    let a = endpoint("btc-lightning-bolt12");
+    let b = endpoint("btc-onchain-address");
+    shop.set_public_endpoint(a.clone(), payload("lno1tips"))
+        .await
+        .unwrap();
+    // Removing A is applied, but the store can't tell.
+    faulty
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let error = shop.remove_public_endpoint(&a).await.unwrap_err();
+    assert!(
+        matches!(
+            error,
+            PaykitError::Client(pubky_switch_client::app::AppError::Store(
+                pubky_switch_client::error::StoreError::Unknown
+            ))
+        ),
+        "{error:?}"
+    );
+    // Adding B on this handle would build on the record it still holds, with A: refused,
+    // naming the way out, and nothing is signed.
+    let record = shop.app().record().clone();
+    let refused = shop
+        .set_public_endpoint(b.clone(), payload("bc1q"))
+        .await
+        .unwrap_err();
+    let PaykitError::Refused(Refusal::NotNow(text)) = &refused else {
+        panic!("{refused:?}");
+    };
+    assert!(text.contains("load the app again"), "{text}");
+    assert_eq!(shop.app().record(), &record);
+    let app_id = shop.app_id();
+    drop(shop);
+    // Loaded again, the app holds the withdrawal, and adding B never brings A back.
+    let mut shop = w
+        .load_with(&w.bob, base, app_id, Arc::clone(&w.clock), publishing())
+        .await;
+    assert!(shop.own_public_endpoints().unwrap().is_empty());
+    shop.set_public_endpoint(b.clone(), payload("bc1q"))
+        .await
+        .unwrap();
+    let held = shop.own_public_endpoints().unwrap();
+    assert_eq!(held.keys().collect::<Vec<_>>(), [&b]);
+    let published = PaykitMember::read(&on_homeserver(&w, &shop).unwrap()).unwrap();
+    assert!(!published.public_endpoints.contains_key(&a));
+}
+
+/// Bob's publishing shop whose withdrawal of its last endpoint reached no switch, backed up
+/// then, and restored on a new store.
+async fn restored_after_an_undelivered_withdrawal(w: &World) -> Paykit {
+    let mut shop = publishing_shop(w).await;
+    let id = endpoint("btc-lightning-bolt12");
+    shop.set_public_endpoint(id.clone(), payload("lno1tips"))
+        .await
+        .unwrap();
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    shop.remove_public_endpoint(&id).await.unwrap_err();
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    Paykit::restore(
+        w.env(&w.bob, store()),
+        publishing(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap()
+}
+
+/// The shop's Homeserver copy offers no public endpoint, and is the record it holds.
+fn withdrawn_on_homeserver(w: &World, shop: &Paykit) {
+    let published = on_homeserver(w, shop).unwrap();
+    assert!(PaykitMember::read(&published)
+        .unwrap()
+        .public_endpoints
+        .is_empty());
+    assert_eq!(published.signed(), shop.app().record());
+}
+
+#[tokio::test]
+async fn test_own_record_restored_withdrawal_signed_anew_at_the_receive() {
+    let w = World::new();
+    let mut restored = restored_after_an_undelivered_withdrawal(&w).await;
+    restored.receive(None).await.unwrap();
+    withdrawn_on_homeserver(&w, &restored);
+}
+
+#[tokio::test]
+async fn test_own_record_restored_withdrawal_signed_anew_at_the_update() {
+    let w = World::new();
+    let mut restored = restored_after_an_undelivered_withdrawal(&w).await;
+    restored.update_own_record().await.unwrap();
+    withdrawn_on_homeserver(&w, &restored);
+}
+
 #[tokio::test]
 async fn test_own_record_capabilities_updated_at_once_on_request() {
     let w = World::new();

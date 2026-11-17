@@ -348,6 +348,11 @@ pub struct Paykit {
     pub(crate) first_read_done: bool,
     /// A read made before a public write, to include in the host's next receive summary.
     pub(crate) first_read_summary: Option<Box<ReceiveSummary>>,
+    /// Whether a write of the app's own record ended with the store unable to tell whether
+    /// it was applied: the record this handle holds may not be the stored one, so no
+    /// public endpoint edit builds on it until the app is loaded again
+    /// (`crate::own_record`).
+    pub(crate) own_record_unknown: bool,
 }
 
 impl std::fmt::Debug for Paykit {
@@ -406,6 +411,7 @@ impl Paykit {
             config,
             first_read_done: false,
             first_read_summary: None,
+            own_record_unknown: false,
         }
     }
 

@@ -300,7 +300,7 @@ async fn test_public_read_payload_bound_reports_an_app_that_does_not_fit() {
 }
 
 #[tokio::test]
-async fn test_public_read_refused_record_reported_beside_the_held_one_over_the_bound() {
+async fn test_public_read_refused_record_gives_no_endpoints_of_the_held_one() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let apps = bob_apps(&w, &["shop", "till"]).await;
@@ -308,8 +308,8 @@ async fn test_public_read_refused_record_reported_beside_the_held_one_over_the_b
     publish_now(&w, apps[1].0, many(2, 8));
     let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
     assert_eq!(offering(&read), [apps[0].1, apps[1].1]);
-    // The shop's newer record leaves one endpoint of room, and the till's newer record is
-    // refused: the till's served record fails, and the record it holds is over the bound.
+    // The till's newer record is refused: that is its failure, once, and the record it holds
+    // gives no endpoints, so it takes none of the room the shop's newer record leaves.
     w.clock.advance_ms(1000);
     publish_now(&w, apps[0].0, many(MAX_PUBLIC_ENDPOINTS - 1, 8));
     publish_now(
@@ -319,14 +319,212 @@ async fn test_public_read_refused_record_reported_beside_the_held_one_over_the_b
     );
     let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
     assert_eq!(offering(&read), [apps[0].1]);
-    assert_eq!(read.failures.len(), 2, "{read:?}");
-    assert!(read.failures.iter().all(|f| f.app_id == apps[1].1));
+    assert_eq!(read.failures.len(), 1, "{read:?}");
+    assert_eq!(read.failures[0].app_id, apps[1].1);
     assert!(
         matches!(&read.failures[0].reason, PublicAppFailureReason::Refused(rule)
             if rule.contains("Paykit wire 3.2")),
         "{read:?}"
     );
-    assert_eq!(read.failures[1].reason, PublicAppFailureReason::OverBound);
+}
+
+#[tokio::test]
+async fn test_public_read_discovery_and_payment_agree_on_a_failed_app() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w
+        .join(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let till = bob_apps(&w, &["till"]).await;
+    let apps = [("shop", shop.app_id()), till[0]];
+    publish_now(
+        &w,
+        apps[0].0,
+        one_endpoint("btc-lightning-bolt12", "lno1shop"),
+    );
+    publish_now(
+        &w,
+        apps[1].0,
+        one_endpoint("btc-lightning-bolt11", "lnbc1till"),
+    );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[0].1, apps[1].1]);
+    // The shop's newer record is refused: discovery gives the shop's failure and only the
+    // till's endpoint, not the shop's record kept.
+    w.clock.advance_ms(1000);
+    publish_now(
+        &w,
+        apps[0].0,
+        json!({ "public_endpoints": { "btc-lightning-bolt12": 7 } }),
+    );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[1].1]);
+    assert_eq!(read.failures.len(), 1, "{read:?}");
+    assert_eq!(read.failures[0].app_id, apps[0].1);
+    // A request requiring the shop has no public destination, as discovery shows.
+    let draft = paykit_sdk::RequestDraft::new(
+        btc("1"),
+        paykit_lib::PaymentReference::new("order-1").unwrap(),
+        paykit_lib::bodies::RequestDestination::RequiredApp(apps[0].1),
+    )
+    .with_proposal_expires_at_ms(w.clock.now_ms() + DAY_MS);
+    let request = request_from(&mut shop, w.alice_id(), draft).await;
+    wallet.receive(None).await.unwrap();
+    let public = || PayOptions::default().with_mode(PaymentMode::Public(UserConfirmed::new()));
+    let refused = wallet.pay_request(&request, public()).await.unwrap_err();
+    let Some(Refusal::NoDestination(text)) = refused.refusal() else {
+        panic!("{refused:?}");
+    };
+    assert!(text.contains("Paykit wire 3.2"), "{text}");
+    assert!(w.rail.all_executions().is_empty());
+    // A payment to any app pays the till's endpoint, the one discovery offers, and tells
+    // the shop's failure with it.
+    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    let PayOutcome::Paid {
+        public_failures, ..
+    } = &outcome
+    else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(public_failures, &read.failures);
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
+        "btc-lightning-bolt11"
+    );
+}
+
+#[tokio::test]
+async fn test_public_read_required_app_cached_record_not_paid_over_a_refused_one() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w
+        .join(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    publish_now(&w, "shop", one_endpoint("btc-lightning-bolt12", "lno1shop"));
+    // The wallet keeps the shop's record holding the endpoint.
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(read.endpoints.len(), 1);
+    w.clock.advance_ms(1000);
+    publish_now(
+        &w,
+        "shop",
+        json!({ "public_endpoints": { "btc-lightning-bolt12": 7 } }),
+    );
+    let draft = paykit_sdk::RequestDraft::new(
+        btc("1"),
+        paykit_lib::PaymentReference::new("order-1").unwrap(),
+        paykit_lib::bodies::RequestDestination::RequiredApp(shop.app_id()),
+    )
+    .with_proposal_expires_at_ms(w.clock.now_ms() + DAY_MS);
+    let request = request_from(&mut shop, w.alice_id(), draft).await;
+    wallet.receive(None).await.unwrap();
+    let public = PayOptions::default().with_mode(PaymentMode::Public(UserConfirmed::new()));
+    let refused = wallet.pay_request(&request, public).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    assert!(wallet.payments().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_public_read_payment_tells_a_conflict_it_first_finds() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let apps = bob_apps(&w, &["shop", "till"]).await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    publish_app_at(
+        &w,
+        apps[0].0,
+        one_endpoint("btc-lightning-bolt12", "lno1a"),
+        t0,
+        expiry,
+    );
+    publish_now(
+        &w,
+        apps[1].0,
+        one_endpoint("btc-lightning-bolt11", "lnbc1till"),
+    );
+    // The wallet's first payment reads both records and pays one.
+    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    // Another body of the shop's record at the same updated_at: the next payment is the
+    // first read to find the conflict, pays the till, and tells the conflict.
+    publish_app_at(
+        &w,
+        apps[0].0,
+        one_endpoint("btc-lightning-bolt12", "lno1b"),
+        t0,
+        expiry,
+    );
+    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    let PayOutcome::Paid {
+        public_failures, ..
+    } = &outcome
+    else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(public_failures.len(), 1, "{public_failures:?}");
+    assert_eq!(public_failures[0].app_id, apps[0].1);
+    assert!(
+        matches!(&public_failures[0].reason, PublicAppFailureReason::Refused(rule)
+            if rule.contains("Switch spec 4.2")),
+        "{public_failures:?}"
+    );
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
+        "btc-lightning-bolt11"
+    );
+}
+
+#[tokio::test]
+async fn test_public_read_records_ahead_after_a_clock_rollback_not_a_conflict() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let apps = bob_apps(&w, &["shop"]).await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    let older = publish_app_at(
+        &w,
+        apps[0].0,
+        one_endpoint("btc-lightning-bolt11", "lnbc1"),
+        t0,
+        expiry,
+    );
+    // The wallet sees only a record an hour later.
+    w.clock.set_ms(t0 + HOUR_MS);
+    publish_now(
+        &w,
+        apps[0].0,
+        one_endpoint("btc-lightning-bolt12", "lno1later"),
+    );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(read.endpoints.len(), 1);
+    // The wallet's clock goes back and the older record is served: the record seen is ahead
+    // of the clock, and that is the failure, not a conflict. Nothing is offered.
+    w.clock.set_ms(t0 + 10 * 60_000);
+    w.homeserver
+        .put(w.bob_id(), &app_record_path(&apps[0].1), older);
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert!(read.endpoints.is_empty(), "{read:?}");
+    assert_eq!(read.failures.len(), 1, "{read:?}");
+    assert!(
+        matches!(&read.failures[0].reason, PublicAppFailureReason::Expired(rule)
+            if rule.contains("newest record seen was made ahead")),
+        "{read:?}"
+    );
 }
 
 #[tokio::test]

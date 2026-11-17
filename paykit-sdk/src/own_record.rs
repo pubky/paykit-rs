@@ -23,13 +23,14 @@
 //! `paykit_request` (Paykit spec 4, 8.4). An app that loses `paykit_request`, or stops
 //! publishing, holds no public endpoints: every record it signs from then on carries none,
 //! whichever path signs it (a removal, the upkeep at a receive or an update, or the join),
-//! so a removal there withdraws them all. With publishing disabled, the client writes nothing to the Homeserver: withdraw
-//! endpoints before disabling it to update that copy. Stale copies remain payable until
+//! so a removal there withdraws them all. With publishing disabled, the client writes
+//! nothing to the Homeserver: withdraw endpoints before disabling it to update that copy. Stale copies remain payable until
 //! expiry or until a payer sees the app revoked (Paykit spec 4).
 //!
 //! **Expiry and renewal.** A record with public endpoints carries `expires_at`, at its
 //! `updated_at` plus the shorter of [`RECORD_LIFETIME_MS`] and the identity's
-//! `record_max_age`, which readers would cut it to anyway. The client derives that expiry
+//! `record_max_age`, which readers would cut it to anyway: that is what Paykit asks for, and
+//! the `expires_at` signed is the earliest any protocol of the app asks for. The client derives that expiry
 //! at the actual signing timestamp, including after clock rollback or a conflict retry;
 //! one without public endpoints asks for none (Paykit wire 3.2). At every receive, once
 //! less than half of the record's trusted lifetime is left on the later of the device
@@ -61,6 +62,7 @@ use std::collections::BTreeMap;
 use paykit_lib::app_record::{PaykitMember, PROTOCOL_NAME};
 use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
 use pubky_switch_client::app::{AppError, Publication};
+use pubky_switch_client::error::StoreError;
 use pubky_switch_core::json::MAX_INT;
 use pubky_switch_core::ops::{sign_batch, OpKind};
 use pubky_switch_core::records::{AppRecord, AppRecordBody};
@@ -105,6 +107,7 @@ impl Paykit {
         endpoint: PaymentEndpointIdentifier,
         payload: PaymentEndpointPayload,
     ) -> Result<Publication> {
+        self.own_record_known()?;
         Box::pin(self.first_read_before_writing()).await?;
         let mut endpoints = self.own_public_endpoints()?;
         endpoints.insert(endpoint, payload);
@@ -112,7 +115,9 @@ impl Paykit {
     }
 
     /// Stop publishing the app's public endpoint `endpoint`; one the record doesn't hold is
-    /// removed already, and nothing is signed.
+    /// removed already. A record is still signed when something else of it is owed: the
+    /// capabilities the payment method pays changed, or a restored record the switch never
+    /// accepted is signed anew ([`Paykit::set_public_endpoints`]).
     ///
     /// # Errors
     ///
@@ -121,6 +126,7 @@ impl Paykit {
         &mut self,
         endpoint: &PaymentEndpointIdentifier,
     ) -> Result<Publication> {
+        self.own_record_known()?;
         Box::pin(self.first_read_before_writing()).await?;
         let mut endpoints = self.own_public_endpoints()?;
         endpoints.remove(endpoint);
@@ -137,6 +143,9 @@ impl Paykit {
     ///
     /// [`Refusal::CertificateRefused`]; [`Refusal::IdentityUnavailable`] while a restore's
     /// first read cannot confirm the own identity; the client's first-read errors;
+    /// [`Refusal::NotNow`] after a write of the own record whose store result was unknown,
+    /// until the app is loaded again ([`Paykit::load`]): the record this handle holds may not
+    /// be the one stored, and an edit built on it could publish an endpoint withdrawn;
     /// [`Refusal::ScopeMissing`] without `paykit_request`,
     /// unless the call only removes endpoints; [`Refusal::Usage`] for an app that doesn't
     /// publish its record, unless the call only removes endpoints, or more than
@@ -151,6 +160,7 @@ impl Paykit {
         &mut self,
         endpoints: BTreeMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
     ) -> Result<Publication> {
+        self.own_record_known()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
         // Fewer endpoints, none included, are always the app's to publish: an app that lost
@@ -189,11 +199,14 @@ impl Paykit {
     ///
     /// [`Refusal::CertificateRefused`]; [`Refusal::IdentityUnavailable`] while a restore's
     /// first read cannot confirm the own identity; the client's refusal, store failure,
-    /// alarm, first-read or delivery error. A record refused before it is kept leaves the
+    /// alarm, first-read or delivery error; [`Refusal::NotNow`] after an unknown store
+    /// result, until the app is loaded again, as [`Paykit::set_public_endpoints`] says. A
+    /// record refused before it is kept leaves the
     /// held record unchanged, and so does a capabilities list the record can't carry
     /// (module docs). A delivery that fails stays owed by the client and goes again at the
     /// next read or update.
     pub async fn update_own_record(&mut self) -> Result<()> {
+        self.own_record_known()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
         if !Box::pin(self.tend_own_record()).await? {
@@ -220,8 +233,16 @@ impl Paykit {
             Box::pin(self.put_member(wanted)).await?;
         } else if !held.public_endpoints.is_empty() && self.renewal_due()? {
             let lifetime = Some(self.record_lifetime());
-            Box::pin(self.app.renew_record_with_lifetime(PROTOCOL_NAME, lifetime)).await?;
+            let renewed =
+                Box::pin(self.app.renew_record_with_lifetime(PROTOCOL_NAME, lifetime)).await;
+            self.note_own_record_write(&renewed);
+            renewed?;
         } else {
+            // The member unchanged still goes to the client: a restored record the switch
+            // never accepted, such as a withdrawal whose `app.put` failed before the backup,
+            // is signed anew, and not left for the accepted record before it to be
+            // published. An accepted or pending record keeps its bytes.
+            Box::pin(self.put_member(wanted)).await?;
             return Ok(false);
         }
         Ok(true)
@@ -266,10 +287,35 @@ impl Paykit {
     async fn put_member(&mut self, member: PaykitMember) -> Result<Publication> {
         let lifetime = (!member.public_endpoints.is_empty()).then(|| self.record_lifetime());
         let value = (member != PaykitMember::default()).then(|| member.to_member());
-        Ok(self
+        let put = self
             .app
             .set_protocol_member_with_lifetime(PROTOCOL_NAME, value, lifetime)
-            .await?)
+            .await;
+        self.note_own_record_write(&put);
+        Ok(put?)
+    }
+
+    /// After a write of the own record whose store result is unknown, the record this handle
+    /// holds may not be the one stored: note it, so no edit builds on it until the app is
+    /// loaded again.
+    fn note_own_record_write<T>(&mut self, result: &std::result::Result<T, AppError>) {
+        if matches!(result, Err(AppError::Store(StoreError::Unknown))) {
+            self.own_record_unknown = true;
+        }
+    }
+
+    /// Refuse an edit of the own record while the record this handle holds may not be the one
+    /// stored ([`Paykit::set_public_endpoints`]).
+    fn own_record_known(&self) -> Result<()> {
+        if self.own_record_unknown {
+            return Err(Refusal::NotNow(
+                "the store couldn't tell whether the last write of the app's record was \
+                 applied: load the app again (Paykit::load) before editing its record"
+                    .into(),
+            )
+            .into());
+        }
+        Ok(())
     }
 
     /// The requested lifetime; the client caps it again at the current identity limit

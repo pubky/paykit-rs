@@ -305,9 +305,9 @@ async fn test_public_conflicting_records_use_the_earlier_one_until_a_later_one()
         expiry,
     );
     assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
-    // Another body at the same updated_at: a conflict. Neither is used; the wallet goes on
-    // with the earlier record it holds (Switch spec 4.2), and reports the conflict as the
-    // shop's failure beside it (Paykit spec 4).
+    // Another body at the same updated_at: a conflict (Switch spec 4.2). It is the shop's
+    // failure, and the shop offers nothing, not even the earlier record kept (Paykit spec
+    // 4): discovery and a payment agree.
     publish_at(
         &w,
         one_endpoint("btc-bitcoin-p2wpkh", "bc1qother"),
@@ -315,17 +315,20 @@ async fn test_public_conflicting_records_use_the_earlier_one_until_a_later_one()
         expiry,
     );
     let list = read(&mut wallet, &w).await;
-    assert_eq!(ids(&list), ["btc-lightning-bolt11"]);
+    assert!(list.endpoints.is_empty(), "{list:?}");
     assert!(
         fails_with(&list, shop.app_id(), &["Switch spec 4.2"]),
         "{list:?}"
     );
-    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
-    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
-    assert_eq!(
-        wallet.payments().await.unwrap()[0].endpoint_id,
-        endpoint("btc-lightning-bolt11")
-    );
+    let refused = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .unwrap_err();
+    let Some(Refusal::NoDestination(text)) = refused.refusal() else {
+        panic!("{refused:?}");
+    };
+    assert!(text.contains("Switch spec 4.2"), "{text}");
+    assert!(w.rail.all_executions().is_empty());
     // A strictly later record ends the conflict, and with it the failure.
     publish_at(
         &w,
@@ -534,8 +537,8 @@ async fn test_public_malformed_newer_record_never_displaces_a_valid_one() {
     );
     assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
     // A newer record whose Paykit member doesn't read: refused as an invalid record, it
-    // takes no part in the comparison (Paykit wire 3.2), and it is the shop's failure while
-    // the valid record held is still used (Paykit spec 4).
+    // takes no part in the comparison (Paykit wire 3.2), and it is the shop's failure, with
+    // no endpoints from the valid record kept (Paykit spec 4).
     publish_at(
         &w,
         json!({ "public_endpoints": { "btc-lightning-bolt12": 7 } }),
@@ -543,12 +546,13 @@ async fn test_public_malformed_newer_record_never_displaces_a_valid_one() {
         expiry,
     );
     let list = read(&mut wallet, &w).await;
-    assert_eq!(ids(&list), ["btc-lightning-bolt11"]);
+    assert!(list.endpoints.is_empty(), "{list:?}");
     assert!(
         fails_with(&list, shop.app_id(), &["Paykit wire 3.2"]),
         "{list:?}"
     );
-    // The valid record served again is still the one used, and nothing fails.
+    // The valid record served again is used again, and nothing fails: the refused one never
+    // displaced it.
     serve(&w, &valid);
     let list = read(&mut wallet, &w).await;
     assert_eq!(ids(&list), ["btc-lightning-bolt11"]);
@@ -556,7 +560,7 @@ async fn test_public_malformed_newer_record_never_displaces_a_valid_one() {
 }
 
 #[tokio::test]
-async fn test_public_record_ahead_of_the_clock_reported_beside_the_held_one() {
+async fn test_public_record_ahead_of_the_clock_gives_no_endpoints_of_the_held_one() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let shop = w.shop().await;
@@ -570,7 +574,7 @@ async fn test_public_record_ahead_of_the_clock_reported_beside_the_held_one() {
     );
     assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
     // A record made a day ahead of the wallet's clock takes no part, and is the shop's
-    // failure while the record held is still used (Paykit spec 4).
+    // failure, with no endpoints from the record kept (Paykit spec 4).
     publish_at(
         &w,
         one_endpoint("btc-lightning-bolt12", "lno1ahead"),
@@ -578,7 +582,7 @@ async fn test_public_record_ahead_of_the_clock_reported_beside_the_held_one() {
         expiry,
     );
     let list = read(&mut wallet, &w).await;
-    assert_eq!(ids(&list), ["btc-lightning-bolt11"]);
+    assert!(list.endpoints.is_empty(), "{list:?}");
     assert!(
         fails_with(&list, shop.app_id(), &["ahead of the payer's clock"]),
         "{list:?}"
@@ -621,7 +625,7 @@ async fn test_public_refused_record_reported_over_a_held_record_without_endpoint
 }
 
 #[tokio::test]
-async fn test_public_refused_record_reported_beside_the_held_one_expired() {
+async fn test_public_refused_record_reported_once_over_an_expired_held_one() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let shop = w.shop().await;
@@ -633,8 +637,8 @@ async fn test_public_refused_record_reported_beside_the_held_one_expired() {
         Some(t0 + 2 * HOUR_MS),
     );
     assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
-    // Past the held record's expires_at, a newer record served is refused: both are the
-    // shop's failures, the record served first.
+    // Past the held record's expires_at, a newer record served is refused: that is the
+    // shop's one failure, and the record kept isn't judged.
     w.clock.advance_ms(3 * HOUR_MS);
     publish_at(
         &w,
@@ -645,7 +649,7 @@ async fn test_public_refused_record_reported_beside_the_held_one_expired() {
     let list = read(&mut wallet, &w).await;
     assert!(list.endpoints.is_empty(), "{list:?}");
     assert!(
-        fails_with(&list, shop.app_id(), &["Paykit wire 3.2", "expires_at"]),
+        fails_with(&list, shop.app_id(), &["Paykit wire 3.2"]),
         "{list:?}"
     );
 }
@@ -675,8 +679,8 @@ async fn test_public_conflict_kept_past_the_history_bound_and_a_reload() {
         t0 + 69,
         expiry,
     );
-    // Neither side of the conflict is used: the wallet falls back to the earlier record.
-    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    // Neither side of the conflict is used, nor the earlier record kept.
+    assert!(listed(&mut wallet, &w).await.is_empty());
     // Many more bodies at that updated_at keep the conflict as it is, and a reload too: the
     // rejected endpoint never becomes usable.
     for i in 0..70u64 {
@@ -686,7 +690,7 @@ async fn test_public_conflict_kept_past_the_history_bound_and_a_reload() {
             t0 + 69,
             expiry,
         );
-        assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+        assert!(listed(&mut wallet, &w).await.is_empty());
     }
     drop(wallet);
     let mut wallet = w
@@ -697,14 +701,14 @@ async fn test_public_conflict_kept_past_the_history_bound_and_a_reload() {
             std::sync::Arc::clone(&w.clock),
         )
         .await;
-    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    assert!(listed(&mut wallet, &w).await.is_empty());
     publish_at(
         &w,
         one_endpoint("btc-bitcoin-p2wpkh", "bc1qsecond"),
         t0 + 69,
         expiry,
     );
-    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    assert!(listed(&mut wallet, &w).await.is_empty());
 }
 
 #[tokio::test]

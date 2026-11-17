@@ -54,6 +54,7 @@ use pubky_switch_core::ops::{Condition, OpKind, RecordVersion};
 use pubky_switch_core::records::{CLOCK_TOLERANCE_MS, DAY_MS};
 
 use crate::activity::{self, ActivityTarget, Role};
+use crate::app_records::PublicAppFailure;
 use crate::conversion::{self, Priced, PricedPayment, RateSource};
 use crate::destination::{Carrier, Need};
 use crate::error::{PaykitError, Refusal, Result};
@@ -340,6 +341,12 @@ pub enum PayOutcome {
         attempt_id: AttemptId,
         /// The proof's `msg_id`.
         proof_msg_id: Option<String>,
+        /// For a payment in [`PaymentMode::Public`], the payee's apps whose public endpoints
+        /// couldn't be used in the read it paid from, with why (Paykit spec 4): the payment
+        /// went to another app's endpoint. The host tells the user, as it must of records
+        /// that conflict (Switch wire 3.2), which a payment can be the first read to find.
+        /// Empty for every other payment, and for a payment resumed or repaired later.
+        public_failures: Vec<PublicAppFailure>,
     },
     /// Paid, but the outcome couldn't be written: the app isn't current any more. Its
     /// attempt is reconciled through the receipt or by another app (Paykit spec 7.3).
@@ -487,6 +494,9 @@ struct Plan {
     /// The request record whose restore hold the user's confirmation ends, in the attempt's
     /// batch: a call refused before it keeps the hold.
     end_hold: Option<[u8; 32]>,
+    /// The payee's apps whose public endpoints couldn't be used in the read the destination
+    /// came from, told with a payment made ([`PayOutcome::Paid`]).
+    public_failures: Vec<PublicAppFailure>,
 }
 
 /// A Payment Endpoint a payment may take: its identifier and payload, handed to the payment
@@ -528,6 +538,8 @@ pub(crate) struct Chosen {
     pub(crate) payment_amount: PaymentAmount,
     pub(crate) paid: Option<PaymentAmount>,
     pub(crate) price: Option<KeptPrice>,
+    /// The payee's apps whose public endpoints couldn't be used in the read it chose from.
+    pub(crate) public_failures: Vec<PublicAppFailure>,
 }
 
 /// How a payment's amount to each endpoint is computed (Paykit spec 7.2 step 1,
@@ -971,6 +983,7 @@ impl Paykit {
             payment_amount,
             paid,
             price,
+            public_failures,
         } = self
             .request_destination(
                 &request.payee,
@@ -1041,6 +1054,7 @@ impl Paykit {
             unconfirmed: options.unconfirmed_identity_confirmed,
             blocked_confirmed: options.blocked_confirmed,
             end_hold,
+            public_failures,
         })
         .await
     }
@@ -1150,6 +1164,7 @@ impl Paykit {
             bound,
             payment_amount,
             paid,
+            public_failures,
             ..
         } = self
             .list_destination(
@@ -1246,6 +1261,7 @@ impl Paykit {
             unconfirmed: options.unconfirmed_identity_confirmed,
             blocked_confirmed: options.blocked_confirmed,
             end_hold: None,
+            public_failures,
         })
         .await
     }
@@ -1332,6 +1348,7 @@ impl Paykit {
         Ok(PayOutcome::Paid {
             attempt_id: *attempt_id,
             proof_msg_id: entry.proof_msg_id.clone(),
+            public_failures: Vec::new(),
         })
     }
 
@@ -1599,6 +1616,9 @@ impl Paykit {
                         })
                 })
                 .collect();
+            // An app whose record served now failed gave no endpoints (`public_records`), so
+            // a request requiring it has no public destination (Paykit spec 4, 8.1); its
+            // failure is in the refusal, or told with the payment made to another app.
             if gathered.is_empty() {
                 let mut text =
                     String::from("Paykit spec 4: the payee has no usable public endpoint");
@@ -1607,9 +1627,11 @@ impl Paykit {
                 }
                 return Err(Refusal::NoDestination(text).into());
             }
-            return self
+            let mut chosen = self
                 .choose(payee, gathered, pricing, options)?
-                .ok_or_else(|| unsupported("the payee's public endpoints"));
+                .ok_or_else(|| unsupported("the payee's public endpoints"))?;
+            chosen.public_failures = failures;
+            return Ok(chosen);
         }
         let mut lists = self.lists_of(payee).await?;
         lists.retain(|l| app.is_none_or(|a| a == l.app_id));
@@ -1914,6 +1936,7 @@ impl Paykit {
                         bound,
                         payment_amount: amount,
                         price,
+                        public_failures: Vec::new(),
                     }))
                 }
                 Err(error) if matches!(error.refusal(), Some(Refusal::Transfer { .. })) => {
@@ -2258,7 +2281,23 @@ impl Paykit {
     }
 
     /// Steps 1 to 4 of the paying order for a planned attempt (Paykit spec 7.2).
-    async fn execute(&mut self, plan: Plan) -> Result<PayOutcome> {
+    async fn execute(&mut self, mut plan: Plan) -> Result<PayOutcome> {
+        let public_failures = std::mem::take(&mut plan.public_failures);
+        Ok(match Box::pin(self.execute_plan(plan)).await? {
+            PayOutcome::Paid {
+                attempt_id,
+                proof_msg_id,
+                ..
+            } => PayOutcome::Paid {
+                attempt_id,
+                proof_msg_id,
+                public_failures,
+            },
+            outcome => outcome,
+        })
+    }
+
+    async fn execute_plan(&mut self, plan: Plan) -> Result<PayOutcome> {
         let Plan {
             mut entry,
             record,
@@ -2271,6 +2310,7 @@ impl Paykit {
             unconfirmed,
             blocked_confirmed,
             end_hold,
+            public_failures: _,
         } = plan;
         let attempt_id = entry.attempt()?;
         let selected_request = entry.request_hash()?.map(|request_hash| RequestRef {
@@ -2985,6 +3025,7 @@ impl Paykit {
         Ok(PayOutcome::Paid {
             attempt_id,
             proof_msg_id: entry.proof_msg_id.clone(),
+            public_failures: Vec::new(),
         })
     }
 
