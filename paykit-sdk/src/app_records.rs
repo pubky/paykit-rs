@@ -430,10 +430,10 @@ impl Paykit {
         let Some(mut reads) = reads else {
             return Ok(Ok(PublicRecords::default()));
         };
-        let mut out = PublicRecords::default();
-        let mut room = Room::new();
         // Only the apps the copy acted on lists, in its order (Paykit spec 4). A newer copy
-        // the switch gave may list apps the first didn't: their records are read now.
+        // the switch gave may list apps the first didn't: their records are read now, all of
+        // them before any app is judged.
+        let mut fetched = Vec::new();
         for listed in &doc.body().apps {
             let app_id = listed.app_id;
             if app.is_some_and(|a| a != app_id) {
@@ -443,6 +443,15 @@ impl Paykit {
                 Some(at) => reads.swap_remove(at).1,
                 None => self.homeserver.get(*payee, app_record_path(&app_id)).await,
             };
+            fetched.push((app_id, bytes));
+        }
+        // One time judges every app of the read, taken once every record is in: no app
+        // expires while another's record is read, and the read's bound goes, in the order of
+        // identity.json, to the apps usable at that time.
+        let now = self.now();
+        let mut out = PublicRecords::default();
+        let mut room = Room::new();
+        for (app_id, bytes) in fetched {
             let fail = |reason| PublicAppFailure { app_id, reason };
             // One app's Homeserver read failing is that app's failure (Paykit spec 4).
             let bytes = match bytes {
@@ -454,7 +463,6 @@ impl Paykit {
                 }
             };
             let read = bytes.as_ref().and_then(|b| read_record(payee, &app_id, b));
-            let now = self.now();
             // The record served is compared with those seen before (Switch spec 4.2): an older
             // one never replaces a newer one, and two bodies at one `updated_at` are a
             // conflict, during which neither is used and the reader goes on with the earlier

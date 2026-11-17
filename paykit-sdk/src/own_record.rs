@@ -195,6 +195,11 @@ impl Paykit {
     /// delivery to the own switch, as after one that failed once the record was kept, and its
     /// Homeserver write ([`pubky_switch_client::app::App::publish_record`]).
     ///
+    /// Returns where the record stands on the Homeserver after the call, as
+    /// [`Paykit::set_public_endpoints`] does: [`Publication::Owed`] when the Homeserver write
+    /// failed, which the client retries at the next read or update, and
+    /// [`Publication::Unchecked`] when the read that checks the Homeserver copy failed.
+    ///
     /// # Errors
     ///
     /// [`Refusal::CertificateRefused`]; [`Refusal::IdentityUnavailable`] while a restore's
@@ -205,40 +210,43 @@ impl Paykit {
     /// held record unchanged, and so does a capabilities list the record can't carry
     /// (module docs). A delivery that fails stays owed by the client and goes again at the
     /// next read or update.
-    pub async fn update_own_record(&mut self) -> Result<()> {
+    pub async fn update_own_record(&mut self) -> Result<Publication> {
         self.own_record_known()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
-        if !Box::pin(self.tend_own_record()).await? {
-            let published = Box::pin(self.app.publish_record()).await;
-            self.note_own_record_write(&published);
-            published?;
+        match Box::pin(self.tend_own_record()).await? {
+            Some(publication) => Ok(publication),
+            None => {
+                let published = Box::pin(self.app.publish_record()).await;
+                self.note_own_record_write(&published);
+                Ok(published?)
+            }
         }
-        Ok(())
     }
 
     /// Bring the app's record up to date at a receive (module docs): its capabilities to
     /// what the payment method pays, and a record with public endpoints renewed once less
-    /// than half of its lifetime is left. Returns whether a record was put to the client,
-    /// changed or renewed. A delivery that fails stays owed by the client, which sends it
-    /// again at a later read; a failure before the client kept the record leaves the record
+    /// than half of its lifetime is left. Returns where a record changed or renewed stands on
+    /// the Homeserver, and `None` when the record held went to the client unchanged. A
+    /// delivery that fails stays owed by the client, which sends it again at a later read; a
+    /// failure before the client kept the record leaves the record
     /// held unchanged, so the next call finds it differs and puts it again.
     ///
     /// # Errors
     ///
     /// The client's refusal, store failure, alarm or delivery error; the refusal of a
     /// capabilities list the record can't carry ([`capabilities_for`]).
-    pub(crate) async fn tend_own_record(&mut self) -> Result<bool> {
+    pub(crate) async fn tend_own_record(&mut self) -> Result<Option<Publication>> {
         let held = self.own_member()?;
         let wanted = self.own_member_with(held.public_endpoints.clone())?;
-        if wanted != held {
-            Box::pin(self.put_member(wanted)).await?;
+        let publication = if wanted != held {
+            Box::pin(self.put_member(wanted)).await?
         } else if !held.public_endpoints.is_empty() && self.renewal_due()? {
             let lifetime = Some(self.record_lifetime());
             let renewed =
                 Box::pin(self.app.renew_record_with_lifetime(PROTOCOL_NAME, lifetime)).await;
             self.note_own_record_write(&renewed);
-            renewed?;
+            renewed?
         } else {
             // The member unchanged still goes to the client: a restored record the switch
             // never accepted, such as a withdrawal whose `app.put` failed before the backup,
@@ -252,9 +260,9 @@ impl Paykit {
             let value = record.body().protocols.get(PROTOCOL_NAME).cloned();
             let lifetime = (!held.public_endpoints.is_empty()).then(|| self.record_lifetime());
             Box::pin(self.put_member_value(value, lifetime)).await?;
-            return Ok(false);
-        }
-        Ok(true)
+            return Ok(None);
+        };
+        Ok(Some(publication))
     }
 
     /// The Paykit member every path that signs the app's own record puts, with `endpoints`
