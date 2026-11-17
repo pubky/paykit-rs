@@ -76,8 +76,8 @@ pub struct ExecutorGrant {
 
 impl ExecutorGrant {
     /// Sign a grant with the executor app's signing key (Paykit spec 8.3, Paykit wire 3.3).
-    /// `built_on` is the version of the Allowance record the write adding the grant reads,
-    /// `{0, 0}` for a new record.
+    /// `built_on` is the version of the Allowance record the write adding the grant reads: a
+    /// grant goes into an Allowance record that holds its proposal already (Paykit wire 5.4).
     ///
     /// The caller keeps its signing key; storing it is the Switch's rule (Switch spec 3.1).
     #[allow(clippy::too_many_arguments)]
