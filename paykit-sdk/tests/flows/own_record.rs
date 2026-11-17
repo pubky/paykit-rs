@@ -547,3 +547,140 @@ async fn test_own_record_half_lifetime_boundary() {
     shop.receive(None).await.unwrap();
     assert!(held(&shop, w.bob_id()).updated_at() > first.updated_at());
 }
+
+#[derive(Clone, Copy, Debug)]
+enum RecordChange {
+    Set,
+    Replace,
+    Remove,
+    Capabilities,
+}
+
+async fn change_record(shop: &mut Paykit, change: RecordChange) -> Result<(), PaykitError> {
+    let id = endpoint("btc-lightning-bolt12");
+    match change {
+        RecordChange::Set => shop
+            .set_public_endpoint(id, payload("lno1changed"))
+            .await
+            .map(|_| ()),
+        RecordChange::Replace => shop
+            .set_public_endpoints(BTreeMap::from([(id, payload("lno1changed"))]))
+            .await
+            .map(|_| ()),
+        RecordChange::Remove => shop.remove_public_endpoint(&id).await.map(|_| ()),
+        RecordChange::Capabilities => shop.update_own_record().await,
+    }
+}
+
+#[tokio::test]
+async fn test_own_record_restored_changes_wait_for_confirmed_first_read() {
+    use crate::common::ScriptedIdentityReads;
+    use std::sync::Arc;
+    for change in [
+        RecordChange::Set,
+        RecordChange::Replace,
+        RecordChange::Remove,
+        RecordChange::Capabilities,
+    ] {
+        let w = World::new();
+        let mut shop = w
+            .join_with(
+                &w.bob,
+                "shop",
+                AppScopes::new().request().pay().build().unwrap(),
+                publishing(),
+                store(),
+            )
+            .await;
+        shop.set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1tips"))
+            .await
+            .unwrap();
+        let backup = shop.backup().await.unwrap();
+        let reads = Arc::new(ScriptedIdentityReads::new(
+            Arc::clone(&w.homeserver),
+            Arc::clone(&w.clock),
+        ));
+        let mut env = w.env(&w.bob, store());
+        env.homeserver = Arc::clone(&reads) as Arc<dyn pubky_switch_client::app::HomeserverReader>;
+        let mut restored = Paykit::restore(
+            env,
+            publishing(),
+            &backup,
+            Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+            w.timer(),
+        )
+        .await
+        .unwrap();
+        let before = restored.app().record().clone();
+        let published = on_homeserver(&w, &restored).unwrap();
+        w.rail
+            .set_endpoint_identifiers(vec![endpoint("btc-onchain-address")]);
+        reads.then(w.bob_id(), 0, true);
+        let error = change_record(&mut restored, change)
+            .await
+            .expect_err("the first read has no confirmed identity");
+        assert!(
+            matches!(error.refusal(), Some(Refusal::IdentityUnavailable(_))),
+            "{change:?}: {error:?}"
+        );
+        assert_eq!(restored.app().record(), &before, "{change:?}");
+        assert_eq!(
+            on_homeserver(&w, &restored).unwrap().signed(),
+            published.signed(),
+            "{change:?}"
+        );
+        assert_eq!(restored.app().restore_held_cursor(), None);
+        change_record(&mut restored, change).await.unwrap();
+        assert!(restored.app().restore_held_cursor().is_some(), "{change:?}");
+        assert_ne!(restored.app().record(), &before, "{change:?}");
+        assert_eq!(
+            on_homeserver(&w, &restored).unwrap().signed(),
+            restored.app().record(),
+            "{change:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_own_record_restored_upkeep_waits_for_a_completed_read() {
+    use std::sync::Arc;
+    let w = World::new();
+    let mut shop = publishing_shop(&w).await;
+    shop.set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1tips"))
+        .await
+        .unwrap();
+    let backup = shop.backup().await.unwrap();
+    let mut restored = Paykit::restore(
+        w.env(&w.bob, store()),
+        publishing(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    let before = restored.app().record().clone();
+    w.clock.advance_ms(16 * DAY_MS);
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/feed".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    assert!(restored.receive(None).await.is_err());
+    assert_eq!(restored.app().record(), &before);
+    assert_eq!(restored.app().restore_held_cursor(), None);
+    restored.receive(None).await.unwrap();
+    assert!(restored.app().restore_held_cursor().is_some());
+    assert!(
+        held(&restored, w.bob_id()).updated_at()
+            > AppRecord::verify(&before, &w.bob_id())
+                .unwrap()
+                .updated_at()
+    );
+    assert_eq!(
+        on_homeserver(&w, &restored).unwrap().signed(),
+        restored.app().record()
+    );
+}

@@ -749,7 +749,6 @@ impl Paykit {
         // used. The steps never count an unblock: the client's copy decides there.
         if self.certificate_refused().is_none() {
             Box::pin(self.drop_unblocks_not_kept()).await?;
-            Box::pin(self.tend_own_record()).await?;
         }
         // An app holding `paykit_contacts` reads the flagged senders again first, at most every 10
         // minutes, for the spam rule (Paykit wire 4.1).
@@ -878,6 +877,7 @@ impl Paykit {
             // completes: this one did, so the hold is bounded by the service time verified
             // (`hold.rs`).
             Box::pin(self.bound_missed_hold()).await?;
+            Box::pin(self.tend_own_record()).await?;
         }
         // A certificate the read took, any other than the one the records were listed under,
         // a narrower one included: they are listed now, or stay unlisted for the next

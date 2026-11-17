@@ -2,6 +2,9 @@
 //! Endpoints and the Payment Endpoint Identifiers its payment method pays (Paykit spec 4,
 //! Paykit wire 3.2).
 //!
+//! After a restore, public mutations wait for the identity-confirmed first read, and
+//! scheduled upkeep runs only after a completed read (Switch spec 12.4).
+//!
 //! **Publishing.** Each public endpoint is one entry of the record's `public_endpoints`, by
 //! its Payment Endpoint Identifier; [`Paykit::set_public_endpoint`],
 //! [`Paykit::remove_public_endpoint`] and [`Paykit::set_public_endpoints`] change them, and
@@ -88,6 +91,7 @@ impl Paykit {
         endpoint: PaymentEndpointIdentifier,
         payload: PaymentEndpointPayload,
     ) -> Result<Publication> {
+        Box::pin(self.first_read_before_writing()).await?;
         let mut endpoints = self.own_public_endpoints()?;
         endpoints.insert(endpoint, payload);
         self.set_public_endpoints(endpoints).await
@@ -103,6 +107,7 @@ impl Paykit {
         &mut self,
         endpoint: &PaymentEndpointIdentifier,
     ) -> Result<Publication> {
+        Box::pin(self.first_read_before_writing()).await?;
         let mut endpoints = self.own_public_endpoints()?;
         endpoints.remove(endpoint);
         self.set_public_endpoints(endpoints).await
@@ -115,7 +120,9 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::CertificateRefused`]; [`Refusal::ScopeMissing`] without `paykit_request`,
+    /// [`Refusal::CertificateRefused`]; [`Refusal::IdentityUnavailable`] while a restore's
+    /// first read cannot confirm the own identity; the client's first-read errors;
+    /// [`Refusal::ScopeMissing`] without `paykit_request`,
     /// unless the call only removes endpoints; [`Refusal::Usage`] for an app that doesn't
     /// publish its record, unless the call only removes endpoints, or more than
     /// [`MAX_OWN_PUBLIC_ENDPOINTS`] endpoints. The client's refusal for a record the switch
@@ -128,6 +135,7 @@ impl Paykit {
         &mut self,
         endpoints: BTreeMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
     ) -> Result<Publication> {
+        Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
         // Fewer endpoints, none included, are always the app's to publish: an app that lost
         // `paykit_request` or stopped publishing can still clear its held endpoints.
@@ -163,10 +171,12 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// [`Refusal::CertificateRefused`]; the client's refusal, store failure, alarm or
-    /// delivery error. A record refused before it is kept leaves the held record unchanged.
+    /// [`Refusal::CertificateRefused`]; [`Refusal::IdentityUnavailable`] while a restore's
+    /// first read cannot confirm the own identity; the client's refusal, store failure,
+    /// alarm, first-read or delivery error. A record refused before it is kept leaves the held record unchanged.
     /// A delivery that fails stays owed by the client and goes again at the next read.
     pub async fn update_own_record(&mut self) -> Result<()> {
+        Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
         Box::pin(self.tend_own_record()).await
     }

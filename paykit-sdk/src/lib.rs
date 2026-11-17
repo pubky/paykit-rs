@@ -56,7 +56,7 @@ mod loss;
 mod marks;
 mod notices;
 mod outbound;
-mod own_record;
+pub mod own_record;
 mod pay;
 mod paykit;
 mod periods;
