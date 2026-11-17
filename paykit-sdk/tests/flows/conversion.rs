@@ -414,16 +414,19 @@ async fn priced_in_flight(
 
 /// `wallet`'s one journal entry with `edit` applied, written back to its store.
 async fn edit_entry(wallet: &mut Paykit, edit: impl FnOnce(&mut serde_json::Value)) {
-    let held = wallet.app().protocol_scan(b"j/").await.unwrap();
+    let held = wallet.app().protocol_scan("paykit", b"j/").await.unwrap();
     assert_eq!(held.len(), 1);
     let mut value: serde_json::Value = serde_json::from_slice(&held[0].1).unwrap();
     edit(&mut value["d"]);
     wallet
         .app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: held[0].0.clone(),
-            value: serde_json::to_vec(&value).unwrap(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: held[0].0.clone(),
+                value: serde_json::to_vec(&value).unwrap(),
+            }],
+        )
         .await
         .unwrap();
 }

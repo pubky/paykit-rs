@@ -11,7 +11,7 @@ use paykit_sdk::{PayOptions, PayOutcome, Paykit, RequestRef};
 use pubky_switch_client::app::{Collection as SwitchCollection, OpBatch, RecordTarget};
 use pubky_switch_client::clock::Clock;
 use pubky_switch_client::error::StoreError;
-use pubky_switch_client::store::{KeyValue, MemoryStore, StateStore, WriteBatch};
+use pubky_switch_client::store::{KeyValue, MemoryStore, StateStore};
 use pubky_switch_core::claims::Outcome;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -61,14 +61,56 @@ impl StateStore for NoSeenMarks {
         self.inner.scan(ns, prefix, after, limit)
     }
 
-    fn commit(&self, batch: WriteBatch) -> Result<(), StoreError> {
-        let queues = batch.writes.iter().any(|write| {
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.commit_with(batch, |batch| {
+            self.inner
+                .commit(batch)
+                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+        })
+        .map(|_| ())
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
+    }
+}
+impl NoSeenMarks {
+    fn commit_with(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+        apply: impl FnOnce(
+            pubky_switch_client::store::WriteBatch,
+        ) -> Result<
+            pubky_switch_client::store::CommitOutcome,
+            pubky_switch_client::error::StoreError,
+        >,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        let queues = batch.writes().iter().any(|write| {
             matches!(write, pubky_switch_client::store::Write::Put { key, .. } if key.starts_with(b"out/"))
         });
         if queues && self.refuse_queue.load(Ordering::SeqCst) {
             return Err(StoreError::Unavailable);
         }
-        self.inner.commit(batch)
+        apply(batch)
     }
 }
 
@@ -109,7 +151,7 @@ pub(crate) async fn phone_writes(phone: &mut Paykit, request: &RequestRef, value
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
 }

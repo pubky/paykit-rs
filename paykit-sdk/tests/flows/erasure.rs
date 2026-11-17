@@ -98,7 +98,7 @@ async fn test_erasure_wait_is_the_switch_not_answering_then_the_account_gone() {
         .unwrap()
         .into_iter()
         .find_map(|event| match event {
-            pubky_switch_client::app::AppEvent::AccountGone { id } => Some(id),
+            pubky_switch_client::app::AppEvent::AccountGone { id, .. } => Some(id),
             _ => None,
         })
         .unwrap();

@@ -2347,18 +2347,28 @@ mod tests {
         tx.delete("peer/c");
         let writes = tx.into_writes();
         assert_eq!(writes.len(), 3);
-        // The client prefixes the protocol's keys with `p/`.
+        // The client qualifies each key with its registered protocol name.
         let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new());
         let mut batch = pubky_switch_client::store::WriteBatch::new();
         for write in &writes {
             if let LocalWrite::Put { key, value } = write {
                 batch
-                    .put("client/x", [PROTOCOL_PREFIX, key].concat(), value.clone())
+                    .put(
+                        "client/x",
+                        [
+                            PROTOCOL_PREFIX,
+                            crate::protocol::BACKUP_NAME.as_bytes(),
+                            b"/",
+                            key,
+                        ]
+                        .concat(),
+                        value.clone(),
+                    )
                     .unwrap();
             }
         }
         store.commit(batch).unwrap();
-        let held = store.get("client/x", b"p/peer/b").unwrap().unwrap();
+        let held = store.get("client/x", b"p/paykit/peer/b").unwrap().unwrap();
         assert_eq!(decode::<u64>(&held).unwrap(), 2);
         assert!(matches!(&writes[2], LocalWrite::Delete { key } if key == b"peer/c"));
     }

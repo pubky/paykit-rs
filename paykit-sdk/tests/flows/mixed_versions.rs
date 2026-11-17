@@ -33,7 +33,7 @@ async fn phone_rewrites(
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
 }

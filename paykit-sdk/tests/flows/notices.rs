@@ -101,7 +101,7 @@ async fn test_notices_late_receipt_of_a_payment_written_failed_raises_one() {
     // Its receipt came: the entry goes past its window, its acknowledged notice with it.
     wallet.resume_payments().await.unwrap();
     assert!(wallet.payments().await.unwrap().is_empty());
-    let kept = wallet.app().protocol_scan(b"nt/").await.unwrap();
+    let kept = wallet.app().protocol_scan("paykit", b"nt/").await.unwrap();
     assert!(kept.is_empty());
 }
 
@@ -121,7 +121,7 @@ async fn waits_for_receipt(wallet: &Paykit, attempt_id: paykit_lib::AttemptId) -
     let key = format!("j/{}", attempt_id.to_text());
     let bytes = wallet
         .app()
-        .protocol_get(key.as_bytes())
+        .protocol_get("paykit", key.as_bytes())
         .await
         .unwrap()
         .unwrap();
@@ -211,7 +211,7 @@ async fn journal_names(wallet: &mut Paykit, attempt_id: paykit_lib::AttemptId, o
     let key = format!("j/{}", attempt_id.to_text());
     let bytes = wallet
         .app()
-        .protocol_get(key.as_bytes())
+        .protocol_get("paykit", key.as_bytes())
         .await
         .unwrap()
         .unwrap();
@@ -219,10 +219,13 @@ async fn journal_names(wallet: &mut Paykit, attempt_id: paykit_lib::AttemptId, o
     entry["d"]["attempt_id"] = serde_json::Value::String(other.to_owned());
     wallet
         .app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: key.into_bytes(),
-            value: serde_json::to_vec(&entry).unwrap(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: key.into_bytes(),
+                value: serde_json::to_vec(&entry).unwrap(),
+            }],
+        )
         .await
         .unwrap();
 }
@@ -351,7 +354,12 @@ async fn test_notices_acknowledged_once_its_payment_is_pruned_goes() {
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1);
     wallet.acknowledge_notice(&notices[0].id).await.unwrap();
-    assert!(wallet.app().protocol_scan(b"nt/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"nt/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]

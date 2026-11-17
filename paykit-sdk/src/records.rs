@@ -582,7 +582,7 @@ mod own_message_tests {
         let held = body(text("records.rs"), "record_held");
         assert!(held.contains("self.own_copy(&signed)"));
         assert!(held.contains("key::held_answer(&payee, &msg_id)"));
-        assert!(held.contains(
+        assert!(held.split_whitespace().collect::<String>().contains(
             "OpBatch::for_protocol(crate::protocol::BACKUP_NAME).locals(local).entry(entry)"
         ));
         assert!(!held.contains(".queue("));

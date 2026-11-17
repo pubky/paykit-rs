@@ -301,7 +301,15 @@ async fn test_spam_own_unblock_refused_before_the_feed_leaves_new_state_counted(
     wallet.block(&w.bob_id()).await.unwrap();
     keep_ops(&w, 1);
     wallet.unblock(&w.bob_id()).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"bk/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"bk/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     w.alice
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Error {
@@ -354,7 +362,15 @@ async fn test_spam_own_unblock_applied_with_its_answer_lost_lets_new_state_throu
             path: "/ops".into(),
         });
     wallet.unblock(&w.bob_id()).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"bk/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"bk/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     keep_ops(&w, 1);
 

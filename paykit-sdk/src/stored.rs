@@ -416,6 +416,7 @@ impl Paykit {
             AppEvent::StoredEntryDropped {
                 sender,
                 accepted_at_ms,
+                waiting: pubky_switch_client::app::WaitingReason::Sender,
                 ..
             } => {
                 self.count_dropped_unverified(&mut tx, *sender, *accepted_at_ms)

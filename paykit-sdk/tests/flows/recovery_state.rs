@@ -11,9 +11,7 @@ use paykit_sdk::{AppScopes, Paykit, PaykitBackup, PaykitConfig, Rail};
 use pubky_switch_client::app::{AppError, LocalWrite};
 use pubky_switch_client::clock::Clock;
 use pubky_switch_client::error::StoreError;
-use pubky_switch_client::store::{
-    Fault, FaultStore, KeyValue, MemoryStore, StateStore, Write, WriteBatch,
-};
+use pubky_switch_client::store::{Fault, FaultStore, KeyValue, MemoryStore, StateStore, Write};
 use pubky_switch_client::testing::{Seeds, TestIdentity, TestSigner};
 use serde_json::{json, Value};
 
@@ -101,7 +99,11 @@ async fn produced(w: &World, family: Family) -> (Paykit, Arc<dyn StateStore>, Ve
             wallet.reject_request(&request, None).await.unwrap();
         }
     }
-    let values = wallet.app().protocol_scan(family.prefix()).await.unwrap();
+    let values = wallet
+        .app()
+        .protocol_scan("paykit", family.prefix())
+        .await
+        .unwrap();
     assert_eq!(
         values.len(),
         1,
@@ -150,12 +152,12 @@ fn damage(bytes: &[u8], how: Damage) -> Vec<u8> {
 
 fn replace(backup: &PaykitBackup, changes: &[(Vec<u8>, Vec<u8>)]) -> PaykitBackup {
     let mut value: Value = serde_json::from_slice(&backup.to_bytes().unwrap()).unwrap();
-    let data = pubky_switch_core::enc::unb64(value["protocol"]["data"].as_str().unwrap()).unwrap();
+    let data = pubky_switch_core::enc::unb64(value["layers"][0]["data"].as_str().unwrap()).unwrap();
     let mut layer = pubky_switch_client::app::decode_local_state(&data).unwrap();
     for (key, bytes) in changes {
         layer.iter_mut().find(|(k, _)| k == key).unwrap().1 = bytes.clone();
     }
-    value["protocol"]["data"] = Value::String(pubky_switch_core::enc::b64(
+    value["layers"][0]["data"] = Value::String(pubky_switch_core::enc::b64(
         &pubky_switch_client::app::encode_local_state(&layer),
     ));
     PaykitBackup::from_bytes(&serde_json::to_vec(&value).unwrap()).unwrap()
@@ -168,10 +170,13 @@ async fn refuse_current(family: Family, how: Damage) {
     assert_ne!(bad, good);
     wallet
         .app_mut()
-        .protocol_commit(&[LocalWrite::Put {
-            key: key.clone(),
-            value: bad.clone(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key: key.clone(),
+                value: bad.clone(),
+            }],
+        )
         .await
         .unwrap();
     let sends = w.bob.switch().entries_from(&w.alice_id());
@@ -199,7 +204,10 @@ async fn refuse_current(family: Family, how: Damage) {
             .expect_err("malformed recovery state was read")
     };
     assert!(crate::common::is_corrupt(&error), "{error:?}");
-    assert_eq!(wallet.app().protocol_get(&key).await.unwrap(), Some(bad));
+    assert_eq!(
+        wallet.app().protocol_get("paykit", &key).await.unwrap(),
+        Some(bad)
+    );
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), sends);
     assert!(w.rail.all_executions().is_empty());
 }
@@ -234,7 +242,7 @@ async fn refuse_backup(family: Family, how: Damage) {
     assert_eq!(
         wallet
             .app()
-            .protocol_scan(family.prefix())
+            .protocol_scan("paykit", family.prefix())
             .await
             .unwrap()
             .len(),
@@ -318,14 +326,20 @@ async fn test_recovery_state_produced_values_reload_and_progress() {
         .await
         .unwrap();
         assert_eq!(
-            loaded.app().protocol_get(&key).await.unwrap(),
+            loaded.app().protocol_get("paykit", &key).await.unwrap(),
             Some(good.clone())
         );
         loaded.receive(None).await.unwrap();
         if matches!(family, Family::RestoreHold) {
-            let held: Value =
-                serde_json::from_slice(&loaded.app().protocol_get(&key).await.unwrap().unwrap())
-                    .unwrap();
+            let held: Value = serde_json::from_slice(
+                &loaded
+                    .app()
+                    .protocol_get("paykit", &key)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
             assert_eq!(held["d"]["asks_queued"], true);
             assert_eq!(held["d"]["asked"], json!([]));
         }
@@ -336,7 +350,12 @@ async fn test_recovery_state_produced_values_reload_and_progress() {
             loaded.unblock(&w.bob_id()).await.unwrap();
             loaded.receive(None).await.unwrap();
             assert!(loaded.app().delivery(msg_id).await.unwrap().is_some());
-            assert!(loaded.app().protocol_get(&key).await.unwrap().is_none());
+            assert!(loaded
+                .app()
+                .protocol_get("paykit", &key)
+                .await
+                .unwrap()
+                .is_none());
         }
         assert!(w.rail.all_executions().is_empty());
     }
@@ -349,7 +368,10 @@ async fn test_recovery_state_retained_values_restore_unchanged() {
         let (mut wallet, _, key, good) = Box::pin(produced(&w, family)).await;
         let backup = wallet.backup().await.unwrap();
         let loaded = restore(&w, store(), &backup).await;
-        assert_eq!(loaded.app().protocol_get(&key).await.unwrap(), Some(good));
+        assert_eq!(
+            loaded.app().protocol_get("paykit", &key).await.unwrap(),
+            Some(good)
+        );
     }
 }
 
@@ -362,20 +384,44 @@ async fn test_recovery_state_restore_regenerates_old_checkpoints() {
     wallet.app_mut().receive(None).await.unwrap();
     let mut changes = Vec::new();
     for key in [b"rh", b"mh", b"ro"] {
-        assert!(wallet.app().protocol_get(key).await.unwrap().is_some());
+        assert!(wallet
+            .app()
+            .protocol_get("paykit", key)
+            .await
+            .unwrap()
+            .is_some());
         changes.push((key.to_vec(), b"{".to_vec()));
     }
     let backup = replace(&wallet.backup().await.unwrap(), &changes);
     let loaded = restore(&w, store(), &backup).await;
-    let hold: Value =
-        serde_json::from_slice(&loaded.app().protocol_get(b"rh").await.unwrap().unwrap()).unwrap();
+    let hold: Value = serde_json::from_slice(
+        &loaded
+            .app()
+            .protocol_get("paykit", b"rh")
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(hold["d"]["asks_queued"], false);
     assert_eq!(hold["d"]["asked"], json!([]));
-    let owed: Value =
-        serde_json::from_slice(&loaded.app().protocol_get(b"ro").await.unwrap().unwrap()).unwrap();
+    let owed: Value = serde_json::from_slice(
+        &loaded
+            .app()
+            .protocol_get("paykit", b"ro")
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
     assert!(owed["d"].get("waiting").unwrap().is_null());
     assert!(owed["d"].get("restored_at_ms").unwrap().is_u64());
-    assert!(loaded.app().protocol_get(b"mh").await.unwrap().is_none());
+    assert!(loaded
+        .app()
+        .protocol_get("paykit", b"mh")
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[derive(Default)]
@@ -400,9 +446,51 @@ impl StateStore for RestoreStampStore {
         self.inner.scan(ns, prefix, after, limit)
     }
 
-    fn commit(&self, batch: WriteBatch) -> Result<(), StoreError> {
-        let stamps = batch.writes.iter().any(|write| match write {
-            Write::Put { key, value, .. } if key == b"p/ro" => {
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.commit_with(batch, |batch| {
+            self.inner
+                .commit(batch)
+                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+        })
+        .map(|_| ())
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
+    }
+}
+impl RestoreStampStore {
+    fn commit_with(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+        apply: impl FnOnce(
+            pubky_switch_client::store::WriteBatch,
+        ) -> Result<
+            pubky_switch_client::store::CommitOutcome,
+            pubky_switch_client::error::StoreError,
+        >,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        let stamps = batch.writes().iter().any(|write| match write {
+            Write::Put { key, value, .. } if key == b"p/paykit/ro" => {
                 let body: Value = serde_json::from_slice(value).unwrap();
                 body["d"]["restored_at_ms"].is_u64()
             }
@@ -412,7 +500,7 @@ impl StateStore for RestoreStampStore {
             self.stopped.store(true, Ordering::SeqCst);
             return Err(StoreError::Unavailable);
         }
-        self.inner.commit(batch)
+        apply(batch)
     }
 }
 
@@ -447,13 +535,23 @@ async fn test_recovery_state_restore_commit_before_stamp_reloads() {
     )
     .await
     .unwrap();
-    let bytes = loaded.app().protocol_get(b"ro").await.unwrap().unwrap();
+    let bytes = loaded
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body["d"].get("waiting").unwrap().is_null());
     assert!(body["d"].get("restored_at_ms").unwrap().is_null());
     storage.stop.store(false, Ordering::SeqCst);
     loaded.receive(None).await.unwrap();
-    assert!(loaded.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(loaded
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     assert!(w.rail.all_executions().is_empty());
 }
 
@@ -473,7 +571,7 @@ async fn test_recovery_state_restore_retains_sorted_waiting_counterparties() {
     wallet.receive(None).await.unwrap();
     wallet.block(&w.carol_id()).await.unwrap();
     wallet.reject_request(&request, None).await.unwrap();
-    let held = wallet.app().protocol_scan(b"ha/").await.unwrap();
+    let held = wallet.app().protocol_scan("paykit", b"ha/").await.unwrap();
     assert_eq!(held.len(), 2);
     let messages: Vec<String> = held
         .iter()
@@ -486,13 +584,25 @@ async fn test_recovery_state_restore_retains_sorted_waiting_counterparties() {
     let storage = store();
     let mut restored = restore(&w, Arc::clone(&storage), &backup).await;
     restored.receive(None).await.unwrap();
-    let bytes = restored.app().protocol_get(b"ro").await.unwrap().unwrap();
+    let bytes = restored
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     let mut waiting = vec![w.bob_id(), w.carol_id()];
     waiting.sort();
     assert_eq!(body["d"]["waiting"], json!(waiting));
     assert!(body["d"]["restored_at_ms"].is_u64());
-    assert_eq!(restored.app().protocol_scan(b"ha/").await.unwrap(), held);
+    assert_eq!(
+        restored
+            .app()
+            .protocol_scan("paykit", b"ha/")
+            .await
+            .unwrap(),
+        held
+    );
     drop(restored);
     let mut loaded = Paykit::load(
         w.env(&w.alice, storage),
@@ -503,7 +613,10 @@ async fn test_recovery_state_restore_retains_sorted_waiting_counterparties() {
     )
     .await
     .unwrap();
-    assert_eq!(loaded.app().protocol_get(b"ro").await.unwrap(), Some(bytes));
+    assert_eq!(
+        loaded.app().protocol_get("paykit", b"ro").await.unwrap(),
+        Some(bytes)
+    );
     loaded.receive(None).await.unwrap();
     for msg_id in &messages {
         assert!(loaded.app().delivery(msg_id).await.unwrap().is_none());
@@ -515,8 +628,18 @@ async fn test_recovery_state_restore_retains_sorted_waiting_counterparties() {
     for msg_id in &messages {
         assert!(loaded.app().delivery(msg_id).await.unwrap().is_some());
     }
-    assert!(loaded.app().protocol_scan(b"ha/").await.unwrap().is_empty());
-    assert!(loaded.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(loaded
+        .app()
+        .protocol_scan("paykit", b"ha/")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(loaded
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     let delivered = (
         w.bob.switch().entries_from(&w.alice_id()),
         w.carol.switch().entries_from(&w.alice_id()),
@@ -550,17 +673,28 @@ async fn checkpoint_put(wallet: &mut Paykit, key: &[u8], value: &Value) -> Vec<u
     let bytes = serde_json::to_vec(value).unwrap();
     wallet
         .app_mut()
-        .protocol_commit(&[LocalWrite::Put {
-            key: key.to_vec(),
-            value: bytes.clone(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key: key.to_vec(),
+                value: bytes.clone(),
+            }],
+        )
         .await
         .unwrap();
     bytes
 }
 
 async fn checkpoint_value(wallet: &Paykit, key: &[u8]) -> Value {
-    serde_json::from_slice(&wallet.app().protocol_get(key).await.unwrap().unwrap()).unwrap()
+    serde_json::from_slice(
+        &wallet
+            .app()
+            .protocol_get("paykit", key)
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap()
 }
 
 async fn checkpoint_own_request(w: &World) -> (Paykit, Arc<dyn StateStore>, StoredMessage) {
@@ -629,7 +763,12 @@ async fn checkpoint_own_request(w: &World) -> (Paykit, Arc<dyn StateStore>, Stor
         .await
         .unwrap()
         .is_none());
-    assert!(shop.app().protocol_scan(b"ha/").await.unwrap().is_empty());
+    assert!(shop
+        .app()
+        .protocol_scan("paykit", b"ha/")
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(
         checkpoint_value(&shop, b"ro").await["d"]["waiting"],
         json!([w.bob_id()])
@@ -655,14 +794,22 @@ async fn test_recovery_checkpoint_empty_waiting_after_reload_refused() {
         .await
         .expect_err("an empty retained resend subset was read");
     assert!(crate::common::is_corrupt(&error), "{error:?}");
-    assert_eq!(shop.app().protocol_get(b"ro").await.unwrap(), Some(bad));
+    assert_eq!(
+        shop.app().protocol_get("paykit", b"ro").await.unwrap(),
+        Some(bad)
+    );
     assert!(shop
         .app()
         .delivery(&original.message().msg_id)
         .await
         .unwrap()
         .is_none());
-    assert!(shop.app().protocol_scan(b"ha/").await.unwrap().is_empty());
+    assert!(shop
+        .app()
+        .protocol_scan("paykit", b"ha/")
+        .await
+        .unwrap()
+        .is_empty());
     assert!(w.rail.all_executions().is_empty());
 }
 
@@ -686,7 +833,12 @@ async fn test_recovery_checkpoint_own_request_resumes_same_signed_message() {
         .find(|sent| sent.msg_id == original.message().msg_id)
         .unwrap();
     assert_eq!(&sent.plaintext, original.plaintext());
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     let before = w.bob.switch().entries_from(&w.alice_id());
     shop.receive(None).await.unwrap();
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
@@ -820,7 +972,10 @@ async fn checkpoint_refuse_asks(how: AskedDamage) {
         .await
         .expect_err("an inconsistent restore checkpoint was read");
     assert!(crate::common::is_corrupt(&error), "{error:?}");
-    assert_eq!(wallet.app().protocol_get(b"rh").await.unwrap(), Some(bad));
+    assert_eq!(
+        wallet.app().protocol_get("paykit", b"rh").await.unwrap(),
+        Some(bad)
+    );
     for peer in asked {
         assert_eq!(crate::common::asked(&wallet, &peer).await.len(), 1);
     }
@@ -852,10 +1007,15 @@ async fn test_recovery_checkpoint_partial_asks_finish_after_reload() {
         asked,
         missing,
     } = Box::pin(checkpoint_partial_asks(&w)).await;
-    let original = wallet.app().protocol_get(b"rh").await.unwrap().unwrap();
+    let original = wallet
+        .app()
+        .protocol_get("paykit", b"rh")
+        .await
+        .unwrap()
+        .unwrap();
     let mut wallet = checkpoint_reload(&w, wallet, storage).await;
     assert_eq!(
-        wallet.app().protocol_get(b"rh").await.unwrap(),
+        wallet.app().protocol_get("paykit", b"rh").await.unwrap(),
         Some(original)
     );
     wallet.receive(None).await.unwrap();
@@ -884,7 +1044,12 @@ async fn checkpoint_regenerated(w: &World, backup: &PaykitBackup) {
     assert!(owed["d"]["waiting"].is_null());
     assert!(owed["d"]["restored_at_ms"].is_u64());
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
@@ -900,7 +1065,7 @@ async fn test_recovery_checkpoint_malformed_live_transients_remain_backable() {
     let ro = checkpoint_put(&mut wallet, b"ro", &owed).await;
     let backup = wallet.backup().await.unwrap();
     let value: Value = serde_json::from_slice(&backup.to_bytes().unwrap()).unwrap();
-    let data = pubky_switch_core::enc::unb64(value["protocol"]["data"].as_str().unwrap()).unwrap();
+    let data = pubky_switch_core::enc::unb64(value["layers"][0]["data"].as_str().unwrap()).unwrap();
     let layer = pubky_switch_client::app::decode_local_state(&data).unwrap();
     for (key, bytes) in [(b"rh", rh), (b"ro", ro)] {
         assert_eq!(layer.iter().find(|(k, _)| k == key).unwrap().1, bytes);

@@ -1369,7 +1369,7 @@ mod tests {
         let p = protocol();
         assert_eq!(p.record_seen("payer_activity", None, Some(b"{}")), None);
         assert_eq!(
-            p.record_regression("payer_activity", b"{}", Some(b"{}")),
+            p.regression("payer_activity", b"{}", Some(b"{}"), false),
             None
         );
     }
@@ -1392,6 +1392,13 @@ mod receive_tests {
 
     fn received(stored: &StoredMessage) -> ReceivedMessage {
         ReceivedMessage {
+            // Supplied callback metadata, not a fixture proving feed acceptance.
+            receipt: pubky_switch_client::app::EntryReceipt {
+                entry_id: [1; 16],
+                service_key: [2; 32],
+                read_at_ms: NOW,
+            },
+            generation: 1,
             seq: 3,
             sender: stored.sender(),
             accepted_at_ms: NOW,
@@ -1575,17 +1582,17 @@ mod receive_tests {
             vec![[1; 32]],
             object(json!({ "label": "shop1" })),
         );
-        assert!(p.sends_to(labelled.message(), &shop1.record(&accepts)));
-        assert!(p.sends_to(labelled.message(), &bob.record(&accepts)));
-        assert!(!p.sends_to(labelled.message(), &shop2.record(&accepts)));
+        assert!(p.narrows(labelled.message(), &shop1.record(&accepts), None));
+        assert!(p.narrows(labelled.message(), &bob.record(&accepts), None));
+        assert!(!p.narrows(labelled.message(), &shop2.record(&accepts), None));
         let plain = alice.message(
             &bob,
             "paykit.payment_request_acceptance",
             vec![[1; 32]],
             object(json!({})),
         );
-        assert!(p.sends_to(plain.message(), &bob.record(&accepts)));
-        assert!(!p.sends_to(plain.message(), &shop1.record(&accepts)));
+        assert!(p.narrows(plain.message(), &bob.record(&accepts), None));
+        assert!(!p.narrows(plain.message(), &shop1.record(&accepts), None));
     }
 
     #[test]
@@ -1786,7 +1793,7 @@ mod receive_tests {
         };
         let (seen, moved) = (seen.to_json().unwrap(), moved.to_json().unwrap());
         assert_eq!(
-            p.record_regression("payer_activity", &seen, Some(&moved)),
+            p.regression("payer_activity", &seen, Some(&moved), false),
             None
         );
         // Built on the version the app holds, the one that attempted the period, the same
@@ -1800,7 +1807,7 @@ mod receive_tests {
         );
         // Dropping the entry again is a regression.
         assert!(p
-            .record_regression("payer_activity", &moved, Some(&seen))
+            .regression("payer_activity", &moved, Some(&seen), false)
             .is_some());
     }
 
@@ -1971,17 +1978,17 @@ mod receive_tests {
         };
         let seen = open(None);
         let ended = open(Some(end));
-        assert_eq!(p.record_regression("allowances", &seen, Some(&ended)), None);
+        assert_eq!(p.regression("allowances", &seen, Some(&ended), false), None);
         assert_eq!(
             p.record_seen("allowances", Some(&seen), Some(&ended)),
             Some(ended.clone())
         );
         // A later write that drops the end seen is refused, as is one that doesn't read.
         assert!(p
-            .record_regression("allowances", &ended, Some(&seen))
+            .regression("allowances", &ended, Some(&seen), false)
             .is_some());
         assert!(p
-            .record_regression("allowances", &seen, Some(b"{}"))
+            .regression("allowances", &seen, Some(b"{}"), false)
             .is_some());
     }
 
@@ -2125,11 +2132,12 @@ mod receive_tests {
         seen: &AllowanceRecord,
         later: &AllowanceRecord,
     ) -> Option<String> {
-        // Pass serialized records through the client callback and its parsing.
-        protocol_of(own).record_regression(
+        // Pass serialized records through the shared regression rule and its parsing.
+        protocol_of(own).regression(
             "allowances",
             &seen.to_json().unwrap(),
             Some(&later.to_json().unwrap()),
+            false,
         )
     }
 
@@ -2900,7 +2908,7 @@ mod receive_tests {
         let seen = seen.to_json().unwrap();
         // The same record and one with more are fine.
         assert_eq!(
-            p.record_regression("payer_activity", &seen, Some(&seen)),
+            p.regression("payer_activity", &seen, Some(&seen), false),
             None
         );
         let cancel = bob.message(
@@ -2913,7 +2921,7 @@ mod receive_tests {
         activity::place(&mut more, activity::Role::Cancellation, cancel);
         let more = more.to_json().unwrap();
         assert_eq!(
-            p.record_regression("payer_activity", &seen, Some(&more)),
+            p.regression("payer_activity", &seen, Some(&more), false),
             None
         );
         // Dropping the request is a regression; so is a value that doesn't read.
@@ -2921,13 +2929,13 @@ mod receive_tests {
             .to_json()
             .unwrap();
         assert!(p
-            .record_regression("payer_activity", &more, Some(&dropped))
+            .regression("payer_activity", &more, Some(&dropped), false)
             .is_some());
         assert!(p
-            .record_regression("payer_activity", &seen, Some(b"{}"))
+            .regression("payer_activity", &seen, Some(b"{}"), false)
             .is_some());
         // A delete isn't one.
-        assert_eq!(p.record_regression("payer_activity", &seen, None), None);
+        assert_eq!(p.regression("payer_activity", &seen, None, false), None);
         // The mark follows the newest value that reads.
         assert_eq!(
             p.record_seen("payer_activity", Some(&seen), Some(&more)),

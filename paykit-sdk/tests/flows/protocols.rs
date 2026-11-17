@@ -88,3 +88,64 @@ async fn test_protocols_chat_only_app_joins_but_takes_no_paykit_kind() {
         .await;
     assert!(app.protocol().accepts(app.app().cert()).is_empty());
 }
+
+#[tokio::test]
+async fn test_protocols_local_writes_require_the_registered_owner() {
+    use pubky_switch_client::app::{AppError, LocalWrite, OpBatch, Refusal};
+
+    let w = World::new();
+    let storage = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&storage)).await;
+    let app_id = wallet.app_id();
+    let before = wallet.app().protocol_scan("paykit", b"").await.unwrap();
+    let (key, value) = before.first().unwrap().clone();
+    let write = LocalWrite::Put {
+        key: key.clone(),
+        value: value.clone(),
+    };
+    assert!(matches!(
+        wallet
+            .app_mut()
+            .protocol_commit("chat", std::slice::from_ref(&write))
+            .await,
+        Err(AppError::Refused(Refusal::Usage(_)))
+    ));
+    assert!(matches!(
+        wallet
+            .app_mut()
+            .submit_batch(OpBatch::new().locals(vec![write.clone()]))
+            .await,
+        Err(AppError::Refused(Refusal::Usage(_)))
+    ));
+    assert_eq!(
+        wallet.app().protocol_scan("paykit", b"").await.unwrap(),
+        before
+    );
+    assert!(matches!(
+        wallet.app().protocol_get("chat", &key).await,
+        Err(AppError::Refused(Refusal::Usage(_)))
+    ));
+    wallet
+        .app_mut()
+        .protocol_commit("paykit", &[write])
+        .await
+        .unwrap();
+    assert_eq!(
+        wallet.app().protocol_get("paykit", &key).await.unwrap(),
+        Some(value)
+    );
+    drop(wallet);
+    let wallet = w
+        .load_with(
+            &w.alice,
+            storage,
+            app_id,
+            std::sync::Arc::clone(&w.clock),
+            paykit_sdk::PaykitConfig::default(),
+        )
+        .await;
+    assert_eq!(
+        wallet.app().protocol_scan("paykit", b"").await.unwrap(),
+        before
+    );
+}

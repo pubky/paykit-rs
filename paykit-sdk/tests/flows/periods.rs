@@ -624,7 +624,7 @@ async fn rewrites(app: &mut Paykit, target: &RecordTarget) {
         .await
         .unwrap();
     app.app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
 }
@@ -1914,7 +1914,7 @@ async fn test_periods_per_period_endpoints_details_invalid_against_the_request_c
         .await
         .unwrap();
     shop.app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     let body = proof_to(&w, shop.app_id(), month(1), "lnbc1rated", 9).await;
@@ -2394,20 +2394,23 @@ async fn test_periods_kept_details_not_bound_to_their_key_refused_as_corrupt() {
     inject_details(&w, &[wallet.app_id()], hash, january());
     inject_details(&w, &[wallet.app_id()], hash, month(1));
     wallet.receive(None).await.unwrap();
-    let kept = wallet.app().protocol_scan(b"pr/").await.unwrap();
+    let kept = wallet.app().protocol_scan("paykit", b"pr/").await.unwrap();
     assert_eq!(kept.len(), 2);
     wallet
         .app_mut()
-        .protocol_commit(&[
-            pubky_switch_client::app::LocalWrite::Put {
-                key: kept[0].0.clone(),
-                value: kept[1].1.clone(),
-            },
-            pubky_switch_client::app::LocalWrite::Put {
-                key: kept[1].0.clone(),
-                value: kept[0].1.clone(),
-            },
-        ])
+        .protocol_commit(
+            "paykit",
+            &[
+                pubky_switch_client::app::LocalWrite::Put {
+                    key: kept[0].0.clone(),
+                    value: kept[1].1.clone(),
+                },
+                pubky_switch_client::app::LocalWrite::Put {
+                    key: kept[1].0.clone(),
+                    value: kept[0].1.clone(),
+                },
+            ],
+        )
         .await
         .unwrap();
     let request = accepted_by(&w, &mut phone, &plaintext, hash).await;
@@ -2433,10 +2436,13 @@ async fn test_periods_details_over_a_corrupt_kept_stop_not_dropped() {
     let key = format!("kc/{}", pubky_switch_core::enc::b64(&record_key));
     wallet
         .app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: key.into_bytes(),
-            value: b"not a kept cancellation".to_vec(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: key.into_bytes(),
+                value: b"not a kept cancellation".to_vec(),
+            }],
+        )
         .await
         .unwrap();
     shop.send_period_details(
@@ -2659,7 +2665,7 @@ async fn test_periods_send_details_never_writes_over_a_period_record_that_doesnt
         .await
         .unwrap();
     till.app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     shop.receive(None).await.unwrap();
@@ -2699,7 +2705,7 @@ async fn test_periods_kept_details_never_written_over_a_period_record_that_doesn
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -2739,7 +2745,7 @@ async fn test_periods_details_over_a_request_record_that_doesnt_read_not_lost() 
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -2757,7 +2763,7 @@ async fn test_periods_details_over_a_request_record_that_doesnt_read_not_lost() 
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -2805,7 +2811,7 @@ async fn test_periods_credit_given_beside_a_record_under_another_policy() {
         .await
         .unwrap();
     shop.app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     let held = shop.app_mut().read_record(&foreign).await.unwrap().unwrap();
@@ -2986,7 +2992,12 @@ async fn test_periods_restore_queues_each_own_details_again_once() {
     }
     let before = w.alice.switch().entries_from(&w.bob_id());
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     for msg_id in &sent {
         assert!(queued(&shop, msg_id).await, "{msg_id}");
     }
@@ -3024,7 +3035,12 @@ async fn test_periods_restore_queues_the_own_acceptance_again_once() {
     .unwrap();
     assert!(!queued(&wallet, &accepted.msg_id).await);
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     assert!(queued(&wallet, &accepted.msg_id).await);
     let after = w.bob.switch().entries_from(&w.alice_id());
     wallet.receive(None).await.unwrap();
@@ -3064,13 +3080,23 @@ async fn test_periods_restore_own_details_wait_while_sends_to_the_payer_are_held
         till.receive(None).await.unwrap();
     }
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
-    assert!(till.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert!(till
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_some());
     for msg_id in &sent {
         assert!(!queued(&till, msg_id).await, "{msg_id}");
     }
     till.unblock(&w.alice_id()).await.unwrap();
     till.receive(None).await.unwrap();
-    assert!(till.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(till
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     for msg_id in &sent {
         assert!(queued(&till, msg_id).await, "{msg_id}");
     }
@@ -3113,7 +3139,12 @@ async fn test_periods_restore_own_details_past_their_replay_window_not_sent_agai
         summary.report.events
     );
     assert!(shop.notices().await.unwrap().is_empty());
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     assert!(!queued(&shop, &sent[0]).await);
     assert!(queued(&shop, &sent[1]).await);
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 1);
@@ -3138,7 +3169,7 @@ pub(crate) async fn writes_value(app: &mut Paykit, target: &RecordTarget, bytes:
         .await
         .unwrap();
     app.app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
 }
@@ -3158,7 +3189,12 @@ async fn test_periods_restore_after_the_payee_cancelled_queues_no_details() {
     let mut shop = bob_restored(&w, &backup).await;
     let before = w.alice.switch().entries_from(&w.bob_id());
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     assert!(queued(&shop, &cancellation).await);
     for msg_id in &sent {
         assert!(!queued(&shop, msg_id).await, "{msg_id}");
@@ -3193,7 +3229,12 @@ async fn test_periods_restore_after_the_period_is_credited_queues_no_details() {
     let mut shop = bob_restored(&w, &backup).await;
     let before = w.alice.switch().entries_from(&w.bob_id());
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     assert!(queued(&shop, &receipt).await);
     for msg_id in &sent {
         assert!(!queued(&shop, msg_id).await, "{msg_id}");
@@ -3228,14 +3269,24 @@ async fn test_periods_restore_own_details_wait_while_their_request_record_doesnt
     for _ in 0..2 {
         shop.receive(None).await.unwrap();
     }
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_some());
     for msg_id in &sent {
         assert!(!queued(&shop, msg_id).await, "{msg_id}");
     }
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
     writes_value(&mut till, &target, &good).await;
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     for msg_id in &sent {
         assert!(queued(&shop, msg_id).await, "{msg_id}");
     }
@@ -3269,10 +3320,20 @@ async fn test_periods_restore_own_details_waiting_on_their_request_record_end_pa
     let mut shop = bob_restored(&w, &backup).await;
     let before = w.alice.switch().entries_from(&w.bob_id());
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_some());
     w.clock.advance_ms(31 * DAY_MS);
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     for msg_id in &sent {
         assert!(!queued(&shop, msg_id).await, "{msg_id}");
     }
@@ -3355,7 +3416,12 @@ async fn test_periods_restore_after_the_payer_rejected_queues_no_details() {
             alice_signs_again(&w, &value["response"], "paykit.payment_request_rejection");
     })
     .await;
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     for msg_id in &sent {
         assert!(!queued(&shop, msg_id).await, "{msg_id}");
     }
@@ -3375,7 +3441,12 @@ async fn test_periods_restore_after_the_payers_cancellation_queues_no_details() 
         );
     })
     .await;
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     for msg_id in &sent {
         assert!(!queued(&shop, msg_id).await, "{msg_id}");
     }
@@ -3415,7 +3486,12 @@ async fn test_periods_restore_details_waiting_leave_another_own_message_queued_o
     for msg_id in &sent {
         assert!(!queued(&shop, msg_id).await, "{msg_id}");
     }
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_some());
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 1);
 }
 
@@ -3528,7 +3604,7 @@ async fn payer_period_paid(
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
 }
@@ -3720,7 +3796,7 @@ async fn test_periods_proof_over_a_payee_period_record_that_doesnt_bind_kept_not
         .await
         .unwrap();
     till.app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     shop.receive(None).await.unwrap();
@@ -3812,7 +3888,7 @@ async fn test_periods_stored_proof_waits_for_its_details_after_the_record_is_del
         .await
         .unwrap();
     till.app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     shop.receive(None).await.unwrap();
@@ -4067,7 +4143,7 @@ async fn test_periods_proof_from_a_flagged_payer_over_a_payee_period_record_that
         .await
         .unwrap();
     shop.app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     till.receive(None).await.unwrap();
@@ -4230,7 +4306,7 @@ async fn test_periods_proof_from_a_flagged_third_party_naming_a_held_request_onl
     );
     till.receive(None).await.unwrap();
     till.receive(None).await.unwrap();
-    let kept = till.app().protocol_scan(b"pr/").await.unwrap();
+    let kept = till.app().protocol_scan("paykit", b"pr/").await.unwrap();
     assert!(kept.is_empty(), "{} kept", kept.len());
     assert_eq!(till.spam_count(&w.carol_id()).await.unwrap(), 1);
 }
@@ -4331,7 +4407,8 @@ async fn test_periods_proof_over_a_payee_request_record_that_never_opens_kept_th
     .unwrap();
     till.app_mut()
         .submit_batch(
-            OpBatch::new().entry((conditions, pubky_switch_core::ops::OpKind::RecordPut(put))),
+            OpBatch::for_protocol("paykit")
+                .entry((conditions, pubky_switch_core::ops::OpKind::RecordPut(put))),
         )
         .await
         .unwrap();
@@ -4362,13 +4439,25 @@ async fn test_periods_proof_over_a_payee_request_record_that_never_opens_kept_th
     );
     let summary = shop.receive(None).await.unwrap();
     assert!(received(&summary, "paykit.payment_proof"), "{summary:?}");
-    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(shop.app_mut().parked_entries().await.unwrap().is_empty());
     w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS + DAY_MS);
     for _ in 0..3 {
         shop.receive(None).await.unwrap();
     }
-    assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert!(shop
+        .app()
+        .protocol_scan("paykit", b"pr/")
+        .await
+        .unwrap()
+        .is_empty());
     let notices = shop.notices().await.unwrap();
     assert!(
         notices
@@ -4454,7 +4543,7 @@ async fn details_dropped_for_the_bounds(
                 .unwrap();
             phone
                 .app_mut()
-                .submit_batch(OpBatch::new().entry(op))
+                .submit_batch(OpBatch::for_protocol("paykit").entry(op))
                 .await
                 .unwrap();
         }
@@ -4494,7 +4583,7 @@ async fn details_dropped_for_the_bounds(
     let dropped = more + 1 > paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
     let marks: Vec<serde_json::Value> = wallet
         .app()
-        .protocol_scan(b"pd/")
+        .protocol_scan("paykit", b"pd/")
         .await
         .unwrap()
         .into_iter()
@@ -4524,7 +4613,7 @@ async fn details_dropped_for_the_bounds(
                 .unwrap();
             phone
                 .app_mut()
-                .submit_batch(OpBatch::new().entry(op))
+                .submit_batch(OpBatch::for_protocol("paykit").entry(op))
                 .await
                 .unwrap();
         }
@@ -4740,7 +4829,12 @@ async fn test_periods_details_over_a_paused_period_record_held_then_placed_once_
         .unwrap();
     wallet.receive(None).await.unwrap();
     assert_eq!(count(&wallet, &request).await, 1);
-    assert!(wallet.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"dw/")
+        .await
+        .unwrap()
+        .is_empty());
     crate::divergent::confirm(&mut wallet, &period)
         .await
         .unwrap();
@@ -4778,7 +4872,12 @@ async fn test_periods_proof_over_a_paused_period_record_held_then_placed_once_co
     );
     shop.receive(None).await.unwrap();
     assert!(!shop.payee_activity().await.unwrap()[0].periods[0].paid);
-    assert!(shop.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    assert!(shop
+        .app()
+        .protocol_scan("paykit", b"dw/")
+        .await
+        .unwrap()
+        .is_empty());
     crate::divergent::confirm(&mut shop, &period).await.unwrap();
     shop.receive(None).await.unwrap();
     shop.receive(None).await.unwrap();
@@ -4863,7 +4962,7 @@ async fn test_periods_invalid_details_never_remove_the_request_destination_const
                     .await
                     .unwrap();
                 shop.app_mut()
-                    .submit_batch(OpBatch::new().entry(op))
+                    .submit_batch(OpBatch::for_protocol("paykit").entry(op))
                     .await
                     .unwrap();
                 let (identifier, destination) = if permitted {
@@ -5237,7 +5336,7 @@ async fn subscribed_with_conversion(
         .await
         .unwrap();
     shop.app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
