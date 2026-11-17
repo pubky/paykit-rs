@@ -1413,6 +1413,8 @@ pub struct AllowanceProposal {
     pub allowance_id: AllowanceId,
     /// The sender's role.
     pub proposer_role: ProposerRole,
+    /// The Allower's verified identity generation (Paykit wire 4.15).
+    pub allower_generation: u64,
     /// The terms, valid by Paykit wire 4.15.
     pub terms: AllowanceTerms,
 }
@@ -1433,9 +1435,15 @@ impl AllowanceProposal {
             "allowee" => ProposerRole::Allowee,
             _ => return Err(bad(PROPOSAL, "proposer_role", "is allower or allowee")),
         };
+        let allower_generation = obj.req_int("allower_generation")?;
+        ensure(
+            allower_generation > 0,
+            "Paykit wire 4.15: allower_generation is positive",
+        )?;
         Ok(Self {
             allowance_id: AllowanceId::parse(obj.req_str("allowance_id")?)?,
             proposer_role,
+            allower_generation,
             terms: AllowanceTerms::from_json(obj.req("terms")?)?,
         })
     }
@@ -1463,6 +1471,7 @@ impl AllowanceProposal {
             ProposerRole::Allowee => "allowee",
         };
         map.insert("proposer_role".into(), Value::String(role.into()));
+        map.insert("allower_generation".into(), self.allower_generation.into());
         map.insert("terms".into(), self.terms.json_unchecked());
         map
     }
@@ -2574,5 +2583,55 @@ mod tests {
         assert_eq!(period_details_order(&a, &b), Ordering::Less);
         a.created_at_ms = 1;
         assert_eq!(period_details_order(&a, &b), Ordering::Greater);
+    }
+    fn allowance_proposal() -> Map<String, Value> {
+        serde_json::from_value(json!({
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "proposer_role": "allower",
+            "allower_generation": 7,
+            "terms": {
+                "asset": "btc", "per_payment_amount": null, "period_limits": [],
+                "lifetime_amount_limit": "2", "active_from": null, "expires_at": null,
+                "allowed_payment_endpoint_identifiers": null
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_allowance_proposal_preserves_positive_allower_generation() {
+        for role in ["allower", "allowee"] {
+            for generation in [1, 7, 9_007_199_254_740_991_u64] {
+                let mut body = allowance_proposal();
+                body.insert("proposer_role".into(), json!(role));
+                body.insert("allower_generation".into(), json!(generation));
+                assert_eq!(
+                    AllowanceProposal::from_body(&body)
+                        .unwrap()
+                        .to_body()
+                        .unwrap(),
+                    body
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_allowance_proposal_refuses_missing_or_invalid_allower_generation() {
+        let mut missing = allowance_proposal();
+        missing.remove("allower_generation");
+        assert!(AllowanceProposal::from_body(&missing).is_err());
+        for invalid in [
+            Value::Null,
+            json!(0),
+            json!(-1),
+            json!(1.5),
+            json!("7"),
+            json!(9_007_199_254_740_992_u64),
+        ] {
+            let mut body = allowance_proposal();
+            body.insert("allower_generation".into(), invalid);
+            assert!(AllowanceProposal::from_body(&body).is_err());
+        }
     }
 }

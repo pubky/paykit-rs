@@ -540,15 +540,31 @@ fn executor_notice_json(keys: &Keys, json: &str) -> String {
 fn signed_messages(keys: &Keys) -> Vec<(Place<'static>, Value)> {
     let file = paykit("messages.json");
     let mut out = Vec::new();
+    let mut hashes = HashMap::new();
     for (i, m) in arr(&file, "messages").iter().enumerate() {
         let mut json = st(m, "json").to_owned();
+        let message = Message::parse(json.as_bytes(), OPAQUE_MEMBERS).unwrap();
+        let refs: Vec<String> = message.refs.iter().map(|r| b64(r)).collect();
+        let updated: Vec<String> = refs
+            .iter()
+            .map(|r| hashes.get(r).cloned().unwrap_or_else(|| r.clone()))
+            .collect();
+        if refs != updated {
+            let from = format!("\"refs\":{}", serde_json::to_string(&refs).unwrap());
+            let to = format!("\"refs\":{}", serde_json::to_string(&updated).unwrap());
+            assert!(json.contains(&from));
+            json = json.replacen(&from, &to, 1);
+        }
         if st(m, "name") == "executor_notice" {
             json = executor_notice_json(keys, &json);
+        }
+        if json != st(m, "json") {
             out.push((Place::At(format!("/messages/{i}/json")), json!(json)));
         }
         let sender = keys.app_by_id(st(m, "sender_app"));
         let plaintext =
             MessagePlaintext::sign_json(&sender.keys, json.into_bytes(), OPAQUE_MEMBERS).unwrap();
+        hashes.insert(st(m, "hash").to_owned(), b64(&plaintext.hash()));
         for (member, value) in [
             ("hash", b64(&plaintext.hash())),
             ("plaintext_hex", hex(&plaintext.encode())),
