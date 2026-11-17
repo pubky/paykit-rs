@@ -785,3 +785,33 @@ async fn test_own_record_failed_renewal_keeps_exact_bytes_until_delivery() {
     assert_eq!(shop.app().record(), &pending);
     assert_eq!(on_homeserver(&w, &shop).unwrap().signed(), &pending);
 }
+
+#[tokio::test]
+async fn test_own_record_labelled_scope_cannot_publish_public_endpoints() {
+    let w = World::new();
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "hosted",
+            AppScopes::new()
+                .request_label(&paykit_lib::Label::parse("shop1").unwrap())
+                .build()
+                .unwrap(),
+            publishing(),
+            store(),
+        )
+        .await;
+    let before = shop.app().record().clone();
+    let error = shop
+        .set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1tips"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error.refusal(), Some(Refusal::ScopeMissing(scope)) if scope == "paykit_request")
+    );
+    assert_eq!(shop.app().record(), &before);
+    assert!(PaykitMember::read(&on_homeserver(&w, &shop).unwrap())
+        .unwrap()
+        .public_endpoints
+        .is_empty());
+}

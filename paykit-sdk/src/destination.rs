@@ -18,8 +18,10 @@
 //!
 //! A public endpoint's carrier is the payee app's record, read from the Homeserver
 //! ([`crate::app_records`]): it names the app whose path it was read from, carries the
-//! endpoint in its Paykit member, and is used only until the earlier of its `expires_at` and
-//! its `updated_at` plus the identity's record age limit, and not while its `updated_at` is
+//! endpoint in its Paykit member, and requires plain `paykit_request`: an unlabelled proof
+//! cannot reach an app holding only a labelled selling scope. It is used only until the
+//! earlier of its `expires_at` and its `updated_at` plus the identity's record age limit,
+//! and not while its `updated_at` is
 //! ahead of the payer's clock (Paykit spec 4, Paykit wire 3.2).
 //!
 //! A removed app's destinations are ignored, even if its messages or its record are still
@@ -52,7 +54,7 @@ use std::task::{Context, Poll};
 use paykit_lib::app_record::PaykitMember;
 use paykit_lib::bodies::RequestDestination;
 use paykit_lib::records::{DestinationSource, StoredMessage};
-use paykit_lib::scopes::{acts_as_payee, check_certificate};
+use paykit_lib::scopes::{acts_as_payee, check_certificate, holds, PaykitScope};
 use paykit_lib::Body;
 use pubky_switch_client::app::{
     Initiator, MayAct, PeerIdentity, SwitchAnswer, UserConfirmed, DOC_CACHE_MS,
@@ -581,9 +583,11 @@ fn record_carries(
 /// The app `app_id` that sent the carrier, or whose record it is, is current in the payee's
 /// `identity.json`, with a certificate that passes Paykit's verifiers' checks (Paykit wire
 /// 3.1: its scope rules, and permissions with none missing and, without another protocol's
-/// scope, no other), allows `paykit_request` and, when listed, hasn't expired; a record is also
-/// within the identity's record age limit (Paykit spec 4). The Switch takes a certificate
-/// Paykit's verifiers refuse, so a record's, which nothing else checks, is checked here.
+/// scope, no other), allows the destination and, when listed, hasn't expired. A message may
+/// come from a labelled selling app; a public record requires plain `paykit_request` and
+/// stays within the identity's record age limit (Paykit spec 4). The Switch takes a
+/// certificate Paykit's verifiers refuse, so a record's, which nothing else checks, is
+/// checked here.
 pub(crate) fn current(
     doc: &IdentityDoc,
     app_id: &[u8; 16],
@@ -592,8 +596,12 @@ pub(crate) fn current(
 ) -> std::result::Result<(), String> {
     let cert = carrier.cert();
     check_certificate(cert).map_err(|error| error.to_string())?;
-    if !acts_as_payee(cert.scopes()) {
-        return Err("Paykit spec 4: the sending app's certificate doesn't allow request".into());
+    let allowed = match carrier {
+        Carrier::Message(_) => acts_as_payee(cert.scopes()),
+        Carrier::Record(_) => holds(cert.scopes(), &PaykitScope::Request),
+    };
+    if !allowed {
+        return Err("Paykit spec 4: the certificate doesn't allow this destination".into());
     }
     let standing = doc.standing(app_id, &cert.hash());
     if standing == Standing::Listed && cert.expired_at(now) {
@@ -813,6 +821,39 @@ mod tests {
             NOW
         )
         .is_err());
+    }
+
+    #[test]
+    fn test_destination_public_record_requires_plain_request_scope() {
+        let (alice, plain) = parties();
+        let labelled = Party::new(
+            "bob",
+            "hosted",
+            &[
+                "paykit_request:shop1",
+                "paykit_settlements",
+                "paykit_contacts",
+            ],
+        );
+        for (app, allowed) in [(&plain, true), (&labelled, false)] {
+            let carrier = Carrier::Record(Box::new(app.record(&["paykit.payment_request"])));
+            assert_eq!(
+                current(&app.doc(&[app]), &app.app_id(), &carrier, NOW).is_ok(),
+                allowed
+            );
+        }
+        let mut body = request_body();
+        body.insert("label".into(), json!("shop1"));
+        let request = labelled.message(&alice, "paykit.payment_request", vec![], body);
+        assert_eq!(
+            current(
+                &labelled.doc(&[&labelled]),
+                &labelled.app_id(),
+                &Carrier::Message(Box::new(request)),
+                NOW
+            ),
+            Ok(())
+        );
     }
 
     #[test]

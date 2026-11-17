@@ -21,6 +21,37 @@ use crate::public::{one_endpoint, public_to_bob, publish_app_at};
 const DAY_MS: u64 = 24 * HOUR_MS;
 const MIB: usize = 1024 * 1024;
 
+#[tokio::test]
+async fn test_public_read_labelled_only_app_cannot_offer_an_unlabelled_destination() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.labelled_shop("hosted", "shop1").await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    publish_now(
+        &w,
+        "hosted",
+        one_endpoint("btc-lightning-bolt12", "lno1labelled"),
+    );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    let outcome = wallet.pay_without_request(public_to_bob(&w)).await;
+    assert!(
+        read.endpoints.is_empty() && w.rail.all_executions().is_empty(),
+        "offered={read:?}; payment={outcome:?}; executions={:?}",
+        w.rail.all_executions()
+    );
+    assert_eq!(read.failures.len(), 1);
+    assert_eq!(read.failures[0].app_id, shop.app_id());
+    assert!(matches!(
+        read.failures[0].reason,
+        PublicAppFailureReason::Refused(_)
+    ));
+    assert!(matches!(
+        outcome.unwrap_err().refusal(),
+        Some(Refusal::NoDestination(_))
+    ));
+    assert!(wallet.payments().await.unwrap().is_empty());
+}
+
 /// The world's Homeserver, but for the app records it was told it can't serve now.
 struct FailingRecords {
     inner: Arc<TestHomeserver>,
