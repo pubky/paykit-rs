@@ -5,7 +5,7 @@ use pubky_switch_client::app::UserConfirmed;
 use pubky_switch_client::clock::Clock;
 use pubky_switch_core::records::RemovedApp;
 
-use crate::common::{draft, request_from, World};
+use crate::common::{draft, list_version, request_from, single_use_payload, World};
 
 #[tokio::test]
 async fn test_destinations_from_a_revoked_app_refused() {
@@ -190,7 +190,7 @@ async fn test_destinations_list_endpoint_the_request_restricts_refused() {
             single_use: false,
         },
     );
-    w.list_to_alice_with(&mut shop, &[wallet.app_id()], w.clock.now_ms(), endpoints)
+    w.list_to_alice_with(&mut shop, &[wallet.app_id()], list_version(1, 1), endpoints)
         .await;
     let request = request_from(&mut shop, w.alice_id(), on_chain_only(w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
@@ -226,7 +226,7 @@ async fn test_destinations_list_paid_only_to_an_endpoint_the_request_allows() {
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     // Bob's list offers on-chain and Lightning.
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     let request = request_from(&mut shop, w.alice_id(), on_chain_only(w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
@@ -336,7 +336,7 @@ async fn test_destinations_list_of_a_removed_app_shadows_no_current_one() {
         },
     );
     let body = paykit_lib::bodies::PrivatePaymentList {
-        version: w.clock.now_ms(),
+        version: list_version(1, 1),
         payment_endpoints: endpoints,
         expires_at: w.clock.now_ms() + 30 * 24 * crate::common::HOUR_MS,
     }
@@ -351,7 +351,7 @@ async fn test_destinations_list_of_a_removed_app_shadows_no_current_one() {
         Vec::new(),
         body,
     );
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms() + 1000)
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 2))
         .await;
     wallet.receive(None).await.unwrap();
     // Bob's signer removes the shop: its newer list doesn't hide the till's.
@@ -509,7 +509,7 @@ async fn test_destinations_list_without_an_endpoint_the_payment_method_pays_refu
         .set_endpoint_identifiers(vec![crate::common::endpoint("btc-bitcoin-p2tr")]);
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     let refused = wallet
@@ -537,7 +537,7 @@ async fn test_destinations_list_pays_the_payment_methods_first_endpoint() {
     ]);
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     let outcome = wallet
@@ -575,7 +575,7 @@ async fn test_destinations_unsupported_live_list_beside_an_expired_one_asks_for_
         .await;
     let mut shop = w.shop().await;
     till.app_mut().invite(&w.alice_id()).await.unwrap();
-    let list = |id: &str, payload: &str, version: u64, expires_at: u64| {
+    let list = |id: &str, payload: &str, version: paykit_lib::ListVersion, expires_at: u64| {
         let mut endpoints = std::collections::BTreeMap::new();
         endpoints.insert(
             crate::common::endpoint(id),
@@ -590,7 +590,7 @@ async fn test_destinations_unsupported_live_list_beside_an_expired_one_asks_for_
     let (endpoints, version, expires_at) = list(
         "btc-bitcoin-p2wpkh",
         "bc1qtill",
-        now,
+        list_version(1, 1),
         now + crate::common::HOUR_MS,
     );
     let body = paykit_lib::bodies::PrivatePaymentList {
@@ -609,8 +609,8 @@ async fn test_destinations_unsupported_live_list_beside_an_expired_one_asks_for_
         Vec::new(),
         body,
     );
-    let (endpoints, _, _) = list("btc-lightning-bolt12", "lno1shop", 0, 0);
-    w.list_to_alice_with(&mut shop, &[wallet.app_id()], now + 1, endpoints)
+    let (endpoints, version, _) = list("btc-lightning-bolt12", "lno1shop", list_version(1, 2), 0);
+    w.list_to_alice_with(&mut shop, &[wallet.app_id()], version, endpoints)
         .await;
     wallet.receive(None).await.unwrap();
     w.clock.advance_ms(2 * crate::common::HOUR_MS);
@@ -639,7 +639,14 @@ async fn test_destinations_unsupported_live_list_beside_an_expired_one_asks_for_
 
 /// Bob's app `app` sends alice's `wallet` its list at `version`, offering the one reusable
 /// endpoint `id`, entered at her switch directly.
-fn list_from(w: &World, app: &str, wallet: [u8; 16], version: u64, id: &str, payload: &str) {
+fn list_from(
+    w: &World,
+    app: &str,
+    wallet: [u8; 16],
+    version: paykit_lib::ListVersion,
+    id: &str,
+    payload: &str,
+) {
     let mut endpoints = std::collections::BTreeMap::new();
     endpoints.insert(
         crate::common::endpoint(id),
@@ -684,12 +691,11 @@ async fn two_lists(w: &World) -> (paykit_sdk::Paykit, paykit_sdk::Paykit) {
         .await;
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     till.app_mut().invite(&w.alice_id()).await.unwrap();
-    let now = w.clock.now_ms();
     list_from(
         w,
         "shop",
         wallet.app_id(),
-        now,
+        list_version(1, 1),
         "btc-lightning-bolt12",
         "lno1shop",
     );
@@ -697,7 +703,7 @@ async fn two_lists(w: &World) -> (paykit_sdk::Paykit, paykit_sdk::Paykit) {
         w,
         "till",
         wallet.app_id(),
-        now + 1,
+        list_version(1, 2),
         "btc-bitcoin-p2wpkh",
         "bc1qtill",
     );
@@ -779,12 +785,11 @@ async fn test_destinations_same_endpoint_in_two_lists_paid_from_the_newer() {
         .await;
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     till.app_mut().invite(&w.alice_id()).await.unwrap();
-    let now = w.clock.now_ms();
     list_from(
         &w,
         "shop",
         wallet.app_id(),
-        now + 1,
+        list_version(1, 2),
         "btc-lightning-bolt12",
         "lno1shop",
     );
@@ -792,7 +797,7 @@ async fn test_destinations_same_endpoint_in_two_lists_paid_from_the_newer() {
         &w,
         "till",
         wallet.app_id(),
-        now,
+        list_version(1, 1),
         "btc-lightning-bolt12",
         "lno1till?amount=2",
     );
@@ -902,12 +907,11 @@ async fn test_destinations_malformed_endpoint_of_one_app_falls_to_another_apps()
         .await;
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     till.app_mut().invite(&w.alice_id()).await.unwrap();
-    let now = w.clock.now_ms();
     list_from(
         &w,
         "shop",
         wallet.app_id(),
-        now + 1,
+        list_version(1, 2),
         "btc-lightning-bolt12",
         "lno1shop?amount=unknown",
     );
@@ -915,7 +919,7 @@ async fn test_destinations_malformed_endpoint_of_one_app_falls_to_another_apps()
         &w,
         "till",
         wallet.app_id(),
-        now,
+        list_version(1, 1),
         "btc-bitcoin-p2wpkh",
         "bc1qtill",
     );
@@ -1121,7 +1125,7 @@ async fn test_destinations_method_failing_fails_the_payment_not_as_unsupported()
             ],
         );
         let request = request_from(&mut shop, w.alice_id(), draft).await;
-        w.list_to_alice_with(&mut shop, &[wallet.app_id()], w.clock.now_ms(), {
+        w.list_to_alice_with(&mut shop, &[wallet.app_id()], list_version(1, 1), {
             let mut endpoints = std::collections::BTreeMap::new();
             for (id, payload) in [
                 ("btc-bitcoin-p2wpkh", "bc1qlist"),
@@ -1206,7 +1210,7 @@ async fn test_destinations_method_choosing_none_refused_as_unsupported() {
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), two_endpoints(w.clock.now_ms())).await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     let refused = wallet
@@ -1241,7 +1245,7 @@ async fn test_destinations_used_single_use_endpoint_the_method_doesnt_pay_not_as
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    let version = w.clock.now_ms();
+    let version = list_version(1, 1);
     w.list_to_alice(&mut shop, &[wallet.app_id()], version)
         .await;
     wallet.receive(None).await.unwrap();
@@ -1281,7 +1285,10 @@ async fn test_destinations_used_single_use_endpoint_the_method_doesnt_pay_not_as
         calls[calls.len() - 2..],
         [
             vec!["0 btc-lightning-bolt12 lno1reusable".to_owned()],
-            vec![format!("0 btc-bitcoin-p2wpkh bc1qsingle{version}")],
+            vec![format!(
+                "0 btc-bitcoin-p2wpkh {}",
+                single_use_payload(version)
+            )],
         ]
     );
 }
@@ -1295,7 +1302,7 @@ async fn test_destinations_used_single_use_endpoint_the_method_cant_judge_fails_
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     let paid = wallet
@@ -1593,7 +1600,7 @@ async fn test_destinations_list_expiring_while_the_payee_is_read_asked_for_again
         },
     );
     let body = paykit_lib::bodies::PrivatePaymentList {
-        version: now,
+        version: list_version(1, 1),
         payment_endpoints: endpoints,
         expires_at: now + crate::common::HOUR_MS,
     }

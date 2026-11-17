@@ -635,7 +635,7 @@ mod tests {
 
     fn list_body(expires_at: u64) -> serde_json::Map<String, serde_json::Value> {
         object(json!({
-            "version": 7,
+            "version": { "generation": 1, "counter": 7 },
             "expires_at": pubky_switch_core::time::rfc3339(expires_at),
             "payment_endpoints": { "btc-bitcoin-p2wpkh": { "payload": "bc1q", "single_use": true } }
         }))
@@ -647,7 +647,8 @@ mod tests {
             &PaymentEndpointIdentifier::new(id).unwrap(),
             &PaymentEndpointPayload::new(payload).unwrap(),
             source,
-            (source == DestinationSource::List).then_some(7),
+            (source == DestinationSource::List)
+                .then(|| paykit_lib::ListVersion::new(1, 7).unwrap()),
             source == DestinationSource::List,
         )
     }
@@ -775,7 +776,7 @@ mod tests {
         )
         .is_err());
         let mut other_version = dest.clone();
-        other_version.list_version = Some(8);
+        other_version.list_version = Some(paykit_lib::ListVersion::new(1, 8).unwrap());
         assert!(carries(
             &bob.id(),
             &other_version,

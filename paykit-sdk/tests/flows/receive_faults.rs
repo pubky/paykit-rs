@@ -12,7 +12,7 @@ use paykit_sdk::{
 use pubky_switch_client::clock::Clock;
 use pubky_switch_client::store::StateStore;
 
-use crate::common::{draft, request_from, FailingRecordReads, World};
+use crate::common::{draft, list_version, request_from, FailingRecordReads, World};
 
 /// How many single read failures each case tries, one per run.
 const READS: u64 = 8;
@@ -139,7 +139,7 @@ async fn test_receive_faults_receipt_parked_on_a_corrupt_journal_then_settles() 
         .wallet_on("wallet", Arc::clone(&failing) as Arc<dyn StateStore>)
         .await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     w.rail.next(paykit_sdk::rail::Behaviour::Hang);

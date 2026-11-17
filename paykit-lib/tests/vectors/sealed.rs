@@ -1331,6 +1331,19 @@ fn allowance_record_value(keys: &Keys) -> Vec<u8> {
 /// Keep each authored binding error while signing the current proposal and response.
 fn binding_value(keys: &Keys, case: &Value) -> String {
     let text = recertified(keys, st(case, "value"));
+    if st(case, "collection") == "payment_lists" {
+        // The stored list is `messages.json`'s, as that file signs it.
+        let value: Value = serde_json::from_str(&text).unwrap();
+        let list = stored_message(keys, "private_payment_list");
+        let held = &value["list"]["plaintext"];
+        assert_eq!(
+            st(held, "sender_app"),
+            b64(&list.plaintext().sender_app_id())
+        );
+        return text
+            .replace(st(held, "signature"), &b64(&list.plaintext().signature()))
+            .replace(st(held, "json"), &b64(list.plaintext().json()));
+    }
     if st(case, "collection") != "allowances" {
         return text;
     }
@@ -3607,18 +3620,17 @@ fn list_case(keys: &Keys, delta: i64) -> (PaymentListRecord, paykit_lib::records
     let s = bound_sealed();
     let mut held = PaymentListRecord::read(value(&arr(&s, "binding_accepted")[0]), &alice).unwrap();
     held.used.push(paykit_lib::records::UsedEndpoint {
-        version: 1,
+        version: paykit_lib::ListVersion::new(1, 1).unwrap(),
         endpoint: paykit_lib::identifiers::PaymentEndpointIdentifier::parse("btc-bitcoin-p2wpkh")
             .unwrap(),
         attempt_id: paykit_lib::identifiers::AttemptId::from_bytes([3; 16]),
         origin: Default::default(),
     });
     let list = resigned(keys, "private_payment_list", None, |body| {
-        let version = body["version"].as_u64().unwrap();
-        body.insert(
-            "version".into(),
-            serde_json::json!(version.checked_add_signed(delta).unwrap()),
-        );
+        let version = paykit_lib::ListVersion::from_value(&body["version"]).unwrap();
+        let counter = version.counter().checked_add_signed(delta).unwrap();
+        let moved = paykit_lib::ListVersion::new(version.generation(), counter).unwrap();
+        body.insert("version".into(), moved.to_value());
         if delta == 0 {
             // The same version, other signed content.
             let expires = body["expires_at"]
@@ -3798,9 +3810,9 @@ fn test_record_transitions_compare_versions_of_one_record() {
     let cap = keys.app("cap").keys.app_id_bytes();
     let cap_list = resign_with(&keys, "private_payment_list", |m| {
         m.from.app_id = cap;
-        let version = m.body["version"].as_u64().unwrap();
+        let version = paykit_lib::ListVersion::from_value(&m.body["version"]).unwrap();
         m.body
-            .insert("version".into(), serde_json::json!(version + 1));
+            .insert("version".into(), version.next().unwrap().to_value());
     });
     let other_app = PaymentListRecord {
         app_id: cap,
@@ -4348,6 +4360,57 @@ fn test_allowance_record_renewed_grant_leaves_the_history_grant_its_own_members(
             vec![Value::Null, Value::Null]
         );
         assert!(!String::from_utf8(json.clone()).unwrap().contains("current"));
+    }
+}
+
+#[test]
+fn test_record_list_version_pair_keeps_unknown_members() {
+    // A list version inside a record is an object like any other: a writer keeps the
+    // members it doesn't know as it read them (wire 5), in a Payment List record's used
+    // entries and in an activity record's unrequested destination alike.
+    let alice = pubky(ALICE);
+    let s = bound_sealed();
+    let list = st(&arr(&s, "binding_accepted")[0], "value").to_owned();
+    let unrequested = bases(&Keys::from_seeds()).unrequested.to_json().unwrap();
+    type Rewrite = fn(&[u8], &[u8; 32]) -> Vec<u8>;
+    let cases: [(&str, Vec<u8>, &str, Rewrite); 2] = [
+        (
+            "Payment List record",
+            list.into_bytes(),
+            "/used/0/version",
+            |json, own| {
+                PaymentListRecord::read(json, own)
+                    .unwrap()
+                    .to_json()
+                    .unwrap()
+            },
+        ),
+        (
+            "activity record",
+            unrequested,
+            "/unrequested/list_version",
+            |json, own| {
+                ActivityRecord::read(json, own, ActivitySide::Payer)
+                    .unwrap()
+                    .to_json()
+                    .unwrap()
+            },
+        ),
+    ];
+    for (name, json, pointer, rewrite) in cases {
+        let mut base: Value = serde_json::from_slice(&json).unwrap();
+        let pair = base
+            .pointer_mut(pointer)
+            .unwrap_or_else(|| panic!("{name}"));
+        assert!(pair.get("generation").is_some(), "{name}");
+        pair["later_member"] = serde_json::json!({ "nested": ["read"] });
+        let written = rewrite(&serde_json::to_vec(&base).unwrap(), &alice);
+        assert_eq!(
+            members_at(&written, &[pointer]),
+            vec![serde_json::json!({ "nested": ["read"] })],
+            "{name}"
+        );
+        assert_eq!(rewrite(&written, &alice), written, "{name}");
     }
 }
 

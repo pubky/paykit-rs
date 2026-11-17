@@ -12,7 +12,7 @@ use paykit_sdk::{
 use pubky_switch_client::app::UserConfirmed;
 use pubky_switch_client::clock::Clock;
 
-use crate::common::{draft, request_from, store, World};
+use crate::common::{draft, list_version, request_from, store, World};
 
 async fn restored(w: &World, backup: &paykit_sdk::PaykitBackup) -> Paykit {
     let mut app = Paykit::restore(
@@ -266,7 +266,7 @@ async fn test_restore_paid_attempt_to_a_single_use_list_endpoint_sends_its_proof
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     let mut any = draft("1", w.clock.now_ms());
     any.destination = paykit_lib::bodies::RequestDestination::Any;
@@ -596,7 +596,10 @@ async fn test_restore_corrupt_journal_refused_and_nothing_written() {
     let damages: [(&str, serde_json::Value); 4] = [
         ("label", serde_json::json!("Not A Label!")),
         ("source", serde_json::json!("elsewhere")),
-        ("list_version", serde_json::json!(7)),
+        (
+            "list_version",
+            serde_json::json!({"generation": 1, "counter": 7}),
+        ),
         ("payment_reference", serde_json::Value::Null),
     ];
     for (member, value) in damages {
@@ -876,7 +879,7 @@ async fn test_restore_journal_entry_naming_another_obligation_refused() {
 
 /// Bob's app `app` sends alice's wallet a list with a single-use on-chain endpoint and a
 /// reusable Lightning offer.
-fn list_from(w: &World, app: &str, wallet: [u8; 16], version: u64) {
+fn list_from(w: &World, app: &str, wallet: [u8; 16], version: paykit_lib::ListVersion) {
     let mut endpoints = std::collections::BTreeMap::new();
     endpoints.insert(
         crate::common::endpoint("btc-bitcoin-p2wpkh"),
@@ -939,8 +942,13 @@ async fn rewrite_marks(wallet: &mut Paykit, w: &World, app_id: [u8; 16], used: s
         .unwrap();
 }
 
-fn mark(version: u64, endpoint: &str, attempt_id: paykit_lib::AttemptId) -> serde_json::Value {
-    serde_json::json!({ "version": version, "endpoint": endpoint, "attempt_id": attempt_id.to_text() })
+fn mark(
+    version: paykit_lib::ListVersion,
+    endpoint: &str,
+    attempt_id: paykit_lib::AttemptId,
+) -> serde_json::Value {
+    serde_json::json!({ "version": version, "endpoint": endpoint,
+        "attempt_id": attempt_id.to_text() })
 }
 
 /// A wallet with lists from bob's `shop` and `other`, a backup taken before paying
@@ -951,14 +959,19 @@ async fn reconcile_with_marks(
     destination: impl Fn([u8; 16]) -> paykit_lib::bodies::RequestDestination,
     accepted: Option<Vec<&str>>,
     paid: &str,
-    marks: impl Fn([u8; 16], [u8; 16], u64, paykit_lib::AttemptId) -> Vec<([u8; 16], serde_json::Value)>,
+    marks: impl Fn(
+        [u8; 16],
+        [u8; 16],
+        paykit_lib::ListVersion,
+        paykit_lib::AttemptId,
+    ) -> Vec<([u8; 16], serde_json::Value)>,
 ) -> (World, paykit_sdk::ReconcileReport, paykit_sdk::RequestRef) {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let other = w.labelled_shop("other", "other").await;
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
-    let version = w.clock.now_ms();
+    let version = list_version(1, 3);
     list_from(&w, "shop", wallet.app_id(), version);
     list_from(&w, "other", wallet.app_id(), version);
     let mut any = draft("1", w.clock.now_ms());
@@ -1348,7 +1361,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
         "paykit.private_payment_list",
         serde_json::Value::Object(
             paykit_lib::bodies::PrivatePaymentList {
-                version: 1,
+                version: list_version(1, 1),
                 payment_endpoints: std::collections::BTreeMap::new(),
                 expires_at: w.clock.now_ms() + 86_400_000,
             }
@@ -2349,7 +2362,7 @@ async fn test_restore_unrequested_entry_naming_another_payments_record_refused()
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     for value in ["0.0015", "0.0025"] {

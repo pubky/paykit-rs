@@ -691,13 +691,13 @@ impl World {
         &self,
         shop: &mut Paykit,
         targets: &[[u8; 16]],
-        version: u64,
+        version: paykit_lib::ListVersion,
     ) -> String {
         let mut endpoints = std::collections::BTreeMap::new();
         endpoints.insert(
             endpoint("btc-bitcoin-p2wpkh"),
             paykit_lib::bodies::ListEndpoint {
-                payload: PaymentEndpointPayload::new(&format!("bc1qsingle{version}")).unwrap(),
+                payload: PaymentEndpointPayload::new(&single_use_payload(version)).unwrap(),
                 single_use: true,
             },
         );
@@ -718,7 +718,7 @@ impl World {
         &self,
         shop: &mut Paykit,
         targets: &[[u8; 16]],
-        version: u64,
+        version: paykit_lib::ListVersion,
         endpoints: std::collections::BTreeMap<
             PaymentEndpointIdentifier,
             paykit_lib::bodies::ListEndpoint,
@@ -1101,4 +1101,14 @@ pub async fn over_hold(app: &Paykit, request: &paykit_sdk::RequestRef) -> paykit
         Some(held) => paykit_sdk::PayOptions::default().with_possibly_cancelled_confirmed(held),
         None => paykit_sdk::PayOptions::default(),
     }
+}
+
+/// The Private Payment List version `(generation, counter)` (Paykit wire 4.13).
+pub fn list_version(generation: u64, counter: u64) -> paykit_lib::ListVersion {
+    paykit_lib::ListVersion::new(generation, counter).unwrap()
+}
+
+/// The single-use on-chain payload of [`World::list_to_alice`]'s list of `version`.
+pub fn single_use_payload(version: paykit_lib::ListVersion) -> String {
+    format!("bc1qsingle{}x{}", version.generation(), version.counter())
 }

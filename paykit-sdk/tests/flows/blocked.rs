@@ -10,7 +10,9 @@ use pubky_switch_client::clock::Clock;
 use pubky_switch_client::testing::Fault;
 use pubky_switch_core::http::ErrorCode;
 
-use crate::common::{btc, day_window, draft, endpoint, request_from, store, World, HOUR_MS};
+use crate::common::{
+    btc, day_window, draft, endpoint, list_version, request_from, store, World, HOUR_MS,
+};
 
 /// Alice's wallet holding `paykit_pay` and `paykit_manage_contacts`, with bob's request received,
 /// then bob blocked. Returns the wallet and the request.
@@ -156,7 +158,7 @@ async fn test_blocked_resume_makes_no_repeat_while_the_deny_list_fails() {
 async fn test_blocked_payment_without_a_request_made_only_once_confirmed() {
     let w = World::new();
     let (mut wallet, mut shop, _) = received(&w, PaykitConfig::default()).await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     wallet.block(&w.bob_id()).await.unwrap();
@@ -2424,7 +2426,7 @@ async fn blocked_then_unknown(
     paykit_sdk::BlockedPayment,
 ) {
     let (mut wallet, mut shop, request) = received(w, PaykitConfig::default()).await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     wallet.block(&w.bob_id()).await.unwrap();

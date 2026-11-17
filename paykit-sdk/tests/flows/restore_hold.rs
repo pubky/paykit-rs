@@ -12,7 +12,7 @@ use paykit_sdk::{
 use pubky_switch_client::app::UserConfirmed;
 use pubky_switch_client::clock::Clock;
 
-use crate::common::{draft, request_from, store, World, HOUR_MS};
+use crate::common::{draft, list_version, request_from, store, World, HOUR_MS};
 use pubky_switch_core::records::CLOCK_TOLERANCE_MS;
 
 async fn restored(w: &World, backup: &PaykitBackup) -> Paykit {
@@ -893,7 +893,7 @@ async fn test_restore_hold_missed_item_asks_the_payee_of_an_open_request_another
     let mut wallet = w.wallet("wallet").await;
     let mut phone = w.wallet("phone").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[phone.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[phone.app_id()], list_version(1, 1))
         .await;
     let request = signed_request(&w, "order-1");
     w.deliver(&w.bob, "shop", &w.alice, &[phone.app_id()], &request);

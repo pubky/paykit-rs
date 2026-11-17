@@ -2495,7 +2495,7 @@ mod receive_tests {
             "paykit.private_payment_list",
             vec![],
             object(json!({
-                "version": 7,
+                "version": { "generation": 1, "counter": 7 },
                 "expires_at": pubky_switch_core::time::rfc3339(NOW + 3_600_000),
                 "payment_endpoints": {
                     "btc-bitcoin-p2wpkh": { "payload": "bc1q", "single_use": true }

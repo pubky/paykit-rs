@@ -13,7 +13,7 @@ use paykit_sdk::rail::{Rail, RailOutcome};
 use paykit_sdk::{Paykit, PaykitConfig};
 use pubky_switch_client::clock::Clock;
 
-use crate::common::{btc, endpoint, store, World, HOUR_MS};
+use crate::common::{btc, endpoint, list_version, store, World, HOUR_MS};
 
 const USD: &str = "usd-ach-account";
 const BTC: &str = "btc-lightning-bolt11";
@@ -138,7 +138,7 @@ async fn check_credit(case: Case, expected: bool) {
             )]
             .into_iter()
             .collect();
-            w.list_to_alice_with(&mut shop, &[wallet.app_id()], 1, endpoints)
+            w.list_to_alice_with(&mut shop, &[wallet.app_id()], list_version(1, 1), endpoints)
                 .await;
             wallet.receive(None).await.unwrap();
         }
@@ -235,7 +235,7 @@ async fn check_credit(case: Case, expected: bool) {
         billing_period: Some(period),
         payment_endpoint_identifier: endpoint(id),
         payment_app_id: shop.app_id(),
-        list_version: matches!(case.destination, Destination::List).then_some(1),
+        list_version: matches!(case.destination, Destination::List).then_some(list_version(1, 1)),
         amount: None,
         allowance_id: None,
         label: None,

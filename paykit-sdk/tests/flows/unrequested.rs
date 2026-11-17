@@ -5,7 +5,7 @@ use paykit_sdk::{PayOptions, PayOutcome, PayeeStatus, Paykit, Refusal, Unrequest
 use pubky_switch_client::app::AppEvent;
 use pubky_switch_client::clock::Clock;
 
-use crate::common::{btc, endpoint, World, HOUR_MS};
+use crate::common::{btc, endpoint, list_version, single_use_payload, World, HOUR_MS};
 
 /// How many `private_payment_list_request`s `shop` takes at its next receive. It publishes no
 /// list, so each one is taken with no effect (Paykit spec 8.4).
@@ -31,7 +31,7 @@ async fn test_unrequested_payment_paid_proven_and_receipted() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     assert_eq!(wallet.receive(None).await.unwrap().applied.len(), 1);
 
@@ -79,7 +79,7 @@ async fn test_unrequested_single_use_endpoint_used_once() {
     w.list_to_alice(
         &mut shop,
         &[wallet.app_id(), phone.app_id()],
-        w.clock.now_ms(),
+        list_version(1, 1),
     )
     .await;
     wallet.receive(None).await.unwrap();
@@ -124,7 +124,7 @@ async fn test_unrequested_single_use_endpoint_used_once() {
 
     // A newer list carries a fresh single-use endpoint.
     w.clock.advance_ms(1000);
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 2))
         .await;
     wallet.receive(None).await.unwrap();
     let fresh = wallet
@@ -167,7 +167,7 @@ async fn test_unrequested_expired_list_refused() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     shop.receive(None).await.unwrap();
@@ -225,8 +225,8 @@ async fn test_unrequested_used_up_list_asks_again_for_each_newer_version() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    let first = w.clock.now_ms();
-    w.list_to_alice(&mut shop, &[wallet.app_id()], first).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
     wallet.receive(None).await.unwrap();
     let paid = wallet
         .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
@@ -251,7 +251,7 @@ async fn test_unrequested_used_up_list_asks_again_for_each_newer_version() {
     assert_eq!(list_requests(&mut shop).await, 0);
     // A newer list, used up in turn, is a new version held: asked at once, within the day.
     w.clock.advance_ms(1000);
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 2))
         .await;
     wallet.receive(None).await.unwrap();
     wallet
@@ -275,7 +275,7 @@ async fn test_unrequested_after_an_idle_spell_not_refused_for_its_deadline() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     // The wallet hears nothing from its switch for 11 minutes: the highest service time it
@@ -294,7 +294,7 @@ async fn test_unrequested_proof_and_receipt_carry_the_attempt_and_no_request_mem
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     let outcome = wallet
@@ -354,12 +354,48 @@ async fn test_unrequested_proof_and_receipt_carry_the_attempt_and_no_request_mem
     assert!(receipt["billing_period"].is_null());
 }
 
+#[tokio::test]
+async fn test_unrequested_next_generation_list_replaces_the_last_counter() {
+    // Versions compare generation first, then counter: the shop's list at the next
+    // generation's first counter is newer than one at the last counter of the generation
+    // before, replaces it, and is the one paid (Paykit wire 4.13).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let last = list_version(1, pubky_switch_core::json::MAX_INT);
+    let next = list_version(2, 1);
+    w.list_to_alice(&mut shop, &[wallet.app_id()], last).await;
+    wallet.receive(None).await.unwrap();
+    w.list_to_alice(&mut shop, &[wallet.app_id()], next).await;
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.held_lists().await.unwrap().is_empty());
+    let outcome = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    let held = wallet
+        .app()
+        .records_of("payer_activity")
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|r| r.content.value().map(<[u8]>::to_vec))
+        .unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&held).unwrap();
+    assert_eq!(
+        record["unrequested"]["list_version"],
+        serde_json::to_value(next).unwrap()
+    );
+    assert_eq!(record["unrequested"]["payload"], single_use_payload(next));
+}
+
 // ---------------------------------------------------------------------------------------
 // A later `payment_lists` write another own app makes (Paykit wire 5.4, "Seen lists")
 
 /// A `private_payment_list` from bob's `shop` to alice at `version`, with one single-use
 /// on-chain endpoint paying `payload`, as a record stores it: signed, not delivered.
-fn stored_list(w: &World, version: u64, payload: &str) -> serde_json::Value {
+fn stored_list(w: &World, version: paykit_lib::ListVersion, payload: &str) -> serde_json::Value {
     let mut endpoints = std::collections::BTreeMap::new();
     endpoints.insert(
         crate::common::endpoint("btc-bitcoin-p2wpkh"),
@@ -417,8 +453,13 @@ async fn list_record(
     (target, value)
 }
 
-/// The phone, another own app, writes the record `change` makes of the one it holds; the
-/// wallet then reads its feed. Returns what the wallet holds after, and its flagged writes.
+/// The version of the list [`written_by_the_phone`] starts from.
+fn phone_list_version() -> paykit_lib::ListVersion {
+    list_version(1, 1)
+}
+
+/// The phone, another own app, writes the record `change` makes of the one it holds, a list of
+/// [`phone_list_version`] paid to its single-use endpoint; the wallet then reads its feed. Returns what the wallet holds after, and its flagged writes.
 async fn written_by_the_phone(
     w: &World,
     change: impl FnOnce(&World, &mut serde_json::Value),
@@ -430,7 +471,7 @@ async fn written_by_the_phone(
     let mut wallet = w.wallet("wallet").await;
     let mut phone = w.wallet("phone").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], phone_list_version())
         .await;
     wallet.receive(None).await.unwrap();
     // The wallet pays its single-use endpoint: the record marks it used.
@@ -464,10 +505,9 @@ async fn written_by_the_phone(
 #[tokio::test]
 async fn test_unrequested_later_list_record_with_another_list_at_its_version_flagged() {
     let w = World::new();
-    let version = w.clock.now_ms();
     let (before, flagged, after) = written_by_the_phone(&w, move |w, value| {
         // Another list at the version held: an equivocation, never taken.
-        let other = stored_list(w, version, "bc1qother");
+        let other = stored_list(w, phone_list_version(), "bc1qother");
         assert_ne!(value["list"], other);
         value["list"] = other;
     })
@@ -482,7 +522,8 @@ async fn test_unrequested_later_list_record_dropping_a_used_mark_flagged() {
     let (before, flagged, after) = written_by_the_phone(&w, move |w, value| {
         // A newer list, but the single-use mark seen dropped: a newer list doesn't reset
         // `used` (Paykit wire 5.4).
-        value["list"] = stored_list(w, w.clock.now_ms() + 1000, "bc1qnewer");
+        let newer = phone_list_version().next().unwrap();
+        value["list"] = stored_list(w, newer, "bc1qnewer");
         value["used"] = serde_json::json!([]);
     })
     .await;
@@ -503,8 +544,12 @@ async fn test_unrequested_list_over_a_record_that_doesnt_read_keeps_single_use_m
     let mut phone = w.wallet("phone").await;
     let mut tool = w.wallet("tool").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id(), phone.app_id()], 1)
-        .await;
+    w.list_to_alice(
+        &mut shop,
+        &[wallet.app_id(), phone.app_id()],
+        list_version(1, 1),
+    )
+    .await;
     // The wallet pays the single-use endpoint: it is marked used in the record, in the
     // attempt's batch.
     wallet.receive(None).await.unwrap();
@@ -537,7 +582,7 @@ async fn test_unrequested_list_over_a_record_that_doesnt_read_keeps_single_use_m
     let held = phone.held_lists().await.unwrap();
     assert_eq!(held.len(), 1, "{held:?}");
     assert_eq!(held[0].payee, w.bob_id());
-    assert_eq!(held[0].version, 1);
+    assert_eq!(held[0].version, list_version(1, 1));
     let refused = phone
         .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
         .await;
@@ -554,7 +599,8 @@ async fn test_unrequested_list_after_a_delete_is_held_until_placed_without_marks
     let mut wallet = w.wallet("wallet").await;
     let mut phone = w.wallet("phone").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
     wallet.receive(None).await.unwrap();
     let paid = wallet
         .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
@@ -583,7 +629,8 @@ async fn test_unrequested_list_after_a_delete_is_held_until_placed_without_marks
 
     // Bob sends a list of the same version again, the single-use endpoint the wallet paid
     // in it: written afresh, it would be payable again. It is held instead.
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
     wallet.receive(None).await.unwrap();
     let held = wallet.held_lists().await.unwrap();
     assert_eq!(held.len(), 1, "{held:?}");
@@ -615,7 +662,7 @@ async fn test_unrequested_with_the_own_switch_down_refused_and_nothing_paid() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     // Alice's switch stops answering: the SDK makes no payment without it (Paykit spec 8.4
@@ -639,7 +686,7 @@ async fn test_unrequested_with_the_own_switch_unavailable_refused_and_nothing_pa
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     w.alice
@@ -666,7 +713,7 @@ async fn test_unrequested_paid_with_its_outcome_unwritten_is_no_error() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     // The attempt's batch goes through; the outcome's, after the method paid, can't connect.
@@ -774,8 +821,12 @@ async fn test_unrequested_list_over_a_value_awaiting_its_epoch_key_keeps_single_
     let mut wallet = w.wallet("wallet").await;
     let mut phone = w.wallet("phone").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id(), phone.app_id()], 1)
-        .await;
+    w.list_to_alice(
+        &mut shop,
+        &[wallet.app_id(), phone.app_id()],
+        list_version(1, 1),
+    )
+    .await;
     wallet.receive(None).await.unwrap();
     let paid = wallet
         .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
@@ -823,7 +874,8 @@ async fn test_unrequested_list_over_a_value_awaiting_its_epoch_key_keeps_single_
         "{:?}",
         held.content
     );
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 2).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 2))
+        .await;
     wallet.receive(None).await.unwrap();
     assert!(wallet.held_lists().await.unwrap().is_empty());
     let refused = wallet
@@ -876,7 +928,7 @@ async fn test_unrequested_receipt_from_another_identity_refused() {
             paykit_sdk::AppScopes::new().request().build().unwrap(),
         )
         .await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     let PayOutcome::Paid { attempt_id, .. } = wallet
@@ -947,7 +999,7 @@ async fn test_unrequested_proof_of_a_settlement_seen_not_credited_again_over_its
             paykit_sdk::AppScopes::new().request().build().unwrap(),
         )
         .await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     let outcome = wallet

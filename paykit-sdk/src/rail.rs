@@ -404,9 +404,11 @@ pub trait Rail: Send + Sync {
     ///
     /// - a request's own endpoints: by Payment Endpoint Identifier;
     /// - the payee's public endpoints: by App ID, then by identifier;
-    /// - the payee's Private Payment Lists in use: newest version first, then by App ID,
-    ///   then by identifier, a single-use endpoint already used at its list's version left
-    ///   out.
+    /// - the payee's Private Payment Lists in use: by list version, the greater pair
+    ///   (generation, then counter) first, then by App ID, then by identifier, a single-use
+    ///   endpoint already used at its list's version left out. Versions of different
+    ///   publishing apps are ordered by number only; the order says nothing of which list
+    ///   was published later.
     ///
     /// Only endpoints the payment may use are handed in: those of the request's accepted
     /// identifiers, and the one the caller named, if any. A payload is sensitive: see

@@ -11,7 +11,7 @@ use pubky_switch_client::testing::Fault;
 use pubky_switch_core::claims::Outcome;
 
 use crate::common::{
-    asked, draft, mark_senders, refuse_writes, request_from, seed_marks, store, World,
+    asked, draft, list_version, mark_senders, refuse_writes, request_from, seed_marks, store, World,
 };
 use pubky_switch_core::records::DAY_MS;
 
@@ -847,7 +847,7 @@ async fn test_stored_refused_list_held_notes_its_sender() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     refuse_writes(&w.alice, 2);
     wallet.receive(None).await.unwrap();
@@ -1302,7 +1302,7 @@ async fn test_stored_refused_unrequested_proof_credited_later() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     let outcome = wallet
@@ -1547,7 +1547,7 @@ async fn test_stored_refused_lists_hold_the_newer() {
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     // Each list's step is refused, and so is the write that would place the held list.
-    for version in [w.clock.now_ms(), w.clock.now_ms() + 1] {
+    for version in [list_version(1, 1), list_version(1, 2)] {
         w.list_to_alice(&mut shop, &[wallet.app_id()], version)
             .await;
         refuse_writes(&w.alice, 2);
@@ -1839,10 +1839,10 @@ async fn test_stored_refused_older_list_never_replaces_a_newer_held() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    let newer = w.clock.now_ms() + 1;
+    let newer = list_version(1, 2);
     // The newer list's step is refused, then the older's, and the writes that would place
     // the held list: the newer stays held.
-    for version in [newer, newer - 1] {
+    for version in [newer, list_version(1, 1)] {
         w.list_to_alice(&mut shop, &[wallet.app_id()], version)
             .await;
         refuse_writes(&w.alice, 2);
@@ -3033,7 +3033,7 @@ async fn test_stored_receipt_dropped_mark_waits_over_a_payment_without_a_request
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     let bob = w.bob_id();
@@ -3132,7 +3132,7 @@ async fn test_stored_reply_dropped_mark_waits_at_the_payee_over_a_payment_withou
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     let alice = w.alice_id();
