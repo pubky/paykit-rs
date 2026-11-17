@@ -2683,231 +2683,171 @@ impl SettlementMark {
     }
 }
 
-/// What adding a mark to a bucket gives ([`SettlementBucket::add`]).
+/// What adding a mark to a bucket gives.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MarkAdded {
-    /// The bucket with the mark in its place: the value the credit's batch writes.
+enum MarkAdded {
+    /// The bucket with the mark in its place.
     Added(SettlementBucket),
-    /// The bucket already holds a mark of the settlement, this one: the settlement is
-    /// credited already, to the occurrence it names.
+    /// The bucket already holds this mark of the settlement.
     Marked(SettlementMark),
-    /// The bucket holds 9,000 marks and none of the settlement: it can't take the mark, so the
-    /// settlement is credited only by hand (Paykit wire 5.7, Full).
+    /// The bucket holds 9,000 marks and none of the settlement.
     Full,
 }
 
 /// What merging the marks a reader has seen into a bucket's current write gives
-/// ([`SettlementBucket::merged_with_seen`]).
+/// ([`SettlementBucket::merged_with_seen`], [`SettlementBucket::merged_with`]; Paykit wire 5.7,
+/// Seen marks and Over capacity).
+///
+/// `twice` lists the settlements the merged marks name with two occurrences, each once, in
+/// ascending order: the merge keeps the lower mark, and the app shows its user that each may
+/// be credited twice. `show_writer` is whether the current write drops a seen mark or raises
+/// it to a higher mark of its settlement: the app shows that write with its writer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SeenMerge {
-    /// The write holds every seen mark, or a lower mark of its settlement, and every retained
-    /// deletion restriction: nothing to write. Conflicts still need to be shown to the user.
+    /// The current write holds every seen mark, or a lower mark of its settlement: nothing to
+    /// write.
     Holds {
-        /// The settlements named with two occurrences, each once, in ascending order.
+        /// The settlements named with two occurrences.
         twice: Vec<[u8; SETTLEMENT_TAG_LEN]>,
     },
-    /// The write lacks a seen mark: the bucket to write back, with every mark of the write and
-    /// every seen mark, the lower where two name one settlement, and the settlements so named
-    /// with two occurrences, which the app shows its user as possibly credited twice.
+    /// The current write lacks a seen mark: the app writes `bucket` at the current write's
+    /// version, with every mark of the write and every seen mark, the lower where two name
+    /// one settlement.
     WriteBack {
         /// The bucket to write.
         bucket: SettlementBucket,
-        /// The settlements named with two occurrences, each once, in ascending order.
+        /// The settlements named with two occurrences.
         twice: Vec<[u8; SETTLEMENT_TAG_LEN]>,
+        /// Whether the current write is shown with its writer.
+        show_writer: bool,
     },
-    /// The complete union exceeds 9,000 marks. The bounded write keeps the current marks,
-    /// fills remaining places in byte order and retains the complete boundary union.
-    Full {
-        /// The full bucket to write; marks that did not fit remain seen locally.
-        bucket: SettlementBucket,
-        /// The settlements named with two occurrences, each once, in ascending order.
+    /// The marks to hold exceed 9,000 (Over capacity). The app keeps every seen mark in its
+    /// own state, those that don't fit too, and tells its host once per bucket
+    /// (`SettlementBucketFull`).
+    OverCapacity {
+        /// The full bucket to write at the current write's version: the current write's
+        /// settlements, then the other seen marks in ascending byte order while places remain.
+        /// `None` when the current write already is that bucket: nothing to write.
+        bucket: Option<SettlementBucket>,
+        /// The settlements named with two occurrences.
         twice: Vec<[u8; SETTLEMENT_TAG_LEN]>,
+        /// Whether the current write is shown with its writer.
+        show_writer: bool,
+    },
+    /// The current write or the merged copy carries a `lost_to_delete` member: the bucket is
+    /// held, and no merge writes it.
+    HeldForDelete,
+}
+
+/// The current write of a settlement's bucket, as the read before a credit found it at the
+/// switch (Paykit wire 5.7, Reading).
+#[derive(Clone, Copy, Debug)]
+pub enum CurrentBucket<'a> {
+    /// No current value at the bucket's key.
+    Absent,
+    /// A current write that doesn't open, a read that failed, or a view that shows the
+    /// bucket divergent (Paykit spec 6, Divergent records).
+    Unopened,
+    /// The opened plaintext of the current write read at `key`, for bucket `bucket` under
+    /// the payee's naming key.
+    Opened {
+        /// The plaintext.
+        json: &'a [u8],
+        /// The bucket's number.
+        bucket: u16,
+        /// The payee's own naming key.
+        naming_key: &'a NamingKey,
+        /// The record key the write was read at.
+        key: &'a [u8; 32],
     },
 }
 
-/// The largest known deletion-boundary set of a settlement bucket (Paykit wire 5.7).
-pub const MAX_SETTLEMENT_DELETES: usize = 128;
-
-/// Retained deletion restrictions of a settlement bucket (Paykit wire 5.7).
-///
-/// A known boundary holds a nonempty bounded set of delete item hashes. An unknown boundary
-/// is absorbing: no rewrite, restore or recovery may narrow it. Hashes identify restrictions;
-/// neither their order nor their presence proves when a delete applied or permits a credit.
+/// What a credit of a settlement may do, from its bucket's current write and the marks the app
+/// has seen in it ([`SettlementBucket::decide_credit`]; Paykit wire 5.7; Paykit spec 8.1
+/// step 4).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SettlementBoundary {
-    deletes: Option<Vec<[u8; 32]>>,
+pub enum CreditDecision {
+    /// The credit's batch writes `bucket`, at the version read or as a new bucket, beside
+    /// the receipt: the current write with every seen mark and the mark in its place.
+    Credit {
+        /// The bucket to write.
+        bucket: SettlementBucket,
+        /// The settlements the merged marks name with two occurrences (see [`SeenMerge`]).
+        twice: Vec<[u8; SETTLEMENT_TAG_LEN]>,
+        /// Whether the current write is shown with its writer (see [`SeenMerge`]).
+        show_writer: bool,
+    },
+    /// The bucket or the app's seen marks hold this mark of the settlement: it is credited
+    /// already, to the occurrence the mark names, whatever the user confirms.
+    Marked(SettlementMark),
+    /// The current write carries a `lost_to_delete` member, of any shape, `null` included,
+    /// valid or not: no credit and no receipt, automatically or by hand, and no write of the
+    /// bucket; the host is told (`CreditHeldForDelete`).
+    HeldForDelete,
+    /// The bucket can't take the mark (Full, Over capacity): the settlement is credited only
+    /// by hand, its receipt stored without a mark; the host is told once per bucket
+    /// (`SettlementBucketFull`).
+    Full,
+    /// The current write doesn't open, read or bind, or is divergent: the settlement may
+    /// already be credited, and is credited only by hand once the user has been shown that
+    /// it may be (`CreditNeedsUser`).
+    NeedsUser,
 }
 
-impl SettlementBoundary {
-    /// A known boundary, sorting and deduplicating `deletes` into canonical byte order.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Validation`] for an empty set or more than 128 distinct hashes.
-    pub fn known(mut deletes: Vec<[u8; 32]>) -> Result<Self> {
-        deletes.sort_unstable();
-        deletes.dedup();
-        if deletes.is_empty() || deletes.len() > MAX_SETTLEMENT_DELETES {
-            return Err(Error::Validation(
-                "Paykit wire 5.7: a known boundary holds 1 to 128 deletes".into(),
-            ));
-        }
-        Ok(Self {
-            deletes: Some(deletes),
-        })
-    }
-
-    /// An unknown boundary, which permits no new settlement credit (Paykit wire 5.7).
-    pub fn unknown() -> Self {
-        Self { deletes: None }
-    }
-
-    /// The canonical known hashes, or `None` when the boundary is unknown.
-    pub fn deletes(&self) -> Option<&[[u8; 32]]> {
-        self.deletes.as_deref()
-    }
-
-    /// The complete union, becoming unknown if either input is unknown or more than 128
-    /// distinct hashes would be needed. No hash is truncated to fit (Paykit wire 5.7).
-    pub fn merged_with(&self, other: &Self) -> Self {
-        let (Some(left), Some(right)) = (&self.deletes, &other.deletes) else {
-            return Self::unknown();
-        };
-        let mut deletes = left.clone();
-        deletes.extend_from_slice(right);
-        deletes.sort_unstable();
-        deletes.dedup();
-        if deletes.len() > MAX_SETTLEMENT_DELETES {
-            Self::unknown()
-        } else {
-            Self {
-                deletes: Some(deletes),
-            }
-        }
-    }
-
-    /// Whether this boundary retains every restriction of `earlier` (Paykit wire 5.7).
-    pub fn preserves(&self, earlier: &Self) -> bool {
-        match (&self.deletes, &earlier.deletes) {
-            (None, _) => true,
-            (Some(_), None) => false,
-            (Some(current), Some(previous)) => previous
-                .iter()
-                .all(|hash| current.binary_search(hash).is_ok()),
-        }
-    }
-
-    fn read(value: &Value) -> Result<Self> {
-        let obj = Obj::of(value, SETTLEMENTS, "lost_to_delete")?;
-        match obj.req_str("kind")? {
-            "known" => {
-                let values = obj.req_arr("deletes")?;
-                if values.is_empty() || values.len() > MAX_SETTLEMENT_DELETES {
-                    return Err(bad(SETTLEMENTS, "deletes", "requires 1 to 128 hashes"));
-                }
-                let deletes = values
-                    .iter()
-                    .map(|value| {
-                        let text = value
-                            .as_str()
-                            .ok_or_else(|| bad(SETTLEMENTS, "deletes", "a hash is not a string"))?;
-                        unb64(text)
-                            .ok()
-                            .and_then(|bytes| bytes.try_into().ok())
-                            .ok_or_else(|| {
-                                bad(
-                                    SETTLEMENTS,
-                                    "deletes",
-                                    "a hash is not canonical b64 of 32 bytes",
-                                )
-                            })
-                    })
-                    .collect::<Result<Vec<[u8; 32]>>>()?;
-                if deletes.windows(2).any(|pair| pair[0] >= pair[1]) {
-                    return Err(bad(SETTLEMENTS, "deletes", "not strictly ascending"));
-                }
-                Ok(Self {
-                    deletes: Some(deletes),
-                })
-            }
-            "unknown" if !obj.has("deletes") => Ok(Self::unknown()),
-            "unknown" => Err(bad(SETTLEMENTS, "deletes", "present with unknown boundary")),
-            _ => Err(bad(SETTLEMENTS, "kind", "unknown boundary kind")),
-        }
-    }
-}
-
-impl Serialize for SettlementBoundary {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        #[serde(tag = "kind", rename_all = "snake_case")]
-        enum Boundary {
-            Known { deletes: Vec<String> },
-            Unknown,
-        }
-        match &self.deletes {
-            Some(deletes) => Boundary::Known {
-                deletes: deletes.iter().map(|hash| b64(hash)).collect(),
-            },
-            None => Boundary::Unknown,
-        }
-        .serialize(serializer)
-    }
+/// A `settlements` bucket value that isn't a valid bucket at its key (Paykit wire 5.7).
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{error}")]
+pub struct InvalidBucket {
+    /// The rule the value breaks.
+    pub error: Error,
+    /// Whether the value carries a `lost_to_delete` member, of any shape: a credit over it is
+    /// then held, never made by hand.
+    pub lost_to_delete: bool,
 }
 
 /// A `settlements` bucket record value (Paykit wire 5.7): the marks of the settlements of one
 /// bucket that any own payee app has credited, labelled or not, in strictly ascending order of
 /// settlement tag, at most 9,000.
 ///
-/// Security: no writer removes or changes a mark, so a reader that has seen a mark ignores a
-/// later write that drops it or changes it to another occurrence
-/// ([`SettlementBucket::check_later_write`]), and writes the bucket back with every mark it has
-/// seen ([`SettlementBucket::merged_with_seen`]). A mark outlives the activity record that
-/// credited it, so a settlement shown again over a deleted record isn't credited twice.
+/// Security: a credit is decided only by [`SettlementBucket::decide_credit`]. No writer
+/// removes or changes a mark, so a reader that has seen a mark shows a later write that drops
+/// it or raises it, and writes the bucket back with every mark it has seen
+/// ([`SettlementBucket::merged_with_seen`]). A mark outlives the activity record that credited
+/// it, so a settlement shown again over a deleted record isn't credited twice. A value carrying
+/// a `lost_to_delete` member, whatever it holds, is never credited into or rewritten.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SettlementBucket {
     marks: Vec<SettlementMark>,
-    /// Retained deletion boundaries, omitted only when none is retained. Every later write
-    /// preserves their union; credit needs the separate evidence of Paykit wire 5.7.
-    pub lost_to_delete: Option<SettlementBoundary>,
+    /// Whether the value carries a `lost_to_delete` member, kept as read among `unknown`.
+    lost_to_delete: bool,
     /// The members the writer doesn't know, kept as read (Paykit wire 5).
     pub unknown: UnknownMembers,
 }
 
 const SETTLEMENTS: &str = "Paykit wire 5.7: settlements";
 
-/// A `settlements` bucket value (Paykit wire 5.7).
+/// The member whose presence, whatever it holds, withholds every credit and write of a
+/// bucket.
+const LOST_TO_DELETE: &str = "lost_to_delete";
+
+/// A `settlements` bucket value (Paykit wire 5.7). `lost_to_delete` isn't one of its members
+/// here: a value carrying it is kept as read and never written.
 static SETTLEMENTS_SHAPE: Shape = Shape {
     name: "settlements",
     id: &[],
     carried: false,
-    members: &[
-        ("v", Member::Leaf),
-        ("marks", Member::Leaf),
-        ("lost_to_delete", Member::Object(&SETTLEMENT_BOUNDARY_SHAPE)),
-    ],
-};
-
-static SETTLEMENT_BOUNDARY_SHAPE: Shape = Shape {
-    name: "settlement boundary",
-    id: &[],
-    carried: false,
-    members: &[("kind", Member::Leaf), ("deletes", Member::Leaf)],
+    members: &[("v", Member::Leaf), ("marks", Member::Leaf)],
 };
 
 #[derive(Serialize)]
-struct SettlementsOut<'a> {
+struct SettlementsOut {
     v: u64,
     marks: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    lost_to_delete: Option<&'a SettlementBoundary>,
 }
 
 /// Check marks as a bucket holds them: at most 9,000, in strictly ascending settlement-tag
-/// order. An empty set also requires a retained boundary, checked by the enclosing bucket.
+/// order. An empty set also requires a `lost_to_delete` member, checked by the enclosing
+/// bucket.
 fn check_marks(marks: &[SettlementMark]) -> Result<()> {
     if marks.len() > MAX_SETTLEMENT_MARKS {
         return Err(bad(SETTLEMENTS, "marks", "more than 9,000 marks"));
@@ -2927,10 +2867,8 @@ fn check_marks(marks: &[SettlementMark]) -> Result<()> {
 }
 
 impl SettlementBucket {
-    /// An empty bucket, one no credit has written yet: a bucket at no key, or one a reader holds
-    /// as deleted, to which a mark is added ([`SettlementBucket::add`]) or seen marks are
-    /// written back ([`SettlementBucket::merged_with_seen`]). It has no writable value until
-    /// it holds a mark or a deletion boundary.
+    /// An empty bucket, the base of a credit at a key with no value
+    /// ([`CurrentBucket::Absent`]). It has no writable value until it holds a mark.
     pub fn new() -> Self {
         Self::default()
     }
@@ -2944,46 +2882,18 @@ impl SettlementBucket {
         marks.sort();
         let bucket = Self {
             marks,
-            lost_to_delete: None,
-            unknown: UnknownMembers::default(),
+            ..Self::default()
         };
         bucket.check().map_err(Error::into_validation)?;
         Ok(bucket)
     }
 
-    /// A boundary-only bucket for a retained restriction when no mark is held (Paykit wire
-    /// 5.7). Publication and credit still require the separate authenticated runtime guards.
-    pub fn with_boundary(boundary: SettlementBoundary) -> Self {
-        Self {
-            marks: Vec::new(),
-            lost_to_delete: Some(boundary),
-            unknown: UnknownMembers::default(),
-        }
-    }
-
     fn check(&self) -> Result<()> {
         check_marks(&self.marks)?;
-        if self.marks.is_empty() && self.lost_to_delete.is_none() {
+        if self.marks.is_empty() && !self.lost_to_delete {
             return Err(bad(SETTLEMENTS, "marks", "no mark or deletion boundary"));
         }
         Ok(())
-    }
-
-    /// The deletion restriction of a readable value, even when the whole bucket is invalid
-    /// (Paykit wire 5.7, Deletion boundaries and Repairing). A malformed present boundary is
-    /// retained as unknown; an absent member contributes no restriction. This does not grant
-    /// credit authority or weaken a boundary the caller already retains.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Invalid`] when the JSON object itself cannot be read. An unopened value alone
-    /// supplies no deletion evidence.
-    pub fn read_boundary(json: &[u8]) -> Result<Option<SettlementBoundary>> {
-        let map = parse_object(json, SETTLEMENTS)?;
-        let obj = Obj::new(&map, SETTLEMENTS);
-        Ok(obj.opt("lost_to_delete").map(|value| {
-            SettlementBoundary::read(value).unwrap_or_else(|_| SettlementBoundary::unknown())
-        }))
     }
 
     /// The bucket's marks, in ascending order.
@@ -2993,14 +2903,28 @@ impl SettlementBucket {
 
     /// Read a `settlements` bucket value (Paykit wire 5.7). Refuses every value no writer
     /// produces: malformed or unordered marks, more than 9,000, repeated settlements,
-    /// unknown occurrence kinds, malformed deletion boundaries, or neither mark nor boundary.
+    /// unknown occurrence kinds, or no mark without a `lost_to_delete` member. That member
+    /// is kept as read, whatever it holds, and makes the bucket held
+    /// ([`SettlementBucket::decide_credit`]).
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] naming the rule.
-    pub fn read(json: &[u8]) -> Result<Self> {
-        let map = parse_object(json, SETTLEMENTS)?;
+    /// [`InvalidBucket`] naming the rule, and whether the value carries `lost_to_delete`.
+    pub fn read(json: &[u8]) -> std::result::Result<Self, InvalidBucket> {
+        let map = parse_object(json, SETTLEMENTS).map_err(|error| InvalidBucket {
+            error,
+            lost_to_delete: false,
+        })?;
         let obj = Obj::new(&map, SETTLEMENTS);
+        // Present means present: `null` and any other value too.
+        let lost_to_delete = obj.has(LOST_TO_DELETE);
+        Self::read_members(&map, obj, lost_to_delete).map_err(|error| InvalidBucket {
+            error,
+            lost_to_delete,
+        })
+    }
+
+    fn read_members(map: &Map<String, Value>, obj: Obj<'_>, lost_to_delete: bool) -> Result<Self> {
         check_v1(&obj)?;
         let bytes =
             unb64(obj.req_str("marks")?).map_err(|_| bad(SETTLEMENTS, "marks", "not base64url"))?;
@@ -3015,11 +2939,7 @@ impl SettlementBucket {
             .iter()
             .map(SettlementMark::from_bytes)
             .collect::<Result<Vec<_>>>()?;
-        let lost_to_delete = obj
-            .opt("lost_to_delete")
-            .map(SettlementBoundary::read)
-            .transpose()?;
-        let (unknown, _) = UnknownMembers::read(&map, &SETTLEMENTS_SHAPE);
+        let (unknown, _) = UnknownMembers::read(map, &SETTLEMENTS_SHAPE);
         let bucket = Self {
             marks,
             lost_to_delete,
@@ -3037,10 +2957,9 @@ impl SettlementBucket {
             .map(|i| &self.marks[i])
     }
 
-    /// The bucket with `mark` added in its place (Paykit wire 5.7, Writing), the members it
-    /// doesn't know kept; or, when the bucket already holds a mark of its settlement, that
-    /// mark, whatever occurrence it names; or [`MarkAdded::Full`] when it holds 9,000 marks.
-    pub fn add(&self, mark: SettlementMark) -> MarkAdded {
+    /// The bucket with `mark` added in its place, the members it doesn't know kept; or the
+    /// bucket's mark of its settlement; or [`MarkAdded::Full`] when it holds 9,000 marks.
+    fn add(&self, mark: SettlementMark) -> MarkAdded {
         match self
             .marks
             .binary_search_by(|m| m.settlement.cmp(&mark.settlement))
@@ -3055,30 +2974,88 @@ impl SettlementBucket {
         }
     }
 
-    /// Merge current and seen marks and deletion restrictions (Paykit wire 5.7). Conflicting
-    /// marks keep the lower occurrence and return their settlement tags in `twice`, even when
-    /// no write is needed. If the complete union exceeds the mark bound, the
-    /// result preserves current settlements and fills remaining places in byte order, with
-    /// the full boundary union. Every omitted mark must remain in the reader's local seen set.
-    pub fn merged_with_seen(
-        &self,
+    /// Decide a credit of the settlement `mark` names, from its bucket's current write and
+    /// every mark the app has seen in the bucket, those that didn't fit too (Paykit wire 5.7,
+    /// Reading, Full; Paykit spec 8.1 step 4). The only way this library writes a mark for a
+    /// credit.
+    ///
+    /// In order: a current write carrying a `lost_to_delete` member, an invalid or unbound
+    /// one too, is [`CreditDecision::HeldForDelete`]. A mark of the settlement the bucket or
+    /// the seen marks hold makes it [`CreditDecision::Marked`]. A current write that doesn't
+    /// open, read or bind is [`CreditDecision::NeedsUser`], and a bucket that can't take the
+    /// mark once every seen mark is merged is [`CreditDecision::Full`]. Otherwise the credit
+    /// writes the current write (empty when absent) with every seen mark and the mark.
+    ///
+    /// The authenticated creation and continuity of the bucket (Paykit wire 5.7) are the
+    /// caller's to verify and to bind in the credit's batch; without them the caller withholds
+    /// the credit whatever this returns.
+    pub fn decide_credit(
+        mark: SettlementMark,
+        current: CurrentBucket<'_>,
         seen: &[SettlementMark],
-        seen_boundary: Option<&SettlementBoundary>,
-    ) -> SeenMerge {
-        let boundary = match (&self.lost_to_delete, seen_boundary) {
-            (Some(current), Some(seen)) => Some(current.merged_with(seen)),
-            (Some(current), None) => Some(current.clone()),
-            (None, seen) => seen.cloned(),
+    ) -> CreditDecision {
+        let read = match current {
+            CurrentBucket::Absent => Some(Self::new()),
+            CurrentBucket::Unopened => None,
+            CurrentBucket::Opened {
+                json,
+                bucket,
+                naming_key,
+                key,
+            } => match Self::bind(json, bucket, naming_key, key) {
+                Ok(read) => Some(read),
+                Err(invalid) if invalid.lost_to_delete => return CreditDecision::HeldForDelete,
+                Err(_) => None,
+            },
         };
-        let mut lacks = boundary != self.lost_to_delete;
-        let mut all = self.marks.clone();
-        for mark in seen {
-            match self.find(&mark.settlement) {
-                Some(held) if held <= mark => {}
-                _ => lacks = true,
-            }
-            all.push(*mark);
+        if read.as_ref().is_some_and(|read| read.lost_to_delete) {
+            return CreditDecision::HeldForDelete;
         }
+        let marked = seen
+            .iter()
+            .chain(read.as_ref().and_then(|read| read.find(&mark.settlement)))
+            .filter(|seen| seen.settlement == mark.settlement)
+            .min();
+        if let Some(marked) = marked {
+            return CreditDecision::Marked(*marked);
+        }
+        let Some(read) = read else {
+            return CreditDecision::NeedsUser;
+        };
+        let (base, twice, show_writer) = match read.merged_with_seen(seen) {
+            SeenMerge::Holds { twice } => (read, twice, false),
+            SeenMerge::WriteBack {
+                bucket,
+                twice,
+                show_writer,
+            } => (bucket, twice, show_writer),
+            SeenMerge::OverCapacity { .. } => return CreditDecision::Full,
+            SeenMerge::HeldForDelete => return CreditDecision::HeldForDelete,
+        };
+        match base.add(mark) {
+            MarkAdded::Added(bucket) => CreditDecision::Credit {
+                bucket,
+                twice,
+                show_writer,
+            },
+            MarkAdded::Marked(marked) => CreditDecision::Marked(marked),
+            MarkAdded::Full => CreditDecision::Full,
+        }
+    }
+
+    /// Merge the marks a reader has seen into this current write (Paykit wire 5.7, Seen marks
+    /// and Over capacity). Two marks of one settlement keep the lower, in byte order, and
+    /// name the settlement in `twice`, even when nothing is written. The result is never a
+    /// write equal to this one, and never a write of a value carrying `lost_to_delete`.
+    pub fn merged_with_seen(&self, seen: &[SettlementMark]) -> SeenMerge {
+        if self.lost_to_delete {
+            return SeenMerge::HeldForDelete;
+        }
+        let show_writer = seen
+            .iter()
+            .any(|mark| self.find(&mark.settlement).is_none_or(|held| held > mark));
+        let mut all = self.marks.clone();
+        all.extend_from_slice(seen);
         all.sort();
         all.dedup();
         let mut marks: Vec<SettlementMark> = Vec::with_capacity(all.len());
@@ -3093,77 +3070,74 @@ impl SettlementBucket {
                 _ => marks.push(mark),
             }
         }
-        if !lacks {
-            return SeenMerge::Holds { twice };
-        }
-        let full = marks.len() > MAX_SETTLEMENT_MARKS;
-        if full {
-            let mut bounded: Vec<_> = marks
-                .iter()
-                .copied()
-                .filter(|mark| self.find(&mark.settlement).is_some())
-                .collect();
+        let over = marks.len() > MAX_SETTLEMENT_MARKS;
+        if over {
+            let (mut bounded, others): (Vec<_>, Vec<_>) = marks
+                .into_iter()
+                .partition(|mark| self.find(&mark.settlement).is_some());
             let room = MAX_SETTLEMENT_MARKS.saturating_sub(bounded.len());
-            bounded.extend(
-                marks
-                    .into_iter()
-                    .filter(|mark| self.find(&mark.settlement).is_none())
-                    .take(room),
-            );
+            bounded.extend(others.into_iter().take(room));
             bounded.sort();
             marks = bounded;
         }
+        if marks == self.marks {
+            return if over {
+                SeenMerge::OverCapacity {
+                    bucket: None,
+                    twice,
+                    show_writer,
+                }
+            } else {
+                SeenMerge::Holds { twice }
+            };
+        }
         let bucket = Self {
             marks,
-            lost_to_delete: boundary,
-            unknown: self.unknown.clone(),
+            ..self.clone()
         };
-        if full {
-            SeenMerge::Full { bucket, twice }
+        if over {
+            SeenMerge::OverCapacity {
+                bucket: Some(bucket),
+                twice,
+                show_writer,
+            }
         } else {
-            SeenMerge::WriteBack { bucket, twice }
+            SeenMerge::WriteBack {
+                bucket,
+                twice,
+                show_writer,
+            }
         }
     }
 
-    /// Merge another copy into the current bucket, retaining every deletion restriction
-    /// even when the complete mark union cannot fit (Paykit wire 5.7).
-    pub fn merged_with(&self, own: &SettlementBucket) -> SeenMerge {
-        self.merged_with_seen(&own.marks, own.lost_to_delete.as_ref())
-    }
-
-    /// The held-to-later rule of a `settlements` bucket (Paykit wire 5.7, Seen marks; Switch
-    /// spec 8.2): a reader that holds `self` ignores, and shows with its writer, a later write
-    /// that drops or narrows a retained deletion boundary, or changes a seen mark to a higher
-    /// mark of the same settlement. Missing seen marks are also refused unless `later` carries
-    /// `lost_to_delete`: that write is merged over without naming its writer. The caller
-    /// retains every seen mark and boundary and uses [`Self::merged_with`] to restore them.
-    /// A later write that adds marks is taken, and so is one that replaces a mark with a
-    /// lower mark of the same settlement, as no change: the higher mark still counts as seen.
+    /// Merge another copy of the bucket into this current write, as
+    /// [`SettlementBucket::merged_with_seen`] with the copy's marks, keeping in the write the
+    /// members neither writer knows from both. A copy carrying `lost_to_delete` holds the
+    /// bucket as the current write would.
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] naming the rule `later` breaks.
-    pub fn check_later_write(&self, later: &SettlementBucket) -> Result<()> {
-        if let Some(boundary) = &self.lost_to_delete {
-            if !later
-                .lost_to_delete
-                .as_ref()
-                .is_some_and(|later| later.preserves(boundary))
-            {
-                return invalid("Paykit wire 5.7: a later write drops a deletion boundary");
+    /// [`Error::Invalid`] when the two copies hold one unknown member with different values.
+    pub fn merged_with(&self, copy: &SettlementBucket) -> Result<SeenMerge> {
+        if copy.lost_to_delete {
+            return Ok(SeenMerge::HeldForDelete);
+        }
+        let mut merge = self.merged_with_seen(&copy.marks);
+        if let SeenMerge::WriteBack { bucket, .. }
+        | SeenMerge::OverCapacity {
+            bucket: Some(bucket),
+            ..
+        } = &mut merge
+        {
+            if !copy.unknown.is_empty() {
+                bucket.unknown = self.unknown.merge_identified(
+                    &copy.unknown,
+                    &bucket.known_json()?,
+                    &SETTLEMENTS_SHAPE,
+                )?;
             }
         }
-        for mark in &self.marks {
-            match later.find(&mark.settlement) {
-                None if later.lost_to_delete.is_some() => {}
-                None => return invalid("Paykit wire 5.7: a later write drops a mark seen"),
-                Some(held) if held > mark => {
-                    return invalid("Paykit wire 5.7: a later write changes a mark seen");
-                }
-                Some(_) => {}
-            }
-        }
-        Ok(())
+        Ok(merge)
     }
 
     /// The record key of bucket `bucket`, with the payee's own naming key (Paykit wire 1.5):
@@ -3191,14 +3165,26 @@ impl SettlementBucket {
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`], [`Error::Validation`] or [`Error::Switch`]: the reader doesn't act
-    /// on it and flags it.
-    pub fn bind(json: &[u8], bucket: u16, naming_key: &NamingKey, key: &[u8; 32]) -> Result<Self> {
+    /// [`InvalidBucket`]: the reader doesn't act on it and flags it; a `lost_to_delete`
+    /// member holds the bucket also in a value at another key.
+    pub fn bind(
+        json: &[u8],
+        bucket: u16,
+        naming_key: &NamingKey,
+        key: &[u8; 32],
+    ) -> std::result::Result<Self, InvalidBucket> {
         let record = Self::read(json)?;
-        ensure(
-            &Self::record_key(bucket, naming_key)? == key,
-            "Paykit wire 5.7: the record isn't at the key of its bucket",
-        )?;
+        Self::record_key(bucket, naming_key)
+            .and_then(|expected| {
+                ensure(
+                    &expected == key,
+                    "Paykit wire 5.7: the record isn't at the key of its bucket",
+                )
+            })
+            .map_err(|error| InvalidBucket {
+                error,
+                lost_to_delete: record.lost_to_delete,
+            })?;
         Ok(record)
     }
 
@@ -3208,18 +3194,26 @@ impl SettlementBucket {
     /// # Errors
     ///
     /// [`Error::Invalid`] if the value can't be written or breaks the bucket's rules, as an
-    /// empty bucket does.
+    /// empty bucket does, or carries `lost_to_delete`.
     pub fn to_json(&self) -> Result<Vec<u8>> {
+        ensure(
+            !self.lost_to_delete,
+            "Paykit wire 5.7: a bucket carrying lost_to_delete is never written",
+        )?;
         self.check()?;
+        self.unknown
+            .write_into(self.known_json()?, &SETTLEMENTS_SHAPE, &[])
+    }
+
+    /// The value's members this writer knows.
+    fn known_json(&self) -> Result<Vec<u8>> {
         let bytes: Vec<u8> = self.marks.iter().flat_map(|m| m.to_bytes()).collect();
         let out = SettlementsOut {
             v: 1,
             marks: b64(&bytes),
-            lost_to_delete: self.lost_to_delete.as_ref(),
         };
-        let json = serde_json::to_vec(&out)
-            .map_err(|_| Error::Invalid(format!("{SETTLEMENTS}: can't be written")))?;
-        self.unknown.write_into(json, &SETTLEMENTS_SHAPE, &[])
+        serde_json::to_vec(&out)
+            .map_err(|_| Error::Invalid(format!("{SETTLEMENTS}: can't be written")))
     }
 }
 
@@ -4258,32 +4252,31 @@ mod tests {
         .unwrap();
         // Every seen mark there, or a lower one of its settlement: nothing to write.
         assert_eq!(
-            current.merged_with_seen(&[], None),
+            current.merged_with_seen(&[]),
             SeenMerge::Holds { twice: Vec::new() }
         );
         assert_eq!(
-            current.merged_with_seen(
-                &[
-                    mark(1, OccurrenceKind::OneTimeRequest, 1),
-                    mark(4, OccurrenceKind::PaymentWithoutRequest, 0),
-                ],
-                None
-            ),
+            current.merged_with_seen(&[
+                mark(1, OccurrenceKind::OneTimeRequest, 1),
+                mark(4, OccurrenceKind::PaymentWithoutRequest, 0),
+            ]),
             SeenMerge::Holds {
                 twice: vec![[4; SETTLEMENT_TAG_LEN]]
             }
         );
         // A seen mark the write lacks, and a lower mark of a settlement it holds.
-        let merged = current.merged_with_seen(
-            &[
-                mark(2, OccurrenceKind::PaymentWithoutRequest, 2),
-                mark(4, OccurrenceKind::OneTimeRequest, 9),
-                mark(2, OccurrenceKind::PaymentWithoutRequest, 2),
-            ],
-            None,
-        );
-        let SeenMerge::WriteBack { bucket, twice } = merged else {
-            panic!("a write back");
+        let merged = current.merged_with_seen(&[
+            mark(2, OccurrenceKind::PaymentWithoutRequest, 2),
+            mark(4, OccurrenceKind::OneTimeRequest, 9),
+            mark(2, OccurrenceKind::PaymentWithoutRequest, 2),
+        ]);
+        let SeenMerge::WriteBack {
+            bucket,
+            twice,
+            show_writer: true,
+        } = merged
+        else {
+            panic!("a write back over a write that drops a seen mark");
         };
         assert_eq!(
             bucket.marks(),
@@ -4294,254 +4287,99 @@ mod tests {
             ]
         );
         assert_eq!(twice, vec![[4; SETTLEMENT_TAG_LEN]]);
-        // The write back is a later write the reader of the current one takes.
-        current.check_later_write(&bucket).unwrap();
-        // Over a delete, every seen mark from an empty bucket.
-        let SeenMerge::WriteBack { bucket, twice } = SettlementBucket::new()
-            .merged_with_seen(&[mark(7, OccurrenceKind::BillingPeriod, 7)], None)
-        else {
-            panic!("a write back");
-        };
-        assert_eq!(bucket.marks(), [mark(7, OccurrenceKind::BillingPeriod, 7)]);
-        assert!(twice.is_empty());
     }
 
-    #[test]
-    fn test_settlement_bucket_merge_past_the_bound_is_full() {
-        let marks: Vec<SettlementMark> = (0..MAX_SETTLEMENT_MARKS as u32)
-            .map(|i| {
-                let mut settlement = [0; SETTLEMENT_TAG_LEN];
-                settlement[8..].copy_from_slice(&(i * 2).to_be_bytes());
-                SettlementMark {
-                    settlement,
-                    kind: OccurrenceKind::OneTimeRequest,
-                    occurrence: [0; OCCURRENCE_TAG_LEN],
-                }
-            })
-            .collect();
-        let full = SettlementBucket::from_marks(marks.clone()).unwrap();
-        let mut new = [0; SETTLEMENT_TAG_LEN];
-        new[11] = 1;
-        let seen = SettlementMark {
-            settlement: new,
+    /// The mark of settlement number `number`, its tag ending in the number's bytes.
+    fn numbered(number: u64) -> SettlementMark {
+        let mut settlement = [0; SETTLEMENT_TAG_LEN];
+        settlement[4..].copy_from_slice(&number.to_be_bytes());
+        SettlementMark {
+            settlement,
             kind: OccurrenceKind::OneTimeRequest,
             occurrence: [0; OCCURRENCE_TAG_LEN],
-        };
-        let SeenMerge::Full { bucket, twice } = full.merged_with_seen(&[seen], None) else {
-            panic!("the full bucket is retained");
-        };
-        assert_eq!(bucket, full);
-        assert!(twice.is_empty());
-        assert_eq!(
-            full.merged_with_seen(&marks, None),
-            SeenMerge::Holds { twice: Vec::new() }
-        );
-    }
-
-    #[test]
-    fn test_settlement_bucket_refuses_a_later_write_dropping_or_changing_a_mark() {
-        let held = SettlementBucket::from_marks(vec![
-            mark(1, OccurrenceKind::BillingPeriod, 5),
-            mark(3, OccurrenceKind::OneTimeRequest, 3),
-        ])
-        .unwrap();
-        let more = SettlementBucket::from_marks(vec![
-            mark(1, OccurrenceKind::BillingPeriod, 5),
-            mark(2, OccurrenceKind::OneTimeRequest, 2),
-            mark(3, OccurrenceKind::OneTimeRequest, 3),
-        ])
-        .unwrap();
-        held.check_later_write(&held).unwrap();
-        held.check_later_write(&more).unwrap();
-        // A lower mark of the same settlement is no change.
-        let lower = SettlementBucket::from_marks(vec![
-            mark(1, OccurrenceKind::OneTimeRequest, 9),
-            mark(3, OccurrenceKind::OneTimeRequest, 3),
-        ])
-        .unwrap();
-        held.check_later_write(&lower).unwrap();
-        let dropped =
-            SettlementBucket::from_marks(vec![mark(3, OccurrenceKind::OneTimeRequest, 3)]).unwrap();
-        let error = held.check_later_write(&dropped).unwrap_err().to_string();
-        assert!(error.contains("drops a mark seen"), "{error}");
-        let error = held
-            .check_later_write(&SettlementBucket::new())
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("drops a mark seen"), "{error}");
-        let changed = SettlementBucket::from_marks(vec![
-            mark(1, OccurrenceKind::BillingPeriod, 6),
-            mark(3, OccurrenceKind::OneTimeRequest, 3),
-        ])
-        .unwrap();
-        let error = held.check_later_write(&changed).unwrap_err().to_string();
-        assert!(error.contains("changes a mark seen"), "{error}");
-    }
-
-    #[test]
-    fn test_settlement_bucket_boundaries_merge_without_removing_restrictions() {
-        let a = SettlementBoundary::known(vec![[2; 32], [1; 32], [1; 32]]).unwrap();
-        let b = SettlementBoundary::known(vec![[2; 32], [3; 32]]).unwrap();
-        assert_eq!(a.deletes().unwrap(), &[[1; 32], [2; 32]]);
-        let union = a.merged_with(&b);
-        assert_eq!(union.deletes().unwrap(), &[[1; 32], [2; 32], [3; 32]]);
-        assert!(union.preserves(&a));
-        assert!(union.preserves(&b));
-        assert!(!a.preserves(&union));
-        let left = SettlementBucket::with_boundary(a);
-        let right = SettlementBucket::with_boundary(b);
-        let SeenMerge::WriteBack { bucket, twice } = left.merged_with(&right) else {
-            panic!("the boundary union is written");
-        };
-        assert!(bucket.marks().is_empty());
-        assert!(twice.is_empty());
-        assert_eq!(bucket.lost_to_delete, Some(union));
-        left.check_later_write(&bucket).unwrap();
-        right.check_later_write(&bucket).unwrap();
-        assert!(bucket.check_later_write(&left).is_err());
-        assert_eq!(
-            bucket.merged_with(&left),
-            SeenMerge::Holds { twice: Vec::new() }
-        );
-        let MarkAdded::Added(added) = bucket.add(mark(1, OccurrenceKind::BillingPeriod, 1)) else {
-            panic!("the mark is added");
-        };
-        assert_eq!(added.lost_to_delete, bucket.lost_to_delete);
-    }
-
-    #[test]
-    fn test_settlement_bucket_boundary_union_is_associative_and_saturates() {
-        let first = SettlementBoundary::known((0..128).map(|i| [i; 32]).collect()).unwrap();
-        let last = SettlementBoundary::known(vec![[128; 32]]).unwrap();
-        let saturated = first.merged_with(&last);
-        assert!(saturated.deletes().is_none());
-        assert!(!first.preserves(&saturated));
-        assert!(saturated.preserves(&first));
-        assert!(SettlementBoundary::known(Vec::new()).is_err());
-        assert!(SettlementBoundary::known((0..129).map(|i| [i; 32]).collect()).is_err());
-        let cases = [
-            first,
-            last,
-            saturated,
-            SettlementBoundary::known(vec![[0; 32], [128; 32]]).unwrap(),
-            SettlementBoundary::known(vec![[1; 32]]).unwrap(),
-        ];
-        for a in &cases {
-            assert_eq!(a.merged_with(a), *a);
-            for b in &cases {
-                let ab = a.merged_with(b);
-                assert_eq!(ab, b.merged_with(a));
-                assert!(ab.preserves(a) && ab.preserves(b));
-                for c in &cases {
-                    assert_eq!(ab.merged_with(c), a.merged_with(&b.merged_with(c)));
-                }
-            }
         }
     }
 
+    /// A bucket of the even-numbered settlements from 0, `count` of them.
+    fn even(count: u64) -> SettlementBucket {
+        SettlementBucket::from_marks((0..count).map(|i| numbered(i * 2)).collect()).unwrap()
+    }
+
     #[test]
-    fn test_settlement_bucket_malformed_boundaries_retain_unknown() {
-        let one = b64(&[1; 32]);
-        let two = b64(&[2; 32]);
-        for (boundary, rule) in [
-            (serde_json::json!({}), "kind: missing"),
-            (serde_json::json!({"kind":"other"}), "unknown boundary kind"),
-            (serde_json::json!({"kind":"known"}), "deletes: missing"),
-            (
-                serde_json::json!({"kind":"known","deletes":[]}),
-                "requires 1 to 128",
-            ),
-            (
-                serde_json::json!({"kind":"known","deletes":[one,one]}),
-                "not strictly ascending",
-            ),
-            (
-                serde_json::json!({"kind":"known","deletes":[two,one]}),
-                "not strictly ascending",
-            ),
-            (
-                serde_json::json!({"kind":"known","deletes":[b64(&[0;31])]}),
-                "canonical b64 of 32 bytes",
-            ),
-            (
-                serde_json::json!({"kind":"known","deletes":[format!("{one}=")]}),
-                "canonical b64 of 32 bytes",
-            ),
-            (
-                serde_json::json!({"kind":"known","deletes":[7]}),
-                "not a string",
-            ),
-            (
-                serde_json::json!({"kind":"known","deletes":(0..129).map(|i|b64(&[i;32])).collect::<Vec<_>>()}),
-                "requires 1 to 128",
-            ),
-            (
-                serde_json::json!({"kind":"unknown","deletes":null}),
-                "present with unknown",
-            ),
-            (
-                serde_json::json!({"kind":"unknown","deletes":[]}),
-                "present with unknown",
-            ),
-        ] {
-            let value = serde_json::to_vec(
-                &serde_json::json!({"v":1,"marks":"","lost_to_delete":boundary}),
-            )
-            .unwrap();
-            let error = SettlementBucket::read(&value).unwrap_err().to_string();
-            assert!(error.contains(rule), "{rule}: {error}");
+    fn test_settlement_bucket_merge_over_capacity_fills_in_byte_order() {
+        // Room for one of two new settlements: the lower in byte order fits.
+        let current = even(MAX_SETTLEMENT_MARKS as u64 - 1);
+        let (later, earlier) = (numbered(3), numbered(1));
+        let SeenMerge::OverCapacity {
+            bucket: Some(bucket),
+            twice,
+            show_writer: true,
+        } = current.merged_with_seen(&[later, earlier])
+        else {
+            panic!("one place remains");
+        };
+        assert!(twice.is_empty());
+        assert_eq!(bucket.marks().len(), MAX_SETTLEMENT_MARKS);
+        assert_eq!(bucket.find(&earlier.settlement), Some(&earlier));
+        assert_eq!(bucket.find(&later.settlement), None);
+        // No room: the bounded write is the current write, so nothing is written, and
+        // reading it again changes nothing.
+        let full = even(MAX_SETTLEMENT_MARKS as u64);
+        for seen in [vec![earlier], vec![later, earlier]] {
             assert_eq!(
-                SettlementBucket::read_boundary(&value).unwrap(),
-                Some(SettlementBoundary::unknown())
+                full.merged_with_seen(&seen),
+                SeenMerge::OverCapacity {
+                    bucket: None,
+                    twice: Vec::new(),
+                    show_writer: true,
+                }
             );
         }
-        assert!(SettlementBucket::read_boundary(b"not JSON").is_err());
         assert_eq!(
-            SettlementBucket::read_boundary(br#"{"v":1,"marks":""}"#).unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn test_settlement_bucket_unknown_boundary_cannot_be_narrowed() {
-        let unknown = SettlementBucket::with_boundary(SettlementBoundary::unknown());
-        let known =
-            SettlementBucket::with_boundary(SettlementBoundary::known(vec![[1; 32]]).unwrap());
-        unknown.check_later_write(&unknown).unwrap();
-        known.check_later_write(&unknown).unwrap();
-        assert!(unknown.check_later_write(&known).is_err());
-        assert!(unknown.check_later_write(&SettlementBucket::new()).is_err());
-        assert_eq!(
-            unknown.merged_with(&known),
+            full.merged_with_seen(full.marks()),
             SeenMerge::Holds { twice: Vec::new() }
         );
-        let SeenMerge::WriteBack { bucket, .. } = known.merged_with(&unknown) else {
-            panic!("unknown is retained");
+        // A lower seen mark of a settlement the full write holds still replaces it.
+        let mut lower = numbered(2);
+        lower.occurrence = [0; OCCURRENCE_TAG_LEN];
+        lower.kind = OccurrenceKind::OneTimeRequest;
+        let mut higher = lower;
+        higher.kind = OccurrenceKind::BillingPeriod;
+        let mut with_higher: Vec<_> = full.marks().to_vec();
+        with_higher[1] = higher;
+        let current = SettlementBucket::from_marks(with_higher).unwrap();
+        let SeenMerge::OverCapacity {
+            bucket: Some(bucket),
+            twice,
+            ..
+        } = current.merged_with_seen(&[lower, earlier])
+        else {
+            panic!("the lower mark is written");
         };
-        assert_eq!(bucket, unknown);
+        assert_eq!(bucket.find(&lower.settlement), Some(&lower));
+        assert_eq!(bucket.find(&earlier.settlement), None);
+        assert_eq!(twice, vec![lower.settlement]);
     }
 
     #[test]
-    fn test_settlement_bucket_nested_unknown_members_survive_boundary_union() {
-        let value = serde_json::json!({
-            "v":1,"marks":"","extra":7,
-            "lost_to_delete":{"kind":"known","deletes":[b64(&[1;32])],"future":{"a":9}}
-        });
-        let read = SettlementBucket::read(&serde_json::to_vec(&value).unwrap()).unwrap();
-        assert_eq!(
-            serde_json::from_slice::<Value>(&read.to_json().unwrap()).unwrap(),
-            value
-        );
-        let SeenMerge::WriteBack { bucket, .. } = read.merged_with(
-            &SettlementBucket::with_boundary(SettlementBoundary::unknown()),
-        ) else {
-            panic!("unknown is retained");
+    fn test_settlement_bucket_merge_keeps_unknown_members_of_both_copies() {
+        let read = |value: Value| SettlementBucket::read(&serde_json::to_vec(&value).unwrap());
+        let one = b64(&mark(1, OccurrenceKind::OneTimeRequest, 1).to_bytes());
+        let two = b64(&mark(2, OccurrenceKind::OneTimeRequest, 2).to_bytes());
+        let current = read(serde_json::json!({"v":1,"marks":one,"extra":{"a":7}})).unwrap();
+        let copy = read(serde_json::json!({"v":1,"marks":two,"other":8})).unwrap();
+        let SeenMerge::WriteBack { bucket, .. } = current.merged_with(&copy).unwrap() else {
+            panic!("the copy's mark is written");
         };
         let out: Value = serde_json::from_slice(&bucket.to_json().unwrap()).unwrap();
-        assert_eq!(out["extra"], 7);
-        assert_eq!(out["lost_to_delete"]["future"], serde_json::json!({"a":9}));
-        assert!(out["lost_to_delete"].get("deletes").is_none());
-        SettlementBucket::read(&bucket.to_json().unwrap()).unwrap();
+        assert_eq!(out["extra"], serde_json::json!({"a":7}));
+        assert_eq!(out["other"], 8);
+        // One member with two values is refused, not chosen.
+        let clash = read(serde_json::json!({"v":1,"marks":two,"extra":8})).unwrap();
+        assert!(matches!(
+            current.merged_with(&clash),
+            Err(Error::Invalid(_))
+        ));
     }
 
     #[test]
@@ -4562,10 +4400,12 @@ mod tests {
             bucket
         );
         for (bucket, nk) in [(18, nk.clone()), (17, NamingKey::from_bytes([4; 32]))] {
-            let error = SettlementBucket::bind(&json, bucket, &nk, &key)
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains("the key of its bucket"), "{error}");
+            let error = SettlementBucket::bind(&json, bucket, &nk, &key).unwrap_err();
+            assert!(
+                error.to_string().contains("the key of its bucket"),
+                "{error}"
+            );
+            assert!(!error.lost_to_delete);
         }
         // Under another policy, the bucket's natural key gives another key.
         let other = Collection::PayeeActivity
@@ -4579,94 +4419,271 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_settlement_bucket_known_boundary_roundtrips() {
-        let value = serde_json::json!({
-            "v": 1,
-            "marks": b64(&mark(1, OccurrenceKind::OneTimeRequest, 1).to_bytes()),
-            "lost_to_delete": { "kind": "known", "deletes": [b64(&[2; 32]), b64(&[3; 32])] }
-        });
-        let read = SettlementBucket::read(&serde_json::to_vec(&value).unwrap()).unwrap();
-        let written: Value = serde_json::from_slice(&read.to_json().unwrap()).unwrap();
-        assert_eq!(written, value);
+    /// The settlement every credit test decides: settlement 5.
+    const CREDITED: u8 = 5;
+
+    /// The bucket 17 key and another bucket's, under one naming key.
+    struct At {
+        nk: NamingKey,
+        key: [u8; 32],
+        other: [u8; 32],
     }
 
-    #[test]
-    fn test_settlement_bucket_boundary_only_unknown_roundtrips() {
-        let value = br#"{"v":1,"marks":"","lost_to_delete":{"kind":"unknown"}}"#;
-        let read = SettlementBucket::read(value).unwrap();
-        assert!(read.marks().is_empty());
-        assert_eq!(read.to_json().unwrap(), value);
-    }
-
-    #[test]
-    fn test_settlement_bucket_full_known_boundary_fits_value_limit() {
-        let marks: Vec<u8> = (0..MAX_SETTLEMENT_MARKS)
-            .flat_map(|i| {
-                let mut settlement = [0; SETTLEMENT_TAG_LEN];
-                settlement[4..].copy_from_slice(&u64::try_from(i).unwrap().to_be_bytes());
-                SettlementMark {
-                    settlement,
-                    kind: OccurrenceKind::OneTimeRequest,
-                    occurrence: [0; OCCURRENCE_TAG_LEN],
-                }
-                .to_bytes()
-            })
-            .collect();
-        let deletes: Vec<String> = (0..128u8).map(|i| b64(&[i; 32])).collect();
-        let value = serde_json::json!({
-            "v": 1,
-            "marks": b64(&marks),
-            "lost_to_delete": { "kind": "known", "deletes": deletes }
-        });
-        let encoded = serde_json::to_vec(&value).unwrap();
-        assert_eq!(encoded.len(), 257_952);
-        let read = SettlementBucket::read(&encoded).unwrap();
-        assert_eq!(read.marks().len(), MAX_SETTLEMENT_MARKS);
-        assert_eq!(read.to_json().unwrap().len(), 257_952);
-    }
-
-    #[test]
-    fn test_settlement_bucket_overflow_preserves_current_marks_and_all_boundaries() {
-        let numbered = |number: u64| {
-            let mut settlement = [0; SETTLEMENT_TAG_LEN];
-            settlement[4..].copy_from_slice(&number.to_be_bytes());
-            SettlementMark {
-                settlement,
-                kind: OccurrenceKind::BillingPeriod,
-                occurrence: [4; OCCURRENCE_TAG_LEN],
+    impl At {
+        fn new() -> Self {
+            let nk = NamingKey::from_bytes([3; 32]);
+            Self {
+                key: SettlementBucket::record_key(17, &nk).unwrap(),
+                other: SettlementBucket::record_key(18, &nk).unwrap(),
+                nk,
             }
-        };
-        let current_marks: Vec<_> = (2..9001).map(numbered).collect();
-        let mut current = SettlementBucket::from_marks(current_marks.clone()).unwrap();
-        current.lost_to_delete =
-            Some(SettlementBoundary::known((0..128).map(|i| [i; 32]).collect()).unwrap());
-        let other = SettlementBoundary::known(vec![[128; 32]]).unwrap();
-        let mut lower = numbered(4);
-        lower.kind = OccurrenceKind::OneTimeRequest;
-        let SeenMerge::Full { bucket, twice } =
-            current.merged_with_seen(&[numbered(1), numbered(0), lower], Some(&other))
-        else {
-            panic!("the complete union exceeds the mark bound");
-        };
-        assert_eq!(bucket.marks().len(), MAX_SETTLEMENT_MARKS);
-        assert_eq!(bucket.lost_to_delete, Some(SettlementBoundary::unknown()));
-        assert_eq!(twice, vec![lower.settlement]);
-        for mark in current_marks {
-            assert!(bucket.find(&mark.settlement).is_some());
         }
-        assert_eq!(bucket.find(&lower.settlement), Some(&lower));
-        assert!(bucket.find(&numbered(0).settlement).is_some());
-        assert!(bucket.find(&numbered(1).settlement).is_none());
-        current.check_later_write(&bucket).unwrap();
-        let read = SettlementBucket::read(&bucket.to_json().unwrap()).unwrap();
-        assert_eq!(read, bucket);
-        // A full current bucket never replaces an existing settlement to fit another one.
-        let SeenMerge::Full { bucket: again, .. } = bucket.merged_with_seen(&[numbered(1)], None)
-        else {
-            panic!("the bucket remains full");
-        };
-        assert_eq!(again, bucket);
+
+        fn opened<'a>(&'a self, json: &'a [u8], key: &'a [u8; 32]) -> CurrentBucket<'a> {
+            CurrentBucket::Opened {
+                json,
+                bucket: 17,
+                naming_key: &self.nk,
+                key,
+            }
+        }
+    }
+
+    /// A bucket value of `marks` and, unless `None`, the `lost_to_delete` member `boundary`.
+    fn bucket_value(marks: &[SettlementMark], boundary: Option<Value>) -> Vec<u8> {
+        let bytes: Vec<u8> = marks.iter().flat_map(|m| m.to_bytes()).collect();
+        let mut value = serde_json::json!({"v": 1, "marks": b64(&bytes)});
+        if let Some(boundary) = boundary {
+            value["lost_to_delete"] = boundary;
+        }
+        serde_json::to_vec(&value).unwrap()
+    }
+
+    #[test]
+    fn test_settlement_credit_held_for_any_lost_to_delete_member() {
+        let at = At::new();
+        let credited = mark(CREDITED, OccurrenceKind::OneTimeRequest, 9);
+        let one = mark(1, OccurrenceKind::OneTimeRequest, 1);
+        let seen = [mark(3, OccurrenceKind::OneTimeRequest, 3)];
+        let hash = b64(&[1; 32]);
+        let full: Vec<SettlementMark> = (0..MAX_SETTLEMENT_MARKS as u64).map(numbered).collect();
+        let unordered = [one, mark(0, OccurrenceKind::OneTimeRequest, 0)];
+        let shapes = [
+            (
+                "known",
+                serde_json::json!({"kind": "known", "deletes": [hash]}),
+            ),
+            ("unknown", serde_json::json!({"kind": "unknown"})),
+            ("null", Value::Null),
+            ("a number", serde_json::json!(7)),
+            ("a string", serde_json::json!("unknown")),
+            ("an array", serde_json::json!([])),
+            ("an unknown kind", serde_json::json!({"kind": "other"})),
+            (
+                "known without deletes",
+                serde_json::json!({"kind": "known"}),
+            ),
+        ];
+        for (shape, member) in shapes {
+            let values = [
+                (
+                    "one mark",
+                    bucket_value(&[one], Some(member.clone())),
+                    &at.key,
+                ),
+                ("no mark", bucket_value(&[], Some(member.clone())), &at.key),
+                (
+                    "a full bucket",
+                    bucket_value(&full, Some(member.clone())),
+                    &at.key,
+                ),
+                (
+                    "the settlement's mark",
+                    bucket_value(&[credited], Some(member.clone())),
+                    &at.key,
+                ),
+                (
+                    "marks out of order",
+                    bucket_value(&unordered, Some(member.clone())),
+                    &at.key,
+                ),
+                (
+                    "another bucket's key",
+                    bucket_value(&[one], Some(member.clone())),
+                    &at.other,
+                ),
+            ];
+            for (case, json, key) in &values {
+                for seen in [&seen[..], &[]] {
+                    assert_eq!(
+                        SettlementBucket::decide_credit(credited, at.opened(json, key), seen),
+                        CreditDecision::HeldForDelete,
+                        "{shape}, {case}"
+                    );
+                }
+                let read = SettlementBucket::read(json);
+                assert!(
+                    read.as_ref().is_ok_and(|read| read.lost_to_delete)
+                        || read.as_ref().is_err_and(|error| error.lost_to_delete),
+                    "{shape}, {case}"
+                );
+            }
+            // A readable value is never merged into or written.
+            let read = SettlementBucket::read(&values[0].1).unwrap();
+            assert_eq!(
+                read.merged_with_seen(&seen),
+                SeenMerge::HeldForDelete,
+                "{shape}"
+            );
+            let plain = SettlementBucket::from_marks(seen.to_vec()).unwrap();
+            assert_eq!(
+                read.merged_with(&plain).unwrap(),
+                SeenMerge::HeldForDelete,
+                "{shape}"
+            );
+            assert_eq!(
+                plain.merged_with(&read).unwrap(),
+                SeenMerge::HeldForDelete,
+                "{shape}"
+            );
+            let error = read.to_json().unwrap_err().to_string();
+            assert!(error.contains("never written"), "{shape}: {error}");
+        }
+    }
+
+    #[test]
+    fn test_settlement_credit_outcomes_without_lost_to_delete() {
+        let at = At::new();
+        let credited = mark(CREDITED, OccurrenceKind::OneTimeRequest, 9);
+        let elsewhere = mark(CREDITED, OccurrenceKind::BillingPeriod, 1);
+        let (one, three) = (
+            mark(1, OccurrenceKind::OneTimeRequest, 1),
+            mark(3, OccurrenceKind::OneTimeRequest, 3),
+        );
+        let bucket =
+            |marks: &[SettlementMark]| SettlementBucket::from_marks(marks.to_vec()).unwrap();
+        let full = |count: u64| bucket_value(&(0..count).map(numbered).collect::<Vec<_>>(), None);
+        // (case, value read (`None`: absent), at the bucket's key, seen, the decision)
+        type Case<'a> = (
+            &'a str,
+            Option<Vec<u8>>,
+            bool,
+            Vec<SettlementMark>,
+            CreditDecision,
+        );
+        let cases: Vec<Case<'_>> = vec![
+            (
+                "a new bucket",
+                None,
+                true,
+                vec![],
+                CreditDecision::Credit {
+                    bucket: bucket(&[credited]),
+                    twice: vec![],
+                    show_writer: false,
+                },
+            ),
+            (
+                "a current write",
+                Some(bucket_value(&[one], None)),
+                true,
+                vec![one],
+                CreditDecision::Credit {
+                    bucket: bucket(&[one, credited]),
+                    twice: vec![],
+                    show_writer: false,
+                },
+            ),
+            (
+                "a seen mark the current write lacks joins the write",
+                Some(bucket_value(&[one], None)),
+                true,
+                vec![three],
+                CreditDecision::Credit {
+                    bucket: bucket(&[one, three, credited]),
+                    twice: vec![],
+                    show_writer: true,
+                },
+            ),
+            (
+                "the bucket's mark of the settlement",
+                Some(bucket_value(&[one, elsewhere], None)),
+                true,
+                vec![],
+                CreditDecision::Marked(elsewhere),
+            ),
+            (
+                "a seen mark of the settlement over a bucket that drops it",
+                Some(bucket_value(&[one], None)),
+                true,
+                vec![elsewhere],
+                CreditDecision::Marked(elsewhere),
+            ),
+            (
+                "a seen mark of the settlement over a value that doesn't read",
+                Some(b"not JSON".to_vec()),
+                true,
+                vec![elsewhere],
+                CreditDecision::Marked(elsewhere),
+            ),
+            (
+                "a value that doesn't read",
+                Some(b"not JSON".to_vec()),
+                true,
+                vec![],
+                CreditDecision::NeedsUser,
+            ),
+            (
+                "an invalid value",
+                Some(bucket_value(&[three, one], None)),
+                true,
+                vec![],
+                CreditDecision::NeedsUser,
+            ),
+            (
+                "a value at another key",
+                Some(bucket_value(&[one], None)),
+                false,
+                vec![],
+                CreditDecision::NeedsUser,
+            ),
+            (
+                "a full bucket",
+                Some(full(MAX_SETTLEMENT_MARKS as u64)),
+                true,
+                vec![],
+                CreditDecision::Full,
+            ),
+            (
+                "a bucket that seen marks fill",
+                Some(full(MAX_SETTLEMENT_MARKS as u64 - 1)),
+                true,
+                vec![one],
+                CreditDecision::Full,
+            ),
+            (
+                "a bucket over capacity with seen marks",
+                Some(full(MAX_SETTLEMENT_MARKS as u64)),
+                true,
+                vec![one],
+                CreditDecision::Full,
+            ),
+        ];
+        for (name, value, at_key, seen, decision) in cases {
+            let key = if at_key { &at.key } else { &at.other };
+            let current = value
+                .as_deref()
+                .map_or(CurrentBucket::Absent, |json| at.opened(json, key));
+            assert_eq!(
+                SettlementBucket::decide_credit(credited, current, &seen),
+                decision,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            SettlementBucket::decide_credit(credited, CurrentBucket::Unopened, &[]),
+            CreditDecision::NeedsUser
+        );
     }
 
     #[test]
