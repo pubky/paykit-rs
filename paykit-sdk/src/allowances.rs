@@ -5,28 +5,33 @@
 //! - **The record:** one `allowances` record per Allowance, keyed by the counterparty and
 //!   the `allowance_id`, holding the proposal, its response and its end, one of each (Paykit
 //!   spec 6 "One message per role"). A message this app sends goes into the record in the
-//!   batch that queues it: a proposal opens it, an acceptance, a rejection or an end is
-//!   recorded first and sent only if that write is applied (Paykit spec 8.1, 8.3). A
+//!   batch that queues it: a proposal opens it, a rejection or an end is recorded first and
+//!   sent only if that write is applied (Paykit spec 8.1, 8.3). This app records and sends
+//!   no acceptance: an acceptance is recorded only together with the Allowance's
+//!   initialized ledger, in one atomic batch on a protected record, which this version
+//!   doesn't build, so accepting is unavailable in either role (Paykit spec 8.3.1). A
 //!   message that would break the record's rules (Paykit wire 5.4) is reflected by its
 //!   `msg_id` only, such as an acceptance crossing the proposal's withdrawal. No path stores
 //!   a message of this app's without queuing it, so a message this app signed in an
 //!   Allowance record is one to be sent; the re-send after a restore builds on that
 //!   (`stores_unqueued`).
 //! - **Receiving:** a proposal opens the record, gated by the spam rule; an acceptance or a
-//!   rejection that would take the record's response is kept by the receive step (`pr/`)
-//!   and goes into the proposer's record after the read, once the read's stored entries
-//!   are noted, or once the app holds the record (Paykit spec 8.1, "Replies before their
-//!   record"); a rejection's stop acts from when it is kept. Every branch holds its entry
-//!   while the app's copy of `allowances` isn't listed yet, never deciding from a record's absence (Paykit
-//!   spec 8.1, "Records not listed yet"). One whose record the app holds as a value it
-//!   can't read is never written over that record, nor dropped at once: it waits
-//!   unprocessed while the value waits for its scope key, and is otherwise kept as a stored
-//!   entry, tried at each read and written in once the record reads, and given up with the
-//!   host's notice 30 days from its acceptance (Paykit spec 8.1, "Stored entries"). An
-//!   acceptance over a record seen divergent waits for the user's confirmation with the
-//!   kept replies (`pr/`). Answers are placed in the order the inbox accepted them: one
-//!   never takes the response while a different, earlier one is still kept to write, but
-//!   is kept as the conflict's stop at once (Paykit spec 8.1, 8.3).
+//!   rejection that would take the record's response is kept by the receive step (`pr/`), and a
+//!   rejection goes into the proposer's record after the read, once the read's stored entries are
+//!   noted, or once the app holds the record (Paykit spec 8.1, "Replies before their record"); a
+//!   rejection's stop acts from when it is kept. A received acceptance never goes into the
+//!   record, for the reason above (`would_accept`): it stays kept, unplaced, tried at each read,
+//!   and is given up with the host's notice 30 days from its acceptance
+//!   ([`crate::NoticeKind::MessageGivenUp`]), as any message its record can't take now; so no
+//!   record this app writes shows an Allowance accepted. Every branch holds its entry while the
+//!   app's copy of `allowances` isn't listed yet, never deciding from a record's absence (Paykit
+//!   spec 8.1, "Records not listed yet"). One whose record the app holds as a value it can't read
+//!   is never written over that record, nor dropped at once: it waits unprocessed while the value
+//!   waits for its scope key, and is otherwise kept as a stored entry, tried at each read and
+//!   written in once the record reads, and given up with the host's notice 30 days from its
+//!   acceptance (Paykit spec 8.1, "Stored entries"). Answers are placed in the order the inbox
+//!   accepted them: one never takes the response while a different, earlier one is still kept to
+//!   write, but is kept as the conflict's stop at once (Paykit spec 8.1, 8.3).
 //! - **The stop:** a counterparty's `allowance_end` is kept in the app's own state in the
 //!   commit that passes its entry, with no write at the switch (`ae/`): at once for an
 //!   Allowance whose record the app holds, whatever the record's value, never waiting for
@@ -100,8 +105,12 @@ pub enum AllowanceRole {
 pub enum AllowanceStatus {
     /// Proposed; no answer yet.
     Proposed,
-    /// Accepted: it may authorize automatic payment, while its terms and the executor's
-    /// checks pass.
+    /// The record holds the proposal's acceptance, written by an app of another
+    /// implementation: this SDK neither accepts an Allowance nor places a received acceptance
+    /// ([`Refusal::AllowanceAcceptanceUnavailable`]). It authorizes no automatic payment
+    /// here: an accepted Allowance is usable only with the initialized ledger its acceptance
+    /// records atomically (Paykit spec 8.3.1), which this version neither writes nor reads.
+    /// It can still be ended by either side ([`Paykit::end_allowance`]).
     Accepted,
     /// Rejected by the proposal's recipient.
     Rejected,
@@ -138,7 +147,8 @@ pub struct AllowanceView {
     /// The executor app the record's current grant names, if it holds one that verifies.
     pub executor_app_id: Option<[u8; 16]>,
     /// Whether this app's consent list holds it, confirmed since any restore: an executor
-    /// pays under an Allowance only then (Paykit spec 8.3).
+    /// pays under an Allowance only then (Paykit spec 8.3). This version adds no Allowance
+    /// to the list: it accepts none and writes no grant.
     pub consented: bool,
     /// Whether the counterparty is on the identity's deny list, as the app last read it
     /// (Paykit spec 8.1, "Blocked counterparties"): nothing new from it is taken, its
@@ -476,6 +486,15 @@ fn acceptance(record: &AllowanceRecord) -> Option<&StoredMessage> {
         .filter(|r| matches!(r.body(), Body::AllowanceAcceptance(_)))
 }
 
+/// Whether placing `stored` would give `record` an acceptance it doesn't hold: the write that
+/// makes an Allowance accepted. This version never makes it: an acceptance is recorded only
+/// together with the Allowance's initialized ledger, in one atomic batch on a protected
+/// record (Paykit spec 8.3.1), which it doesn't build.
+fn would_accept(record: &AllowanceRecord, stored: &StoredMessage) -> bool {
+    let mut next = record.clone();
+    acceptance(record).is_none() && place(&mut next, stored.clone()) && acceptance(&next).is_some()
+}
+
 /// The status the record shows, `stopped` when this app keeps the counterparty's end,
 /// `conflict` when it keeps a conflicting message as the stop. A conflict shows over all
 /// else, for good; the record's own end or rejection shows over a kept end, which may yet
@@ -741,8 +760,9 @@ fn put_placed(
         return keep_conflict(cx, target, stored, seq, scopes);
     }
     // The step never writes an answer into the record's empty response. The answer is kept
-    // with the replies kept to place (`pr/`), with its place in the inbox's order, and
-    // written by the placement after the read, once that read's stored entries are noted
+    // with the replies kept to place (`pr/`), with its place in the inbox's order, and a
+    // rejection is written by the placement after the read (an acceptance never is:
+    // [`would_accept`]), once that read's stored entries are noted
     // (`se/`), in that order ([`Paykit::place_kept_allowance_responses`]): an earlier answer
     // kept, or stored and noted (`se/`), or tried again by the client before the feed, takes
     // the response first, and a later one conflicts with it ([`answered_before`]). An entry
@@ -1250,8 +1270,8 @@ impl Paykit {
     /// Propose an Allowance to `to` (Paykit spec 8.3, Paykit wire 4.15): this identity takes
     /// `role`, `to` the other. The proposal is signed under a fresh Allowance ID, and its
     /// `allowances` record written in the batch that queues it, then it is sent. The
-    /// recipient must admit this identity (Paykit spec 1). A proposal grants nothing: only
-    /// its acceptance does.
+    /// recipient must admit this identity (Paykit spec 1). A proposal grants nothing, and
+    /// this version makes no Allowance usable ([`Paykit::accept_allowance`]).
     ///
     /// # Errors
     ///
@@ -1394,28 +1414,23 @@ impl Paykit {
         Ok(())
     }
 
-    /// Accept the Allowance proposed to this identity at `record` (Paykit spec 8.3, Paykit
-    /// wire 4.16): the acceptance is recorded, then sent. Only the proposal's recipient
-    /// answers it, once. Returns the acceptance's `msg_id`.
+    /// Accept the Allowance proposed to this identity at `record` (Paykit spec 8.3, 8.3.1;
+    /// Paykit wire 4.16): unavailable in this version, in either role. An acceptance is
+    /// recorded only together with the Allowance's initialized ledger, in one atomic batch on
+    /// a protected record, and creating usable Allowance authority stays unavailable until
+    /// that is built (Paykit spec 8.3.1). The call is refused before anything is read,
+    /// signed, written or sent.
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotFound`], also for a record held as deleted; [`Refusal::AllowanceEnded`]
-    /// once it ended, or while this app keeps the counterparty's end;
-    /// [`Refusal::AllowanceConflicted`] for a conflicted one, for good; [`Refusal::NotNow`]
-    /// while the shared records aren't listed, the record waits for its scope key, or sends
-    /// to the counterparty are held, as [`Paykit::propose_allowance`] says, with nothing
-    /// changed; [`Refusal::Divergent`] while the record was seen divergent and the user
-    /// hasn't confirmed it, or messages kept over it wait to be written, naming it, with
-    /// nothing signed, written or sent: an acceptance adds no stop (Paykit spec 6);
-    /// [`Refusal::Usage`] for a proposal this identity sent or one answered already; as
-    /// [`Paykit::propose_allowance`].
+    /// Always [`Refusal::AllowanceAcceptanceUnavailable`].
     pub async fn accept_allowance(&mut self, record: &[u8; 32]) -> Result<String> {
         Box::pin(self.answer_allowance(record, Kind::AllowanceAcceptance)).await
     }
 
     /// Reject the Allowance proposed to this identity at `record` (Paykit spec 8.3, Paykit
-    /// wire 4.16), as [`Paykit::accept_allowance`] accepts it. A rejected Allowance has no
+    /// wire 4.16): the rejection is recorded, then sent. Only the proposal's recipient
+    /// answers it, once. Returns the rejection's `msg_id`. A rejected Allowance has no
     /// end. A rejection is a stop: it goes over a record seen divergent as over any other
     /// (Paykit spec 6).
     ///
@@ -1453,9 +1468,15 @@ impl Paykit {
         Box::pin(self.answer_allowance(record, Kind::AllowanceEnd)).await
     }
 
-    /// Record and send this identity's acceptance, rejection or end of the Allowance at
-    /// `record`, `kind`, built again from a fresh read after the record changed meanwhile.
+    /// Record and send this identity's rejection or end of the Allowance at `record`, `kind`,
+    /// built again from a fresh read after the record changed meanwhile. An acceptance is
+    /// refused before any effect: it is recorded only with the Allowance's initialized
+    /// ledger, which this version doesn't build (Paykit spec 8.3.1), so no write of this SDK
+    /// makes an Allowance accepted.
     async fn answer_allowance(&mut self, record: &[u8; 32], kind: Kind) -> Result<String> {
+        if kind == Kind::AllowanceAcceptance {
+            return Err(Refusal::AllowanceAcceptanceUnavailable.into());
+        }
         self.refresh_own()?;
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
@@ -1478,18 +1499,13 @@ impl Paykit {
             if held.end.is_some() || Box::pin(self.allowance_stopped(record)).await? {
                 return Err(Refusal::AllowanceEnded.into());
             }
-            // A proposal, acceptance or rejection to a counterparty whose sends are held is
-            // refused, which moves no money in either role (Paykit spec 8.1, "Blocked
+            // A rejection to a counterparty whose sends are held is refused, as a proposal
+            // is, which moves no money in either role (Paykit spec 8.1, "Blocked
             // counterparties"). The user's end is never held: it stops payment, so it is
             // recorded and sent at once, as a payee's cancellation is (Paykit spec 8.1,
             // "What stops or settles a payment still goes"; 8.3).
             if kind != Kind::AllowanceEnd {
                 Box::pin(self.refuse_while_sends_held(&held.counterparty)).await?;
-            }
-            // An acceptance adds no stop: it waits for the user's confirmation of a record
-            // seen divergent (Paykit spec 6). A rejection and an end are stops and go.
-            if kind == Kind::AllowanceAcceptance {
-                Box::pin(self.refuse_while_write_waits(record)).await?;
             }
             let proposal = held.proposal.hash();
             let to_here = held.proposal.message().to == own;
@@ -2376,6 +2392,9 @@ impl Paykit {
     ///   [`crate::KEPT_MESSAGE_MS`] have passed since its acceptance (Paykit spec 8.1).
     /// - One the record reflects already, or that makes the Allowance conflicted, is done:
     ///   the conflict is kept as its stop (`cf/`) in the commit of `locals`.
+    /// - Any other acceptance that would take the record's response ([`would_accept`]) isn't
+    ///   written now ([`Placed::Not`]): this version makes no Allowance accepted (Paykit spec
+    ///   8.3.1). It stays kept, and is given up past its window with the notice.
     /// - A failure of the app's own store, or a switch that doesn't answer, is the call's
     ///   error, never a message not written.
     async fn place_allowance_later(
@@ -2452,8 +2471,14 @@ impl Paykit {
                     Box::pin(self.keep_conflict_later(&record, &stored, order, locals)).await?;
                     return Ok(Placed::Done);
                 }
-                // A proposal or an acceptance waits over a divergent record until the user
-                // confirms it, as at receive; a rejection goes.
+                // An acceptance never takes the record's response: an Allowance becomes
+                // accepted only with its initialized ledger, recorded in one atomic batch on a
+                // protected record (Paykit spec 8.3.1), which this version doesn't build. It
+                // isn't written now: kept, tried again at each receive, and given up past its
+                // window with the host's notice, as any message its record can't take now.
+                Some(held) if would_accept(&held, &stored) => return Ok(Placed::Not),
+                // A proposal waits over a divergent record until the user confirms it, as at
+                // receive; a rejection goes.
                 Some(held)
                     if !reflects(&held, &stored.message().msg_id)
                         && Box::pin(self.divergent_write_waits(&record, &stored, Some(order)))
