@@ -43,7 +43,9 @@
 //! all the apps, in the order of `identity.json`: an app whose usable endpoints don't fit in
 //! what is left is reported as over the bound, never cut to fit, and a later app still gets
 //! what is left. A payment to a request's `required_app_id` reads only that app's record, so
-//! that app's failure leaves it no public destination (Paykit spec 8.1). The same checks run
+//! that app's failure leaves it no public destination (Paykit spec 8.1); an app whose records
+//! conflict still pays from the earlier record it holds, if any, the conflict reported
+//! beside it (Switch spec 4.2). The same checks run
 //! again before money moves, on the record kept as the destination's carrier.
 //!
 //! **Publishing** this app's own Paykit member is `crate::own_record`'s.
@@ -163,15 +165,6 @@ impl std::fmt::Display for PublicAppFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "app {}: {}", zbase32_encode(&self.app_id), self.reason)
     }
-}
-
-/// The payee's app records that may be used now, of one read, and the apps whose couldn't.
-#[derive(Default)]
-pub(crate) struct PublicRecords {
-    /// The usable records, in the order of the payee's `identity.json`.
-    pub(crate) usable: Vec<UsableRecord>,
-    /// The apps whose records couldn't be used.
-    pub(crate) failures: Vec<PublicAppFailure>,
 }
 
 /// What is left of one read's bound ([`MAX_PUBLIC_ENDPOINTS`], [`MAX_PUBLIC_PAYLOAD_BYTES`]).
@@ -315,7 +308,8 @@ impl SeenRecords {
     /// Dropping an older record can only lose the earlier record a conflict falls back to,
     /// which leaves no record used rather than a wrong one. Past [`SEEN_RECORDS_BYTES`] the
     /// oldest are dropped the same way; `false` when the records at the newest `updated_at`
-    /// alone are over it, and so can't be kept.
+    /// alone are over it, and so can't be kept. Records go by whole `updated_at`: both sides
+    /// of an older conflict go together, never one alone.
     fn keep(&mut self, record: &AppRecord, held: &[AppRecord]) -> bool {
         self.records.push(record.signed().clone());
         let times: Vec<u64> = held
@@ -340,7 +334,22 @@ impl SeenRecords {
             bytes = bytes.saturating_sub(sizes[drop]);
             drop += 1;
         }
-        self.records.drain(..drop.min(droppable));
+        // A whole `updated_at` goes or none of it: one side of an older conflict, kept
+        // without the other, would replay as a record no conflict touched and could become
+        // the earlier record a later conflict falls back to (Switch spec 4.2). The times
+        // dropped are all older than the newest, which is never dropped.
+        let gone: Vec<u64> = times[..drop.min(droppable)].to_vec();
+        let mut at = 0;
+        self.records.retain(|_| {
+            let keep = !gone.contains(&times[at]);
+            at += 1;
+            keep
+        });
+        let bytes = self
+            .records
+            .iter()
+            .map(|signed| serde_json::to_vec(signed).map_or(usize::MAX, |b| b.len() + 1))
+            .fold(0usize, usize::saturating_add);
         bytes <= SEEN_RECORDS_BYTES
     }
 
@@ -390,7 +399,9 @@ impl Paykit {
     /// The payee's app records that may be used now (module docs), of `app` only when given,
     /// and the apps whose records couldn't be used: in the order of the payee's
     /// `identity.json`, within the read's bound. `Err` inside holds the refusal of the payee's
-    /// `identity.json`. The rules of discovery ([`Paykit::public_endpoints`]) and of a public
+    /// `identity.json`. Each app whose records couldn't be used goes into `failures` as it
+    /// is judged, so an error later in the read leaves the failures found before it there.
+    /// The rules of discovery ([`Paykit::public_endpoints`]) and of a public
     /// payment alike: an app whose record served now fails gives its failure and no endpoints
     /// (Paykit spec 4), except a conflict, reported while an earlier record held is still
     /// used (Switch spec 4.2).
@@ -400,7 +411,8 @@ impl Paykit {
         app: Option<[u8; 16]>,
         by: Initiator,
         confirmed: Option<UserConfirmed>,
-    ) -> Result<std::result::Result<PublicRecords, Refusal>> {
+        failures: &mut Vec<PublicAppFailure>,
+    ) -> Result<std::result::Result<Vec<UsableRecord>, Refusal>> {
         // The current apps' records are read from the Homeserver beside the payee's switch
         // lookup, from the copy of identity.json taken first (Paykit spec 4, 14).
         let homeserver = Arc::clone(&self.homeserver);
@@ -424,16 +436,18 @@ impl Paykit {
                 out
             }))
         };
-        let (doc, reads) = self
+        let (identity, reads) = self
             .payee_identity_with(payee, Need::SwitchCopy, by, confirmed, start)
             .await?;
-        let doc = match doc {
-            Ok(identity) => identity.doc,
+        let identity = match identity {
+            Ok(identity) => identity,
             Err(refusal) => return Ok(Err(refusal)),
         };
+        let fresh_until = identity.fresh_until_ms();
+        let mut doc = identity.doc;
         // The reads start with the first copy taken, so they ran.
         let Some(mut reads) = reads else {
-            return Ok(Ok(PublicRecords::default()));
+            return Ok(Ok(Vec::new()));
         };
         // Only the apps the copy acted on lists, in its order (Paykit spec 4). A newer copy
         // the switch gave may list apps the first didn't: their records are read now, all of
@@ -452,9 +466,36 @@ impl Paykit {
         }
         // One time judges every app of the read, taken once every record is in: no app
         // expires while another's record is read, and the read's bound goes, in the order of
-        // identity.json, to the apps usable at that time.
-        let now = self.now();
-        let mut out = PublicRecords::default();
+        // identity.json, to the apps usable at that time. A copy of identity.json that went
+        // stale while the records were read is looked up again at that time, as any copy
+        // over 10 minutes old is before it is acted on (Switch spec 4.3), and only the apps
+        // the fresh copy lists are judged, in its order: an app it no longer lists offers
+        // nothing, and one it newly lists is read now.
+        let mut now = self.now();
+        if now >= fresh_until {
+            doc = match self
+                .payee_identity(payee, Need::SwitchCopy, by, confirmed)
+                .await?
+            {
+                Ok(identity) => identity.doc,
+                Err(refusal) => return Ok(Err(refusal)),
+            };
+            let mut reconciled = Vec::with_capacity(fetched.len());
+            for listed in &doc.body().apps {
+                let app_id = listed.app_id;
+                if app.is_some_and(|a| a != app_id) {
+                    continue;
+                }
+                let bytes = match fetched.iter().position(|(id, _)| *id == app_id) {
+                    Some(at) => fetched.swap_remove(at).1,
+                    None => self.homeserver.get(*payee, app_record_path(&app_id)).await,
+                };
+                reconciled.push((app_id, bytes));
+            }
+            fetched = reconciled;
+            now = self.now();
+        }
+        let mut usable_records = Vec::new();
         let mut room = Room::new();
         for (app_id, bytes) in fetched {
             let fail = |reason| PublicAppFailure { app_id, reason };
@@ -462,8 +503,7 @@ impl Paykit {
             let bytes = match bytes {
                 Ok(bytes) => bytes,
                 Err(error) => {
-                    out.failures
-                        .push(fail(PublicAppFailureReason::Homeserver(error)));
+                    failures.push(fail(PublicAppFailureReason::Homeserver(error)));
                     continue;
                 }
             };
@@ -495,11 +535,10 @@ impl Paykit {
                     // is an earlier one in its place, which it may withdraw: the app's
                     // failure, and the other apps' reads go on (Paykit spec 4, below).
                     if !seen.keep(&record, &held) {
-                        out.failures
-                            .push(fail(PublicAppFailureReason::Refused(format!(
-                                "Paykit spec 4: the app's newest records are over the \
+                        failures.push(fail(PublicAppFailureReason::Refused(format!(
+                            "Paykit spec 4: the app's newest records are over the \
                              {SEEN_RECORDS_BYTES} bytes a reader keeps of them"
-                            ))));
+                        ))));
                         continue;
                     }
                     view.see(&record, now);
@@ -546,7 +585,7 @@ impl Paykit {
             // no earlier record.
             let in_conflict = !served_refused && !served_ahead && view.in_conflict();
             if let Some(reason) = served_failure {
-                out.failures.push(fail(reason));
+                failures.push(fail(reason));
                 if !(in_conflict && view.used().is_some()) {
                     continue;
                 }
@@ -560,12 +599,12 @@ impl Paykit {
             }
             match usable(&app_id, used, &doc, now) {
                 // An app's endpoints are taken whole or not at all (Paykit spec 4).
-                Ok(usable) if room.take(&usable.member) => out.usable.push(usable),
-                Ok(_) => out.failures.push(fail(PublicAppFailureReason::OverBound)),
-                Err(reason) => out.failures.push(fail(reason)),
+                Ok(usable) if room.take(&usable.member) => usable_records.push(usable),
+                Ok(_) => failures.push(fail(PublicAppFailureReason::OverBound)),
+                Err(reason) => failures.push(fail(reason)),
             }
         }
-        Ok(Ok(out))
+        Ok(Ok(usable_records))
     }
 
     /// The payee's public Payment List (Paykit spec 4): the public endpoints of `payee`'s
@@ -597,11 +636,11 @@ impl Paykit {
         confirmed: Option<UserConfirmed>,
     ) -> Result<PublicPaymentList> {
         self.refresh_own()?;
+        let mut failures = Vec::new();
         let records = self
-            .public_records(payee, None, Initiator::User, confirmed)
+            .public_records(payee, None, Initiator::User, confirmed, &mut failures)
             .await??;
         let endpoints = records
-            .usable
             .iter()
             .flat_map(|usable| {
                 usable
@@ -617,7 +656,7 @@ impl Paykit {
             .collect();
         Ok(PublicPaymentList {
             endpoints,
-            failures: records.failures,
+            failures,
         })
     }
 }

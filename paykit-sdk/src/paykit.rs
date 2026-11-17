@@ -353,9 +353,6 @@ pub struct Paykit {
     /// public endpoint edit builds on it until the app is loaded again
     /// (`crate::own_record`).
     pub(crate) own_record_unknown: bool,
-    /// Whether this load already asked the client to drop Paykit's expiry ask from a held
-    /// record without public endpoints (`crate::own_record`).
-    pub(crate) expiry_ask_dropped: bool,
 }
 
 impl std::fmt::Debug for Paykit {
@@ -415,7 +412,6 @@ impl Paykit {
             first_read_done: false,
             first_read_summary: None,
             own_record_unknown: false,
-            expiry_ask_dropped: false,
         }
     }
 
@@ -866,7 +862,10 @@ impl Paykit {
         // cannot be made leaves the first read owed (Switch spec 12.4, "The held cursor").
         let first_read = self.first_read_pending();
         if first_read && self.certificate_refused().is_none() {
-            match self.app.refresh_identity().await {
+            let refreshed = self.app.refresh_identity().await;
+            // The refresh can take a renewal into the own record.
+            self.note_own_record_write(&refreshed);
+            match refreshed {
                 Ok(IdentityRefresh::Current { .. } | IdentityRefresh::Newer { .. }) => {}
                 Ok(_) | Err(AppError::Transport(_)) => {
                     return Err(Refusal::IdentityUnavailable(

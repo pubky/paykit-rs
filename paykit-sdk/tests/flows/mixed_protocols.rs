@@ -301,6 +301,90 @@ async fn test_mixed_protocols_withdrawal_refused_by_a_lapsed_expiry_keeps_the_me
         pubky_switch_core::records::AppRecord::verify(app.app().record(), &w.alice_id()).unwrap();
     assert_eq!(held.expires_at(), None);
     app.receive(None).await.unwrap();
+    // Chat asks for an expiry again: a record without public endpoints whose expiry is
+    // chat's alone is left as it is, receive after receive.
+    let deadline = pubky_switch_client::clock::Clock::now_ms(w.clock.as_ref()) + 2 * hour;
+    app.app_mut()
+        .set_protocol_member("chat", chat(), Some(deadline))
+        .await
+        .unwrap();
+    let signed = app.app().record().clone();
+    app.receive(None).await.unwrap();
+    app.receive(None).await.unwrap();
+    assert_eq!(app.app().record(), &signed);
+}
+
+/// Alice's app owning chat and Paykit, holding `paykit_request`, publishing its record.
+async fn publishing_mixed(w: &World) -> Paykit {
+    let mut scopes = AppScopes::new().request().build().unwrap();
+    scopes.scopes.push("chat".into());
+    Paykit::join_with_protocols(
+        w.env(&w.alice, store()),
+        PaykitConfig::default().with_app(pubky_switch_client::app::AppConfig {
+            publishes_record: true,
+            ..pubky_switch_client::app::AppConfig::default()
+        }),
+        w.approve(&w.alice, "mixed", &scopes),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        register,
+    )
+    .await
+    .unwrap()
+}
+
+/// A chat member.
+fn chat_member() -> Option<serde_json::Map<String, serde_json::Value>> {
+    let mut member = serde_json::Map::new();
+    member.insert("room".into(), serde_json::json!("lobby"));
+    Some(member)
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_unread_paykit_member_kept_beside_chat_expiry() {
+    let w = world();
+    let mut app = publishing_mixed(&w).await;
+    // A Paykit member of a field this version doesn't read only, and chat's expiry.
+    let mut member = serde_json::Map::new();
+    member.insert("future_field".into(), serde_json::json!("kept"));
+    app.app_mut()
+        .set_protocol_member_with_lifetime("paykit", Some(member), None)
+        .await
+        .unwrap();
+    let deadline = pubky_switch_client::clock::Clock::now_ms(w.clock.as_ref()) + 3_600_000;
+    app.app_mut()
+        .set_protocol_member("chat", chat_member(), Some(deadline))
+        .await
+        .unwrap();
+    // No withdrawal is owed: the record keeps its bytes, receive after receive.
+    let signed = app.app().record().clone();
+    app.receive(None).await.unwrap();
+    app.receive(None).await.unwrap();
+    app.update_own_record().await.unwrap();
+    assert_eq!(app.app().record(), &signed);
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_update_beside_chat_expiry_checks_the_homeserver() {
+    use pubky_switch_client::app::Publication;
+    let w = world();
+    let mut app = publishing_mixed(&w).await;
+    // No Paykit member, and chat's expiry: nothing of Paykit's is owed, so the update is
+    // the explicit check of the Homeserver copy, which can't be read now.
+    let deadline = pubky_switch_client::clock::Clock::now_ms(w.clock.as_ref()) + 3_600_000;
+    app.app_mut()
+        .set_protocol_member("chat", chat_member(), Some(deadline))
+        .await
+        .unwrap();
+    let signed = app.app().record().clone();
+    w.homeserver.set_down(true);
+    let publication = app.update_own_record().await.unwrap();
+    w.homeserver.set_down(false);
+    assert!(
+        matches!(publication, Publication::Unchecked { .. }),
+        "{publication:?}"
+    );
+    assert_eq!(app.app().record(), &signed);
 }
 
 fn register(p: Arc<PaykitProtocol>) -> Result<ProtocolSet, AppError> {

@@ -336,7 +336,9 @@ pub struct TransferQuote {
 /// public endpoints couldn't be used in the read this call made, with why (Paykit spec 4).
 /// The failures come with every outcome and every error alike, so the host can tell the user
 /// of each failed app, as it must of records that conflict (Switch wire 3.2), whatever the
-/// payment did. A payment resumed or repaired later ([`Paykit::resume_payments`],
+/// payment did. A failure doesn't mean the payment went to another app: an app whose records
+/// conflict is listed and can still be paid from the earlier record it holds (module docs of
+/// [`crate::app_records`]). A payment resumed or repaired later ([`Paykit::resume_payments`],
 /// [`Paykit::repair_activity_record`]) reads no public endpoints and returns its outcome
 /// alone.
 #[derive(Debug)]
@@ -1642,15 +1644,15 @@ impl Paykit {
                 && allowed.is_none_or(|ids| ids.contains(id))
         };
         if let PaymentMode::Public(_) = options.mode {
-            let crate::app_records::PublicRecords {
-                usable: mut records,
-                failures,
-            } = self
+            // The failures go into the call's list as each app is judged, so an error later in
+            // the read still returns those found before it ([`PayResult`]).
+            let mut records = self
                 .public_records(
                     payee,
                     app,
                     pricing.by,
                     options.unconfirmed_identity_confirmed,
+                    public_failures,
                 )
                 .await??;
             // The payee's public Payment List is every current app's public endpoints together
@@ -1672,14 +1674,13 @@ impl Paykit {
                 })
                 .collect();
             // An app whose record served now failed gave no endpoints (`public_records`), so
-            // a request requiring it has no public destination (Paykit spec 4, 8.1); its
-            // failure is in the refusal, and in the call's `PayResult` with any outcome.
-            // Every failure of this read is the call's, whatever it returns ([`PayResult`]).
-            public_failures.clone_from(&failures);
+            // a request requiring it has no public destination (Paykit spec 4, 8.1), unless
+            // its records conflict and it keeps an earlier one (Switch spec 4.2). Each failure
+            // is in the refusal, and in the call's `PayResult` with any outcome.
             if gathered.is_empty() {
                 let mut text =
                     String::from("Paykit spec 4: the payee has no usable public endpoint");
-                for failure in &failures {
+                for failure in public_failures.iter() {
                     text.push_str(&format!("; {failure}"));
                 }
                 return Err(Refusal::NoDestination(text).into());
@@ -2572,7 +2573,10 @@ impl Paykit {
             // confirmation held still counts if it is fresh once the read is over. An error
             // is more: a copy that doesn't verify, a store that fails, or an alarm, such as
             // the own identity.json equivocating (Switch wire 3.3), and it stops the payment.
-            if let Err(error) = self.app.refresh_identity().await {
+            let refreshed = self.app.refresh_identity().await;
+            // The refresh can take a renewal into the own record.
+            self.note_own_record_write(&refreshed);
+            if let Err(error) = refreshed {
                 return Err(Refusal::IdentityUnavailable(format!(
                     "Paykit spec 4: the own identity.json can't be read again: {error}"
                 )));

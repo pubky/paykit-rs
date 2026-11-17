@@ -9,7 +9,7 @@ use paykit_sdk::app_records::{
 use paykit_sdk::{PayOptions, PayOutcome, Paykit, PaymentMode, Refusal};
 use pubky_switch_client::app::{HomeserverReader, UserConfirmed};
 use pubky_switch_client::clock::{Clock, TestClock};
-use pubky_switch_client::error::TransportError;
+use pubky_switch_client::error::{StoreError, TransportError};
 use pubky_switch_client::testing::TestHomeserver;
 use pubky_switch_client::transport::BoxFuture;
 use pubky_switch_core::records::{app_record_path, IDENTITY_PATH};
@@ -102,8 +102,19 @@ impl HomeserverReader for FailingRecords {
 
 /// Alice's wallet, reading Homeservers through a [`FailingRecords`].
 async fn wallet_reading_through(w: &World) -> (Paykit, Arc<FailingRecords>) {
+    wallet_reading_through_on(w, |base| base).await
+}
+
+/// As [`wallet_reading_through`], its store `wrap` of a fresh one.
+async fn wallet_reading_through_on(
+    w: &World,
+    wrap: impl FnOnce(
+        Arc<dyn pubky_switch_client::store::StateStore>,
+    ) -> Arc<dyn pubky_switch_client::store::StateStore>,
+) -> (Paykit, Arc<FailingRecords>) {
     let base = store();
     let app_id = w.wallet_on("wallet", Arc::clone(&base)).await.app_id();
+    let base = wrap(base);
     let reads = Arc::new(FailingRecords {
         inner: Arc::clone(&w.homeserver),
         failing: Mutex::new(Vec::new()),
@@ -313,7 +324,14 @@ async fn test_public_read_one_time_judges_every_app() {
     );
     w.homeserver.put(w.bob_id(), IDENTITY_PATH, older);
     reads.slow(&till.1, HOUR_MS);
+    let looked_up = w.homeserver.identity_reads(&w.bob_id());
     let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    // The copy of identity.json taken first is over 10 minutes old once the records are
+    // in: it is looked up again before any app is judged.
+    assert!(
+        w.homeserver.identity_reads(&w.bob_id()) >= looked_up + 2,
+        "{looked_up}"
+    );
     // Both are judged at the read's one time: the shop has expired, and the bound goes to
     // the till.
     assert_eq!(offering(&read), [till.1], "{read:?}");
@@ -776,6 +794,143 @@ async fn test_public_read_large_records_kept_per_app_within_the_store_bound() {
         "{:?}",
         read.failures
     );
+}
+
+/// A store that moves the world's clock on at the first read, once armed, of the records a
+/// reader keeps of a payee app (`ar/`).
+struct ClockOnSeenRead {
+    inner: Arc<dyn pubky_switch_client::store::StateStore>,
+    clock: Arc<TestClock>,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl pubky_switch_client::store::StateStore for ClockOnSeenRead {
+    fn get(&self, ns: &str, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+        if key.windows(4).any(|w| w == b"/ar/")
+            && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.clock.advance_ms(2 * HOUR_MS);
+        }
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, StoreError> {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(&self, batch: pubky_switch_client::store::WriteBatch) -> Result<(), StoreError> {
+        self.inner.commit(batch)
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, StoreError> {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, StoreError> {
+        self.inner.commit_if(ns, owner, batch)
+    }
+}
+
+#[tokio::test]
+async fn test_public_read_time_taken_once_before_any_app_is_judged() {
+    let w = World::new();
+    let seen = Arc::new(std::sync::OnceLock::<Arc<ClockOnSeenRead>>::new());
+    let clock = Arc::clone(&w.clock);
+    let kept = Arc::clone(&seen);
+    let (mut wallet, _reads) = wallet_reading_through_on(&w, move |base| {
+        let store = Arc::new(ClockOnSeenRead {
+            inner: base,
+            clock,
+            armed: std::sync::atomic::AtomicBool::new(false),
+        });
+        let _ = kept.set(Arc::clone(&store));
+        store
+    })
+    .await;
+    let apps = bob_apps(&w, &["shop", "till"]).await;
+    let now = w.clock.now_ms();
+    publish_now(
+        &w,
+        apps[0].0,
+        one_endpoint("btc-lightning-bolt12", "lno1shop"),
+    );
+    // The till's record expires in an hour.
+    publish_app_at(
+        &w,
+        apps[1].0,
+        one_endpoint("btc-lightning-bolt11", "lnbc1till"),
+        now,
+        Some(now + HOUR_MS),
+    );
+    // Reading what the wallet keeps of the shop takes two hours: the till is still judged
+    // at the read's one time, before them.
+    seen.get()
+        .unwrap()
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[0].1, apps[1].1], "{read:?}");
+    assert!(read.failures.is_empty(), "{read:?}");
+}
+
+#[tokio::test]
+async fn test_public_read_failures_found_before_an_error_come_with_it() {
+    let w = World::new();
+    let fault = Arc::new(std::sync::OnceLock::<
+        Arc<pubky_switch_client::store::FaultStore>,
+    >::new());
+    let kept = Arc::clone(&fault);
+    let (mut wallet, reads) = wallet_reading_through_on(&w, move |base| {
+        let store = Arc::new(pubky_switch_client::store::FaultStore::new(
+            base,
+            pubky_switch_client::store::Fault::None,
+        ));
+        let _ = kept.set(Arc::clone(&store));
+        store
+    })
+    .await;
+    let apps = bob_apps(&w, &["shop", "till"]).await;
+    publish_now(
+        &w,
+        apps[0].0,
+        one_endpoint("btc-lightning-bolt12", "lno1shop"),
+    );
+    publish_now(
+        &w,
+        apps[1].0,
+        one_endpoint("btc-lightning-bolt11", "lnbc1till"),
+    );
+    // The shop's record can't be read, then keeping the till's record fails: the payment
+    // stops with the store's error, and the shop's failure comes with it.
+    reads.fail(&apps[0].1);
+    fault.get().unwrap().fail_put_once(b"p/paykit/ar/");
+    let paid = wallet.pay_without_request(public_to_bob(&w)).await;
+    assert!(paid.outcome.is_err(), "{paid:?}");
+    assert_eq!(paid.public_failures.len(), 1, "{paid:?}");
+    assert_eq!(paid.public_failures[0].app_id, apps[0].1);
+    assert!(
+        matches!(
+            paid.public_failures[0].reason,
+            PublicAppFailureReason::Homeserver(_)
+        ),
+        "{paid:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
 }
 
 #[tokio::test]

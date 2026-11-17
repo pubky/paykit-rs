@@ -353,6 +353,74 @@ async fn test_public_conflicting_records_use_the_earlier_one_until_a_later_one()
 }
 
 #[tokio::test]
+async fn test_public_conflict_sides_leave_the_history_together() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    // Every updated_at is a conflict, more of them than the history keeps: no side of an
+    // older one is ever the earlier record a later conflict falls back to.
+    for i in 0..34u64 {
+        publish_at(
+            &w,
+            one_endpoint("btc-lightning-bolt11", &format!("lnbc1a{i}")),
+            t0 + i,
+            expiry,
+        );
+        listed(&mut wallet, &w).await;
+        publish_at(
+            &w,
+            one_endpoint("btc-lightning-bolt12", &format!("lno1b{i}")),
+            t0 + i,
+            expiry,
+        );
+        let list = read(&mut wallet, &w).await;
+        assert!(list.endpoints.is_empty(), "pair {i}: {list:?}");
+    }
+}
+
+#[tokio::test]
+async fn test_public_older_record_served_again_answered_from_the_newer_one() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let t0 = w.clock.now_ms();
+    let older = publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1old"),
+        t0,
+        Some(t0 + 2 * HOUR_MS),
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1new"),
+        t0 + 1000,
+        Some(t0 + 30 * DAY_MS),
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
+    // The older record, now expired, is served again: it is superseded, never the app's
+    // record again (Switch spec 4.2), and the newer one, checked as any record used, is.
+    w.clock.advance_ms(3 * HOUR_MS);
+    serve(&w, &older);
+    let list = read(&mut wallet, &w).await;
+    assert_eq!(ids(&list), ["btc-lightning-bolt12"]);
+    assert!(list.failures.is_empty(), "{list:?}");
+    let outcome = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].endpoint_id,
+        endpoint("btc-lightning-bolt12")
+    );
+}
+
+#[tokio::test]
 async fn test_public_record_comparison_survives_a_reload() {
     let w = World::new();
     let base = crate::common::store();

@@ -73,6 +73,7 @@ use pubky_switch_core::time::MAX_TIME_MS;
 use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
 use crate::rail::Rail;
+use crate::state::key;
 
 /// The lifetime of a record with public endpoints the SDK signs: 30 days, the recommended
 /// most, unless the identity's `record_max_age` is shorter (Paykit spec 4, Paykit wire 3.2).
@@ -241,21 +242,27 @@ impl Paykit {
     /// The client's refusal, store failure, alarm or delivery error; the refusal of a
     /// capabilities list the record can't carry ([`capabilities_for`]).
     pub(crate) async fn tend_own_record(&mut self) -> Result<Option<Publication>> {
+        // Nothing is signed while the record this handle holds may not be the one stored:
+        // the next load reads it again (`own_record_known`).
+        if self.own_record_unknown {
+            return Ok(None);
+        }
         let held = self.own_member()?;
         let wanted = self.own_member_with(held.public_endpoints.clone())?;
         let publication = if wanted != held {
             Box::pin(self.put_member(wanted)).await?
+        } else if held.public_endpoints.is_empty() && self.withdrawal_cleanup_owed().await? {
+            // The second step of a last withdrawal is owed, the withdrawal itself signed.
+            match Box::pin(self.finish_withdrawal()).await? {
+                Some(publication) => publication,
+                None => return Ok(None),
+            }
         } else if !held.public_endpoints.is_empty() && self.renewal_due()? {
             let lifetime = Some(self.record_lifetime());
             let renewed =
                 Box::pin(self.app.renew_record_with_lifetime(PROTOCOL_NAME, lifetime)).await;
             self.note_own_record_write(&renewed);
             renewed?
-        } else if held.public_endpoints.is_empty() && !self.expiry_ask_dropped && self.expires()? {
-            // A record without public endpoints asks for no expiry (Paykit wire 3.2): Paykit's
-            // lifetime ask kept through the last withdrawal (`put_member`) goes now, once the
-            // withdrawal is signed.
-            Box::pin(self.drop_expiry_ask()).await?
         } else {
             // The member unchanged still goes to the client: a restored record the switch
             // never accepted, such as a withdrawal whose `app.put` failed before the backup,
@@ -310,62 +317,85 @@ impl Paykit {
 
     /// Sign `member` into the app's record, with `expires_at` when it carries public
     /// endpoints and none when it doesn't, and send it as the client orders (module docs).
+    /// Returns where the last record the call signed stands on the Homeserver.
     ///
-    /// The last withdrawal, a member without public endpoints over one with some, keeps
-    /// Paykit's lifetime ask, and the member itself, empty, while the member changes, and
-    /// drops the ask, with the empty member, only once the withdrawal is signed: the client keeps an ask even when another protocol's lapsed
-    /// expiry refuses the signing, so asking for none with the change would leave the
-    /// endpoints held with no expiry, a member no reader takes (Paykit wire 3.2). A
-    /// withdrawal refused so keeps the endpoints under their lifetime; an ask the drop leaves,
-    /// refused the same way, has no endpoints left under it, and the upkeep drops it later
-    /// (`Paykit::tend_own_record`).
+    /// The last withdrawal, a member without public endpoints over one with some, goes in two
+    /// steps, so the member and its expiry ask are never apart: the client keeps a protocol's
+    /// ask even when another protocol's lapsed expiry refuses the signing, so asking for no
+    /// expiry with the change itself could leave the endpoints held with none, a member no
+    /// reader takes (Paykit wire 3.2). First Paykit's durable mark that the second step is
+    /// owed is written, and the withdrawal is signed with Paykit's lifetime ask kept, the
+    /// member staying in the record (with the capabilities of an app that pays, or empty).
+    /// Then the second step asks for no expiry ([`Paykit::finish_withdrawal`]). Setting
+    /// endpoints again clears the mark: the lifetime ask is wanted again.
     async fn put_member(&mut self, member: PaykitMember) -> Result<Publication> {
+        self.own_record_known()?;
         let withdraws_last =
             member.public_endpoints.is_empty() && !self.own_member()?.public_endpoints.is_empty();
+        if withdraws_last {
+            self.local_put(key::WITHDRAWAL_CLEANUP_OWED, &true).await?;
+        } else if !member.public_endpoints.is_empty() && self.withdrawal_cleanup_owed().await? {
+            self.local_delete(key::WITHDRAWAL_CLEANUP_OWED).await?;
+        }
         let lifetime =
             (!member.public_endpoints.is_empty() || withdraws_last).then(|| self.record_lifetime());
-        // The member stays in the record through the last withdrawal, empty: the client asks
-        // for no expiry for a member it removes.
-        let value =
-            (member != PaykitMember::default() || withdraws_last).then(|| member.to_member());
-        if lifetime.is_some() {
-            // Paykit asks for a lifetime again: a later record without endpoints drops it.
-            self.expiry_ask_dropped = false;
-        }
+        // A member that changes nothing goes as the record holds it, so what this version
+        // doesn't read is kept and nothing is signed for it. The client asks for no expiry
+        // for a member it removes: through the last withdrawal the member stays.
+        let value = if member == self.own_member()? {
+            AppRecord::verify(self.app.record(), &self.identity())
+                .map_err(|_| PaykitError::corrupt())?
+                .body()
+                .protocols
+                .get(PROTOCOL_NAME)
+                .cloned()
+        } else {
+            (member != PaykitMember::default() || withdraws_last).then(|| member.to_member())
+        };
         let publication = Box::pin(self.put_member_value(value, lifetime)).await?;
         if withdraws_last {
-            // The withdrawal stands either way; a drop that fails is the upkeep's again.
-            if let Ok(dropped) = Box::pin(self.drop_expiry_ask()).await {
-                return Ok(dropped);
+            if let Some(cleaned) = Box::pin(self.finish_withdrawal()).await? {
+                return Ok(cleaned);
             }
         }
         Ok(publication)
     }
 
-    /// Ask for no expiry for Paykit's member, signing the record anew (Paykit wire 3.2: a
-    /// record without public endpoints may write `null`); an empty member, kept through the
-    /// last withdrawal, goes with the ask.
-    async fn drop_expiry_ask(&mut self) -> Result<Publication> {
-        let renewed = if self.own_member()? == PaykitMember::default() {
-            Box::pin(
-                self.app
-                    .set_protocol_member_with_lifetime(PROTOCOL_NAME, None, None),
-            )
-            .await
-        } else {
-            Box::pin(self.app.renew_record_with_lifetime(PROTOCOL_NAME, None)).await
-        };
-        self.note_own_record_write(&renewed);
-        let publication = renewed?;
-        self.expiry_ask_dropped = true;
-        Ok(publication)
+    /// Whether the second step of a last withdrawal is owed ([`Paykit::put_member`]).
+    async fn withdrawal_cleanup_owed(&self) -> Result<bool> {
+        Ok(self
+            .local_get::<bool>(key::WITHDRAWAL_CLEANUP_OWED)
+            .await?
+            .unwrap_or(false))
     }
 
-    /// Whether the record the app holds carries `expires_at`.
-    fn expires(&self) -> Result<bool> {
-        let record = AppRecord::verify(self.app.record(), &self.identity())
-            .map_err(|_| PaykitError::corrupt())?;
-        Ok(record.expires_at().is_some())
+    /// The second step of a last withdrawal: Paykit asks for no expiry, the member's bytes
+    /// kept, which signs the record anew (Paykit wire 3.2: a record without public endpoints
+    /// may write `null`). It runs only while the mark is set and the record held has no
+    /// public endpoints, never on what the record looks like: another protocol's expiry or
+    /// a member of fields this version doesn't read decides nothing. The mark goes once the
+    /// client has signed the record, whatever its delivery did; a result the store can't
+    /// tell keeps it and stops the handle's edits until a load (`own_record_known`).
+    /// `Ok(None)` when the client refused before signing, as while another protocol's
+    /// expiry has lapsed: nothing changed, the mark stays and a later upkeep tries again.
+    async fn finish_withdrawal(&mut self) -> Result<Option<Publication>> {
+        self.own_record_known()?;
+        let before = self.app.record().clone();
+        let renewed = Box::pin(self.app.renew_record_with_lifetime(PROTOCOL_NAME, None)).await;
+        self.note_own_record_write(&renewed);
+        if self.own_record_unknown {
+            return Err(renewed
+                .err()
+                .map_or_else(PaykitError::corrupt, PaykitError::from));
+        }
+        if self.app.record() != &before {
+            self.local_delete(key::WITHDRAWAL_CLEANUP_OWED).await?;
+        }
+        match renewed {
+            Ok(publication) => Ok(Some(publication)),
+            Err(AppError::Refused(_)) if self.app.record() == &before => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Put `value` as the record's Paykit member, `None` for none, asking for `lifetime`.
@@ -374,6 +404,7 @@ impl Paykit {
         value: Option<serde_json::Map<String, serde_json::Value>>,
         lifetime: Option<u64>,
     ) -> Result<Publication> {
+        self.own_record_known()?;
         let put = self
             .app
             .set_protocol_member_with_lifetime(PROTOCOL_NAME, value, lifetime)

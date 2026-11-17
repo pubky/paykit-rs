@@ -404,16 +404,25 @@ async fn test_own_record_upkeep_without_publishing_withdraws_every_endpoint() {
     holds_none_published_two(&w, &shop);
 }
 
-/// A store whose next commit, once armed, is applied and then answers that its result is
-/// unknown, as a store that can't tell may.
+/// A store whose next commit of the client's own state, once armed, is applied and then
+/// answers that its result is unknown, as a store that can't tell may. Paykit's own state
+/// (`p/paykit/`) commits as it is.
 struct UnknownOnce {
     inner: Arc<dyn pubky_switch_client::store::StateStore>,
     armed: std::sync::atomic::AtomicBool,
 }
 
 impl UnknownOnce {
+    fn clients(batch: &pubky_switch_client::store::WriteBatch) -> bool {
+        use pubky_switch_client::store::Write;
+        batch.writes().iter().any(|write| {
+            !matches!(write, Write::Put { key, .. } | Write::Delete { key, .. } if key.starts_with(b"p/paykit/"))
+        })
+    }
+
     fn after(
         &self,
+        clients: bool,
         result: Result<
             pubky_switch_client::store::CommitOutcome,
             pubky_switch_client::error::StoreError,
@@ -422,6 +431,7 @@ impl UnknownOnce {
     {
         let applied = result?;
         if applied == pubky_switch_client::store::CommitOutcome::Applied
+            && clients
             && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
         {
             return Err(pubky_switch_client::error::StoreError::Unknown);
@@ -454,11 +464,12 @@ impl pubky_switch_client::store::StateStore for UnknownOnce {
         &self,
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
+        let clients = Self::clients(&batch);
         let result = self
             .inner
             .commit(batch)
             .map(|()| pubky_switch_client::store::CommitOutcome::Applied);
-        self.after(result).map(|_| ())
+        self.after(clients, result).map(|_| ())
     }
 
     fn acquire(
@@ -477,7 +488,8 @@ impl pubky_switch_client::store::StateStore for UnknownOnce {
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
     {
-        self.after(self.inner.commit_if(ns, owner, batch))
+        let clients = Self::clients(&batch);
+        self.after(clients, self.inner.commit_if(ns, owner, batch))
     }
 }
 
@@ -623,6 +635,191 @@ async fn test_own_record_upkeep_keeps_a_member_it_does_not_read() {
     shop.update_own_record().await.unwrap();
     assert_eq!(shop.app().record(), &signed);
     assert_eq!(on_homeserver(&w, &shop).unwrap().signed(), &signed);
+}
+
+#[tokio::test]
+async fn test_own_record_unknown_identity_refresh_stops_edits_and_upkeep() {
+    let w = World::new();
+    let mut shop = publishing_shop(&w).await;
+    shop.set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1tips"))
+        .await
+        .unwrap();
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let faulty = Arc::new(UnknownOnce {
+        inner: store(),
+        armed: std::sync::atomic::AtomicBool::new(false),
+    });
+    let mut restored = Paykit::restore(
+        w.env(
+            &w.bob,
+            Arc::clone(&faulty) as Arc<dyn pubky_switch_client::store::StateStore>,
+        ),
+        publishing(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    // A renewal is due, and bob's identity.json is newer than the one restored. The first
+    // read's refresh of the own identity, which can take a renewal into the own record,
+    // takes the newer copy, applied but the store can't tell.
+    w.clock.advance_ms(16 * DAY_MS);
+    let _till = w
+        .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
+        .await;
+    faulty
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let error = restored.receive(None).await.unwrap_err();
+    assert!(
+        matches!(
+            error,
+            PaykitError::Client(pubky_switch_client::app::AppError::Store(
+                pubky_switch_client::error::StoreError::Unknown
+            ))
+        ),
+        "{error:?}"
+    );
+    // An edit is refused, naming the way out, and the upkeep signs nothing.
+    let refused = restored
+        .set_public_endpoint(endpoint("btc-onchain-address"), payload("bc1q"))
+        .await
+        .unwrap_err();
+    let PaykitError::Refused(Refusal::NotNow(text)) = &refused else {
+        panic!("{refused:?}");
+    };
+    assert!(text.contains("load the app again"), "{text}");
+    let record = restored.app().record().clone();
+    restored.receive(None).await.unwrap();
+    assert_eq!(restored.app().record(), &record);
+}
+
+#[tokio::test]
+async fn test_own_record_withdrawal_reports_its_second_delivery() {
+    let w = World::new();
+    let mut shop = publishing_shop(&w).await;
+    let id = endpoint("btc-lightning-bolt12");
+    shop.set_public_endpoint(id.clone(), payload("lno1tips"))
+        .await
+        .unwrap();
+    // The withdrawal is delivered; its second step, asking for no expiry, is not.
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 1,
+        });
+    let error = shop.remove_public_endpoint(&id).await.unwrap_err();
+    assert!(
+        matches!(
+            error,
+            PaykitError::Client(pubky_switch_client::app::AppError::Transport(_))
+        ),
+        "{error:?}"
+    );
+    // The withdrawal stands, and the second record is held, owed to the switch.
+    assert!(shop.own_public_endpoints().unwrap().is_empty());
+    assert_eq!(held(&shop, w.bob_id()).expires_at(), None);
+    let published = on_homeserver(&w, &shop).unwrap();
+    assert!(PaykitMember::read(&published)
+        .unwrap()
+        .public_endpoints
+        .is_empty());
+    assert_ne!(published.signed(), shop.app().record());
+    // The next receive delivers it.
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        on_homeserver(&w, &shop).unwrap().signed(),
+        shop.app().record()
+    );
+}
+
+#[tokio::test]
+async fn test_own_record_restored_before_a_withdrawal_has_nothing_owed() {
+    let w = World::new();
+    let mut shop = publishing_shop(&w).await;
+    let id = endpoint("btc-lightning-bolt12");
+    shop.set_public_endpoint(id.clone(), payload("lno1tips"))
+        .await
+        .unwrap();
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let mut restored = Paykit::restore(
+        w.env(&w.bob, store()),
+        publishing(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    // The backup holds the record with the endpoint and no withdrawal owed: the first read
+    // and the upkeep keep the record as it is.
+    let record = restored.app().record().clone();
+    restored.receive(None).await.unwrap();
+    restored.receive(None).await.unwrap();
+    assert_eq!(restored.app().record(), &record);
+    assert_eq!(
+        restored
+            .own_public_endpoints()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        [&id]
+    );
+}
+
+#[tokio::test]
+async fn test_own_record_restored_between_the_withdrawal_steps_finishes_after_the_first_read() {
+    let w = World::new();
+    let mut shop = publishing_shop(&w).await;
+    let id = endpoint("btc-lightning-bolt12");
+    shop.set_public_endpoint(id.clone(), payload("lno1tips"))
+        .await
+        .unwrap();
+    // The withdrawal is signed but reaches no switch, so its second step isn't made; the
+    // backup taken then holds the withdrawal and the step owed.
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    shop.remove_public_endpoint(&id).await.unwrap_err();
+    assert!(held(&shop, w.bob_id()).expires_at().is_some());
+    let backup = shop.backup().await.unwrap();
+    drop(shop);
+    let mut restored = Paykit::restore(
+        w.env(&w.bob, store()),
+        publishing(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    // Nothing is signed before the confirmed first read.
+    let restored_record = restored.app().record().clone();
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/feed".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    assert!(restored.receive(None).await.is_err());
+    assert_eq!(restored.app().record(), &restored_record);
+    // After it, the second step goes: no endpoint and no expiry, published.
+    restored.receive(None).await.unwrap();
+    assert_ne!(restored.app().record(), &restored_record);
+    assert!(restored.own_public_endpoints().unwrap().is_empty());
+    assert_eq!(held(&restored, w.bob_id()).expires_at(), None);
+    assert_eq!(
+        on_homeserver(&w, &restored).unwrap().signed(),
+        restored.app().record()
+    );
 }
 
 /// Bob's publishing shop whose withdrawal of its last endpoint reached no switch, backed up
