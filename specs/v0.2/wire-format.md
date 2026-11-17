@@ -954,7 +954,7 @@ A grant doesn't affect whether the record is valid. Grants are checked against t
 | `version` | int | yes | that version's `seq`, 0 for a new record; with `generation`, signed by the grant (3.3) |
 | `grant` | Executor grant | yes | 3.3 |
 
-- **Writing.** An executor that writes its grant, at acceptance, at a handoff, or when a confirmation signs it again (spec 8.3), appends an entry naming the version its write builds on, the one it read, and sets `grant` to the same grant. A write that fails with `409` is rebuilt from a fresh read, so an entry's version is always the one the adding write built on. Writers only append: every other write keeps `grants` as read.
+- **Writing.** An executor that writes its grant, on setting up, at a handoff, or when a confirmation signs it again (spec 8.3), appends an entry naming the version its write builds on, the one it read, and sets `grant` to the same grant. A write that fails with `409` is rebuilt from a fresh read, so an entry's version is always the one the adding write built on. Writers only append: every other write keeps `grants` as read.
 - **A usable history** has versions that strictly increase, ordered by (generation, `seq`), and ends with an entry whose grant equals `grant`. Otherwise every ledger check against it fails closed.
 - **Valid entries.** In a usable history an entry names an executor only if its grant verifies at the entry's version for this identity, counterparty and Allowance, and names the current terms hash (3.3). Any other entry means "no valid grant from this version on".
 - **The executor at a version** v is the one named by the last entry whose version is older than v: the adding write built on that version, so the grant holds from the write's own version, which is newer. A ledger write (5.5) counts only if it carries `record_version` on the Allowance record at some v no newer than the Allowance record the app holds, and its writer is the executor at v. This holds for versions the app never saw: a version that is now a stub, an app added later, or a new executor checking its predecessor's writes.
@@ -962,7 +962,7 @@ A grant doesn't affect whether the record is valid. Grants are checked against t
 - **Records without a history** have no current grant, until the executor writes its grant again.
 - **Size.** An entry with its certificate takes about 1 KiB, so a record whose stored messages are small holds about 200 grants within the 256 KiB cap, and fewer beside large ones: unlike the kinds activity records store (4.1), Allowance messages are bounded only by the envelope limit of 65536 bytes (Switch wire 4.4).
 
-Example entry (`documents.json` `executor_grant_history_entry`: the record was created at (1, 12) and the executor's acceptance write built on it; certificate cut short):
+Example entry (`documents.json` `executor_grant_history_entry`: the record was created at (1, 12) and the executor's grant write built on it; certificate cut short):
 
 ```json
 {
