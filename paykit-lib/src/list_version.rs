@@ -2,7 +2,7 @@
 
 use pubky_switch_core::json::MAX_INT;
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use crate::error::{ensure, Error, Result};
 use crate::json::{parse_object, Obj};
@@ -89,14 +89,6 @@ impl ListVersion {
     pub fn to_json(self) -> Result<Vec<u8>> {
         serde_json::to_vec(&self)
             .map_err(|_| Error::Invalid("Paykit wire 4.13: cannot write list-version".into()))
-    }
-
-    /// The pair's JSON object for embedding in a Paykit body.
-    pub fn to_value(self) -> Value {
-        let mut object = Map::new();
-        object.insert("generation".into(), self.generation.into());
-        object.insert("counter".into(), self.counter.into());
-        Value::Object(object)
     }
 }
 
