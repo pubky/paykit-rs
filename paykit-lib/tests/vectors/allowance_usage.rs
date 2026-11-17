@@ -119,14 +119,16 @@ pub(crate) fn check() {
     }
     // Compacting again changes nothing, and the step from before to after is accepted.
     assert!(compact(&terms, &after, now).unwrap().is_none());
-    check_successor(&terms, &before, &after, now).unwrap();
-    assert!(check_successor(&terms, &before, &after, time("2026-01-10T00:00:00.000Z")).is_err());
+    check_successor(&terms, &before, now, &after, now).unwrap();
+    let early = time("2026-01-10T00:00:00.000Z");
+    assert!(check_successor(&terms, &before, early, &after, early).is_err());
     // An entry of another asset makes the ledger invalid: usage and compaction refuse it.
     let mut other = c["before"].clone();
     other["entries"][0]["asset"] = json!("usd");
     let other = ledger(&other);
     assert!(usage(&terms, &other, &claim_map, now).is_err());
     assert!(compact(&terms, &other, now).is_err());
+    check_successor_cases(&v);
     let failures = arr(&v, "failure_evidence");
     assert_eq!(failures.len(), failure_cases().len());
     for case in failures {
@@ -158,7 +160,18 @@ names the first limit that refuses. failure_evidence holds pure counting inputs:
 means already validated local journal and payer-proof evidence, not a shared record member; \
 Callers must bind it to the attempt, obligation, Allowance, amount, asset and owner. Its \
 compacted cases replace the entry with one totals.failed item. period_limit_spellings \
-checks duplicate terms by wire spelling; period_limit_members checks required members.";
+checks duplicate terms by wire spelling; period_limit_members checks required members. \
+compaction/successors checks which newer ledger versions a reader holding an older one \
+accepts after a compaction it didn't see.";
+
+const SUCCESSORS_DESCRIPTION: &str = "Wire 5.5 From one version to the next, spec 8.3: a \
+reader holds held, written at service time held_time, and reads newer, written at newer_time, \
+which no longer lists a held entry. newer counts that entry in its totals, as a compaction \
+writes it. The reader accepts newer when the entry's at + longest period + 60 s was before \
+some service time from held_time to newer_time, the longest period taken at that time, so \
+an anchored month or year limit's entry compacted in a shorter period is accepted in a \
+version written in a longer one. A held_time after newer_time judges at newer_time alone. \
+accepted is the verdict.";
 
 const SPELLINGS_DESCRIPTION: &str = "Wire 4.15, specs/allowances.md: the terms of the first \
 case with period_limits replaced. Two period limits are duplicates when every member is \
@@ -251,6 +264,7 @@ pub(crate) fn generate(_keys: &Keys) {
         ),
     ];
     cases.push((Place::Member("/failure_evidence"), json!(failure_cases())));
+    cases.push((Place::Member("/compaction/successors"), successor_cases()));
     for (index, name) in [
         (
             3,
@@ -269,6 +283,120 @@ pub(crate) fn generate(_keys: &Keys) {
     }
     cases.extend(computed());
     generated("allowance_usage.json", &cases);
+}
+
+/// `compaction/successors`: a held ledger with one `done` entry, the version a compaction at
+/// `compacted_at` writes from it, and the verdict of a reader holding it from `held_time` on
+/// that version written at `newer_time`.
+fn successor_cases() -> Value {
+    let v = paykit("allowance_usage.json");
+    let c = &v["compaction"];
+    let anchored = |unit: &str| {
+        let mut terms = c["terms"].clone();
+        terms["period_limits"][0]["period"]["anchor"] = json!("2026-01-01T00:00:00.000Z");
+        terms["period_limits"][0]["period"]["unit"] = json!(unit);
+        terms
+    };
+    let monthly = anchored("month");
+    let yearly = anchored("year");
+    // (name, terms, entry at, compacted at, held_time, newer_time)
+    let inputs = [
+        (
+            "monthly: compacted at February's end, written in March",
+            &monthly,
+            "2026-01-31T12:00:00.000Z",
+            "2026-02-28T23:59:00.000Z",
+            "2026-01-31T13:00:00.000Z",
+            "2026-03-01T00:00:30.000Z",
+        ),
+        (
+            "monthly: held from the newer write's time, judged in March alone",
+            &monthly,
+            "2026-01-31T12:00:00.000Z",
+            "2026-02-28T23:59:00.000Z",
+            "2026-03-01T00:00:30.000Z",
+            "2026-03-01T00:00:30.000Z",
+        ),
+        (
+            "monthly: held from after the newer write's time, judged at newer_time alone",
+            &monthly,
+            "2026-01-31T12:00:00.000Z",
+            "2026-02-28T23:59:00.000Z",
+            "2026-03-05T00:00:00.000Z",
+            "2026-03-01T00:00:30.000Z",
+        ),
+        (
+            "monthly: no time from held_time to newer_time could compact the entry",
+            &monthly,
+            "2026-02-01T00:30:00.000Z",
+            "2026-04-15T00:00:00.000Z",
+            "2026-02-02T00:00:00.000Z",
+            "2026-03-01T01:00:00.000Z",
+        ),
+        (
+            "yearly: compacted at 2027's end, written in leap year 2028",
+            &yearly,
+            "2026-12-31T12:00:00.000Z",
+            "2027-12-31T23:00:00.000Z",
+            "2026-12-31T13:00:00.000Z",
+            "2028-01-01T00:00:30.000Z",
+        ),
+        (
+            "yearly: held from the newer write's time, judged in 2028 alone",
+            &yearly,
+            "2026-12-31T12:00:00.000Z",
+            "2027-12-31T23:00:00.000Z",
+            "2028-01-01T00:00:30.000Z",
+            "2028-01-01T00:00:30.000Z",
+        ),
+    ];
+    let cases: Vec<Value> = inputs
+        .iter()
+        .map(|(name, terms, at, compacted_at, held_time, newer_time)| {
+            let mut held = c["before"].clone();
+            let mut entry = held["entries"][0].clone();
+            entry["at"] = json!(at);
+            held["entries"] = json!([entry]);
+            let read = AllowanceTerms::from_json(terms).unwrap();
+            let newer = compact(&read, &ledger(&held), time(compacted_at))
+                .unwrap()
+                .unwrap_or_else(|| panic!("{name}: the compaction drops the entry"));
+            let accepted = check_successor(
+                &read,
+                &ledger(&held),
+                time(held_time),
+                &newer,
+                time(newer_time),
+            )
+            .is_ok();
+            let newer: Value = serde_json::from_slice(&newer.to_json().unwrap()).unwrap();
+            json!({ "accepted": accepted, "held": held, "held_time": held_time, "name": name,
+                "newer": newer, "newer_time": newer_time, "terms": terms })
+        })
+        .collect();
+    json!({ "cases": cases, "description": SUCCESSORS_DESCRIPTION })
+}
+
+/// `compaction/successors` against paykit-lib: every case's verdict.
+fn check_successor_cases(v: &Value) {
+    let cases = arr(&v["compaction"]["successors"], "cases");
+    assert_eq!(cases.len(), 6);
+    for case in cases {
+        let name = st(case, "name");
+        let terms = AllowanceTerms::from_json(&case["terms"]).unwrap();
+        let verdict = check_successor(
+            &terms,
+            &ledger(&case["held"]),
+            time(st(case, "held_time")),
+            &ledger(&case["newer"]),
+            time(st(case, "newer_time")),
+        );
+        assert_eq!(
+            verdict.is_ok(),
+            case["accepted"].as_bool().unwrap(),
+            "{name}: {verdict:?}"
+        );
+    }
 }
 
 /// Counting evidence is an input to the pure library, not a shared wire member.
