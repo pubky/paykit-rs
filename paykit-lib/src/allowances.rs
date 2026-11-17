@@ -1507,12 +1507,15 @@ fn larger(a: &Decimal, b: &Decimal) -> Decimal {
 /// amount-free proof, nominal request amount or unaccepted shown value cannot supply a
 /// missing amount. If either authority or amount evidence is missing, the caller must
 /// refuse the repair rather than call this function with incomplete inputs.
+/// Unknown members of retained objects are kept from both ledgers. Different values for
+/// the same unknown member refuse the merge (Paykit wire 5).
 ///
 /// # Errors
 ///
 /// [`Error::Invalid`] for a `kept` that isn't valid against the terms, a `shown` of another
 /// Allowance, own evidence of a larger value than `kept` holds for one of its attempts or
-/// dated after that entry's window, or a sum that overflows; [`Error::Validation`] for a
+/// dated after that entry's window, conflicting retained unknown members, or a sum that
+/// overflows; [`Error::Validation`] for a
 /// kept entry's window that ends past the last time the grammar writes.
 pub fn merge_for_repair(
     terms: &AllowanceTerms,
@@ -1675,6 +1678,20 @@ pub fn merge_for_repair(
     }
     next.count = count;
     next.check_valid(terms)?;
+    if let Some(shown) = shown {
+        // An ignored entry is not retained, even when another input has its attempt ID.
+        let mut retained = shown.clone();
+        retained.entries.retain(|entry| of_the_terms(terms, entry));
+        let retained = Ledger::from_json(&retained.json_unchecked()?)?;
+        let known = Ledger {
+            unknown: UnknownMembers::default(),
+            ..next.clone()
+        }
+        .json_unchecked()?;
+        next.unknown = kept
+            .unknown
+            .merge_identified(&retained.unknown, &known, &LEDGER_SHAPE)?;
+    }
     Ok(next)
 }
 
@@ -2698,6 +2715,184 @@ mod tests {
         failed.insert(id(9), ClaimState::Failed { by_owner: true });
         failed.insert(id(3), ClaimState::Failed { by_owner: false });
         vec![HashMap::new(), open, settled, failed]
+    }
+
+    fn repair_unknown_inputs() -> (Value, Value) {
+        let mut kept = ledger(vec![entry(1, "0.01", IN_MONTH, None)]);
+        kept.failed.push(CompactedFailed {
+            obligation: [2; 32],
+            attempt_id: AttemptId::from_bytes([2; 16]),
+            value: Decimal::parse("0.01").unwrap(),
+        });
+        let mut shown = kept.clone();
+        shown.entries.push(entry(3, "0.01", IN_MONTH, None));
+        shown.failed.push(CompactedFailed {
+            obligation: [4; 32],
+            attempt_id: AttemptId::from_bytes([4; 16]),
+            value: Decimal::parse("0.01").unwrap(),
+        });
+        (
+            serde_json::from_slice(&kept.to_json().unwrap()).unwrap(),
+            serde_json::from_slice(&shown.to_json().unwrap()).unwrap(),
+        )
+    }
+
+    fn repair_unknown(kept: Value, shown: Value, own: &[LedgerEntry]) -> Result<Value> {
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let kept = Ledger::from_map(kept.as_object().unwrap()).unwrap();
+        let shown = Ledger::from_map(shown.as_object().unwrap()).unwrap();
+        let merged = merge_for_repair(&terms, &kept, Some(&shown), own, &[], t(IN_MONTH))?;
+        Ok(serde_json::from_slice(&merged.to_json()?).unwrap())
+    }
+
+    fn repair_keeps_unknown_at(path: &str) {
+        let (mut kept, mut shown) = repair_unknown_inputs();
+        kept.pointer_mut(path).unwrap()["kept_note"] = json!({"kept": [1, null]});
+        shown.pointer_mut(path).unwrap()["shown_note"] = json!({"shown": [2, true]});
+        let out = repair_unknown(kept, shown, &[]).unwrap();
+        assert_eq!(
+            out.pointer(path).unwrap()["kept_note"],
+            json!({"kept": [1, null]})
+        );
+        assert_eq!(
+            out.pointer(path).unwrap()["shown_note"],
+            json!({"shown": [2, true]})
+        );
+    }
+
+    fn repair_refuses_unknown_conflict_at(path: &str) {
+        let (mut kept, mut shown) = repair_unknown_inputs();
+        kept.pointer_mut(path).unwrap()["note"] = json!({"kept": 1});
+        shown.pointer_mut(path).unwrap()["note"] = json!({"shown": 2});
+        assert!(matches!(
+            repair_unknown(kept, shown, &[]),
+            Err(Error::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn test_merge_for_repair_preserves_unknown_root_members() {
+        repair_keeps_unknown_at("");
+    }
+
+    #[test]
+    fn test_merge_for_repair_preserves_unknown_totals_members() {
+        repair_keeps_unknown_at("/totals");
+    }
+
+    #[test]
+    fn test_merge_for_repair_preserves_unknown_entry_members() {
+        repair_keeps_unknown_at("/entries/0");
+    }
+
+    #[test]
+    fn test_merge_for_repair_preserves_unknown_failed_members() {
+        repair_keeps_unknown_at("/totals/failed/0");
+    }
+
+    #[test]
+    fn test_merge_for_repair_refuses_unknown_root_conflict() {
+        repair_refuses_unknown_conflict_at("");
+    }
+
+    #[test]
+    fn test_merge_for_repair_refuses_unknown_totals_conflict() {
+        repair_refuses_unknown_conflict_at("/totals");
+    }
+
+    #[test]
+    fn test_merge_for_repair_refuses_unknown_entry_conflict() {
+        repair_refuses_unknown_conflict_at("/entries/0");
+    }
+
+    #[test]
+    fn test_merge_for_repair_refuses_unknown_failed_conflict() {
+        repair_refuses_unknown_conflict_at("/totals/failed/0");
+    }
+
+    #[test]
+    fn test_merge_for_repair_preserves_imported_unknown_members() {
+        let (kept, mut shown) = repair_unknown_inputs();
+        shown["entries"][1]["note"] = json!("entry");
+        shown["totals"]["failed"][1]["note"] = json!("failed");
+        let out = repair_unknown(kept, shown, &[]).unwrap();
+        assert_eq!(out["entries"][1]["note"], "entry");
+        assert_eq!(out["totals"]["failed"][1]["note"], "failed");
+    }
+
+    #[test]
+    fn test_merge_for_repair_preserves_imported_failed_unknown_members() {
+        let (kept, mut shown) = repair_unknown_inputs();
+        shown["totals"]["failed"][1]["note"] = json!("failed");
+        let out = repair_unknown(kept, shown, &[]).unwrap();
+        assert_eq!(out["totals"]["failed"][1]["note"], "failed");
+    }
+
+    #[test]
+    fn test_merge_for_repair_does_not_take_members_from_an_invalid_entry() {
+        let (kept, mut shown) = repair_unknown_inputs();
+        shown["entries"][0]["asset"] = json!("usd");
+        shown["entries"][0]["note"] = json!("another asset");
+        let out = repair_unknown(kept, shown, &[]).unwrap();
+        assert_eq!(out["entries"][0]["asset"], "btc");
+        assert!(out["entries"][0].get("note").is_none());
+    }
+
+    #[test]
+    fn test_ledger_compaction_drops_the_last_unknown_object() {
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let held = ledger(vec![entry(
+            1,
+            "0.01",
+            "2026-01-05T00:00:00.000Z",
+            Some(EntryOutcome::Done),
+        )]);
+        let mut input: Value = serde_json::from_slice(&held.to_json().unwrap()).unwrap();
+        input["entries"][0]["note"] = json!("removed entry");
+        let before = Ledger::from_map(input.as_object().unwrap()).unwrap();
+        let after = compact(&terms, &before, t(IN_MONTH)).unwrap().unwrap();
+        assert!(after.entries.is_empty());
+        let out: Value = serde_json::from_slice(&after.to_json().unwrap()).unwrap();
+        assert!(!out.to_string().contains("removed entry"));
+        assert_eq!(out["totals"]["spent"], "0.01");
+    }
+
+    #[test]
+    fn test_merge_for_repair_keeps_identical_unknown_values() {
+        let (mut kept, mut shown) = repair_unknown_inputs();
+        for path in ["", "/totals", "/entries/0", "/totals/failed/0"] {
+            kept.pointer_mut(path).unwrap()["note"] = json!({"same": [null, false]});
+            shown.pointer_mut(path).unwrap()["note"] = json!({"same": [null, false]});
+        }
+        let out = repair_unknown(kept.clone(), shown, &[]).unwrap();
+        for path in ["", "/totals", "/entries/0", "/totals/failed/0"] {
+            assert_eq!(
+                out.pointer(path).unwrap()["note"],
+                kept.pointer(path).unwrap()["note"]
+            );
+        }
+    }
+
+    #[test]
+    fn test_merge_for_repair_drops_unknown_members_with_replaced_objects() {
+        let (mut kept, mut shown) = repair_unknown_inputs();
+        kept["totals"]["failed"][0]["note"] = json!("kept failed");
+        shown["totals"]["failed"][0]["note"] = json!("shown failed");
+        shown["totals"]["failed"][1]["note"] = json!("replaced failed");
+        shown["entries"][1]["asset"] = json!("usd");
+        shown["entries"][1]["note"] = json!("discarded asset");
+        let own = [
+            entry(2, "0.01", IN_MONTH, Some(EntryOutcome::Done)),
+            entry(4, "0.01", IN_MONTH, None),
+        ];
+        let out = repair_unknown(kept, shown, &own).unwrap();
+        assert!(out["totals"].get("failed").is_none());
+        assert_eq!(out["entries"].as_array().unwrap().len(), 2);
+        assert!(out["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry.get("note").is_none()));
     }
 
     #[test]
