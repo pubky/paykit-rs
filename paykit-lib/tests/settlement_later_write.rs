@@ -1,4 +1,8 @@
-use paykit_lib::records::{OccurrenceKind, SeenMerge, SettlementBucket, SettlementMark};
+use paykit_lib::records::{OccurrenceKind, SeenMarks, SeenMerge, SettlementBucket, SettlementMark};
+use pubky_switch_core::enc::b64;
+use pubky_switch_core::ident::NamingKey;
+
+const BUCKET: u16 = 17;
 
 fn mark(settlement: u8, occurrence: u8) -> SettlementMark {
     SettlementMark {
@@ -12,10 +16,15 @@ fn marks(pairs: &[(u8, u8)]) -> Vec<SettlementMark> {
     pairs.iter().map(|&(s, o)| mark(s, o)).collect()
 }
 
-/// A later write of `pairs`, as a reader reads it.
+/// A write of `pairs`, read and bound at bucket [`BUCKET`]'s key.
 fn write(pairs: &[(u8, u8)]) -> SettlementBucket {
-    let bucket = SettlementBucket::from_marks(marks(pairs)).unwrap();
-    SettlementBucket::read(&bucket.to_json().unwrap()).unwrap()
+    let mut marks = marks(pairs);
+    marks.sort();
+    let bytes: Vec<u8> = marks.iter().flat_map(|m| m.to_bytes()).collect();
+    let json = format!(r#"{{"v":1,"marks":"{}"}}"#, b64(&bytes));
+    let nk = NamingKey::from_bytes([3; 32]);
+    let key = SettlementBucket::record_key(BUCKET, &nk).unwrap();
+    SettlementBucket::bind(json.as_bytes(), BUCKET, &nk, &key).unwrap()
 }
 
 /// Paykit wire 5.7, Seen marks: what a reader holding seen marks does with each later write.
@@ -23,7 +32,8 @@ fn write(pairs: &[(u8, u8)]) -> SettlementBucket {
 /// one that lacks them, and shows the writer of one that drops a seen mark or raises it.
 #[test]
 fn test_settlement_later_write_merges_back_and_shows_its_writer() {
-    let seen = marks(&[(1, 1), (2, 2)]);
+    let mut seen = SeenMarks::new(BUCKET);
+    seen.add(&write(&[(1, 1), (2, 2)])).unwrap();
     // (case, later write, `None` when taken, else the write back's marks and whether the
     // writer is shown)
     type Expected<'a> = Option<(&'a [(u8, u8)], bool)>;
@@ -54,14 +64,9 @@ fn test_settlement_later_write_merges_back_and_shows_its_writer() {
             write(&[(1, 1), (2, 3)]),
             Some((&[(1, 1), (2, 2)], true)),
         ),
-        (
-            "an empty bucket",
-            SettlementBucket::new(),
-            Some((&[(1, 1), (2, 2)], true)),
-        ),
     ];
     for (name, later, expected) in cases {
-        match (later.merged_with_seen(&seen), expected) {
+        match (later.merged_with_seen(&seen).unwrap(), expected) {
             (SeenMerge::Holds { .. }, None) => {}
             (
                 SeenMerge::WriteBack {
@@ -73,11 +78,17 @@ fn test_settlement_later_write_merges_back_and_shows_its_writer() {
             ) => {
                 assert_eq!(bucket.marks(), marks(pairs), "{name}");
                 assert_eq!(show_writer, shown, "{name}");
-                let read = SettlementBucket::read(&bucket.to_json().unwrap()).unwrap();
-                assert_eq!(read, bucket, "{name}");
                 // The write back holds everything: merging again writes nothing.
+                let nk = NamingKey::from_bytes([3; 32]);
+                let key = SettlementBucket::record_key(BUCKET, &nk).unwrap();
+                let read =
+                    SettlementBucket::bind(&bucket.to_json().unwrap(), BUCKET, &nk, &key).unwrap();
+                assert_eq!(read, bucket, "{name}");
                 assert!(
-                    matches!(read.merged_with_seen(&seen), SeenMerge::Holds { .. }),
+                    matches!(
+                        read.merged_with_seen(&seen).unwrap(),
+                        SeenMerge::Holds { .. }
+                    ),
                     "{name}"
                 );
             }

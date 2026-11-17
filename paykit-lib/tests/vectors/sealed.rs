@@ -9,12 +9,12 @@ use paykit_lib::derive::{
 };
 use paykit_lib::identifiers::PaymentEndpointIdentifier;
 use paykit_lib::records::{
-    bind_ledger, ActivityRecord, ActivitySide, AllowanceRecord, OccurrenceKind, PaymentListRecord,
-    SeenMerge, SettlementBucket, SettlementMark, MAX_SETTLEMENT_MARKS,
+    bind_ledger, ActivityRecord, ActivitySide, AllowanceRecord, InvalidBucket, OccurrenceKind,
+    PaymentListRecord, SeenMerge, SettlementBucket, SettlementMark, MAX_SETTLEMENT_MARKS,
 };
 use paykit_lib::scopes::{Label, PaykitScope, ScopeName, SETTLEMENTS};
 use pubky_switch_core::enc::b64;
-use pubky_switch_core::ident::{key_of_scope, Policy};
+use pubky_switch_core::ident::{key_of_scope, NamingKey, Policy};
 use pubky_switch_core::records::AppCert;
 use pubky_switch_core::sealed::{aad, pad, RecordValue, SealedValue};
 use serde_json::Value;
@@ -4678,8 +4678,7 @@ fn settlement_marks(keys: &Keys) -> Value {
         let nonce_label = settlement_seed_label(c.kind, "nonce");
         let (bucket, mark) = credited_mark(keys, &c);
         marks.push(mark);
-        let value = SettlementBucket::from_marks(vec![mark]).unwrap();
-        let plaintext = value.to_json().unwrap();
+        let plaintext = raw_bucket(&mark.to_bytes()).into_bytes();
         let record_key = SettlementBucket::record_key(bucket, &nk).unwrap();
         let nonce: [u8; 24] = crate::common::seed(&nonce_label)[..24].try_into().unwrap();
         let sealed = SealedValue::seal_with_nonce(
@@ -4693,8 +4692,10 @@ fn settlement_marks(keys: &Keys) -> Value {
         )
         .unwrap();
         assert_eq!(
-            SettlementBucket::bind(&plaintext, bucket, &nk, &record_key).unwrap(),
-            value,
+            SettlementBucket::bind(&plaintext, bucket, &nk, &record_key)
+                .unwrap()
+                .marks(),
+            [mark],
             "{}",
             c.name
         );
@@ -4712,7 +4713,7 @@ fn settlement_marks(keys: &Keys) -> Value {
             "settlement_id": c.settlement_id,
         }));
     }
-    let example = SettlementBucket::read(SETTLEMENT_MARKS_EXAMPLE.as_bytes()).unwrap();
+    let example = bucket_at(&nk, SETTLEMENT_MARKS_EXAMPLE.as_bytes()).unwrap();
     assert_eq!(
         example.to_json().unwrap(),
         SETTLEMENT_MARKS_EXAMPLE.as_bytes()
@@ -4762,7 +4763,7 @@ fn settlement_marks(keys: &Keys) -> Value {
     let mut refused: Vec<Value> = values
         .iter()
         .map(|(name, value)| {
-            let error = SettlementBucket::read(value.as_bytes())
+            let error = bucket_at(&nk, value.as_bytes())
                 .expect_err(name)
                 .to_string();
             json!({ "name": name, "reason": quoted(&error), "value": value })
@@ -4772,10 +4773,7 @@ fn settlement_marks(keys: &Keys) -> Value {
     let other = Collection::PayeeActivity.fixed_policy();
     assert_eq!(Collection::Settlements.policy_label(&other), None);
     let other_key = naming_record_key(&nk, unrequested.0, &other);
-    let value = SettlementBucket::from_marks(vec![unrequested.1])
-        .unwrap()
-        .to_json()
-        .unwrap();
+    let value = raw_bucket(&unrequested.1.to_bytes()).into_bytes();
     let error = SettlementBucket::bind(&value, unrequested.0, &nk, &other_key)
         .unwrap_err()
         .to_string();
@@ -4791,7 +4789,7 @@ fn settlement_marks(keys: &Keys) -> Value {
     }));
     json!({
         "accepted": accepted,
-        "merges": settlement_mark_merges(&marks, &twice, one_time.occurrence),
+        "merges": settlement_mark_merges(&nk, &marks, &twice, one_time.occurrence),
         "data_epoch": SETTLEMENTS_EPOCH,
         "description": SETTLEMENT_MARKS_DESCRIPTION,
         "example": {
@@ -4806,6 +4804,16 @@ fn settlement_marks(keys: &Keys) -> Value {
         "scope_key_hex": hex(&scope_key),
         "write_scopes": policy.write_scopes,
     })
+}
+
+/// The bucket every settlement value of `settlement_marks` not bound to its own bucket is
+/// read as.
+const VALUE_BUCKET: u16 = 0;
+
+/// `json` read and bound as bucket [`VALUE_BUCKET`] at its key under `nk`.
+fn bucket_at(nk: &NamingKey, json: &[u8]) -> Result<SettlementBucket, InvalidBucket> {
+    let key = SettlementBucket::record_key(VALUE_BUCKET, nk).unwrap();
+    SettlementBucket::bind(json, VALUE_BUCKET, nk, &key)
 }
 
 /// A mark merge as `settlement_marks.merges` lists it: the write, if any, whether the bucket
@@ -4831,12 +4839,18 @@ fn merge_result(merge: SeenMerge) -> (Option<SettlementBucket>, bool, Vec<[u8; 1
 /// merged into a current write, from the accepted marks, the two marks of one settlement and
 /// numbered settlements of the one-time request's occurrence.
 fn settlement_mark_merges(
+    nk: &NamingKey,
     marks: &[SettlementMark],
     twice: &[SettlementMark; 2],
     occurrence: [u8; 8],
 ) -> Value {
     use serde_json::json;
-    let bucket = |marks: &[SettlementMark]| SettlementBucket::from_marks(marks.to_vec()).unwrap();
+    let bucket = |marks: &[SettlementMark]| {
+        let mut marks = marks.to_vec();
+        marks.sort();
+        let bytes: Vec<u8> = marks.iter().flat_map(|m| m.to_bytes()).collect();
+        bucket_at(nk, raw_bucket(&bytes).as_bytes()).unwrap()
+    };
     let numbered = |i: u128| {
         let mut settlement = [0; 12];
         settlement.copy_from_slice(&i.to_be_bytes()[4..]);
@@ -4907,13 +4921,13 @@ fn settlement_mark_merges(
 }
 
 /// Merge every `settlement_marks.merges` case's seen copy into its current write again.
-fn check_settlement_mark_merges(cases: &Value) {
+fn check_settlement_mark_merges(nk: &NamingKey, cases: &Value) {
     let cases = cases.as_array().unwrap();
     assert_eq!(cases.len(), 5);
     for case in cases {
         let name = st(case, "name");
-        let current = SettlementBucket::read(st(case, "current").as_bytes()).unwrap();
-        let seen = SettlementBucket::read(st(case, "seen").as_bytes()).unwrap();
+        let current = bucket_at(nk, st(case, "current").as_bytes()).unwrap();
+        let seen = bucket_at(nk, st(case, "seen").as_bytes()).unwrap();
         let (write, over_capacity, twice, show_writer) =
             merge_result(current.merged_with(&seen).unwrap());
         let write = write.map(|bucket| bucket.to_json().unwrap());
@@ -4934,7 +4948,7 @@ fn check_settlement_mark_merges(cases: &Value) {
         // writes nothing more.
         if let Some(write) = &write {
             assert_ne!(write.as_slice(), st(case, "current").as_bytes(), "{name}");
-            let written = SettlementBucket::read(write).unwrap();
+            let written = bucket_at(nk, write).unwrap();
             assert!(
                 matches!(
                     written.merged_with(&seen).unwrap(),
@@ -5027,9 +5041,9 @@ fn check_settlement_marks(keys: &Keys, m: &Value) {
             assert!(sealed.open(&other, &bob, &record_key).is_err(), "{name}");
         }
     }
-    check_settlement_mark_merges(&m["merges"]);
+    check_settlement_mark_merges(&nk, &m["merges"]);
     let example = &m["example"];
-    let read = SettlementBucket::read(st(example, "value").as_bytes()).unwrap();
+    let read = bucket_at(&nk, st(example, "value").as_bytes()).unwrap();
     assert_eq!(json_marks(&read), example["marks"]);
     let refused = arr(m, "refused");
     assert_eq!(refused.len(), 8);
@@ -5037,7 +5051,7 @@ fn check_settlement_marks(keys: &Keys, m: &Value) {
         let name = st(case, "name");
         let value = st(case, "value").as_bytes();
         let error = match case.get("record_key") {
-            None => SettlementBucket::read(value).unwrap_err(),
+            None => bucket_at(&nk, value).unwrap_err(),
             Some(key) => {
                 let policy = Policy::new(st(case, "read_scope"), &strings(&case["write_scopes"]));
                 assert_eq!(
@@ -5049,7 +5063,8 @@ fn check_settlement_marks(keys: &Keys, m: &Value) {
                 let key = b64n::<32>(key.as_str().unwrap());
                 assert_eq!(key, naming_record_key(&nk, bucket, &policy), "{name}");
                 // The value reads, and binds only at its bucket's key.
-                SettlementBucket::read(value).unwrap();
+                let own = SettlementBucket::record_key(bucket, &nk).unwrap();
+                SettlementBucket::bind(value, bucket, &nk, &own).unwrap();
                 SettlementBucket::bind(value, bucket, &nk, &key).unwrap_err()
             }
         };

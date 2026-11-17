@@ -828,7 +828,7 @@
         "name": "no place leaves the full write as it is",
         "over_capacity": true,
         "seen": "{\"v\":1,\"marks\":\"AAAAAAAAAAAAACMnATdgj2cBdh9bAAAAAAAAAAAAACMoATdgj2cBdh9b\"}",
-        "show_writer": true,
+        "show_writer": false,
         "twice": [],
         "write": null
       }
