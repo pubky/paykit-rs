@@ -14,12 +14,11 @@ use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, Paykit, PaykitConfig, Rail, RequestedScopes,
     UnrequestedPayment,
 };
-use pubky_switch_client::clock::Clock;
 use pubky_switch_client::testing::TestSigner;
 use pubky_switch_client::transport::BoxFuture;
 use serde_json::{json, Map, Value};
 
-use crate::common::{btc, endpoint, store, World};
+use crate::common::{btc, endpoint, list_version, store, World};
 
 /// The fake rail, as a ledger whose proofs read `{ "type": "x-ledger", "entry": ... }`
 /// rather than the `bitcoin-txid` spelling `paykit-lib` knows.
@@ -154,7 +153,11 @@ async fn joined_with(
 }
 
 /// A proof alice's wallet sends bob's shop for its list's reusable endpoint, `proof`.
-fn proof_body(shop: [u8; 16], version: u64, proof: Map<String, Value>) -> Map<String, Value> {
+fn proof_body(
+    shop: [u8; 16],
+    version: paykit_lib::ListVersion,
+    proof: Map<String, Value>,
+) -> Map<String, Value> {
     PaymentProof {
         attempt_id: AttemptId::generate().unwrap(),
         billing_period: None,
@@ -196,7 +199,7 @@ async fn test_custom_rail_proof_credited_once_per_settlement() {
         &rail,
     )
     .await;
-    let version = w.clock.now_ms();
+    let version = list_version(1, 1);
     w.list_to_alice(&mut shop, &[wallet.app_id()], version)
         .await;
     wallet.receive(None).await.unwrap();
@@ -279,7 +282,7 @@ async fn pay_through_with(
         rail,
     )
     .await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     wallet

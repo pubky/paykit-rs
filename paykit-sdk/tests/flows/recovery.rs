@@ -9,7 +9,7 @@ use paykit_sdk::{PayOptions, PayOutcome, RailDeclaration, Stage};
 use pubky_switch_client::clock::{Clock, TestClock};
 use pubky_switch_core::claims::{ClaimStatus, Outcome};
 
-use crate::common::{draft, request_from, store, World, HOUR_MS};
+use crate::common::{draft, list_version, request_from, store, World, HOUR_MS};
 
 const DAY_MS: u64 = 24 * HOUR_MS;
 
@@ -652,7 +652,7 @@ async fn test_recovery_list_expiring_during_the_own_identity_read_not_paid() {
         },
     );
     let body = paykit_lib::bodies::PrivatePaymentList {
-        version: w.clock.now_ms(),
+        version: list_version(1, 1),
         payment_endpoints: endpoints,
         expires_at: w.clock.now_ms() + 30_000,
     }

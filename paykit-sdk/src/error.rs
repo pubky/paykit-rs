@@ -53,10 +53,9 @@ pub enum Refusal {
     /// "Conflicted").
     #[error("Paykit spec 8.3: the Allowance is conflicted")]
     AllowanceConflicted,
-    /// Accepting an Allowance is unavailable in this version: an acceptance is recorded only
-    /// together with the Allowance's initialized ledger, in one atomic batch on a protected
-    /// record, which this version doesn't build (Paykit spec 8.3.1). Nothing was signed,
-    /// read, written or sent. Rejecting, proposing, withdrawing and ending stay available.
+    /// Allowance acceptance is unavailable in this revision (Paykit spec 8.3.1).
+    /// [`crate::Paykit::accept_allowance`] returns this refusal in either role before
+    /// it reads, signs, writes or sends anything.
     #[error("Paykit spec 8.3.1: accepting an Allowance is unavailable in this version")]
     AllowanceAcceptanceUnavailable,
     /// The obligation is paid: its claim is SETTLED, or its record holds the proof of a

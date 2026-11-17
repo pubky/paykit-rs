@@ -38,7 +38,8 @@ use paykit_lib::records::{
     ActivityRecord, ActivitySide, DestinationSource, PaymentListRecord, StoredMessage, UsedEndpoint,
 };
 use paykit_lib::{
-    AttemptId, Body, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload, Rate,
+    AttemptId, Body, ListVersion, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
+    Rate,
 };
 use pubky_switch_client::app::{
     claim_conflict, AppError, ClaimAttempt, ClaimOp, Initiator, KeptBatch, KeptBatchStatus,
@@ -833,7 +834,7 @@ pub(crate) struct ListAsk {
     #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) app_id: Option<[u8; 16]>,
     #[serde(deserialize_with = "Option::deserialize")]
-    pub(crate) held_version: Option<u64>,
+    pub(crate) held_version: Option<ListVersion>,
     pub(crate) asked_at_ms: u64,
 }
 
@@ -1720,17 +1721,15 @@ impl Paykit {
         // was read is expired here, and the payee asked for its current one, rather than
         // chosen and then refused by the destination check.
         let now = self.now();
-        // Newest list first, then by App ID, so every payer device hands the method the same
-        // for the same lists.
+        // Highest version first, then by App ID, so every payer device hands the method the
+        // same for the same lists. Versions of two publishing apps count apart (Paykit wire
+        // 4.13), so this order says nothing about which list is newer.
         lists.sort_by_key(|l| {
-            let version = match l.list.body() {
-                Body::PrivatePaymentList(list) => list.version,
-                _ => 0,
-            };
+            let version = crate::receive::list_version(&l.list);
             (std::cmp::Reverse(version), l.app_id)
         });
         // The version held of each app's list, newest first, for a request that names it.
-        let mut held: Vec<([u8; 16], u64)> = Vec::new();
+        let mut held: Vec<([u8; 16], ListVersion)> = Vec::new();
         // Whether a list still in use offers an endpoint the payment would use, though each
         // one is used: a list used up, not one without such an endpoint.
         let mut offered = false;
@@ -2075,11 +2074,11 @@ impl Paykit {
         &mut self,
         payee: &[u8; 32],
         app: Option<[u8; 16]>,
-        held: &[([u8; 16], u64)],
+        held: &[([u8; 16], ListVersion)],
     ) -> Result<()> {
         self.refuse_while_sends_held(payee).await?;
         let held_of = |app: [u8; 16]| held.iter().find(|(a, _)| *a == app).map(|(_, v)| *v);
-        let asks: Vec<(Option<[u8; 16]>, Option<u64>)> = match app {
+        let asks: Vec<(Option<[u8; 16]>, Option<ListVersion>)> = match app {
             Some(app) => vec![(Some(app), held_of(app))],
             None if held.is_empty() => vec![(None, None)],
             None => held.iter().map(|(app, v)| (Some(*app), Some(*v))).collect(),
@@ -4629,7 +4628,10 @@ mod tests {
         for (app_id, held_version) in [
             (None, None),
             (Some([4; 16]), None),
-            (Some([4; 16]), Some(9)),
+            (
+                Some([4; 16]),
+                Some(paykit_lib::ListVersion::new(1, 9).unwrap()),
+            ),
         ] {
             let value = ListAsk {
                 payee: [3; 32],

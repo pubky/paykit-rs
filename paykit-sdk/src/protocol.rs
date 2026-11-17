@@ -832,14 +832,9 @@ impl Protocol for PaykitProtocol {
         })
     }
 
-    /// The delivery gate, asked before every try of every Paykit message's delivery, a
-    /// first one or a re-send, whichever call makes it: a send, a flush, a restore's re-send
-    /// from a record, the answer to a counterparty's re-send request, or a message the
-    /// outbox already holds. An Allowance acceptance never goes out: it is recorded only
-    /// together with the Allowance's initialized ledger, in one atomic batch on a protected
-    /// record, which this version doesn't build, so this app sends no acceptance in either
-    /// role (Paykit spec 8.3.1). One the outbox holds stays there, held, until its replay
-    /// deadline gives it up. Every other kind goes, as the Switch's own holds allow.
+    /// Hold every attempt to deliver an Allowance acceptance, including a re-send or an
+    /// acceptance already in the outbox (Paykit spec 8.3.1). This gate allows every
+    /// other message kind through, subject to the Switch's own holds.
     fn may_send(
         &self,
         delivery: &pubky_switch_client::app::DeliveryView<'_>,
@@ -2495,7 +2490,7 @@ mod receive_tests {
             "paykit.private_payment_list",
             vec![],
             object(json!({
-                "version": 7,
+                "version": { "generation": 1, "counter": 7 },
                 "expires_at": pubky_switch_core::time::rfc3339(NOW + 3_600_000),
                 "payment_endpoints": {
                     "btc-bitcoin-p2wpkh": { "payload": "bc1q", "single_use": true }

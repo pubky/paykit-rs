@@ -30,7 +30,7 @@ Sections 3.3 and 9 require an extension eviction to atomically record its recove
 
 ## Allowance acceptance and initial ledgers
 
-Section 8.3.1 and wire 5.9 require one protected original for an Allowance ID and atomic Allower acceptance with its canonical initial spending ledger. The proposal binds the verified Allower identity generation. Both roles use the same parent policy; the Allowee mirror does not initialize spending state. An accepting app can lack execute scope, while a distinct executor establishes zero only from complete fresh evidence that the initial ledger is still current, followed by a grant conditioned on the exact parent and child. Missing, deleted or recovered history never becomes zero, and ordinary later accounting, repair, handoff and stopping rules remain. The generic specification is adopted, but its complete implementing Switch revision, Paykit runtime/readers and generated cases remain required before these positive paths are available.
+Allowance acceptance is unavailable in this revision (Section 8.3.1, specified with its implementation). The proposal binds the verified Allower identity generation.
 
 ## Queued message delivery
 

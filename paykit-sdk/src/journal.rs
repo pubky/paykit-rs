@@ -23,7 +23,7 @@ use paykit_lib::bodies::{Body, Conversion};
 use paykit_lib::derive::{natural_key, payment_obligation};
 use paykit_lib::records::{DestinationSource, StoredMessage};
 use paykit_lib::{
-    Asset, AttemptId, Decimal, Label, PaymentAmount, PaymentEndpointIdentifier,
+    Asset, AttemptId, Decimal, Label, ListVersion, PaymentAmount, PaymentEndpointIdentifier,
     PaymentEndpointPayload, PaymentReference, Rate,
 };
 use pubky_switch_core::chain::TransitionProof;
@@ -100,7 +100,7 @@ pub(crate) struct Destination {
     pub(crate) endpoint_id: String,
     pub(crate) payload: String,
     pub(crate) source: String,
-    pub(crate) list_version: Option<u64>,
+    pub(crate) list_version: Option<ListVersion>,
     pub(crate) single_use: bool,
 }
 
@@ -116,7 +116,7 @@ impl Destination {
         endpoint_id: &PaymentEndpointIdentifier,
         payload: &PaymentEndpointPayload,
         source: DestinationSource,
-        list_version: Option<u64>,
+        list_version: Option<ListVersion>,
         single_use: bool,
     ) -> Self {
         Self {

@@ -735,12 +735,11 @@ struct FailedOut {
 }
 
 impl Ledger {
-    /// A ledger with no entries and no totals, of the Allowee `counterparty`'s Allowance
-    /// `allowance_id`: the value of Paykit wire 5.5 that counts nothing. It is no initial
-    /// ledger: an Allowance's ledger is initialized only together with its acceptance, in
-    /// one atomic batch, under the canonical value and evidence of Paykit wire 5.9, and an
-    /// empty value written later by an ordinary put never establishes zero usage (Paykit
-    /// spec 8.3.1). Its [`Ledger::to_json`] isn't that canonical value either.
+    /// An empty ledger value for the Allowee `counterparty` and Allowance `allowance_id`
+    /// (Paykit wire 5.5). An empty value alone does not establish zero usage.
+    /// Allowance acceptance is unavailable in this revision. How acceptance establishes
+    /// the Allower's initial ledger and the executor's initial anchor remains unspecified
+    /// (Paykit spec 8.3.1).
     pub fn empty(counterparty: [u8; 32], allowance_id: AllowanceId) -> Self {
         Self {
             counterparty,
@@ -850,8 +849,8 @@ impl Ledger {
     /// spelling of a computed amount (Paykit wire 1.2), and `failed` left out when empty;
     /// and the members it doesn't know as it read them (Paykit wire 5). The value is read
     /// back by [`Ledger::from_json`] before it is handed out, so the writer never writes a
-    /// ledger its readers refuse. It always holds `entries` and `totals`, so it is never the
-    /// canonical initial ledger of Paykit wire 5.9, which holds neither.
+    /// ledger its readers refuse. The output always includes `entries` and `totals`,
+    /// even for an empty ledger.
     ///
     /// # Errors
     ///

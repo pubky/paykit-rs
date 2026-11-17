@@ -43,7 +43,7 @@ use paykit_lib::derive::{natural_key, request_obligation_blinded};
 use paykit_lib::records::{
     ActivityRecord, ActivitySide, PaymentListRecord, StoredMessage, UnrequestedDestination,
 };
-use paykit_lib::{AttemptId, Body};
+use paykit_lib::{AttemptId, Body, ListVersion};
 use pubky_switch_client::app::{
     AppError, ClaimFetch, ClaimOp, KeptBatchStatus, LocalWrite, Need, ObligationDeadline,
     ReceiveContext, RecordContent, RecordTarget, Refusal as ClientRefusal, StoreFailure, Unopened,
@@ -1964,7 +1964,7 @@ pub(crate) fn next_list_record(
             if held.list.message().msg_id == *msg_id || held.msg_ids.contains(msg_id) {
                 return None;
             }
-            if list.version <= list_version(&held.list) {
+            if Some(list.version) <= list_version(&held.list) {
                 return None;
             }
             held
@@ -1984,11 +1984,11 @@ pub(crate) fn next_list_record(
     Some(record)
 }
 
-/// A list's version; 0 for a message that isn't one.
-pub(crate) fn list_version(stored: &StoredMessage) -> u64 {
+/// A list's version; `None`, ordered below every version, for a message that isn't one.
+pub(crate) fn list_version(stored: &StoredMessage) -> Option<ListVersion> {
     match stored.body() {
-        Body::PrivatePaymentList(list) => list.version,
-        _ => 0,
+        Body::PrivatePaymentList(list) => Some(list.version),
+        _ => None,
     }
 }
 
@@ -2212,7 +2212,7 @@ pub struct HeldList {
     /// The payee's app that published the list.
     pub app_id: [u8; 16],
     /// The list's version.
-    pub version: u64,
+    pub version: ListVersion,
     /// The list message's `msg_id`.
     pub msg_id: String,
 }
@@ -2247,7 +2247,7 @@ impl Paykit {
             out.push(HeldList {
                 payee: list.sender(),
                 app_id: list.message().from.app_id,
-                version: list_version(&list),
+                version: list_version(&list).ok_or_else(crate::error::PaykitError::corrupt)?,
                 msg_id: list.message().msg_id.clone(),
             });
         }

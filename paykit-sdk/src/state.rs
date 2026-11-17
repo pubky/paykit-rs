@@ -64,7 +64,7 @@
 //! | `bw/<from_ms>` | a widening of the block marks, from `from_ms` to the time it holds, owed to every counterparty the deny list holds at the next read of the lists: written by a restore and by a `missed` item (`marks.rs`) | |
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `kw/<sender>` | a mark of a sender's entries the client dropped while they waited for a scope key, as `pd/` holds, with the data epochs they waited for; it asks only while the app holds every key of those epochs (`marks.rs`) | |
-//! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply, or a payee's period details, for a request the app holds no record of yet, or whose record it holds but can't open, read or bind, kept until it does, placed only once the record names its sender, a proof of a payment without a request for the payee's record of its settlement that the app holds but can't read, placed once it reads naming its sender and removed if it names another, or a receipt for a payer record the app holds but can't read and that isn't paused as divergent, kept until it reads, and moved to `dw/` if it reads paused (`receive.rs`), or a counterparty's Allowance answer the receive step took, which it never writes into the record's response itself: a rejection placed after the read, or kept before the app holds its Allowance record, or waiting over a record seen divergent for the user's confirmation; an acceptance never placed, kept and given up with the host's notice 30 days from its acceptance, since this version makes no Allowance accepted (Paykit spec 8.3.1; `allowances.rs`); each with the feed `seq` its entry was read at, which orders it (`records::KeptOrder`) | |
+//! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply, or a payee's period details, for a request the app holds no record of yet, or whose record it holds but can't open, read or bind, kept until it does, placed only once the record names its sender, a proof of a payment without a request for the payee's record of its settlement that the app holds but can't read, placed once it reads naming its sender and removed if it names another, or a receipt for a payer record the app holds but can't read and that isn't paused as divergent, kept until it reads, and moved to `dw/` if it reads paused (`receive.rs`), or a counterparty's Allowance answer the receive step took, which it never writes into the record's response itself: a rejection placed after the read, or kept before the app holds its Allowance record, or waiting over a record seen divergent for the user's confirmation; an acceptance kept unplaced if it would fill the record's empty `response` (Paykit spec 8.3.1; `allowances.rs`); each with the feed `seq` its entry was read at, which orders it (`records::KeptOrder`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing, since a dropped entry's time is already in its sender's mark | |
 //! | `dv/<record key>` | the pause mark of a record the app has seen divergent: paused until the user confirms, or the write the user confirmed over, with the write a credit's refusal showed it at and the write a credit's confirmation was given over, which is always the write that showing names, at or before the plain confirmation: any other stored state reads as a corrupt store (`divergent.rs`); a restore installs it paused, neither shown nor confirmed for a credit | |
 //! | `dw/<record key>/<role>/<sender>/<msg_id>` | a received message, by its sender and `msg_id`, whose write over a divergent record waits for the user's confirmation, or for the messages kept over the record before it, to write into its record later, in the order its inbox accepted them (by acceptance time, then the feed `seq` its entry was read at, as the kept replies are, never by `msg_id`), a receipt over a payer record that doesn't read included, written once the record also reads, and one kept in `pr/` whose record read paused; never one from anyone but the counterparty of a record that reads; given up at its 30 days, also one that no longer points to its record (`divergent.rs`) | |
@@ -645,11 +645,9 @@ impl sealed::Sealed for KeptMessage {}
 ///   payee app's `payment_lists` record, from its sender and App ID (Paykit wire 5.4).
 /// - At `pr/<sender>/<record key>/<msg_id>` too, an Allowance's acceptance or rejection the
 ///   receive step took, from that sender and of that `msg_id`, kept under the record key of
-///   the Allowance record it names, with its feed `seq`: a rejection to write into the
-///   proposal's record after the read, or once this app holds that record; an acceptance
-///   never written, kept until it is given up with the host's notice 30 days from its
-///   acceptance, since this version makes no Allowance accepted (Paykit spec 6, 8.1, 8.3,
-///   8.3.1).
+///   the Allowance record it names, with its feed `seq`. The app tries to place the answer
+///   after the read, once it holds the record. It keeps an acceptance unplaced if it would
+///   fill the record's empty `response` (Paykit spec 8.1, 8.3.1).
 /// - At `ae/<record key>/<msg_id>`, a counterparty's `paykit.allowance_end` its inbox
 ///   accepted, of that `msg_id`, with its feed `seq`, kept as the stop under the record key of
 ///   the Allowance record of its sender and the Allowance it names (Paykit spec 8.3, "Ends
@@ -2610,7 +2608,7 @@ mod tests {
         let value = serde_json::to_value(ListAsk {
             payee: [3; 32],
             app_id: None,
-            held_version: Some(9),
+            held_version: Some(paykit_lib::ListVersion::new(1, 9).unwrap()),
             asked_at_ms: 7,
         })
         .unwrap();
@@ -2618,11 +2616,42 @@ mod tests {
     }
 
     #[test]
+    fn test_discovery_state_ask_version_refuses_repeated_members() {
+        let key = key::list_ask(&[3; 32], Some(&[4; 16]));
+        let held = r#"{"counter":9,"generation":1}"#;
+        let valid = String::from_utf8(
+            encode(&ListAsk {
+                payee: [3; 32],
+                app_id: Some([4; 16]),
+                held_version: Some(paykit_lib::ListVersion::new(1, 9).unwrap()),
+                asked_at_ms: 7,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(valid.contains(held));
+        let read = |version: &str| {
+            let bytes = valid.replace(held, version);
+            bound::<ListAsk>(
+                key.as_bytes(),
+                bytes.as_bytes(),
+                &Binder::unblinded([1; 32]),
+            )
+        };
+        assert!(read(held).is_ok());
+        assert!(read(r#"{"generation":1,"generation":2,"counter":9}"#).is_err());
+        assert!(read(r#"{"generation":1,"counter":9,"counter":8}"#).is_err());
+    }
+
+    #[test]
     fn test_discovery_state_ask_current_bindings() {
         for (app_id, held_version) in [
             (None, None),
             (Some([4; 16]), None),
-            (Some([4; 16]), Some(9)),
+            (
+                Some([4; 16]),
+                Some(paykit_lib::ListVersion::new(1, 9).unwrap()),
+            ),
         ] {
             let value = serde_json::to_value(ListAsk {
                 payee: [3; 32],
