@@ -198,8 +198,8 @@ Example (`documents.json` `executor_grant`, whose write built on version (1, 12)
     "sig": "JEGa78qsr_F28gpLUIq1wG1q5zlNcZQ3SpZNstomnJXVaGVFCERjADDUWpaikmdTNBBnpCLsyvYKUS6ukIiWBA"
   },
   "confirmed_generation": 1,
-  "sig": "TwAuCSVx5eKgCkbbyAxeqddsr0xSL5QebVA794GsLihQO5VxA0O_qUCAk30KFH2TNuVgcWqpORJMNWNEaaLGDw",
-  "terms_hash": "PEj43Oz6GuVKcLXW3n5vIbBdSORajscVVsogpqd7Y9M"
+  "sig": "jKZ13zfRyNtQPpLEeOU2USP0AH5ryagD_QqudMVFPn2bi61kshMto6Uuqxohf38_ueLZXBivfe9V3j_CWacmBg",
+  "terms_hash": "c6fSZwYRwRa_3yscaUapKYa_TKWdhfCEvJ5kzyMbauI"
 }
 ```
 
@@ -724,7 +724,7 @@ A period is `{ "kind": "anchored", "every": int, "unit": unit, "anchor": time }`
   },
   "to": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
   "refs": [
-    "d_lSlfB4ApJgnnzeHaXDXEPnY75IIb8lXrnihxE_vZE"
+    "9HiIEoWyxH5nFqUHR-xtwv2XgbbdUOIiWyQF-BpcwQU"
   ],
   "body": {
     "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
@@ -973,8 +973,8 @@ Example entry (`documents.json` `executor_grant_history_entry`: the record was c
       "sig": "JEGa78qsr_F28gpLUIq1wG1q5zlNcZQ3SpZNstomnJXVaGVFCERjADDUWpaikmdTNBBnpCLsyvYKUS6ukIiWBA"
     },
     "confirmed_generation": 1,
-    "sig": "TwAuCSVx5eKgCkbbyAxeqddsr0xSL5QebVA794GsLihQO5VxA0O_qUCAk30KFH2TNuVgcWqpORJMNWNEaaLGDw",
-    "terms_hash": "PEj43Oz6GuVKcLXW3n5vIbBdSORajscVVsogpqd7Y9M"
+    "sig": "jKZ13zfRyNtQPpLEeOU2USP0AH5ryagD_QqudMVFPn2bi61kshMto6Uuqxohf38_ueLZXBivfe9V3j_CWacmBg",
+    "terms_hash": "c6fSZwYRwRa_3yscaUapKYa_TKWdhfCEvJ5kzyMbauI"
   },
   "version": 12
 }
