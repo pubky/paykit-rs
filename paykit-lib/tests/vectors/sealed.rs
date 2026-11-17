@@ -1331,6 +1331,16 @@ fn allowance_record_value(keys: &Keys) -> Vec<u8> {
 /// Keep each authored binding error while signing the current proposal and response.
 fn binding_value(keys: &Keys, case: &Value) -> String {
     let text = recertified(keys, st(case, "value"));
+    if st(case, "collection") == "payment_lists" {
+        // The stored list is `messages.json`'s, as that file signs it.
+        let value: Value = serde_json::from_str(&text).unwrap();
+        let list = stored_message(keys, "private_payment_list");
+        let held = &value["list"]["plaintext"];
+        assert_eq!(st(held, "sender_app"), b64(&list.plaintext().sender_app_id()));
+        return text
+            .replace(st(held, "signature"), &b64(&list.plaintext().signature()))
+            .replace(st(held, "json"), &b64(list.plaintext().json()));
+    }
     if st(case, "collection") != "allowances" {
         return text;
     }
