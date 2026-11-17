@@ -37,6 +37,56 @@
       "signature": "TwAuCSVx5eKgCkbbyAxeqddsr0xSL5QebVA794GsLihQO5VxA0O_qUCAk30KFH2TNuVgcWqpORJMNWNEaaLGDw",
       "signed_bytes_hex": "000000187061796b69742f76312f6578656375746f722d6772616e7400000020f149881e9fb5b6c16f5a70fdae005551024ff70895b7fd499d5e368921b52f0c00000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc070000002464306566666662372d313931622d343730392d623663372d653334336166353530306234000000203c48f8dcecfa1ae54a70b5d6de7e6f21b05d48e45a8ec71556ca20a6a77b63d300000008000000000000000100000008000000000000000100000008000000000000000c",
       "signer": "executor app"
+    },
+    {
+      "fields": [
+        {
+          "hex": "f149881e9fb5b6c16f5a70fdae005551024ff70895b7fd499d5e368921b52f0c",
+          "name": "identity"
+        },
+        {
+          "hex": "eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc07",
+          "name": "counterparty identity"
+        },
+        {
+          "hex": "64306566666662372d313931622d343730392d623663372d653334336166353530306234",
+          "name": "allowance_id"
+        },
+        {
+          "hex": "0000000000000001",
+          "name": "u64(grant generation)"
+        },
+        {
+          "hex": "0000000000000003",
+          "name": "u64(grant version)"
+        },
+        {
+          "hex": "0000000000000001",
+          "name": "u64(ledger generation)"
+        },
+        {
+          "hex": "0000000000000002",
+          "name": "u64(ledger version)"
+        },
+        {
+          "hex": "0909090909090909090909090909090909090909090909090909090909090909",
+          "name": "item hash"
+        }
+      ],
+      "grant": {
+        "generation": 1,
+        "version": 3
+      },
+      "item_hash": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk",
+      "label": "paykit/v1/ledger-handoff",
+      "ledger": {
+        "generation": 1,
+        "version": 2
+      },
+      "public_key": "XnAJx2W5wcu3tEWuCMCvImc3bRFSxWP1-8lnRCsrzcY",
+      "signature": "F9M_1wlc8-CBA0RrPwu_lF9xdAIjWZfPfluQFcxoM4BzxbA8WpxI-51jiSfBomWPpN-QdbCqLjVJXioKFshyCA",
+      "signed_bytes_hex": "000000187061796b69742f76312f6c65646765722d68616e646f666600000020f149881e9fb5b6c16f5a70fdae005551024ff70895b7fd499d5e368921b52f0c00000020eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc070000002464306566666662372d313931622d343730392d623663372d653334336166353530306234000000080000000000000001000000080000000000000003000000080000000000000001000000080000000000000002000000200909090909090909090909090909090909090909090909090909090909090909",
+      "signer": "executor app, as the previous executor"
     }
   ]
 }
