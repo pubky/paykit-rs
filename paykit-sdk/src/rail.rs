@@ -433,9 +433,14 @@ pub trait Rail: Send + Sync {
     /// - Otherwise, when the conversion terms left a payable candidate unusable, the payment
     ///   is refused as [`crate::Refusal::UnsupportedEndpoint`], naming why.
     /// - Otherwise the method pays none: the payment is refused as
-    ///   [`crate::Refusal::UnsupportedEndpoint`], but for Private Payment Lists a newer one
-    ///   may serve, when one has expired or a single-use endpoint is used up: then the payee
-    ///   is asked for it ([`crate::Refusal::WaitingForList`]).
+    ///   [`crate::Refusal::UnsupportedEndpoint`].
+    ///
+    /// In the last two cases, for Private Payment Lists, when another list of the payee has
+    /// expired or its version is used up, a single-use endpoint of it reserved, a newer list
+    /// may serve: the payee is asked for it and the payment is refused as
+    /// [`crate::Refusal::WaitingForList`] instead, unless a list of the payee is paused as
+    /// divergent, which refuses it as [`crate::Refusal::Divergent`] (Paykit spec 6, 8.4).
+    /// The endpoints of a used-up version are never handed in.
     ///
     /// An error for the whole call (`Err`) fails the payment with it, as
     /// [`crate::PaykitError::Rail`]. An ID that isn't one of the candidates', or one returned
@@ -446,10 +451,6 @@ pub trait Rail: Send + Sync {
     /// [`crate::Paykit`] waiting for it. The choice is journaled with the attempt before the
     /// method pays: a payment resumed later pays the endpoint chosen, whatever the method
     /// would choose then.
-    ///
-    /// For Private Payment Lists, a call that pays none may be followed by one handing in
-    /// only the single-use endpoints left out as used, to tell whether a newer list may
-    /// serve: none of those is paid.
     ///
     /// # Errors
     ///

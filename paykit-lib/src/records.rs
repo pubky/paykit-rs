@@ -4790,20 +4790,28 @@ mod tests {
 
     #[test]
     fn test_unrequested_list_version_only_for_a_list() {
-        let destination = |source: &str, version: Option<u64>| {
+        let destination = |source: &str, version: Option<ListVersion>| {
             let mut v = serde_json::json!({ "app_id": "brrz3m6g5rci6iqnzke44q4djc",
                 "endpoint_id": "btc-bitcoin-p2wpkh", "payload": "bc1q", "source": source,
                 "single_use": false, "amount": { "asset": "btc", "value": "0.0015" } });
-            if let Some(n) = version {
-                v["list_version"] = serde_json::json!({"generation": 1, "counter": n});
+            if let Some(version) = version {
+                v["list_version"] = version.to_value();
             }
             v
         };
-        read_unrequested(&destination("list", Some(7))).unwrap();
+        read_unrequested(&destination("list", Some(ListVersion::new(1, 7).unwrap()))).unwrap();
         read_unrequested(&destination("public", None)).unwrap();
         assert!(read_unrequested(&destination("list", None)).is_err());
-        assert!(read_unrequested(&destination("public", Some(7))).is_err());
-        assert!(read_unrequested(&destination("request", Some(7))).is_err());
+        assert!(read_unrequested(&destination(
+            "public",
+            Some(ListVersion::new(1, 7).unwrap())
+        ))
+        .is_err());
+        assert!(read_unrequested(&destination(
+            "request",
+            Some(ListVersion::new(1, 7).unwrap())
+        ))
+        .is_err());
     }
 
     #[test]

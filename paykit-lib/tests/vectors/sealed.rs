@@ -3619,8 +3619,11 @@ fn list_case(keys: &Keys, delta: i64) -> (PaymentListRecord, paykit_lib::records
     let alice = pubky(ALICE);
     let s = bound_sealed();
     let mut held = PaymentListRecord::read(value(&arr(&s, "binding_accepted")[0]), &alice).unwrap();
+    let paykit_lib::Body::PrivatePaymentList(held_list) = held.list.body() else {
+        panic!("a list")
+    };
     held.used.push(paykit_lib::records::UsedEndpoint {
-        version: paykit_lib::ListVersion::new(1, 1).unwrap(),
+        version: held_list.version,
         endpoint: paykit_lib::identifiers::PaymentEndpointIdentifier::parse("btc-bitcoin-p2wpkh")
             .unwrap(),
         attempt_id: paykit_lib::identifiers::AttemptId::from_bytes([3; 16]),

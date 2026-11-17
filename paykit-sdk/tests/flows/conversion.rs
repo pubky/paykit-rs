@@ -663,6 +663,72 @@ async fn test_conversion_unusable_list_endpoints_beside_an_expired_list_ask_for_
 }
 
 #[tokio::test]
+async fn test_conversion_unusable_list_endpoints_beside_a_used_up_list_ask_for_it() {
+    // The shop's list is used up: alice paid its single-use endpoint. The till's live list
+    // is unusable under the terms, but a newer list from the shop may serve: alice is told
+    // she waits for a list, and bob is asked (Paykit spec 8.4).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(
+            paykit_sdk::UnrequestedPayment::new(w.bob_id(), btc("0.0015"))
+                .with_options(PayOptions::default().with_endpoint(endpoint("btc-bitcoin-p2wpkh"))),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    till.app_mut().invite(&w.alice_id()).await.unwrap();
+    let mut endpoints = std::collections::BTreeMap::new();
+    endpoints.insert(
+        endpoint("btc-lightning-bolt12"),
+        paykit_lib::bodies::ListEndpoint {
+            payload: PaymentEndpointPayload::new("lno1till").unwrap(),
+            single_use: false,
+        },
+    );
+    let body = paykit_lib::bodies::PrivatePaymentList {
+        version: list_version(1, 1),
+        payment_endpoints: endpoints,
+        expires_at: w.clock.now_ms() + 30 * 24 * HOUR_MS,
+    }
+    .to_body()
+    .unwrap();
+    w.inject(
+        &w.bob,
+        "till",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.private_payment_list",
+        Vec::new(),
+        body,
+    );
+    wallet.receive(None).await.unwrap();
+    let asked = list_asks(&wallet, &w.bob_id()).await;
+    let request = eth_priced_request(&w, &mut shop, &mut wallet).await;
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        "{refused:?}"
+    );
+    assert!(list_asks(&wallet, &w.bob_id()).await > asked);
+    assert_eq!(wallet.payments().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn test_conversion_unusable_list_endpoints_refused_without_a_list_to_ask() {
     // Both lists live, every endpoint unusable under the terms: a newer list needn't
     // differ, so the payment is refused for the terms and the payee isn't asked.

@@ -138,9 +138,13 @@ pub enum Refusal {
     /// method, may serve.
     #[error("no endpoint the payment method pays: {0}")]
     UnsupportedEndpoint(String),
-    /// No usable Private Payment List from the payee: none held, or each one expired or its
-    /// single-use endpoints the payment would use already used (Paykit spec 8.4, "No usable
-    /// list"). The app asked the payee for its current list with a
+    /// No usable Private Payment List from the payee: none held, or each one expired, of a
+    /// version used up by a single-use endpoint of it reserved, or of a generation above the
+    /// payee's verified `identity.json` (Paykit spec 8.4, "No usable list"; Paykit wire
+    /// 4.13); also when lists in use offer only endpoints the payment method, the conversion
+    /// terms, the caller's endpoint or a request's accepted identifiers leave unusable,
+    /// beside one used up, or, for the first two, beside one expired, whose newer list may
+    /// serve ([`crate::Rail::select_endpoints`]). The app asked the payee for its current list with a
     /// `paykit.private_payment_list_request`; the payee can't be forced to answer, so the
     /// user is told the app is waiting for the payee's list. The user may choose to pay to
     /// the payee's public endpoints instead ([`crate::PaymentMode::Public`]); the app never
