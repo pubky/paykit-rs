@@ -44,7 +44,7 @@ use crate::periods::PeriodView;
 use crate::rail::ProofCheck;
 use crate::receipts::{received_receipt, ReceiptDetails, ReceivedReceipt};
 use crate::receive::KEPT_MESSAGE_MS;
-use crate::records::{conflict, KeptMessage};
+use crate::records::{conflict, KeptMessage, KeptOrder};
 use crate::state::{key, Tx};
 
 /// How many times a payee's write is built again after its record changed meanwhile.
@@ -1442,14 +1442,15 @@ impl Paykit {
     /// kept stop is judged outside the receive step.
     async fn kept_stop_message(&self, target: &ActivityTarget) -> Result<Option<StoredMessage>> {
         let record = self.held_activity(target).await?;
-        let mut stops: Vec<StoredMessage> = self
+        let mut stops: Vec<(KeptOrder, StoredMessage)> = self
             .kept_stop_copies(target)
             .await?
             .into_values()
-            .filter(|stop| stop_applies(stop, record.as_ref()))
+            .filter(|(_, stop)| stop_applies(stop, record.as_ref()))
             .collect();
-        stops.sort_by_key(StoredMessage::accepted_at);
-        Ok(stops.into_iter().next())
+        // Inbox acceptance order: acceptance time, then the intake the receive step assigned.
+        stops.sort_by_key(|(order, _)| *order);
+        Ok(stops.into_iter().next().map(|(_, stop)| stop))
     }
 
     /// Every cancellation kept as a stop of the request record at `target`, by its key, each
@@ -1458,12 +1459,15 @@ impl Paykit {
     async fn kept_stop_copies(
         &self,
         target: &ActivityTarget,
-    ) -> Result<std::collections::BTreeMap<String, StoredMessage>> {
+    ) -> Result<std::collections::BTreeMap<String, (KeptOrder, StoredMessage)>> {
         let prefix = key::kept_cancellations(&self.activity_key(target)?);
         let own = self.identity();
         let mut copies = std::collections::BTreeMap::new();
         for (rest, kept) in self.local_scan::<KeptMessage>(&prefix).await? {
-            copies.insert(format!("{prefix}{rest}"), kept.stored(&own)?);
+            copies.insert(
+                format!("{prefix}{rest}"),
+                (kept.order()?, kept.stored(&own)?),
+            );
         }
         Ok(copies)
     }
@@ -2637,5 +2641,135 @@ mod stop_tests {
             };
             assert_eq!(status, expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod stop_order_tests {
+    use paykit_lib::bodies::RequestReply;
+    use paykit_lib::{
+        Asset, Decimal, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
+    };
+    use pubky_switch_client::clock::Clock;
+
+    use super::*;
+    use crate::testkit::Switches;
+
+    /// `canceller`'s cancellation of bob's request `request` to alice, as alice's inbox took it
+    /// at `accepted_at`.
+    fn stop_from(
+        canceller: &Paykit,
+        alice: [u8; 32],
+        bob: [u8; 32],
+        request: [u8; 32],
+        accepted_at: u64,
+    ) -> StoredMessage {
+        let body = RequestReply {
+            reason: None,
+            label: None,
+        }
+        .to_body()
+        .unwrap();
+        let signed = canceller
+            .sign(alice, Kind::PaymentRequestCancellation, vec![request], body)
+            .unwrap();
+        let message = pubky_switch_core::message::Message::parse(
+            signed.plaintext().json(),
+            paykit_lib::kinds::OPAQUE_MEMBERS,
+        )
+        .unwrap();
+        StoredMessage::from_received(
+            bob,
+            canceller.app.cert().clone(),
+            signed.plaintext().clone(),
+            message,
+            Some(accepted_at),
+        )
+        .unwrap()
+    }
+
+    /// Two valid stops of one request, from two of the payee's apps, accepted in the same
+    /// millisecond: the one the inbox took first, by its intake `seq`, is placed, whichever
+    /// app's key sorts first (Paykit spec 8.1: kept messages in inbox acceptance order).
+    #[tokio::test]
+    async fn test_requests_stops_in_one_millisecond_placed_in_intake_order() {
+        let w = Switches::new();
+        let alice = w.alice.identity().public();
+        let bob = w.bob.identity().public();
+        let mut wallet = w
+            .join(
+                &w.alice,
+                "wallet",
+                crate::AppScopes::new().pay().build().unwrap(),
+            )
+            .await;
+        wallet.app_mut().invite(&bob).await.unwrap();
+        let mut shop1 = w.labelled("shop1", "shop1").await;
+        let shop = w
+            .join(
+                &w.bob,
+                "shop",
+                crate::AppScopes::new().request().build().unwrap(),
+            )
+            .await;
+        let mut endpoints = std::collections::BTreeMap::new();
+        endpoints.insert(
+            PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            PaymentEndpointPayload::new("lnbc1invoice").unwrap(),
+        );
+        let draft = RequestDraft::new(
+            PaymentAmount {
+                value: Decimal::new("1").unwrap(),
+                asset: Asset::new("btc").unwrap(),
+            },
+            PaymentReference::new("order-1").unwrap(),
+            RequestDestination::Endpoints(endpoints),
+        );
+        let request = shop1
+            .send_request(alice, draft)
+            .await
+            .unwrap()
+            .request
+            .unwrap();
+        wallet.receive(None).await.unwrap();
+        let record = wallet.request(&request).await.unwrap().record;
+        let at = w.clock.now_ms();
+        let stops = [
+            (
+                shop1.app_id(),
+                stop_from(&shop1, alice, bob, request.request_hash, at),
+            ),
+            (
+                shop.app_id(),
+                stop_from(&shop, alice, bob, request.request_hash, at),
+            ),
+        ];
+        // The app whose key sorts last gets the earlier intake: the key order alone would
+        // pick the other one.
+        let keys: Vec<String> = stops
+            .iter()
+            .map(|(app, _)| key::kept_cancellation(&record, app))
+            .collect();
+        let first = usize::from(keys[0] < keys[1]);
+        let mut tx = Tx::default();
+        for (i, (_, stop)) in stops.iter().enumerate() {
+            let seq = if i == first { 1 } else { 2 };
+            tx.put(&keys[i], &KeptMessage::taken(stop, seq)).unwrap();
+        }
+        wallet.local_commit(tx).await.unwrap();
+        wallet.place_kept_cancellations().await.unwrap();
+        let target =
+            ActivityTarget::payer(natural_key::request_record(&bob, &request.request_hash));
+        let held = wallet.held_activity(&target).await.unwrap().unwrap();
+        let placed = held.cancellation.unwrap();
+        assert_eq!(
+            placed.message().msg_id,
+            stops[first].1.message().msg_id,
+            "the stop the inbox took first is placed"
+        );
+        assert_eq!(
+            wallet.request(&request).await.unwrap().status,
+            RequestStatus::Cancelled
+        );
     }
 }

@@ -1782,7 +1782,10 @@ fn payee_label_senders(keys: &Keys) -> Value {
             Ok(()) => assert!(taken, "{name}: taken"),
             Err(error) => {
                 assert!(!taken, "{name}: {error}");
-                assert!(error.contains("Paykit spec 3."), "{name}: {error}");
+                assert!(
+                    error.contains("Paykit spec 3.4") || error.contains("Paykit spec 3.3"),
+                    "{name}: {error}"
+                );
                 out["reason"] = json!(quoted(&error));
             }
         }
