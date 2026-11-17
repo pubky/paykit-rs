@@ -9,12 +9,15 @@
 //!   sent only if that write is applied (Paykit spec 8.1, 8.3). This app records and sends
 //!   no acceptance: an acceptance is recorded only together with the Allowance's
 //!   initialized ledger, in one atomic batch on a protected record, which this version
-//!   doesn't build, so accepting is unavailable in either role (Paykit spec 8.3.1). A
-//!   message that would break the record's rules (Paykit wire 5.4) is reflected by its
-//!   `msg_id` only, such as an acceptance crossing the proposal's withdrawal. No path stores
-//!   a message of this app's without queuing it, so a message this app signed in an
-//!   Allowance record is one to be sent; the re-send after a restore builds on that
-//!   (`stores_unqueued`).
+//!   doesn't build, so accepting is unavailable in either role (Paykit spec 8.3.1). Nor
+//!   does any acceptance go out on any other path: a restore's re-send never queues one a
+//!   record holds, whoever wrote it there (`own_allowance_to_send_again`), and the delivery
+//!   gate, asked before every try of every delivery, holds any the outbox holds
+//!   (`PaykitProtocol::may_send`). A message that would break the record's rules (Paykit
+//!   wire 5.4) is reflected by its `msg_id` only, such as an acceptance crossing the
+//!   proposal's withdrawal. No path stores a message of this app's without queuing it, so a
+//!   proposal, rejection or end this app signed in an Allowance record is one to be sent;
+//!   the re-send after a restore builds on that (`stores_unqueued`).
 //! - **Receiving:** a proposal opens the record, gated by the spam rule; an acceptance or a
 //!   rejection that would take the record's response is kept by the receive step (`pr/`), and a
 //!   rejection goes into the proposer's record after the read, once the read's stored entries are
@@ -106,8 +109,8 @@ pub enum AllowanceStatus {
     /// Proposed; no answer yet.
     Proposed,
     /// The record holds the proposal's acceptance, written by an app of another
-    /// implementation: this SDK neither accepts an Allowance nor places a received acceptance
-    /// ([`Refusal::AllowanceAcceptanceUnavailable`]). It authorizes no automatic payment
+    /// implementation: this SDK neither accepts an Allowance, nor sends an acceptance a record
+    /// holds, nor places a received one ([`Refusal::AllowanceAcceptanceUnavailable`]). It authorizes no automatic payment
     /// here: an accepted Allowance is usable only with the initialized ledger its acceptance
     /// records atomically (Paykit spec 8.3.1), which this version neither writes nor reads.
     /// It can still be ended by either side ([`Paykit::end_allowance`]).
@@ -2540,10 +2543,12 @@ fn written(result: Result<()>) -> Result<Placed> {
 /// record it also queues in that batch, or, for a crossing end recorded while sends to the
 /// counterparty were held, marks owed in it ([`stores_unqueued`]), while the counterparty
 /// hasn't answered it and no later stop covers it. The proposal goes while the record holds
-/// no response and no end; an acceptance or a rejection while it holds no end; an end, a
-/// stop, always. Nothing goes
-/// for a conflicted Allowance (Paykit spec 8.3, "Conflicted"); the caller leaves out one
-/// whose conflict or counterparty's end this app keeps as a stop not in the record yet.
+/// no response and no end; a rejection while it holds no end; an end, a stop, always. An
+/// acceptance never goes, whoever wrote it into the record: this app sends no acceptance
+/// (Paykit spec 8.3.1), so it isn't queued either, and the delivery gate holds any that
+/// reaches the outbox (`PaykitProtocol::may_send`). Nothing goes for a conflicted Allowance
+/// (Paykit spec 8.3, "Conflicted"); the caller leaves out one whose conflict or
+/// counterparty's end this app keeps as a stop not in the record yet.
 pub(crate) fn own_allowance_to_send_again<'a>(
     record: &'a AllowanceRecord,
     own: &[u8; 32],
@@ -2555,7 +2560,10 @@ pub(crate) fn own_allowance_to_send_again<'a>(
     let ended = record.end.is_some();
     let candidates = [
         (Some(&record.proposal), record.response.is_none() && !ended),
-        (record.response.as_ref(), !ended),
+        (
+            record.response.as_ref(),
+            !ended && acceptance(record).is_none(),
+        ),
         (record.end.as_ref(), true),
     ];
     candidates
