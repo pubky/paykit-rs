@@ -810,6 +810,359 @@
     "lifetime_after": "0.07",
     "lifetime_before": "0.07",
     "now": "2026-03-10T00:00:00.000Z",
+    "successors": {
+      "cases": [
+        {
+          "accepted": true,
+          "held": {
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [
+              {
+                "asset": "btc",
+                "at": "2026-01-31T12:00:00.000Z",
+                "attempt_id": "VnrZo7AZZB3mwR-gfg4t9w",
+                "obligation": "pMucwmH6LXML24Onv5CmiDyOn0b-nMzZnrD4iN3SLB0",
+                "outcome": "done",
+                "value": "0.01"
+              }
+            ],
+            "totals": {
+              "count": 2,
+              "spent": "0.02"
+            },
+            "v": 1
+          },
+          "held_time": "2026-01-31T13:00:00.000Z",
+          "name": "monthly: compacted at February's end, written in March",
+          "newer": {
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [],
+            "totals": {
+              "count": 3,
+              "spent": "0.03"
+            },
+            "v": 1
+          },
+          "newer_time": "2026-03-01T00:00:30.000Z",
+          "terms": {
+            "active_from": null,
+            "allowed_payment_endpoint_identifiers": null,
+            "asset": "btc",
+            "expires_at": null,
+            "lifetime_amount_limit": "0.10",
+            "per_payment_amount": {
+              "maximum": "0.01",
+              "minimum": "0.0001"
+            },
+            "period_limits": [
+              {
+                "amount_limit": "0.03",
+                "payment_count_limit": 3,
+                "period": {
+                  "anchor": "2026-01-01T00:00:00.000Z",
+                  "every": 1,
+                  "kind": "anchored",
+                  "unit": "month"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "accepted": false,
+          "held": {
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [
+              {
+                "asset": "btc",
+                "at": "2026-01-31T12:00:00.000Z",
+                "attempt_id": "VnrZo7AZZB3mwR-gfg4t9w",
+                "obligation": "pMucwmH6LXML24Onv5CmiDyOn0b-nMzZnrD4iN3SLB0",
+                "outcome": "done",
+                "value": "0.01"
+              }
+            ],
+            "totals": {
+              "count": 2,
+              "spent": "0.02"
+            },
+            "v": 1
+          },
+          "held_time": "2026-03-01T00:00:30.000Z",
+          "name": "monthly: held from the newer write's time, judged in March alone",
+          "newer": {
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [],
+            "totals": {
+              "count": 3,
+              "spent": "0.03"
+            },
+            "v": 1
+          },
+          "newer_time": "2026-03-01T00:00:30.000Z",
+          "terms": {
+            "active_from": null,
+            "allowed_payment_endpoint_identifiers": null,
+            "asset": "btc",
+            "expires_at": null,
+            "lifetime_amount_limit": "0.10",
+            "per_payment_amount": {
+              "maximum": "0.01",
+              "minimum": "0.0001"
+            },
+            "period_limits": [
+              {
+                "amount_limit": "0.03",
+                "payment_count_limit": 3,
+                "period": {
+                  "anchor": "2026-01-01T00:00:00.000Z",
+                  "every": 1,
+                  "kind": "anchored",
+                  "unit": "month"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "accepted": false,
+          "held": {
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [
+              {
+                "asset": "btc",
+                "at": "2026-01-31T12:00:00.000Z",
+                "attempt_id": "VnrZo7AZZB3mwR-gfg4t9w",
+                "obligation": "pMucwmH6LXML24Onv5CmiDyOn0b-nMzZnrD4iN3SLB0",
+                "outcome": "done",
+                "value": "0.01"
+              }
+            ],
+            "totals": {
+              "count": 2,
+              "spent": "0.02"
+            },
+            "v": 1
+          },
+          "held_time": "2026-03-05T00:00:00.000Z",
+          "name": "monthly: held from after the newer write's time, judged at newer_time alone",
+          "newer": {
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [],
+            "totals": {
+              "count": 3,
+              "spent": "0.03"
+            },
+            "v": 1
+          },
+          "newer_time": "2026-03-01T00:00:30.000Z",
+          "terms": {
+            "active_from": null,
+            "allowed_payment_endpoint_identifiers": null,
+            "asset": "btc",
+            "expires_at": null,
+            "lifetime_amount_limit": "0.10",
+            "per_payment_amount": {
+              "maximum": "0.01",
+              "minimum": "0.0001"
+            },
+            "period_limits": [
+              {
+                "amount_limit": "0.03",
+                "payment_count_limit": 3,
+                "period": {
+                  "anchor": "2026-01-01T00:00:00.000Z",
+                  "every": 1,
+                  "kind": "anchored",
+                  "unit": "month"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "accepted": false,
+          "held": {
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [
+              {
+                "asset": "btc",
+                "at": "2026-02-01T00:30:00.000Z",
+                "attempt_id": "VnrZo7AZZB3mwR-gfg4t9w",
+                "obligation": "pMucwmH6LXML24Onv5CmiDyOn0b-nMzZnrD4iN3SLB0",
+                "outcome": "done",
+                "value": "0.01"
+              }
+            ],
+            "totals": {
+              "count": 2,
+              "spent": "0.02"
+            },
+            "v": 1
+          },
+          "held_time": "2026-02-02T00:00:00.000Z",
+          "name": "monthly: no time from held_time to newer_time could compact the entry",
+          "newer": {
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [],
+            "totals": {
+              "count": 3,
+              "spent": "0.03"
+            },
+            "v": 1
+          },
+          "newer_time": "2026-03-01T01:00:00.000Z",
+          "terms": {
+            "active_from": null,
+            "allowed_payment_endpoint_identifiers": null,
+            "asset": "btc",
+            "expires_at": null,
+            "lifetime_amount_limit": "0.10",
+            "per_payment_amount": {
+              "maximum": "0.01",
+              "minimum": "0.0001"
+            },
+            "period_limits": [
+              {
+                "amount_limit": "0.03",
+                "payment_count_limit": 3,
+                "period": {
+                  "anchor": "2026-01-01T00:00:00.000Z",
+                  "every": 1,
+                  "kind": "anchored",
+                  "unit": "month"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "accepted": true,
+          "held": {
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [
+              {
+                "asset": "btc",
+                "at": "2026-12-31T12:00:00.000Z",
+                "attempt_id": "VnrZo7AZZB3mwR-gfg4t9w",
+                "obligation": "pMucwmH6LXML24Onv5CmiDyOn0b-nMzZnrD4iN3SLB0",
+                "outcome": "done",
+                "value": "0.01"
+              }
+            ],
+            "totals": {
+              "count": 2,
+              "spent": "0.02"
+            },
+            "v": 1
+          },
+          "held_time": "2026-12-31T13:00:00.000Z",
+          "name": "yearly: compacted at 2027's end, written in leap year 2028",
+          "newer": {
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [],
+            "totals": {
+              "count": 3,
+              "spent": "0.03"
+            },
+            "v": 1
+          },
+          "newer_time": "2028-01-01T00:00:30.000Z",
+          "terms": {
+            "active_from": null,
+            "allowed_payment_endpoint_identifiers": null,
+            "asset": "btc",
+            "expires_at": null,
+            "lifetime_amount_limit": "0.10",
+            "per_payment_amount": {
+              "maximum": "0.01",
+              "minimum": "0.0001"
+            },
+            "period_limits": [
+              {
+                "amount_limit": "0.03",
+                "payment_count_limit": 3,
+                "period": {
+                  "anchor": "2026-01-01T00:00:00.000Z",
+                  "every": 1,
+                  "kind": "anchored",
+                  "unit": "year"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "accepted": false,
+          "held": {
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [
+              {
+                "asset": "btc",
+                "at": "2026-12-31T12:00:00.000Z",
+                "attempt_id": "VnrZo7AZZB3mwR-gfg4t9w",
+                "obligation": "pMucwmH6LXML24Onv5CmiDyOn0b-nMzZnrD4iN3SLB0",
+                "outcome": "done",
+                "value": "0.01"
+              }
+            ],
+            "totals": {
+              "count": 2,
+              "spent": "0.02"
+            },
+            "v": 1
+          },
+          "held_time": "2028-01-01T00:00:30.000Z",
+          "name": "yearly: held from the newer write's time, judged in 2028 alone",
+          "newer": {
+            "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+            "entries": [],
+            "totals": {
+              "count": 3,
+              "spent": "0.03"
+            },
+            "v": 1
+          },
+          "newer_time": "2028-01-01T00:00:30.000Z",
+          "terms": {
+            "active_from": null,
+            "allowed_payment_endpoint_identifiers": null,
+            "asset": "btc",
+            "expires_at": null,
+            "lifetime_amount_limit": "0.10",
+            "per_payment_amount": {
+              "maximum": "0.01",
+              "minimum": "0.0001"
+            },
+            "period_limits": [
+              {
+                "amount_limit": "0.03",
+                "payment_count_limit": 3,
+                "period": {
+                  "anchor": "2026-01-01T00:00:00.000Z",
+                  "every": 1,
+                  "kind": "anchored",
+                  "unit": "year"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "description": "Wire 5.5 From one version to the next, spec 8.3: a reader holds held, written at service time held_time, and reads newer, written at newer_time, which no longer lists a held entry. newer counts that entry in its totals, as a compaction writes it. The reader accepts newer when the entry's at + longest period + 60 s was before some service time from held_time to newer_time, the longest period taken at that time, so an anchored month or year limit's entry compacted in a shorter period is accepted in a version written in a longer one. A held_time after newer_time judges at newer_time alone. accepted is the verdict."
+    },
     "terms": {
       "active_from": null,
       "allowed_payment_endpoint_identifiers": null,
@@ -834,7 +1187,7 @@
       ]
     }
   },
-  "description": "Allowance usage (wire 5.5, spec 8.3 with specs/allowances.md): for every period limit the amount and count of counted entries in the period containing t (anchored) or with t < at + 60 s + L (rolling), the lifetime amount including compacted totals, and entry counts reserved, spent and released. A ledger or claim done, or a validated payer proof, spends. Open and unknown claims reserve entries without an outcome. Every failed attempt spends immediately, whoever wrote the failure, while its claim remains and after it is gone. Only durable journal evidence bound to the attempt proving it ended before the payment method's call and can never dispatch releases it; a restored journal, a reported failure or user confirmation alone is insufficient. Done or a paid proof overrides release. An entry without an outcome whose claim is gone spends. Compacted totals.failed items use the same rule for lifetime usage. Candidates are checked against every limit; refused_by names the first limit that refuses. failure_evidence holds pure counting inputs: evidence means already validated local journal and payer-proof evidence, not a shared record member; Callers must bind it to the attempt, obligation, Allowance, amount, asset and owner. Its compacted cases replace the entry with one totals.failed item. period_limit_spellings checks duplicate terms by wire spelling; period_limit_members checks required members.",
+  "description": "Allowance usage (wire 5.5, spec 8.3 with specs/allowances.md): for every period limit the amount and count of counted entries in the period containing t (anchored) or with t < at + 60 s + L (rolling), the lifetime amount including compacted totals, and entry counts reserved, spent and released. A ledger or claim done, or a validated payer proof, spends. Open and unknown claims reserve entries without an outcome. Every failed attempt spends immediately, whoever wrote the failure, while its claim remains and after it is gone. Only durable journal evidence bound to the attempt proving it ended before the payment method's call and can never dispatch releases it; a restored journal, a reported failure or user confirmation alone is insufficient. Done or a paid proof overrides release. An entry without an outcome whose claim is gone spends. Compacted totals.failed items use the same rule for lifetime usage. Candidates are checked against every limit; refused_by names the first limit that refuses. failure_evidence holds pure counting inputs: evidence means already validated local journal and payer-proof evidence, not a shared record member; Callers must bind it to the attempt, obligation, Allowance, amount, asset and owner. Its compacted cases replace the entry with one totals.failed item. period_limit_spellings checks duplicate terms by wire spelling; period_limit_members checks required members. compaction/successors checks which newer ledger versions a reader holding an older one accepts after a compaction it didn't see.",
   "failure_evidence": [
     {
       "attempt_id": "1csmdhiTomzJxPwNK4iUiQ",
