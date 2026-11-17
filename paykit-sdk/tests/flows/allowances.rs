@@ -347,7 +347,14 @@ async fn test_allowances_received_acceptance_kept_unplaced_then_given_up_with_a_
     for _ in 0..2 {
         assert_eq!(w.record_writes(&w.bob, &theirs), writes);
         assert!(Box::pin(value(&shop, &theirs)).await["response"].is_null());
-        assert_eq!(shop.app().protocol_scan("paykit", b"pr/").await.unwrap().len(), 1);
+        assert_eq!(
+            shop.app()
+                .protocol_scan("paykit", b"pr/")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         let view = shop.allowance(&theirs).await.unwrap();
         assert_eq!(view.status, AllowanceStatus::Proposed);
         assert!(!view.consented);
@@ -360,7 +367,12 @@ async fn test_allowances_received_acceptance_kept_unplaced_then_given_up_with_a_
     shop.receive(None).await.unwrap();
     assert_eq!(w.record_writes(&w.bob, &theirs), writes);
     assert!(Box::pin(value(&shop, &theirs)).await["response"].is_null());
-    assert!(shop.app().protocol_scan("paykit", b"pr/").await.unwrap().is_empty());
+    assert!(shop
+        .app()
+        .protocol_scan("paykit", b"pr/")
+        .await
+        .unwrap()
+        .is_empty());
     let notices = shop.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
@@ -388,7 +400,12 @@ async fn test_allowances_accepted_record_written_elsewhere_reports_no_authority(
     assert_eq!(view.executor_app_id, None);
     assert!(!view.consented);
     assert_eq!(w.record_writes(&w.alice, &mine), writes);
-    assert!(wallet.app().protocol_scan("paykit", b"ac/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"ac/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
