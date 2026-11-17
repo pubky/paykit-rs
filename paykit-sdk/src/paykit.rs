@@ -324,6 +324,10 @@ fn account_gone(events: &[AppEvent]) -> bool {
 }
 
 /// One Paykit App of an identity.
+///
+/// This wrapper owns a Switch app registered with Paykit alone. Its own certificate's
+/// scope roots must belong to that registered protocol (Switch wire 3.1). Certificates
+/// from counterparties may include other protocols' scopes; those grant no Paykit rights.
 pub struct Paykit {
     pub(crate) app: App,
     pub(crate) protocol: Arc<PaykitProtocol>,
@@ -390,6 +394,8 @@ impl Paykit {
     /// Join from an approval (Switch spec 12.1), as a Paykit App: the client's join, with
     /// Paykit as its protocol. The approval's certificate must pass Paykit's checks (Paykit
     /// wire 3.1). Session creation, key storage and the approval's channel stay the host's.
+    /// This constructor registers only Paykit: an own certificate requiring another
+    /// protocol's scope root, such as `chat`, is refused (Switch wire 3.1).
     ///
     /// # Errors
     ///
@@ -444,6 +450,9 @@ impl Paykit {
     /// a renewal the Switch took, still loads: the app reads its feed, to take a renewal
     /// that passes, and takes no Paykit action meanwhile ([`Paykit::certificate_refused`]).
     ///
+    /// This constructor registers only Paykit, with the same own-certificate scope-root
+    /// requirement as [`Paykit::join`] (Switch wire 3.1).
+    ///
     /// # Errors
     ///
     /// The client's errors; [`crate::PaykitError::Lib`] `Validation` for an
@@ -492,6 +501,9 @@ impl Paykit {
     /// 7.2), each request payment's claim key bound to its request under the backup's naming
     /// key. On an error, neither layer is in the store. The app is in reconcile mode until
     /// [`Paykit::reconcile`] and [`Paykit::end_reconcile`].
+    ///
+    /// This constructor registers only Paykit. The restored own certificate must require
+    /// no other protocol's scope root (Switch wire 3.1), as at [`Paykit::join`].
     ///
     /// # Errors
     ///
