@@ -261,8 +261,9 @@ enum Place {
     },
     /// A list, held over its record: the hold to keep, `None` when a list as new is held.
     List(Option<(String, KeptMessage)>),
-    /// An Allowance's proposal, acceptance or rejection, written into its record later
-    /// (`allowances.rs`).
+    /// An Allowance's proposal or rejection, written into its record later, or its
+    /// acceptance, never written: kept and given up past its window with the host's notice,
+    /// since this version makes no Allowance accepted (Paykit spec 8.3.1; `allowances.rs`).
     Allowance,
     /// An Allowance's end, kept as the stop at once, unless one is kept already.
     Stop(Option<(String, KeptMessage)>),
