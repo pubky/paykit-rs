@@ -139,3 +139,18 @@ fn test_publication_value_preserves_unknown_members_within_the_complete_bound() 
     decoded.message_id = "not-a-uuid".into();
     assert!(decoded.to_json().is_err());
 }
+
+#[test]
+fn test_publication_known_members_take_precedence_over_unknown_members() {
+    let floor = paykit_lib::records::BlockFloorRecord::read(
+        br#"{"v":1,"floor":"2026-01-01T00:00:00.000Z","generation":99,"future":{"v":2}}"#,
+    )
+    .unwrap();
+    let mut value = publication();
+    value.unknown = floor.unknown;
+    let bytes = value.to_json().unwrap();
+    let read = PrivateListPublication::read(&bytes).unwrap();
+    assert_eq!(read.version, value.version);
+    let object: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(object["future"], serde_json::json!({"v":2}));
+}

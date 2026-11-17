@@ -6,6 +6,8 @@
 use pubky_switch_core::enc::{b64, pubky_id, zbase32_encode};
 use pubky_switch_core::json::check_uuid_v4;
 use serde::Serialize;
+use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::error::{ensure, Error, Result};
 use crate::json::{check_v1, parse_object, Obj};
@@ -65,6 +67,8 @@ struct Written<'a> {
     grant_id: Option<String>,
     message_id: &'a str,
     message_hash: String,
+    #[serde(flatten)]
+    unknown: BTreeMap<&'a str, &'a Value>,
 }
 
 impl PrivateListPublication {
@@ -112,10 +116,10 @@ impl PrivateListPublication {
             grant_id: self.grant_id.as_ref().map(|id| b64(id)),
             message_id: &self.message_id,
             message_hash: b64(&self.message_hash),
+            unknown: self.unknown.root_members(&SHAPE),
         };
         let json = serde_json::to_vec(&value)
             .map_err(|_| Error::Invalid(format!("{SECTION}: cannot write value")))?;
-        let json = self.unknown.write_into(json, &SHAPE, &[])?;
         check_size(&json)?;
         Ok(json)
     }
