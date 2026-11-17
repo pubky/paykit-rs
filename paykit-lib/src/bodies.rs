@@ -24,9 +24,9 @@ use crate::identifiers::{
 };
 use crate::json::{bad, Obj};
 use crate::kinds::{ExtensionKind, Kind, MessageKind, MAX_RECORDED_KIND_LEN};
-use crate::ListVersion;
 use crate::periods::{BillingPeriod, PeriodRef, Recurrence};
 use crate::scopes::Label;
+use crate::ListVersion;
 
 /// How long a payer uses a Private Payment List after its inbox accepted it, at most: 30
 /// days (Paykit spec 5, Paykit wire 4.13).

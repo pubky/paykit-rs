@@ -242,7 +242,10 @@ fn damage(bytes: &[u8], how: Damage) -> Vec<u8> {
         }
         Damage::VersionWithoutApp => {
             assert!(body["app_id"].is_null());
-            body.insert("held_version".into(), json!({"generation": 1, "counter": 7}));
+            body.insert(
+                "held_version".into(),
+                json!({"generation": 1, "counter": 7}),
+            );
         }
     }
     serde_json::to_vec(&value).unwrap()
@@ -577,7 +580,10 @@ async fn test_discovery_state_ask_clock_and_version_progress() {
         .unwrap()
         .unwrap();
     let mark: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(mark["d"]["held_version"], json!({"generation": 1, "counter": 8}));
+    assert_eq!(
+        mark["d"]["held_version"],
+        json!({"generation": 1, "counter": 8})
+    );
     assert_eq!(
         held.wallet
             .app()

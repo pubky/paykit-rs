@@ -38,8 +38,8 @@ use paykit_lib::records::{
     ActivityRecord, ActivitySide, DestinationSource, PaymentListRecord, StoredMessage, UsedEndpoint,
 };
 use paykit_lib::{
-    ListVersion,
-    AttemptId, Body, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload, Rate,
+    AttemptId, Body, ListVersion, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
+    Rate,
 };
 use pubky_switch_client::app::{
     claim_conflict, AppError, ClaimAttempt, ClaimOp, Initiator, KeptBatch, KeptBatchStatus,
@@ -4560,7 +4560,10 @@ mod tests {
         for (app_id, held_version) in [
             (None, None),
             (Some([4; 16]), None),
-            (Some([4; 16]), Some(paykit_lib::ListVersion::new(1, 9).unwrap())),
+            (
+                Some([4; 16]),
+                Some(paykit_lib::ListVersion::new(1, 9).unwrap()),
+            ),
         ] {
             let value = ListAsk {
                 payee: [3; 32],

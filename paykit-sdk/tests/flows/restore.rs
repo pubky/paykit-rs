@@ -596,7 +596,10 @@ async fn test_restore_corrupt_journal_refused_and_nothing_written() {
     let damages: [(&str, serde_json::Value); 4] = [
         ("label", serde_json::json!("Not A Label!")),
         ("source", serde_json::json!("elsewhere")),
-        ("list_version", serde_json::json!({"generation": 1, "counter": 7})),
+        (
+            "list_version",
+            serde_json::json!({"generation": 1, "counter": 7}),
+        ),
         ("payment_reference", serde_json::Value::Null),
     ];
     for (member, value) in damages {

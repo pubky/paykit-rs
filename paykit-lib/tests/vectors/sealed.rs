@@ -1336,7 +1336,10 @@ fn binding_value(keys: &Keys, case: &Value) -> String {
         let value: Value = serde_json::from_str(&text).unwrap();
         let list = stored_message(keys, "private_payment_list");
         let held = &value["list"]["plaintext"];
-        assert_eq!(st(held, "sender_app"), b64(&list.plaintext().sender_app_id()));
+        assert_eq!(
+            st(held, "sender_app"),
+            b64(&list.plaintext().sender_app_id())
+        );
         return text
             .replace(st(held, "signature"), &b64(&list.plaintext().signature()))
             .replace(st(held, "json"), &b64(list.plaintext().json()));
@@ -3807,9 +3810,9 @@ fn test_record_transitions_compare_versions_of_one_record() {
     let cap = keys.app("cap").keys.app_id_bytes();
     let cap_list = resign_with(&keys, "private_payment_list", |m| {
         m.from.app_id = cap;
-        let version = m.body["version"].as_u64().unwrap();
+        let version = paykit_lib::ListVersion::from_value(&m.body["version"]).unwrap();
         m.body
-            .insert("version".into(), serde_json::json!(version + 1));
+            .insert("version".into(), version.next().unwrap().to_value());
     });
     let other_app = PaymentListRecord {
         app_id: cap,
@@ -4358,6 +4361,19 @@ fn test_allowance_record_renewed_grant_leaves_the_history_grant_its_own_members(
         );
         assert!(!String::from_utf8(json.clone()).unwrap().contains("current"));
     }
+}
+
+#[test]
+fn test_payment_list_record_version_pair_keeps_unknown_members() {
+    // A list version inside a record is an object like any other: a writer keeps the
+    // members it doesn't know as it read them (wire 5).
+    let alice = pubky(ALICE);
+    let s = bound_sealed();
+    let mut base: Value = serde_json::from_slice(value(&arr(&s, "binding_accepted")[0])).unwrap();
+    base["used"][0]["version"]["later_member"] = serde_json::json!("read");
+    let held = PaymentListRecord::read(&serde_json::to_vec(&base).unwrap(), &alice).unwrap();
+    let written: Value = serde_json::from_slice(&held.to_json().unwrap()).unwrap();
+    assert_eq!(written["used"][0]["version"]["later_member"], "read");
 }
 
 #[test]

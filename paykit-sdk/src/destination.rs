@@ -647,7 +647,8 @@ mod tests {
             &PaymentEndpointIdentifier::new(id).unwrap(),
             &PaymentEndpointPayload::new(payload).unwrap(),
             source,
-            (source == DestinationSource::List).then(|| paykit_lib::ListVersion::new(1, 7).unwrap()),
+            (source == DestinationSource::List)
+                .then(|| paykit_lib::ListVersion::new(1, 7).unwrap()),
             source == DestinationSource::List,
         )
     }

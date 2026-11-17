@@ -2621,7 +2621,10 @@ mod tests {
         for (app_id, held_version) in [
             (None, None),
             (Some([4; 16]), None),
-            (Some([4; 16]), Some(paykit_lib::ListVersion::new(1, 9).unwrap())),
+            (
+                Some([4; 16]),
+                Some(paykit_lib::ListVersion::new(1, 9).unwrap()),
+            ),
         ] {
             let value = serde_json::to_value(ListAsk {
                 payee: [3; 32],

@@ -23,8 +23,7 @@ use paykit_lib::bodies::{Body, Conversion};
 use paykit_lib::derive::{natural_key, payment_obligation};
 use paykit_lib::records::{DestinationSource, StoredMessage};
 use paykit_lib::{
-    ListVersion,
-    Asset, AttemptId, Decimal, Label, PaymentAmount, PaymentEndpointIdentifier,
+    Asset, AttemptId, Decimal, Label, ListVersion, PaymentAmount, PaymentEndpointIdentifier,
     PaymentEndpointPayload, PaymentReference, Rate,
 };
 use pubky_switch_core::chain::TransitionProof;
