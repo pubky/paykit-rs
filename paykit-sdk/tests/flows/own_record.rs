@@ -3,6 +3,7 @@
 //! lifetime, and the capabilities of a paying app.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use paykit_lib::app_record::PaykitMember;
 use paykit_lib::PaymentEndpointPayload;
@@ -814,4 +815,126 @@ async fn test_own_record_labelled_scope_cannot_publish_public_endpoints() {
         .unwrap()
         .public_endpoints
         .is_empty());
+}
+
+/// The publisher's wall clock, independent of the payer and service clocks.
+struct PublisherClock {
+    times: Mutex<(u64, Option<u64>)>,
+}
+
+impl PublisherClock {
+    fn new(now: u64) -> Self {
+        Self {
+            times: Mutex::new((now, None)),
+        }
+    }
+
+    /// Change the wall time immediately after the next read of it.
+    fn roll_back_after_read(&self, now: u64, later: u64) {
+        *self.times.lock().unwrap() = (now, Some(later));
+    }
+}
+
+impl Clock for PublisherClock {
+    fn now_ms(&self) -> u64 {
+        let mut times = self.times.lock().unwrap();
+        let now = times.0;
+        if let Some(later) = times.1.take() {
+            times.0 = later;
+        }
+        now
+    }
+}
+
+async fn shop_on_clock(w: &World, clock: Arc<PublisherClock>) -> Paykit {
+    let base = store();
+    let shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+            publishing(),
+            Arc::clone(&base),
+        )
+        .await;
+    let mut env = w.env(&w.bob, base);
+    env.clock = clock as Arc<dyn Clock>;
+    Box::pin(Paykit::load(
+        env,
+        publishing(),
+        shop.app_id(),
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_own_record_mutation_after_clock_rollback_stays_payable() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let clock = Arc::new(PublisherClock::new(w.clock.now_ms()));
+    let mut shop = Box::pin(shop_on_clock(&w, Arc::clone(&clock))).await;
+    let id = endpoint("btc-lightning-bolt12");
+    shop.set_public_endpoint(id.clone(), payload("lno1first"))
+        .await
+        .unwrap();
+    let first = held(&shop, w.bob_id());
+    *clock.times.lock().unwrap() = (w.clock.now_ms() - 40 * DAY_MS, None);
+    shop.set_public_endpoint(id.clone(), payload("lno1changed"))
+        .await
+        .unwrap();
+    let changed = on_homeserver(&w, &shop).unwrap();
+    assert!(changed.updated_at() > first.updated_at());
+    assert_eq!(changed.signed(), shop.app().record());
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(read.endpoints.len(), 1, "{read:?}");
+    assert!(read.failures.is_empty(), "{read:?}");
+    assert_eq!(read.endpoints[0].endpoint_id, id);
+    assert_eq!(read.endpoints[0].payload, payload("lno1changed"));
+    assert_eq!(
+        changed.expires_at(),
+        Some(changed.updated_at() + RECORD_LIFETIME_MS)
+    );
+    let signed = shop.app().record().clone();
+    shop.update_own_record().await.unwrap();
+    assert_eq!(shop.app().record(), &signed);
+}
+
+#[tokio::test]
+async fn test_own_record_renewal_during_clock_rollback_stays_payable() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let clock = Arc::new(PublisherClock::new(w.clock.now_ms()));
+    let mut shop = Box::pin(shop_on_clock(&w, Arc::clone(&clock))).await;
+    let id = endpoint("btc-lightning-bolt12");
+    shop.set_public_endpoint(id.clone(), payload("lno1tips"))
+        .await
+        .unwrap();
+    let first = held(&shop, w.bob_id());
+    w.clock.advance_ms(16 * DAY_MS);
+    // The half-life check observes the current time; before the writer signs, the host
+    // clock rolls back. The payer and the service keep their current wall time.
+    clock.roll_back_after_read(w.clock.now_ms(), first.updated_at() - 40 * DAY_MS);
+    shop.update_own_record().await.unwrap();
+    let renewed = on_homeserver(&w, &shop).unwrap();
+    assert!(renewed.updated_at() > first.updated_at());
+    assert_eq!(renewed.signed(), shop.app().record());
+    assert_eq!(
+        PaykitMember::read(&renewed).unwrap(),
+        PaykitMember::read(&first).unwrap()
+    );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(read.endpoints.len(), 1, "{read:?}");
+    assert!(read.failures.is_empty(), "{read:?}");
+    assert_eq!(read.endpoints[0].endpoint_id, id);
+    assert_eq!(read.endpoints[0].payload, payload("lno1tips"));
+    assert_eq!(
+        renewed.expires_at(),
+        Some(renewed.updated_at() + RECORD_LIFETIME_MS)
+    );
+    let signed = shop.app().record().clone();
+    shop.update_own_record().await.unwrap();
+    assert_eq!(shop.app().record(), &signed);
 }
