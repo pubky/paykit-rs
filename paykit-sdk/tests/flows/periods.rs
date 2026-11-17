@@ -5326,3 +5326,487 @@ async fn test_periods_named_endpoints_keep_the_required_app_constraint() {
         }
     }
 }
+
+#[tokio::test]
+async fn test_periods_receipt_checks_both_period_bounds_and_waits_for_the_request() {
+    for (wrong_end, missing_request) in [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let w = World::new();
+        let mut shop = w.shop().await;
+        let mut wallet = w.wallet("wallet").await;
+        let (request, sale) = subscribed(&w, &mut shop, &mut wallet).await;
+        shop.send_period_details(&sale, january_details(w.clock.now_ms() + DAY_MS))
+            .await
+            .unwrap();
+        wallet.receive(None).await.unwrap();
+        let request_target = RecordTarget::new(
+            SwitchCollection::new(
+                Collection::PayerActivity.name(),
+                Collection::PayerActivity.policy(None),
+            ),
+            &natural_key::request_record(&request.payee, &request.request_hash),
+        );
+        let held = wallet
+            .app_mut()
+            .read_record(&request_target)
+            .await
+            .unwrap()
+            .unwrap();
+        let original = held.content.value().unwrap().to_vec();
+        if missing_request {
+            let delete = wallet
+                .app_mut()
+                .record_op(&request_target, None, Vec::new())
+                .await
+                .unwrap();
+            wallet
+                .app_mut()
+                .submit_batch(OpBatch::new().entry(delete))
+                .await
+                .unwrap();
+        }
+        let obligation = paykit_lib::derive::request_obligation_blinded(
+            &wallet.app().blind(&request.payee),
+            &wallet.app().blind(&request.request_hash),
+            january().start_secs(),
+        );
+        let attempt = AttemptId::from_bytes([0x4a; 16]);
+        w.alice
+            .switch()
+            .open_attempt(obligation, attempt.to_bytes(), [0x5b; 16])
+            .unwrap();
+        let mut named = january();
+        if wrong_end {
+            named.ends_at += DAY_MS;
+        }
+        let body = paykit_lib::bodies::PaymentReceipt {
+            attempt_id: attempt,
+            billing_period: Some(named),
+            metadata: None,
+            payment_reference: None,
+        }
+        .to_body(2)
+        .unwrap();
+        w.inject(
+            &w.bob,
+            "shop",
+            &w.alice,
+            &[wallet.app_id()],
+            "paykit.payment_receipt",
+            vec![[7; 32], request.request_hash],
+            body,
+        );
+        wallet.receive(None).await.unwrap();
+        let outcome = wallet
+            .app_mut()
+            .read_claim(&obligation)
+            .await
+            .unwrap()
+            .unwrap()
+            .view
+            .attempt(&attempt.to_bytes())
+            .unwrap()
+            .outcome;
+        assert_eq!(
+            outcome == pubky_switch_core::claims::Outcome::Done,
+            !wrong_end && !missing_request
+        );
+        if missing_request {
+            let restore = wallet
+                .app_mut()
+                .record_op(&request_target, Some(&original), Vec::new())
+                .await
+                .unwrap();
+            wallet
+                .app_mut()
+                .submit_batch(OpBatch::new().entry(restore))
+                .await
+                .unwrap();
+            wallet.receive(None).await.unwrap();
+            let outcome = wallet
+                .app_mut()
+                .read_claim(&obligation)
+                .await
+                .unwrap()
+                .unwrap()
+                .view
+                .attempt(&attempt.to_bytes())
+                .unwrap()
+                .outcome;
+            assert_eq!(
+                outcome == pubky_switch_core::claims::Outcome::Done,
+                !wrong_end
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_periods_deferred_receipt_waits_for_its_request() {
+    let w = World::new();
+    let base = store();
+    let mut wallet = Box::pin(w.wallet_on("wallet", Arc::clone(&base))).await;
+    let mut shop = Box::pin(w.shop()).await;
+    let (request, sale) = Box::pin(subscribed(&w, &mut shop, &mut wallet)).await;
+    Box::pin(shop.send_period_details(&sale, january_details(w.clock.now_ms() + DAY_MS)))
+        .await
+        .unwrap();
+    Box::pin(wallet.receive(None)).await.unwrap();
+    let period_key = wallet.request(&request).await.unwrap().periods[0].record;
+    let request_target = RecordTarget::new(
+        SwitchCollection::new(
+            Collection::PayerActivity.name(),
+            Collection::PayerActivity.policy(None),
+        ),
+        &natural_key::request_record(&request.payee, &request.request_hash),
+    );
+    let parent = Box::pin(wallet.app_mut().read_record(&request_target))
+        .await
+        .unwrap()
+        .unwrap();
+    let parent_bytes = parent.content.value().unwrap().to_vec();
+    let obligation = paykit_lib::derive::request_obligation_blinded(
+        &wallet.app().blind(&request.payee),
+        &wallet.app().blind(&request.request_hash),
+        january().start_secs(),
+    );
+    let attempt = AttemptId::from_bytes([0x6a; 16]);
+    w.alice
+        .switch()
+        .open_attempt(obligation, attempt.to_bytes(), [0x5b; 16])
+        .unwrap();
+    crate::divergent::set_divergent(&base, &wallet, &period_key, true);
+    let receipt = paykit_lib::bodies::PaymentReceipt {
+        attempt_id: attempt,
+        billing_period: Some(january()),
+        metadata: None,
+        payment_reference: None,
+    }
+    .to_body(2)
+    .unwrap();
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.payment_receipt",
+        vec![[7; 32], request.request_hash],
+        receipt,
+    );
+    Box::pin(wallet.receive(None)).await.unwrap();
+    assert_eq!(wallet.app().protocol_scan(b"dw/").await.unwrap().len(), 1);
+    Box::pin(wallet.app_mut().delete_record(&request_target, Vec::new()))
+        .await
+        .unwrap();
+    crate::divergent::set_divergent(&base, &wallet, &period_key, false);
+    Box::pin(crate::divergent::confirm(&mut wallet, &period_key))
+        .await
+        .unwrap();
+    Box::pin(wallet.receive(None)).await.unwrap();
+    let claim = Box::pin(wallet.app_mut().read_claim(&obligation))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        claim.view.attempt(&attempt.to_bytes()).unwrap().outcome,
+        pubky_switch_core::claims::Outcome::Open
+    );
+    assert_eq!(wallet.app().protocol_scan(b"dw/").await.unwrap().len(), 1);
+    Box::pin(
+        wallet
+            .app_mut()
+            .put_record(&request_target, &parent_bytes, Vec::new()),
+    )
+    .await
+    .unwrap();
+    Box::pin(wallet.receive(None)).await.unwrap();
+    let claim = Box::pin(wallet.app_mut().read_claim(&obligation))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        claim.view.attempt(&attempt.to_bytes()).unwrap().outcome,
+        pubky_switch_core::claims::Outcome::Done
+    );
+    assert!(wallet.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_periods_receipt_before_its_period_record_needs_admission_and_its_request() {
+    // A receipt naming a Billing Period whose record the wallet holds no record of yet is
+    // new state: it settles the attempt it names and waits for its proof only when its
+    // sender is admitted and the wallet holds the request it names (Paykit spec 8.1; Paykit
+    // wire 4.1, 4.4).
+    #[derive(Clone, Copy, Debug)]
+    enum Case {
+        Admitted,
+        Flagged,
+        NoRequest,
+    }
+    for case in [Case::Admitted, Case::Flagged, Case::NoRequest] {
+        let w = World::new();
+        let lists = Arc::new(crate::common::ListsStore::default());
+        let mut wallet = Box::pin(w.wallet_on(
+            "wallet",
+            Arc::clone(&lists) as Arc<dyn pubky_switch_client::store::StateStore>,
+        ))
+        .await;
+        let mut shop = Box::pin(w.shop()).await;
+        let (request, _) = Box::pin(subscribed(&w, &mut shop, &mut wallet)).await;
+        let request_hash = match case {
+            Case::NoRequest => [9; 32],
+            Case::Admitted | Case::Flagged => request.request_hash,
+        };
+        if matches!(case, Case::Flagged) {
+            lists.flag(&w.bob_id());
+        }
+        let obligation = paykit_lib::derive::request_obligation_blinded(
+            &wallet.app().blind(&request.payee),
+            &wallet.app().blind(&request_hash),
+            january().start_secs(),
+        );
+        let attempt = AttemptId::from_bytes([0x7a; 16]);
+        w.alice
+            .switch()
+            .open_attempt(obligation, attempt.to_bytes(), [0x5b; 16])
+            .unwrap();
+        let body = paykit_lib::bodies::PaymentReceipt {
+            attempt_id: attempt,
+            billing_period: Some(january()),
+            metadata: None,
+            payment_reference: None,
+        }
+        .to_body(2)
+        .unwrap();
+        w.inject(
+            &w.bob,
+            "shop",
+            &w.alice,
+            &[wallet.app_id()],
+            "paykit.payment_receipt",
+            vec![[7; 32], request_hash],
+            body,
+        );
+        Box::pin(wallet.receive(None)).await.unwrap();
+        let outcome = Box::pin(wallet.app_mut().read_claim(&obligation))
+            .await
+            .unwrap()
+            .unwrap()
+            .view
+            .attempt(&attempt.to_bytes())
+            .unwrap()
+            .outcome;
+        let admitted = matches!(case, Case::Admitted);
+        assert_eq!(
+            outcome == pubky_switch_core::claims::Outcome::Done,
+            admitted,
+            "{case:?}"
+        );
+        assert_eq!(
+            wallet.app().protocol_scan(b"pr/").await.unwrap().len(),
+            usize::from(admitted),
+            "{case:?}: kept until its proof"
+        );
+        assert_eq!(
+            wallet.spam_count(&w.bob_id()).await.unwrap(),
+            u64::from(matches!(case, Case::Flagged)),
+            "{case:?}"
+        );
+        // Nothing waits for a request the wallet doesn't hold: no message is given up later.
+        w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS + DAY_MS);
+        Box::pin(wallet.receive(None)).await.unwrap();
+        let given_up = wallet
+            .notices()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|n| n.kind == paykit_sdk::NoticeKind::MessageGivenUp)
+            .count();
+        assert_eq!(given_up, 0, "{case:?}");
+    }
+}
+
+#[tokio::test]
+async fn test_periods_receipt_of_a_recurring_request_without_its_period_settles_nothing() {
+    // A receipt of a recurring request names its Billing Period (Paykit wire 4.11): one naming
+    // none is dropped, and settles no attempt on the obligation a period start of 0 gives.
+    let w = World::new();
+    let mut wallet = Box::pin(w.wallet("wallet")).await;
+    let mut shop = Box::pin(w.shop()).await;
+    let (request, _) = Box::pin(subscribed(&w, &mut shop, &mut wallet)).await;
+    let obligation = paykit_lib::derive::request_obligation_blinded(
+        &wallet.app().blind(&request.payee),
+        &wallet.app().blind(&request.request_hash),
+        0,
+    );
+    let attempt = AttemptId::from_bytes([0x9a; 16]);
+    w.alice
+        .switch()
+        .open_attempt(obligation, attempt.to_bytes(), [0x5b; 16])
+        .unwrap();
+    let body = paykit_lib::bodies::PaymentReceipt {
+        attempt_id: attempt,
+        billing_period: None,
+        metadata: None,
+        payment_reference: None,
+    }
+    .to_body(2)
+    .unwrap();
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.payment_receipt",
+        vec![[7; 32], request.request_hash],
+        body,
+    );
+    Box::pin(wallet.receive(None)).await.unwrap();
+    let claim = Box::pin(wallet.app_mut().read_claim(&obligation))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        claim.view.attempt(&attempt.to_bytes()).unwrap().outcome,
+        pubky_switch_core::claims::Outcome::Open
+    );
+}
+
+#[tokio::test]
+async fn test_periods_kept_receipt_checks_its_period_again_when_written() {
+    // A receipt kept in the app's state is checked against its request again when it is
+    // written: one naming a period that isn't the request's, or naming none for this
+    // recurring request, as a store could hold, settles nothing and is dropped (Paykit wire
+    // 4.4, 4.11).
+    use pubky_switch_client::store::WriteBatch;
+
+    let w = World::new();
+    let base = store();
+    let mut wallet = Box::pin(w.wallet_on("wallet", Arc::clone(&base))).await;
+    let mut shop = Box::pin(w.shop()).await;
+    let (request, sale) = Box::pin(subscribed(&w, &mut shop, &mut wallet)).await;
+    let blinded = |start| {
+        paykit_lib::derive::request_obligation_blinded(
+            &wallet.app().blind(&request.payee),
+            &wallet.app().blind(&request.request_hash),
+            start,
+        )
+    };
+    let obligation = blinded(january().start_secs());
+    let unnamed = blinded(0);
+    // The receipt the wallet keeps names an attempt no claim holds; each of the others names
+    // an open attempt of the claim it would settle.
+    let kept_attempt = AttemptId::from_bytes([0x8a; 16]);
+    let other_end = AttemptId::from_bytes([0x8b; 16]);
+    let no_period = AttemptId::from_bytes([0x8c; 16]);
+    for (on, attempt) in [(obligation, other_end), (unnamed, no_period)] {
+        w.alice
+            .switch()
+            .open_attempt(on, attempt.to_bytes(), [0x5b; 16])
+            .unwrap();
+    }
+    let receipt = |attempt_id, billing_period| {
+        paykit_lib::bodies::PaymentReceipt {
+            attempt_id,
+            billing_period,
+            metadata: None,
+            payment_reference: None,
+        }
+        .to_body(2)
+        .unwrap()
+    };
+    // Signed before the receipt the wallet keeps is accepted, as a message kept is.
+    let mut other_end_period = january();
+    other_end_period.ends_at += DAY_MS;
+    let [other_end_plaintext, no_period_plaintext] =
+        [(other_end, Some(other_end_period)), (no_period, None)].map(|(attempt, period)| {
+            w.sign_as(
+                &w.bob,
+                "shop",
+                &w.alice,
+                "paykit.payment_receipt",
+                vec![[7; 32], request.request_hash],
+                receipt(attempt, period),
+            )
+        });
+    // A receipt before its period record is kept for it.
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.payment_receipt",
+        vec![[7; 32], request.request_hash],
+        receipt(kept_attempt, Some(january())),
+    );
+    Box::pin(wallet.receive(None)).await.unwrap();
+    let kept = wallet.app().protocol_scan(b"pr/").await.unwrap();
+    assert_eq!(kept.len(), 1);
+    let kept_key = String::from_utf8(kept[0].0.clone()).unwrap();
+    // `pr/<sender>/<record key>/<msg_id>`: the store holds, beside it, one naming January
+    // with another end, kept for the period record, and one naming no period, kept for the
+    // request record.
+    let mut parts = kept_key.split('/');
+    let (_, sender, period_record) = (parts.next(), parts.next().unwrap(), parts.next().unwrap());
+    let request_record = pubky_switch_core::enc::b64(
+        &wallet
+            .app()
+            .record_key(&RecordTarget::new(
+                SwitchCollection::new(
+                    Collection::PayerActivity.name(),
+                    Collection::PayerActivity.policy(None),
+                ),
+                &natural_key::request_record(&request.payee, &request.request_hash),
+            ))
+            .unwrap(),
+    );
+    let ns = pubky_switch_client::store::client_namespace(&wallet.app_id());
+    let mut batch = WriteBatch::new();
+    let mut forged = Vec::new();
+    for (plaintext, record) in [
+        (other_end_plaintext, period_record.to_owned()),
+        (no_period_plaintext, request_record),
+    ] {
+        let message: serde_json::Value = serde_json::from_slice(plaintext.json()).unwrap();
+        let msg_id = message["msg_id"].as_str().unwrap().to_owned();
+        let mut value: serde_json::Value = serde_json::from_slice(&kept[0].1).unwrap();
+        value["d"]["plaintext"] = json!(pubky_switch_core::enc::b64(&plaintext.encode()));
+        let key = format!("p/pr/{sender}/{record}/{msg_id}");
+        batch
+            .put(&ns, key.into_bytes(), serde_json::to_vec(&value).unwrap())
+            .unwrap();
+        forged.push(msg_id);
+    }
+    base.commit(batch).unwrap();
+    // Once the period record is held, the kept receipts are written.
+    Box::pin(shop.send_period_details(&sale, january_details(w.clock.now_ms() + DAY_MS)))
+        .await
+        .unwrap();
+    Box::pin(wallet.receive(None)).await.unwrap();
+    Box::pin(wallet.receive(None)).await.unwrap();
+    let mut outcome = async |on: [u8; 32], attempt: AttemptId| {
+        wallet
+            .app_mut()
+            .read_claim(&on)
+            .await
+            .unwrap()
+            .unwrap()
+            .view
+            .attempt(&attempt.to_bytes())
+            .unwrap()
+            .outcome
+    };
+    use pubky_switch_core::claims::Outcome;
+    assert_eq!(
+        Box::pin(outcome(obligation, other_end)).await,
+        Outcome::Open
+    );
+    assert_eq!(Box::pin(outcome(unnamed, no_period)).await, Outcome::Open);
+    let kept = wallet.app().protocol_scan(b"pr/").await.unwrap();
+    for msg_id in &forged {
+        assert!(
+            !kept.iter().any(|(key, _)| key.ends_with(msg_id.as_bytes())),
+            "{msg_id} dropped"
+        );
+    }
+}

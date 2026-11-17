@@ -171,20 +171,29 @@ pub(crate) fn period_views(
     views
 }
 
-/// The Billing Period a proof names, when `request` is recurring and the period is one of its
-/// own (Paykit wire 4.4): `Ok(None)` for a proof that names none.
+/// The Billing Period a proof or a receipt names, when `request` is recurring and the period
+/// is one of its own, start and end alike (Paykit wire 4.4): `Ok(None)` for one that names
+/// none.
 ///
 /// # Errors
 ///
-/// A period that isn't one of the request's, or one named for a one-time request.
+/// A period that isn't one of the request's, one named for a one-time request, or a proof or
+/// receipt of a recurring request that names none (Paykit wire 4.10, 4.11).
 pub(crate) fn named_period(
     request: &PaymentRequest,
     stored: &StoredMessage,
 ) -> std::result::Result<Option<PeriodRef>, paykit_lib::Error> {
     match stored.body().billing_period() {
-        None if request.is_recurring() && matches!(stored.body(), Body::PaymentProof(_)) => {
+        None if request.is_recurring()
+            && matches!(
+                stored.body(),
+                Body::PaymentProof(_) | Body::PaymentReceipt(_)
+            ) =>
+        {
             Err(paykit_lib::Error::Invalid(
-                "Paykit wire 4.10: a proof of a recurring request names its Billing Period".into(),
+                "Paykit wire 4.10, 4.11: a proof or receipt of a recurring request names its \
+                 Billing Period"
+                    .into(),
             ))
         }
         None => Ok(None),

@@ -1063,6 +1063,33 @@ impl Paykit {
         };
         let attempt_id = receipt.attempt_id;
         let mut tx = locals;
+        let request_record = match stored.message().refs.get(1) {
+            Some(hash) if stored.body().billing_period().is_some() => {
+                let target =
+                    ActivityTarget::payer(natural_key::request_record(&stored.sender(), hash));
+                let held = self.held_activity(&target).await?;
+                match crate::receive::receipt_period(held.as_ref(), &stored) {
+                    crate::receive::ReceiptPeriod::Request => held,
+                    crate::receive::ReceiptPeriod::Unchecked => return Ok(Placed::Not),
+                    crate::receive::ReceiptPeriod::Invalid => {
+                        self.local_commit(tx).await?;
+                        return Ok(Placed::Done);
+                    }
+                }
+            }
+            // Naming no period, it goes into the request's record, checked against it.
+            Some(_) => {
+                if matches!(
+                    crate::receive::receipt_period(Some(record), &stored),
+                    crate::receive::ReceiptPeriod::Invalid
+                ) {
+                    self.local_commit(tx).await?;
+                    return Ok(Placed::Done);
+                }
+                None
+            }
+            None => None,
+        };
         let Some(found) = receipt_on_record(record, &stored) else {
             self.local_commit(tx).await?;
             return Ok(Placed::Done);
@@ -1081,11 +1108,12 @@ impl Paykit {
         }
         if self.app.cert().has_permission(Permission::ClaimsWrite) {
             // Read bound to its key and to the claim the receipt settles, as at the first read.
-            let obligation = receipt_claim(&stored, &attempt_id, |request| {
-                self.obligation(&sender, request, 0)
+            let obligation = receipt_claim(&stored, &attempt_id, |request, period_start| {
+                self.obligation(&sender, request, period_start)
             });
             let journaled = self.journal_entry_on(&attempt_id, &obligation).await?;
-            let deadline = receipt_deadline(&stored, record, journaled.as_ref());
+            let deadline =
+                receipt_deadline(&stored, record, request_record.as_ref(), journaled.as_ref());
             // The claim view as the first read takes it, by the same rule
             // (`receive::failure_view`): the view the app keeps, or the switch's read only
             // when it asks for it. A read the switch refuses settles nothing.
