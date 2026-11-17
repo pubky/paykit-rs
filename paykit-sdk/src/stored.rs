@@ -3,8 +3,9 @@
 //! kept in Paykit's own state.
 //!
 //! - **An effect refused for good** (`EffectRefused`, or a `Parked` duty event of any reason
-//!   but `Uncertain`), such as a record write the switch refused (`403
-//!   permission_missing`), or one over a quota: the message is kept (`p/se/<sender>/<msg_id>`)
+//!   but `Uncertain`, `Released` or `AwaitingAdmission`), such as a record write refused
+//!   with `403 permission_missing`, or one over a quota: the message is kept
+//!   (`p/se/<sender>/<msg_id>`)
 //!   and written into its record by a later write of the app's own, tried at every receive
 //!   until it lands, as room frees: a request, a payer's reply, a proof of a payment without
 //!   a request into the record of its settlement, a receipt beside the proof it names, and
@@ -28,14 +29,17 @@
 //!   nothing. A copy of the entry the host released after that is declined, its message
 //!   processed, so its effect isn't applied twice (`PaykitProtocol`'s receive step).
 //! - **A released entry that ran as a duplicate** (`ReleasedDuplicate`): its note goes.
+//! - **An input awaiting protocol admission:** its parked and dropped notices stay owed.
+//!   Custody alone does not authorize a later record write (Switch spec 8.2).
 //! - **An entry dropped unverified** (`StoredEntryDropped`): it counts in its sender's mark
 //!   of entries dropped unverified (`ud/<sender>`, `marks.rs`), and the sender is asked at
 //!   once to send again what its inbox accepted from the mark's earliest time to its latest,
 //!   while it may still keep them, and again at most once a day while the mark lives (Paykit
 //!   spec 8.1, 9).
 //! - **An entry dropped while it waited for a scope key** (`StoredEntryDropped` with its
-//!   `awaited_epoch`): the message was never processed. The host is told once that it is
-//!   given up ([`crate::NoticeKind::MessageGivenUp`]), by the event that names its `msg_id`,
+//!   `WaitingReason::Key`): this copy is dropped without being processed. The host is told
+//!   once that it is given up ([`crate::NoticeKind::MessageGivenUp`]), by the event that
+//!   names its `msg_id`,
 //!   even while the copy of the records may lack its record, and the drop counts in its
 //!   sender's mark of key waits (`kw/<sender>`, `marks.rs`), which asks that sender, on the
 //!   same cadence, only once the app holds every key those messages waited for. A copy
@@ -388,7 +392,9 @@ impl Paykit {
         let taken = match event {
             AppEvent::Parked {
                 stored_id, reason, ..
-            } if *reason != ParkReason::Released => self.note_stored(*stored_id, &mut tx).await?,
+            } if !matches!(reason, ParkReason::Released | ParkReason::AwaitingAdmission) => {
+                self.note_stored(*stored_id, &mut tx).await?
+            }
             AppEvent::EffectRefused { stored_id, .. }
             | AppEvent::EffectUncertain { stored_id, .. } => {
                 self.note_stored(*stored_id, &mut tx).await?

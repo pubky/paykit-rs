@@ -898,7 +898,7 @@ async fn test_divergent_kept_value_that_doesnt_read_holds_the_new_message() {
     set_divergent(&base, &shop, &record, true);
     let ns = pubky_switch_client::store::client_namespace(&shop.app_id());
     let kept = format!(
-        "p/dw/{}/proof/{}/123e4567-e89b-42d3-a456-426614174000",
+        "p/paykit/dw/{}/proof/{}/123e4567-e89b-42d3-a456-426614174000",
         pubky_switch_core::enc::b64(&record),
         pubky_switch_core::enc::b64(&w.alice_id())
     );

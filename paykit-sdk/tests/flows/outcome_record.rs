@@ -528,19 +528,39 @@ async fn test_outcome_record_batch_refused_when_sent_again_is_written_again() {
 
 #[tokio::test]
 async fn test_outcome_record_kept_after_a_refusal_about_the_caller_stays_unwritten() {
-    // The outcome's batch is signed and kept, and the service time read before its first
-    // send is refused `403 not_current`. The batch still goes once the app is current, so
-    // the entry isn't finished as unreportable: when the switch then refuses the batch for
-    // good, the entry is still there for a resume.
+    // The outcome batch is kept after a transport failure. Its retry is refused about
+    // the caller, before the service looks up its ID, so the outcome remains owed. A
+    // later refusal for good drops that batch without losing the journaled payment.
     let w = World::new();
     let (mut wallet, _phone, request, attempt_id) = in_flight(&w).await;
-    w.clock.advance_ms(11 * 60_000);
-    let not_current = pubky_switch_client::testing::Fault::Error {
-        path: "/feed".into(),
+    w.rail.settle(&attempt_id, true);
+    let switch = w.alice.switch();
+    switch.fail_next(pubky_switch_client::testing::Fault::Unreachable {
+        path: "/ops".into(),
+        after: 0,
+    });
+    switch.fail_next(pubky_switch_client::testing::Fault::Error {
+        path: "/ops".into(),
         code: pubky_switch_core::http::ErrorCode::NotCurrent,
         current: serde_json::Value::Null,
-    };
-    outcome_refused_when_sent_again(&w, &mut wallet, &attempt_id, not_current).await;
+    });
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            resumed.as_slice(),
+            [PayOutcome::PaidOutcomeUnwritten { .. }]
+        ),
+        "{resumed:?}"
+    );
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::RailPaid
+    );
+    switch.fail_next(pubky_switch_client::testing::Fault::Error {
+        path: "/ops".into(),
+        code: pubky_switch_core::http::ErrorCode::Conflict,
+        current: serde_json::Value::Null,
+    });
     outcome_written_again(&w, &mut wallet, &request, &attempt_id).await;
 }
 

@@ -2,7 +2,7 @@
 //! Paykit wire 3.1): another protocol's scopes authorize nothing in Paykit.
 
 use paykit_sdk::Paykit;
-use pubky_switch_client::app::{AppEvent, Protocol};
+use pubky_switch_client::app::AppEvent;
 use pubky_switch_client::testing::AppSpec;
 use pubky_switch_core::scopes::Permission;
 use serde_json::json;
@@ -72,21 +72,28 @@ async fn test_protocols_payee_that_also_chats_request_recorded() {
 }
 
 #[tokio::test]
-async fn test_protocols_chat_only_app_joins_but_takes_no_paykit_kind() {
-    // Paykit's verifiers take a chat-only certificate as valid, so such an app joins with
-    // Paykit as its protocol; its record accepts no Paykit kind.
+async fn test_protocols_chat_only_app_requires_its_registered_protocol() {
+    // A valid chat certificate holds no Paykit kind, but Paykit alone cannot own its
+    // scope root (Switch wire 3.1): the host must register the chat protocol too.
     let w = World::new();
     let scopes = paykit_sdk::RequestedScopes::new(vec!["chat".into()], vec![Permission::ListsRead]);
-    let app: Paykit = w
-        .join_with(
-            &w.alice,
-            "chat",
-            scopes,
-            paykit_sdk::PaykitConfig::default(),
-            crate::common::store(),
-        )
-        .await;
-    assert!(app.protocol().accepts(app.app().cert()).is_empty());
+    let request = w.approve(&w.alice, "chat", &scopes);
+    let result = Paykit::join(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        request,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(paykit_sdk::PaykitError::Client(
+            pubky_switch_client::app::AppError::Refused(pubky_switch_client::app::Refusal::Usage(
+                _
+            ))
+        ))
+    ));
 }
 
 #[tokio::test]

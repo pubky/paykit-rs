@@ -8,7 +8,7 @@
 //!   table (Paykit spec 3.3), and narrows a payer's replies by label (Paykit spec 3.4).
 //! - **Check 10** ([`Protocol::check_body`]): the kind and its body, with no effect, the one
 //!   place these rules run, so a push peek and the receive step agree.
-//! - **Receiving** ([`Protocol::receive_with`]): the effect of a message that passed check 10,
+//! - **Receiving** ([`Protocol::receive`]): the effect of a message that passed check 10,
 //!   built through the client's receive context so the record write it causes, any claim entry and
 //!   local write go in the batch that moves the cursor (Switch spec 8.2; `crate::receive`).
 //!   After `409 conflict` the client reads the records again and calls it once more, and the

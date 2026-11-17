@@ -1259,9 +1259,15 @@ async fn test_restore_hold_held_cursor_gap_bounded_by_the_verified_service_time(
     let _shop = w.shop().await;
     wallet.receive(None).await.unwrap();
     let position = wallet.app().cursor().seq;
-    w.alice
-        .switch()
-        .set_held_cursor(&wallet.app_id(), position + 4);
+    // Four actual feed positions exist before another instance advances its cursor.
+    let mut ahead = position;
+    for _ in 0..4 {
+        ahead = w
+            .alice
+            .switch()
+            .push_missed(1, w.clock.now_ms(), w.clock.now_ms());
+    }
+    w.alice.switch().set_held_cursor(&wallet.app_id(), ahead);
     let read_ms = w.clock.now_ms();
     let report = wallet.receive(None).await.unwrap();
     assert!(
@@ -1274,9 +1280,7 @@ async fn test_restore_hold_held_cursor_gap_bounded_by_the_verified_service_time(
     );
     let verified = wallet.app().highest_service_time().unwrap();
     assert_eq!(missed_hold(&wallet).await, (Some(verified), false));
-    // The other instance's cursor goes back to the wallet's position, so the wallet's own
-    // moves go through again.
-    w.alice.switch().set_held_cursor(&wallet.app_id(), position);
+    // New entries follow the cursor the client adopted from the other instance.
     assert_bounded_by_the_read(&w, &mut wallet, read_ms).await;
 }
 
@@ -1294,12 +1298,12 @@ async fn test_restore_hold_owed_missed_call_with_no_end_bounded_by_the_verified_
     let cursor = wallet.app().cursor();
     let owed = serde_json::json!({
         "v": pubky_switch_client::app::SCHEMA_VERSION,
-        "d": { "Missed": {
+        "d": { "to": ["paykit"], "call": { "Missed": {
             "seq": cursor.seq,
             "entries": 0,
             "accepted_from_ms": w.clock.now_ms() - 1_000,
             "accepted_until_ms": u64::MAX,
-        } },
+        } } },
     });
     let mut batch = pubky_switch_client::store::WriteBatch::new();
     batch
@@ -1329,9 +1333,15 @@ async fn test_restore_hold_held_cursor_gap_and_a_bounded_item_hold_to_the_later_
     wallet.receive(None).await.unwrap();
     let position = wallet.app().cursor().seq;
     let now = w.clock.now_ms();
-    w.alice
-        .switch()
-        .set_held_cursor(&wallet.app_id(), position + 4);
+    // Four actual feed positions exist before another instance advances its cursor.
+    let mut ahead = position;
+    for _ in 0..4 {
+        ahead = w
+            .alice
+            .switch()
+            .push_missed(1, w.clock.now_ms(), w.clock.now_ms());
+    }
+    w.alice.switch().set_held_cursor(&wallet.app_id(), ahead);
     w.alice
         .switch()
         .push_missed(1, now - 2 * HOUR_MS, now - HOUR_MS);
@@ -1339,7 +1349,6 @@ async fn test_restore_hold_held_cursor_gap_and_a_bounded_item_hold_to_the_later_
     let verified = wallet.app().highest_service_time().unwrap();
     assert!(verified >= now, "{verified} {now}");
     assert_eq!(missed_hold(&wallet).await, (Some(verified), false));
-    w.alice.switch().set_held_cursor(&wallet.app_id(), position);
     w.clock.set_ms(now - HOUR_MS / 2);
     let between = signed_request(&w, "order-1");
     w.clock.set_ms(now);

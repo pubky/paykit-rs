@@ -515,11 +515,15 @@ async fn test_spam_lists_read_at_most_every_ten_minutes() {
     w.clock.advance_ms(LISTS_REFRESH_MS - 1);
     wallet.receive(None).await.unwrap();
     assert_eq!(transport.reads.load(Ordering::SeqCst), 0);
-    // Then the next receive reads them, once.
+    // The next receive refreshes them. The client also reads the lists for the gap
+    // that replacing its copy owes to every protocol (Switch spec 8.3).
     w.clock.advance_ms(1);
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
-    assert_eq!(transport.reads.load(Ordering::SeqCst), 1);
+    assert_eq!(transport.reads.load(Ordering::SeqCst), 2);
+    w.clock.advance_ms(LISTS_REFRESH_MS - 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(transport.reads.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
