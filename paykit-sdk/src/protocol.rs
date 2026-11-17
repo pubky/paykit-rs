@@ -27,7 +27,8 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use paykit_lib::bodies::check_body;
 use paykit_lib::collections::Collection;
-use paykit_lib::kinds::{targets_app, Kind, Role as KindRole, Side, OPAQUE_MEMBERS};
+pub(crate) use paykit_lib::kinds::holds_role;
+use paykit_lib::kinds::{targets_app, Kind, Side, OPAQUE_MEMBERS};
 use paykit_lib::records::{
     ActivitySide, AllowanceRecord, BlockFloorRecord, PaymentListRecord, StoredMessage,
 };
@@ -247,19 +248,6 @@ pub(crate) fn stored_copy(message: &ReceivedMessage) -> Result<StoredMessage, St
         Some(message.accepted_at_ms),
     )
     .map_err(|error| error.to_string())
-}
-
-/// Whether a certificate's scopes hold one of `roles` (Paykit spec 3.3).
-pub(crate) fn holds_role(scopes: &[String], roles: &[KindRole]) -> bool {
-    roles.iter().any(|role| match role {
-        KindRole::Pay => scopes.iter().any(|s| s == "paykit_pay"),
-        KindRole::Request => acts_as_payee(scopes),
-        KindRole::Allowance => scopes.iter().any(|s| s == "paykit_allowance"),
-        KindRole::AllowanceExecute => scopes.iter().any(|s| s == "paykit_allowance_execute"),
-        // Any Paykit App: another protocol's scopes alone take no Paykit kind (Switch wire
-        // 3.1 "Several protocols").
-        KindRole::Any => paykit_lib::scopes::holds_paykit_scope(scopes),
-    })
 }
 
 /// The label in a message body, if it is a valid one.

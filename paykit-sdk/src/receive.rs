@@ -207,6 +207,12 @@ pub(crate) fn effect(
             // key, so the stop never waits for the value's key or a listing, and no give-up
             // of the entry can lose it.
             if pay && held_request(cx, &payer_target)? {
+                // Paykit spec 3.4: a record that reads judges the sender at once; one that
+                // doesn't keeps the stop until it reads, a denial, never a payment
+                // ([`crate::Paykit::place_kept_cancellations`] judges it then).
+                if payee_sender_refused(cx, &payer_target, stored, settlement)? {
+                    return Err(Fail::Drop(PAYEE_SENDER.into()));
+                }
                 return keep_cancellation(cx, &payer_target, stored, seq, true);
             }
             // A payer's cancellation of a request this app holds goes into its record. One naming a
@@ -630,6 +636,26 @@ fn bound_activity(
         |t| cx.record_key(t).ok(),
         settlement,
     ))
+}
+
+/// Why a payee's message is dropped at the payer when the request's label doesn't let its
+/// sender send it (Paykit spec 3.4).
+const PAYEE_SENDER: &str =
+    "Paykit spec 3.4: the sender's certificate holds neither paykit_request nor the request's label";
+
+/// Whether `stored`, a payee's message naming the request whose payer record is at `target`,
+/// is from an app that request's label doesn't let send it (Paykit spec 3.4): `false` while
+/// the record doesn't read, which decides nothing.
+fn payee_sender_refused(
+    cx: &ReceiveContext<'_>,
+    target: &ActivityTarget,
+    stored: &StoredMessage,
+    settlement: Settlement<'_>,
+) -> Result<bool, Fail> {
+    Ok(held_bound(cx, target, settlement)?.is_some_and(|record| {
+        crate::requests::request_of(&record)
+            .is_some_and(|(_, request)| stored.check_payee_sender(request).is_err())
+    }))
 }
 
 /// Whether the app's copy holds the record at `target` ([`holds_record`]).
@@ -1222,9 +1248,17 @@ fn period_details_effect(
         ));
     };
     // A kept stop is read back as a restore reads it, bound to its key: one that doesn't
-    // verify is corrupt state, never taken as a stop that drops the details.
+    // verify is corrupt state, never taken as a stop that drops the details. One from a
+    // sender the request's label doesn't let cancel it stops nothing (Paykit spec 3.4).
     let kept_stop = key::kept_cancellation(&cx.record_key(&request_target.record_target())?);
-    let stopped = state::cx_get::<KeptMessage>(cx, &kept_stop)?.is_some();
+    let stopped = match state::cx_get::<KeptMessage>(cx, &kept_stop)? {
+        None => false,
+        Some(kept) => match (kept.stored(&own), crate::requests::request_of(&record)) {
+            (Err(_), _) => return Err(Fail::corrupt()),
+            (Ok(stop), Some((_, request))) => stop.check_payee_sender(request).is_ok(),
+            (Ok(_), None) => true,
+        },
+    };
     // The period record's paid state decides too; one absent shows nothing paid. One whose
     // value waits for its key holds the entry; one held that doesn't open, read or bind
     // decides nothing and is never written over here: the details are kept until placed.
@@ -1730,6 +1764,13 @@ pub(crate) fn receipt_on_record(
     stored: &StoredMessage,
 ) -> Option<ReceiptOnRecord> {
     if record.counterparty != stored.sender() {
+        return None;
+    }
+    // Paykit spec 3.4: a receipt about a request from an app its label doesn't let send it
+    // does nothing, stored nowhere and settling nothing.
+    if crate::requests::request_of(record)
+        .is_some_and(|(_, request)| stored.check_payee_sender(request).is_err())
+    {
         return None;
     }
     let names_held_proof = record
@@ -3220,7 +3261,10 @@ pub(crate) fn awaits_named_details(
 /// The record `kept`, a message naming `request`, goes into now that `record`, the request
 /// record at `target`, is held: the period record of the Billing Period it names, checked
 /// against the request (Paykit wire 4.4, 4.9), or else the request record itself. `None`
-/// for a message that fails that check, or a request record that holds another request.
+/// for a message that fails that check, a payee's message at the payer from an app the
+/// request's label doesn't let send it (Paykit spec 3.4), or a request record that holds
+/// another request. The one rule of the receive step and of every later write that places
+/// such a message.
 pub(crate) fn period_or_request(
     own: &[u8; 32],
     target: &ActivityTarget,
@@ -3230,6 +3274,9 @@ pub(crate) fn period_or_request(
 ) -> Option<ActivityTarget> {
     let (held, body) = crate::requests::request_of(record)?;
     if held.hash() != *request {
+        return None;
+    }
+    if target.side == crate::activity::SideTag::Payer && kept.check_payee_sender(body).is_err() {
         return None;
     }
     let period = match kept.body() {

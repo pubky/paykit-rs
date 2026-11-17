@@ -1376,9 +1376,17 @@ impl Paykit {
     /// kept copy, in one batch. Returns whether there was one.
     async fn place_kept_cancellation(&mut self, target: &ActivityTarget) -> Result<bool> {
         let kept_key = key::kept_cancellation(&self.activity_key(target)?);
-        let Some(cancellation) = self.kept_stop_message(target).await? else {
+        let Some(cancellation) = self.kept_stop_copy(target).await? else {
             return Ok(false);
         };
+        // Paykit spec 3.4: a stop from a sender the request's label doesn't let cancel it is
+        // dropped once the request reads, never placed, and stops nothing from then on.
+        if self.stop_refused(target, &cancellation).await? {
+            let mut tx = Tx::default();
+            tx.delete(&kept_key);
+            self.local_commit(tx).await?;
+            return Ok(false);
+        }
         let write = self
             .placed_write(
                 target,
@@ -1414,13 +1422,32 @@ impl Paykit {
 
     /// The payee's cancellation kept as the stop for the request record at `target`, read
     /// bound to its key, as a restore reads it (`state::Stored`): one that fails it is a
-    /// corrupt store, never no stop.
+    /// corrupt store, never no stop. A copy from a sender the request's label doesn't let
+    /// cancel it is no stop once the request reads ([`Paykit::stop_refused`]).
     async fn kept_stop_message(&self, target: &ActivityTarget) -> Result<Option<StoredMessage>> {
+        match self.kept_stop_copy(target).await? {
+            Some(stop) if self.stop_refused(target, &stop).await? => Ok(None),
+            kept => Ok(kept),
+        }
+    }
+
+    /// The kept copy of [`Paykit::kept_stop_message`], whatever its sender.
+    async fn kept_stop_copy(&self, target: &ActivityTarget) -> Result<Option<StoredMessage>> {
         let kept_key = key::kept_cancellation(&self.activity_key(target)?);
         self.local_get::<KeptMessage>(&kept_key)
             .await?
             .map(|kept| kept.stored(&self.identity()))
             .transpose()
+    }
+
+    /// Whether `stop`, a payee's cancellation kept for the request record at `target`, is
+    /// from an app the request's label doesn't let cancel it (Paykit spec 3.4): `false` while
+    /// the record doesn't read, so the stop stands until it does, a denial, never a payment.
+    async fn stop_refused(&self, target: &ActivityTarget, stop: &StoredMessage) -> Result<bool> {
+        Ok(self.held_activity(target).await?.is_some_and(|record| {
+            request_of(&record)
+                .is_some_and(|(_, request)| stop.check_payee_sender(request).is_err())
+        }))
     }
 
     /// Place every kept cancellation whose request record this app holds, each as a later
@@ -1618,8 +1645,16 @@ impl Paykit {
                 RequestStatus::Open | RequestStatus::Subscribed | RequestStatus::Ended
             )
         };
+        // One from a sender the request's label doesn't let cancel it is no stop (Paykit spec
+        // 3.4).
         let stop = key::kept_cancellation(&record_key);
-        let stopped = self.local_get::<KeptMessage>(&stop).await?.is_some();
+        let stopped = match self.local_get::<KeptMessage>(&stop).await? {
+            Some(kept) => kept
+                .stored(&self.identity())?
+                .check_payee_sender(request)
+                .is_ok(),
+            None => false,
+        };
         if live(&status) && stopped {
             status = RequestStatus::Cancelled;
         }

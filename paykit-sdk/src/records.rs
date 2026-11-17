@@ -21,7 +21,7 @@
 
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
-use paykit_lib::kinds::Kind;
+use paykit_lib::kinds::{check_sender_for_request, Kind, Side};
 use paykit_lib::records::{ActivityRecord, ActivitySide, PaymentListRecord, StoredMessage};
 use paykit_lib::Label;
 use pubky_switch_client::app::{LocalWrite, OpBatch, OutgoingMessage, RecordTarget, SignedMessage};
@@ -33,8 +33,8 @@ use pubky_switch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::activity::{self, ActivityTarget, Role};
-use crate::error::{PaykitError, Result};
+use crate::activity::{self, ActivityTarget, Role, SideTag};
+use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
 use crate::receive::Settlement;
 
@@ -318,6 +318,7 @@ impl Paykit {
     ) -> Result<String> {
         let msg_id = signed.msg_id().to_owned();
         let stored = self.own_copy(&signed)?;
+        refuse_unless_may_send(self.app.cert().scopes(), &stored, target)?;
         let write = self
             .placed_write(target, signed.to(), role, stored, conditions)
             .await?;
@@ -418,6 +419,36 @@ pub(crate) fn bind_activity(
         &natural,
     );
     (record_key(&target)? == *key).then_some(record)
+}
+
+/// The sending side of Paykit spec 3.4: an app holding `scopes` sends `stored`, its own
+/// message going into the record at `target`, only if it may send it about that record's
+/// request ([`paykit_lib::kinds::may_send`]). A payee record sits under its request's label's
+/// policy, or the fixed one for an unlabelled request or none, so the record's label is the
+/// request's. So an app holding only labelled selling scopes signs and queues no period
+/// details, receipt or cancellation about another label's request or an unlabelled one.
+///
+/// # Errors
+///
+/// [`Refusal::Label`], with nothing written or queued.
+pub(crate) fn refuse_unless_may_send(
+    scopes: &[String],
+    stored: &StoredMessage,
+    target: &ActivityTarget,
+) -> Result<()> {
+    let side = match target.side {
+        SideTag::Payer => Side::Payer,
+        SideTag::Payee => Side::Payee,
+    };
+    check_sender_for_request(stored.message(), side, scopes, target.label().as_ref()).map_err(
+        |_| {
+            Refusal::Label(
+                "the certificate holds neither paykit_request nor the label of the request this message is about"
+                    .into(),
+            )
+            .into()
+        },
+    )
 }
 
 /// Bind a `payment_lists` value held at `key` (Paykit wire 5.4): `key` is the one derived
@@ -613,5 +644,74 @@ mod own_message_tests {
         assert!(outcome.contains("batch = batch.queue(proof);"));
         assert!(outcome.contains("self.app.queue_signed(proof)"));
         assert!(body(pay, "place_acceptance").contains("if !entry.acceptance_released {"));
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::testkit::{object, Party};
+
+    /// Bob's payee app `app`, holding `selling` and the scopes it requires.
+    fn payee(app: &str, selling: &str) -> Party {
+        Party::new(
+            "bob",
+            app,
+            &[selling, "paykit_settlements", "paykit_contacts"],
+        )
+    }
+
+    #[test]
+    fn test_records_send_refused_about_a_request_outside_the_labels() {
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let shop1 = Label::parse("shop1").unwrap();
+        let in_shop1 = ActivityTarget::payee(vec![1], Some(&shop1));
+        let unlabelled = ActivityTarget::payee(vec![1], None);
+        for (kind, refs, body) in [
+            (
+                "paykit.payment_period_details",
+                vec![[7; 32]],
+                json!({
+                    "billing_period": {
+                        "starts_at": "2026-02-28T00:00:00.000Z",
+                        "ends_at": "2026-03-31T00:00:00.000Z"
+                    },
+                    "expires_at": "2026-03-01T00:00:00.000Z",
+                    "payment_endpoints": { "btc-lightning-bolt11": "lnbc1period" }
+                }),
+            ),
+            (
+                "paykit.payment_receipt",
+                vec![[3; 32], [7; 32]],
+                json!({ "attempt_id": "DgCVYQKL1eyDacZvG6YhZg" }),
+            ),
+            (
+                "paykit.payment_request_cancellation",
+                vec![[7; 32]],
+                json!({ "reason": null }),
+            ),
+        ] {
+            for (app, selling, target, sends) in [
+                ("shop2", "paykit_request:shop2", &in_shop1, false),
+                ("shop2", "paykit_request:shop2", &unlabelled, false),
+                ("shop1", "paykit_request:shop1", &unlabelled, false),
+                ("shop1", "paykit_request:shop1", &in_shop1, true),
+                ("shop", "paykit_request", &in_shop1, true),
+                ("shop", "paykit_request", &unlabelled, true),
+            ] {
+                let sender = payee(app, selling);
+                let stored = sender.message(&alice, kind, refs.clone(), object(body.clone()));
+                let result = refuse_unless_may_send(sender.cert.scopes(), &stored, target);
+                assert_eq!(result.is_ok(), sends, "{kind} from {selling}");
+                if let Err(error) = result {
+                    assert!(
+                        matches!(error.refusal(), Some(Refusal::Label(_))),
+                        "{error:?}"
+                    );
+                }
+            }
+        }
     }
 }

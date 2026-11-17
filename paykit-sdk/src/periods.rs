@@ -86,7 +86,8 @@ pub struct PeriodView {
 /// The period details `record` holds that are valid against `request`, the request of its
 /// Billing Period (Paykit wire 4.9, 5.3). A reader of a period record ignores the others, for
 /// any reason of wire 4.9, such as rates under a request without `per_period` conversion
-/// terms: nothing shows them or pays by them.
+/// terms, or a sender the request's label doesn't let send them (Paykit spec 3.4): nothing
+/// shows them or pays by them.
 pub(crate) fn valid_details<'a>(
     record: &'a ActivityRecord,
     request: &PaymentRequest,
@@ -95,7 +96,9 @@ pub(crate) fn valid_details<'a>(
         .details()
         .into_iter()
         .filter(|stored| match stored.body() {
-            Body::PaymentPeriodDetails(details) => details.check_against(request).is_ok(),
+            Body::PaymentPeriodDetails(details) => {
+                details.check_against(request).is_ok() && stored.check_payee_sender(request).is_ok()
+            }
             _ => false,
         })
         .collect()
@@ -147,14 +150,20 @@ fn period_view(
             })
         })
         .collect();
+    // A receipt from an app the request's label doesn't let send it credits nothing (Paykit
+    // spec 3.4).
+    let credited = record
+        .receipt
+        .as_ref()
+        .is_some_and(|receipt| receipt.check_payee_sender(request).is_ok());
     Some(PeriodView {
         record: key,
         billing_period,
         details,
         paid: record.shows_paid(),
-        credited: record.receipt.is_some(),
+        credited,
         // The request's reference stays on the request's view.
-        receipt: received_receipt(key, record, None),
+        receipt: received_receipt(key, record, None).filter(|_| credited),
     })
 }
 
@@ -624,6 +633,8 @@ impl Paykit {
 mod tests {
     use serde_json::json;
 
+    use paykit_lib::Label;
+
     use super::*;
     use crate::activity::{empty, place};
     use crate::testkit::{object, Party};
@@ -748,6 +759,159 @@ mod tests {
         let views = period_views(vec![([1; 32], record)], &monthly(None));
         assert_eq!(views[0].details.len(), 1);
         assert_eq!(views[0].details[0].msg_id, endpoints_only.message().msg_id);
+    }
+
+    /// The payee app of `label`, of bob's identity, holding only that labelled selling scope.
+    fn labelled(label: &str) -> Party {
+        Party::new(
+            "bob",
+            label,
+            &[
+                &format!("paykit_request:{label}"),
+                "paykit_settlements",
+                "paykit_contacts",
+            ],
+        )
+    }
+
+    #[test]
+    fn test_periods_details_from_another_label_left_out_of_the_valid_details() {
+        let (alice, bob) = parties();
+        let shop1 = labelled("shop1");
+        let mut labelled_request = monthly(None);
+        labelled_request.label = Some(Label::parse("shop1").unwrap());
+        for (sender, label, valid) in [
+            (&shop1, Some(&labelled_request), true),
+            (&labelled("shop2"), Some(&labelled_request), false),
+            (&bob, Some(&labelled_request), true),
+            (&shop1, None, false),
+        ] {
+            let request = label.cloned().unwrap_or_else(|| monthly(None));
+            let mut record = empty(ActivitySide::Payer, bob.id());
+            let held = details(sender, &alice, [7; 32], "2026-03-01T00:00:00.000Z");
+            assert!(place(&mut record, Role::PeriodDetails, held));
+            // The record holds no request, so it binds whatever the sender; its reader
+            // judges the details against the request record's request.
+            record.to_json().unwrap();
+            assert_eq!(valid_details(&record, &request).len(), usize::from(valid));
+            let view = period_view([1; 32], &record, &request).unwrap();
+            assert_eq!(view.details.len(), usize::from(valid));
+        }
+    }
+
+    #[test]
+    fn test_periods_receipt_from_another_label_credits_no_period() {
+        let (alice, _) = parties();
+        let mut request = monthly(None);
+        request.label = Some(Label::parse("shop1").unwrap());
+        for (sender, credited) in [(labelled("shop1"), true), (labelled("shop2"), false)] {
+            let receipt = sender.message(
+                &alice,
+                "paykit.payment_receipt",
+                vec![[3; 32], [7; 32]],
+                object(json!({
+                    "attempt_id": "DgCVYQKL1eyDacZvG6YhZg",
+                    "billing_period": {
+                        "starts_at": "2026-02-28T00:00:00.000Z",
+                        "ends_at": "2026-03-31T00:00:00.000Z"
+                    }
+                })),
+            );
+            let mut record = empty(ActivitySide::Payer, sender.id());
+            assert!(place(&mut record, Role::Receipt, receipt));
+            let view = period_view([1; 32], &record, &request).unwrap();
+            assert_eq!(view.credited, credited);
+            assert_eq!(view.receipt.is_some(), credited);
+            assert_eq!(
+                received_receipt([1; 32], &record, Some(&request)).is_some(),
+                credited
+            );
+        }
+    }
+
+    #[test]
+    fn test_periods_receive_places_nothing_from_another_label() {
+        // The one rule of the receive step and the later writes: another label's period
+        // details go into no record, and its receipt finds nothing in the request record.
+        let (alice, _) = parties();
+        let shop1 = labelled("shop1");
+        let mut body = json!({
+            "amount": { "asset": "usd", "value": "10" },
+            "payment_reference": "plan-1",
+            "proposal_expires_at": null,
+            "payment_deadline": { "type": "period_start", "seconds": 86400 },
+            "recurrence": {
+                "anchor": "2026-01-31T00:00:00.000Z", "ends_at": null, "every": 1,
+                "starts_at": "2026-01-31T00:00:00.000Z", "unit": "month"
+            }
+        });
+        body["label"] = json!("shop1");
+        let request = shop1.message(&alice, "paykit.payment_request", Vec::new(), object(body));
+        let mut record = empty(ActivitySide::Payer, shop1.id());
+        assert!(place(&mut record, Role::Request, request.clone()));
+        let target = ActivityTarget::payer(vec![1]);
+        for (sender, taken) in [(shop1, true), (labelled("shop2"), false)] {
+            let held = details(&sender, &alice, request.hash(), "2026-03-01T00:00:00.000Z");
+            let into = crate::receive::period_or_request(
+                &alice.id(),
+                &target,
+                &record,
+                &held,
+                &request.hash(),
+            );
+            assert_eq!(into.is_some(), taken);
+            let receipt = sender.message(
+                &alice,
+                "paykit.payment_receipt",
+                vec![[3; 32], request.hash()],
+                object(json!({
+                    "attempt_id": "DgCVYQKL1eyDacZvG6YhZg",
+                    "billing_period": {
+                        "starts_at": "2026-02-28T00:00:00.000Z",
+                        "ends_at": "2026-03-31T00:00:00.000Z"
+                    }
+                })),
+            );
+            assert_eq!(
+                crate::receive::receipt_on_record(&record, &receipt).is_some(),
+                taken
+            );
+        }
+    }
+
+    #[test]
+    fn test_periods_request_record_refuses_another_labels_receipt_and_cancellation() {
+        let (alice, _) = parties();
+        let shop1 = labelled("shop1");
+        let body = json!({
+            "amount": { "asset": "usd", "value": "10" },
+            "payment_reference": "order-1",
+            "proposal_expires_at": null,
+            "label": "shop1"
+        });
+        let request = shop1.message(&alice, "paykit.payment_request", Vec::new(), object(body));
+        for (sender, passes) in [(&shop1, true), (&labelled("shop2"), false)] {
+            for (kind, refs, body, role) in [
+                (
+                    "paykit.payment_receipt",
+                    vec![[3; 32], request.hash()],
+                    json!({ "attempt_id": "DgCVYQKL1eyDacZvG6YhZg" }),
+                    Role::Receipt,
+                ),
+                (
+                    "paykit.payment_request_cancellation",
+                    vec![request.hash()],
+                    json!({ "reason": null }),
+                    Role::Cancellation,
+                ),
+            ] {
+                let mut record = empty(ActivitySide::Payer, shop1.id());
+                assert!(place(&mut record, Role::Request, request.clone()));
+                let message = sender.message(&alice, kind, refs, object(body));
+                assert!(place(&mut record, role, message));
+                assert_eq!(record.to_json().is_ok(), passes, "{kind}");
+            }
+        }
     }
 
     #[test]

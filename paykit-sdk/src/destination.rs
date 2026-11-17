@@ -51,6 +51,7 @@ use std::task::{Context, Poll};
 
 use paykit_lib::app_record::PaykitMember;
 use paykit_lib::bodies::RequestDestination;
+use paykit_lib::kinds::{check_sender_scopes, may_publish_public_endpoints};
 use paykit_lib::records::{DestinationSource, StoredMessage};
 use paykit_lib::scopes::{acts_as_payee, check_certificate};
 use paykit_lib::Body;
@@ -581,8 +582,10 @@ fn record_carries(
 /// The app `app_id` that sent the carrier, or whose record it is, is current in the payee's
 /// `identity.json`, with a certificate that passes Paykit's verifiers' checks (Paykit wire
 /// 3.1: its scope rules, and permissions with none missing and, without another protocol's
-/// scope, no other), allows `paykit_request` and, when listed, hasn't expired; a record is also
-/// within the identity's record age limit (Paykit spec 4). The Switch takes a certificate
+/// scope, no other), lets the app send the carrier (Paykit spec 3.4: a request under its
+/// label; a Private Payment List or public endpoints only from `paykit_request`) and, when
+/// listed, hasn't expired; a record is also within the identity's record age limit (Paykit
+/// spec 4). The Switch takes a certificate
 /// Paykit's verifiers refuse, so a record's, which nothing else checks, is checked here.
 pub(crate) fn current(
     doc: &IdentityDoc,
@@ -592,7 +595,14 @@ pub(crate) fn current(
 ) -> std::result::Result<(), String> {
     let cert = carrier.cert();
     check_certificate(cert).map_err(|error| error.to_string())?;
-    if !acts_as_payee(cert.scopes()) {
+    let sends = match carrier {
+        Carrier::Message(message) => {
+            check_sender_scopes(message.message(), cert.scopes()).is_ok()
+                && acts_as_payee(cert.scopes())
+        }
+        Carrier::Record(_) => may_publish_public_endpoints(cert.scopes()),
+    };
+    if !sends {
         return Err("Paykit spec 4: the sending app's certificate doesn't allow request".into());
     }
     let standing = doc.standing(app_id, &cert.hash());
@@ -851,6 +861,30 @@ mod tests {
             current(&valid.doc(&[&valid]), &valid.app_id(), &carrier, NOW),
             Ok(())
         );
+    }
+
+    #[test]
+    fn test_destination_public_endpoints_only_from_paykit_request() {
+        // A labelled selling app publishes no public endpoints (Paykit spec 3.4, 4): its
+        // record carries none a payer takes, while its request under its label does.
+        let alice = Party::new("alice", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let shop = Party::new(
+            "bob",
+            "shop1",
+            &[
+                "paykit_request:shop1",
+                "paykit_settlements",
+                "paykit_contacts",
+            ],
+        );
+        let carrier = Carrier::Record(Box::new(shop.record(&["paykit.payment_request"])));
+        let doc = shop.doc(&[&shop]);
+        assert!(current(&doc, &shop.app_id(), &carrier, NOW).is_err());
+        let mut body = request_body();
+        body.insert("label".into(), serde_json::json!("shop1"));
+        let request = shop.message(&alice, "paykit.payment_request", vec![], body);
+        let carrier = Carrier::Message(Box::new(request));
+        assert_eq!(current(&doc, &shop.app_id(), &carrier, NOW), Ok(()));
     }
 
     #[test]

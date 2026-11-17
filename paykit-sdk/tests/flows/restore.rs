@@ -956,7 +956,10 @@ async fn reconcile_with_marks(
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    let other = w.labelled_shop("other", "other").await;
+    // A Private Payment List comes only from an app holding `paykit_request` (Paykit spec 3.4).
+    let other = w
+        .join(&w.bob, "other", AppScopes::new().request().build().unwrap())
+        .await;
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     let version = w.clock.now_ms();
     list_from(&w, "shop", wallet.app_id(), version);

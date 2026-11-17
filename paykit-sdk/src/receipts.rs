@@ -177,13 +177,17 @@ pub(crate) fn period_request_target(
 
 /// The receipt `record`, held at `key`, stores, as the payer sees it. `request` is the
 /// request it pays: the one `record` holds, or, for a period record, the one its request
-/// record holds ([`period_request_target`]).
+/// record holds ([`period_request_target`]). A receipt from an app the request's label
+/// doesn't let send it shows nothing (Paykit spec 3.4, Paykit wire 5.3).
 pub(crate) fn received_receipt(
     key: [u8; 32],
     record: &ActivityRecord,
     request: Option<&PaymentRequest>,
 ) -> Option<ReceivedReceipt> {
     let stored = record.receipt.as_ref()?;
+    if request.is_some_and(|request| stored.check_payee_sender(request).is_err()) {
+        return None;
+    }
     let Body::PaymentReceipt(PaymentReceipt {
         attempt_id,
         billing_period,
