@@ -892,7 +892,10 @@ impl Paykit {
         let paused_before = Box::pin(self.paused_records()).await?;
         // Whether the client may list at this read's start ([`Paykit::records_listed`]).
         let keys_held_before = self.holds_scope_keys();
-        let report = match Box::pin(self.app.receive(wait)).await {
+        let received = Box::pin(self.app.receive(wait)).await;
+        // A read can take another device's record or a renewal into the own record.
+        self.note_own_record_write(&received);
+        let report = match received {
             Ok(report) => report,
             // The erasure's wait: the switch answers as for an account it doesn't host, and
             // nothing authenticates that, so it counts as not answering until the wait ends.

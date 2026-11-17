@@ -369,14 +369,17 @@ impl SeenRecords {
 /// in nothing, one seen already is the same record, and one earlier than a record seen is
 /// earlier than the newest, which the view never goes back from (Switch wire 3.2).
 /// A record conflicting with the newest while the view is in conflict already adds nothing:
-/// one more body at that `updated_at` keeps the conflict as it is.
+/// one more body at that `updated_at` keeps the conflict as it is. It is compared only with
+/// the records seen that the view uses at `now`: one ahead of the clock, as after the payer's
+/// clock went back, is set aside by the view, so a record served earlier than it but later
+/// than the rest, such as a withdrawal, takes part and is used, not the record before it.
 fn takes_part(record: &AppRecord, held: &[AppRecord], view: &RecordView, now: u64) -> bool {
     let adds_nothing = |h: &AppRecord| match record.order(h) {
         RecordOrder::Same | RecordOrder::Earlier => true,
         RecordOrder::Conflict => view.in_conflict(),
         RecordOrder::Later => false,
     };
-    !record.is_ahead(now) && !held.iter().any(adds_nothing)
+    !record.is_ahead(now) && !held.iter().filter(|h| !h.is_ahead(now)).any(adds_nothing)
 }
 
 impl Paykit {

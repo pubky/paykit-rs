@@ -540,6 +540,75 @@ async fn test_own_record_edit_after_an_unknown_store_result_waits_for_a_load() {
     assert!(!published.public_endpoints.contains_key(&a));
 }
 
+#[tokio::test]
+async fn test_own_record_edit_after_an_unknown_read_result_waits_for_a_load() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let faulty = Arc::new(UnknownOnce {
+        inner: store(),
+        armed: std::sync::atomic::AtomicBool::new(false),
+    });
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+            publishing(),
+            Arc::clone(&faulty) as Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    shop.set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1tips"))
+        .await
+        .unwrap();
+    wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    // The read that takes the proof is applied, but the store can't tell: a read may take
+    // another device's record into the own record, so the record held may be stale.
+    faulty
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let error = shop.receive(None).await.unwrap_err();
+    assert!(
+        matches!(
+            error,
+            PaykitError::Client(pubky_switch_client::app::AppError::Store(
+                pubky_switch_client::error::StoreError::Unknown
+            ))
+        ),
+        "{error:?}"
+    );
+    let record = shop.app().record().clone();
+    let refused = shop
+        .set_public_endpoint(endpoint("btc-onchain-address"), payload("bc1q"))
+        .await
+        .unwrap_err();
+    let PaykitError::Refused(Refusal::NotNow(text)) = &refused else {
+        panic!("{refused:?}");
+    };
+    assert!(text.contains("load the app again"), "{text}");
+    assert_eq!(shop.app().record(), &record);
+}
+
+#[tokio::test]
+async fn test_own_record_upkeep_keeps_a_member_it_does_not_read() {
+    let w = World::new();
+    let mut shop = publishing_shop(&w).await;
+    // A Paykit member carrying a field this version doesn't read, and no capabilities.
+    let mut member = serde_json::Map::new();
+    member.insert("future_field".into(), serde_json::json!("kept"));
+    shop.app_mut()
+        .set_protocol_member_with_lifetime("paykit", Some(member), None)
+        .await
+        .unwrap();
+    let signed = shop.app().record().clone();
+    assert_eq!(on_homeserver(&w, &shop).unwrap().signed(), &signed);
+    // The upkeep finds nothing to change: the accepted record keeps its exact bytes.
+    shop.receive(None).await.unwrap();
+    shop.update_own_record().await.unwrap();
+    assert_eq!(shop.app().record(), &signed);
+    assert_eq!(on_homeserver(&w, &shop).unwrap().signed(), &signed);
+}
+
 /// Bob's publishing shop whose withdrawal of its last endpoint reached no switch, backed up
 /// then, and restored on a new store.
 async fn restored_after_an_undelivered_withdrawal(w: &World) -> Paykit {

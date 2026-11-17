@@ -210,7 +210,9 @@ impl Paykit {
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
         if !Box::pin(self.tend_own_record()).await? {
-            Box::pin(self.app.publish_record()).await?;
+            let published = Box::pin(self.app.publish_record()).await;
+            self.note_own_record_write(&published);
+            published?;
         }
         Ok(())
     }
@@ -241,8 +243,15 @@ impl Paykit {
             // The member unchanged still goes to the client: a restored record the switch
             // never accepted, such as a withdrawal whose `app.put` failed before the backup,
             // is signed anew, and not left for the accepted record before it to be
-            // published. An accepted or pending record keeps its bytes.
-            Box::pin(self.put_member(wanted)).await?;
+            // published. An accepted or pending record keeps its bytes. The member goes as
+            // the record holds it, not rebuilt from what Paykit reads of it, so a member
+            // carrying what this version doesn't read, or leaving out an optional part, is
+            // the same member to the client and is never signed again for that.
+            let record = AppRecord::verify(self.app.record(), &self.identity())
+                .map_err(|_| PaykitError::corrupt())?;
+            let value = record.body().protocols.get(PROTOCOL_NAME).cloned();
+            let lifetime = (!held.public_endpoints.is_empty()).then(|| self.record_lifetime());
+            Box::pin(self.put_member_value(value, lifetime)).await?;
             return Ok(false);
         }
         Ok(true)
@@ -287,6 +296,15 @@ impl Paykit {
     async fn put_member(&mut self, member: PaykitMember) -> Result<Publication> {
         let lifetime = (!member.public_endpoints.is_empty()).then(|| self.record_lifetime());
         let value = (member != PaykitMember::default()).then(|| member.to_member());
+        Box::pin(self.put_member_value(value, lifetime)).await
+    }
+
+    /// Put `value` as the record's Paykit member, `None` for none, asking for `lifetime`.
+    async fn put_member_value(
+        &mut self,
+        value: Option<serde_json::Map<String, serde_json::Value>>,
+        lifetime: Option<u64>,
+    ) -> Result<Publication> {
         let put = self
             .app
             .set_protocol_member_with_lifetime(PROTOCOL_NAME, value, lifetime)
@@ -295,10 +313,11 @@ impl Paykit {
         Ok(put?)
     }
 
-    /// After a write of the own record whose store result is unknown, the record this handle
-    /// holds may not be the one stored: note it, so no edit builds on it until the app is
-    /// loaded again.
-    fn note_own_record_write<T>(&mut self, result: &std::result::Result<T, AppError>) {
+    /// After a client call that can change the own record (a write of it, a delivery, or a
+    /// read that takes another device's record or a renewal) ends with the store unable to
+    /// tell whether it was applied, the record this handle holds may not be the one stored:
+    /// note it, so no edit builds on it until the app is loaded again.
+    pub(crate) fn note_own_record_write<T>(&mut self, result: &std::result::Result<T, AppError>) {
         if matches!(result, Err(AppError::Store(StoreError::Unknown))) {
             self.own_record_unknown = true;
         }

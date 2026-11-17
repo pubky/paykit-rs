@@ -490,40 +490,61 @@ async fn test_public_read_payment_tells_a_conflict_it_first_finds() {
 }
 
 #[tokio::test]
-async fn test_public_read_records_ahead_after_a_clock_rollback_not_a_conflict() {
+async fn test_public_read_withdrawal_served_after_a_clock_rollback_is_used() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
-    let apps = bob_apps(&w, &["shop"]).await;
+    let mut shop = w
+        .join(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let app = ("shop", shop.app_id());
     let t0 = w.clock.now_ms();
     let expiry = Some(t0 + 30 * DAY_MS);
-    let older = publish_app_at(
+    // The wallet keeps T0, offering A, then T2, an hour later, offering A and B.
+    let a_and_b = json!({ "public_endpoints": {
+        "btc-lightning-bolt12": "lno1a",
+        "btc-lightning-bolt11": "lnbc1b"
+    } });
+    publish_app_at(
         &w,
-        apps[0].0,
-        one_endpoint("btc-lightning-bolt11", "lnbc1"),
+        app.0,
+        one_endpoint("btc-lightning-bolt12", "lno1a"),
         t0,
         expiry,
     );
-    // The wallet sees only a record an hour later.
+    wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
     w.clock.set_ms(t0 + HOUR_MS);
-    publish_now(
+    publish_app_at(&w, app.0, a_and_b, t0 + HOUR_MS, expiry);
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(read.endpoints.len(), 2);
+    // The wallet's clock goes back below T2, which the view sets aside, and the Homeserver
+    // serves T1, which withdraws A: T1 is used, not T0, and A is never offered.
+    w.clock.set_ms(t0 + 20 * 60_000);
+    publish_app_at(
         &w,
-        apps[0].0,
-        one_endpoint("btc-lightning-bolt12", "lno1later"),
+        app.0,
+        one_endpoint("btc-lightning-bolt11", "lnbc1b"),
+        t0 + 10 * 60_000,
+        expiry,
     );
     let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
-    assert_eq!(read.endpoints.len(), 1);
-    // The wallet's clock goes back and the older record is served: the record seen is ahead
-    // of the clock, and that is the failure, not a conflict. Nothing is offered.
-    w.clock.set_ms(t0 + 10 * 60_000);
-    w.homeserver
-        .put(w.bob_id(), &app_record_path(&apps[0].1), older);
-    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
-    assert!(read.endpoints.is_empty(), "{read:?}");
-    assert_eq!(read.failures.len(), 1, "{read:?}");
-    assert!(
-        matches!(&read.failures[0].reason, PublicAppFailureReason::Expired(rule)
-            if rule.contains("newest record seen was made ahead")),
-        "{read:?}"
+    let ids: Vec<&str> = read
+        .endpoints
+        .iter()
+        .map(|e| e.endpoint_id.as_str())
+        .collect();
+    assert_eq!(ids, ["btc-lightning-bolt11"], "{read:?}");
+    assert!(read.failures.is_empty(), "{read:?}");
+    // A payment pays from the same record discovery shows.
+    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
+        "btc-lightning-bolt11"
     );
 }
 
