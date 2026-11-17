@@ -5460,7 +5460,7 @@ async fn test_periods_receipt_checks_both_period_bounds_and_waits_for_the_reques
                 .unwrap();
             wallet
                 .app_mut()
-                .submit_batch(OpBatch::new().entry(delete))
+                .submit_batch(OpBatch::for_protocol("paykit").entry(delete))
                 .await
                 .unwrap();
         }
@@ -5518,7 +5518,7 @@ async fn test_periods_receipt_checks_both_period_bounds_and_waits_for_the_reques
                 .unwrap();
             wallet
                 .app_mut()
-                .submit_batch(OpBatch::new().entry(restore))
+                .submit_batch(OpBatch::for_protocol("paykit").entry(restore))
                 .await
                 .unwrap();
             wallet.receive(None).await.unwrap();
@@ -5593,7 +5593,15 @@ async fn test_periods_deferred_receipt_waits_for_its_request() {
         receipt,
     );
     Box::pin(wallet.receive(None)).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"dw/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"dw/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     Box::pin(wallet.app_mut().delete_record(&request_target, Vec::new()))
         .await
         .unwrap();
@@ -5610,7 +5618,15 @@ async fn test_periods_deferred_receipt_waits_for_its_request() {
         claim.view.attempt(&attempt.to_bytes()).unwrap().outcome,
         pubky_switch_core::claims::Outcome::Open
     );
-    assert_eq!(wallet.app().protocol_scan(b"dw/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"dw/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     Box::pin(
         wallet
             .app_mut()
@@ -5627,7 +5643,12 @@ async fn test_periods_deferred_receipt_waits_for_its_request() {
         claim.view.attempt(&attempt.to_bytes()).unwrap().outcome,
         pubky_switch_core::claims::Outcome::Done
     );
-    assert!(wallet.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"dw/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -5702,7 +5723,12 @@ async fn test_periods_receipt_before_its_period_record_needs_admission_and_its_r
             "{case:?}"
         );
         assert_eq!(
-            wallet.app().protocol_scan(b"pr/").await.unwrap().len(),
+            wallet
+                .app()
+                .protocol_scan("paykit", b"pr/")
+                .await
+                .unwrap()
+                .len(),
             usize::from(admitted),
             "{case:?}: kept until its proof"
         );
@@ -5839,7 +5865,7 @@ async fn test_periods_kept_receipt_checks_its_period_again_when_written() {
         receipt(kept_attempt, Some(january())),
     );
     Box::pin(wallet.receive(None)).await.unwrap();
-    let kept = wallet.app().protocol_scan(b"pr/").await.unwrap();
+    let kept = wallet.app().protocol_scan("paykit", b"pr/").await.unwrap();
     assert_eq!(kept.len(), 1);
     let kept_key = String::from_utf8(kept[0].0.clone()).unwrap();
     // `pr/<sender>/<record key>/<msg_id>`: the store holds, beside it, one naming January
@@ -5870,7 +5896,7 @@ async fn test_periods_kept_receipt_checks_its_period_again_when_written() {
         let msg_id = message["msg_id"].as_str().unwrap().to_owned();
         let mut value: serde_json::Value = serde_json::from_slice(&kept[0].1).unwrap();
         value["d"]["plaintext"] = json!(pubky_switch_core::enc::b64(&plaintext.encode()));
-        let key = format!("p/pr/{sender}/{record}/{msg_id}");
+        let key = format!("p/paykit/pr/{sender}/{record}/{msg_id}");
         batch
             .put(&ns, key.into_bytes(), serde_json::to_vec(&value).unwrap())
             .unwrap();
@@ -5901,7 +5927,7 @@ async fn test_periods_kept_receipt_checks_its_period_again_when_written() {
         Outcome::Open
     );
     assert_eq!(Box::pin(outcome(unnamed, no_period)).await, Outcome::Open);
-    let kept = wallet.app().protocol_scan(b"pr/").await.unwrap();
+    let kept = wallet.app().protocol_scan("paykit", b"pr/").await.unwrap();
     for msg_id in &forged {
         assert!(
             !kept.iter().any(|(key, _)| key.ends_with(msg_id.as_bytes())),
