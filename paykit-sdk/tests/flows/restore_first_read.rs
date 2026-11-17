@@ -395,6 +395,60 @@ async fn test_restore_first_read_block_refusal_keeps_other_current_blocks() {
 }
 
 #[tokio::test]
+async fn test_restore_first_read_block_refusal_preserves_the_page_report() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let backup = wallet.backup().await.unwrap();
+    let sent = shop
+        .send_request(w.alice_id(), draft("1", w.clock.now_ms()))
+        .await
+        .unwrap();
+    assert!(matches!(sent.delivery, MessageDelivery::Accepted { .. }));
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    let error = restored.block(&w.carol_id()).await.unwrap_err();
+    assert!(matches!(
+        error,
+        paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Refused(_))
+    ));
+    assert!(restored.app().restore_held_cursor().is_some());
+    let summary = restored.receive(None).await.unwrap();
+    assert_eq!(
+        summary
+            .applied
+            .iter()
+            .filter(|id| *id == &sent.msg_id)
+            .count(),
+        1
+    );
+    assert_eq!(
+        summary
+            .report
+            .events
+            .iter()
+            .filter(|event| matches!(event,
+        pubky_switch_client::app::AppEvent::MessageReceived { msg_id, .. }
+        if msg_id == &sent.msg_id))
+            .count(),
+        1
+    );
+    let later = restored.receive(None).await.unwrap();
+    assert!(!later.applied.contains(&sent.msg_id));
+    assert!(!later.report.events.iter().any(|event| matches!(event,
+        pubky_switch_client::app::AppEvent::MessageReceived { msg_id, .. }
+        if msg_id == &sent.msg_id)));
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
 async fn test_restore_first_read_keeps_block_intent_when_identity_is_unavailable() {
     let w = World::new();
     let mut wallet = w
@@ -635,4 +689,208 @@ async fn test_restore_first_read_newer_directory_identity_confirmed_sends() {
         "delivery={delivery:?}; flush={result:?}; verdict={:?}",
         restored.app().restore_held_cursor()
     );
+}
+
+#[derive(Clone, Copy)]
+enum BlockFailure {
+    None,
+    Keep,
+    Commit,
+}
+
+struct BlockFailureStore {
+    inner: pubky_switch_client::store::MemoryStore,
+    target: Vec<u8>,
+    failure: BlockFailure,
+    finalization_fails: bool,
+    armed: std::sync::atomic::AtomicBool,
+    failures: std::sync::atomic::AtomicUsize,
+}
+
+impl pubky_switch_client::store::StateStore for BlockFailureStore {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        use std::sync::atomic::Ordering;
+        if self.finalization_fails
+            && prefix == b"duty/"
+            && self
+                .failures
+                .compare_exchange(1, 2, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        {
+            return Err(pubky_switch_client::error::StoreError::Corrupt);
+        }
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        use pubky_switch_client::store::Write;
+        use std::sync::atomic::Ordering;
+        let matches = batch
+            .writes
+            .iter()
+            .any(|write| match (self.failure, write) {
+                (BlockFailure::Commit, Write::Delete { key, .. }) => key == &self.target,
+                (BlockFailure::Keep, Write::Put { key, value, .. }) if key.starts_with(b"opq/") => {
+                    let value: serde_json::Value = serde_json::from_slice(value).unwrap();
+                    let bytes = pubky_switch_core::enc::unb64(value["d"]["body"].as_str().unwrap())
+                        .unwrap();
+                    pubky_switch_client::client::Batch::from_body(bytes)
+                        .unwrap()
+                        .ops()
+                        .iter()
+                        .any(|op| {
+                            matches!(
+                                op.body().kind,
+                                pubky_switch_core::ops::OpKind::DenyPut { .. }
+                            )
+                        })
+                }
+                _ => false,
+            });
+        if matches && self.armed.swap(false, Ordering::SeqCst) {
+            self.failures.fetch_add(1, Ordering::SeqCst);
+            return Err(pubky_switch_client::error::StoreError::Unavailable);
+        }
+        self.inner.commit(batch)
+    }
+}
+
+async fn block_after_first_page(failure: BlockFailure, manages: bool, finalization_fails: bool) {
+    use pubky_switch_client::error::StoreError;
+    use pubky_switch_client::store::StateStore;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let w = World::new();
+    let mut wallet = if manages {
+        w.join(
+            &w.alice,
+            "wallet",
+            paykit_sdk::AppScopes::new()
+                .pay()
+                .manage_contacts()
+                .build()
+                .unwrap(),
+        )
+        .await
+    } else {
+        w.wallet("wallet").await
+    };
+    if manages {
+        wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    }
+    let mut shop = w.shop().await;
+    let backup = wallet.backup().await.unwrap();
+    let sent = shop
+        .send_request(w.alice_id(), draft("1", w.clock.now_ms()))
+        .await
+        .unwrap();
+    assert!(matches!(sent.delivery, MessageDelivery::Accepted { .. }));
+    let target = format!("p/bk/{}", pubky_switch_core::enc::b64(&w.carol_id())).into_bytes();
+    let faults = Arc::new(BlockFailureStore {
+        inner: Default::default(),
+        target,
+        failure,
+        finalization_fails,
+        armed: AtomicBool::new(false),
+        failures: AtomicUsize::new(0),
+    });
+    let mut restored = Paykit::restore(
+        w.env(&w.alice, Arc::clone(&faults) as Arc<dyn StateStore>),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    faults.armed.store(true, Ordering::SeqCst);
+    let result = restored.block(&w.carol_id()).await;
+    match (failure, finalization_fails) {
+        (BlockFailure::None, false) => result.unwrap(),
+        (_, true) => assert!(
+            matches!(
+                result,
+                Err(paykit_sdk::PaykitError::Client(
+                    pubky_switch_client::app::AppError::Store(StoreError::Corrupt)
+                ))
+            ),
+            "{result:?}"
+        ),
+        _ => assert!(
+            matches!(
+                result,
+                Err(paykit_sdk::PaykitError::Client(
+                    pubky_switch_client::app::AppError::Store(StoreError::Unavailable)
+                ))
+            ),
+            "{result:?}"
+        ),
+    }
+    let expected = if matches!(failure, BlockFailure::None) {
+        0
+    } else {
+        1 + usize::from(finalization_fails)
+    };
+    assert_eq!(faults.failures.load(Ordering::SeqCst), expected);
+    assert!(restored.app().restore_held_cursor().is_some());
+    if !finalization_fails {
+        let summary = restored.receive(None).await.unwrap();
+        assert_eq!(
+            summary
+                .applied
+                .iter()
+                .filter(|id| *id == &sent.msg_id)
+                .count(),
+            1
+        );
+        assert_eq!(summary.report.events.iter().filter(|event| matches!(event,
+            pubky_switch_client::app::AppEvent::MessageReceived { msg_id, .. } if msg_id == &sent.msg_id)).count(), 1);
+        let later = restored.receive(None).await.unwrap();
+        assert!(!later.applied.contains(&sent.msg_id));
+        assert!(!later.report.events.iter().any(|event| matches!(event,
+            pubky_switch_client::app::AppEvent::MessageReceived { msg_id, .. } if msg_id == &sent.msg_id)));
+    }
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_restore_first_read_block_success_reports_the_page_once() {
+    Box::pin(block_after_first_page(BlockFailure::None, true, false)).await;
+}
+
+#[tokio::test]
+async fn test_restore_first_read_block_store_error_reports_the_page_once() {
+    Box::pin(block_after_first_page(BlockFailure::Keep, true, false)).await;
+}
+
+#[tokio::test]
+async fn test_restore_first_read_block_commit_error_reports_the_page_once() {
+    Box::pin(block_after_first_page(BlockFailure::Commit, true, false)).await;
+}
+
+#[tokio::test]
+async fn test_restore_first_read_block_rollback_error_reports_the_page_once() {
+    Box::pin(block_after_first_page(BlockFailure::Commit, false, false)).await;
+}
+
+#[tokio::test]
+async fn test_restore_first_read_finalization_error_precedes_block_error() {
+    Box::pin(block_after_first_page(BlockFailure::Commit, false, true)).await;
 }

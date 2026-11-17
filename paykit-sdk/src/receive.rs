@@ -2794,7 +2794,10 @@ impl Paykit {
     /// applied nor kept, such as without `paykit_manage_contacts` or the switch's refusal for
     /// good, the copy is then as it was; on any other, such as a store failure or an alarm,
     /// whose fate is unknown, the block stays counted and is written again at a later
-    /// receive.
+    /// receive. If this call makes a restore's first read, its deferred processing runs
+    /// even when the block fails. A failure of that processing takes precedence over the
+    /// block's error; otherwise the original error is returned and the completed read's
+    /// summary remains for the next [`Paykit::receive`].
     pub async fn block(&mut self, pubky: &[u8; 32]) -> crate::error::Result<()> {
         self.refresh_own()?;
         self.list_own(pubky, true).await
@@ -2875,82 +2878,88 @@ impl Paykit {
         // The user's block counts before receiving can recover any old replies. Only the
         // client's read runs here; the SDK's outgoing recovery follows the block below.
         let first_read = if self.first_read_pending() {
-            let read = Box::pin(self.read_before_effects(None)).await?;
-            self.refresh_own()?;
-            if self.first_read_pending() {
-                // Preserve the block intent and report while keys or the listing wait.
-                Box::pin(self.finish_first_read(read)).await?;
-                self.require_first_read()?;
-                return Ok(());
-            }
-            Some(read)
+            Some(Box::pin(self.read_before_effects(None)).await?)
         } else {
             None
         };
-        let mut tx = Tx::default();
-        match self.deny_at_switch(pubky).await {
-            Ok(()) => {
-                tx.delete(&mark);
+        // Keep every fallible step after the page inside this result. Finishing the read
+        // runs once even when the block or its rollback fails. A finalization error takes
+        // precedence: the host must know that the SDK's recovery work did not finish.
+        let blocked = async {
+            if first_read.is_some() {
+                self.refresh_own()?;
+                self.require_first_read()?;
             }
-            Err(error) if error.kept_batch().is_some() => {
-                let kept = OwnBlockMark {
-                    blocked: true,
-                    batch: error.kept_batch(),
-                };
-                tx.put(&mark, &kept)?;
-            }
-            // Put back only on an answer that shows the block was neither applied nor kept
-            // (the client's `App::submit_batch`): `Refused`, before anything was signed or
-            // kept (no `lists.manage`, the app stopped, the cap on kept batches); `Switch`, a
-            // refusal for good of this batch, after which nothing of it is kept, or an
-            // earlier kept batch that still can't be sent, before this one is signed;
-            // `Transport`, only that earlier batch's send, since a failed send of this one
-            // leaves it kept. Any other error is of unknown fate, such as a store failure or
-            // an alarm, which may follow an applied block: the block stays counted.
-            Err(error)
-                if !matches!(
-                    error,
-                    AppError::Refused(_) | AppError::Switch(_) | AppError::Transport(_)
-                ) =>
-            {
-                return Err(error.into());
-            }
-            Err(error) => {
-                if first_read.is_some() {
-                    // The read may have taken a newer deny list. Restore only this call's
-                    // unchanged provisional mark and its counterparty; never overwrite
-                    // unrelated new blocks or a mark the authenticated list settled.
-                    let current = self.local_get::<OwnBlockMark>(&mark).await?;
-                    if current
-                        .as_ref()
-                        .is_some_and(|m| m.blocked() && m.batch().is_none())
-                    {
+            let mut tx = Tx::default();
+            match self.deny_at_switch(pubky).await {
+                Ok(()) => {
+                    tx.delete(&mark);
+                }
+                Err(error) if error.kept_batch().is_some() => {
+                    let kept = OwnBlockMark {
+                        blocked: true,
+                        batch: error.kept_batch(),
+                    };
+                    tx.put(&mark, &kept)?;
+                }
+                // Put back only on an answer that shows the block was neither applied nor kept
+                // (the client's `App::submit_batch`): `Refused`, before anything was signed or
+                // kept (no `lists.manage`, the app stopped, the cap on kept batches); `Switch`, a
+                // refusal for good of this batch, after which nothing of it is kept, or an
+                // earlier kept batch that still can't be sent, before this one is signed;
+                // `Transport`, only that earlier batch's send, since a failed send of this one
+                // leaves it kept. Any other error is of unknown fate, such as a store failure or
+                // an alarm, which may follow an applied block: the block stays counted.
+                Err(error)
+                    if !matches!(
+                        error,
+                        AppError::Refused(_) | AppError::Switch(_) | AppError::Transport(_)
+                    ) =>
+                {
+                    return Err(error.into());
+                }
+                Err(error) => {
+                    if first_read.is_some() {
+                        // The read may have taken a newer deny list. Restore only this call's
+                        // unchanged provisional mark and its counterparty; never overwrite
+                        // unrelated new blocks or a mark the authenticated list settled.
+                        let current = self.local_get::<OwnBlockMark>(&mark).await?;
+                        if current
+                            .as_ref()
+                            .is_some_and(|m| m.blocked() && m.batch().is_none())
+                        {
+                            match held {
+                                Some(held) => tx.put(&mark, &held)?,
+                                None => tx.delete(&mark),
+                            };
+                            self.copy_denied(
+                                &mut tx,
+                                pubky,
+                                copy.is_some_and(|d| d.contains(pubky)),
+                            )
+                            .await?;
+                        }
+                    } else {
                         match held {
                             Some(held) => tx.put(&mark, &held)?,
                             None => tx.delete(&mark),
                         };
-                        self.copy_denied(&mut tx, pubky, copy.is_some_and(|d| d.contains(pubky)))
-                            .await?;
+                        match copy {
+                            Some(copy) => tx.put(key::DENIED, &copy)?,
+                            None => tx.delete(key::DENIED),
+                        };
                     }
-                } else {
-                    match held {
-                        Some(held) => tx.put(&mark, &held)?,
-                        None => tx.delete(&mark),
-                    };
-                    match copy {
-                        Some(copy) => tx.put(key::DENIED, &copy)?,
-                        None => tx.delete(key::DENIED),
-                    };
+                    self.local_commit(tx).await?;
+                    return Err(error.into());
                 }
-                self.local_commit(tx).await?;
-                return Err(error.into());
             }
+            self.local_commit(tx).await
         }
-        self.local_commit(tx).await?;
+        .await;
         if let Some(read) = first_read {
             Box::pin(self.finish_first_read(read)).await?;
         }
-        Ok(())
+        blocked
     }
 
     /// Write again, at a receive, each block this app counts (`bk/`) that may not reach the
