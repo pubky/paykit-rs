@@ -22,7 +22,10 @@
 //! spec 4.2, Switch wire 3.2 "Equal times"), through the core's `RecordView`: the newest
 //! seen; during a conflict, two bodies at one `updated_at`, the earlier one held, if any,
 //! until a strictly later record ends it. The records that took part are kept in the
-//! store, so the comparison survives a restart.
+//! store, so the comparison survives a restart. The record served now is judged on its own:
+//! one refused, made ahead of the payer's clock, or in conflict is the app's failure even
+//! when the earlier record held still supplies the app's endpoints, and the read reports
+//! both.
 //!
 //! A record that fails any of these is never paid. Each app's failure is that app's own
 //! (Paykit spec 4): a record the Homeserver can't serve now, one the reader refuses,
@@ -94,7 +97,10 @@ pub struct PublicPaymentList {
     /// `identity.json`, then by Payment Endpoint Identifier.
     pub endpoints: Vec<PublicEndpoint>,
     /// The apps whose public endpoints couldn't be used, in the same order. An app with no
-    /// record has no public endpoints and isn't one of them.
+    /// record has no public endpoints and isn't one of them. An app whose record served now
+    /// fails while an earlier record it held is used is one of them, and that earlier
+    /// record's endpoints are in [`Self::endpoints`]; when that earlier record fails too, its
+    /// failure follows.
     pub failures: Vec<PublicAppFailure>,
 }
 
@@ -445,23 +451,32 @@ impl Paykit {
                     self.local_put(&seen_key, &seen).await?;
                 }
             }
-            let Some(used) = view.used() else {
-                let reason = if served_refused {
-                    PublicAppFailureReason::Refused(
-                        "Switch wire 3.2, Paykit wire 3.2: the record served doesn't verify \
-                         as the app's, or its Paykit member doesn't read"
-                            .into(),
-                    )
-                } else if served_ahead {
-                    PublicAppFailureReason::Expired(
-                        "Paykit spec 4: the record was made ahead of the payer's clock".into(),
-                    )
-                } else {
-                    PublicAppFailureReason::Refused(
-                        "Switch spec 4.2: the app's records conflict at one updated_at".into(),
-                    )
-                };
+            // The record served now is judged on its own (Paykit spec 4): refused, made ahead
+            // of the payer's clock, or in conflict with one seen, it is this app's failure,
+            // whether or not an earlier record the comparison falls back on still supplies
+            // endpoints. That record is then judged as any record used, and its own failure,
+            // if any, is reported after it.
+            let served_failure = if served_refused {
+                Some(PublicAppFailureReason::Refused(
+                    "Switch wire 3.2, Paykit wire 3.2: the record served doesn't verify \
+                     as the app's, or its Paykit member doesn't read"
+                        .into(),
+                ))
+            } else if served_ahead {
+                Some(PublicAppFailureReason::Expired(
+                    "Paykit spec 4: the record was made ahead of the payer's clock".into(),
+                ))
+            } else if view.in_conflict() || view.used().is_none() {
+                Some(PublicAppFailureReason::Refused(
+                    "Switch spec 4.2: the app's records conflict at one updated_at".into(),
+                ))
+            } else {
+                None
+            };
+            if let Some(reason) = served_failure {
                 out.failures.push(fail(reason));
+            }
+            let Some(used) = view.used() else {
                 continue;
             };
             // A record without public endpoints offers none, and nothing of it fails.

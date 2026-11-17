@@ -300,6 +300,36 @@ async fn test_public_read_payload_bound_reports_an_app_that_does_not_fit() {
 }
 
 #[tokio::test]
+async fn test_public_read_refused_record_reported_beside_the_held_one_over_the_bound() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let apps = bob_apps(&w, &["shop", "till"]).await;
+    publish_now(&w, apps[0].0, many(1, 8));
+    publish_now(&w, apps[1].0, many(2, 8));
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[0].1, apps[1].1]);
+    // The shop's newer record leaves one endpoint of room, and the till's newer record is
+    // refused: the till's served record fails, and the record it holds is over the bound.
+    w.clock.advance_ms(1000);
+    publish_now(&w, apps[0].0, many(MAX_PUBLIC_ENDPOINTS - 1, 8));
+    publish_now(
+        &w,
+        apps[1].0,
+        json!({ "public_endpoints": { "btc-lightning-bolt12": 7 } }),
+    );
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[0].1]);
+    assert_eq!(read.failures.len(), 2, "{read:?}");
+    assert!(read.failures.iter().all(|f| f.app_id == apps[1].1));
+    assert!(
+        matches!(&read.failures[0].reason, PublicAppFailureReason::Refused(rule)
+            if rule.contains("Paykit wire 3.2")),
+        "{read:?}"
+    );
+    assert_eq!(read.failures[1].reason, PublicAppFailureReason::OverBound);
+}
+
+#[tokio::test]
 async fn test_public_read_required_app_failure_leaves_no_public_destination() {
     let w = World::new();
     let (mut wallet, reads) = wallet_reading_through(&w).await;

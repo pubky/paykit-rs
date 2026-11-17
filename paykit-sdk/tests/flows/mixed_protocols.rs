@@ -168,6 +168,79 @@ async fn test_mixed_protocols_own_restore() {
         .is_some());
 }
 
+/// Chat, also naming many kinds whose roots chat doesn't own. The client keeps none of them
+/// in the app's record (Switch wire 3.1, 5.1), so they make it no larger.
+struct ChatNamingForeignKinds;
+
+impl Protocol for ChatNamingForeignKinds {
+    fn resend_needed(&self, r: &ResendNeeded) -> Result<Vec<LocalWrite>, StoreFailure> {
+        Chat.resend_needed(r)
+    }
+    fn missed(&self, m: &MissedEntries) -> Result<Vec<LocalWrite>, StoreFailure> {
+        Chat.missed(m)
+    }
+    fn receive(&self, message: &ReceivedMessage, cx: &mut ReceiveContext<'_>) -> Outcome {
+        Chat.receive(message, cx)
+    }
+    fn name(&self) -> String {
+        Chat.name()
+    }
+    fn has_keys(&self, scope: &str) -> bool {
+        Chat.has_keys(scope)
+    }
+    fn sent_between_own_apps(&self, kind: &str) -> bool {
+        Chat.sent_between_own_apps(kind)
+    }
+    fn check_scopes(&self, m: &Message, sender: &AppCert, own: &AppCert) -> Result<(), String> {
+        Chat.check_scopes(m, sender, own)
+    }
+    fn accepts(&self, cert: &AppCert) -> Vec<String> {
+        // Far more than one signed operation carries, under roots of other protocols: a
+        // payment kind, another protocol's, and a root that only starts with `chat`.
+        let pad = "x".repeat(200);
+        let mut kinds = Chat.accepts(cert);
+        for i in 0..2000 {
+            kinds.push(format!("news.item{i}{pad}"));
+        }
+        kinds.push("paykit.chat_receipt".into());
+        kinds.push("chatroom.item".into());
+        kinds
+    }
+    fn check_body(&self, m: &ReceivedMessage) -> Result<(), String> {
+        Chat.check_body(m)
+    }
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_join_counts_only_owned_kinds() {
+    let w = world();
+    let app = Paykit::join_with_protocols(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        w.approve(&w.alice, "mixed", &scopes()),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        |p| ProtocolSet::new(vec![p, Arc::new(ChatNamingForeignKinds)]),
+    )
+    .await
+    .expect("the record the client signs fits");
+    let record = w
+        .alice
+        .switch()
+        .app(&app.app_id())
+        .record
+        .expect("the joined app's record");
+    let record = pubky_switch_core::records::AppRecord::verify(&record, &w.alice_id()).unwrap();
+    let accepts = &record.body().accepts;
+    assert!(accepts.iter().any(|k| k == "chat.item"), "{accepts:?}");
+    assert!(
+        accepts
+            .iter()
+            .all(|k| !k.starts_with("news.") && !k.starts_with("chatroom.")),
+        "{accepts:?}"
+    );
+}
+
 fn register(p: Arc<PaykitProtocol>) -> Result<ProtocolSet, AppError> {
     ProtocolSet::new(vec![p, Arc::new(Chat)])
 }

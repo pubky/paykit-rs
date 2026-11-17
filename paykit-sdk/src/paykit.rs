@@ -490,12 +490,19 @@ impl Paykit {
                 check_own_certificate(&approved.cert)?;
                 // The record the client's join signs, with the capabilities the update below
                 // adds: a list it can't carry refuses the join here, before anything is
-                // written. Its `accepts` is every registered protocol's kinds for the
-                // certificate, at least the client's, so the check is never the looser one.
+                // written. Its `accepts` is the client's: each registered protocol's kinds for
+                // the certificate, in registration order, each kept only when that protocol
+                // owns the kind's root, its prefix before the first `.` (Switch wire 3.1,
+                // 5.1), once. The client's set computes it privately, so its rule is applied
+                // here with the same public ownership check.
                 let mut accepts: Vec<String> = Vec::new();
-                for owner in protocols.names().iter().filter_map(|n| protocols.get(n)) {
+                for name in protocols.names() {
+                    let Some(owner) = protocols.get(&name) else {
+                        continue;
+                    };
                     for kind in owner.accepts(&approved.cert) {
-                        if !accepts.contains(&kind) {
+                        let root = kind.split_once('.').map_or(kind.as_str(), |(root, _)| root);
+                        if owns_root(&name, root) && !accepts.contains(&kind) {
                             accepts.push(kind);
                         }
                     }

@@ -76,6 +76,33 @@ async fn listed(wallet: &mut paykit_sdk::Paykit, w: &World) -> Vec<String> {
         .collect()
 }
 
+/// Bob's public Payment List as the wallet reads it now.
+async fn read(wallet: &mut paykit_sdk::Paykit, w: &World) -> PublicPaymentList {
+    wallet.public_endpoints(&w.bob_id(), None).await.unwrap()
+}
+
+/// The endpoint identifiers of `list`.
+fn ids(list: &PublicPaymentList) -> Vec<&str> {
+    list.endpoints
+        .iter()
+        .map(|e| e.endpoint_id.as_str())
+        .collect()
+}
+
+/// Whether `list` reports exactly `app`'s failures, in order, each `Refused` or `Expired`
+/// naming its rule as `rules` give.
+fn fails_with(list: &PublicPaymentList, app: [u8; 16], rules: &[&str]) -> bool {
+    list.failures.len() == rules.len()
+        && list.failures.iter().zip(rules).all(|(failure, rule)| {
+            failure.app_id == app
+                && match &failure.reason {
+                    PublicAppFailureReason::Refused(text)
+                    | PublicAppFailureReason::Expired(text) => text.contains(rule),
+                    _ => false,
+                }
+        })
+}
+
 fn tip_jar() -> Value {
     json!({
         "capabilities": { "endpoint_identifiers": ["btc-lightning-bolt12"] },
@@ -279,28 +306,36 @@ async fn test_public_conflicting_records_use_the_earlier_one_until_a_later_one()
     );
     assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
     // Another body at the same updated_at: a conflict. Neither is used; the wallet goes on
-    // with the earlier record it holds (Switch spec 4.2).
+    // with the earlier record it holds (Switch spec 4.2), and reports the conflict as the
+    // shop's failure beside it (Paykit spec 4).
     publish_at(
         &w,
         one_endpoint("btc-bitcoin-p2wpkh", "bc1qother"),
         t0 + 1000,
         expiry,
     );
-    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    let list = read(&mut wallet, &w).await;
+    assert_eq!(ids(&list), ["btc-lightning-bolt11"]);
+    assert!(
+        fails_with(&list, shop.app_id(), &["Switch spec 4.2"]),
+        "{list:?}"
+    );
     let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     assert_eq!(
         wallet.payments().await.unwrap()[0].endpoint_id,
         endpoint("btc-lightning-bolt11")
     );
-    // A strictly later record ends the conflict.
+    // A strictly later record ends the conflict, and with it the failure.
     publish_at(
         &w,
         one_endpoint("btc-lightning-bolt12", "lno1b"),
         t0 + 2000,
         expiry,
     );
-    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
+    let list = read(&mut wallet, &w).await;
+    assert_eq!(ids(&list), ["btc-lightning-bolt12"]);
+    assert!(list.failures.is_empty(), "{list:?}");
 }
 
 #[tokio::test]
@@ -488,7 +523,7 @@ async fn test_public_record_of_an_app_only_the_switch_lists_read() {
 async fn test_public_malformed_newer_record_never_displaces_a_valid_one() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
-    let _shop = w.shop().await;
+    let shop = w.shop().await;
     let t0 = w.clock.now_ms();
     let expiry = Some(t0 + 30 * DAY_MS);
     let valid = publish_at(
@@ -499,17 +534,120 @@ async fn test_public_malformed_newer_record_never_displaces_a_valid_one() {
     );
     assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
     // A newer record whose Paykit member doesn't read: refused as an invalid record, it
-    // takes no part in the comparison (Paykit wire 3.2).
+    // takes no part in the comparison (Paykit wire 3.2), and it is the shop's failure while
+    // the valid record held is still used (Paykit spec 4).
     publish_at(
         &w,
         json!({ "public_endpoints": { "btc-lightning-bolt12": 7 } }),
         t0 + 1000,
         expiry,
     );
-    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
-    // The valid record served again is still the one used.
+    let list = read(&mut wallet, &w).await;
+    assert_eq!(ids(&list), ["btc-lightning-bolt11"]);
+    assert!(
+        fails_with(&list, shop.app_id(), &["Paykit wire 3.2"]),
+        "{list:?}"
+    );
+    // The valid record served again is still the one used, and nothing fails.
     serve(&w, &valid);
+    let list = read(&mut wallet, &w).await;
+    assert_eq!(ids(&list), ["btc-lightning-bolt11"]);
+    assert!(list.failures.is_empty(), "{list:?}");
+}
+
+#[tokio::test]
+async fn test_public_record_ahead_of_the_clock_reported_beside_the_held_one() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1ok"),
+        t0,
+        expiry,
+    );
     assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    // A record made a day ahead of the wallet's clock takes no part, and is the shop's
+    // failure while the record held is still used (Paykit spec 4).
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1ahead"),
+        t0 + DAY_MS,
+        expiry,
+    );
+    let list = read(&mut wallet, &w).await;
+    assert_eq!(ids(&list), ["btc-lightning-bolt11"]);
+    assert!(
+        fails_with(&list, shop.app_id(), &["ahead of the payer's clock"]),
+        "{list:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_public_refused_record_reported_over_a_held_record_without_endpoints() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    publish_at(&w, json!({ "public_endpoints": {} }), t0, expiry);
+    assert_eq!(read(&mut wallet, &w).await, PublicPaymentList::default());
+    // The record held offers no endpoints, and nothing of it fails; the newer one served is
+    // refused, which is the shop's failure all the same (Paykit spec 4).
+    publish_at(
+        &w,
+        json!({ "public_endpoints": { "btc-lightning-bolt12": 7 } }),
+        t0 + 1000,
+        expiry,
+    );
+    let list = read(&mut wallet, &w).await;
+    assert!(list.endpoints.is_empty(), "{list:?}");
+    assert!(
+        fails_with(&list, shop.app_id(), &["Paykit wire 3.2"]),
+        "{list:?}"
+    );
+    // A payment finds no destination, and its refusal names that failure.
+    let refused = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .unwrap_err();
+    let Some(Refusal::NoDestination(text)) = refused.refusal() else {
+        panic!("{refused:?}");
+    };
+    assert!(text.contains("Paykit wire 3.2"), "{text}");
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_public_refused_record_reported_beside_the_held_one_expired() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1ok"),
+        t0,
+        Some(t0 + 2 * HOUR_MS),
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    // Past the held record's expires_at, a newer record served is refused: both are the
+    // shop's failures, the record served first.
+    w.clock.advance_ms(3 * HOUR_MS);
+    publish_at(
+        &w,
+        json!({ "public_endpoints": { "btc-lightning-bolt12": 7 } }),
+        t0 + 1000,
+        Some(t0 + 30 * DAY_MS),
+    );
+    let list = read(&mut wallet, &w).await;
+    assert!(list.endpoints.is_empty(), "{list:?}");
+    assert!(
+        fails_with(&list, shop.app_id(), &["Paykit wire 3.2", "expires_at"]),
+        "{list:?}"
+    );
 }
 
 #[tokio::test]
