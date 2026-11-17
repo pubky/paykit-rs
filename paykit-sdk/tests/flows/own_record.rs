@@ -329,20 +329,9 @@ async fn test_own_record_oversized_capabilities_refuse_the_update() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let before = wallet.app().record().clone();
-    let oversized = (0..10_000)
-        .map(|i| endpoint(&format!("btc-{i:057}")))
-        .collect();
-    w.rail.set_endpoint_identifiers(oversized);
+    w.rail.set_endpoint_identifiers(oversized_capabilities());
     let error = wallet.update_own_record().await.unwrap_err();
-    assert!(
-        matches!(
-            error,
-            PaykitError::Client(pubky_switch_client::app::AppError::Refused(
-                pubky_switch_client::app::Refusal::Usage(_)
-            ))
-        ),
-        "{error:?}"
-    );
+    assert!(is_usage(&error), "{error:?}");
     assert_eq!(wallet.app().record(), &before);
     let supported = endpoint("btc-onchain-address");
     w.rail.set_endpoint_identifiers(vec![supported.clone()]);
@@ -360,20 +349,9 @@ async fn test_own_record_oversized_capabilities_refuse_the_receive() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let before = wallet.app().record().clone();
-    let oversized = (0..10_000)
-        .map(|i| endpoint(&format!("btc-{i:057}")))
-        .collect();
-    w.rail.set_endpoint_identifiers(oversized);
+    w.rail.set_endpoint_identifiers(oversized_capabilities());
     let error = wallet.receive(None).await.unwrap_err();
-    assert!(
-        matches!(
-            error,
-            PaykitError::Client(pubky_switch_client::app::AppError::Refused(
-                pubky_switch_client::app::Refusal::Usage(_)
-            ))
-        ),
-        "{error:?}"
-    );
+    assert!(is_usage(&error), "{error:?}");
     assert_eq!(wallet.app().record(), &before);
     let supported = endpoint("btc-onchain-address");
     w.rail.set_endpoint_identifiers(vec![supported.clone()]);
@@ -384,6 +362,176 @@ async fn test_own_record_oversized_capabilities_refuse_the_receive() {
             .endpoint_identifiers,
         vec![supported]
     );
+}
+
+/// A list of Payment Endpoint Identifiers no app record can carry: its `app.put` is over
+/// the Switch's cap on a signed operation (Switch wire 6.1).
+fn oversized_capabilities() -> Vec<paykit_lib::PaymentEndpointIdentifier> {
+    (0..10_000)
+        .map(|i| endpoint(&format!("btc-{i:057}")))
+        .collect()
+}
+
+fn is_usage(error: &PaykitError) -> bool {
+    matches!(
+        error,
+        PaykitError::Client(pubky_switch_client::app::AppError::Refused(
+            pubky_switch_client::app::Refusal::Usage(_)
+        ))
+    )
+}
+
+#[tokio::test]
+async fn test_own_record_oversized_capabilities_refuse_the_join() {
+    use pubky_switch_client::store::{Fault, FaultStore, StateStore};
+
+    let w = World::new();
+    w.rail.set_endpoint_identifiers(oversized_capabilities());
+    let request = w.approve(&w.alice, "wallet", &AppScopes::new().pay().build().unwrap());
+    let app_id = request.keys.app_id_bytes();
+    let base = store();
+    let fault = Arc::new(FaultStore::new(Arc::clone(&base), Fault::None));
+    let tip = w.alice.switch().tip_seq();
+    let joined = Box::pin(Paykit::join(
+        w.env(&w.alice, Arc::clone(&fault) as Arc<dyn StateStore>),
+        publishing(),
+        request.clone(),
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await;
+    let error = joined.expect_err("a record over the cap was joined with");
+    assert!(is_usage(&error), "{error:?}");
+    // Refused before the client's join: no commit, nothing at the switch or the Homeserver.
+    assert_eq!(fault.commits(), 0);
+    assert_eq!(w.alice.switch().tip_seq(), tip);
+    assert!(w.alice.switch().app(&app_id).record.is_none());
+    assert!(w
+        .homeserver
+        .file(w.alice_id(), &app_record_path(&app_id))
+        .is_none());
+    let loaded = Box::pin(Paykit::load(
+        w.env(&w.alice, Arc::clone(&base)),
+        publishing(),
+        app_id,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await;
+    assert!(
+        matches!(
+            loaded,
+            Err(PaykitError::Client(
+                pubky_switch_client::app::AppError::Refused(
+                    pubky_switch_client::app::Refusal::NotJoined
+                )
+            ))
+        ),
+        "the join wrote the app's state"
+    );
+    // The same approval joins once the list fits, and its record lists it.
+    let supported = endpoint("btc-onchain-address");
+    w.rail.set_endpoint_identifiers(vec![supported.clone()]);
+    let wallet = Box::pin(Paykit::join(
+        w.env(&w.alice, base),
+        publishing(),
+        request,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        PaykitMember::read(&held(&wallet, w.alice_id()))
+            .unwrap()
+            .endpoint_identifiers,
+        vec![supported]
+    );
+}
+
+/// Alice's wallet, publishing its record, joined while the delivery of the record carrying
+/// its capabilities fails: the switch takes the join's registration, then is unreachable
+/// for the `app.put` that follows. Returns the wallet and the record it kept.
+async fn joined_with_failed_delivery(
+    w: &World,
+    supported: &paykit_lib::PaymentEndpointIdentifier,
+) -> (Paykit, pubky_switch_core::sig::SignedDoc) {
+    w.rail.set_endpoint_identifiers(vec![supported.clone()]);
+    let request = w.approve(&w.alice, "wallet", &AppScopes::new().pay().build().unwrap());
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 1,
+        });
+    let wallet = Box::pin(Paykit::join(
+        w.env(&w.alice, store()),
+        publishing(),
+        request,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .expect("the joined app is returned");
+    // The record with the capabilities is kept and owed: the switch and the Homeserver
+    // hold the join's record, without them.
+    let kept = wallet.app().record().clone();
+    assert_eq!(
+        PaykitMember::read(&held(&wallet, w.alice_id()))
+            .unwrap()
+            .endpoint_identifiers,
+        vec![supported.clone()]
+    );
+    let at_switch = w.alice.switch().app(&wallet.app_id()).record.unwrap();
+    assert_ne!(at_switch, kept);
+    assert_eq!(
+        PaykitMember::read(&AppRecord::verify(&at_switch, &w.alice_id()).unwrap()).unwrap(),
+        PaykitMember::default()
+    );
+    let published = w
+        .homeserver
+        .file(w.alice_id(), &app_record_path(&wallet.app_id()))
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<pubky_switch_core::sig::SignedDoc>(&published).unwrap(),
+        at_switch
+    );
+    (wallet, kept)
+}
+
+/// The record `wallet` kept is the one at alice's switch and on her Homeserver.
+fn delivered(w: &World, wallet: &Paykit, kept: &pubky_switch_core::sig::SignedDoc) {
+    assert_eq!(wallet.app().record(), kept);
+    assert_eq!(
+        w.alice.switch().app(&wallet.app_id()).record.as_ref(),
+        Some(kept)
+    );
+    let bytes = w
+        .homeserver
+        .file(w.alice_id(), &app_record_path(&wallet.app_id()))
+        .unwrap();
+    assert_eq!(
+        &serde_json::from_slice::<pubky_switch_core::sig::SignedDoc>(&bytes).unwrap(),
+        kept
+    );
+}
+
+#[tokio::test]
+async fn test_own_record_join_delivery_failure_completed_by_the_update() {
+    let w = World::new();
+    let supported = endpoint("btc-onchain-address");
+    let (mut wallet, kept) = joined_with_failed_delivery(&w, &supported).await;
+    Box::pin(wallet.update_own_record()).await.unwrap();
+    delivered(&w, &wallet, &kept);
+}
+
+#[tokio::test]
+async fn test_own_record_join_delivery_failure_completed_by_the_receive() {
+    let w = World::new();
+    let supported = endpoint("btc-onchain-address");
+    let (mut wallet, kept) = joined_with_failed_delivery(&w, &supported).await;
+    Box::pin(wallet.receive(None)).await.unwrap();
+    delivered(&w, &wallet, &kept);
 }
 
 #[tokio::test]

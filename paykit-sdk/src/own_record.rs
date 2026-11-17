@@ -44,7 +44,10 @@
 //! method pays ([`crate::Rail::endpoint_identifiers`]) at an app holding `paykit_pay`, and
 //! nothing at one without (Paykit wire 3.2). At the join and at every receive the record is
 //! brought to that list when it differs, and
-//! [`Paykit::update_own_record`] does so at once.
+//! [`Paykit::update_own_record`] does so at once. A list the record can't carry, one that
+//! would make its `app.put` larger than the Switch's cap on a signed operation (Switch wire
+//! 6.1), is refused the same way wherever it is read: at the join before anything is
+//! written, and at a receive, an update or a publication before anything is signed.
 //!
 //! Security: the record is public by design, readable by anyone on the Homeserver (Paykit
 //! spec 4, "What is public"); it goes to no counterparty, so no deny list gates it. Every
@@ -56,11 +59,17 @@ use std::collections::BTreeMap;
 
 use paykit_lib::app_record::{PaykitMember, PROTOCOL_NAME};
 use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
-use pubky_switch_client::app::Publication;
-use pubky_switch_core::records::AppRecord;
+use pubky_switch_client::app::{AppError, Publication};
+use pubky_switch_core::json::MAX_INT;
+use pubky_switch_core::ops::{sign_batch, OpKind};
+use pubky_switch_core::records::{AppRecord, AppRecordBody};
+use pubky_switch_core::sig::SignedDoc;
+use pubky_switch_core::signing::Signs;
+use pubky_switch_core::time::MAX_TIME_MS;
 
 use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
+use crate::rail::Rail;
 
 /// The lifetime of a record with public endpoints the SDK signs: 30 days, the recommended
 /// most, unless the identity's `record_max_age` is shorter (Paykit spec 4, Paykit wire 3.2).
@@ -165,7 +174,7 @@ impl Paykit {
             .into());
         }
         let member = PaykitMember {
-            endpoint_identifiers: self.capabilities(),
+            endpoint_identifiers: self.capabilities()?,
             public_endpoints: endpoints,
         };
         Box::pin(self.put_member(member)).await
@@ -173,34 +182,45 @@ impl Paykit {
 
     /// Bring the app's record up to date now (module docs), as each receive and the join do:
     /// for a host whose payment method changed what it pays, so the record lists it at once.
+    /// When the record held is already up to date, what is owed of it goes instead: its
+    /// delivery to the own switch, as after one that failed once the record was kept, and its
+    /// Homeserver write ([`pubky_switch_client::app::App::publish_record`]).
     ///
     /// # Errors
     ///
     /// [`Refusal::CertificateRefused`]; [`Refusal::IdentityUnavailable`] while a restore's
     /// first read cannot confirm the own identity; the client's refusal, store failure,
-    /// alarm, first-read or delivery error. A record refused before it is kept leaves the held record unchanged.
-    /// A delivery that fails stays owed by the client and goes again at the next read.
+    /// alarm, first-read or delivery error. A record refused before it is kept leaves the
+    /// held record unchanged, and so does a capabilities list the record can't carry
+    /// (module docs). A delivery that fails stays owed by the client and goes again at the
+    /// next read or update.
     pub async fn update_own_record(&mut self) -> Result<()> {
         Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
-        Box::pin(self.tend_own_record()).await
+        if !Box::pin(self.tend_own_record()).await? {
+            Box::pin(self.app.publish_record()).await?;
+        }
+        Ok(())
     }
 
     /// Bring the app's record up to date at a receive (module docs): its capabilities to
     /// what the payment method pays, and a record with public endpoints renewed once less
-    /// than half of its lifetime is left. A delivery that fails stays owed by the client,
-    /// which sends it again at a later read.
+    /// than half of its lifetime is left. Returns whether a record was put to the client,
+    /// changed or renewed. A delivery that fails stays owed by the client, which sends it
+    /// again at a later read; a failure before the client kept the record leaves the record
+    /// held unchanged, so the next call finds it differs and puts it again.
     ///
     /// # Errors
     ///
-    /// The client's refusal, store failure, alarm or delivery error.
-    pub(crate) async fn tend_own_record(&mut self) -> Result<()> {
+    /// The client's refusal, store failure, alarm or delivery error; the refusal of a
+    /// capabilities list the record can't carry ([`capabilities_for`]).
+    pub(crate) async fn tend_own_record(&mut self) -> Result<bool> {
         let held = self.own_member()?;
         // An app that no longer holds `paykit_request`, or no longer publishes its record,
         // signs its next record without public endpoints (Paykit wire 3.2).
         let publishes = self.holds("paykit_request") && self.config.app.publishes_record;
         let wanted = PaykitMember {
-            endpoint_identifiers: self.capabilities(),
+            endpoint_identifiers: self.capabilities()?,
             public_endpoints: if publishes {
                 held.public_endpoints.clone()
             } else {
@@ -208,16 +228,14 @@ impl Paykit {
             },
         };
         if wanted != held {
-            Box::pin(self.put_member(wanted)).await.map(|_| ())
+            Box::pin(self.put_member(wanted)).await?;
         } else if !held.public_endpoints.is_empty() && self.renewal_due()? {
             let lifetime = Some(self.record_lifetime());
-            Box::pin(self.app.renew_record_with_lifetime(PROTOCOL_NAME, lifetime))
-                .await
-                .map(|_| ())
-                .map_err(PaykitError::from)
+            Box::pin(self.app.renew_record_with_lifetime(PROTOCOL_NAME, lifetime)).await?;
         } else {
-            Ok(())
+            return Ok(false);
         }
+        Ok(true)
     }
 
     /// The Paykit member of the record the app holds, empty when it has none.
@@ -227,16 +245,12 @@ impl Paykit {
         PaykitMember::read(&record).map_err(|_| PaykitError::corrupt())
     }
 
-    /// `capabilities.endpoint_identifiers` for this app: what its payment method pays, at an
-    /// app holding `paykit_pay`, and nothing at one without (Paykit wire 3.2).
-    fn capabilities(&self) -> Vec<PaymentEndpointIdentifier> {
-        if !self.holds("paykit_pay") {
-            return Vec::new();
-        }
-        let mut ids = self.rail.endpoint_identifiers();
-        ids.sort();
-        ids.dedup();
-        ids
+    /// `capabilities.endpoint_identifiers` for this app, checked against the record it
+    /// holds ([`capabilities_for`]).
+    fn capabilities(&self) -> Result<Vec<PaymentEndpointIdentifier>> {
+        let held = AppRecord::verify(self.app.record(), &self.identity())
+            .map_err(|_| PaykitError::corrupt())?;
+        capabilities_for(self.rail.as_ref(), self.holds("paykit_pay"), held.body())
     }
 
     /// Sign `member` into the app's record, with `expires_at` when it carries public
@@ -266,5 +280,89 @@ impl Paykit {
         let lifetime = record.trusted_until(max_age_s).saturating_sub(updated);
         let now = self.now().max(self.app.highest_service_time().unwrap_or(0));
         Ok(now > updated.saturating_add(lifetime / 2))
+    }
+}
+
+/// `capabilities.endpoint_identifiers` for an app whose record is `base`: what its payment
+/// method pays, sorted and without repeats, at an app holding `paykit_pay` (`pays`), and
+/// nothing at one without (Paykit wire 3.2). [`Rail::endpoint_identifiers`] enters the SDK
+/// here alone, so a list the record can't carry is refused the same way at the join, a
+/// receive, [`Paykit::update_own_record`] and [`Paykit::set_public_endpoints`].
+///
+/// # Errors
+///
+/// The client's `Usage` refusal for a list that `base`, with it as its only Paykit member,
+/// can't carry ([`check_member_fits`]).
+pub(crate) fn capabilities_for(
+    rail: &dyn Rail,
+    pays: bool,
+    base: &AppRecordBody,
+) -> Result<Vec<PaymentEndpointIdentifier>> {
+    if !pays {
+        return Ok(Vec::new());
+    }
+    let mut ids = rail.endpoint_identifiers();
+    ids.sort();
+    ids.dedup();
+    check_member_fits(
+        base,
+        &PaykitMember {
+            endpoint_identifiers: ids.clone(),
+            public_endpoints: BTreeMap::new(),
+        },
+    )?;
+    Ok(ids)
+}
+
+/// Refuse `member` when the record `base`, with it as its Paykit member, would make an
+/// `app.put` over the Switch's cap on a signed operation (Switch wire 6.1): the cap at
+/// which the client refuses the record before signing or keeping anything. The record and
+/// its `app.put` are built by the same core functions the client uses, with what the client
+/// fills in at signing at its widest (the times and the generation) and a placeholder for
+/// each signature, which is always 64 bytes. So a member this passes is one the client
+/// signs, for a record with the same certificate, label and no wider `accepts`.
+///
+/// # Errors
+///
+/// The client's `Usage` refusal, in the client's words, for a record over the cap.
+fn check_member_fits(base: &AppRecordBody, member: &PaykitMember) -> Result<()> {
+    let refused = |error: pubky_switch_core::Error| {
+        PaykitError::from(AppError::from(pubky_switch_client::app::Refusal::Usage(
+            format!("the app record: {error}"),
+        )))
+    };
+    let mut body = base.clone();
+    if *member == PaykitMember::default() {
+        body.protocols.remove(PROTOCOL_NAME);
+    } else {
+        body.protocols
+            .insert(PROTOCOL_NAME.to_owned(), member.to_member());
+    }
+    body.updated_at = MAX_TIME_MS;
+    body.expires_at = Some(MAX_TIME_MS);
+    let record = SignedDoc::from_parts(&body.to_json().map_err(refused)?, &[0; 64]);
+    sign_batch(
+        &Measure(body.signing_key),
+        &body.identity,
+        Some(body.app_id),
+        MAX_INT,
+        [0; 16],
+        vec![(Vec::new(), OpKind::AppPut { record })],
+    )
+    .map_err(refused)?;
+    Ok(())
+}
+
+/// A writer that only measures what it signs: the app's signing key as its public key, and
+/// a placeholder of a signature's length for each signature.
+struct Measure([u8; 32]);
+
+impl Signs for Measure {
+    fn public_key(&self) -> [u8; 32] {
+        self.0
+    }
+
+    fn sign_fields(&self, _label: &str, _fields: &[&[u8]]) -> [u8; 64] {
+        [0; 64]
     }
 }
