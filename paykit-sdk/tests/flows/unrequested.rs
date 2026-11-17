@@ -369,7 +369,7 @@ fn stored_list(w: &World, version: u64, payload: &str) -> serde_json::Value {
         },
     );
     let body = paykit_lib::bodies::PrivatePaymentList {
-        version,
+        version: crate::common::pair(version),
         payment_endpoints: endpoints,
         expires_at: w.clock.now_ms() + 30 * 24 * crate::common::HOUR_MS,
     }
@@ -537,7 +537,7 @@ async fn test_unrequested_list_over_a_record_that_doesnt_read_keeps_single_use_m
     let held = phone.held_lists().await.unwrap();
     assert_eq!(held.len(), 1, "{held:?}");
     assert_eq!(held[0].payee, w.bob_id());
-    assert_eq!(held[0].version, 1);
+    assert_eq!(held[0].version, crate::common::pair(1));
     let refused = phone
         .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
         .await;

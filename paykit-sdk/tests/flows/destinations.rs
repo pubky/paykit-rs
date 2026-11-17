@@ -336,7 +336,7 @@ async fn test_destinations_list_of_a_removed_app_shadows_no_current_one() {
         },
     );
     let body = paykit_lib::bodies::PrivatePaymentList {
-        version: w.clock.now_ms(),
+        version: crate::common::pair(1),
         payment_endpoints: endpoints,
         expires_at: w.clock.now_ms() + 30 * 24 * crate::common::HOUR_MS,
     }
@@ -590,11 +590,11 @@ async fn test_destinations_unsupported_live_list_beside_an_expired_one_asks_for_
     let (endpoints, version, expires_at) = list(
         "btc-bitcoin-p2wpkh",
         "bc1qtill",
-        now,
+        1,
         now + crate::common::HOUR_MS,
     );
     let body = paykit_lib::bodies::PrivatePaymentList {
-        version,
+        version: crate::common::pair(version),
         payment_endpoints: endpoints,
         expires_at,
     }
@@ -649,7 +649,7 @@ fn list_from(w: &World, app: &str, wallet: [u8; 16], version: u64, id: &str, pay
         },
     );
     let body = paykit_lib::bodies::PrivatePaymentList {
-        version,
+        version: crate::common::pair(version),
         payment_endpoints: endpoints,
         expires_at: w.clock.now_ms() + 30 * 24 * crate::common::HOUR_MS,
     }
@@ -684,12 +684,11 @@ async fn two_lists(w: &World) -> (paykit_sdk::Paykit, paykit_sdk::Paykit) {
         .await;
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     till.app_mut().invite(&w.alice_id()).await.unwrap();
-    let now = w.clock.now_ms();
     list_from(
         w,
         "shop",
         wallet.app_id(),
-        now,
+        1,
         "btc-lightning-bolt12",
         "lno1shop",
     );
@@ -697,7 +696,7 @@ async fn two_lists(w: &World) -> (paykit_sdk::Paykit, paykit_sdk::Paykit) {
         w,
         "till",
         wallet.app_id(),
-        now + 1,
+        2,
         "btc-bitcoin-p2wpkh",
         "bc1qtill",
     );
@@ -779,12 +778,11 @@ async fn test_destinations_same_endpoint_in_two_lists_paid_from_the_newer() {
         .await;
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     till.app_mut().invite(&w.alice_id()).await.unwrap();
-    let now = w.clock.now_ms();
     list_from(
         &w,
         "shop",
         wallet.app_id(),
-        now + 1,
+        2,
         "btc-lightning-bolt12",
         "lno1shop",
     );
@@ -792,7 +790,7 @@ async fn test_destinations_same_endpoint_in_two_lists_paid_from_the_newer() {
         &w,
         "till",
         wallet.app_id(),
-        now,
+        1,
         "btc-lightning-bolt12",
         "lno1till?amount=2",
     );
@@ -902,12 +900,11 @@ async fn test_destinations_malformed_endpoint_of_one_app_falls_to_another_apps()
         .await;
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     till.app_mut().invite(&w.alice_id()).await.unwrap();
-    let now = w.clock.now_ms();
     list_from(
         &w,
         "shop",
         wallet.app_id(),
-        now + 1,
+        2,
         "btc-lightning-bolt12",
         "lno1shop?amount=unknown",
     );
@@ -915,7 +912,7 @@ async fn test_destinations_malformed_endpoint_of_one_app_falls_to_another_apps()
         &w,
         "till",
         wallet.app_id(),
-        now,
+        1,
         "btc-bitcoin-p2wpkh",
         "bc1qtill",
     );
@@ -1593,7 +1590,7 @@ async fn test_destinations_list_expiring_while_the_payee_is_read_asked_for_again
         },
     );
     let body = paykit_lib::bodies::PrivatePaymentList {
-        version: now,
+        version: crate::common::pair(1),
         payment_endpoints: endpoints,
         expires_at: now + crate::common::HOUR_MS,
     }

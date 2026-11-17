@@ -1554,7 +1554,7 @@ async fn test_stored_refused_lists_hold_the_newer() {
         wallet.receive(None).await.unwrap();
         let held = wallet.held_lists().await.unwrap();
         assert_eq!(held.len(), 1);
-        assert_eq!(held[0].version, version);
+        assert_eq!(held[0].version, crate::common::pair(version));
     }
 }
 
@@ -1849,7 +1849,7 @@ async fn test_stored_refused_older_list_never_replaces_a_newer_held() {
         wallet.receive(None).await.unwrap();
         let held = wallet.held_lists().await.unwrap();
         assert_eq!(held.len(), 1);
-        assert_eq!(held[0].version, newer);
+        assert_eq!(held[0].version, crate::common::pair(newer));
     }
 }
 

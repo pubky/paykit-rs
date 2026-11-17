@@ -103,7 +103,7 @@ async fn list(w: &World, wallet: &mut Paykit, app: [u8; 16], version: u64) {
         .await
         .unwrap();
     let body = PrivatePaymentList {
-        version,
+        version: crate::common::pair(version),
         payment_endpoints: BTreeMap::from([(
             endpoint("btc-lightning-bolt12"),
             ListEndpoint {
@@ -187,7 +187,7 @@ async fn produced(w: &World, family: Family) -> Held {
         );
     } else {
         let app_id = (!matches!(family, Family::GenericAsk)).then_some(app);
-        let held_version = matches!(family, Family::HeldAsk).then_some(7);
+        let held_version = matches!(family, Family::HeldAsk).then_some(crate::common::pair(7));
         assert_eq!(value["d"].as_object().unwrap().len(), 4);
         assert_eq!(value["d"]["payee"], b64(&w.bob_id()));
         assert_eq!(value["d"]["app_id"], json!(app_id));
@@ -242,7 +242,7 @@ fn damage(bytes: &[u8], how: Damage) -> Vec<u8> {
         }
         Damage::VersionWithoutApp => {
             assert!(body["app_id"].is_null());
-            body.insert("held_version".into(), json!(7));
+            body.insert("held_version".into(), json!({"generation": 1, "counter": 7}));
         }
     }
     serde_json::to_vec(&value).unwrap()
@@ -577,7 +577,7 @@ async fn test_discovery_state_ask_clock_and_version_progress() {
         .unwrap()
         .unwrap();
     let mark: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(mark["d"]["held_version"], 8);
+    assert_eq!(mark["d"]["held_version"], json!({"generation": 1, "counter": 8}));
     assert_eq!(
         held.wallet
             .app()

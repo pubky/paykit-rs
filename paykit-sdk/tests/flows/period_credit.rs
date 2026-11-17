@@ -235,7 +235,7 @@ async fn check_credit(case: Case, expected: bool) {
         billing_period: Some(period),
         payment_endpoint_identifier: endpoint(id),
         payment_app_id: shop.app_id(),
-        list_version: matches!(case.destination, Destination::List).then_some(1),
+        list_version: matches!(case.destination, Destination::List).then_some(crate::common::pair(1)),
         amount: None,
         allowance_id: None,
         label: None,

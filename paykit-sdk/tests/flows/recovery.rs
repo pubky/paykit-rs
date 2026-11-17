@@ -652,7 +652,7 @@ async fn test_recovery_list_expiring_during_the_own_identity_read_not_paid() {
         },
     );
     let body = paykit_lib::bodies::PrivatePaymentList {
-        version: w.clock.now_ms(),
+        version: crate::common::pair(1),
         payment_endpoints: endpoints,
         expires_at: w.clock.now_ms() + 30_000,
     }

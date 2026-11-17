@@ -13,7 +13,7 @@
 //! app can file a counterparty's message under another obligation, label or Allowance.
 //! Writers may write every member, with `null` for absent; readers read `null` as absent.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 use pubky_switch_core::enc::{b64, pubky_id, unb64, zbase32_encode};
 use pubky_switch_core::ident::NamingKey;
@@ -42,6 +42,7 @@ use crate::json::{bad, check_v1, parse_object, Obj};
 use crate::kinds::{check_sender_scopes, Kind, OPAQUE_MEMBERS};
 use crate::periods::{PeriodRef, Recurrence};
 use crate::scopes::{self, Label};
+use crate::ListVersion;
 
 /// How many `msg_id`s of messages a record doesn't store it keeps, the newest (Paykit wire
 /// 5.3).
@@ -273,19 +274,6 @@ impl UnknownMembers {
     /// Whether there are none.
     pub fn is_empty(&self) -> bool {
         self.held.is_empty()
-    }
-
-    /// Members of an unidentified root, excluding every member its writer now knows.
-    /// Flattening these after a typed value preserves that value's member order.
-    pub(crate) fn root_members(&self, shape: &Shape) -> BTreeMap<&str, &Value> {
-        self.held
-            .iter()
-            .find(|held| held.anchor.is_none() && held.path.is_empty())
-            .into_iter()
-            .flat_map(|held| &held.members)
-            .filter(|(name, _)| !shape.members.iter().any(|(known, _)| known == name))
-            .map(|(name, value)| (name.as_str(), value))
-            .collect()
     }
 
     /// Merge the members of retained objects found by identity or path, never by a carried
@@ -526,10 +514,18 @@ static UNREQUESTED: Shape = Shape {
         ("endpoint_id", Member::Leaf),
         ("payload", Member::Leaf),
         ("source", Member::Leaf),
-        ("list_version", Member::Leaf),
+        ("list_version", Member::Object(&LIST_VERSION)),
         ("single_use", Member::Leaf),
         ("amount", Member::Object(&AMOUNT)),
     ],
+};
+
+/// A Private Payment List version (Paykit wire 4.13).
+static LIST_VERSION: Shape = Shape {
+    name: "list version",
+    id: &[],
+    carried: false,
+    members: &[("generation", Member::Leaf), ("counter", Member::Leaf)],
 };
 
 static REASSOCIATION: Shape = Shape {
@@ -575,7 +571,7 @@ static USED: Shape = Shape {
     id: &[],
     carried: true,
     members: &[
-        ("version", Member::Leaf),
+        ("version", Member::Object(&LIST_VERSION)),
         ("endpoint", Member::Leaf),
         ("attempt_id", Member::Leaf),
     ],
@@ -913,7 +909,7 @@ pub struct UnrequestedDestination {
     /// Where it came from.
     pub source: DestinationSource,
     /// The list's version, for a list.
-    pub list_version: Option<u64>,
+    pub list_version: Option<ListVersion>,
     /// Whether the endpoint was single-use.
     pub single_use: bool,
     /// The asset and amount being paid, written with the `attempt` (Paykit wire 5.3).
@@ -1166,7 +1162,10 @@ fn read_unrequested(value: &Value) -> Result<UnrequestedDestination> {
             ))
         }
     };
-    let list_version = u.opt_int("list_version")?;
+    let list_version = u
+        .opt("list_version")
+        .map(ListVersion::from_value)
+        .transpose()?;
     if (source == DestinationSource::List) != list_version.is_some() {
         return Err(bad(
             ACTIVITY,
@@ -1256,7 +1255,7 @@ fn unrequested_json(u: &UnrequestedDestination) -> Value {
         Value::String(u.endpoint_id.as_str().into()),
     );
     if let Some(v) = u.list_version {
-        map.insert("list_version".into(), Value::from(v));
+        map.insert("list_version".into(), v.to_value());
     }
     map.insert("payload".into(), Value::String(u.payload.as_str().into()));
     map.insert("single_use".into(), Value::Bool(u.single_use));
@@ -2240,7 +2239,7 @@ pub fn reassociation_condition(from_period: u64) -> Result<Condition> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UsedEndpoint {
     /// The list version it was in.
-    pub version: u64,
+    pub version: ListVersion,
     /// The identifier.
     pub endpoint: PaymentEndpointIdentifier,
     /// The attempt whose batch reserved it.
@@ -2281,7 +2280,7 @@ struct ListOut<'a> {
 
 #[derive(Serialize)]
 struct UsedOut {
-    version: u64,
+    version: ListVersion,
     endpoint: String,
     attempt_id: String,
 }
@@ -2306,7 +2305,7 @@ impl PaymentListRecord {
         for (i, item) in obj.opt_arr("used")?.into_iter().flatten().enumerate() {
             let u = Obj::of(item, LISTS, "used")?;
             used.push(UsedEndpoint {
-                version: u.req_int("version")?,
+                version: ListVersion::from_value(u.req("version")?)?,
                 endpoint: PaymentEndpointIdentifier::parse(u.req_str("endpoint")?)?,
                 attempt_id: AttemptId::from_bytes(u.req_b64::<16>("attempt_id")?),
                 origin: origins.at(&format!("/used/{i}")),
@@ -4796,7 +4795,7 @@ mod tests {
                 "endpoint_id": "btc-bitcoin-p2wpkh", "payload": "bc1q", "source": source,
                 "single_use": false, "amount": { "asset": "btc", "value": "0.0015" } });
             if let Some(n) = version {
-                v["list_version"] = serde_json::json!(n);
+                v["list_version"] = serde_json::json!({"generation": 1, "counter": n});
             }
             v
         };
@@ -4903,17 +4902,6 @@ mod tests {
                 "carried": [{ "k": 1 }, { "k": 1, "b": "second" }] })
         );
         assert_eq!(first, second, "an origin isn't part of the value");
-        assert_eq!(
-            serde_json::to_value(unknown.root_members(&OUTER)).unwrap(),
-            serde_json::json!({ "x": 2 })
-        );
-        let expanded = Shape {
-            name: "outer",
-            id: &[],
-            carried: false,
-            members: &[("x", Member::Leaf)],
-        };
-        assert!(unknown.root_members(&expanded).is_empty());
         // None: the bytes as written.
         let none = UnknownMembers::default();
         assert_eq!(

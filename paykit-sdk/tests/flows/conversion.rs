@@ -590,7 +590,7 @@ async fn two_lists(w: &World, wallet: &mut Paykit, till_expires: bool) -> Paykit
         now + 30 * 24 * HOUR_MS
     };
     let body = paykit_lib::bodies::PrivatePaymentList {
-        version: now,
+        version: crate::common::pair(1),
         payment_endpoints: one("btc-bitcoin-p2wpkh", "bc1qtill"),
         expires_at,
     }

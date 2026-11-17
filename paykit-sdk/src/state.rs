@@ -2609,7 +2609,7 @@ mod tests {
         let value = serde_json::to_value(ListAsk {
             payee: [3; 32],
             app_id: None,
-            held_version: Some(9),
+            held_version: Some(paykit_lib::ListVersion::new(1, 9).unwrap()),
             asked_at_ms: 7,
         })
         .unwrap();
@@ -2621,7 +2621,7 @@ mod tests {
         for (app_id, held_version) in [
             (None, None),
             (Some([4; 16]), None),
-            (Some([4; 16]), Some(9)),
+            (Some([4; 16]), Some(paykit_lib::ListVersion::new(1, 9).unwrap())),
         ] {
             let value = serde_json::to_value(ListAsk {
                 payee: [3; 32],

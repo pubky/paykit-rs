@@ -596,7 +596,7 @@ async fn test_restore_corrupt_journal_refused_and_nothing_written() {
     let damages: [(&str, serde_json::Value); 4] = [
         ("label", serde_json::json!("Not A Label!")),
         ("source", serde_json::json!("elsewhere")),
-        ("list_version", serde_json::json!(7)),
+        ("list_version", serde_json::json!({"generation": 1, "counter": 7})),
         ("payment_reference", serde_json::Value::Null),
     ];
     for (member, value) in damages {
@@ -893,7 +893,7 @@ fn list_from(w: &World, app: &str, wallet: [u8; 16], version: u64) {
         },
     );
     let body = paykit_lib::bodies::PrivatePaymentList {
-        version,
+        version: crate::common::pair(version),
         payment_endpoints: endpoints,
         expires_at: w.clock.now_ms() + 30 * 24 * crate::common::HOUR_MS,
     }
@@ -1348,7 +1348,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
         "paykit.private_payment_list",
         serde_json::Value::Object(
             paykit_lib::bodies::PrivatePaymentList {
-                version: 1,
+                version: crate::common::pair(1),
                 payment_endpoints: std::collections::BTreeMap::new(),
                 expires_at: w.clock.now_ms() + 86_400_000,
             }

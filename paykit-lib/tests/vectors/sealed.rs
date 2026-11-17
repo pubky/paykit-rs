@@ -3607,18 +3607,17 @@ fn list_case(keys: &Keys, delta: i64) -> (PaymentListRecord, paykit_lib::records
     let s = bound_sealed();
     let mut held = PaymentListRecord::read(value(&arr(&s, "binding_accepted")[0]), &alice).unwrap();
     held.used.push(paykit_lib::records::UsedEndpoint {
-        version: 1,
+        version: paykit_lib::ListVersion::new(1, 1).unwrap(),
         endpoint: paykit_lib::identifiers::PaymentEndpointIdentifier::parse("btc-bitcoin-p2wpkh")
             .unwrap(),
         attempt_id: paykit_lib::identifiers::AttemptId::from_bytes([3; 16]),
         origin: Default::default(),
     });
     let list = resigned(keys, "private_payment_list", None, |body| {
-        let version = body["version"].as_u64().unwrap();
-        body.insert(
-            "version".into(),
-            serde_json::json!(version.checked_add_signed(delta).unwrap()),
-        );
+        let version = paykit_lib::ListVersion::from_value(&body["version"]).unwrap();
+        let counter = version.counter().checked_add_signed(delta).unwrap();
+        let moved = paykit_lib::ListVersion::new(version.generation(), counter).unwrap();
+        body.insert("version".into(), moved.to_value());
         if delta == 0 {
             // The same version, other signed content.
             let expires = body["expires_at"]

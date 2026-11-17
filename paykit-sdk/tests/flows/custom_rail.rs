@@ -160,7 +160,7 @@ fn proof_body(shop: [u8; 16], version: u64, proof: Map<String, Value>) -> Map<St
         billing_period: None,
         payment_endpoint_identifier: endpoint("btc-lightning-bolt12"),
         payment_app_id: shop,
-        list_version: Some(version),
+        list_version: Some(crate::common::pair(version)),
         amount: Some(btc("0.0015")),
         allowance_id: None,
         label: None,

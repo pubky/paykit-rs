@@ -256,15 +256,15 @@ fn check_contents(keys: &Keys, read: &HashMap<String, Read>) {
         )
         .unwrap();
     assert_eq!(notice.allowance_record, key);
-    // The list's version is its publishing time, and it expires 30 days later.
+    // The list's version is a pair, not a time; the list expires 30 days after publishing.
     let Body::PrivatePaymentList(list) = &read["private_payment_list"].body else {
         panic!("a list")
     };
+    assert_eq!(list.version, paykit_lib::ListVersion::new(1, 12).unwrap());
     assert_eq!(
-        list.version,
-        read["private_payment_list"].message.created_at_ms
+        list.expires_at,
+        read["private_payment_list"].message.created_at_ms + 30 * 86_400_000
     );
-    assert_eq!(list.expires_at, list.version + 30 * 86_400_000);
     // The proof of a payment without a request names its settlement.
     let Body::PaymentProof(unrequested) = &read["payment_proof_unrequested"].body else {
         panic!("a proof")

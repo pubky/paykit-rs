@@ -36,7 +36,6 @@ mod json;
 pub mod kinds;
 mod list_version;
 pub mod periods;
-pub mod publications;
 pub mod records;
 pub mod scopes;
 #[cfg(feature = "signer")]

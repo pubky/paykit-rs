@@ -1171,7 +1171,7 @@ async fn test_divergent_older_kept_list_leaves_a_newer_held_list() {
         .unwrap();
     w.list_to_alice(&mut shop, &[wallet.app_id()], 3).await;
     wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.held_lists().await.unwrap()[0].version, 3);
+    assert_eq!(wallet.held_lists().await.unwrap()[0].version, crate::common::pair(3));
     set_divergent(&base, &wallet, &record, true);
     w.list_to_alice(&mut shop, &[wallet.app_id()], 2).await;
     wallet.receive(None).await.unwrap();
@@ -1194,7 +1194,7 @@ async fn test_divergent_older_kept_list_leaves_a_newer_held_list() {
         .is_empty());
     let held = wallet.held_lists().await.unwrap();
     assert_eq!(held.len(), 1);
-    assert_eq!(held[0].version, 3);
+    assert_eq!(held[0].version, crate::common::pair(3));
 }
 
 #[tokio::test]
@@ -1626,7 +1626,7 @@ async fn test_divergent_mismatched_mark_beside_a_held_list_fails_no_receive() {
     mark_past_its_record(&mut wallet).await;
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.held_lists().await.unwrap()[0].version, 3);
+    assert_eq!(wallet.held_lists().await.unwrap()[0].version, crate::common::pair(3));
 }
 
 #[tokio::test]
@@ -3778,7 +3778,7 @@ async fn test_divergent_paused_list_asks_the_app_whose_list_expired() {
         },
     );
     let body = paykit_lib::bodies::PrivatePaymentList {
-        version: 1,
+        version: crate::common::pair(1),
         payment_endpoints: endpoints,
         expires_at: w.clock.now_ms() + HOUR_MS,
     }
@@ -3821,7 +3821,7 @@ async fn till_list(w: &World, wallet: &Paykit, expires_at: u64) -> Paykit {
         },
     );
     let body = paykit_lib::bodies::PrivatePaymentList {
-        version: 1,
+        version: crate::common::pair(1),
         payment_endpoints: endpoints,
         expires_at,
     }

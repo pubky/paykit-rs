@@ -24,6 +24,7 @@ use crate::identifiers::{
 };
 use crate::json::{bad, Obj};
 use crate::kinds::{ExtensionKind, Kind, MessageKind, MAX_RECORDED_KIND_LEN};
+use crate::ListVersion;
 use crate::periods::{BillingPeriod, PeriodRef, Recurrence};
 use crate::scopes::Label;
 
@@ -839,7 +840,7 @@ pub struct PaymentProof {
     /// The payee app whose endpoint was paid.
     pub payment_app_id: [u8; 16],
     /// The Private Payment List `version`, when paid to one.
-    pub list_version: Option<u64>,
+    pub list_version: Option<ListVersion>,
     /// The amount, for a payment without a request; a request's comes from the request.
     pub amount: Option<PaymentAmount>,
     /// The Allowance of an automatic payment.
@@ -917,7 +918,10 @@ impl PaymentProof {
                 obj.req_str("payment_endpoint_identifier")?,
             )?,
             payment_app_id: obj.req_app_id("payment_app_id")?,
-            list_version: obj.opt_int("list_version")?,
+            list_version: obj
+                .opt("list_version")
+                .map(ListVersion::from_value)
+                .transpose()?,
             amount,
             allowance_id: obj
                 .opt_str("allowance_id")?
@@ -965,7 +969,7 @@ impl PaymentProof {
         }
         insert_label(&mut map, &self.label);
         if let Some(v) = self.list_version {
-            map.insert("list_version".into(), Value::from(v));
+            map.insert("list_version".into(), v.to_value());
         }
         map.insert(
             "payment_app_id".into(),
@@ -1266,8 +1270,9 @@ pub struct ListEndpoint {
 /// publishing app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrivatePaymentList {
-    /// Unix milliseconds of publishing, higher than every earlier version from this app.
-    pub version: u64,
+    /// The version (Paykit wire 4.13): greater than every earlier version of this
+    /// publishing app for this recipient.
+    pub version: ListVersion,
     /// The endpoints.
     pub payment_endpoints: BTreeMap<PaymentEndpointIdentifier, ListEndpoint>,
     /// When the list expires, chosen by the publishing app from its current time.
@@ -1301,7 +1306,7 @@ impl PrivatePaymentList {
             );
         }
         Ok(Self {
-            version: obj.req_int("version")?,
+            version: ListVersion::from_value(obj.req("version")?)?,
             payment_endpoints: endpoints,
             expires_at: obj.req_time("expires_at")?,
         })
@@ -1335,7 +1340,7 @@ impl PrivatePaymentList {
             })
             .collect();
         map.insert("payment_endpoints".into(), Value::Object(endpoints));
-        map.insert("version".into(), Value::from(self.version));
+        map.insert("version".into(), self.version.to_value());
         map
     }
 
@@ -1353,7 +1358,7 @@ impl PrivatePaymentList {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PrivatePaymentListRequest {
     /// The `version` the sender holds, `None` when none; always written.
-    pub held_version: Option<u64>,
+    pub held_version: Option<ListVersion>,
     /// The publishing app asked about.
     pub app_id: Option<[u8; 16]>,
 }
@@ -1367,7 +1372,10 @@ impl PrivatePaymentListRequest {
     pub fn from_body(body: &Map<String, Value>) -> Result<Self> {
         let obj = Obj::new(body, "Paykit wire 4.14: private_payment_list_request");
         Ok(Self {
-            held_version: obj.opt_int("held_version")?,
+            held_version: obj
+                .opt("held_version")
+                .map(ListVersion::from_value)
+                .transpose()?,
             app_id: obj.opt_app_id("app_id")?,
         })
     }
@@ -1391,7 +1399,7 @@ impl PrivatePaymentListRequest {
         }
         map.insert(
             "held_version".into(),
-            self.held_version.map_or(Value::Null, Value::from),
+            self.held_version.map_or(Value::Null, ListVersion::to_value),
         );
         map
     }
@@ -2413,7 +2421,7 @@ mod tests {
         }
         // list_version goes with either.
         let mut listed = with_amount;
-        listed["list_version"] = json!(7);
+        listed["list_version"] = json!({"generation": 1, "counter": 7});
         PaymentProof::from_body(&body(listed), 0).unwrap();
     }
 
@@ -2506,7 +2514,7 @@ mod tests {
 
     #[test]
     fn test_private_list_expiry_and_round_trip() {
-        let l = json!({ "expires_at": "2026-01-31T00:06:00.000Z", "version": 1767225960000u64,
+        let l = json!({ "expires_at": "2026-01-31T00:06:00.000Z", "version": {"generation": 1, "counter": 7},
             "payment_endpoints": { "btc-bitcoin-p2wpkh": { "payload": "bc1q", "single_use": true },
                 "btc-lightning-bolt12": { "payload": "lno1" } } });
         let list = PrivatePaymentList::from_body(&body(l.clone())).unwrap();

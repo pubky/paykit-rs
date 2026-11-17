@@ -292,7 +292,7 @@ mod tests {
                     &id(),
                     &payload(),
                     paykit_lib::records::DestinationSource::List,
-                    Some(1),
+                    Some(paykit_lib::ListVersion::new(1, 1).unwrap()),
                     true,
                 )
             ),

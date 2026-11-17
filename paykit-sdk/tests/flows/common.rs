@@ -726,7 +726,7 @@ impl World {
     ) -> String {
         shop.app_mut().invite(&self.alice_id()).await.unwrap();
         let body = paykit_lib::bodies::PrivatePaymentList {
-            version,
+            version: pair(version),
             payment_endpoints: endpoints,
             expires_at: self.clock.now_ms() + 30 * 24 * HOUR_MS,
         }
@@ -1101,4 +1101,10 @@ pub async fn over_hold(app: &Paykit, request: &paykit_sdk::RequestRef) -> paykit
         Some(held) => paykit_sdk::PayOptions::default().with_possibly_cancelled_confirmed(held),
         None => paykit_sdk::PayOptions::default(),
     }
+}
+
+/// The list version of counter `counter` in generation 1, the generation of every identity
+/// these flows build (Paykit wire 4.13).
+pub fn pair(counter: u64) -> paykit_lib::ListVersion {
+    paykit_lib::ListVersion::new(1, counter).unwrap()
 }

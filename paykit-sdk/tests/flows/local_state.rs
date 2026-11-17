@@ -759,7 +759,7 @@ fn list_of(w: &World, app: &str) -> Value {
         "paykit.private_payment_list",
         Value::Object(
             paykit_lib::bodies::PrivatePaymentList {
-                version: 1,
+                version: crate::common::pair(1),
                 payment_endpoints: std::collections::BTreeMap::new(),
                 expires_at: w.clock.now_ms() + 86_400_000,
             }
