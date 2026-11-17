@@ -11,7 +11,8 @@
 //! can't be written, stays doubtful, a reported failure too, since a payment that completed
 //! after all couldn't be reported for it. What nothing can tell stays doubtful, "may be paid", for
 //! the user: [`Paykit::resolve_attempt`] writes the user's choice (`done` basis
-//! `reconcile`, `unknown`, or `failed`). [`Paykit::end_reconcile`] ends the mode.
+//! `reconcile`, `unknown`, or `failed`). [`Paykit::end_reconcile`] completes Paykit's part;
+//! the app stays in reconcile mode until its other protocols complete theirs.
 //!
 //! After a provider loss, a reconcile also lists each one-time request of the payer's records
 //! still in doubt from before the loss ([`Doubtful::before_loss`], Paykit spec 7.3, "After a
@@ -728,13 +729,17 @@ impl Paykit {
             .await?)
     }
 
-    /// Reconciliation finished (Switch spec 12.4 step 2.4): reconcile mode ends, and new
-    /// attempts may be made again. After a restore, the re-send requests to the open
-    /// requests' counterparties are queued first if [`Paykit::reconcile`] didn't queue them
-    /// (Paykit spec 7.2), reading the records for them: a host that ends reconcile mode
-    /// without reconciling still asks once. After a restore, payments still wait for a
-    /// reconcile under `paykit_pay` that runs the payer pass, if none has yet; the payee's side
-    /// works at once.
+    /// Paykit's reconciliation finished (Switch spec 12.4 step 2.4). The app stays in
+    /// reconcile mode until every registered protocol has finished. The host completes
+    /// its other protocols through
+    /// [`App::end_reconcile_for`](pubky_switch_client::app::App::end_reconcile_for).
+    /// New attempts wait until then.
+    ///
+    /// After a restore, the re-send requests to open requests' counterparties are queued
+    /// first if [`Paykit::reconcile`] didn't queue them (Paykit spec 7.2): a host that
+    /// finishes without reconciling still asks once. Payments still wait for a reconcile
+    /// under `paykit_pay` that runs the payer pass, if none has yet; Paykit's payee side
+    /// doesn't require that payer pass.
     ///
     /// # Errors
     ///
@@ -754,7 +759,9 @@ impl Paykit {
             // Queued: what isn't sent now goes at the next receive.
             let _ = self.send_asks().await;
         }
-        self.app.end_reconcile(confirmed).await?;
+        self.app
+            .end_reconcile_for(crate::protocol::BACKUP_NAME, confirmed)
+            .await?;
         Ok(())
     }
 }

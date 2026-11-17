@@ -325,9 +325,10 @@ fn account_gone(events: &[AppEvent]) -> bool {
 
 /// One Paykit App of an identity.
 ///
-/// This wrapper owns a Switch app registered with Paykit alone. Its own certificate's
-/// scope roots must belong to that registered protocol (Switch wire 3.1). Certificates
-/// from counterparties may include other protocols' scopes; those grant no Paykit rights.
+/// The convenience constructors register Paykit alone; the `*_with_protocols` constructors
+/// let the host register its other protocols under the same App ID (Paykit spec 3.2).
+/// Each own scope root needs its registered owner (Switch wire 3.1). Other protocols'
+/// scopes grant no Paykit rights, whether in the own or a counterparty's certificate.
 pub struct Paykit {
     pub(crate) app: App,
     pub(crate) protocol: Arc<PaykitProtocol>,
@@ -414,7 +415,7 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// The client's errors; [`crate::PaykitError::Lib`] for a certificate Paykit refuses,
+    /// The client's errors; [`Refusal::CertificateRefused`] for a certificate Paykit refuses,
     /// and `Validation` for an `orphan_after_s` below the rail's floor ([`orphan_floor_s`]),
     /// before anything is written.
     pub async fn join(

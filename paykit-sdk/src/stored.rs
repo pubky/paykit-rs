@@ -346,8 +346,8 @@ impl Paykit {
         Ok(out)
     }
 
-    /// Take the duty events about stored entries the client hasn't had acknowledged,
-    /// `events`, each at its first sight (module docs, "Taken at first sight"); acknowledge,
+    /// Take Paykit's duty events about stored entries the client hasn't had acknowledged,
+    /// from `events`, each at its first sight (module docs, "Taken at first sight"); acknowledge,
     /// in order, those taken up to the first that isn't; drop the marks of events
     /// acknowledged. Only Paykit's own local state is written: the kept messages are written
     /// into their records by [`Paykit::place_stored`].
@@ -356,6 +356,9 @@ impl Paykit {
         let mut prefix = true;
         let mut through = None;
         for event in events {
+            if !self.app.event_is_for(event, crate::protocol::BACKUP_NAME) {
+                continue;
+            }
             let Some(id) = event.id() else {
                 continue;
             };

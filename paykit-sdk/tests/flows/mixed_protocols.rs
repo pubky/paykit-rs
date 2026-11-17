@@ -26,6 +26,15 @@ impl Protocol for Chat {
         Ok(Vec::new())
     }
     fn receive(&self, message: &ReceivedMessage, _: &mut ReceiveContext<'_>) -> Outcome {
+        if message
+            .message
+            .body
+            .get("wait_for_epoch")
+            .and_then(serde_json::Value::as_u64)
+            == Some(2)
+        {
+            return Outcome::AwaitKey { data_epoch: 2 };
+        }
         Outcome::Apply(Effect {
             ops: Vec::new(),
             local: vec![LocalWrite::Put {
@@ -439,4 +448,186 @@ async fn test_mixed_protocols_callbacks_and_layers_survive_load_and_restore() {
         .unwrap()
         .is_empty());
     assert_eq!(app.requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_foreign_drop_stays_with_its_owner() {
+    use pubky_switch_client::app::{AppEvent, WaitingReason, MAX_UNVERIFIED_AGE_MS};
+    use pubky_switch_client::clock::Clock;
+    let w = world();
+    let storage = store();
+    let mut app = Paykit::join_with_protocols(
+        w.env(&w.alice, Arc::clone(&storage)),
+        PaykitConfig::default(),
+        w.approve(&w.alice, "mixed", &scopes()),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        register,
+    )
+    .await
+    .unwrap();
+    app.receive(None).await.unwrap();
+    let id = app.app_id();
+    let keys = w.bob.identity().app_keys("chat");
+    w.bob.register_app(&keys, &AppSpec::new(&["chat"])).unwrap();
+    let message = w.inject(
+        &w.bob,
+        "chat",
+        &w.alice,
+        &[id],
+        "chat.item",
+        Vec::new(),
+        serde_json::json!({"wait_for_epoch":2})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let report = app.app_mut().receive(None).await.unwrap();
+    assert!(report.events.iter().any(|e| matches!(
+        e,
+        AppEvent::Parked {
+            reason: pubky_switch_client::app::ParkReason::AwaitingKey { data_epoch: 2 },
+            ..
+        }
+    )));
+    w.clock
+        .set_ms(w.clock.now_ms() + MAX_UNVERIFIED_AGE_MS + 86_400_000);
+    app.app_mut().receive(None).await.unwrap();
+    app.app_mut().receive(None).await.unwrap();
+    let chat = app
+        .app_mut()
+        .unacknowledged_events_for("chat")
+        .await
+        .unwrap();
+    let drop_id = chat
+        .iter()
+        .find_map(|e| match e {
+            AppEvent::StoredEntryDropped {
+                waiting: WaitingReason::Key { data_epoch: 2 },
+                message: msg,
+                ..
+            } if msg.msg_id == message => e.id(),
+            _ => None,
+        })
+        .expect("the real chat key wait expires into its owned drop duty");
+    assert_eq!(app.app().event_owners(drop_id).unwrap(), ["chat"]);
+    assert!(!app
+        .app_mut()
+        .unacknowledged_events_for("paykit")
+        .await
+        .unwrap()
+        .iter()
+        .any(|e| e.id() == Some(drop_id)));
+    for pass in 0..2 {
+        if pass == 1 {
+            drop(app);
+            app = Paykit::load_with_protocols(
+                w.env(&w.alice, Arc::clone(&storage)),
+                PaykitConfig::default(),
+                id,
+                Arc::clone(&w.rail) as Arc<dyn Rail>,
+                w.timer(),
+                register,
+            )
+            .await
+            .unwrap();
+        }
+        let handled = app.receive(None).await;
+        for prefix in ["kw/", "ud/", "pd/", "se/", "dt/", "nt/", "dv/"] {
+            assert!(
+                app.app()
+                    .protocol_scan("paykit", prefix.as_bytes())
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "a foreign duty must not change Paykit {prefix}"
+            );
+        }
+        handled.unwrap();
+        assert!(app
+            .app_mut()
+            .unacknowledged_events_for("chat")
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| e.id() == Some(drop_id)));
+    }
+    app.app_mut().ack_events_for("chat", drop_id).await.unwrap();
+    assert!(!app
+        .app_mut()
+        .unacknowledged_events_for("chat")
+        .await
+        .unwrap()
+        .iter()
+        .any(|e| e.id() == Some(drop_id)));
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_reconciliation_requires_each_owner() {
+    let w = world();
+    let mut original = Paykit::join_with_protocols(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        w.approve(&w.alice, "mixed", &scopes()),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        register,
+    )
+    .await
+    .unwrap();
+    original.receive(None).await.unwrap();
+    let backup = original.backup().await.unwrap();
+    let id = original.app_id();
+    drop(original);
+    for chat_first in [false, true] {
+        let storage = store();
+        let mut app = Paykit::restore_with_protocols(
+            w.env(&w.alice, Arc::clone(&storage)),
+            PaykitConfig::default(),
+            &backup,
+            Arc::clone(&w.rail) as Arc<dyn Rail>,
+            w.timer(),
+            register,
+        )
+        .await
+        .unwrap();
+        app.receive(None).await.unwrap();
+        app.reconcile().await.unwrap();
+        assert!(app.app().reconcile_mode());
+        if chat_first {
+            assert!(!app
+                .app_mut()
+                .end_reconcile_for("chat", UserConfirmed::new())
+                .await
+                .unwrap());
+        }
+        app.end_reconcile(UserConfirmed::new()).await.unwrap();
+        assert_eq!(
+            app.app().reconcile_mode(),
+            !chat_first,
+            "Paykit cannot finish another owner's reconciliation"
+        );
+        if !chat_first {
+            assert!(app.app().may_attempt(false).is_err());
+            drop(app);
+            app = Paykit::load_with_protocols(
+                w.env(&w.alice, storage),
+                PaykitConfig::default(),
+                id,
+                Arc::clone(&w.rail) as Arc<dyn Rail>,
+                w.timer(),
+                register,
+            )
+            .await
+            .unwrap();
+            assert!(app.app().reconcile_mode());
+            assert!(app
+                .app_mut()
+                .end_reconcile_for("chat", UserConfirmed::new())
+                .await
+                .unwrap());
+        }
+        assert!(!app.app().reconcile_mode());
+        app.app().may_attempt(false).unwrap();
+    }
 }
