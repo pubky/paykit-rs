@@ -309,7 +309,12 @@ impl Paykit {
 
     /// `capabilities.endpoint_identifiers` for this app, checked against the record it
     /// holds ([`capabilities_for`]).
+    /// During the join's first update, the list the join checked before anything was written,
+    /// as it was read then.
     fn capabilities(&self) -> Result<Vec<PaymentEndpointIdentifier>> {
+        if let Some(snapshot) = &self.capability_snapshot {
+            return Ok(snapshot.clone());
+        }
         let held = AppRecord::verify(self.app.record(), &self.identity())
             .map_err(|_| PaykitError::corrupt())?;
         capabilities_for(self.rail.as_ref(), self.holds("paykit_pay"), held.body())

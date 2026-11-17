@@ -523,10 +523,11 @@ impl Paykit {
             if bytes.is_none() {
                 continue;
             }
-            // Only a record whose Paykit member reads takes part (Paykit wire 3.2): a reader
-            // refuses a malformed one as it refuses any invalid record, and it never displaces
-            // a valid one.
-            let read = read.filter(|record| PaykitMember::read(record).is_ok());
+            // Every record that verifies as the app's takes part in the comparison, whatever
+            // its Paykit member: two bodies at one `updated_at` are a conflict for every reader
+            // (Switch wire 3.2), and the newest record is the app's (Switch spec 4.2). A Paykit
+            // member that doesn't read makes that record's endpoints unusable, as `usable`
+            // judges the record used (Paykit wire 3.2), and decides nothing of the comparison.
             let served_ahead = read.as_ref().is_some_and(|record| record.is_ahead(now));
             let served_refused = read.is_none();
             if let Some(record) = read {
@@ -549,9 +550,7 @@ impl Paykit {
             // clock, or in conflict with one seen, it is reported as this app's failure.
             let served_failure = if served_refused {
                 Some(PublicAppFailureReason::Refused(
-                    "Switch wire 3.2, Paykit wire 3.2: the record served doesn't verify \
-                     as the app's, or its Paykit member doesn't read"
-                        .into(),
+                    "Switch wire 3.2: the record served doesn't verify as the app's".into(),
                 ))
             } else if served_ahead {
                 Some(PublicAppFailureReason::Expired(

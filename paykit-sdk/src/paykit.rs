@@ -353,6 +353,9 @@ pub struct Paykit {
     /// public endpoint edit builds on it until the app is loaded again
     /// (`crate::own_record`).
     pub(crate) own_record_unknown: bool,
+    /// The capabilities the join checked, which its first update signs as they are
+    /// (`crate::own_record`); `None` otherwise.
+    pub(crate) capability_snapshot: Option<Vec<paykit_lib::PaymentEndpointIdentifier>>,
 }
 
 impl std::fmt::Debug for Paykit {
@@ -412,6 +415,7 @@ impl Paykit {
             first_read_done: false,
             first_read_summary: None,
             own_record_unknown: false,
+            capability_snapshot: None,
         }
     }
 
@@ -478,6 +482,7 @@ impl Paykit {
             // client's join reads the approval with this same function, on these same inputs,
             // before its first commit, so this is the certificate it would keep. An approval
             // that doesn't read is left to the client's join, which refuses it, writing nothing.
+            let mut snapshot = None;
             if let Ok(approved) = Approval::read(
                 &request.approval,
                 &request.request,
@@ -516,7 +521,9 @@ impl Paykit {
                 let mut base = AppRecordBody::new(&approved.cert, accepts, 0);
                 base.label.clone_from(&config.app.label);
                 let pays = approved.cert.scopes().iter().any(|s| s == "paykit_pay");
-                capabilities_for(rail.as_ref(), pays, &base)?;
+                // One reading of what the payment method pays, checked here and signed by the
+                // update after the join: the method promises no two readings agree.
+                snapshot = Some(capabilities_for(rail.as_ref(), pays, &base)?);
             }
             let app = App::join(env.clone(), protocols, config.app.clone(), request).await?;
             // No certificate is kept as listed under: the copy is empty until a listing has run
@@ -527,8 +534,11 @@ impl Paykit {
             // The app is joined and kept: an error here would hide it from the host, which
             // could join again or lose it. A failed update stays owed instead, for the next
             // receive or `update_own_record` (the Errors section above), and nothing is
-            // marked done for it.
+            // marked done for it. The update signs the capabilities checked above; later
+            // upkeep reads the payment method again.
+            paykit.capability_snapshot = snapshot;
             let _owed = Box::pin(paykit.tend_own_record()).await;
+            paykit.capability_snapshot = None;
             Ok(paykit)
         })
         .await

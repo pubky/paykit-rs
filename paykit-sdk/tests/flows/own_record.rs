@@ -1008,6 +1008,103 @@ async fn test_own_record_oversized_capabilities_refuse_the_receive() {
 
 /// A list of Payment Endpoint Identifiers no app record can carry: its `app.put` is over
 /// the Switch's cap on a signed operation (Switch wire 6.1).
+/// A payment method whose list of what it pays is a different one at each reading, the last
+/// repeated.
+struct ShiftingRail {
+    fake: Arc<paykit_sdk::rail::FakeRail>,
+    lists: Mutex<Vec<Vec<paykit_lib::PaymentEndpointIdentifier>>>,
+}
+
+impl paykit_sdk::Rail for ShiftingRail {
+    fn declaration(&self) -> paykit_sdk::rail::RailDeclaration {
+        self.fake.declaration()
+    }
+
+    fn select_endpoints(
+        &self,
+        candidates: &[paykit_sdk::rail::PaymentEndpointCandidate],
+        amount: Option<&paykit_lib::PaymentAmount>,
+    ) -> Result<paykit_sdk::rail::EndpointSelection, paykit_sdk::rail::RailError> {
+        self.fake.select_endpoints(candidates, amount)
+    }
+
+    fn endpoint_identifiers(&self) -> Vec<paykit_lib::PaymentEndpointIdentifier> {
+        let mut lists = self.lists.lock().unwrap();
+        if lists.len() > 1 {
+            lists.remove(0)
+        } else {
+            lists[0].clone()
+        }
+    }
+
+    fn transfer(
+        &self,
+        endpoint_id: &paykit_lib::PaymentEndpointIdentifier,
+        payload: &PaymentEndpointPayload,
+        amount: &paykit_lib::PaymentAmount,
+    ) -> paykit_sdk::rail::Transfer {
+        self.fake.transfer(endpoint_id, payload, amount)
+    }
+
+    fn fraction_digits(&self, endpoint_id: &paykit_lib::PaymentEndpointIdentifier) -> Option<u32> {
+        self.fake.fraction_digits(endpoint_id)
+    }
+
+    fn pay(
+        &self,
+        payment: paykit_sdk::rail::RailPayment,
+    ) -> pubky_switch_client::transport::BoxFuture<
+        '_,
+        Result<paykit_sdk::rail::RailOutcome, paykit_sdk::rail::RailError>,
+    > {
+        self.fake.pay(payment)
+    }
+
+    fn payment(
+        &self,
+        idempotency_key: paykit_lib::AttemptId,
+    ) -> pubky_switch_client::transport::BoxFuture<
+        '_,
+        Result<Option<paykit_sdk::rail::RailOutcome>, paykit_sdk::rail::RailError>,
+    > {
+        self.fake.payment(idempotency_key)
+    }
+
+    fn verify(
+        &self,
+        check: paykit_sdk::rail::ProofCheck,
+    ) -> pubky_switch_client::transport::BoxFuture<
+        '_,
+        Result<Option<u64>, paykit_sdk::rail::RailError>,
+    > {
+        self.fake.verify(check)
+    }
+}
+
+#[tokio::test]
+async fn test_own_record_join_signs_the_capabilities_it_checked() {
+    let w = World::new();
+    // The method pays one identifier at the join's check, and a list the record can't carry
+    // at every reading after.
+    let only = endpoint("btc-onchain-address");
+    let rail = Arc::new(ShiftingRail {
+        fake: Arc::clone(&w.rail),
+        lists: Mutex::new(vec![vec![only.clone()], oversized_capabilities()]),
+    });
+    let wallet = Box::pin(Paykit::join(
+        w.env(&w.alice, store()),
+        publishing(),
+        w.approve(&w.alice, "wallet", &AppScopes::new().pay().build().unwrap()),
+        rail as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    // The join's first record carries what was checked.
+    let member = PaykitMember::read(&held(&wallet, w.alice_id())).unwrap();
+    assert_eq!(member.endpoint_identifiers, [only]);
+}
+
 fn oversized_capabilities() -> Vec<paykit_lib::PaymentEndpointIdentifier> {
     (0..10_000)
         .map(|i| endpoint(&format!("btc-{i:057}")))

@@ -609,7 +609,7 @@ async fn test_public_record_of_an_app_only_the_switch_lists_read() {
 }
 
 #[tokio::test]
-async fn test_public_malformed_newer_record_never_displaces_a_valid_one() {
+async fn test_public_malformed_newer_record_is_the_apps_record_and_unusable() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let shop = w.shop().await;
@@ -622,8 +622,8 @@ async fn test_public_malformed_newer_record_never_displaces_a_valid_one() {
         expiry,
     );
     assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
-    // A newer record whose Paykit member doesn't read: refused as an invalid record, it
-    // takes no part in the comparison (Paykit wire 3.2), and it is the shop's failure, with
+    // A newer record whose Paykit member doesn't read: it is the app's newest record (Switch
+    // spec 4.2), and its endpoints are unusable (Paykit wire 3.2): the shop's failure, with
     // no endpoints from the valid record kept (Paykit spec 4).
     publish_at(
         &w,
@@ -637,12 +637,68 @@ async fn test_public_malformed_newer_record_never_displaces_a_valid_one() {
         fails_with(&list, shop.app_id(), &["Paykit wire 3.2"]),
         "{list:?}"
     );
-    // The valid record served again is used again, and nothing fails: the refused one never
-    // displaced it.
+    // The valid record served again is older than the newest seen: it never comes back, and
+    // the shop still fails.
     serve(&w, &valid);
     let list = read(&mut wallet, &w).await;
-    assert_eq!(ids(&list), ["btc-lightning-bolt11"]);
-    assert!(list.failures.is_empty(), "{list:?}");
+    assert!(list.endpoints.is_empty(), "{list:?}");
+    assert!(
+        fails_with(&list, shop.app_id(), &["Paykit wire 3.2"]),
+        "{list:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_public_equal_time_malformed_record_is_a_conflict_across_a_reload() {
+    let w = World::new();
+    let base = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&base)).await;
+    let app_id = wallet.app_id();
+    let shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1old"),
+        t0,
+        expiry,
+    );
+    listed(&mut wallet, &w).await;
+    let valid = publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1new"),
+        t0 + 1000,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
+    // Another body at the same updated_at, its Paykit member malformed: still two bodies at
+    // one updated_at, a conflict (Switch wire 3.2). The earlier record is used meanwhile.
+    publish_at(
+        &w,
+        json!({ "public_endpoints": { "btc-lightning-bolt12": 7 } }),
+        t0 + 1000,
+        expiry,
+    );
+    let conflict = |list: &PublicPaymentList| {
+        ids(list) == ["btc-lightning-bolt11"]
+            && fails_with(list, shop.app_id(), &["Switch spec 4.2"])
+    };
+    let list = read(&mut wallet, &w).await;
+    assert!(conflict(&list), "{list:?}");
+    // Restarted and served the valid side again: the conflict was kept, and stays until a
+    // strictly later record.
+    drop(wallet);
+    serve(&w, &valid);
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            std::sync::Arc::clone(&base),
+            app_id,
+            std::sync::Arc::clone(&w.clock),
+        )
+        .await;
+    let list = read(&mut wallet, &w).await;
+    assert!(conflict(&list), "{list:?}");
 }
 
 #[tokio::test]
