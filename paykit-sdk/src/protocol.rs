@@ -1910,7 +1910,7 @@ mod receive_tests {
             &alice,
             "paykit.allowance_proposal",
             vec![],
-            object(json!({ "allowance_id": id, "proposer_role": "allowee", "terms": terms })),
+            object(json!({ "allowance_id": id, "proposer_role": "allowee", "allower_generation": 1, "terms": terms })),
         );
         let end = bob.message(
             &alice,

@@ -1827,7 +1827,7 @@ mod tests {
         );
         // So does a proposal carrying them, the one message whose body holds terms.
         let body = json!({ "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
-            "proposer_role": "allowee", "terms": received });
+            "proposer_role": "allowee", "allower_generation": 1, "terms": received });
         let proposal =
             crate::bodies::AllowanceProposal::from_body(body.as_object().unwrap()).unwrap();
         assert_eq!(Value::Object(proposal.to_body().unwrap()), body);

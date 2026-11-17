@@ -1325,7 +1325,39 @@ pub(crate) fn generate(keys: &Keys) {
 /// [`binding_cases`] generates it.
 fn allowance_record_value(keys: &Keys) -> Vec<u8> {
     let held = paykit("sealed.json");
-    recertified(keys, st(&arr(&held, "binding_accepted")[1], "value")).into_bytes()
+    binding_value(keys, &arr(&held, "binding_accepted")[1]).into_bytes()
+}
+
+/// Keep each authored binding error while signing the current proposal and response.
+fn binding_value(keys: &Keys, case: &Value) -> String {
+    let text = recertified(keys, st(case, "value"));
+    if st(case, "collection") != "allowances" {
+        return text;
+    }
+    let value: Value = serde_json::from_str(&text).unwrap();
+    let proposal = stored_message(keys, "allowance_proposal");
+    let mut response = pubky_switch_core::message::Message::parse(
+        &pubky_switch_core::enc::unb64(st(&value["response"]["plaintext"], "json")).unwrap(),
+        paykit_lib::kinds::OPAQUE_MEMBERS,
+    )
+    .unwrap();
+    response.refs = vec![proposal.hash()];
+    let sender = keys.app_by_id(&response.from.app_id_text());
+    let response = pubky_switch_core::message::MessagePlaintext::sign_json(
+        &sender.keys,
+        response.to_json().unwrap(),
+        paykit_lib::kinds::OPAQUE_MEMBERS,
+    )
+    .unwrap();
+    let mut text = text;
+    for (member, plaintext) in [("proposal", proposal.plaintext()), ("response", &response)] {
+        let held = &value[member]["plaintext"];
+        assert_eq!(st(held, "sender_app"), b64(&plaintext.sender_app_id()));
+        text = text
+            .replace(st(held, "signature"), &b64(&plaintext.signature()))
+            .replace(st(held, "json"), &b64(plaintext.json()));
+    }
+    text
 }
 
 /// `sealed.json` with its binding cases as [`binding_cases`] generates them: the cases other
@@ -1390,7 +1422,7 @@ fn binding_cases(keys: &Keys) -> Vec<(Place<'static>, Value)> {
             let at = format!("/{list}/{i}");
             out.push((
                 Place::At(format!("{at}/value")),
-                Value::String(recertified(keys, st(case, "value"))),
+                Value::String(binding_value(keys, case)),
             ));
             out.push((
                 Place::At(format!("{at}/record_key")),

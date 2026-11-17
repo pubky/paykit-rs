@@ -90,6 +90,54 @@ async fn proposed(w: &World, shop: &mut Paykit, wallet: &mut Paykit) -> ([u8; 32
 }
 
 #[tokio::test]
+async fn test_allowances_proposal_binds_verified_own_generation() {
+    let w = World::new();
+    let _shop = Box::pin(shop(&w)).await;
+    let mut wallet = Box::pin(wallet(&w)).await;
+    let generation = wallet.app().own_identity().generation();
+    let sent = Box::pin(wallet.propose_allowance(w.bob_id(), AllowanceRole::Allower, terms()))
+        .await
+        .unwrap();
+    let held = Box::pin(value(&wallet, &sent.record)).await;
+    let record = AllowanceRecord::read(&serde_json::to_vec(&held).unwrap(), &w.alice_id()).unwrap();
+    let paykit_lib::Body::AllowanceProposal(body) = record.proposal.body() else {
+        panic!("proposal")
+    };
+    assert_eq!(body.allower_generation, generation);
+    assert_eq!(record.proposal.sender(), w.alice_id());
+}
+
+#[tokio::test]
+async fn test_allowances_proposal_binds_verified_remote_generation() {
+    let w = World::new();
+    let mut shop = Box::pin(shop(&w)).await;
+    let _wallet = Box::pin(wallet(&w)).await;
+    let old = w.homeserver.identity_doc(&w.alice_id()).unwrap();
+    w.alice
+        .sign_next(|body| {
+            body.service_keys
+                .push(pubky_switch_core::records::ServiceKeyEntry {
+                    generation: old.generation(),
+                    key: old.body().inbox.service_key,
+                });
+            body.generation = old.generation() + 1;
+        })
+        .unwrap();
+    let current = w.homeserver.identity_doc(&w.alice_id()).unwrap();
+    assert_ne!(current.generation(), shop.app().own_identity().generation());
+    let sent = Box::pin(shop.propose_allowance(w.alice_id(), AllowanceRole::Allowee, terms()))
+        .await
+        .unwrap();
+    let held = Box::pin(value(&shop, &sent.record)).await;
+    let record = AllowanceRecord::read(&serde_json::to_vec(&held).unwrap(), &w.bob_id()).unwrap();
+    let paykit_lib::Body::AllowanceProposal(body) = record.proposal.body() else {
+        panic!("proposal")
+    };
+    assert_eq!(body.allower_generation, current.generation());
+    assert_eq!(record.proposal.message().to, w.alice_id());
+}
+
+#[tokio::test]
 async fn test_allowances_proposal_accepted_on_both_sides() {
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
@@ -1134,7 +1182,7 @@ fn propose_unknown(w: &World, wallet: &Paykit, i: usize) {
         Vec::new(),
         json!({
             "allowance_id": format!("d0efffb7-191b-4709-b6c7-e343af55{i:04x}"),
-            "proposer_role": "allowee",
+            "proposer_role": "allowee", "allower_generation": 1,
             "terms": terms().to_json().unwrap(),
         })
         .as_object()
@@ -1564,7 +1612,7 @@ fn propose_as(w: &World, to: &[[u8; 16]], allowance_id: &str, limit: &str) {
         to,
         "paykit.allowance_proposal",
         Vec::new(),
-        json!({ "allowance_id": allowance_id, "proposer_role": "allowee", "terms": terms })
+        json!({ "allowance_id": allowance_id, "proposer_role": "allowee", "allower_generation": 1, "terms": terms })
             .as_object()
             .cloned()
             .unwrap(),
@@ -3397,7 +3445,7 @@ async fn test_allowances_answer_dropped_for_the_bound_taken_again_from_a_resend_
     let id = paykit_lib::AllowanceId::generate().unwrap();
     let body = json!({
         "allowance_id": id.as_str(),
-        "proposer_role": "allowee",
+        "proposer_role": "allowee", "allower_generation": 1,
         "terms": terms().to_json().unwrap(),
     });
     let signed = shop
@@ -3937,7 +3985,7 @@ async fn wallet_answer_dropped_then_recorded(
     let id = paykit_lib::AllowanceId::generate().unwrap();
     let body = json!({
         "allowance_id": id.as_str(),
-        "proposer_role": "allower",
+        "proposer_role": "allower", "allower_generation": 1,
         "terms": terms().to_json().unwrap(),
     });
     let signed = wallet
@@ -4251,7 +4299,7 @@ async fn test_allowances_kept_answer_waits_through_a_renewal_without_keys_then_p
     let id = paykit_lib::AllowanceId::generate().unwrap();
     let body = json!({
         "allowance_id": id.as_str(),
-        "proposer_role": "allower",
+        "proposer_role": "allower", "allower_generation": 1,
         "terms": terms().to_json().unwrap(),
     });
     let signed = wallet
@@ -5012,7 +5060,7 @@ async fn test_allowances_answers_of_one_millisecond_placed_in_acceptance_order()
     let id = paykit_lib::AllowanceId::generate().unwrap();
     let body = json!({
         "allowance_id": id.as_str(),
-        "proposer_role": "allower",
+        "proposer_role": "allower", "allower_generation": 1,
         "terms": terms().to_json().unwrap(),
     });
     let signed = wallet
@@ -5589,7 +5637,7 @@ async fn answer_kept_then_recorded_divergent(
     let id = paykit_lib::AllowanceId::generate().unwrap();
     let body = json!({
         "allowance_id": id.as_str(),
-        "proposer_role": "allower",
+        "proposer_role": "allower", "allower_generation": 1,
         "terms": terms().to_json().unwrap(),
     });
     let signed = wallet
@@ -5683,7 +5731,7 @@ fn unrecorded_proposal(
     let id = paykit_lib::AllowanceId::generate().unwrap();
     let body = json!({
         "allowance_id": id.as_str(),
-        "proposer_role": "allower",
+        "proposer_role": "allower", "allower_generation": 1,
         "terms": terms().to_json().unwrap(),
     });
     let signed = wallet

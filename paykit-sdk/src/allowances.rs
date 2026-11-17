@@ -1287,10 +1287,15 @@ impl Paykit {
             AllowanceRole::Allower => ProposerRole::Allower,
             AllowanceRole::Allowee => ProposerRole::Allowee,
         };
+        let allower_generation = match role {
+            AllowanceRole::Allower => self.app.own_identity().generation(),
+            AllowanceRole::Allowee => self.app.identity_of(&to, true).await?.doc.generation(),
+        };
         // The writer reads back what it writes by the recipient's rules (Paykit wire 4.15).
         let body = AllowanceProposal {
             allowance_id: allowance_id.clone(),
             proposer_role,
+            allower_generation,
             terms,
         }
         .to_body()?;
@@ -2589,7 +2594,7 @@ mod tests {
             &alice,
             "paykit.allowance_proposal",
             vec![],
-            object(json!({ "allowance_id": ID, "proposer_role": "allowee", "terms": terms() })),
+            object(json!({ "allowance_id": ID, "proposer_role": "allowee", "allower_generation": 1, "terms": terms() })),
         );
         let record = opened(bob.id(), proposal).unwrap();
         (alice, bob, record)
