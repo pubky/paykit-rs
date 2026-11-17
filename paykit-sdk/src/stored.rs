@@ -52,10 +52,11 @@
 //! nothing twice, whoever acknowledges it and whenever. A mark goes once its event is
 //! acknowledged. An event whose message the SDK can't keep, such as one whose entry is
 //! gone, is not taken, and stays for the host. So once [`Paykit::receive`] has returned,
-//! the host may acknowledge up to the last event its report showed. The SDK also
-//! acknowledges, in order, the events it has taken up to the first one it hasn't, so they
-//! don't pile up for a host that acknowledges only its own: housekeeping, which decides
-//! nothing.
+//! the host may acknowledge for Paykit up to the last event its report showed
+//! (`App::ack_events_for`), and app-wide (`App::ack_events`) only once every other protocol
+//! each event is for has handled it. The SDK also acknowledges for Paykit, in order, the
+//! events it has taken up to the first one it hasn't, so they don't pile up for a host that
+//! acknowledges only its own: housekeeping, which decides nothing.
 
 use paykit_lib::derive::natural_key;
 use paykit_lib::records::{ActivityRecord, StoredMessage};

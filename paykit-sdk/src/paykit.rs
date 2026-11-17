@@ -213,7 +213,8 @@ impl PaykitBackup {
 #[non_exhaustive]
 pub struct ReceiveSummary {
     /// The client's report of the feed read. Once the receive has returned, the host may
-    /// acknowledge its duty events up to the last one the report shows
+    /// acknowledge its duty events for Paykit up to the last one the report shows, and
+    /// app-wide only once every other protocol each is for has handled it
     /// ([`Paykit::receive`]).
     pub report: ReceiveReport,
     /// The `msg_id`s of the messages received, each with its effect committed with the
@@ -753,13 +754,17 @@ impl Paykit {
     /// (Paykit spec 9). `wait` is the long-poll wait in seconds.
     ///
     /// **Acknowledging duty events.** Once this call has returned, the host may acknowledge
-    /// the client's duty events up to the last one its summary's report shows
-    /// ([`pubky_switch_client::app::App::ack_events`]), whether the call returned early, under
-    /// a certificate Paykit refuses or an account gone, or not: the SDK has kept what it
-    /// needs of the events about stored entries before it returns. The SDK itself
-    /// acknowledges, in order, the events it took up to the first it didn't; the rest wait
-    /// for the host. An entry dropped unverified (`AppEvent::StoredEntryDropped`) counts in
-    /// its sender's mark, which asks that sender to send it again (`marks.rs`).
+    /// for Paykit the duty events up to the last one its summary's report shows, with
+    /// [`App::ack_events_for`] under `"paykit"`, the name [`PaykitProtocol`] registers,
+    /// whether the call returned early, under a certificate Paykit refuses or an account
+    /// gone, or not: the SDK has kept what it needs of the events about stored entries
+    /// before it returns. The app-wide [`App::ack_events`] acknowledges each event for every
+    /// protocol it is for, so in an app with other protocols the host calls it only once
+    /// each of those has handled the event too. The SDK itself acknowledges for Paykit
+    /// ([`App::ack_events_for`]), in order, the events it took up to the first it didn't;
+    /// the rest wait for the host. An entry dropped unverified
+    /// (`AppEvent::StoredEntryDropped`) counts in its sender's mark, which asks that sender
+    /// to send it again (`marks.rs`).
     ///
     /// An outgoing method may make the restore's first read before preparing its effects.
     /// This receive includes that read's events and effects in its summary, then its own.
@@ -768,9 +773,9 @@ impl Paykit {
     /// A receive that returns an error shows no report. When the client's read returned
     /// before the error, the client counts the duty events the read raised as handed to the
     /// host, so no later report shows them: after an error, the host takes them from
-    /// [`App::unacknowledged_events`] (through [`Paykit::app_mut`]), and acknowledges them
-    /// only once a later receive has returned, up to the last event its report shows, so the
-    /// SDK has taken those about stored entries first.
+    /// [`App::unacknowledged_events`] (through [`Paykit::app_mut`]), and acknowledges them,
+    /// as above, only once a later receive has returned, up to the last event its report
+    /// shows, so the SDK has taken those about stored entries first.
     ///
     /// # Errors
     ///
