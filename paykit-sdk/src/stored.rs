@@ -14,8 +14,9 @@
 //!   Meanwhile a Private Payment List is held over its record (`lh/`), the newer kept, and a
 //!   request is shown unrecorded ([`crate::RequestStatus::Unrecorded`]). A payee's
 //!   cancellation needs nothing here: its stop is kept with the cursor move, with no write
-//!   at the switch (`kc/`, Paykit spec 8.1). An Allowance's proposal and answers go into its
-//!   `allowances` record the same way; its end is kept as the stop at once (`ae/`, Paykit
+//!   at the switch (`kc/`, Paykit spec 8.1). An Allowance proposal or answer is tried
+//!   against its `allowances` record. An acceptance that would fill the empty `response`
+//!   stays unplaced (Paykit spec 8.3.1). An end is kept as the stop at once (`ae/`, Paykit
 //!   spec 8.3). A later write has the effects the message has at its first read, in the
 //!   batch that writes it: a receipt's on its claim and in the journal, the notice "marked
 //!   failed, was paid" included (`receive::receipt_settles`), and a request's or a list's
@@ -261,9 +262,8 @@ enum Place {
     },
     /// A list, held over its record: the hold to keep, `None` when a list as new is held.
     List(Option<(String, KeptMessage)>),
-    /// An Allowance's proposal or rejection, written into its record later, or its
-    /// acceptance, never written: kept and given up past its window with the host's notice,
-    /// since this version makes no Allowance accepted (Paykit spec 8.3.1; `allowances.rs`).
+    /// An Allowance proposal or answer to place in its record later. An acceptance that
+    /// would fill the empty `response` stays unplaced (Paykit spec 8.3.1).
     Allowance,
     /// An Allowance's end, kept as the stop at once, unless one is kept already.
     Stop(Option<(String, KeptMessage)>),
