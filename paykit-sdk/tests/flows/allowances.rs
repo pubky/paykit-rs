@@ -89,11 +89,9 @@ async fn proposed(w: &World, shop: &mut Paykit, wallet: &mut Paykit) -> ([u8; 32
     (sent.record, views[0].record)
 }
 
-/// The acceptance of the proposal `app` holds at `record`, sent to its identity, signed by
-/// `app` and written into the identity's record by a plain put, as an app of another
-/// implementation of this identity records it (Paykit spec 8.3.1), without the initialized
-/// ledger the test can't write. This SDK accepts no Allowance ([`Paykit::accept_allowance`])
-/// and sends none: nothing is queued. Returns the acceptance.
+/// Sign an acceptance of the proposal at `record` and put it in the record for tests
+/// that need an existing response. This helper returns the acceptance without queuing it.
+/// [`Paykit::accept_allowance`] refuses a direct acceptance (Paykit spec 8.3.1).
 async fn own_acceptance_recorded(app: &mut Paykit, record: &[u8; 32]) -> StoredMessage {
     let own = app.identity();
     let held = app.app().shared_record(record).await.unwrap().unwrap();
@@ -138,9 +136,8 @@ fn signer_of<'a>(w: &'a World, pubky: &[u8; 32]) -> &'a pubky_switch_client::tes
         .unwrap()
 }
 
-/// [`own_acceptance_recorded`], and the acceptance entered into its recipient's inbox for
-/// every app of the recipient holding `paykit_allowance`, as the other implementation's app
-/// sends it: this SDK's outbox never sends one (`may_send`).
+/// Put the acceptance from [`own_acceptance_recorded`] in the recipient's inbox for each
+/// app holding `paykit_allowance`. The SDK holds every delivery of an acceptance.
 async fn accept_elsewhere(w: &World, app: &mut Paykit, record: &[u8; 32]) -> StoredMessage {
     let acceptance = Box::pin(own_acceptance_recorded(app, record)).await;
     let to = signer_of(w, &acceptance.message().to);
@@ -169,9 +166,9 @@ async fn accept_elsewhere(w: &World, app: &mut Paykit, record: &[u8; 32]) -> Sto
     acceptance
 }
 
-/// Write `acceptance`, the counterparty's, into the record `app` holds at `record`, as an app
-/// of another implementation places a received acceptance (Paykit spec 8.3.1), by a plain
-/// put: this SDK keeps a received acceptance unplaced.
+/// Put the counterparty's `acceptance` in `record` for a test that needs it there.
+/// On receipt, the SDK keeps an acceptance unplaced if it would fill an empty `response`
+/// (Paykit spec 8.3.1).
 async fn place_elsewhere(
     w: &World,
     app: &mut Paykit,
@@ -203,9 +200,8 @@ async fn place_elsewhere(
         .unwrap();
 }
 
-/// The proposal at `theirs`, `proposer`'s, accepted by `acceptor` at `mine`, each record
-/// holding the acceptance as apps of another implementation write it ([`accept_elsewhere`],
-/// [`place_elsewhere`]). The acceptance is in the proposer's inbox too, which reflects it.
+/// Give both test records the same acceptance and put it in the proposer's inbox
+/// ([`accept_elsewhere`], [`place_elsewhere`]). Return the acceptance.
 async fn accepted(
     w: &World,
     acceptor: &mut Paykit,
@@ -322,9 +318,9 @@ async fn acceptance_refused(
 
 #[tokio::test]
 async fn test_allowances_acceptance_unavailable_in_either_role_with_no_effect() {
-    // Accepting is unavailable in this version: an acceptance is recorded only with the
-    // Allowance's initialized ledger, which isn't built (Paykit spec 8.3.1). In either role
-    // the call is refused before anything is written or queued, locally or at the switch.
+    // Allowance acceptance is unavailable in this revision (Paykit spec 8.3.1).
+    // In either role the SDK returns AllowanceAcceptanceUnavailable before it writes
+    // or queues anything. The proposal stays unanswered.
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
     let mut wallet = Box::pin(wallet(&w)).await;
@@ -368,11 +364,9 @@ async fn test_allowances_acceptance_unavailable_in_either_role_with_no_effect() 
 
 #[tokio::test]
 async fn test_allowances_received_acceptance_kept_unplaced_then_given_up_with_a_notice() {
-    // An app of alice's of another implementation accepts bob's proposal. Bob's shop takes
-    // the acceptance but never writes it into its record, which would make the Allowance
-    // accepted without its initialized ledger (Paykit spec 8.3.1): the acceptance stays kept,
-    // tried at each read, and 30 days from its acceptance it is given up with the host's
-    // notice, as a message its record can't take (Paykit spec 8.1).
+    // Bob's shop keeps the incoming acceptance unplaced because it would fill the
+    // record's empty response (Paykit spec 8.3.1). After the 30-day window, the shop
+    // gives it up and tells the host (Paykit spec 8.1).
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
     let mut wallet = Box::pin(wallet(&w)).await;
@@ -422,9 +416,9 @@ async fn test_allowances_received_acceptance_kept_unplaced_then_given_up_with_a_
 
 #[tokio::test]
 async fn test_allowances_accepted_record_written_elsewhere_reports_no_authority() {
-    // Alice's record holds an acceptance an app of another implementation wrote, without the
-    // initialized ledger this version doesn't read (Paykit spec 8.3.1). The wallet shows it
-    // accepted, with no executor and no consent, and writes nothing under it.
+    // Alice's record already holds the acceptance. Her wallet shows the Allowance as
+    // accepted, with no executor or consent, and makes no write to the record
+    // (Paykit spec 8.3.1).
     let w = World::new();
     let mut shop = Box::pin(shop(&w)).await;
     let mut wallet = Box::pin(wallet(&w)).await;

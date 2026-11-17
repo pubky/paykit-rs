@@ -2483,11 +2483,10 @@ impl Paykit {
                     Box::pin(self.keep_conflict_later(&record, &stored, order, locals)).await?;
                     return Ok(Placed::Done);
                 }
-                // An acceptance never takes the record's response: an Allowance becomes
-                // accepted only with its initialized ledger, recorded in one atomic batch on a
-                // protected record (Paykit spec 8.3.1), which this version doesn't build. It
-                // isn't written now: kept, tried again at each receive, and given up past its
-                // window with the host's notice, as any message its record can't take now.
+                // Allowance acceptance is unavailable in this revision (Paykit spec 8.3.1).
+                // Keep a received acceptance unplaced if it would fill the empty `response`.
+                // How acceptance establishes the Allower's initial ledger and the
+                // executor's initial anchor is specified with its implementation.
                 Some(held) if would_accept(&held, &stored) => return Ok(Placed::Not),
                 // A proposal waits over a divergent record until the user confirms it, as at
                 // receive; a rejection goes.
