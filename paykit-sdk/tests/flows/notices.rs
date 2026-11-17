@@ -29,6 +29,7 @@ async fn paid_after_failed(w: &World) -> (Paykit, Paykit, paykit_lib::AttemptId)
     let PayOutcome::Failed { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("failed");
@@ -173,6 +174,7 @@ async fn test_notices_late_receipt_raised_by_an_owner_restored_from_before_the_f
     let PayOutcome::Failed { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("failed");
@@ -317,6 +319,7 @@ async fn test_notices_late_receipt_of_a_payment_written_done_raises_none() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     shop.receive(None).await.unwrap();

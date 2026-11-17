@@ -33,7 +33,7 @@ async fn test_public_read_labelled_only_app_cannot_offer_an_unlabelled_destinati
         one_endpoint("btc-lightning-bolt12", "lno1labelled"),
     );
     let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
-    let outcome = wallet.pay_without_request(public_to_bob(&w)).await;
+    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.outcome;
     assert!(
         read.endpoints.is_empty() && w.rail.all_executions().is_empty(),
         "offered={read:?}; payment={outcome:?}; executions={:?}",
@@ -197,7 +197,11 @@ async fn test_public_read_one_app_failure_keeps_the_others() {
         ),
         "{read:?}"
     );
-    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    let outcome = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     assert_eq!(
         wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
@@ -208,6 +212,7 @@ async fn test_public_read_one_app_failure_keeps_the_others() {
     let refused = wallet
         .pay_without_request(public_to_bob(&w))
         .await
+        .outcome
         .unwrap_err();
     let Some(Refusal::NoDestination(text)) = refused.refusal() else {
         panic!("{refused:?}");
@@ -258,7 +263,11 @@ async fn test_public_read_refused_or_expired_app_reported_others_kept() {
         matches!(failures[1].1, PublicAppFailureReason::Refused(_)),
         "{read:?}"
     );
-    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    let outcome = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     // The third app's record expires as well: nothing is left, and the refusal names the
     // failures.
@@ -266,6 +275,7 @@ async fn test_public_read_refused_or_expired_app_reported_others_kept() {
     let refused = wallet
         .pay_without_request(public_to_bob(&w))
         .await
+        .outcome
         .unwrap_err();
     let Some(Refusal::NoDestination(text)) = refused.refusal() else {
         panic!("{refused:?}");
@@ -433,7 +443,11 @@ async fn test_public_read_discovery_and_payment_agree_on_a_failed_app() {
     let request = request_from(&mut shop, w.alice_id(), draft).await;
     wallet.receive(None).await.unwrap();
     let public = || PayOptions::default().with_mode(PaymentMode::Public(UserConfirmed::new()));
-    let refused = wallet.pay_request(&request, public()).await.unwrap_err();
+    let refused = wallet
+        .pay_request(&request, public())
+        .await
+        .outcome
+        .unwrap_err();
     let Some(Refusal::NoDestination(text)) = refused.refusal() else {
         panic!("{refused:?}");
     };
@@ -441,14 +455,10 @@ async fn test_public_read_discovery_and_payment_agree_on_a_failed_app() {
     assert!(w.rail.all_executions().is_empty());
     // A payment to any app pays the till's endpoint, the one discovery offers, and tells
     // the shop's failure with it.
-    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
-    let PayOutcome::Paid {
-        public_failures, ..
-    } = &outcome
-    else {
-        panic!("{outcome:?}");
-    };
-    assert_eq!(public_failures, &read.failures);
+    let paid = wallet.pay_without_request(public_to_bob(&w)).await;
+    assert_eq!(paid.public_failures, read.failures);
+    let outcome = paid.outcome.unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     assert_eq!(
         wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
         "btc-lightning-bolt11"
@@ -503,13 +513,14 @@ async fn test_public_read_required_app_in_conflict_pays_the_earlier_record() {
     let request = request_from(&mut shop, w.alice_id(), draft).await;
     wallet.receive(None).await.unwrap();
     let public = PayOptions::default().with_mode(PaymentMode::Public(UserConfirmed::new()));
-    let outcome = wallet.pay_request(&request, public).await.unwrap();
+    let paid = wallet.pay_request(&request, public).await;
+    let outcome = paid.outcome.unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     assert_eq!(
         wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
         "btc-lightning-bolt11"
     );
-    let failures = wallet.payment_public_failures();
+    let failures = &paid.public_failures;
     assert_eq!(failures.len(), 1, "{failures:?}");
     assert!(
         matches!(&failures[0].reason, PublicAppFailureReason::Refused(rule)
@@ -546,9 +557,12 @@ async fn test_public_read_failures_told_with_every_payment_result() {
     // The payment method fails the payment: the outcome isn't `Paid`, and the shop's
     // failure is still told.
     w.rail.next(paykit_sdk::rail::Behaviour::Fail);
-    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
-    assert!(matches!(outcome, PayOutcome::Failed { .. }), "{outcome:?}");
-    assert!(shop_failed(wallet.payment_public_failures()));
+    let failed = wallet.pay_without_request(public_to_bob(&w)).await;
+    assert!(
+        matches!(failed.outcome, Ok(PayOutcome::Failed { .. })),
+        "{failed:?}"
+    );
+    assert!(shop_failed(&failed.public_failures));
     // The payer's switch can't be reached for the attempt: an error, and the shop's
     // failure is still told.
     w.alice
@@ -557,11 +571,16 @@ async fn test_public_read_failures_told_with_every_payment_result() {
             path: "/ops".into(),
             after: 0,
         });
-    assert!(wallet.pay_without_request(public_to_bob(&w)).await.is_err());
-    assert!(shop_failed(wallet.payment_public_failures()));
-    // A resume reads no public endpoints: it tells none.
-    wallet.resume_payments().await.unwrap();
-    assert!(wallet.payment_public_failures().is_empty());
+    let errored = wallet.pay_without_request(public_to_bob(&w)).await;
+    assert!(errored.outcome.is_err(), "{errored:?}");
+    assert!(shop_failed(&errored.public_failures));
+    // A payment that goes through tells it too.
+    let paid = wallet.pay_without_request(public_to_bob(&w)).await;
+    assert!(
+        matches!(paid.outcome, Ok(PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
+    assert!(shop_failed(&paid.public_failures));
 }
 
 #[tokio::test]
@@ -595,7 +614,11 @@ async fn test_public_read_required_app_cached_record_not_paid_over_a_refused_one
     let request = request_from(&mut shop, w.alice_id(), draft).await;
     wallet.receive(None).await.unwrap();
     let public = PayOptions::default().with_mode(PaymentMode::Public(UserConfirmed::new()));
-    let refused = wallet.pay_request(&request, public).await.unwrap_err();
+    let refused = wallet
+        .pay_request(&request, public)
+        .await
+        .outcome
+        .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
         "{refused:?}"
@@ -624,7 +647,11 @@ async fn test_public_read_payment_tells_a_conflict_it_first_finds() {
         one_endpoint("btc-lightning-bolt11", "lnbc1till"),
     );
     // The wallet's first payment reads both records and pays one.
-    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    let outcome = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     // Another body of the shop's record at the same updated_at: the next payment is the
     // first read to find the conflict, pays the till, and tells the conflict.
@@ -635,13 +662,12 @@ async fn test_public_read_payment_tells_a_conflict_it_first_finds() {
         t0,
         expiry,
     );
-    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
-    let PayOutcome::Paid {
-        public_failures, ..
-    } = &outcome
-    else {
-        panic!("{outcome:?}");
-    };
+    let paid = wallet.pay_without_request(public_to_bob(&w)).await;
+    let public_failures = &paid.public_failures;
+    assert!(
+        matches!(paid.outcome, Ok(PayOutcome::Paid { .. })),
+        "{paid:?}"
+    );
     assert_eq!(public_failures.len(), 1, "{public_failures:?}");
     assert_eq!(public_failures[0].app_id, apps[0].1);
     assert!(
@@ -706,7 +732,11 @@ async fn test_public_read_withdrawal_served_after_a_clock_rollback_is_used() {
     assert_eq!(ids, ["btc-lightning-bolt11"], "{read:?}");
     assert!(read.failures.is_empty(), "{read:?}");
     // A payment pays from the same record discovery shows.
-    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    let outcome = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     assert_eq!(
         wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
@@ -782,7 +812,11 @@ async fn test_public_read_required_app_failure_leaves_no_public_destination() {
     let request = request_from(&mut shop, w.alice_id(), draft).await;
     wallet.receive(None).await.unwrap();
     reads.fail(&shop.app_id());
-    let refused = wallet.pay_request(&request, public()).await.unwrap_err();
+    let refused = wallet
+        .pay_request(&request, public())
+        .await
+        .outcome
+        .unwrap_err();
     let Some(Refusal::NoDestination(text)) = refused.refusal() else {
         panic!("{refused:?}");
     };
@@ -792,7 +826,11 @@ async fn test_public_read_required_app_failure_leaves_no_public_destination() {
     assert!(wallet.payments().await.unwrap().is_empty());
     // Once the shop's record reads again, its endpoint is paid, never the till's.
     reads.heal();
-    let outcome = wallet.pay_request(&request, public()).await.unwrap();
+    let outcome = wallet
+        .pay_request(&request, public())
+        .await
+        .outcome
+        .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     assert_eq!(
         wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
@@ -817,6 +855,7 @@ async fn test_public_read_app_without_record_has_none_whatever_was_seen() {
     let refused = wallet
         .pay_without_request(public_to_bob(&w))
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::NoDestination(_))),

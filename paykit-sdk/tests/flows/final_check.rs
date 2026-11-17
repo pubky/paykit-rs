@@ -398,6 +398,7 @@ async fn in_flight(w: &World) -> (Arc<HookedStore>, [u8; 16], paykit_lib::Attemp
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -427,7 +428,10 @@ async fn stopped_before_the_rail() -> (World, Arc<HookedStore>, [u8; 16], paykit
                 crate::common::day_window(),
             )
             .await;
-        let _ = crashing.pay_request(&request, PayOptions::default()).await;
+        let _ = crashing
+            .pay_request(&request, PayOptions::default())
+            .await
+            .outcome;
         drop(crashing);
         assert!(
             w.rail.all_executions().is_empty(),
@@ -482,6 +486,7 @@ async fn test_final_check_first_dispatch_late_answer_removing_the_app_not_paid()
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let PayOutcome::Pending { attempt_id, .. } = outcome else {
         panic!("{outcome:?}");
@@ -574,6 +579,7 @@ async fn test_final_check_first_dispatch_payee_copy_aged_during_the_own_read_not
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(
@@ -667,6 +673,7 @@ async fn test_final_check_repeat_retention_ending_during_the_lookup_not_paid() {
     let PayOutcome::Pending { attempt_id, .. } = first
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -740,6 +747,7 @@ async fn test_final_check_first_dispatch_late_equivocation_refused() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(
@@ -900,6 +908,7 @@ async fn resumed_failed(
     let again = wallet
         .pay_request(request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(again, PayOutcome::Paid { .. }), "{again:?}");
 }
@@ -921,6 +930,7 @@ async fn test_final_check_commit_after_the_acceptance_failing_leaves_the_payment
     assert!(wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .is_err());
     let payment = wallet.payments().await.unwrap().remove(0);
     assert_eq!(payment.stage, paykit_sdk::Stage::Attempted);
@@ -952,6 +962,7 @@ async fn test_final_check_held_first_dispatch_leaves_the_payment_unsubmitted() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
     let payment = wallet.payments().await.unwrap().remove(0);
@@ -1021,6 +1032,7 @@ async fn test_fence_removal_answered_during_paying_not_paid() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let PayOutcome::Pending { attempt_id, .. } = outcome else {
         panic!("{outcome:?}");
@@ -1057,6 +1069,7 @@ async fn test_fence_equivocation_answered_during_paying_refused() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(
@@ -1082,6 +1095,7 @@ async fn test_fence_stop_lost_to_a_crash_stays_paying_and_uncertain() {
     assert!(wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .is_err());
     drop(wallet);
     assert!(w.rail.all_executions().is_empty());
@@ -1124,6 +1138,7 @@ async fn test_acceptance_queued_once_the_call_is_made() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     // The control for `no_acceptance_queued`: the call was made, and the outbox holds the
@@ -1161,6 +1176,7 @@ async fn test_fence_attempt_past_its_pre_dispatch_budget_not_paid() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(
@@ -1265,6 +1281,7 @@ async fn test_default_config_takes_a_one_day_rail() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
@@ -1290,6 +1307,7 @@ async fn test_fence_answer_committed_past_the_budget_not_paid() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(
@@ -1323,7 +1341,10 @@ async fn test_acceptance_after_a_paid_outcome_goes_only_once_its_proof_is_journa
         )
         .await;
     store.stop_at_outbox();
-    let _ = wallet.pay_request(&request, PayOptions::default()).await;
+    let _ = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome;
     drop(wallet);
     let attempt_id = {
         store.restart();
@@ -1375,6 +1396,7 @@ async fn test_acceptance_owed_after_the_outcome_is_queued_once_at_a_resume() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     assert_eq!(
@@ -1429,6 +1451,7 @@ async fn test_acceptance_owed_backs_up_and_restores() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     assert_eq!(
@@ -1475,6 +1498,7 @@ async fn test_acceptance_owed_sent_with_a_users_done_on_a_pending_payment() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let PayOutcome::Pending { attempt_id, .. } = outcome else {
         panic!("{outcome:?}")
@@ -1518,6 +1542,7 @@ async fn test_acceptance_of_a_pending_payment_retried_at_resume() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Pending { .. }), "{outcome:?}");
     store.refuse_acceptances(false);
@@ -1546,6 +1571,7 @@ async fn test_acceptance_owed_sent_when_another_app_resolves_the_payment_done() 
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let PayOutcome::Pending { attempt_id, .. } = outcome else {
         panic!("{outcome:?}")
@@ -1601,6 +1627,7 @@ async fn stopped_unsubmitted(w: &World) -> (Arc<HookedStore>, Paykit, paykit_lib
     assert!(wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .is_err());
     let payment = wallet.payments().await.unwrap().remove(0);
     assert_eq!(payment.stage, paykit_sdk::Stage::Attempted);
@@ -1680,12 +1707,14 @@ async fn test_resume_an_owed_acceptance_that_fails_stops_no_later_entry() {
         let paid = wallet
             .pay_request(&first, PayOptions::default())
             .await
+            .outcome
             .unwrap();
         assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
         w.rail.next(Behaviour::Hang);
         let PayOutcome::Pending { attempt_id, .. } = wallet
             .pay_request(&second, PayOptions::default())
             .await
+            .outcome
             .unwrap()
         else {
             panic!("the second payment is in flight");
@@ -1736,6 +1765,7 @@ async fn test_acceptance_sent_earlier_is_placed_when_another_app_resolves_the_pa
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("in flight");
@@ -1796,6 +1826,7 @@ async fn test_acceptance_owed_sent_once_confirmed_over_a_divergent_view() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     store.refuse_acceptances(false);
@@ -1832,6 +1863,7 @@ async fn test_acceptance_owed_queued_then_unplaced_finishes_after_a_restart() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let PayOutcome::Paid { attempt_id, .. } = outcome else {
         panic!("{outcome:?}")
@@ -1894,6 +1926,7 @@ async fn crash_owed_acceptance_path(
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let attempt_id = match outcome {
         PayOutcome::Paid { attempt_id, .. } | PayOutcome::Pending { attempt_id, .. } => attempt_id,
@@ -1991,6 +2024,7 @@ async fn test_acceptance_owed_restored_bare_is_placed_at_the_first_resume() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     store.refuse_acceptances(false);
@@ -2067,6 +2101,7 @@ async fn manual_deny_boundary(
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     let Some(paykit_sdk::Refusal::Blocked { payment }) = refused.refusal() else {
         panic!("{refused:?}")
@@ -2100,7 +2135,7 @@ async fn manual_deny_boundary(
             });
         }
     }));
-    let outcome = wallet.pay_request(&request, options).await.unwrap();
+    let outcome = wallet.pay_request(&request, options).await.outcome.unwrap();
     (w, outcome)
 }
 
@@ -2166,6 +2201,7 @@ async fn test_final_check_manual_override_keeps_its_selected_transfer_amount() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     let Some(paykit_sdk::Refusal::Transfer { quote, .. }) = refused.refusal() else {
         panic!("{refused:?}")
@@ -2180,6 +2216,7 @@ async fn test_final_check_manual_override_keeps_its_selected_transfer_amount() {
             PayOptions::default().with_transfer_confirmed((**quote).clone()),
         )
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(paykit_sdk::Refusal::AttemptFailed(inner))

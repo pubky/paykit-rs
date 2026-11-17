@@ -84,7 +84,10 @@ async fn crash_and_resume(fault: Fault) -> bool {
         wallet_id,
     )
     .await;
-    let first = crashing.pay_request(&request, PayOptions::default()).await;
+    let first = crashing
+        .pay_request(&request, PayOptions::default())
+        .await
+        .outcome;
     let hit = faulty.stopped();
     drop(crashing);
     if !hit {
@@ -99,7 +102,10 @@ async fn crash_and_resume(fault: Fault) -> bool {
     wallet.resume_payments().await.unwrap();
     wallet.receive(None).await.unwrap();
     if wallet.request(&request).await.unwrap().status != RequestStatus::Paid {
-        let again = wallet.pay_request(&request, PayOptions::default()).await;
+        let again = wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .outcome;
         assert!(
             matches!(again, Ok(PayOutcome::Paid { .. })),
             "{fault:?}: {again:?}"
@@ -225,6 +231,7 @@ async fn crash_receiving_a_receipt(fault: Fault) -> bool {
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");

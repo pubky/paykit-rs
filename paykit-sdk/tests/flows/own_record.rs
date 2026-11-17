@@ -84,7 +84,11 @@ async fn test_own_record_public_endpoint_published_paid_and_credited() {
         member.public_endpoints
     );
 
-    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    let outcome = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap();
     let PayOutcome::Paid { attempt_id, .. } = outcome else {
         panic!("{outcome:?}");
     };
@@ -117,6 +121,7 @@ async fn test_own_record_public_endpoint_removed_no_longer_paid() {
     let refused = wallet
         .pay_without_request(public_to_bob(&w))
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused, PaykitError::Refused(Refusal::NoDestination(_))),
@@ -568,7 +573,11 @@ async fn test_own_record_edit_after_an_unknown_read_result_waits_for_a_load() {
     shop.set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1tips"))
         .await
         .unwrap();
-    wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap();
     // The read that takes the proof is applied, but the store can't tell: a read may take
     // another device's record into the own record, so the record held may be stale.
     faulty

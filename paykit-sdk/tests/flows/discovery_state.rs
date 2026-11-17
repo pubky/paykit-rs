@@ -82,6 +82,7 @@ impl Held {
                 .wallet
                 .pay_without_request(payment(w, self.family, self.app))
                 .await
+                .outcome
                 .map(|_| ()),
         }
     }
@@ -161,6 +162,7 @@ async fn produced(w: &World, family: Family) -> Held {
         let error = wallet
             .pay_without_request(payment(w, family, app))
             .await
+            .outcome
             .unwrap_err();
         assert!(
             matches!(error.refusal(), Some(Refusal::WaitingForList)),

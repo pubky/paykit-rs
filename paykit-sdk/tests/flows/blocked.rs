@@ -62,6 +62,7 @@ async fn resumed_repeat(w: &World, between: impl AsyncFnOnce(&mut Paykit)) -> u6
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("in flight");
@@ -87,6 +88,7 @@ async fn test_blocked_request_paid_only_once_the_user_confirms_it() {
     let error = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     let payment = shown(error);
     assert_eq!(payment.payee, w.bob_id());
@@ -105,6 +107,7 @@ async fn test_blocked_request_paid_only_once_the_user_confirms_it() {
             PayOptions::default().with_blocked_confirmed(other),
         )
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(shown(again), payment);
     let outcome = wallet
@@ -113,6 +116,7 @@ async fn test_blocked_request_paid_only_once_the_user_confirms_it() {
             PayOptions::default().with_blocked_confirmed(payment),
         )
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
@@ -125,6 +129,7 @@ async fn test_blocked_pause_ends_when_the_payee_is_unblocked() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
@@ -166,7 +171,13 @@ async fn test_blocked_payment_without_a_request_made_only_once_confirmed() {
         UnrequestedPayment::new(w.bob_id(), btc("0.001"))
             .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")))
     };
-    let shown = shown(wallet.pay_without_request(payment()).await.unwrap_err());
+    let shown = shown(
+        wallet
+            .pay_without_request(payment())
+            .await
+            .outcome
+            .unwrap_err(),
+    );
     assert_eq!(shown.request, None);
     assert_eq!(shown.amount, btc("0.001"));
     let confirmed = UnrequestedPayment::new(w.bob_id(), btc("0.001")).with_options(
@@ -174,7 +185,7 @@ async fn test_blocked_payment_without_a_request_made_only_once_confirmed() {
             .with_endpoint(endpoint("btc-lightning-bolt12"))
             .with_blocked_confirmed(shown),
     );
-    let outcome = wallet.pay_without_request(confirmed).await.unwrap();
+    let outcome = wallet.pay_without_request(confirmed).await.outcome.unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
 
@@ -197,6 +208,7 @@ async fn test_blocked_copy_read_within_10_minutes_makes_no_call() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
@@ -208,6 +220,7 @@ async fn test_blocked_copy_older_than_10_minutes_read_first() {
     let error = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(shown(error).payee, w.bob_id());
 }
@@ -221,6 +234,7 @@ async fn test_blocked_copy_older_than_10_minutes_fails_closed_on_a_failed_read()
     assert!(wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .is_err());
     assert!(wallet.payments().await.unwrap().is_empty());
 }
@@ -234,6 +248,7 @@ async fn test_blocked_local_block_seen_with_no_read() {
     let error = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(shown(error).payee, w.bob_id());
 }
@@ -346,6 +361,7 @@ async fn test_blocked_restore_reads_the_deny_list_again_before_a_payment() {
     let refused = restored
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::Blocked { .. })),
@@ -365,6 +381,7 @@ async fn test_blocked_own_unblock_kept_unanswered_lets_the_users_payment_go() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
@@ -907,7 +924,11 @@ async fn test_blocked_own_block_kept_unanswered_survives_a_restore_and_is_writte
     // Past the restore's hold, which the user confirms, the block refuses the payment.
     let held = PayOptions::default()
         .with_possibly_cancelled_confirmed(crate::common::held(&wallet, &request).await);
-    let refused = wallet.pay_request(&request, held).await.unwrap_err();
+    let refused = wallet
+        .pay_request(&request, held)
+        .await
+        .outcome
+        .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::Blocked { .. })),
         "{refused:?}"
@@ -1324,6 +1345,7 @@ async fn test_blocked_block_the_switch_took_counts_though_the_store_then_fails()
     let error = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(shown(error).payee, w.bob_id());
     assert!(w.rail.all_executions().is_empty());
@@ -1417,6 +1439,7 @@ async fn test_blocked_own_unblock_whose_batch_is_dropped_counts_no_more_for_the_
     let error = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(shown(error).payee, w.bob_id());
     assert!(w.rail.all_executions().is_empty());
@@ -1472,7 +1495,11 @@ async fn test_blocked_own_unblock_kept_unanswered_not_restored() {
     assert!(lists.deny.contains(&w.bob_id()));
     let held = PayOptions::default()
         .with_possibly_cancelled_confirmed(crate::common::held(&wallet, &request).await);
-    let error = wallet.pay_request(&request, held).await.unwrap_err();
+    let error = wallet
+        .pay_request(&request, held)
+        .await
+        .outcome
+        .unwrap_err();
     assert_eq!(shown(error).payee, w.bob_id());
 }
 
@@ -1589,6 +1616,7 @@ async fn test_blocked_block_applied_whose_answer_is_of_unknown_fate_still_counts
     let error = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(shown(error).payee, w.bob_id());
     assert!(w.rail.all_executions().is_empty());
@@ -1739,6 +1767,7 @@ async fn test_blocked_block_counted_but_never_kept_written_at_the_next_receive()
     let error = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(shown(error).payee, w.bob_id());
     wallet.receive(None).await.unwrap();
@@ -2017,6 +2046,7 @@ async fn answer_held(held: Held, answer: Answer, between: Between) {
         let refused = phone
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err();
         assert_eq!(
             refused.refusal(),
@@ -2290,6 +2320,7 @@ async fn test_blocked_held_rejection_past_its_window_given_up_with_a_notice() {
     assert!(phone
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .is_err());
     wallet.acknowledge_notice(&notices[0].id).await.unwrap();
     assert!(wallet.notices().await.unwrap().is_empty());
@@ -2434,12 +2465,14 @@ async fn blocked_then_unknown(
         wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err(),
     );
     let unrequested = shown(
         wallet
             .pay_without_request(unrequested_payment(w, PayOptions::default()))
             .await
+            .outcome
             .unwrap_err(),
     );
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
@@ -2466,7 +2499,8 @@ async fn test_blocked_confirmed_payment_while_the_deny_list_is_unknown_refused()
     fail_list_read(&w);
     let refused = wallet
         .pay_request(&request, PayOptions::default().with_blocked_confirmed(paid))
-        .await;
+        .await
+        .outcome;
     assert!(refused.is_err(), "{refused:?}");
     wallet.flush().await.unwrap();
     assert!(w.rail.all_executions().is_empty());
@@ -2487,7 +2521,8 @@ async fn test_blocked_confirmed_payment_without_a_request_while_the_deny_list_is
             &w,
             PayOptions::default().with_blocked_confirmed(unrequested),
         ))
-        .await;
+        .await
+        .outcome;
     assert!(refused.is_err(), "{refused:?}");
     wallet.flush().await.unwrap();
     assert!(w.rail.all_executions().is_empty());
@@ -2515,6 +2550,7 @@ async fn no_list_asked_while_held(held: Held) {
     let refused = wallet
         .pay_without_request(unrequested_payment(&w, PayOptions::default()))
         .await
+        .outcome
         .unwrap_err();
     match held {
         Held::Blocked => assert!(
@@ -2534,6 +2570,7 @@ async fn no_list_asked_while_held(held: Held) {
     let waits = wallet
         .pay_without_request(unrequested_payment(&w, PayOptions::default()))
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(waits.refusal(), Some(Refusal::WaitingForList)),
@@ -2836,6 +2873,7 @@ async fn test_blocked_receipt_to_a_blocked_payer_delivered() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     till.receive(None).await.unwrap();

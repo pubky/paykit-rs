@@ -795,6 +795,7 @@ async fn test_stored_refused_request_shown_unrecorded_then_written() {
     assert!(wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .is_err());
     // The SDK took the duty events and acknowledged them.
     let events = wallet.app_mut().unacknowledged_events().await.unwrap();
@@ -865,6 +866,7 @@ async fn test_stored_refused_proof_at_the_payee_written_later() {
     wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     // The acceptance's and the proof's steps are refused, and the app's first writes too.
     refuse_writes(&w.bob, 4);
@@ -1151,6 +1153,7 @@ async fn test_stored_refused_receipt_written_beside_its_proof() {
     wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     shop.receive(None).await.unwrap();
     let record = shop.payee_activity().await.unwrap()[0].record;
@@ -1175,6 +1178,7 @@ async fn test_stored_refused_receipt_from_before_a_joined_apps_first_listing_wri
     wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let mut phone = Paykit::join(
         w.env(&w.alice, store()),
@@ -1224,6 +1228,7 @@ pub(crate) async fn pending(
     let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -1314,6 +1319,7 @@ async fn test_stored_refused_unrequested_proof_credited_later() {
                 ),
         )
         .await
+        .outcome
         .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
@@ -1796,6 +1802,7 @@ async fn test_stored_refused_receipt_never_opens_a_deleted_record() {
     wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     shop.receive(None).await.unwrap();
     let record = shop.payee_activity().await.unwrap()[0].record;
@@ -1891,6 +1898,7 @@ async fn test_stored_refused_receipt_waiting_for_its_records_key_given_up_after_
     wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     phone.receive(None).await.unwrap();
     shop.receive(None).await.unwrap();
@@ -1940,6 +1948,7 @@ async fn test_stored_refused_receipt_waiting_for_the_current_epochs_key_given_up
     wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     shop.receive(None).await.unwrap();
     let record = shop.payee_activity().await.unwrap()[0].record;
@@ -3018,7 +3027,7 @@ async fn paid_without_a_request(w: &World, wallet: &mut Paykit) {
         .with_options(
             PayOptions::default().with_endpoint(crate::common::endpoint("btc-lightning-bolt12")),
         );
-    let outcome = wallet.pay_without_request(payment).await.unwrap();
+    let outcome = wallet.pay_without_request(payment).await.outcome.unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
         "{outcome:?}"

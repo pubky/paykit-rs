@@ -210,6 +210,7 @@ async fn test_custom_rail_proof_credited_once_per_settlement() {
             ),
         )
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     // The payee credits it, by the settlement its rail reads from the ledger's proof.
@@ -292,6 +293,7 @@ async fn pay_through_with(
             ),
         )
         .await
+        .outcome
 }
 
 #[tokio::test]

@@ -133,7 +133,11 @@ async fn test_public_endpoint_paid_proven_and_credited() {
     assert_eq!(listed[0].endpoint_id, endpoint("btc-lightning-bolt12"));
     assert_eq!(listed[0].app_id, shop.app_id());
 
-    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    let outcome = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap();
     let PayOutcome::Paid { attempt_id, .. } = outcome else {
         panic!("{outcome:?}");
     };
@@ -177,6 +181,7 @@ async fn test_public_malformed_record_refused() {
     let refused = wallet
         .pay_without_request(public_to_bob(&w))
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
@@ -197,6 +202,7 @@ async fn test_public_expired_or_stale_record_refused() {
     let refused = wallet
         .pay_without_request(public_to_bob(&w))
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
@@ -210,6 +216,7 @@ async fn test_public_expired_or_stale_record_refused() {
     let refused = wallet
         .pay_without_request(public_to_bob(&w))
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
@@ -242,6 +249,7 @@ async fn test_public_record_without_public_endpoints_offers_none() {
     let refused = wallet
         .pay_without_request(public_to_bob(&w))
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
@@ -275,7 +283,11 @@ async fn test_public_older_record_after_a_newer_one_not_used() {
     // 4.2), and the payment goes to the newer record's endpoint.
     serve(&w, &older);
     assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
-    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    let outcome = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     assert_eq!(
         wallet.payments().await.unwrap()[0].endpoint_id,
@@ -320,14 +332,10 @@ async fn test_public_conflicting_records_use_the_earlier_one_until_a_later_one()
         fails_with(&list, shop.app_id(), &["Switch spec 4.2"]),
         "{list:?}"
     );
-    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
-    let PayOutcome::Paid {
-        public_failures, ..
-    } = &outcome
-    else {
-        panic!("{outcome:?}");
-    };
-    assert_eq!(public_failures, &list.failures);
+    let paid = wallet.pay_without_request(public_to_bob(&w)).await;
+    assert_eq!(paid.public_failures, list.failures);
+    let outcome = paid.outcome.unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     assert_eq!(
         wallet.payments().await.unwrap()[0].endpoint_id,
         endpoint("btc-lightning-bolt11")
@@ -440,6 +448,7 @@ async fn test_public_slow_switch_waited_on_only_through_its_grace() {
         .with_options(PayOptions::default().with_mode(PaymentMode::Public(UserConfirmed::new())));
     let refused = bounded(wallet.pay_without_request(unconfirmed.clone()))
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::IdentityUnconfirmed));
     assert!(wallet.payments().await.unwrap().is_empty());
@@ -447,6 +456,7 @@ async fn test_public_slow_switch_waited_on_only_through_its_grace() {
     slow.release();
     let outcome = bounded(wallet.pay_without_request(unconfirmed))
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
@@ -460,7 +470,10 @@ async fn test_public_slow_switch_paid_once_the_user_confirms() {
     let (mut wallet, _slow, _) = beside_a_slow_switch(&w, &mut shop).await;
     let mut payment = public_to_bob(&w);
     payment.options.unconfirmed_identity_confirmed = Some(UserConfirmed::new());
-    let outcome = bounded(wallet.pay_without_request(payment)).await.unwrap();
+    let outcome = bounded(wallet.pay_without_request(payment))
+        .await
+        .outcome
+        .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     assert_eq!(w.rail.all_executions().len(), 1);
 }
@@ -479,11 +492,12 @@ async fn test_public_unconfirmed_payee_paid_only_once_the_user_confirms() {
     let refused = wallet
         .pay_without_request(public_to_bob(&w))
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::IdentityUnconfirmed));
     let mut payment = public_to_bob(&w);
     payment.options.unconfirmed_identity_confirmed = Some(UserConfirmed::new());
-    let outcome = wallet.pay_without_request(payment).await.unwrap();
+    let outcome = wallet.pay_without_request(payment).await.outcome.unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
 
@@ -496,6 +510,7 @@ async fn test_public_request_endpoint_beside_a_slow_switch_not_waited_on() {
     let (mut wallet, _slow, request) = beside_a_slow_switch(&w, &mut shop).await;
     let outcome = bounded(wallet.pay_request(&request, PayOptions::default()))
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
@@ -619,6 +634,7 @@ async fn test_public_refused_record_reported_over_a_held_record_without_endpoint
     let refused = wallet
         .pay_without_request(public_to_bob(&w))
         .await
+        .outcome
         .unwrap_err();
     let Some(Refusal::NoDestination(text)) = refused.refusal() else {
         panic!("{refused:?}");
@@ -728,6 +744,7 @@ async fn test_public_endpoint_the_payment_method_doesnt_pay_refused() {
     let refused = wallet
         .pay_without_request(public_to_bob(&w))
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(
@@ -759,7 +776,11 @@ async fn test_public_endpoints_pay_the_payment_methods_first() {
         } }),
         Some(w.clock.now_ms() + 30 * DAY_MS),
     );
-    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    let outcome = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     assert_eq!(
         wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
@@ -814,7 +835,11 @@ async fn test_public_endpoints_of_every_app_in_the_payment_methods_order() {
         2,
         "both apps' endpoints are listed"
     );
-    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    let outcome = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     // Only the later app offers it.
     assert_eq!(
@@ -885,7 +910,11 @@ async fn test_public_same_identifier_from_two_apps_pays_the_first_by_app_id() {
         .endpoints;
     assert_eq!(offered.len(), 2, "{offered:?}");
 
-    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    let outcome = wallet
+        .pay_without_request(public_to_bob(&w))
+        .await
+        .outcome
+        .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     let (handed, _) = w.rail.selections().pop().unwrap();
     let payloads: Vec<&str> = handed.iter().map(|c| c.payload.as_str()).collect();

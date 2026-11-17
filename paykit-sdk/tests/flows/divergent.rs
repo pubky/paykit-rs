@@ -144,6 +144,7 @@ async fn test_divergent_request_paid_by_hand_only_after_confirmation() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused_records(&refused), vec![(record, true, true)]);
     assert!(w.rail.all_executions().is_empty());
@@ -159,6 +160,7 @@ async fn test_divergent_request_paid_by_hand_only_after_confirmation() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
@@ -193,6 +195,7 @@ async fn test_divergent_request_past_its_deadline_refused_for_the_deadline() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused.refusal(), Some(&Refusal::DeadlinePassed));
     assert!(w.rail.all_executions().is_empty());
@@ -216,6 +219,7 @@ async fn test_divergent_request_from_a_removed_app_refused_for_its_destination()
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::Destination(_))),
@@ -256,6 +260,7 @@ async fn test_divergent_request_requiring_a_removed_app_refused_for_its_destinat
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::Destination(_))),
@@ -289,6 +294,7 @@ async fn test_divergent_request_requiring_an_app_not_listed_yet_still_paused() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused_records(&refused), vec![(record, true, true)]);
     assert!(w.rail.all_executions().is_empty());
@@ -314,6 +320,7 @@ async fn test_divergent_request_unjudged_while_the_payees_identity_is_unreadable
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::IdentityUnavailable(_))),
@@ -378,12 +385,14 @@ async fn test_divergent_pause_kept_after_a_newer_write_clears_the_view() {
     assert!(wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .is_err());
     // A newer write clears the view: the pause stays until the user confirms.
     set_divergent(&base, &wallet, &record, false);
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused_records(&refused), vec![(record, true, false)]);
     wallet.receive(None).await.unwrap();
@@ -415,6 +424,7 @@ async fn test_divergent_pause_kept_after_a_newer_write_clears_the_view() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
@@ -439,6 +449,7 @@ async fn test_divergent_flag_seen_at_a_load_pauses_once_the_view_clears() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused_records(&refused), vec![(record, true, false)]);
 }
@@ -460,10 +471,12 @@ async fn test_divergent_two_own_apps_each_pause_until_their_own_user_confirms() 
     assert!(wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .is_err());
     assert!(phone
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .is_err());
 
     // The wallet's user confirms: the phone still pauses.
@@ -473,11 +486,13 @@ async fn test_divergent_two_own_apps_each_pause_until_their_own_user_confirms() 
     let refused = phone
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused_records(&refused), vec![(record, true, true)]);
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 
@@ -524,7 +539,11 @@ async fn test_divergent_list_endpoints_paused_single_use_and_reusable() {
     for id in ["btc-bitcoin-p2wpkh", "btc-lightning-bolt12"] {
         let payment = UnrequestedPayment::new(w.bob_id(), btc("1"))
             .with_options(PayOptions::default().with_endpoint(endpoint(id)));
-        let refused = wallet.pay_without_request(payment).await.unwrap_err();
+        let refused = wallet
+            .pay_without_request(payment)
+            .await
+            .outcome
+            .unwrap_err();
         assert_eq!(
             refused_records(&refused),
             vec![(record, true, true)],
@@ -537,7 +556,7 @@ async fn test_divergent_list_endpoints_paused_single_use_and_reusable() {
         .unwrap();
     let payment = UnrequestedPayment::new(w.bob_id(), btc("1"))
         .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")));
-    let outcome = wallet.pay_without_request(payment).await.unwrap();
+    let outcome = wallet.pay_without_request(payment).await.outcome.unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
 
@@ -554,6 +573,7 @@ async fn test_divergent_payee_keeps_a_proof_and_writes_it_after_confirmation() {
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 
@@ -610,6 +630,7 @@ async fn test_divergent_kept_proof_given_up_past_its_window_with_a_notice() {
     wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     shop.receive(None).await.unwrap();
     assert!(shop.notices().await.unwrap().is_empty());
@@ -638,6 +659,7 @@ async fn test_divergent_credit_waits_for_the_record_and_another_of_the_payer() {
     wallet
         .pay_request(&first, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     shop.receive(None).await.unwrap();
     let paid = sale(&shop, &first).await.record;
@@ -675,6 +697,7 @@ async fn test_divergent_receipt_kept_over_the_payer_record_until_confirmed() {
     wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     let record = wallet.request(&request).await.unwrap().record;
     shop.receive(None).await.unwrap();
@@ -702,6 +725,7 @@ async fn test_divergent_repeat_withheld_while_divergent_and_made_once_clear_and_
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -743,6 +767,7 @@ async fn test_divergent_repeat_withheld_after_the_view_clears_until_confirmed() 
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -773,6 +798,7 @@ async fn test_divergent_outcome_waits_for_the_confirmation() {
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -823,6 +849,7 @@ async fn test_divergent_restore_pauses_again_a_record_confirmed_before_the_backu
     assert!(wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .is_err());
     crate::divergent::confirm(&mut wallet, &record)
         .await
@@ -860,6 +887,7 @@ async fn test_divergent_receipt_settles_its_claim_only_once_confirmed() {
     let PayOutcome::Failed { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("failed");
@@ -912,6 +940,7 @@ async fn test_divergent_kept_value_that_doesnt_read_holds_the_new_message() {
     wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     // The state doesn't read: the receive fails rather than act on it.
     assert!(shop.receive(None).await.is_err());
@@ -947,6 +976,7 @@ async fn test_divergent_kept_write_waits_while_its_record_may_be_missing_from_th
     wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     shop.receive(None).await.unwrap();
     assert_eq!(
@@ -1018,6 +1048,7 @@ async fn kept_at_the_shop(
     wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     shop.receive(None).await.unwrap();
     assert_eq!(
@@ -1120,6 +1151,7 @@ async fn test_divergent_users_done_waits_for_the_confirmation_once_the_view_clea
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -1445,7 +1477,10 @@ async fn test_divergent_resume_records_a_payment_made_once_confirmed_over_a_dive
         let mut crashing = w
             .load_on_clock(&w.alice, faulty, app_id, Arc::clone(&w.clock))
             .await;
-        let _ = crashing.pay_request(&request, PayOptions::default()).await;
+        let _ = crashing
+            .pay_request(&request, PayOptions::default())
+            .await
+            .outcome;
         drop(crashing);
         let mut wallet = w
             .load_on_clock(&w.alice, Arc::clone(&base), app_id, Arc::clone(&w.clock))
@@ -1500,6 +1535,7 @@ async fn test_divergent_mark_not_pointing_to_its_record_fails_no_receive() {
     assert!(wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .is_err());
     mark_past_its_record(&mut wallet).await;
     wallet.receive(None).await.unwrap();
@@ -1508,12 +1544,14 @@ async fn test_divergent_mark_not_pointing_to_its_record_fails_no_receive() {
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     assert_eq!(refused_records(&refused), vec![(record, true, true)]);
     confirm(&mut wallet, &record).await.unwrap();
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
@@ -1531,6 +1569,7 @@ async fn test_divergent_mismatched_mark_lets_the_payers_cancel_go() {
     assert!(wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .is_err());
     mark_past_its_record(&mut wallet).await;
     // A stop goes over it, no mark written, and the payee gets it.
@@ -1554,6 +1593,7 @@ async fn test_divergent_mismatched_mark_takes_a_payees_cancellation() {
     assert!(wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .is_err());
     mark_past_its_record(&mut wallet).await;
     let sold = shop.payee_activity().await.unwrap()[0].record;
@@ -1730,6 +1770,7 @@ async fn test_divergent_kept_value_at_a_key_without_its_msg_id_holds_the_new_mes
     wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     assert!(shop.receive(None).await.is_err());
     let mut batch = WriteBatch::new();
@@ -1759,6 +1800,7 @@ async fn test_divergent_outcome_waits_after_the_view_clears_until_confirmed() {
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -1831,7 +1873,11 @@ async fn test_divergent_kept_list_written_before_a_payment_to_it() {
         UnrequestedPayment::new(w.bob_id(), btc("1"))
             .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")))
     };
-    let refused = wallet.pay_without_request(payment()).await.unwrap_err();
+    let refused = wallet
+        .pay_without_request(payment())
+        .await
+        .outcome
+        .unwrap_err();
     assert_eq!(refused_records(&refused), vec![(record, false, true)]);
     let Some(Refusal::Divergent { records }) = refused.refusal() else {
         panic!("{refused:?}");
@@ -1845,7 +1891,7 @@ async fn test_divergent_kept_list_written_before_a_payment_to_it() {
         .await
         .unwrap()
         .is_empty());
-    let outcome = wallet.pay_without_request(payment()).await.unwrap();
+    let outcome = wallet.pay_without_request(payment()).await.outcome.unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
 
@@ -1888,6 +1934,7 @@ async fn over_unread(w: &World, failed: bool) -> OverUnread {
         let PayOutcome::Failed { attempt_id, .. } = wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap()
         else {
             panic!("failed");
@@ -2092,6 +2139,7 @@ async fn test_divergent_receipt_kept_before_its_record_read_moves_over_it_once_i
         .wallet
         .pay_request(&s.request, PayOptions::default())
         .await
+        .outcome
         .unwrap_err();
     let Some(Refusal::Divergent { records }) = refused.refusal() else {
         panic!("{refused:?}");
@@ -2150,6 +2198,7 @@ async fn receipt_without_request_over_unread_paused(stranger: bool) {
             ),
         )
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -2285,6 +2334,7 @@ async fn test_divergent_kept_messages_of_two_senders_with_one_msg_id_both_kept()
             ),
         )
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -2537,6 +2587,7 @@ async fn test_divergent_receipt_from_another_identity_never_kept_over_a_paused_r
             ),
         )
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -2986,6 +3037,7 @@ mod durable_event {
         let refused = wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err();
         let named = refused_records(&refused);
         assert!(
@@ -3019,12 +3071,14 @@ mod durable_event {
         let refused = wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err();
         assert_eq!(refused_records(&refused), vec![(record, true, false)]);
         confirm(&mut wallet, &record).await.unwrap();
         let outcome = wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap();
         assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     }
@@ -3119,12 +3173,14 @@ mod durable_event {
         let refused = wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err();
         assert_eq!(refused_records(&refused), vec![(record, true, false)]);
         confirm(&mut wallet, &record).await.unwrap();
         let outcome = wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap();
         assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     }
@@ -3167,12 +3223,14 @@ mod durable_event {
         let refused = wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap_err();
         assert_eq!(refused_records(&refused), vec![(record, true, true)]);
         confirm(&mut wallet, &record).await.unwrap();
         let outcome = wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap();
         assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     }
@@ -3192,6 +3250,7 @@ mod durable_event {
         let PayOutcome::Pending { attempt_id, .. } = wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap()
         else {
             panic!("pending");
@@ -3244,6 +3303,7 @@ mod durable_event {
         wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap();
         shop.receive(None).await.unwrap();
         let paid = sale(&shop, &request).await.record;
@@ -3401,6 +3461,7 @@ mod durable_event {
         let outcome = wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap();
         assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     }
@@ -3420,6 +3481,7 @@ mod durable_event {
         let PayOutcome::Pending { attempt_id, .. } = wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap()
         else {
             panic!("pending");
@@ -3645,6 +3707,7 @@ async fn test_divergent_credit_flag_set_by_the_host_credits_nothing() {
     wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     shop.receive(None).await.unwrap();
     let paid = sale(&shop, &request).await.record;
@@ -3689,6 +3752,7 @@ async fn test_divergent_mark_with_a_credit_confirmation_no_writer_leaves_credits
         wallet
             .pay_request(&request, PayOptions::default())
             .await
+            .outcome
             .unwrap();
         shop.receive(None).await.unwrap();
         let paid = sale(&shop, &request).await.record;
@@ -3815,7 +3879,11 @@ async fn test_divergent_paused_list_asks_the_app_whose_list_expired() {
     set_divergent(&base, &wallet, &record, true);
     let payment = UnrequestedPayment::new(w.bob_id(), btc("1"))
         .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")));
-    let refused = wallet.pay_without_request(payment).await.unwrap_err();
+    let refused = wallet
+        .pay_without_request(payment)
+        .await
+        .outcome
+        .unwrap_err();
     assert_eq!(refused_records(&refused), vec![(record, true, true)]);
     assert!(w.rail.all_executions().is_empty());
     assert_eq!(list_asks(&w, &wallet).await, vec![Some(till.app_id())]);
@@ -3894,7 +3962,11 @@ async fn test_divergent_list_of_a_removed_app_waits_for_a_current_list() {
     remove_from_bob(&w, shop.app_id());
     let payment = UnrequestedPayment::new(w.bob_id(), btc("1"))
         .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")));
-    let refused = wallet.pay_without_request(payment).await.unwrap_err();
+    let refused = wallet
+        .pay_without_request(payment)
+        .await
+        .outcome
+        .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),
         "{refused:?}"
@@ -3929,7 +4001,11 @@ async fn test_divergent_list_of_a_removed_app_leaves_an_expired_current_list_ask
     remove_from_bob(&w, shop.app_id());
     let payment = UnrequestedPayment::new(w.bob_id(), btc("1"))
         .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")));
-    let refused = wallet.pay_without_request(payment).await.unwrap_err();
+    let refused = wallet
+        .pay_without_request(payment)
+        .await
+        .outcome
+        .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::WaitingForList)),
         "{refused:?}"
@@ -3955,7 +4031,7 @@ async fn test_divergent_list_of_a_removed_app_leaves_a_current_list_paid() {
     remove_from_bob(&w, shop.app_id());
     let payment = UnrequestedPayment::new(w.bob_id(), btc("1"))
         .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")));
-    let outcome = wallet.pay_without_request(payment).await.unwrap();
+    let outcome = wallet.pay_without_request(payment).await.outcome.unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
     assert_eq!(w.rail.all_executions().len(), 1);
     till.receive(None).await.unwrap();
@@ -3983,7 +4059,11 @@ async fn test_divergent_paused_list_unjudged_while_the_payees_identity_is_unread
     w.clock.advance_ms(11 * 60_000);
     let payment = UnrequestedPayment::new(w.bob_id(), btc("1"))
         .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")));
-    let refused = wallet.pay_without_request(payment).await.unwrap_err();
+    let refused = wallet
+        .pay_without_request(payment)
+        .await
+        .outcome
+        .unwrap_err();
     assert!(
         matches!(refused.refusal(), Some(Refusal::IdentityUnavailable(_))),
         "{refused:?}"
@@ -4021,7 +4101,11 @@ async fn test_divergent_paused_list_of_a_current_app_pauses_whatever_its_certifi
     w.clock.advance_ms(11 * 60_000);
     let payment = UnrequestedPayment::new(w.bob_id(), btc("1"))
         .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")));
-    let refused = wallet.pay_without_request(payment).await.unwrap_err();
+    let refused = wallet
+        .pay_without_request(payment)
+        .await
+        .outcome
+        .unwrap_err();
     assert_eq!(refused_records(&refused), vec![(record, true, true)]);
     assert!(w.rail.all_executions().is_empty());
     assert!(list_asks(&w, &wallet).await.is_empty());
@@ -4103,6 +4187,7 @@ async fn test_divergent_credit_waits_for_a_deleted_record_seen_divergent() {
     wallet
         .pay_request(&first, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     shop.receive(None).await.unwrap();
     let paid = sale(&shop, &first).await.record;
@@ -4141,6 +4226,7 @@ async fn test_divergent_failure_goes_on_the_claim_alone_while_divergent() {
     let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap()
     else {
         panic!("pending");
@@ -4194,6 +4280,7 @@ async fn test_divergent_stored_entry_neither_written_nor_given_up_while_its_reco
     wallet
         .pay_request(&request, PayOptions::default())
         .await
+        .outcome
         .unwrap();
     crate::common::refuse_writes(&w.bob, 4);
     shop.receive(None).await.unwrap();
