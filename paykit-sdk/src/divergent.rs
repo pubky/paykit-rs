@@ -1719,7 +1719,12 @@ impl Paykit {
             };
             match self
                 .app
-                .forget_processed(dropped.sender(), dropped_id, &[delete])
+                .forget_processed(
+                    crate::protocol::BACKUP_NAME,
+                    dropped.sender(),
+                    dropped_id,
+                    &[delete],
+                )
                 .await
             {
                 Ok(_) | Err(AppError::Refused(ClientRefusal::NotNow(_))) => {}

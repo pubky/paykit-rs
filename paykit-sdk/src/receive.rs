@@ -2438,9 +2438,10 @@ impl Paykit {
                     .app
                     .record_op(&target, Some(&value), Vec::new())
                     .await?;
-                let batch = pubky_switch_client::app::OpBatch::new()
-                    .entry(op)
-                    .locals(tx.into_writes());
+                let batch =
+                    pubky_switch_client::app::OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
+                        .entry(op)
+                        .locals(tx.into_writes());
                 let _ = self.submit(batch).await;
             }
             None => self.local_commit(tx).await?,
@@ -3259,7 +3260,7 @@ impl Paykit {
             .app
             .record_op(&target, Some(&value), Vec::new())
             .await?;
-        let batch = pubky_switch_client::app::OpBatch::new()
+        let batch = pubky_switch_client::app::OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .entry(op)
             .locals(tx.into_writes());
         if let Err(error) = self.submit(batch).await {

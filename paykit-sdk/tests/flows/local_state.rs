@@ -16,7 +16,7 @@ use pubky_switch_client::app::{
 };
 use pubky_switch_client::clock::Clock;
 use pubky_switch_client::error::StoreError;
-use pubky_switch_client::store::{KeyValue, MemoryStore, StateStore, WriteBatch};
+use pubky_switch_client::store::{KeyValue, MemoryStore, StateStore};
 use pubky_switch_core::claims::Outcome;
 use pubky_switch_core::enc::b64;
 use serde_json::{json, Value};
@@ -39,7 +39,10 @@ fn corrupt(error: &PaykitError) -> bool {
 
 /// The bytes Paykit keeps at `key`.
 async fn held(app: &Paykit, key: &str) -> Option<Vec<u8>> {
-    app.app().protocol_get(key.as_bytes()).await.unwrap()
+    app.app()
+        .protocol_get("paykit", key.as_bytes())
+        .await
+        .unwrap()
 }
 
 /// The value Paykit keeps at `key`, as JSON.
@@ -50,10 +53,13 @@ async fn held_json(app: &Paykit, key: &str) -> Value {
 /// Put `value` at `key` of Paykit's state, as a store that holds it would serve it.
 async fn put(app: &mut Paykit, key: &str, value: &Value) {
     app.app_mut()
-        .protocol_commit(&[LocalWrite::Put {
-            key: key.as_bytes().to_vec(),
-            value: serde_json::to_vec(value).unwrap(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key: key.as_bytes().to_vec(),
+                value: serde_json::to_vec(value).unwrap(),
+            }],
+        )
         .await
         .unwrap();
 }
@@ -61,9 +67,12 @@ async fn put(app: &mut Paykit, key: &str, value: &Value) {
 /// Delete `key` of Paykit's state.
 async fn delete(app: &mut Paykit, key: &str) {
     app.app_mut()
-        .protocol_commit(&[LocalWrite::Delete {
-            key: key.as_bytes().to_vec(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Delete {
+                key: key.as_bytes().to_vec(),
+            }],
+        )
         .await
         .unwrap();
 }
@@ -71,7 +80,7 @@ async fn delete(app: &mut Paykit, key: &str) {
 /// The keys of Paykit's state under `prefix`.
 async fn keys(app: &Paykit, prefix: &str) -> Vec<String> {
     app.app()
-        .protocol_scan(prefix.as_bytes())
+        .protocol_scan("paykit", prefix.as_bytes())
         .await
         .unwrap()
         .into_iter()
@@ -105,7 +114,7 @@ struct SwappedReads {
 impl SwappedReads {
     /// Serve `bytes` for reads of Paykit's `key`.
     fn serve(&self, key: &str, bytes: Vec<u8>) {
-        *self.served.lock().unwrap() = Some((format!("p/{key}").into_bytes(), bytes));
+        *self.served.lock().unwrap() = Some((format!("p/paykit/{key}").into_bytes(), bytes));
     }
 }
 
@@ -129,8 +138,50 @@ impl StateStore for SwappedReads {
         self.inner.scan(ns, prefix, after, limit)
     }
 
-    fn commit(&self, batch: WriteBatch) -> Result<(), StoreError> {
-        self.inner.commit(batch)
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.commit_with(batch, |batch| {
+            self.inner
+                .commit(batch)
+                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+        })
+        .map(|_| ())
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
+    }
+}
+impl SwappedReads {
+    fn commit_with(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+        apply: impl FnOnce(
+            pubky_switch_client::store::WriteBatch,
+        ) -> Result<
+            pubky_switch_client::store::CommitOutcome,
+            pubky_switch_client::error::StoreError,
+        >,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        apply(batch)
     }
 }
 
@@ -772,7 +823,7 @@ async fn test_local_state_held_list_of_another_app_parks_a_list_to_hold() {
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(OpBatch::new().entry(op))
+        .submit_batch(OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     wallet.receive(None).await.unwrap();

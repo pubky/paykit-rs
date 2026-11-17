@@ -937,9 +937,9 @@ async fn kept_request(w: &World, shop: &mut paykit_sdk::Paykit) -> (String, [u8;
 #[tokio::test]
 async fn test_one_time_request_kept_reads_as_kept_after_a_store_failure_and_a_reload() {
     // The call's commits are the client's own: the one that keeps the request's batch,
-    // indexing its message, and its send's. The store fails the first commit after them,
-    // as it would fail a write of the SDK's own, and the reloaded shop still reads the
-    // request kept. Its next flush sends it.
+    // indexing its message, and the stamp before sending it. The store fails the next
+    // commit, which records that the transport did not carry the batch. The reloaded shop
+    // still reads the request kept, and its next flush sends it.
     let w = World::new();
     let _wallet = w.wallet("wallet").await;
     let base = crate::common::store();
@@ -969,7 +969,7 @@ async fn test_one_time_request_kept_reads_as_kept_after_a_store_failure_and_a_re
         .await;
     assert_eq!(fault.commits(), 0, "a load commits nothing here");
     let (msg_id, batch_id) = kept_request(&w, &mut shop).await;
-    assert_eq!(fault.commits(), 2);
+    assert_eq!(fault.commits(), 3, "the attempted third commit failed");
     assert_eq!(
         shop.message_delivery(&msg_id).await.unwrap(),
         Some(MessageDelivery::Kept { batch_id })
@@ -1438,7 +1438,7 @@ async fn keeps_stop(w: &World, wallet: &paykit_sdk::Paykit, hash: [u8; 32]) -> b
     let stop = format!("kc/{}", pubky_switch_core::enc::b64(&key));
     wallet
         .app()
-        .protocol_scan(stop.as_bytes())
+        .protocol_scan("paykit", stop.as_bytes())
         .await
         .unwrap()
         .iter()
@@ -1467,7 +1467,15 @@ async fn test_one_time_stops_for_requests_not_held_bounded_per_sender() {
     shop_cancels(&mut shop, &held[1]).await;
     wallet.receive(None).await.unwrap();
     let all = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER + 2;
-    assert_eq!(wallet.app().protocol_scan(b"kc/").await.unwrap().len(), all);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"kc/")
+            .await
+            .unwrap()
+            .len(),
+        all
+    );
     w.clock.advance_ms(1);
     cancel_to(
         &w,
@@ -1475,7 +1483,15 @@ async fn test_one_time_stops_for_requests_not_held_bounded_per_sender() {
         unknown(paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER),
     );
     wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"kc/").await.unwrap().len(), all);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"kc/")
+            .await
+            .unwrap()
+            .len(),
+        all
+    );
     for request in &held {
         assert!(keeps_stop(&w, &wallet, request.request_hash).await);
     }
@@ -1526,7 +1542,15 @@ async fn test_one_time_stop_dropped_for_the_bounds_kept_again_when_sent_again() 
     }
     wallet.receive(None).await.unwrap();
     let all = paykit_sdk::MAX_KEPT_REPLIES_PER_SENDER;
-    assert_eq!(wallet.app().protocol_scan(b"kc/").await.unwrap().len(), all);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"kc/")
+            .await
+            .unwrap()
+            .len(),
+        all
+    );
     w.clock.advance_ms(1);
     cancel_to(&w, &[wallet.app_id()], unknown(all));
     let asked = w.bob.switch().entries_from(&w.alice_id());
@@ -1547,7 +1571,15 @@ async fn test_one_time_stop_dropped_for_the_bounds_kept_again_when_sent_again() 
     w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &first);
     wallet.receive(None).await.unwrap();
     assert!(keeps_stop(&w, &wallet, unknown(0)).await);
-    assert_eq!(wallet.app().protocol_scan(b"kc/").await.unwrap().len(), all);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"kc/")
+            .await
+            .unwrap()
+            .len(),
+        all
+    );
     assert!(!keeps_stop(&w, &wallet, unknown(1)).await);
 }
 
@@ -1594,7 +1626,12 @@ async fn stop_then_request_stored(w: &World, wallet: &mut paykit_sdk::Paykit) ->
     crate::common::refuse_writes(&w.alice, 2);
     wallet.receive(None).await.unwrap();
     assert_eq!(
-        wallet.app().protocol_scan(b"se/").await.unwrap().len(),
+        wallet
+            .app()
+            .protocol_scan("paykit", b"se/")
+            .await
+            .unwrap()
+            .len(),
         1,
         "the request is kept to write later"
     );
@@ -1619,7 +1656,12 @@ async fn test_one_time_stop_for_a_request_kept_to_write_stays_past_30_days() {
     assert!(keeps_stop(&w, &wallet, hash).await);
     // Room frees: the request is written, the stop placed in its record.
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_scan(b"se/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"se/")
+        .await
+        .unwrap()
+        .is_empty());
     assert!(!keeps_stop(&w, &wallet, hash).await);
     let request = paykit_sdk::RequestRef {
         payee: w.bob_id(),
@@ -1659,13 +1701,26 @@ async fn test_one_time_stop_for_a_request_given_up_goes_past_30_days() {
     crate::common::refuse_writes(&w.alice, 1);
     wallet.receive(None).await.unwrap();
     assert!(keeps_stop(&w, &wallet, hash).await);
-    assert_eq!(wallet.app().protocol_scan(b"se/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"se/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     // At 30 days the request is given up, and the stop goes.
     w.clock.advance_ms(day);
     housekeeping(&mut wallet).await;
     crate::common::refuse_writes(&w.alice, 1);
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_scan(b"se/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"se/")
+        .await
+        .unwrap()
+        .is_empty());
     assert!(!keeps_stop(&w, &wallet, hash).await);
 }
 
@@ -1688,7 +1743,12 @@ async fn test_one_time_stops_bound_never_drops_a_stop_for_a_request_kept_to_writ
     crate::common::refuse_writes(&w.alice, 1);
     wallet.receive(None).await.unwrap();
     assert_eq!(
-        wallet.app().protocol_scan(b"kc/").await.unwrap().len(),
+        wallet
+            .app()
+            .protocol_scan("paykit", b"kc/")
+            .await
+            .unwrap()
+            .len(),
         max + 1
     );
     w.clock.advance_ms(1);
@@ -1697,13 +1757,26 @@ async fn test_one_time_stops_bound_never_drops_a_stop_for_a_request_kept_to_writ
     crate::common::refuse_writes(&w.alice, 1);
     wallet.receive(None).await.unwrap();
     assert_eq!(
-        wallet.app().protocol_scan(b"kc/").await.unwrap().len(),
+        wallet
+            .app()
+            .protocol_scan("paykit", b"kc/")
+            .await
+            .unwrap()
+            .len(),
         max + 1
     );
     assert!(keeps_stop(&w, &wallet, hash).await);
     assert!(!keeps_stop(&w, &wallet, unknown(0)).await);
     assert!(keeps_stop(&w, &wallet, unknown(max)).await);
-    assert_eq!(wallet.app().protocol_scan(b"se/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"se/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -1730,8 +1803,22 @@ async fn test_one_time_cancellation_of_a_request_not_held_kept_as_stop_and_reply
     cancel_to(&w, &[till.app_id()], hash);
     till.receive(None).await.unwrap();
     assert!(keeps_stop(&w, &till, hash).await);
-    assert_eq!(till.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
-    assert_eq!(till.app().protocol_scan(b"kc/").await.unwrap().len(), 1);
+    assert_eq!(
+        till.app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        till.app()
+            .protocol_scan("paykit", b"kc/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 /// `app` pays `request`: the acceptance goes with the dispatch, then the method reports the
@@ -1871,13 +1958,26 @@ async fn test_one_time_missed_item_asks_wait_for_a_sealed_records_key() {
     w.alice.switch().push_missed(1, now - 1_000, now);
     wallet.receive(None).await.unwrap();
     assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
-    assert_eq!(wallet.app().protocol_scan(b"mi/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"mi/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
     for _ in 0..3 {
         wallet.receive(None).await.unwrap();
     }
     assert_eq!(crate::common::asked(&wallet, &w.bob_id()).await.len(), 1);
-    assert!(wallet.app().protocol_scan(b"mi/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"mi/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -1921,7 +2021,7 @@ async fn test_one_time_restore_asks_wait_for_a_sealed_records_key() {
 /// The value Paykit keeps at `key` in `app`'s state.
 async fn state_value(app: &paykit_sdk::Paykit, key: &[u8]) -> Vec<u8> {
     app.app()
-        .protocol_scan(key)
+        .protocol_scan("paykit", key)
         .await
         .unwrap()
         .into_iter()
@@ -1960,7 +2060,10 @@ async fn test_one_time_stop_naming_another_request_refused_as_corrupt() {
     let key = stop_key(&w, &wallet, request.request_hash);
     wallet
         .app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put { key, value }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put { key, value }],
+        )
         .await
         .unwrap();
     let failed = wallet.receive(None).await.unwrap_err();
@@ -2109,7 +2212,12 @@ async fn test_one_time_payers_cancellation_before_its_record_placed_at_an_app_pa
     let sales = dual.payee_activity().await.unwrap();
     assert_eq!(sales.len(), 1, "{sales:?}");
     assert_eq!(sales[0].status, PayeeStatus::Cancelled, "{sales:?}");
-    assert!(dual.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+    assert!(dual
+        .app()
+        .protocol_scan("paykit", b"pr/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 /// Carol's shop, with a request to alice `wallet` takes at its next receive, each side
@@ -2145,14 +2253,27 @@ async fn test_one_time_missed_item_asks_the_readable_now_and_the_sealed_once_ope
     wallet.receive(None).await.unwrap();
     assert_eq!(crate::common::asked(&wallet, &w.carol_id()).await.len(), 1);
     assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
-    assert_eq!(wallet.app().protocol_scan(b"mi/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"mi/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     crate::unrequested::store_bundle(&w, wallet.app_id(), &cert);
     for _ in 0..3 {
         wallet.receive(None).await.unwrap();
     }
     assert_eq!(crate::common::asked(&wallet, &w.bob_id()).await.len(), 1);
     assert_eq!(crate::common::asked(&wallet, &w.carol_id()).await.len(), 1);
-    assert!(wallet.app().protocol_scan(b"mi/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"mi/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -2316,7 +2437,10 @@ async fn test_one_time_stop_at_another_key_refuses_the_receive_steps_bounds() {
     let key = stop_key(&w, &wallet, [8; 32]);
     wallet
         .app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put { key, value }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put { key, value }],
+        )
         .await
         .unwrap();
     cancel_to(&w, &[wallet.app_id()], [9; 32]);

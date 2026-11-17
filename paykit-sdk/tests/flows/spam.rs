@@ -301,7 +301,15 @@ async fn test_spam_own_unblock_refused_before_the_feed_leaves_new_state_counted(
     wallet.block(&w.bob_id()).await.unwrap();
     keep_ops(&w, 1);
     wallet.unblock(&w.bob_id()).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"bk/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"bk/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     w.alice
         .switch()
         .fail_next(pubky_switch_client::testing::Fault::Error {
@@ -354,7 +362,15 @@ async fn test_spam_own_unblock_applied_with_its_answer_lost_lets_new_state_throu
             path: "/ops".into(),
         });
     wallet.unblock(&w.bob_id()).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"bk/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"bk/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     keep_ops(&w, 1);
 
@@ -499,11 +515,15 @@ async fn test_spam_lists_read_at_most_every_ten_minutes() {
     w.clock.advance_ms(LISTS_REFRESH_MS - 1);
     wallet.receive(None).await.unwrap();
     assert_eq!(transport.reads.load(Ordering::SeqCst), 0);
-    // Then the next receive reads them, once.
+    // The next receive refreshes them. The client also reads the lists for the gap
+    // that replacing its copy owes to every protocol (Switch spec 8.3).
     w.clock.advance_ms(1);
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
-    assert_eq!(transport.reads.load(Ordering::SeqCst), 1);
+    assert_eq!(transport.reads.load(Ordering::SeqCst), 2);
+    w.clock.advance_ms(LISTS_REFRESH_MS - 1);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(transport.reads.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

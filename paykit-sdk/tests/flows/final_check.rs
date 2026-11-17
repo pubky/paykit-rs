@@ -10,7 +10,7 @@ use paykit_sdk::{PayOptions, PayOutcome, Paykit, PaykitConfig, RailDeclaration, 
 use pubky_switch_client::app::HomeserverReader;
 use pubky_switch_client::clock::Clock;
 use pubky_switch_client::error::{StoreError, TransportError};
-use pubky_switch_client::store::{KeyValue, MemoryStore, StateStore, Write, WriteBatch};
+use pubky_switch_client::store::{KeyValue, MemoryStore, StateStore, Write};
 use pubky_switch_client::transport::{BoxFuture, Transport};
 use pubky_switch_core::records::{RemovedApp, IDENTITY_PATH};
 
@@ -98,7 +98,7 @@ impl HookedStore {
 impl StateStore for HookedStore {
     fn get(&self, ns: &str, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
         let value = self.inner.get(ns, key)?;
-        if key == b"p/dl" {
+        if key == b"p/paykit/dl" {
             if let Some(hook) = self.deny_hook.lock().unwrap().take() {
                 hook();
             }
@@ -116,13 +116,56 @@ impl StateStore for HookedStore {
         self.inner.scan(ns, prefix, after, limit)
     }
 
-    fn commit(&self, batch: WriteBatch) -> Result<(), StoreError> {
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.commit_with(batch, |batch| {
+            self.inner
+                .commit(batch)
+                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+        })
+        .map(|_| ())
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
+    }
+}
+impl HookedStore {
+    fn commit_with(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+        apply: impl FnOnce(
+            pubky_switch_client::store::WriteBatch,
+        ) -> Result<
+            pubky_switch_client::store::CommitOutcome,
+            pubky_switch_client::error::StoreError,
+        >,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
         const SIGNED: &[u8] = b"\"acceptance_msg_id\":\"";
         const PAYING: &[u8] = b"\"stage\":\"paying\"";
         let journals = |marker: &[u8]| {
-            batch.writes.iter().any(|write| match write {
+            batch.writes().iter().any(|write| match write {
                 Write::Put { key, value, .. } => {
-                    key.starts_with(b"p/j/") && value.windows(marker.len()).any(|w| w == marker)
+                    key.starts_with(b"p/paykit/j/")
+                        && value.windows(marker.len()).any(|w| w == marker)
                 }
                 _ => false,
             })
@@ -130,9 +173,9 @@ impl StateStore for HookedStore {
         let signed = journals(SIGNED);
         let paying = journals(PAYING);
         let attempted = journals(b"\"stage\":\"attempted\"");
-        for write in &batch.writes {
+        for write in batch.writes() {
             if let Write::Put { key, value, .. } = write {
-                if !key.starts_with(b"p/j/") {
+                if !key.starts_with(b"p/paykit/j/") {
                     continue;
                 }
                 if let Some(at) = value.windows(SIGNED.len()).position(|w| w == SIGNED) {
@@ -150,7 +193,7 @@ impl StateStore for HookedStore {
             return Err(StoreError::Unavailable);
         }
         const ACCEPTANCE: &[u8] = b"paykit.payment_request_acceptance";
-        let queues_acceptance = batch.writes.iter().any(|write| {
+        let queues_acceptance = batch.writes().iter().any(|write| {
             matches!(write, Write::Put { key, value, .. }
                 if key.starts_with(b"out/")
                     && value.windows(ACCEPTANCE.len()).any(|w| w == ACCEPTANCE))
@@ -163,7 +206,7 @@ impl StateStore for HookedStore {
             return Err(StoreError::Unavailable);
         }
         let queues = batch
-            .writes
+            .writes()
             .iter()
             .any(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"out/")));
         if queues
@@ -181,7 +224,10 @@ impl StateStore for HookedStore {
         {
             return Err(StoreError::Unavailable);
         }
-        self.inner.commit(batch)?;
+        let applied = apply(batch)?;
+        if applied != pubky_switch_client::store::CommitOutcome::Applied {
+            return Ok(applied);
+        }
         if signed
             && self
                 .fail_queueing
@@ -212,7 +258,7 @@ impl StateStore for HookedStore {
                     .store(true, std::sync::atomic::Ordering::SeqCst);
             }
         }
-        Ok(())
+        Ok(pubky_switch_client::store::CommitOutcome::Applied)
     }
 }
 

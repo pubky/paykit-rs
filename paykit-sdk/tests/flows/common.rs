@@ -345,7 +345,7 @@ impl StateStore for FailingRecordReads {
         if self
             .corrupt_journal
             .load(std::sync::atomic::Ordering::SeqCst)
-            && key.starts_with(b"p/j/")
+            && key.starts_with(b"p/paykit/j/")
         {
             return Ok(Some(b"not a journal entry".to_vec()));
         }
@@ -380,7 +380,46 @@ impl StateStore for FailingRecordReads {
         &self,
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
-        self.inner.commit(batch)
+        self.commit_with(batch, |batch| {
+            self.inner
+                .commit(batch)
+                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+        })
+        .map(|_| ())
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
+    }
+}
+impl FailingRecordReads {
+    fn commit_with(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+        apply: impl FnOnce(
+            pubky_switch_client::store::WriteBatch,
+        ) -> Result<
+            pubky_switch_client::store::CommitOutcome,
+            pubky_switch_client::error::StoreError,
+        >,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        apply(batch)
     }
 }
 
@@ -455,8 +494,8 @@ impl StateStore for ListsStore {
         if self.flagged.lock().unwrap().iter().any(|k| k == key) {
             return Ok(Some(Vec::new()));
         }
-        // Paykit's own keys are under the client's protocol prefix, `p/`.
-        if key == b"p/fg" {
+        // Paykit's own keys are under the client's protocol namespace, `p/paykit/`.
+        if key == b"p/paykit/fg" {
             if self
                 .flagged_unknown
                 .load(std::sync::atomic::Ordering::SeqCst)
@@ -494,7 +533,46 @@ impl StateStore for ListsStore {
         &self,
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
-        self.inner.commit(batch)
+        self.commit_with(batch, |batch| {
+            self.inner
+                .commit(batch)
+                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+        })
+        .map(|_| ())
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
+    }
+}
+impl ListsStore {
+    fn commit_with(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+        apply: impl FnOnce(
+            pubky_switch_client::store::WriteBatch,
+        ) -> Result<
+            pubky_switch_client::store::CommitOutcome,
+            pubky_switch_client::error::StoreError,
+        >,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        apply(batch)
     }
 }
 
@@ -963,14 +1041,17 @@ pub async fn seed_marks(app: &mut Paykit, prefix: &str, n: usize, latest: u64) -
         });
         senders.push(sender);
     }
-    app.app_mut().protocol_commit(&writes).await.unwrap();
+    app.app_mut()
+        .protocol_commit("paykit", &writes)
+        .await
+        .unwrap();
     senders
 }
 
 /// The senders holding a mark under `prefix`.
 pub async fn mark_senders(app: &Paykit, prefix: &str) -> Vec<[u8; 32]> {
     app.app()
-        .protocol_scan(prefix.as_bytes())
+        .protocol_scan("paykit", prefix.as_bytes())
         .await
         .unwrap()
         .into_iter()

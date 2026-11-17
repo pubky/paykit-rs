@@ -61,7 +61,11 @@ async fn came_back(w: &World, wallet: &mut Paykit, shop: &mut Paykit) {
 
 /// The marks of messages dropped for a block that `app` keeps.
 async fn block_marks(app: &Paykit) -> usize {
-    app.app().protocol_scan(b"bd/").await.unwrap().len()
+    app.app()
+        .protocol_scan("paykit", b"bd/")
+        .await
+        .unwrap()
+        .len()
 }
 
 /// How many of the payer records `app` holds carry `manual_only`.
@@ -172,7 +176,12 @@ async fn test_blocked_return_flagged_and_blocked_asked_only_once_neither() {
     wallet.unblock(&w.bob_id()).await.unwrap();
     w.clock.advance_ms(11 * MINUTE_MS);
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_get(b"lr").await.unwrap().is_some());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"lr")
+        .await
+        .unwrap()
+        .is_some());
     assert!(asked(&wallet, &w.bob_id()).await.is_empty());
     // No longer flagged either, at a later read of the lists: he is asked.
     lists.unflag(&w.bob_id());
@@ -228,7 +237,7 @@ async fn test_blocked_return_own_unblock_unanswered_asks_nothing() {
     let mark: serde_json::Value = serde_json::from_slice(
         &wallet
             .app()
-            .protocol_get(mark.as_bytes())
+            .protocol_get("paykit", mark.as_bytes())
             .await
             .unwrap()
             .unwrap(),
@@ -240,7 +249,7 @@ async fn test_blocked_return_own_unblock_unanswered_asks_nothing() {
     let own_unblock = format!("bk/{}", pubky_switch_core::enc::b64(&w.bob_id()));
     assert!(wallet
         .app()
-        .protocol_get(own_unblock.as_bytes())
+        .protocol_get("paykit", own_unblock.as_bytes())
         .await
         .unwrap()
         .is_some());
@@ -500,10 +509,13 @@ async fn test_blocked_return_late_start_asks_what_is_kept_and_tells_the_rest_los
     });
     wallet
         .app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: format!("bd/{}", pubky_switch_core::enc::b64(&w.bob_id())).into_bytes(),
-            value: serde_json::to_vec(&mark).unwrap(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: format!("bd/{}", pubky_switch_core::enc::b64(&w.bob_id())).into_bytes(),
+                value: serde_json::to_vec(&mark).unwrap(),
+            }],
+        )
         .await
         .unwrap();
     w.clock.advance_ms(11 * MINUTE_MS);
@@ -542,7 +554,12 @@ async fn test_blocked_return_no_ask_while_the_deny_list_holds_the_sender() {
     w.clock.advance_ms(11 * MINUTE_MS);
     wallet.receive(None).await.unwrap();
     assert!(wallet.requests().await.unwrap().is_empty());
-    assert!(wallet.app().protocol_get(b"lr").await.unwrap().is_some());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"lr")
+        .await
+        .unwrap()
+        .is_some());
     // Bob is blocked at the client, with no own block mark of Paykit's.
     wallet.app_mut().deny(&w.bob_id()).await.unwrap();
     lists.lists_unknown(false);
@@ -605,7 +622,11 @@ async fn delivery_not_written_into_the_mark(w: &World, wallet: &mut Paykit, spec
         .find(|m| m.kind == "paykit.resend_request")
         .expect("the request");
     let key = format!("bd/{}", pubky_switch_core::enc::b64(&w.bob_id()));
-    let marks = wallet.app().protocol_scan(key.as_bytes()).await.unwrap();
+    let marks = wallet
+        .app()
+        .protocol_scan("paykit", key.as_bytes())
+        .await
+        .unwrap();
     let mut mark: serde_json::Value = serde_json::from_slice(&marks[0].1).unwrap();
     assert!(mark["d"]["asked_at_ms"].is_u64(), "{mark}");
     mark["d"]["asked_at_ms"] = serde_json::Value::Null;
@@ -618,10 +639,13 @@ async fn delivery_not_written_into_the_mark(w: &World, wallet: &mut Paykit, spec
     }
     wallet
         .app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: key.into_bytes(),
-            value: serde_json::to_vec(&mark).unwrap(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: key.into_bytes(),
+                value: serde_json::to_vec(&mark).unwrap(),
+            }],
+        )
         .await
         .unwrap();
 }
@@ -715,7 +739,46 @@ impl StateStore for FailingDeliveryReads {
         &self,
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
-        self.inner.commit(batch)
+        self.commit_with(batch, |batch| {
+            self.inner
+                .commit(batch)
+                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+        })
+        .map(|_| ())
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
+    }
+}
+impl FailingDeliveryReads {
+    fn commit_with(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+        apply: impl FnOnce(
+            pubky_switch_client::store::WriteBatch,
+        ) -> Result<
+            pubky_switch_client::store::CommitOutcome,
+            pubky_switch_client::error::StoreError,
+        >,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        apply(batch)
     }
 }
 
@@ -734,7 +797,11 @@ async fn lost_for(app: &Paykit, counterparty: &[u8; 32]) -> usize {
 
 /// The notices of lost messages `app` keeps owed.
 async fn lost_owed(app: &Paykit) -> usize {
-    app.app().protocol_scan(b"bl/").await.unwrap().len()
+    app.app()
+        .protocol_scan("paykit", b"bl/")
+        .await
+        .unwrap()
+        .len()
 }
 
 /// Bob's mark asked and its request was delivered ([`came_back`]); the mark is written back
@@ -753,15 +820,22 @@ async fn bound_drops_bob_at_the_next_receive_step(
     delivery_not_written_into_the_mark(w, wallet, true).await;
     if let Some(msg_id) = undelivered {
         let key = format!("bd/{}", pubky_switch_core::enc::b64(&w.bob_id()));
-        let marks = wallet.app().protocol_scan(key.as_bytes()).await.unwrap();
+        let marks = wallet
+            .app()
+            .protocol_scan("paykit", key.as_bytes())
+            .await
+            .unwrap();
         let mut mark: serde_json::Value = serde_json::from_slice(&marks[0].1).unwrap();
         mark["d"]["queued"]["msg_id"] = serde_json::Value::String(msg_id.to_owned());
         wallet
             .app_mut()
-            .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-                key: key.into_bytes(),
-                value: serde_json::to_vec(&mark).unwrap(),
-            }])
+            .protocol_commit(
+                "paykit",
+                &[pubky_switch_client::app::LocalWrite::Put {
+                    key: key.into_bytes(),
+                    value: serde_json::to_vec(&mark).unwrap(),
+                }],
+            )
             .await
             .unwrap();
     }
@@ -967,7 +1041,11 @@ async fn test_blocked_return_restore_owed_lost_notice_delivered_after_the_restor
     w.clock.advance_ms(11 * MINUTE_MS);
     wallet.receive(None).await.unwrap();
     let key = format!("bd/{}", pubky_switch_core::enc::b64(&w.bob_id()));
-    let marks = wallet.app().protocol_scan(key.as_bytes()).await.unwrap();
+    let marks = wallet
+        .app()
+        .protocol_scan("paykit", key.as_bytes())
+        .await
+        .unwrap();
     let mut mark: serde_json::Value = serde_json::from_slice(&marks[0].1).unwrap();
     let msg_id = mark["d"]["queued"]["msg_id"]
         .as_str()
@@ -976,10 +1054,13 @@ async fn test_blocked_return_restore_owed_lost_notice_delivered_after_the_restor
     mark["d"]["speculative"] = serde_json::Value::Bool(true);
     wallet
         .app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: key.into_bytes(),
-            value: serde_json::to_vec(&mark).unwrap(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: key.into_bytes(),
+                value: serde_json::to_vec(&mark).unwrap(),
+            }],
+        )
         .await
         .unwrap();
     Box::pin(bound_filled_and_carol_sends(&w, &mut wallet)).await;
@@ -1180,7 +1261,11 @@ async fn test_blocked_return_entry_held_while_no_mark_may_go() {
             value: serde_json::to_vec(&value).unwrap(),
         });
     }
-    wallet.app_mut().protocol_commit(&writes).await.unwrap();
+    wallet
+        .app_mut()
+        .protocol_commit("paykit", &writes)
+        .await
+        .unwrap();
     request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.app_mut().deny(&w.bob_id()).await.unwrap();
     wallet.receive(None).await.unwrap();
@@ -1208,10 +1293,13 @@ async fn seed_block_mark(app: &mut Paykit, sender: &[u8; 32], earliest: u64, lat
         }
     });
     app.app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: format!("bd/{}", pubky_switch_core::enc::b64(sender)).into_bytes(),
-            value: serde_json::to_vec(&mark).unwrap(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: format!("bd/{}", pubky_switch_core::enc::b64(sender)).into_bytes(),
+                value: serde_json::to_vec(&mark).unwrap(),
+            }],
+        )
         .await
         .unwrap();
 }
@@ -1254,10 +1342,13 @@ async fn test_blocked_return_marks_and_widenings_dated_past_the_backup_bounded_a
     let widening = serde_json::json!({ "v": 1, "d": { "from_ms": ahead, "until_ms": u64::MAX } });
     wallet
         .app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: format!("bw/{ahead:020}").into_bytes(),
-            value: serde_json::to_vec(&widening).unwrap(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: format!("bw/{ahead:020}").into_bytes(),
+                value: serde_json::to_vec(&widening).unwrap(),
+            }],
+        )
         .await
         .unwrap();
     let backup = wallet.backup().await.unwrap();
@@ -1272,11 +1363,20 @@ async fn test_blocked_return_marks_and_widenings_dated_past_the_backup_bounded_a
     .await
     .unwrap();
     let bound = w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS;
-    let marks = restored.app().protocol_scan(b"bd/").await.unwrap();
+    let marks = restored
+        .app()
+        .protocol_scan("paykit", b"bd/")
+        .await
+        .unwrap();
     assert_eq!(marks.len(), 1);
     let mark: serde_json::Value = serde_json::from_slice(&marks[0].1).unwrap();
     assert!(mark["d"]["latest_ms"].as_u64().unwrap() <= bound, "{mark}");
-    for (key, value) in restored.app().protocol_scan(b"bw/").await.unwrap() {
+    for (key, value) in restored
+        .app()
+        .protocol_scan("paykit", b"bw/")
+        .await
+        .unwrap()
+    {
         let window: serde_json::Value = serde_json::from_slice(&value).unwrap();
         assert!(
             window["d"]["from_ms"].as_u64().unwrap() <= bound,
@@ -1299,7 +1399,12 @@ async fn test_blocked_return_mark_of_a_sender_still_blocked_spares_the_lists_rea
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert_eq!(block_marks(&wallet).await, 1);
-    assert!(wallet.app().protocol_get(b"lr").await.unwrap().is_some());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"lr")
+        .await
+        .unwrap()
+        .is_some());
     for _ in 0..3 {
         w.clock.advance_ms(MINUTE_MS);
         w.alice
@@ -1310,7 +1415,12 @@ async fn test_blocked_return_mark_of_a_sender_still_blocked_spares_the_lists_rea
                 current: serde_json::Value::Null,
             });
         wallet.receive(None).await.unwrap();
-        assert!(wallet.app().protocol_get(b"lr").await.unwrap().is_some());
+        assert!(wallet
+            .app()
+            .protocol_get("paykit", b"lr")
+            .await
+            .unwrap()
+            .is_some());
         // The armed fault stays for the next read; this one takes it.
         wallet.receive(None).await.unwrap();
     }
@@ -1356,7 +1466,11 @@ async fn test_blocked_return_request_after_its_mark_went_for_the_bound_paid_only
             value: serde_json::to_vec(&value).unwrap(),
         });
     }
-    wallet.app_mut().protocol_commit(&writes).await.unwrap();
+    wallet
+        .app_mut()
+        .protocol_commit("paykit", &writes)
+        .await
+        .unwrap();
     let mut carol = w
         .join(
             &w.carol,
@@ -1959,15 +2073,57 @@ impl StateStore for PayingStore {
         &self,
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.commit_with(batch, |batch| {
+            self.inner
+                .commit(batch)
+                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+        })
+        .map(|_| ())
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
+    }
+}
+impl PayingStore {
+    fn commit_with(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+        apply: impl FnOnce(
+            pubky_switch_client::store::WriteBatch,
+        ) -> Result<
+            pubky_switch_client::store::CommitOutcome,
+            pubky_switch_client::error::StoreError,
+        >,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
         const PAYING: &[u8] = b"\"stage\":\"paying\"";
-        let paying = batch.writes.iter().any(|write| {
+        let paying = batch.writes().iter().any(|write| {
             matches!(write, pubky_switch_client::store::Write::Put { key, value, .. }
-                if key.starts_with(b"p/j/") && value.windows(PAYING.len()).any(|w| w == PAYING))
+                if key.starts_with(b"p/paykit/j/") && value.windows(PAYING.len()).any(|w| w == PAYING))
         });
-        let deny_list = batch.writes.iter().any(|write| {
-            matches!(write, pubky_switch_client::store::Write::Put { key, .. } if key == b"p/dl")
+        let deny_list = batch.writes().iter().any(|write| {
+            matches!(write, pubky_switch_client::store::Write::Put { key, .. } if key == b"p/paykit/dl")
         });
-        self.inner.commit(batch)?;
+        let applied = apply(batch)?;
+        if applied != pubky_switch_client::store::CommitOutcome::Applied {
+            return Ok(applied);
+        }
         if paying {
             if let Some(hook) = self.hook.lock().unwrap().take() {
                 hook();
@@ -1978,7 +2134,7 @@ impl StateStore for PayingStore {
                 hook();
             }
         }
-        Ok(())
+        Ok(pubky_switch_client::store::CommitOutcome::Applied)
     }
 }
 
@@ -2767,7 +2923,7 @@ async fn test_blocked_return_floor_write_kept_at_a_receive_is_asked_once() {
             path: "/ops".into(),
         });
     wallet.receive(None).await.unwrap();
-    let marks = wallet.app().protocol_scan(b"bd/").await.unwrap();
+    let marks = wallet.app().protocol_scan("paykit", b"bd/").await.unwrap();
     let mark: serde_json::Value = serde_json::from_slice(&marks[0].1).unwrap();
     assert!(mark["d"]["queued"]["kept_batch"].is_array(), "{mark}");
     wallet.receive(None).await.unwrap();
@@ -2806,10 +2962,14 @@ async fn keep_ask(app: &mut Paykit, sender: &[u8; 32], from_ms: u64) {
         }
     });
     app.app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: format!("ask/{}/{from_ms:020}", pubky_switch_core::enc::b64(sender)).into_bytes(),
-            value: serde_json::to_vec(&ask).unwrap(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: format!("ask/{}/{from_ms:020}", pubky_switch_core::enc::b64(sender))
+                    .into_bytes(),
+                value: serde_json::to_vec(&ask).unwrap(),
+            }],
+        )
         .await
         .unwrap();
 }
@@ -2847,7 +3007,7 @@ async fn test_blocked_return_ask_whose_answer_is_lost_asked_once_after_a_restart
     assert!(shared_floor(&wallet).await.is_some());
     assert!(wallet
         .app()
-        .protocol_scan(b"ask/")
+        .protocol_scan("paykit", b"ask/")
         .await
         .unwrap()
         .is_empty());
@@ -2871,14 +3031,22 @@ async fn test_blocked_return_ask_whose_raise_conflicts_leaves_the_others_going()
         });
     wallet.receive(None).await.unwrap();
     assert_eq!(asked(&wallet, &w.bob_id()).await, vec![(Some(6), None)]);
-    assert_eq!(wallet.app().protocol_scan(b"ask/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ask/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     wallet.receive(None).await.unwrap();
     let mut asks = asked(&wallet, &w.bob_id()).await;
     asks.sort();
     assert_eq!(asks, vec![(Some(5), None), (Some(6), None)]);
     assert!(wallet
         .app()
-        .protocol_scan(b"ask/")
+        .protocol_scan("paykit", b"ask/")
         .await
         .unwrap()
         .is_empty());
@@ -2986,7 +3154,11 @@ async fn test_blocked_return_entry_held_while_the_notices_owed_are_full() {
             }
         })
         .collect();
-    wallet.app_mut().protocol_commit(&writes).await.unwrap();
+    wallet
+        .app_mut()
+        .protocol_commit("paykit", &writes)
+        .await
+        .unwrap();
     Box::pin(wallet.receive(None)).await.unwrap();
     let senders = crate::common::mark_senders(&wallet, "bd/").await;
     assert!(senders.contains(&w.bob_id()));

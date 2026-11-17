@@ -80,7 +80,12 @@ impl Held {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("the real feed did not hand over {id}: {report:?}"));
-        let values = self.app.app().protocol_scan(b"ans/").await.unwrap();
+        let values = self
+            .app
+            .app()
+            .protocol_scan("paykit", b"ans/")
+            .await
+            .unwrap();
         assert_eq!(values.len(), 1);
         let (key, bytes) = &values[0];
         let value: Value = serde_json::from_slice(bytes).unwrap();
@@ -97,10 +102,13 @@ impl Held {
     async fn put(&mut self, bytes: Vec<u8>) {
         self.app
             .app_mut()
-            .protocol_commit(&[LocalWrite::Put {
-                key: self.key.clone(),
-                value: bytes,
-            }])
+            .protocol_commit(
+                "paykit",
+                &[LocalWrite::Put {
+                    key: self.key.clone(),
+                    value: bytes,
+                }],
+            )
             .await
             .unwrap();
     }
@@ -198,7 +206,12 @@ async fn held_with_contacts(w: &World, family: Family, contacts: bool) -> Held {
     result.plaintext = result.signed_bytes().await;
     if matches!(family, Family::Answer) {
         result.ask().await;
-        let values = result.app.app().protocol_scan(b"ans/").await.unwrap();
+        let values = result
+            .app
+            .app()
+            .protocol_scan("paykit", b"ans/")
+            .await
+            .unwrap();
         (result.key, result.bytes) = values.into_iter().next().unwrap();
         let value: Value = serde_json::from_slice(&result.bytes).unwrap();
         let body = &value["d"];
@@ -225,7 +238,7 @@ async fn held_with_contacts(w: &World, family: Family, contacts: bool) -> Held {
         result.bytes = result
             .app
             .app()
-            .protocol_get(&result.key)
+            .protocol_get("paykit", &result.key)
             .await
             .unwrap()
             .unwrap();
@@ -249,10 +262,10 @@ fn extra(bytes: &[u8]) -> Vec<u8> {
 
 fn replace(backup: &PaykitBackup, key: &[u8], bytes: Vec<u8>) -> PaykitBackup {
     let mut value: Value = serde_json::from_slice(&backup.to_bytes().unwrap()).unwrap();
-    let data = pubky_switch_core::enc::unb64(value["protocol"]["data"].as_str().unwrap()).unwrap();
+    let data = pubky_switch_core::enc::unb64(value["layers"][0]["data"].as_str().unwrap()).unwrap();
     let mut layer = pubky_switch_client::app::decode_local_state(&data).unwrap();
     layer.iter_mut().find(|(k, _)| k == key).unwrap().1 = bytes;
-    value["protocol"]["data"] = Value::String(pubky_switch_core::enc::b64(
+    value["layers"][0]["data"] = Value::String(pubky_switch_core::enc::b64(
         &pubky_switch_client::app::encode_local_state(&layer),
     ));
     PaykitBackup::from_bytes(&serde_json::to_vec(&value).unwrap()).unwrap()
@@ -275,11 +288,22 @@ async fn refuses_read(family: Family) {
         .expect_err("unknown stored member must fail at the typed reader");
     assert!(is_corrupt(&error), "{error:?}");
     assert_eq!(
-        value.app.app().protocol_get(&value.key).await.unwrap(),
+        value
+            .app
+            .app()
+            .protocol_get("paykit", &value.key)
+            .await
+            .unwrap(),
         Some(bad)
     );
     assert_eq!(
-        value.app.app().protocol_scan(b"ans/").await.unwrap().len(),
+        value
+            .app
+            .app()
+            .protocol_scan("paykit", b"ans/")
+            .await
+            .unwrap()
+            .len(),
         1
     );
     assert_eq!(value.entries(&w), before);
@@ -306,7 +330,12 @@ async fn refuses_backup(family: Family) {
         "{error:?}"
     );
     assert_eq!(
-        value.app.app().protocol_get(&value.key).await.unwrap(),
+        value
+            .app
+            .app()
+            .protocol_get("paykit", &value.key)
+            .await
+            .unwrap(),
         Some(bad)
     );
     assert_eq!(value.entries(&w), before);
@@ -342,7 +371,12 @@ async fn refuses_restore(family: Family) {
     );
     assert_eq!(target.commits(), 0);
     assert_eq!(
-        value.app.app().protocol_get(&value.key).await.unwrap(),
+        value
+            .app
+            .app()
+            .protocol_get("paykit", &value.key)
+            .await
+            .unwrap(),
         Some(value.bytes)
     );
 }
@@ -366,7 +400,12 @@ async fn refuses_recipient(family: Family) {
         "unreadable side must select no recipient: {delivery:?}"
     );
     assert_eq!(
-        value.app.app().protocol_get(&value.key).await.unwrap(),
+        value
+            .app
+            .app()
+            .protocol_get("paykit", &value.key)
+            .await
+            .unwrap(),
         Some(bad)
     );
     assert_eq!(value.signed_bytes().await, value.plaintext);
@@ -443,7 +482,12 @@ async fn current_reload_restore_and_resend(family: Family) {
     .await
     .unwrap();
     assert_eq!(
-        value.app.app().protocol_get(&value.key).await.unwrap(),
+        value
+            .app
+            .app()
+            .protocol_get("paykit", &value.key)
+            .await
+            .unwrap(),
         Some(value.bytes.clone())
     );
     value.reload(&w).await;
@@ -454,7 +498,7 @@ async fn current_reload_restore_and_resend(family: Family) {
     assert!(value
         .app
         .app()
-        .protocol_scan(b"ans/")
+        .protocol_scan("paykit", b"ans/")
         .await
         .unwrap()
         .is_empty());
@@ -469,7 +513,7 @@ async fn current_reload_restore_and_resend(family: Family) {
         &value
             .app
             .app()
-            .protocol_get(stamp.as_bytes())
+            .protocol_get("paykit", stamp.as_bytes())
             .await
             .unwrap()
             .unwrap(),
@@ -518,7 +562,12 @@ async fn test_answer_state_unknown_deny_preserves_queued_answer() {
         });
     value.app.receive(None).await.unwrap();
     assert_eq!(
-        value.app.app().protocol_get(&value.key).await.unwrap(),
+        value
+            .app
+            .app()
+            .protocol_get("paykit", &value.key)
+            .await
+            .unwrap(),
         Some(value.bytes.clone())
     );
     assert_eq!(value.entries(&w), before);
@@ -526,7 +575,7 @@ async fn test_answer_state_unknown_deny_preserves_queued_answer() {
     assert!(value
         .app
         .app()
-        .protocol_get(&value.key)
+        .protocol_get("paykit", &value.key)
         .await
         .unwrap()
         .is_none());
@@ -544,7 +593,7 @@ async fn test_answer_state_blocked_requester_gets_no_answer() {
     assert!(value
         .app
         .app()
-        .protocol_get(&value.key)
+        .protocol_get("paykit", &value.key)
         .await
         .unwrap()
         .is_none());
@@ -567,7 +616,7 @@ async fn test_answer_state_selection_with_no_match_completes_without_send() {
     assert!(value
         .app
         .app()
-        .protocol_scan(b"ans/")
+        .protocol_scan("paykit", b"ans/")
         .await
         .unwrap()
         .is_empty());

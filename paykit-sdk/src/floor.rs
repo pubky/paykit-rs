@@ -271,7 +271,9 @@ impl Paykit {
         if floor.is_some_and(|floor| floor >= to_ms) {
             let writes = owed.into_writes();
             if !writes.is_empty() {
-                self.app.protocol_commit(&writes).await?;
+                self.app
+                    .protocol_commit(crate::protocol::BACKUP_NAME, &writes)
+                    .await?;
             }
             return Ok(None);
         }
@@ -288,7 +290,11 @@ impl Paykit {
             .app
             .record_op(&target, Some(&raised.to_json()?), Vec::new())
             .await?;
-        Ok(Some(OpBatch::new().entry(entry).locals(owed.into_writes())))
+        Ok(Some(
+            OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
+                .entry(entry)
+                .locals(owed.into_writes()),
+        ))
     }
 
     /// Submit `batch`; after a `409 conflict` the floor is read again before the error
