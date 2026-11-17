@@ -1,0 +1,633 @@
+//! Own certificates and state shared by Paykit and another protocol (Paykit spec 3.2).
+
+use std::sync::Arc;
+
+use paykit_sdk::{
+    AppScopes, Paykit, PaykitBackup, PaykitConfig, PaykitProtocol, Rail, RequestedScopes,
+};
+use pubky_switch_client::app::{
+    App, AppBackup, AppError, Effect, LocalWrite, MissedEntries, Outcome, Protocol, ProtocolSet,
+    ReceiveContext, ReceivedMessage, Refusal, ResendNeeded, StoreFailure, UserConfirmed,
+};
+use pubky_switch_client::store::{Fault, FaultStore, StateStore};
+use pubky_switch_client::testing::{AppSpec, Seeds, TestIdentity, TestSigner};
+use pubky_switch_core::message::Message;
+use pubky_switch_core::records::AppCert;
+
+use crate::common::{store, World, ALICE_ORIGIN};
+
+struct Chat;
+
+impl Protocol for Chat {
+    fn resend_needed(&self, _: &ResendNeeded) -> Result<Vec<LocalWrite>, StoreFailure> {
+        Ok(Vec::new())
+    }
+    fn missed(&self, _: &MissedEntries) -> Result<Vec<LocalWrite>, StoreFailure> {
+        Ok(Vec::new())
+    }
+    fn receive(&self, message: &ReceivedMessage, _: &mut ReceiveContext<'_>) -> Outcome {
+        if message
+            .message
+            .body
+            .get("wait_for_epoch")
+            .and_then(serde_json::Value::as_u64)
+            == Some(2)
+        {
+            return Outcome::AwaitKey { data_epoch: 2 };
+        }
+        Outcome::Apply(Effect {
+            ops: Vec::new(),
+            local: vec![LocalWrite::Put {
+                key: message.message.msg_id.as_bytes().to_vec(),
+                value: b"chat".to_vec(),
+            }],
+        })
+    }
+    fn name(&self) -> String {
+        "chat".into()
+    }
+    fn has_keys(&self, scope: &str) -> bool {
+        scope == "chat"
+    }
+    fn sent_between_own_apps(&self, _: &str) -> bool {
+        false
+    }
+    fn check_scopes(&self, _: &Message, sender: &AppCert, own: &AppCert) -> Result<(), String> {
+        if sender.scopes().iter().any(|s| s == "chat") && own.scopes().iter().any(|s| s == "chat") {
+            Ok(())
+        } else {
+            Err("chat requires its own scope".into())
+        }
+    }
+    fn accepts(&self, _: &AppCert) -> Vec<String> {
+        vec!["chat.item".into()]
+    }
+    fn check_body(&self, _: &ReceivedMessage) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+fn world() -> World {
+    let mut w = World::new();
+    let mut spec = crate::common::spec();
+    spec.keyed_scopes.push("chat".into());
+    w.alice = TestSigner::at(
+        TestIdentity::new(&Seeds::default(), "alice"),
+        ALICE_ORIGIN,
+        Arc::clone(&w.clock),
+        Arc::clone(&w.homeserver),
+        spec,
+    );
+    w.router.add_switch(w.alice.origin(), w.alice.switch());
+    w
+}
+
+fn scopes() -> RequestedScopes {
+    let mut scopes = AppScopes::new().pay().build().unwrap();
+    scopes.scopes.push("chat".into());
+    scopes
+}
+
+async fn client(w: &World, storage: Arc<dyn StateStore>) -> App {
+    let p = Arc::new(PaykitProtocol::with_rail(
+        Arc::clone(&w.rail) as Arc<dyn Rail>
+    ));
+    let set = ProtocolSet::new(vec![p, Arc::new(Chat)]).unwrap();
+    App::join(
+        w.env(&w.alice, storage),
+        set,
+        PaykitConfig::default().app,
+        w.approve(&w.alice, "mixed", &scopes()),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_own_join() {
+    let w = world();
+    let app = Paykit::join_with_protocols(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        w.approve(&w.alice, "mixed", &scopes()),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        |p| ProtocolSet::new(vec![p, Arc::new(Chat)]),
+    )
+    .await
+    .expect("a Paykit app can also own chat");
+    assert!(app
+        .app()
+        .scope_key(app.app().data_epoch(), "chat")
+        .is_some());
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_own_load() {
+    let w = world();
+    let storage = store();
+    let app = client(&w, Arc::clone(&storage)).await;
+    let id = app.app_id();
+    drop(app);
+    let app = Paykit::load_with_protocols(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        id,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        |p| ProtocolSet::new(vec![p, Arc::new(Chat)]),
+    )
+    .await
+    .expect("load retains both registered owners");
+    assert!(app
+        .app()
+        .scope_key(app.app().data_epoch(), "chat")
+        .is_some());
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_own_restore() {
+    let w = world();
+    let mut app = client(&w, store()).await;
+    let backup =
+        PaykitBackup::from_bytes(&app.backup_layered().await.unwrap().to_bytes().unwrap()).unwrap();
+    drop(app);
+    let app = Paykit::restore_with_protocols(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        |p| ProtocolSet::new(vec![p, Arc::new(Chat)]),
+    )
+    .await
+    .expect("restore installs both registered owners");
+    assert!(app
+        .app()
+        .scope_key(app.app().data_epoch(), "chat")
+        .is_some());
+}
+
+fn register(p: Arc<PaykitProtocol>) -> Result<ProtocolSet, AppError> {
+    ProtocolSet::new(vec![p, Arc::new(Chat)])
+}
+
+fn bad_registration(p: Arc<PaykitProtocol>, case: u8) -> Result<ProtocolSet, AppError> {
+    match case {
+        0 => ProtocolSet::single(Arc::new(Chat)),
+        1 => ProtocolSet::new(vec![Arc::new(PaykitProtocol::new()), Arc::new(Chat)]),
+        _ => ProtocolSet::new(vec![p, Arc::new(Chat), Arc::new(Chat)]),
+    }
+}
+
+fn usage(result: paykit_sdk::Result<Paykit>) {
+    assert!(matches!(
+        result,
+        Err(paykit_sdk::PaykitError::Client(AppError::Refused(
+            Refusal::Usage(_)
+        )))
+    ));
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_join_requires_the_supplied_paykit() {
+    for case in 0..3 {
+        let w = world();
+        let fault = Arc::new(FaultStore::new(store(), Fault::None));
+        let request = w.approve(&w.alice, "mixed", &scopes());
+        let tip = w.alice.switch().tip_seq();
+        usage(
+            Paykit::join_with_protocols(
+                w.env(&w.alice, Arc::clone(&fault) as Arc<dyn StateStore>),
+                PaykitConfig::default(),
+                request,
+                Arc::clone(&w.rail) as Arc<dyn Rail>,
+                w.timer(),
+                |p| bad_registration(p, case),
+            )
+            .await,
+        );
+        assert_eq!(fault.commits(), 0);
+        assert_eq!(w.alice.switch().tip_seq(), tip);
+    }
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_load_requires_the_supplied_paykit() {
+    let w = world();
+    let fault = Arc::new(FaultStore::new(store(), Fault::None));
+    let app = client(&w, Arc::clone(&fault) as Arc<dyn StateStore>).await;
+    let id = app.app_id();
+    drop(app);
+    for case in 0..3 {
+        let commits = fault.commits();
+        usage(
+            Paykit::load_with_protocols(
+                w.env(&w.alice, Arc::clone(&fault) as Arc<dyn StateStore>),
+                PaykitConfig::default(),
+                id,
+                Arc::clone(&w.rail) as Arc<dyn Rail>,
+                w.timer(),
+                |p| bad_registration(p, case),
+            )
+            .await,
+        );
+        assert_eq!(fault.commits(), commits);
+    }
+    usage(
+        Paykit::load(
+            w.env(&w.alice, fault),
+            PaykitConfig::default(),
+            id,
+            Arc::clone(&w.rail) as Arc<dyn Rail>,
+            w.timer(),
+        )
+        .await,
+    );
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_restore_requires_the_supplied_paykit() {
+    let w = world();
+    let mut app = client(&w, store()).await;
+    let backup =
+        PaykitBackup::from_bytes(&app.backup_layered().await.unwrap().to_bytes().unwrap()).unwrap();
+    drop(app);
+    for case in 0..3 {
+        let fault = Arc::new(FaultStore::new(store(), Fault::None));
+        usage(
+            Paykit::restore_with_protocols(
+                w.env(&w.alice, Arc::clone(&fault) as Arc<dyn StateStore>),
+                PaykitConfig::default(),
+                &backup,
+                Arc::clone(&w.rail) as Arc<dyn Rail>,
+                w.timer(),
+                |p| bad_registration(p, case),
+            )
+            .await,
+        );
+        assert_eq!(fault.commits(), 0);
+    }
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_keyed_approval_checks_paykit_before_writes() {
+    let w = world();
+    let fault = Arc::new(FaultStore::new(store(), Fault::None));
+    let mut requested = scopes();
+    requested.permissions.clear();
+    let request = w.approve(&w.alice, "mixed", &requested);
+    let tip = w.alice.switch().tip_seq();
+    let result = Paykit::join_with_protocols(
+        w.env(&w.alice, Arc::clone(&fault) as Arc<dyn StateStore>),
+        PaykitConfig::default(),
+        request,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        register,
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(paykit_sdk::PaykitError::Refused(
+            paykit_sdk::Refusal::CertificateRefused(_)
+        ))
+    ));
+    assert_eq!(fault.commits(), 0);
+    assert_eq!(w.alice.switch().tip_seq(), tip);
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_callbacks_and_layers_survive_load_and_restore() {
+    let w = world();
+    let storage = store();
+    let mut app = Paykit::join_with_protocols(
+        w.env(&w.alice, Arc::clone(&storage)),
+        PaykitConfig::default(),
+        w.approve(&w.alice, "mixed", &scopes()),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        register,
+    )
+    .await
+    .unwrap();
+    app.receive(None).await.unwrap();
+    let id = app.app_id();
+    let _shop = w.shop().await;
+    let keys = w.bob.identity().app_keys("chat");
+    w.bob.register_app(&keys, &AppSpec::new(&["chat"])).unwrap();
+    let chat_id = w.inject(
+        &w.bob,
+        "chat",
+        &w.alice,
+        &[id],
+        "chat.item",
+        Vec::new(),
+        serde_json::Map::new(),
+    );
+    let request_id = w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[id],
+        "paykit.payment_request",
+        Vec::new(),
+        serde_json::json!({"amount":{"asset":"btc","value":"1"}, "payment_reference":"mixed",
+        "proposal_expires_at":null,"payment_endpoints":{"btc-lightning-bolt11":"lnbc1invoice"}})
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    app.receive(None).await.unwrap();
+    assert_eq!(
+        app.app()
+            .protocol_get("chat", chat_id.as_bytes())
+            .await
+            .unwrap(),
+        Some(b"chat".to_vec())
+    );
+    assert_eq!(
+        app.app()
+            .protocol_get("paykit", chat_id.as_bytes())
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        app.app()
+            .protocol_get("chat", request_id.as_bytes())
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(app.requests().await.unwrap().len(), 1);
+    let chat_state = app.app().protocol_scan("chat", b"").await.unwrap();
+    drop(app);
+    let mut app = Paykit::load_with_protocols(
+        w.env(&w.alice, storage),
+        PaykitConfig::default(),
+        id,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        register,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        app.app().protocol_scan("chat", b"").await.unwrap(),
+        chat_state
+    );
+    assert_eq!(app.requests().await.unwrap().len(), 1);
+    let backup = app.backup().await.unwrap();
+    let layers = AppBackup::from_bytes(&backup.to_bytes().unwrap())
+        .unwrap()
+        .layers()
+        .unwrap();
+    assert_eq!(
+        layers
+            .iter()
+            .map(|l| l.protocol.as_str())
+            .collect::<Vec<_>>(),
+        vec!["paykit", "chat"]
+    );
+    drop(app);
+    let mut app = Paykit::restore_with_protocols(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        register,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        app.app().protocol_scan("chat", b"").await.unwrap(),
+        chat_state
+    );
+    app.receive(None).await.unwrap();
+    app.reconcile().await.unwrap();
+    app.end_reconcile(UserConfirmed::new()).await.unwrap();
+    assert_eq!(app.requests().await.unwrap().len(), 1);
+    let second = w.inject(
+        &w.bob,
+        "chat",
+        &w.alice,
+        &[id],
+        "chat.item",
+        Vec::new(),
+        serde_json::Map::new(),
+    );
+    app.receive(None).await.unwrap();
+    assert_eq!(
+        app.app()
+            .protocol_get("chat", second.as_bytes())
+            .await
+            .unwrap(),
+        Some(b"chat".to_vec())
+    );
+    assert_eq!(
+        app.app()
+            .protocol_get("paykit", second.as_bytes())
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(matches!(
+        app.app().protocol_get("absent", b"anything").await,
+        Err(AppError::Refused(Refusal::Usage(_)))
+    ));
+    app.app_mut()
+        .protocol_commit("chat", &[LocalWrite::DeletePrefix { prefix: Vec::new() }])
+        .await
+        .unwrap();
+    assert!(app
+        .app()
+        .protocol_scan("chat", b"")
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(app.requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_foreign_drop_stays_with_its_owner() {
+    use pubky_switch_client::app::{AppEvent, WaitingReason, MAX_UNVERIFIED_AGE_MS};
+    use pubky_switch_client::clock::Clock;
+    let w = world();
+    let storage = store();
+    let mut app = Paykit::join_with_protocols(
+        w.env(&w.alice, Arc::clone(&storage)),
+        PaykitConfig::default(),
+        w.approve(&w.alice, "mixed", &scopes()),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        register,
+    )
+    .await
+    .unwrap();
+    app.receive(None).await.unwrap();
+    let id = app.app_id();
+    let keys = w.bob.identity().app_keys("chat");
+    w.bob.register_app(&keys, &AppSpec::new(&["chat"])).unwrap();
+    let message = w.inject(
+        &w.bob,
+        "chat",
+        &w.alice,
+        &[id],
+        "chat.item",
+        Vec::new(),
+        serde_json::json!({"wait_for_epoch":2})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let report = app.app_mut().receive(None).await.unwrap();
+    assert!(report.events.iter().any(|e| matches!(
+        e,
+        AppEvent::Parked {
+            reason: pubky_switch_client::app::ParkReason::AwaitingKey { data_epoch: 2 },
+            ..
+        }
+    )));
+    w.clock
+        .set_ms(w.clock.now_ms() + MAX_UNVERIFIED_AGE_MS + 86_400_000);
+    app.app_mut().receive(None).await.unwrap();
+    app.app_mut().receive(None).await.unwrap();
+    let chat = app
+        .app_mut()
+        .unacknowledged_events_for("chat")
+        .await
+        .unwrap();
+    let drop_id = chat
+        .iter()
+        .find_map(|e| match e {
+            AppEvent::StoredEntryDropped {
+                waiting: WaitingReason::Key { data_epoch: 2 },
+                message: msg,
+                ..
+            } if msg.msg_id == message => e.id(),
+            _ => None,
+        })
+        .expect("the real chat key wait expires into its owned drop duty");
+    assert_eq!(app.app().event_owners(drop_id).unwrap(), ["chat"]);
+    assert!(!app
+        .app_mut()
+        .unacknowledged_events_for("paykit")
+        .await
+        .unwrap()
+        .iter()
+        .any(|e| e.id() == Some(drop_id)));
+    for pass in 0..2 {
+        if pass == 1 {
+            drop(app);
+            app = Paykit::load_with_protocols(
+                w.env(&w.alice, Arc::clone(&storage)),
+                PaykitConfig::default(),
+                id,
+                Arc::clone(&w.rail) as Arc<dyn Rail>,
+                w.timer(),
+                register,
+            )
+            .await
+            .unwrap();
+        }
+        let handled = app.receive(None).await;
+        for prefix in ["kw/", "ud/", "pd/", "se/", "dt/", "nt/", "dv/"] {
+            assert!(
+                app.app()
+                    .protocol_scan("paykit", prefix.as_bytes())
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "a foreign duty must not change Paykit {prefix}"
+            );
+        }
+        handled.unwrap();
+        assert!(app
+            .app_mut()
+            .unacknowledged_events_for("chat")
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| e.id() == Some(drop_id)));
+    }
+    app.app_mut().ack_events_for("chat", drop_id).await.unwrap();
+    assert!(!app
+        .app_mut()
+        .unacknowledged_events_for("chat")
+        .await
+        .unwrap()
+        .iter()
+        .any(|e| e.id() == Some(drop_id)));
+}
+
+#[tokio::test]
+async fn test_mixed_protocols_reconciliation_requires_each_owner() {
+    let w = world();
+    let mut original = Paykit::join_with_protocols(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        w.approve(&w.alice, "mixed", &scopes()),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        register,
+    )
+    .await
+    .unwrap();
+    original.receive(None).await.unwrap();
+    let backup = original.backup().await.unwrap();
+    let id = original.app_id();
+    drop(original);
+    for chat_first in [false, true] {
+        let storage = store();
+        let mut app = Paykit::restore_with_protocols(
+            w.env(&w.alice, Arc::clone(&storage)),
+            PaykitConfig::default(),
+            &backup,
+            Arc::clone(&w.rail) as Arc<dyn Rail>,
+            w.timer(),
+            register,
+        )
+        .await
+        .unwrap();
+        app.receive(None).await.unwrap();
+        app.reconcile().await.unwrap();
+        assert!(app.app().reconcile_mode());
+        if chat_first {
+            assert!(!app
+                .app_mut()
+                .end_reconcile_for("chat", UserConfirmed::new())
+                .await
+                .unwrap());
+        }
+        app.end_reconcile(UserConfirmed::new()).await.unwrap();
+        assert_eq!(
+            app.app().reconcile_mode(),
+            !chat_first,
+            "Paykit cannot finish another owner's reconciliation"
+        );
+        if !chat_first {
+            assert!(app.app().may_attempt(false).is_err());
+            drop(app);
+            app = Paykit::load_with_protocols(
+                w.env(&w.alice, storage),
+                PaykitConfig::default(),
+                id,
+                Arc::clone(&w.rail) as Arc<dyn Rail>,
+                w.timer(),
+                register,
+            )
+            .await
+            .unwrap();
+            assert!(app.app().reconcile_mode());
+            assert!(app
+                .app_mut()
+                .end_reconcile_for("chat", UserConfirmed::new())
+                .await
+                .unwrap());
+        }
+        assert!(!app.app().reconcile_mode());
+        app.app().may_attempt(false).unwrap();
+    }
+}

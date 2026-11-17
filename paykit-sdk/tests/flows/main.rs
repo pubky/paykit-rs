@@ -21,6 +21,7 @@ mod final_check;
 mod hold_confirmation;
 mod labels;
 mod local_state;
+mod mixed_protocols;
 mod mixed_versions;
 mod notices;
 mod one_time;
