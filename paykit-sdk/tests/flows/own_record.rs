@@ -402,7 +402,12 @@ async fn test_own_record_failed_update_stays_owed_until_delivery() {
     let published = w.homeserver.file(w.alice_id(), &path).unwrap();
     let supported = endpoint("btc-onchain-address");
     w.rail.set_endpoint_identifiers(vec![supported.clone()]);
-    w.router.remove(w.alice.origin());
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
     let error = wallet.update_own_record().await.unwrap_err();
     assert!(
         matches!(
@@ -419,7 +424,6 @@ async fn test_own_record_failed_update_stays_owed_until_delivery() {
         vec![supported]
     );
     assert_eq!(w.homeserver.file(w.alice_id(), &path), Some(published));
-    w.router.add_switch(w.alice.origin(), w.alice.switch());
     wallet.receive(None).await.unwrap();
     let bytes = w.homeserver.file(w.alice_id(), &path).unwrap();
     let signed = serde_json::from_slice(&bytes).unwrap();
@@ -508,7 +512,12 @@ async fn test_own_record_withdrawal_waits_for_delivery_before_publication() {
         .await
         .unwrap();
     let published = on_homeserver(&w, &shop).unwrap();
-    w.router.remove(w.bob.origin());
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
     let error = shop.remove_public_endpoint(&id).await.unwrap_err();
     assert!(
         matches!(
@@ -523,7 +532,6 @@ async fn test_own_record_withdrawal_waits_for_delivery_before_publication() {
         published.signed()
     );
     let pending = shop.app().record().clone();
-    w.router.add_switch(w.bob.origin(), w.bob.switch());
     shop.receive(None).await.unwrap();
     assert_eq!(on_homeserver(&w, &shop).unwrap().signed(), &pending);
     assert!(PaykitMember::read(&on_homeserver(&w, &shop).unwrap())
@@ -954,12 +962,13 @@ async fn test_own_record_completed_read_renews_after_clock_rollback() {
     *clock.times.lock().unwrap() = (first.updated_at() - 40 * DAY_MS, None);
     shop.receive(None).await.unwrap();
     assert!(shop.app().highest_service_time().unwrap() >= w.clock.now_ms());
+    let before_payer_read = w.clock.now_ms();
     let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
     assert_eq!(read.endpoints.len(), 1, "{read:?}");
     assert!(read.failures.is_empty(), "{read:?}");
     assert_eq!(read.endpoints[0].payload, payload("lno1tips"));
     let renewed = on_homeserver(&w, &shop).unwrap();
-    assert!(renewed.updated_at() >= w.clock.now_ms());
+    assert!(renewed.updated_at() >= before_payer_read);
     assert_eq!(renewed.signed(), shop.app().record());
     assert_eq!(
         renewed.expires_at(),
@@ -968,4 +977,63 @@ async fn test_own_record_completed_read_renews_after_clock_rollback() {
     let signed = shop.app().record().clone();
     shop.receive(None).await.unwrap();
     assert_eq!(shop.app().record(), &signed);
+}
+
+#[tokio::test]
+async fn test_own_record_restored_endpoint_after_clock_rollback_stays_payable() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let clock = Arc::new(PublisherClock::new(w.clock.now_ms()));
+    let mut shop = Box::pin(shop_on_clock(&w, Arc::clone(&clock))).await;
+    let id = endpoint("btc-lightning-bolt12");
+    shop.set_public_endpoint(id.clone(), payload("lno1first"))
+        .await
+        .unwrap();
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    shop.set_public_endpoint(id.clone(), payload("lno1restored"))
+        .await
+        .unwrap_err();
+    let backup = shop.backup().await.unwrap();
+    let before = held(&shop, w.bob_id());
+    drop(shop);
+    w.clock.advance_ms(31 * DAY_MS);
+    *clock.times.lock().unwrap() = (before.updated_at() - 40 * DAY_MS, None);
+    let mut env = w.env(&w.bob, store());
+    env.clock = clock as Arc<dyn Clock>;
+    let mut restored = Box::pin(Paykit::restore(
+        env,
+        publishing(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    ))
+    .await
+    .unwrap();
+    restored
+        .set_public_endpoint(id.clone(), payload("lno1restored"))
+        .await
+        .unwrap();
+    let before_payer_read = w.clock.now_ms();
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(read.endpoints.len(), 1, "{read:?}");
+    assert!(read.failures.is_empty(), "{read:?}");
+    assert_eq!(read.endpoints[0].endpoint_id, id);
+    assert_eq!(read.endpoints[0].payload, payload("lno1restored"));
+    let published = on_homeserver(&w, &restored).unwrap();
+    assert!(published.updated_at() >= before_payer_read);
+    assert_eq!(published.signed(), restored.app().record());
+    assert_eq!(
+        published.expires_at(),
+        Some(published.updated_at() + RECORD_LIFETIME_MS)
+    );
+    restored
+        .set_public_endpoint(id, payload("lno1restored"))
+        .await
+        .unwrap();
+    assert_eq!(restored.app().record(), published.signed());
 }

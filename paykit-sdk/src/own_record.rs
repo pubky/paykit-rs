@@ -11,7 +11,7 @@
 //! [`Paykit::own_public_endpoints`] lists the ones the app's record holds. Every change
 //! signs a new record, which the Switch client keeps, delivers to the own switch with
 //! `app.put` and then writes to the own Homeserver, in that order and in the same bytes
-//! (Switch spec 4.2, [`pubky_switch_client::app::App::set_protocol_member`]). A delivery
+//! (Switch spec 4.2, [`pubky_switch_client::app::App::set_protocol_member_with_lifetime`]). A delivery
 //! or a Homeserver write that fails stays owed by the client and goes again at the next
 //! read; until then readers of the Homeserver see the record published before. The client's
 //! record is the only copy of the public endpoints: Paykit keeps none of its own, and
@@ -28,11 +28,15 @@
 //!
 //! **Expiry and renewal.** A record with public endpoints carries `expires_at`, at its
 //! `updated_at` plus the shorter of [`RECORD_LIFETIME_MS`] and the identity's
-//! `record_max_age`, which readers would cut it to anyway; one without carries none (Paykit
-//! wire 3.2). At every receive, once less than half of the record's trusted lifetime is
-//! left (from its `updated_at` to the earlier of its `expires_at` and its `updated_at` plus
-//! `record_max_age`), the app renews it ([`pubky_switch_client::app::App::renew_record`]);
-//! a record with more left isn't signed again. A renewal the switch hasn't accepted yet is
+//! `record_max_age`, which readers would cut it to anyway. The client derives that expiry
+//! at the actual signing timestamp, including after clock rollback or a conflict retry;
+//! one without public endpoints asks for none (Paykit wire 3.2). At every receive, once
+//! less than half of the record's trusted lifetime is left on the later of the device
+//! clock and verified service time, the app renews it with the client's
+//! [`renew_record_with_lifetime`](pubky_switch_client::app::App::renew_record_with_lifetime).
+//! The trusted lifetime ends at the earlier of `expires_at` and `updated_at` plus
+//! `record_max_age`. A record with more left isn't signed again. A renewal the switch
+//! hasn't accepted yet is
 //! the record the app holds, pending, and the client sends it again at the next read: the
 //! check reads the record held, so nothing counts as renewed that isn't kept.
 //!
@@ -115,8 +119,9 @@ impl Paykit {
 
     /// Publish exactly `endpoints` as the app's public endpoints, none to publish none
     /// (module docs): a new record is signed, kept, delivered to the own switch and written
-    /// to the own Homeserver. When the record already holds them, nothing is signed, and
-    /// only what is owed of an earlier record goes.
+    /// to the own Homeserver. When the record already holds them, its saved lifetime
+    /// policy is kept and owed delivery finishes. An unaccepted restored record is signed
+    /// anew; accepted and pending records retain their bytes.
     ///
     /// # Errors
     ///
@@ -205,8 +210,8 @@ impl Paykit {
         if wanted != held {
             Box::pin(self.put_member(wanted)).await.map(|_| ())
         } else if !held.public_endpoints.is_empty() && self.renewal_due()? {
-            let expires_at = Some(self.expires_at_from_now());
-            Box::pin(self.app.renew_record(expires_at))
+            let lifetime = Some(self.record_lifetime());
+            Box::pin(self.app.renew_record_with_lifetime(PROTOCOL_NAME, lifetime))
                 .await
                 .map(|_| ())
                 .map_err(PaykitError::from)
@@ -237,36 +242,29 @@ impl Paykit {
     /// Sign `member` into the app's record, with `expires_at` when it carries public
     /// endpoints and none when it doesn't, and send it as the client orders (module docs).
     async fn put_member(&mut self, member: PaykitMember) -> Result<Publication> {
-        let held = AppRecord::verify(self.app.record(), &self.identity())
-            .map_err(|_| PaykitError::corrupt())?;
-        let unchanged = PaykitMember::read(&held).map_err(|_| PaykitError::corrupt())? == member;
-        let expires_at = if unchanged {
-            held.expires_at()
-        } else {
-            (!member.public_endpoints.is_empty()).then(|| self.expires_at_from_now())
-        };
+        let lifetime = (!member.public_endpoints.is_empty()).then(|| self.record_lifetime());
         let value = (member != PaykitMember::default()).then(|| member.to_member());
         Ok(self
             .app
-            .set_protocol_member(PROTOCOL_NAME, value, expires_at)
+            .set_protocol_member_with_lifetime(PROTOCOL_NAME, value, lifetime)
             .await?)
     }
 
-    /// The `expires_at` of a record signed now: the shorter of [`RECORD_LIFETIME_MS`] and the
-    /// identity's `record_max_age` past the device clock.
-    fn expires_at_from_now(&self) -> u64 {
-        let lifetime = RECORD_LIFETIME_MS.min(self.app.own_identity().record_max_age_ms());
-        self.now().saturating_add(lifetime)
+    /// The requested lifetime; the client caps it again at the current identity limit
+    /// after readiness and binds it to the exact timestamp it signs (Paykit wire 3.2).
+    fn record_lifetime(&self) -> u64 {
+        RECORD_LIFETIME_MS.min(self.app.own_identity().record_max_age_ms())
     }
 
     /// Whether less than half of the held record's trusted lifetime is left on the device
-    /// clock (module docs).
+    /// clock or the highest verified service time (module docs).
     fn renewal_due(&self) -> Result<bool> {
         let record = AppRecord::verify(self.app.record(), &self.identity())
             .map_err(|_| PaykitError::corrupt())?;
         let max_age_s = self.app.own_identity().record_max_age_ms() / 1000;
         let updated = record.updated_at();
         let lifetime = record.trusted_until(max_age_s).saturating_sub(updated);
-        Ok(self.now() > updated.saturating_add(lifetime / 2))
+        let now = self.now().max(self.app.highest_service_time().unwrap_or(0));
+        Ok(now > updated.saturating_add(lifetime / 2))
     }
 }
