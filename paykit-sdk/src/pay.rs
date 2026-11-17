@@ -892,6 +892,8 @@ impl Paykit {
         by: Initiator,
     ) -> Result<PayOutcome> {
         self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
+        self.refresh_own()?;
         self.records_known().await?;
         self.require_pay()?;
         self.app.may_attempt(false).map_err(not_now)?;
@@ -1131,6 +1133,8 @@ impl Paykit {
         payment: UnrequestedPayment,
     ) -> Result<PayOutcome> {
         self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
+        self.refresh_own()?;
         self.records_known().await?;
         self.require_pay()?;
         self.app.may_attempt(false).map_err(not_now)?;
@@ -1295,6 +1299,8 @@ impl Paykit {
 
     async fn repair_activity_record_inner(&mut self, attempt_id: &AttemptId) -> Result<PayOutcome> {
         self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
+        self.refresh_own()?;
         // A repair writes over a value the app can't read, on the user's word: it waits for
         // the records to be listed, a wider certificate's keys included.
         self.records_known().await?;
@@ -1321,7 +1327,7 @@ impl Paykit {
             }
         }
         if let Some(msg_id) = entry.proof_msg_id.clone() {
-            let _ = self.app.flush_message(&msg_id).await;
+            let _ = self.send_message(&msg_id).await;
         }
         Ok(PayOutcome::Paid {
             attempt_id: *attempt_id,
@@ -2068,7 +2074,7 @@ impl Paykit {
             .await?;
             // Queued, the request goes at the next flush if this one fails: the refusal still
             // tells the user the app waits for the payee.
-            let _ = self.app.flush_message(&msg_id).await;
+            let _ = self.send_message(&msg_id).await;
         }
         Ok(())
     }
@@ -2371,7 +2377,7 @@ impl Paykit {
         let (answered_wall_ms, answered_at) = (self.now(), std::time::Instant::now());
         // The client checks the attempt's proof: only one that shows this app's own open
         // attempt lets money move (Paykit spec 7.2; Switch wire 6.5 "Binding").
-        let submitted = self.app.submit_batch(batch).await;
+        let submitted = self.submit(batch).await;
         let submitted = match submitted {
             Ok(submitted) => submitted,
             Err(error) if error.code() == Some(ErrorCode::Conflict) => {
@@ -2674,7 +2680,7 @@ impl Paykit {
         self.save(entry).await?;
         if let Some(msg_id) = entry.acceptance_msg_id.clone() {
             // Not awaited for paying: a delivery failure leaves it queued.
-            let _ = self.app.flush_message(&msg_id).await;
+            let _ = self.send_message(&msg_id).await;
         }
         Ok(())
     }
@@ -2727,7 +2733,7 @@ impl Paykit {
         match write {
             Some(write) => {
                 let batch = OpBatch::new().entry(write).local(journal_write(&finished)?);
-                match self.app.submit_batch(batch).await {
+                match self.submit(batch).await {
                     Ok(_) => {}
                     Err(error) if error.code() == Some(ErrorCode::Conflict) => {
                         self.app.read_record(&target.record_target()).await?;
@@ -2972,7 +2978,7 @@ impl Paykit {
         if let Some(msg_id) = entry.proof_msg_id.clone() {
             // After the payment and its outcome's batch: a delivery failure leaves the proof
             // queued for the next flush, and decides nothing about paying.
-            let _ = self.app.flush_message(&msg_id).await;
+            let _ = self.send_message(&msg_id).await;
         }
         Ok(PayOutcome::Paid {
             attempt_id,
@@ -3097,7 +3103,7 @@ impl Paykit {
             if let Some(proof) = proof {
                 batch = batch.queue(proof);
             }
-            match self.app.submit_batch(batch).await {
+            match self.submit(batch).await {
                 Ok(_) => {
                     *entry = finished;
                     return Ok(Written::Done);
@@ -3359,6 +3365,8 @@ impl Paykit {
 
     async fn resume_payments_inner(&mut self) -> Result<Vec<PayOutcome>> {
         self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
+        self.refresh_own()?;
         // While a wider certificate's scope keys are missing, the resume goes on only on the
         // payer's side it can read: with the `paykit_pay` key held and the payer's records and
         // claims read as before, its writes are built on versions it holds. Otherwise it
@@ -3377,7 +3385,7 @@ impl Paykit {
         // below, until the batch is sent or the client drops it. The flush sends only bytes
         // signed earlier, kept batches and queued messages, and builds nothing on the copy,
         // so it goes while the payer's side waits too.
-        self.app.flush_outbox().await?;
+        self.send_outbox().await?;
         // Cancellations kept and not yet placed go into their records (Paykit spec 8.1),
         // which they build on: not while the payer's side waits.
         if !payer_waits {
@@ -3454,7 +3462,7 @@ impl Paykit {
         }
         self.prune_journal().await?;
         // Last, after every payment's own work: what can't be delivered now stays queued.
-        let _ = self.app.flush_outbox().await;
+        let _ = self.send_outbox().await;
         Ok(out)
     }
 

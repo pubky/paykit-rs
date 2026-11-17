@@ -645,7 +645,11 @@ async fn test_recovery_checkpoint_empty_waiting_after_reload_refused() {
     value["d"]["waiting"] = json!([]);
     let bad = checkpoint_put(&mut shop, b"ro", &value).await;
     let mut shop = checkpoint_reload(&w, shop, storage).await;
-    shop.unblock(&w.bob_id()).await.unwrap();
+    let error = shop
+        .unblock(&w.bob_id())
+        .await
+        .expect_err("the first read before unblocking validates the resend subset");
+    assert!(crate::common::is_corrupt(&error), "{error:?}");
     let error = shop
         .receive(None)
         .await

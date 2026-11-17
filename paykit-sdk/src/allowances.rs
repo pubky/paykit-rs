@@ -1278,6 +1278,8 @@ impl Paykit {
         terms: AllowanceTerms,
     ) -> Result<SentAllowance> {
         self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
+        self.refresh_own()?;
         self.require_allowance()?;
         Box::pin(self.refuse_while_sends_held(&to)).await?;
         let allowance_id = AllowanceId::generate()?;
@@ -1316,7 +1318,7 @@ impl Paykit {
             .queue(signed)
             .locals(tx.into_writes());
         let record_key = self.app.record_key(&target)?;
-        let delivery = match Box::pin(self.app.submit_batch(batch)).await {
+        let delivery = match Box::pin(self.submit(batch)).await {
             Ok(_) => Box::pin(self.delivered(&msg_id)).await?,
             Err(error) => match error.kept_batch() {
                 Some(batch_id) => MessageDelivery::Kept { batch_id },
@@ -1450,6 +1452,8 @@ impl Paykit {
     /// `record`, `kind`, built again from a fresh read after the record changed meanwhile.
     async fn answer_allowance(&mut self, record: &[u8; 32], kind: Kind) -> Result<String> {
         self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
+        self.refresh_own()?;
         Box::pin(self.records_known()).await?;
         self.require_allowance()?;
         // A record that can't be opened yet may hold a response or an end: nothing is
@@ -1539,7 +1543,7 @@ impl Paykit {
                     Box::pin(self.delivered(&msg_id)).await?;
                     // A notice not delivered now goes with the next flush.
                     for notice in notices {
-                        let _ = Box::pin(self.app.flush_message(&notice)).await;
+                        let _ = Box::pin(self.send_message(&notice)).await;
                     }
                     return Ok(msg_id);
                 }
@@ -1595,7 +1599,7 @@ impl Paykit {
         for message in queue {
             batch = batch.queue(message);
         }
-        match Box::pin(self.app.submit_batch(batch)).await {
+        match Box::pin(self.submit(batch)).await {
             Ok(_) => Ok(()),
             Err(error) if error.kept_batch().is_some() => Ok(()),
             Err(error) => {
@@ -2199,7 +2203,7 @@ impl Paykit {
         // The write went through with the messages queued in its batch: one not delivered
         // now goes with the next flush, and the write's outcome doesn't wait for it.
         for msg_id in sent {
-            let _ = Box::pin(self.app.flush_message(&msg_id)).await;
+            let _ = Box::pin(self.send_message(&msg_id)).await;
         }
         Ok(())
     }

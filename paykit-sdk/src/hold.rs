@@ -943,7 +943,7 @@ impl Paykit {
                     }
                     match self.app.queue_stored(stored.plaintext()).await {
                         Ok(msg_id) => {
-                            let _ = self.app.flush_message(&msg_id).await;
+                            let _ = self.send_message(&msg_id).await;
                         }
                         // Refused for good: nothing is queued; the pass doesn't ask again. A
                         // held answer never went, so the host is told.
@@ -1127,7 +1127,7 @@ impl Paykit {
     ) -> Result<()> {
         match self.app.queue_stored(stored.plaintext()).await {
             Ok(msg_id) => {
-                let _ = self.app.flush_message(&msg_id).await;
+                let _ = self.send_message(&msg_id).await;
                 Ok(())
             }
             // Refused for good, or not this app's own: nothing is queued and nothing is
