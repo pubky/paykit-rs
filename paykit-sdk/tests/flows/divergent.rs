@@ -85,7 +85,7 @@ fn shown_for_a_credit(refused: &paykit_sdk::PaykitError) -> bool {
 /// than the one held, so it doesn't point to its record.
 async fn mark_past_its_record(app: &mut Paykit) {
     let mut writes = Vec::new();
-    for (key, value) in app.app().protocol_scan(b"dv/").await.unwrap() {
+    for (key, value) in app.app().protocol_scan("paykit", b"dv/").await.unwrap() {
         let mut mark: serde_json::Value = serde_json::from_slice(&value).unwrap();
         mark["d"]["seen"]["generation"] = serde_json::json!(u64::MAX);
         writes.push(pubky_switch_client::app::LocalWrite::Put {
@@ -94,7 +94,10 @@ async fn mark_past_its_record(app: &mut Paykit) {
         });
     }
     assert!(!writes.is_empty());
-    app.app_mut().protocol_commit(&writes).await.unwrap();
+    app.app_mut()
+        .protocol_commit("paykit", &writes)
+        .await
+        .unwrap();
 }
 
 /// Bob's shop on `store`.
@@ -392,10 +395,23 @@ async fn test_divergent_pause_kept_after_a_newer_write_clears_the_view() {
         .await
         .unwrap();
     // Confirmed with the view clear, the mark goes at the next receive.
-    assert_eq!(wallet.app().protocol_scan(b"dv/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"dv/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     wallet.receive(None).await.unwrap();
     assert!(wallet.divergent_records().await.unwrap().is_empty());
-    assert!(wallet.app().protocol_scan(b"dv/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"dv/")
+        .await
+        .unwrap()
+        .is_empty());
     let outcome = wallet
         .pay_request(&request, PayOptions::default())
         .await
@@ -882,7 +898,7 @@ async fn test_divergent_kept_value_that_doesnt_read_holds_the_new_message() {
     set_divergent(&base, &shop, &record, true);
     let ns = pubky_switch_client::store::client_namespace(&shop.app_id());
     let kept = format!(
-        "p/dw/{}/proof/{}/123e4567-e89b-42d3-a456-426614174000",
+        "p/paykit/dw/{}/proof/{}/123e4567-e89b-42d3-a456-426614174000",
         pubky_switch_core::enc::b64(&record),
         pubky_switch_core::enc::b64(&w.alice_id())
     );
@@ -932,7 +948,14 @@ async fn test_divergent_kept_write_waits_while_its_record_may_be_missing_from_th
         .await
         .unwrap();
     shop.receive(None).await.unwrap();
-    assert_eq!(shop.app().protocol_scan(b"dw/").await.unwrap().len(), 2);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"dw/")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
     till.receive(None).await.unwrap();
     let target = RecordTarget::new(
         SwitchCollection::new(
@@ -959,10 +982,22 @@ async fn test_divergent_kept_write_waits_while_its_record_may_be_missing_from_th
         });
     let got = shop.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
-    assert_eq!(shop.app().protocol_scan(b"dw/").await.unwrap().len(), 2);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"dw/")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
     assert!(shop.notices().await.unwrap().is_empty());
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    assert!(shop
+        .app()
+        .protocol_scan("paykit", b"dw/")
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(shop.notices().await.unwrap().len(), 2);
 }
 
@@ -984,7 +1019,14 @@ async fn kept_at_the_shop(
         .await
         .unwrap();
     shop.receive(None).await.unwrap();
-    assert_eq!(shop.app().protocol_scan(b"dw/").await.unwrap().len(), 2);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"dw/")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
     (base, shop, wallet, request, record)
 }
 
@@ -996,7 +1038,14 @@ async fn test_divergent_kept_writes_wait_after_the_view_clears_until_confirmed()
     set_divergent(&base, &shop, &record, false);
     shop.receive(None).await.unwrap();
     assert_eq!(sale(&shop, &request).await.status, PayeeStatus::Requested);
-    assert_eq!(shop.app().protocol_scan(b"dw/").await.unwrap().len(), 2);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"dw/")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
     confirm(&mut shop, &record).await.unwrap();
     shop.receive(None).await.unwrap();
     assert_eq!(
@@ -1013,7 +1062,7 @@ async fn test_divergent_kept_write_pointing_past_its_record_never_written() {
     let w = World::new();
     let (_base, mut shop, _wallet, request, record) = kept_at_the_shop(&w).await;
     let mut writes = Vec::new();
-    for (key, value) in shop.app().protocol_scan(b"dw/").await.unwrap() {
+    for (key, value) in shop.app().protocol_scan("paykit", b"dw/").await.unwrap() {
         let mut kept: serde_json::Value = serde_json::from_slice(&value).unwrap();
         kept["d"]["seen"]["generation"] = serde_json::json!(u64::MAX);
         writes.push(pubky_switch_client::app::LocalWrite::Put {
@@ -1021,11 +1070,21 @@ async fn test_divergent_kept_write_pointing_past_its_record_never_written() {
             value: serde_json::to_vec(&kept).unwrap(),
         });
     }
-    shop.app_mut().protocol_commit(&writes).await.unwrap();
+    shop.app_mut()
+        .protocol_commit("paykit", &writes)
+        .await
+        .unwrap();
     confirm(&mut shop, &record).await.unwrap();
     shop.receive(None).await.unwrap();
     assert_eq!(sale(&shop, &request).await.status, PayeeStatus::Requested);
-    assert_eq!(shop.app().protocol_scan(b"dw/").await.unwrap().len(), 2);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"dw/")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
     assert!(shop.notices().await.unwrap().is_empty());
     // Nothing waits for them: the record shows no writes waiting.
     assert!(shop
@@ -1036,7 +1095,12 @@ async fn test_divergent_kept_write_pointing_past_its_record_never_written() {
         .all(|r| r.record != record || !r.writes_waiting));
     w.clock.advance_ms(31 * 24 * HOUR_MS);
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    assert!(shop
+        .app()
+        .protocol_scan("paykit", b"dw/")
+        .await
+        .unwrap()
+        .is_empty());
     let notices = shop.notices().await.unwrap();
     assert_eq!(notices.len(), 2, "{notices:?}");
     assert!(notices.iter().all(|n| n.kind == NoticeKind::MessageGivenUp));
@@ -1111,10 +1175,23 @@ async fn test_divergent_older_kept_list_leaves_a_newer_held_list() {
     set_divergent(&base, &wallet, &record, true);
     w.list_to_alice(&mut shop, &[wallet.app_id()], 2).await;
     wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"dw/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"dw/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     confirm(&mut wallet, &record).await.unwrap();
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"dw/")
+        .await
+        .unwrap()
+        .is_empty());
     let held = wallet.held_lists().await.unwrap();
     assert_eq!(held.len(), 1);
     assert_eq!(held[0].version, 3);
@@ -1212,7 +1289,15 @@ async fn test_divergent_restore_carries_a_kept_proof_and_writes_it_once_confirme
     let backup = shop.backup().await.unwrap();
     drop(shop);
     let (_restored_store, mut restored) = restored_shop(&w, &backup).await;
-    assert_eq!(restored.app().protocol_scan(b"dw/").await.unwrap().len(), 2);
+    assert_eq!(
+        restored
+            .app()
+            .protocol_scan("paykit", b"dw/")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
     restored.receive(None).await.unwrap();
     confirm(&mut restored, &record).await.unwrap();
     restored.receive(None).await.unwrap();
@@ -1225,7 +1310,7 @@ async fn test_divergent_restore_carries_a_kept_proof_and_writes_it_once_confirme
     restored.receive(None).await.unwrap();
     assert!(restored
         .app()
-        .protocol_scan(b"dw/")
+        .protocol_scan("paykit", b"dw/")
         .await
         .unwrap()
         .is_empty());
@@ -1253,7 +1338,7 @@ async fn test_divergent_placed_write_stays_placed_through_a_restore_and_a_resend
     restored.receive(None).await.unwrap();
     assert!(restored
         .app()
-        .protocol_scan(b"dw/")
+        .protocol_scan("paykit", b"dw/")
         .await
         .unwrap()
         .is_empty());
@@ -1279,7 +1364,7 @@ async fn test_divergent_given_up_write_stays_given_up_through_a_restore_and_a_re
     // The messages stay processed: nothing is kept again, and no notice is raised twice.
     assert!(restored
         .app()
-        .protocol_scan(b"dw/")
+        .protocol_scan("paykit", b"dw/")
         .await
         .unwrap()
         .is_empty());
@@ -1303,7 +1388,12 @@ async fn test_divergent_ended_mark_stays_ended_through_a_restore_and_a_listing()
     confirm(&mut wallet, &record).await.unwrap();
     set_divergent(&base, &wallet, &record, false);
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_scan(b"dv/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"dv/")
+        .await
+        .unwrap()
+        .is_empty());
     let backup = wallet.backup().await.unwrap();
     let mut restored = Paykit::restore(
         w.env(&w.alice, store()),
@@ -1320,7 +1410,7 @@ async fn test_divergent_ended_mark_stays_ended_through_a_restore_and_a_listing()
     assert!(restored.divergent_records().await.unwrap().is_empty());
     assert!(restored
         .app()
-        .protocol_scan(b"dv/")
+        .protocol_scan("paykit", b"dv/")
         .await
         .unwrap()
         .is_empty());
@@ -1577,10 +1667,22 @@ async fn test_divergent_later_message_kept_is_reflected_once_written() {
         body(None),
     );
     shop.receive(None).await.unwrap();
-    assert_eq!(shop.app().protocol_scan(b"dw/").await.unwrap().len(), 2);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"dw/")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
     confirm(&mut shop, &record).await.unwrap();
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    assert!(shop
+        .app()
+        .protocol_scan("paykit", b"dw/")
+        .await
+        .unwrap()
+        .is_empty());
     let held = shop.app().shared_record(&record).await.unwrap().unwrap();
     let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
     let ids: Vec<String> = value["msg_ids"]
@@ -1605,7 +1707,7 @@ async fn test_divergent_kept_value_at_a_key_without_its_msg_id_holds_the_new_mes
     let record = sale(&shop, &request).await.record;
     set_divergent(&base, &shop, &record, true);
     let ns = pubky_switch_client::store::client_namespace(&shop.app_id());
-    let kept = format!("p/dw/{}/proof", pubky_switch_core::enc::b64(&record));
+    let kept = format!("p/paykit/dw/{}/proof", pubky_switch_core::enc::b64(&record));
     let mut batch = WriteBatch::new();
     batch
         .put(&ns, kept.clone().into_bytes(), b"not a kept write".to_vec())
@@ -1700,7 +1802,15 @@ async fn test_divergent_kept_list_written_before_a_payment_to_it() {
     set_divergent(&base, &wallet, &record, true);
     w.list_to_alice(&mut shop, &[wallet.app_id()], 2).await;
     wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"dw/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"dw/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     confirm(&mut wallet, &record).await.unwrap();
     let payment = || {
         UnrequestedPayment::new(w.bob_id(), btc("1"))
@@ -1714,7 +1824,12 @@ async fn test_divergent_kept_list_written_before_a_payment_to_it() {
     assert!(records[0].writes_waiting);
     assert!(w.rail.all_executions().is_empty());
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"dw/")
+        .await
+        .unwrap()
+        .is_empty());
     let outcome = wallet.pay_without_request(payment()).await.unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
@@ -2049,7 +2164,7 @@ async fn receipt_without_request_over_unread_paused(stranger: bool) {
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(pubky_switch_client::app::OpBatch::new().entry(op))
+        .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -2092,7 +2207,7 @@ async fn receipt_without_request_over_unread_paused(stranger: bool) {
         .unwrap();
     phone
         .app_mut()
-        .submit_batch(pubky_switch_client::app::OpBatch::new().entry(op))
+        .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(op))
         .await
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -2186,7 +2301,7 @@ async fn test_divergent_kept_messages_of_two_senders_with_one_msg_id_both_kept()
             .unwrap();
         phone
             .app_mut()
-            .submit_batch(pubky_switch_client::app::OpBatch::new().entry(op))
+            .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(op))
             .await
             .unwrap();
     };
@@ -2274,7 +2389,15 @@ async fn test_divergent_held_rejection_recorded_over_a_paused_record_and_sent_on
     let view = wallet.request(&request).await.unwrap();
     assert_eq!(view.status, RequestStatus::Rejected);
     assert!(view.divergent);
-    assert_eq!(wallet.app().protocol_scan(b"ha/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ha/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     wallet.receive(None).await.unwrap();
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
     let paused = |listed: &[paykit_sdk::DivergentRecord]| {
@@ -2286,7 +2409,12 @@ async fn test_divergent_held_rejection_recorded_over_a_paused_record_and_sent_on
     wallet.receive(None).await.unwrap();
     wallet.flush().await.unwrap();
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries + 1);
-    assert!(wallet.app().protocol_scan(b"ha/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"ha/")
+        .await
+        .unwrap()
+        .is_empty());
     assert!(wallet.notices().await.unwrap().is_empty());
     assert!(paused(&wallet.divergent_records().await.unwrap()));
     shop.receive(None).await.unwrap();
@@ -2331,7 +2459,12 @@ async fn test_divergent_acceptance_from_another_identity_never_kept_over_a_pause
         acceptance_body(),
     );
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    assert!(shop
+        .app()
+        .protocol_scan("paykit", b"dw/")
+        .await
+        .unwrap()
+        .is_empty());
     let listed = shop.divergent_records().await.unwrap();
     assert!(
         listed
@@ -2350,7 +2483,14 @@ async fn test_divergent_acceptance_from_another_identity_never_kept_over_a_pause
         acceptance_body(),
     );
     shop.receive(None).await.unwrap();
-    assert_eq!(shop.app().protocol_scan(b"dw/").await.unwrap().len(), 1);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"dw/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -2497,7 +2637,7 @@ async fn acceptance_over_unread_paused(blocked: bool) {
             .await
             .unwrap();
         till.app_mut()
-            .submit_batch(pubky_switch_client::app::OpBatch::new().entry(op))
+            .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(op))
             .await
             .unwrap();
     };
@@ -2518,17 +2658,44 @@ async fn acceptance_over_unread_paused(blocked: bool) {
     if blocked {
         shop.block(&w.carol_id()).await.unwrap();
         shop.receive(None).await.unwrap();
-        assert!(shop.app().protocol_scan(b"dw/").await.unwrap().is_empty());
-        assert!(shop.app().protocol_scan(b"pr/").await.unwrap().is_empty());
+        assert!(shop
+            .app()
+            .protocol_scan("paykit", b"dw/")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(shop
+            .app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .is_empty());
         assert_eq!(shop.spam_count(&w.carol_id()).await.unwrap(), 1);
         return;
     }
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_scan(b"dw/").await.unwrap().is_empty());
-    assert_eq!(shop.app().protocol_scan(b"pr/").await.unwrap().len(), 1);
+    assert!(shop
+        .app()
+        .protocol_scan("paykit", b"dw/")
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"pr/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     till_writes(&mut till, &good).await;
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    assert!(shop
+        .app()
+        .protocol_scan("paykit", b"dw/")
+        .await
+        .unwrap()
+        .is_empty());
     let listed = shop.divergent_records().await.unwrap();
     assert!(
         listed
@@ -2589,7 +2756,15 @@ async fn held_answer_lacking_in_its_record(divergent: bool) {
     wallet.block(&w.bob_id()).await.unwrap();
     let entries = w.bob.switch().entries_from(&w.alice_id());
     let rejection = wallet.reject_request(&request, None).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"ha/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ha/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     seen.armed.store(true, std::sync::atomic::Ordering::SeqCst);
     phone.receive(None).await.unwrap();
     crate::outcome_record::phone_writes(&mut phone, &request, Some(&good)).await;
@@ -2605,7 +2780,12 @@ async fn held_answer_lacking_in_its_record(divergent: bool) {
     assert_ne!(view.status, RequestStatus::Rejected, "{view:?}");
     let sent = |w: &World| w.bob.switch().entries_from(&w.alice_id()) - entries;
     if divergent {
-        let held = wallet.app().protocol_scan(b"ha/").await.unwrap().len();
+        let held = wallet
+            .app()
+            .protocol_scan("paykit", b"ha/")
+            .await
+            .unwrap()
+            .len();
         let notices = wallet.notices().await.unwrap().len();
         wallet.unblock(&w.bob_id()).await.unwrap();
         wallet.receive(None).await.unwrap();
@@ -2615,7 +2795,15 @@ async fn held_answer_lacking_in_its_record(divergent: bool) {
             (1, 0, 0),
             "(held answers kept, notices, sent to bob) while the record is paused"
         );
-        assert_eq!(wallet.app().protocol_scan(b"ha/").await.unwrap().len(), 1);
+        assert_eq!(
+            wallet
+                .app()
+                .protocol_scan("paykit", b"ha/")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(wallet.notices().await.unwrap().is_empty());
         confirm(&mut wallet, &record).await.unwrap();
         wallet.receive(None).await.unwrap();
@@ -2624,7 +2812,12 @@ async fn held_answer_lacking_in_its_record(divergent: bool) {
         wallet.receive(None).await.unwrap();
         wallet.flush().await.unwrap();
     }
-    assert!(wallet.app().protocol_scan(b"ha/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"ha/")
+        .await
+        .unwrap()
+        .is_empty());
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, NoticeKind::MessageGivenUp);
@@ -2678,16 +2871,37 @@ async fn test_divergent_held_answer_kept_while_its_paused_record_is_deleted() {
         held.content,
         pubky_switch_client::app::RecordContent::Deleted
     );
-    assert_eq!(wallet.app().protocol_scan(b"ha/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ha/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(wallet.notices().await.unwrap().is_empty());
     wallet.unblock(&w.bob_id()).await.unwrap();
     wallet.receive(None).await.unwrap();
     wallet.flush().await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"ha/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ha/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
     confirm(&mut wallet, &record).await.unwrap();
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_scan(b"ha/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"ha/")
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
 }
 
@@ -2743,7 +2957,12 @@ mod durable_event {
         let mut wallet = w
             .load_on_clock(&w.alice, Arc::clone(&base), app_id, Arc::clone(&w.clock))
             .await;
-        assert!(wallet.app().protocol_scan(b"dv/").await.unwrap().is_empty());
+        assert!(wallet
+            .app()
+            .protocol_scan("paykit", b"dv/")
+            .await
+            .unwrap()
+            .is_empty());
         let summary = wallet.receive(None).await.unwrap();
         assert!(
             summary.divergent.iter().any(|r| r.record == record),
@@ -2840,7 +3059,7 @@ mod durable_event {
             .unwrap();
         other
             .app_mut()
-            .submit_batch(pubky_switch_client::app::OpBatch::new().entry(op))
+            .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(op))
             .await
             .unwrap();
     }
@@ -3073,14 +3292,58 @@ mod durable_event {
             self.inner.scan(ns, prefix, after, limit)
         }
 
-        fn commit(&self, batch: WriteBatch) -> Result<(), pubky_switch_client::error::StoreError> {
-            let taken = batch.writes.iter().any(|write| {
-                matches!(write, pubky_switch_client::store::Write::Put { key, .. } if key.starts_with(b"p/dt/"))
+        fn commit(
+            &self,
+            batch: pubky_switch_client::store::WriteBatch,
+        ) -> Result<(), pubky_switch_client::error::StoreError> {
+            self.commit_with(batch, |batch| {
+                self.inner
+                    .commit(batch)
+                    .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+            })
+            .map(|_| ())
+        }
+
+        fn acquire(
+            &self,
+            ns: &str,
+            owner: pubky_switch_client::store::StoreOwner,
+        ) -> Result<
+            pubky_switch_client::store::AcquireOutcome,
+            pubky_switch_client::error::StoreError,
+        > {
+            self.inner.acquire(ns, owner)
+        }
+
+        fn commit_if(
+            &self,
+            ns: &str,
+            owner: pubky_switch_client::store::StoreOwner,
+            batch: pubky_switch_client::store::WriteBatch,
+        ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+        {
+            self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
+        }
+    }
+    impl FailsTaken {
+        fn commit_with(
+            &self,
+            batch: pubky_switch_client::store::WriteBatch,
+            apply: impl FnOnce(
+                pubky_switch_client::store::WriteBatch,
+            ) -> Result<
+                pubky_switch_client::store::CommitOutcome,
+                pubky_switch_client::error::StoreError,
+            >,
+        ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+        {
+            let taken = batch.writes().iter().any(|write| {
+                matches!(write, pubky_switch_client::store::Write::Put { key, .. } if key.starts_with(b"p/paykit/dt/"))
             });
             if taken && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
                 return Err(pubky_switch_client::error::StoreError::Unavailable);
             }
-            self.inner.commit(batch)
+            apply(batch)
         }
     }
 
@@ -3220,7 +3483,14 @@ async fn test_divergent_acceptance_after_a_confirmation_written_after_the_kept_o
     };
     let first = acceptance(&w);
     shop.receive(None).await.unwrap();
-    assert_eq!(shop.app().protocol_scan(b"dw/").await.unwrap().len(), 1);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"dw/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     confirm(&mut shop, &record).await.unwrap();
     w.clock.advance_ms(1_000);
     let second = acceptance(&w);
@@ -3232,7 +3502,12 @@ async fn test_divergent_acceptance_after_a_confirmation_written_after_the_kept_o
         .as_array()
         .unwrap()
         .contains(&serde_json::json!(second)));
-    assert!(shop.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    assert!(shop
+        .app()
+        .protocol_scan("paykit", b"dw/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -3323,7 +3598,14 @@ async fn test_divergent_later_write_waits_behind_a_kept_one_not_written_yet() {
         });
     shop.receive(None).await.unwrap();
     assert_eq!(in_role(&shop, &record, "response").await, None);
-    assert_eq!(shop.app().protocol_scan(b"dw/").await.unwrap().len(), 2);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"dw/")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
     shop.receive(None).await.unwrap();
     assert_eq!(in_role(&shop, &record, "response").await, Some(first));
     let held = shop.app().shared_record(&record).await.unwrap().unwrap();
@@ -3397,7 +3679,7 @@ async fn test_divergent_mark_with_a_credit_confirmation_no_writer_leaves_credits
         let paid = sale(&shop, &request).await.record;
         set_divergent(&base, &shop, &paid, true);
         confirm(&mut shop, &paid).await.unwrap();
-        let stored = shop.app().protocol_scan(b"dv/").await.unwrap();
+        let stored = shop.app().protocol_scan("paykit", b"dv/").await.unwrap();
         assert_eq!(stored.len(), 1, "{case}");
         let (key, value) = stored[0].clone();
         let mut mark: serde_json::Value = serde_json::from_slice(&value).unwrap();
@@ -3416,7 +3698,7 @@ async fn test_divergent_mark_with_a_credit_confirmation_no_writer_leaves_credits
             value,
         };
         shop.app_mut()
-            .protocol_commit(&[put(serde_json::to_vec(&mark).unwrap())])
+            .protocol_commit("paykit", &[put(serde_json::to_vec(&mark).unwrap())])
             .await
             .unwrap();
         let refused = shop.confirm_payment(&paid).await.unwrap_err();
@@ -3430,7 +3712,10 @@ async fn test_divergent_mark_with_a_credit_confirmation_no_writer_leaves_credits
             "{case}: {refused:?}"
         );
         assert!(shop.divergent_records().await.is_err(), "{case}");
-        shop.app_mut().protocol_commit(&[put(value)]).await.unwrap();
+        shop.app_mut()
+            .protocol_commit("paykit", &[put(value)])
+            .await
+            .unwrap();
         let refused = shop.confirm_payment(&paid).await.unwrap_err();
         assert_eq!(
             refused_records(&refused),
@@ -3753,7 +4038,14 @@ async fn test_divergent_acceptance_dropped_for_the_bound_taken_again_from_a_rese
         sent.push(plaintext);
     }
     shop.receive(None).await.unwrap();
-    assert_eq!(shop.app().protocol_scan(b"dw/").await.unwrap().len(), 17);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"dw/")
+            .await
+            .unwrap()
+            .len(),
+        17
+    );
     let msg_id = |plaintext: &pubky_switch_core::message::MessagePlaintext| {
         pubky_switch_core::message::Message::parse(
             plaintext.json(),
@@ -3884,7 +4176,14 @@ async fn test_divergent_stored_entry_neither_written_nor_given_up_while_its_reco
         .unwrap();
     crate::common::refuse_writes(&w.bob, 4);
     shop.receive(None).await.unwrap();
-    assert_eq!(shop.app().protocol_scan(b"se/").await.unwrap().len(), 2);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"se/")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
     set_divergent(&base, &shop, &record, true);
     shop.receive(None).await.unwrap();
     till.receive(None).await.unwrap();
@@ -3914,7 +4213,14 @@ async fn test_divergent_stored_entry_neither_written_nor_given_up_while_its_reco
         });
     let got = shop.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
-    assert_eq!(shop.app().protocol_scan(b"se/").await.unwrap().len(), 2);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"se/")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
     assert!(shop.notices().await.unwrap().is_empty());
 }
 
@@ -3963,7 +4269,7 @@ async fn test_divergent_messages_of_one_millisecond_kept_dropped_and_written_in_
     }
     shop.receive(None).await.unwrap();
     let ids: Vec<String> = same_time.iter().map(msg_id).collect();
-    let kept = shop.app().protocol_scan(b"dw/").await.unwrap();
+    let kept = shop.app().protocol_scan("paykit", b"dw/").await.unwrap();
     let named = |id: &str| {
         kept.iter()
             .any(|(key, _)| String::from_utf8_lossy(key).ends_with(id))
@@ -3974,7 +4280,12 @@ async fn test_divergent_messages_of_one_millisecond_kept_dropped_and_written_in_
     confirm(&mut shop, &record).await.unwrap();
     shop.receive(None).await.unwrap();
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_scan(b"dw/").await.unwrap().is_empty());
+    assert!(shop
+        .app()
+        .protocol_scan("paykit", b"dw/")
+        .await
+        .unwrap()
+        .is_empty());
     let held = shop.app().shared_record(&record).await.unwrap().unwrap();
     let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
     let reflected: Vec<String> = value["msg_ids"]

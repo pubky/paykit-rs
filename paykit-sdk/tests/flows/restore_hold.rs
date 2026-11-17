@@ -372,7 +372,15 @@ async fn test_restore_hold_stop_kept_before_the_backup_stops_after_it() {
     cancel(&mut shop, &request).await;
     refuse_writes(&w, 4);
     let _ = wallet.receive(None).await;
-    assert_eq!(wallet.app().protocol_scan(b"kc/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"kc/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     let mut app = restored_from(&w, wallet).await;
     let refused = app
         .pay_request(&request, crate::common::over_hold(&app, &request).await)
@@ -677,7 +685,7 @@ async fn test_restore_hold_confirming_a_request_missing_from_a_copy_not_listed_r
 async fn missed_unlisted(wallet: &Paykit) -> bool {
     wallet
         .app()
-        .protocol_scan(b"ml")
+        .protocol_scan("paykit", b"ml")
         .await
         .unwrap()
         .iter()
@@ -743,7 +751,14 @@ async fn test_restore_hold_missed_item_keeps_a_stop_past_30_days_until_paykit_li
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let _shop = w.shop().await;
-    let stops = async |wallet: &Paykit| wallet.app().protocol_scan(b"kc/").await.unwrap().len();
+    let stops = async |wallet: &Paykit| {
+        wallet
+            .app()
+            .protocol_scan("paykit", b"kc/")
+            .await
+            .unwrap()
+            .len()
+    };
     let body = paykit_lib::bodies::RequestReply {
         reason: None,
         label: None,
@@ -887,7 +902,7 @@ async fn test_restore_hold_missed_item_asks_the_payee_of_an_open_request_another
     assert_eq!(status_of(&w, &wallet, &request).await, RequestStatus::Open);
     assert!(wallet
         .app()
-        .protocol_scan(b"peer/")
+        .protocol_scan("paykit", b"peer/")
         .await
         .unwrap()
         .is_empty());
@@ -908,7 +923,15 @@ async fn test_restore_hold_missed_item_asks_no_counterparty_of_a_closed_request(
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     wallet.reject_request(&request, None).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"peer/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"peer/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     missed(&w);
     wallet.receive(None).await.unwrap();
     assert_eq!(asks_to(&wallet, &w.bob_id()).await, 0);
@@ -990,13 +1013,26 @@ async fn test_restore_hold_missed_item_deleted_record_decides_nothing_until_the_
     let got = wallet.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_some(), "{got:?}");
     assert!(!got.applied.contains(&cancellation), "{got:?}");
-    assert!(wallet.app().protocol_scan(b"kc/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"kc/")
+        .await
+        .unwrap()
+        .is_empty());
     // The next receive's read still holds it, and its end lists; the one after takes it.
     let got = wallet.receive(None).await.unwrap();
     assert!(got.records_unlisted.is_none(), "{got:?}");
     let got = wallet.receive(None).await.unwrap();
     assert!(got.applied.contains(&cancellation), "{got:?}");
-    assert_eq!(wallet.app().protocol_scan(b"kc/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"kc/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -1012,16 +1048,27 @@ async fn test_restore_hold_missed_item_mark_naming_another_time_refused_as_corru
     let value = serde_json::to_vec(&serde_json::json!({ "v": 1, "d": 0 })).unwrap();
     wallet
         .app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: key.clone().into_bytes(),
-            value,
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: key.clone().into_bytes(),
+                value,
+            }],
+        )
         .await
         .unwrap();
     let failed = wallet.receive(None).await.unwrap_err();
     assert!(crate::common::is_corrupt(&failed), "{failed:?}");
     assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
-    assert_eq!(wallet.app().protocol_scan(b"mi/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"mi/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -1070,7 +1117,12 @@ async fn test_restore_hold_missed_item_asks_sent_not_sent_again_by_a_restore() {
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert_eq!(asks_to(&wallet, &w.bob_id()).await, 1);
-    assert!(wallet.app().protocol_scan(b"mi/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"mi/")
+        .await
+        .unwrap()
+        .is_empty());
     // The restore's own ask goes as its reconcile ends.
     let mut wallet = restored_from(&w, wallet).await;
     let before = asks_to(&wallet, &w.bob_id()).await;
@@ -1078,10 +1130,15 @@ async fn test_restore_hold_missed_item_asks_sent_not_sent_again_by_a_restore() {
         wallet.receive(None).await.unwrap();
     }
     assert_eq!(asks_to(&wallet, &w.bob_id()).await, before);
-    assert!(wallet.app().protocol_scan(b"mi/").await.unwrap().is_empty());
     assert!(wallet
         .app()
-        .protocol_scan(b"ask/")
+        .protocol_scan("paykit", b"mi/")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"ask/")
         .await
         .unwrap()
         .is_empty());
@@ -1108,13 +1165,23 @@ async fn test_restore_hold_missed_item_listing_failing_in_the_read_fails_the_rec
         });
     assert!(wallet.receive(None).await.is_err());
     // The item was passed: the records count as not listed by Paykit since.
-    assert!(wallet.app().protocol_get(b"ml").await.unwrap().is_some());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"ml")
+        .await
+        .unwrap()
+        .is_some());
     let mut applied = Vec::new();
     for _ in 0..2 {
         applied.extend(wallet.receive(None).await.unwrap().applied);
     }
     assert_eq!(applied.len(), 1, "{applied:?}");
-    assert!(wallet.app().protocol_get(b"ml").await.unwrap().is_none());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"ml")
+        .await
+        .unwrap()
+        .is_none());
     assert!(wallet.request(&request).await.is_ok());
 }
 
@@ -1149,14 +1216,19 @@ async fn test_restore_hold_missed_item_bounded_by_its_last_acceptance_time() {
 async fn missed_hold(wallet: &Paykit) -> (Option<u64>, bool) {
     let bound = wallet
         .app()
-        .protocol_get(b"mh")
+        .protocol_get("paykit", b"mh")
         .await
         .unwrap()
         .map(|bytes| {
             let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             value["d"]["bound_ms"].as_u64().unwrap()
         });
-    let unknown = wallet.app().protocol_get(b"mu").await.unwrap().is_some();
+    let unknown = wallet
+        .app()
+        .protocol_get("paykit", b"mu")
+        .await
+        .unwrap()
+        .is_some();
     (bound, unknown)
 }
 
@@ -1187,9 +1259,15 @@ async fn test_restore_hold_held_cursor_gap_bounded_by_the_verified_service_time(
     let _shop = w.shop().await;
     wallet.receive(None).await.unwrap();
     let position = wallet.app().cursor().seq;
-    w.alice
-        .switch()
-        .set_held_cursor(&wallet.app_id(), position + 4);
+    // Four actual feed positions exist before another instance advances its cursor.
+    let mut ahead = position;
+    for _ in 0..4 {
+        ahead = w
+            .alice
+            .switch()
+            .push_missed(1, w.clock.now_ms(), w.clock.now_ms());
+    }
+    w.alice.switch().set_held_cursor(&wallet.app_id(), ahead);
     let read_ms = w.clock.now_ms();
     let report = wallet.receive(None).await.unwrap();
     assert!(
@@ -1202,9 +1280,7 @@ async fn test_restore_hold_held_cursor_gap_bounded_by_the_verified_service_time(
     );
     let verified = wallet.app().highest_service_time().unwrap();
     assert_eq!(missed_hold(&wallet).await, (Some(verified), false));
-    // The other instance's cursor goes back to the wallet's position, so the wallet's own
-    // moves go through again.
-    w.alice.switch().set_held_cursor(&wallet.app_id(), position);
+    // New entries follow the cursor the client adopted from the other instance.
     assert_bounded_by_the_read(&w, &mut wallet, read_ms).await;
 }
 
@@ -1222,12 +1298,12 @@ async fn test_restore_hold_owed_missed_call_with_no_end_bounded_by_the_verified_
     let cursor = wallet.app().cursor();
     let owed = serde_json::json!({
         "v": pubky_switch_client::app::SCHEMA_VERSION,
-        "d": { "Missed": {
+        "d": { "to": ["paykit"], "call": { "Missed": {
             "seq": cursor.seq,
             "entries": 0,
             "accepted_from_ms": w.clock.now_ms() - 1_000,
             "accepted_until_ms": u64::MAX,
-        } },
+        } } },
     });
     let mut batch = pubky_switch_client::store::WriteBatch::new();
     batch
@@ -1257,9 +1333,15 @@ async fn test_restore_hold_held_cursor_gap_and_a_bounded_item_hold_to_the_later_
     wallet.receive(None).await.unwrap();
     let position = wallet.app().cursor().seq;
     let now = w.clock.now_ms();
-    w.alice
-        .switch()
-        .set_held_cursor(&wallet.app_id(), position + 4);
+    // Four actual feed positions exist before another instance advances its cursor.
+    let mut ahead = position;
+    for _ in 0..4 {
+        ahead = w
+            .alice
+            .switch()
+            .push_missed(1, w.clock.now_ms(), w.clock.now_ms());
+    }
+    w.alice.switch().set_held_cursor(&wallet.app_id(), ahead);
     w.alice
         .switch()
         .push_missed(1, now - 2 * HOUR_MS, now - HOUR_MS);
@@ -1267,7 +1349,6 @@ async fn test_restore_hold_held_cursor_gap_and_a_bounded_item_hold_to_the_later_
     let verified = wallet.app().highest_service_time().unwrap();
     assert!(verified >= now, "{verified} {now}");
     assert_eq!(missed_hold(&wallet).await, (Some(verified), false));
-    w.alice.switch().set_held_cursor(&wallet.app_id(), position);
     w.clock.set_ms(now - HOUR_MS / 2);
     let between = signed_request(&w, "order-1");
     w.clock.set_ms(now);
@@ -1295,22 +1376,25 @@ async fn test_restore_hold_missed_end_not_known_holds_every_open_request_until_b
     };
     wallet
         .app_mut()
-        .protocol_commit(&[
-            pubky_switch_client::app::LocalWrite::Put {
-                key: b"he".to_vec(),
-                value: kept(serde_json::json!(pubky_switch_core::enc::b64(
-                    &pubky_switch_core::enc::random_bytes::<16>().unwrap()
-                ))),
-            },
-            pubky_switch_client::app::LocalWrite::Put {
-                key: b"mh".to_vec(),
-                value: kept(serde_json::json!({ "bound_ms": 0 })),
-            },
-            pubky_switch_client::app::LocalWrite::Put {
-                key: b"mu".to_vec(),
-                value: kept(serde_json::json!(true)),
-            },
-        ])
+        .protocol_commit(
+            "paykit",
+            &[
+                pubky_switch_client::app::LocalWrite::Put {
+                    key: b"he".to_vec(),
+                    value: kept(serde_json::json!(pubky_switch_core::enc::b64(
+                        &pubky_switch_core::enc::random_bytes::<16>().unwrap()
+                    ))),
+                },
+                pubky_switch_client::app::LocalWrite::Put {
+                    key: b"mh".to_vec(),
+                    value: kept(serde_json::json!({ "bound_ms": 0 })),
+                },
+                pubky_switch_client::app::LocalWrite::Put {
+                    key: b"mu".to_vec(),
+                    value: kept(serde_json::json!(true)),
+                },
+            ],
+        )
         .await
         .unwrap();
     assert_eq!(status_of(&w, &wallet, &request).await, RequestStatus::Held);

@@ -193,7 +193,11 @@ impl Paykit {
     /// for a store failure, and a corrupt store for a value that doesn't read, isn't its
     /// family's, or names another key than `key`. Never `None` for one that doesn't bind.
     pub(crate) async fn local_get<T: Stored>(&self, key: &str) -> Result<Option<T>> {
-        match self.app.protocol_get(key.as_bytes()).await? {
+        match self
+            .app
+            .protocol_get(crate::protocol::BACKUP_NAME, key.as_bytes())
+            .await?
+        {
             None => Ok(None),
             Some(bytes) => self
                 .binding(|binder| bound(key.as_bytes(), &bytes, binder))
@@ -204,7 +208,10 @@ impl Paykit {
     /// Every value under protocol prefix `prefix`, with the key's rest after the prefix, each
     /// read whole and bound to its own key as [`Paykit::local_get`] reads one.
     pub(crate) async fn local_scan<T: Stored>(&self, prefix: &str) -> Result<Vec<(String, T)>> {
-        let held = self.app.protocol_scan(prefix.as_bytes()).await?;
+        let held = self
+            .app
+            .protocol_scan(crate::protocol::BACKUP_NAME, prefix.as_bytes())
+            .await?;
         self.binding(|binder| {
             let mut out = Vec::with_capacity(held.len());
             for (key, value) in &held {
@@ -220,7 +227,10 @@ impl Paykit {
         if tx.writes.is_empty() {
             return Ok(());
         }
-        Ok(self.app.protocol_commit(&tx.writes).await?)
+        Ok(self
+            .app
+            .protocol_commit(crate::protocol::BACKUP_NAME, &tx.writes)
+            .await?)
     }
 
     /// Put one record and commit it.
@@ -2337,18 +2347,28 @@ mod tests {
         tx.delete("peer/c");
         let writes = tx.into_writes();
         assert_eq!(writes.len(), 3);
-        // The client prefixes the protocol's keys with `p/`.
+        // The client qualifies each key with its registered protocol name.
         let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new());
         let mut batch = pubky_switch_client::store::WriteBatch::new();
         for write in &writes {
             if let LocalWrite::Put { key, value } = write {
                 batch
-                    .put("client/x", [PROTOCOL_PREFIX, key].concat(), value.clone())
+                    .put(
+                        "client/x",
+                        [
+                            PROTOCOL_PREFIX,
+                            crate::protocol::BACKUP_NAME.as_bytes(),
+                            b"/",
+                            key,
+                        ]
+                        .concat(),
+                        value.clone(),
+                    )
                     .unwrap();
             }
         }
         store.commit(batch).unwrap();
-        let held = store.get("client/x", b"p/peer/b").unwrap().unwrap();
+        let held = store.get("client/x", b"p/paykit/peer/b").unwrap().unwrap();
         assert_eq!(decode::<u64>(&held).unwrap(), 2);
         assert!(matches!(&writes[2], LocalWrite::Delete { key } if key == b"peer/c"));
     }

@@ -287,13 +287,26 @@ async fn test_blocked_own_block_mark_goes_once_the_list_shows_it() {
     let (mut wallet, _, _) = received(&w, PaykitConfig::default()).await;
     keep_ops(&w, 1);
     wallet.block(&w.bob_id()).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"bk/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"bk/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     wallet.flush().await.unwrap();
     let lists = wallet.app_mut().allow_list().await.unwrap();
     assert!(lists.deny.contains(&w.bob_id()));
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_scan(b"bk/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"bk/")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -379,10 +392,13 @@ async fn kept_resend_request(w: &World, wallet: &mut Paykit, shop: &Paykit, requ
     });
     wallet
         .app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: format!("ans/{:020}/{msg_id}", 1).into_bytes(),
-            value: serde_json::to_vec(&value).unwrap(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: format!("ans/{:020}/{msg_id}", 1).into_bytes(),
+                value: serde_json::to_vec(&value).unwrap(),
+            }],
+        )
         .await
         .unwrap();
 }
@@ -395,7 +411,7 @@ async fn test_blocked_kept_resend_request_answered_while_its_sender_isnt_blocked
     assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
     assert!(wallet
         .app()
-        .protocol_scan(b"ans/")
+        .protocol_scan("paykit", b"ans/")
         .await
         .unwrap()
         .is_empty());
@@ -413,7 +429,7 @@ async fn test_blocked_kept_resend_request_from_a_sender_blocked_since_not_answer
     assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
     assert!(wallet
         .app()
-        .protocol_scan(b"ans/")
+        .protocol_scan("paykit", b"ans/")
         .await
         .unwrap()
         .is_empty());
@@ -431,15 +447,28 @@ async fn test_blocked_peer_asked_after_a_missed_item_only_once_unblocked() {
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
-    assert!(wallet.app().protocol_scan(b"mi/").await.unwrap().is_empty());
-    assert_eq!(wallet.app().protocol_scan(b"ask/").await.unwrap().len(), 1);
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"mi/")
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ask/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     wallet.unblock(&w.bob_id()).await.unwrap();
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert_eq!(crate::common::asked(&wallet, &w.bob_id()).await.len(), 1);
     assert!(wallet
         .app()
-        .protocol_scan(b"ask/")
+        .protocol_scan("paykit", b"ask/")
         .await
         .unwrap()
         .is_empty());
@@ -460,7 +489,15 @@ async fn test_blocked_peer_asked_after_a_missed_item_only_once_the_deny_list_rea
     w.alice.switch().push_missed(1, now - 1_000, now);
     wallet.receive(None).await.unwrap();
     assert!(crate::common::asked(&wallet, &w.bob_id()).await.is_empty());
-    assert_eq!(wallet.app().protocol_scan(b"ask/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ask/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     wallet.receive(None).await.unwrap();
     assert_eq!(crate::common::asked(&wallet, &w.bob_id()).await.len(), 1);
 }
@@ -476,11 +513,19 @@ async fn test_blocked_kept_resend_request_answered_only_once_the_deny_list_reads
     w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS);
     fail_list_read(&w);
     assert_eq!(wallet.receive(None).await.unwrap().resends, 0);
-    assert_eq!(wallet.app().protocol_scan(b"ans/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ans/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
     assert!(wallet
         .app()
-        .protocol_scan(b"ans/")
+        .protocol_scan("paykit", b"ans/")
         .await
         .unwrap()
         .is_empty());
@@ -517,10 +562,13 @@ async fn shop_with_a_due_mark(w: &World) -> Paykit {
         }
     });
     shop.app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: format!("pd/{alice}").into_bytes(),
-            value: serde_json::to_vec(&value).unwrap(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: format!("pd/{alice}").into_bytes(),
+                value: serde_json::to_vec(&value).unwrap(),
+            }],
+        )
         .await
         .unwrap();
     shop
@@ -535,7 +583,14 @@ async fn test_blocked_payer_asked_for_dropped_replies_only_once_unblocked() {
     shop.block(&w.alice_id()).await.unwrap();
     shop.receive(None).await.unwrap();
     assert!(crate::common::asked(&shop, &w.alice_id()).await.is_empty());
-    assert_eq!(shop.app().protocol_scan(b"pd/").await.unwrap().len(), 1);
+    assert_eq!(
+        shop.app()
+            .protocol_scan("paykit", b"pd/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     shop.unblock(&w.alice_id()).await.unwrap();
     shop.receive(None).await.unwrap();
     assert_eq!(crate::common::asked(&shop, &w.alice_id()).await.len(), 1);
@@ -600,13 +655,52 @@ impl pubky_switch_client::store::StateStore for FailingDenyCopy {
         &self,
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
-        let copy = batch.writes.iter().any(|write| {
-            matches!(write, pubky_switch_client::store::Write::Put { key, .. } if key == b"p/dl")
+        self.commit_with(batch, |batch| {
+            self.inner
+                .commit(batch)
+                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+        })
+        .map(|_| ())
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
+    }
+}
+impl FailingDenyCopy {
+    fn commit_with(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+        apply: impl FnOnce(
+            pubky_switch_client::store::WriteBatch,
+        ) -> Result<
+            pubky_switch_client::store::CommitOutcome,
+            pubky_switch_client::error::StoreError,
+        >,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        let copy = batch.writes().iter().any(|write| {
+            matches!(write, pubky_switch_client::store::Write::Put { key, .. } if key == b"p/paykit/dl")
         });
         if copy && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
             return Err(pubky_switch_client::error::StoreError::Unavailable);
         }
-        self.inner.commit(batch)
+        apply(batch)
     }
 }
 
@@ -628,14 +722,22 @@ async fn test_blocked_own_block_kept_mark_and_copy_written_together() {
         )
         .await;
     wallet.receive(None).await.unwrap();
-    let before = wallet.app().protocol_get(b"dl").await.unwrap();
+    let before = wallet.app().protocol_get("paykit", b"dl").await.unwrap();
     keep_ops(&w, 1);
     failing
         .armed
         .store(true, std::sync::atomic::Ordering::SeqCst);
     assert!(wallet.block(&w.bob_id()).await.is_err());
-    assert!(wallet.app().protocol_scan(b"bk/").await.unwrap().is_empty());
-    assert_eq!(wallet.app().protocol_get(b"dl").await.unwrap(), before);
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"bk/")
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        wallet.app().protocol_get("paykit", b"dl").await.unwrap(),
+        before
+    );
 }
 
 #[tokio::test]
@@ -645,24 +747,40 @@ async fn test_blocked_kept_resend_request_at_another_key_refused_as_corrupt() {
     let w = World::new();
     let (mut wallet, shop, request) = received(&w, PaykitConfig::default()).await;
     kept_resend_request(&w, &mut wallet, &shop, &request).await;
-    let (key, value) = wallet.app().protocol_scan(b"ans/").await.unwrap().remove(0);
+    let (key, value) = wallet
+        .app()
+        .protocol_scan("paykit", b"ans/")
+        .await
+        .unwrap()
+        .remove(0);
     let moved = String::from_utf8(key.clone())
         .unwrap()
         .replace(&format!("ans/{:020}/", 1), &format!("ans/{:020}/", 2));
     wallet
         .app_mut()
-        .protocol_commit(&[
-            pubky_switch_client::app::LocalWrite::Delete { key },
-            pubky_switch_client::app::LocalWrite::Put {
-                key: moved.into_bytes(),
-                value,
-            },
-        ])
+        .protocol_commit(
+            "paykit",
+            &[
+                pubky_switch_client::app::LocalWrite::Delete { key },
+                pubky_switch_client::app::LocalWrite::Put {
+                    key: moved.into_bytes(),
+                    value,
+                },
+            ],
+        )
         .await
         .unwrap();
     let failed = wallet.receive(None).await.unwrap_err();
     assert!(crate::common::is_corrupt(&failed), "{failed:?}");
-    assert_eq!(wallet.app().protocol_scan(b"ans/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ans/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -683,17 +801,25 @@ async fn test_blocked_mark_queued_request_naming_another_message_refused_as_corr
         .iter()
         .find(|m| m.kind == "paykit.payment_request")
         .unwrap();
-    let (key, value) = shop.app().protocol_scan(b"pd/").await.unwrap().remove(0);
+    let (key, value) = shop
+        .app()
+        .protocol_scan("paykit", b"pd/")
+        .await
+        .unwrap()
+        .remove(0);
     let mut mark: serde_json::Value = serde_json::from_slice(&value).unwrap();
     mark["d"]["queued"] = serde_json::json!({
         "msg_id": request.msg_id,
         "hash": pubky_switch_core::enc::b64(&[0; 32]),
     });
     shop.app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key,
-            value: serde_json::to_vec(&mark).unwrap(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key,
+                value: serde_json::to_vec(&mark).unwrap(),
+            }],
+        )
         .await
         .unwrap();
     let failed = shop.receive(None).await.unwrap_err();
@@ -713,16 +839,32 @@ async fn test_blocked_peer_ask_held_goes_30_days_after_its_time() {
     w.alice.switch().push_missed(1, now - 1_000, now);
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"ask/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ask/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     w.clock
         .advance_ms(paykit_sdk::KEPT_MESSAGE_MS - pubky_switch_core::records::DAY_MS);
     wallet.receive(None).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"ask/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ask/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     w.clock.advance_ms(2 * pubky_switch_core::records::DAY_MS);
     wallet.receive(None).await.unwrap();
     assert!(wallet
         .app()
-        .protocol_scan(b"ask/")
+        .protocol_scan("paykit", b"ask/")
         .await
         .unwrap()
         .is_empty());
@@ -862,7 +1004,7 @@ async fn wallet_with_block_mark(
             wallet.unblock(&w.bob_id()).await.unwrap();
         }
     }
-    let marks = wallet.app().protocol_scan(b"bk/").await.unwrap();
+    let marks = wallet.app().protocol_scan("paykit", b"bk/").await.unwrap();
     assert_eq!(marks.len(), 1);
     let mark: serde_json::Value = serde_json::from_slice(&marks[0].1).unwrap();
     assert_eq!(mark["v"], 1);
@@ -884,15 +1026,23 @@ async fn block_mark_refused_after_reload(alter: fn(&mut serde_json::Value)) {
     use pubky_switch_client::store::{Fault as StoreFault, FaultStore, StateStore};
     let w = World::new();
     let (mut wallet, storage) = wallet_with_block_mark(&w, BlockMarkValue::KeptBlock).await;
-    let (key, bytes) = wallet.app().protocol_scan(b"bk/").await.unwrap().remove(0);
+    let (key, bytes) = wallet
+        .app()
+        .protocol_scan("paykit", b"bk/")
+        .await
+        .unwrap()
+        .remove(0);
     let mut value = serde_json::from_slice(&bytes).unwrap();
     alter(&mut value);
     wallet
         .app_mut()
-        .protocol_commit(&[LocalWrite::Put {
-            key,
-            value: serde_json::to_vec(&value).unwrap(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key,
+                value: serde_json::to_vec(&value).unwrap(),
+            }],
+        )
         .await
         .unwrap();
     let app_id = wallet.app_id();
@@ -907,7 +1057,7 @@ async fn block_mark_refused_after_reload(alter: fn(&mut serde_json::Value)) {
         )
         .await;
     // Load stays lazy; the public block call must reject before rewriting or sending.
-    let before = wallet.app().protocol_scan(b"").await.unwrap();
+    let before = wallet.app().protocol_scan("paykit", b"").await.unwrap();
     let commits = observed.commits();
     let error = wallet.block(&w.bob_id()).await.unwrap_err();
     assert!(matches!(
@@ -915,7 +1065,10 @@ async fn block_mark_refused_after_reload(alter: fn(&mut serde_json::Value)) {
         paykit_sdk::PaykitError::Client(AppError::Store(StoreError::Corrupt))
     ));
     assert_eq!(observed.commits(), commits);
-    assert_eq!(wallet.app().protocol_scan(b"").await.unwrap(), before);
+    assert_eq!(
+        wallet.app().protocol_scan("paykit", b"").await.unwrap(),
+        before
+    );
     assert!(!wallet
         .app_mut()
         .allow_list()
@@ -1017,12 +1170,15 @@ async fn test_local_state_current_block_values_reload_and_restore() {
         let w = World::new();
         let (wallet, storage) = wallet_with_block_mark(&w, value).await;
         let app_id = wallet.app_id();
-        let marks = wallet.app().protocol_scan(b"bk/").await.unwrap();
+        let marks = wallet.app().protocol_scan("paykit", b"bk/").await.unwrap();
         drop(wallet);
         let mut wallet = w
             .load_on_clock(&w.alice, storage, app_id, std::sync::Arc::clone(&w.clock))
             .await;
-        assert_eq!(wallet.app().protocol_scan(b"bk/").await.unwrap(), marks);
+        assert_eq!(
+            wallet.app().protocol_scan("paykit", b"bk/").await.unwrap(),
+            marks
+        );
         let backup = wallet.backup().await.unwrap();
         let restored = Paykit::restore(
             w.env(&w.alice, store()),
@@ -1033,7 +1189,11 @@ async fn test_local_state_current_block_values_reload_and_restore() {
         )
         .await
         .unwrap();
-        let kept = restored.app().protocol_scan(b"bk/").await.unwrap();
+        let kept = restored
+            .app()
+            .protocol_scan("paykit", b"bk/")
+            .await
+            .unwrap();
         if matches!(value, BlockMarkValue::KeptUnblock) {
             assert!(kept.is_empty());
         } else {
@@ -1074,23 +1234,65 @@ impl pubky_switch_client::store::StateStore for FailAfterBlock {
         &self,
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.commit_with(batch, |batch| {
+            self.inner
+                .commit(batch)
+                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+        })
+        .map(|_| ())
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
+    }
+}
+impl FailAfterBlock {
+    fn commit_with(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+        apply: impl FnOnce(
+            pubky_switch_client::store::WriteBatch,
+        ) -> Result<
+            pubky_switch_client::store::CommitOutcome,
+            pubky_switch_client::error::StoreError,
+        >,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
         use pubky_switch_client::store::Write;
         use std::sync::atomic::Ordering;
-        let ours = batch.writes.iter().any(|write| {
-            matches!(write, Write::Put { key, .. } | Write::Delete { key, .. } if key.starts_with(b"p/"))
+        let ours = batch.writes().iter().any(|write| {
+            matches!(write, Write::Put { key, .. } | Write::Delete { key, .. } if key.starts_with(b"p/paykit/"))
         });
         if ours && self.armed.swap(false, Ordering::SeqCst) {
             return Err(pubky_switch_client::error::StoreError::Unavailable);
         }
         let blocked = batch
-            .writes
+            .writes()
             .iter()
             .any(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"lc/deny/")));
-        self.inner.commit(batch)?;
+        let applied = apply(batch)?;
+        if applied != pubky_switch_client::store::CommitOutcome::Applied {
+            return Ok(applied);
+        }
         if blocked && !self.used.swap(true, Ordering::SeqCst) {
             self.armed.store(true, Ordering::SeqCst);
         }
-        Ok(())
+        Ok(pubky_switch_client::store::CommitOutcome::Applied)
     }
 }
 
@@ -1258,7 +1460,12 @@ async fn test_blocked_own_unblock_kept_unanswered_not_restored() {
         .await
         .unwrap();
     wallet.receive(None).await.unwrap();
-    assert!(wallet.app().protocol_scan(b"bk/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"bk/")
+        .await
+        .unwrap()
+        .is_empty());
     let lists = wallet.app_mut().allow_list().await.unwrap();
     assert!(lists.deny.contains(&w.bob_id()));
     let held = PayOptions::default()
@@ -1299,17 +1506,59 @@ impl pubky_switch_client::store::StateStore for UnknownBlockCommit {
         &self,
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.commit_with(batch, |batch| {
+            self.inner
+                .commit(batch)
+                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+        })
+        .map(|_| ())
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
+    }
+}
+impl UnknownBlockCommit {
+    fn commit_with(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+        apply: impl FnOnce(
+            pubky_switch_client::store::WriteBatch,
+        ) -> Result<
+            pubky_switch_client::store::CommitOutcome,
+            pubky_switch_client::error::StoreError,
+        >,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
         use pubky_switch_client::store::Write;
         use std::sync::atomic::Ordering;
         let blocked = batch
-            .writes
+            .writes()
             .iter()
             .any(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"lc/deny/")));
-        self.inner.commit(batch)?;
+        let applied = apply(batch)?;
+        if applied != pubky_switch_client::store::CommitOutcome::Applied {
+            return Ok(applied);
+        }
         if blocked && !self.used.swap(true, Ordering::SeqCst) {
             return Err(pubky_switch_client::error::StoreError::Unknown);
         }
-        Ok(())
+        Ok(pubky_switch_client::store::CommitOutcome::Applied)
     }
 }
 
@@ -1358,12 +1607,17 @@ async fn test_blocked_own_unblock_applied_in_the_read_keeps_the_resend_request_o
     let first = wallet.receive(None).await.unwrap();
     let lists = wallet.app_mut().allow_list().await.unwrap();
     assert!(!lists.deny.contains(&w.bob_id()));
-    let left = wallet.app().protocol_scan(b"ans/").await.unwrap().len();
+    let left = wallet
+        .app()
+        .protocol_scan("paykit", b"ans/")
+        .await
+        .unwrap()
+        .len();
     assert_eq!((first.resends, left), (0, 1));
     assert_eq!(wallet.receive(None).await.unwrap().resends, 1);
     assert!(wallet
         .app()
-        .protocol_scan(b"ans/")
+        .protocol_scan("paykit", b"ans/")
         .await
         .unwrap()
         .is_empty());
@@ -1401,16 +1655,55 @@ impl pubky_switch_client::store::StateStore for FailNextKeep {
         &self,
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.commit_with(batch, |batch| {
+            self.inner
+                .commit(batch)
+                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+        })
+        .map(|_| ())
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
+    }
+}
+impl FailNextKeep {
+    fn commit_with(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+        apply: impl FnOnce(
+            pubky_switch_client::store::WriteBatch,
+        ) -> Result<
+            pubky_switch_client::store::CommitOutcome,
+            pubky_switch_client::error::StoreError,
+        >,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
         use pubky_switch_client::store::Write;
         use std::sync::atomic::Ordering;
         let keeps = batch
-            .writes
+            .writes()
             .iter()
             .any(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"opq/")));
         if keeps && self.armed.swap(false, Ordering::SeqCst) {
             return Err(pubky_switch_client::error::StoreError::Unavailable);
         }
-        self.inner.commit(batch)
+        apply(batch)
     }
 }
 
@@ -1484,9 +1777,48 @@ impl pubky_switch_client::store::StateStore for CountsQueued {
         &self,
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.commit_with(batch, |batch| {
+            self.inner
+                .commit(batch)
+                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+        })
+        .map(|_| ())
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
+    }
+}
+impl CountsQueued {
+    fn commit_with(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+        apply: impl FnOnce(
+            pubky_switch_client::store::WriteBatch,
+        ) -> Result<
+            pubky_switch_client::store::CommitOutcome,
+            pubky_switch_client::error::StoreError,
+        >,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
         use pubky_switch_client::store::Write;
         let queues = batch
-            .writes
+            .writes()
             .iter()
             .filter(|write| {
                 matches!(write, Write::Put { key, .. }
@@ -1494,16 +1826,19 @@ impl pubky_switch_client::store::StateStore for CountsQueued {
             })
             .count();
         let outbox = batch
-            .writes
+            .writes()
             .iter()
             .filter(|write| matches!(write, Write::Put { key, .. } if key.starts_with(b"out/")))
             .count();
-        self.inner.commit(batch)?;
+        let applied = apply(batch)?;
+        if applied != pubky_switch_client::store::CommitOutcome::Applied {
+            return Ok(applied);
+        }
         self.queued
             .fetch_add(queues, std::sync::atomic::Ordering::SeqCst);
         self.outbox
             .fetch_add(outbox, std::sync::atomic::Ordering::SeqCst);
-        Ok(())
+        Ok(pubky_switch_client::store::CommitOutcome::Applied)
     }
 }
 
@@ -1886,7 +2221,15 @@ async fn test_blocked_held_rejection_kept_while_its_record_doesnt_read() {
     }
     let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
     assert_eq!(held.content.value(), Some(crate::outcome_record::INVALID));
-    assert_eq!(wallet.app().protocol_scan(b"ha/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ha/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
     assert!(wallet.notices().await.unwrap().is_empty());
     phone.receive(None).await.unwrap();
@@ -1895,7 +2238,12 @@ async fn test_blocked_held_rejection_kept_while_its_record_doesnt_read() {
         wallet.receive(None).await.unwrap();
     }
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries + 1);
-    assert!(wallet.app().protocol_scan(b"ha/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"ha/")
+        .await
+        .unwrap()
+        .is_empty());
     shop.receive(None).await.unwrap();
     assert_eq!(
         shop.payee_activity().await.unwrap()[0].status,
@@ -2530,7 +2878,12 @@ async fn test_blocked_subscription_cancellation_and_rejection_refused_with_nothi
         version(wallet.app().shared_record(&record).await.unwrap()),
         before
     );
-    assert!(wallet.app().protocol_scan(b"ha/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"ha/")
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
     assert_eq!(
         wallet.request(&request).await.unwrap().status,
@@ -2552,7 +2905,15 @@ async fn test_blocked_held_rejection_over_a_record_left_unreadable_after_a_resto
     let mut phone = w.wallet("phone").await;
     wallet.block(&w.bob_id()).await.unwrap();
     let rejection = wallet.reject_request(&request, None).await.unwrap();
-    assert_eq!(wallet.app().protocol_scan(b"ha/").await.unwrap().len(), 1);
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ha/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     let backup = wallet.backup().await.unwrap();
     drop(wallet);
     phone.receive(None).await.unwrap();
@@ -2592,14 +2953,37 @@ async fn test_blocked_held_rejection_over_a_record_left_unreadable_after_a_resto
     let after_asks = w.bob.switch().entries_from(&w.alice_id());
     assert_eq!(after_asks, entries + sent.len());
     assert!(wallet.app().delivery(&rejection).await.unwrap().is_none());
-    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_some());
-    assert_eq!(wallet.app().protocol_scan(b"ha/").await.unwrap().len(), 1);
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"ha/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     crate::periods::writes_value(&mut phone, &target, &good).await;
     wallet.receive(None).await.unwrap();
     assert!(wallet.app().delivery(&rejection).await.unwrap().is_some());
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), after_asks + 1);
-    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
-    assert!(wallet.app().protocol_scan(b"ha/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"ha/")
+        .await
+        .unwrap()
+        .is_empty());
     wallet.receive(None).await.unwrap();
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), after_asks + 1);
 }
