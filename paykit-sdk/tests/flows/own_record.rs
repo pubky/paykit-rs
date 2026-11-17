@@ -608,6 +608,39 @@ async fn test_own_record_capabilities_updated_at_once_on_request() {
 }
 
 #[tokio::test]
+async fn test_own_record_update_returns_where_the_record_stands() {
+    use pubky_switch_client::app::Publication;
+    let w = World::new();
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().pay().build().unwrap(),
+            publishing(),
+            store(),
+        )
+        .await;
+    // The record listing what the payment method pays now fails its Homeserver write: the
+    // update says it is owed.
+    let only = endpoint("btc-onchain-address");
+    w.rail.set_endpoint_identifiers(vec![only.clone()]);
+    w.homeserver.fail_writes(1, false);
+    let publication = shop.update_own_record().await.unwrap();
+    assert!(
+        matches!(publication, Publication::Owed { .. }),
+        "{publication:?}"
+    );
+    assert!(on_homeserver(&w, &shop).is_none_or(|record| {
+        PaykitMember::read(&record).unwrap().endpoint_identifiers != [only.clone()]
+    }));
+    // The Homeserver takes writes again: the next update publishes it.
+    let publication = shop.update_own_record().await.unwrap();
+    assert_eq!(publication, Publication::Published);
+    let published = PaykitMember::read(&on_homeserver(&w, &shop).unwrap()).unwrap();
+    assert_eq!(published.endpoint_identifiers, [only]);
+}
+
+#[tokio::test]
 async fn test_own_record_oversized_capabilities_refuse_the_update() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
@@ -1008,7 +1041,7 @@ async fn change_record(shop: &mut Paykit, change: RecordChange) -> Result<(), Pa
             .await
             .map(|_| ()),
         RecordChange::Remove => shop.remove_public_endpoint(&id).await.map(|_| ()),
-        RecordChange::Capabilities => shop.update_own_record().await,
+        RecordChange::Capabilities => shop.update_own_record().await.map(|_| ()),
     }
 }
 

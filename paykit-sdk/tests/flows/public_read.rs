@@ -8,11 +8,11 @@ use paykit_sdk::app_records::{
 };
 use paykit_sdk::{PayOptions, PayOutcome, Paykit, PaymentMode, Refusal};
 use pubky_switch_client::app::{HomeserverReader, UserConfirmed};
-use pubky_switch_client::clock::Clock;
+use pubky_switch_client::clock::{Clock, TestClock};
 use pubky_switch_client::error::TransportError;
 use pubky_switch_client::testing::TestHomeserver;
 use pubky_switch_client::transport::BoxFuture;
-use pubky_switch_core::records::app_record_path;
+use pubky_switch_core::records::{app_record_path, IDENTITY_PATH};
 use serde_json::{json, Map, Value};
 
 use crate::common::{btc, request_from, store, World, HOUR_MS};
@@ -52,10 +52,13 @@ async fn test_public_read_labelled_only_app_cannot_offer_an_unlabelled_destinati
     assert!(wallet.payments().await.unwrap().is_empty());
 }
 
-/// The world's Homeserver, but for the app records it was told it can't serve now.
+/// The world's Homeserver, but for the app records it was told it can't serve now, and the
+/// one whose read it was told takes a while on the world's clock.
 struct FailingRecords {
     inner: Arc<TestHomeserver>,
     failing: Mutex<Vec<String>>,
+    clock: Arc<TestClock>,
+    slow: Mutex<Option<(String, u64)>>,
 }
 
 impl FailingRecords {
@@ -68,6 +71,11 @@ impl FailingRecords {
     fn heal(&self) {
         self.failing.lock().unwrap().clear();
     }
+
+    /// Reading the record of `app_id` moves the clock on by `ms`.
+    fn slow(&self, app_id: &[u8; 16], ms: u64) {
+        *self.slow.lock().unwrap() = Some((app_record_path(app_id), ms));
+    }
 }
 
 impl HomeserverReader for FailingRecords {
@@ -78,6 +86,15 @@ impl HomeserverReader for FailingRecords {
     ) -> BoxFuture<'_, Result<Option<Vec<u8>>, TransportError>> {
         if self.failing.lock().unwrap().contains(&path) {
             return Box::pin(async { Err(TransportError::Connect("unreachable".into())) });
+        }
+        if let Some((_, ms)) = self
+            .slow
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(p, _)| *p == path)
+        {
+            self.clock.advance_ms(*ms);
         }
         self.inner.get(identity, path)
     }
@@ -90,6 +107,8 @@ async fn wallet_reading_through(w: &World) -> (Paykit, Arc<FailingRecords>) {
     let reads = Arc::new(FailingRecords {
         inner: Arc::clone(&w.homeserver),
         failing: Mutex::new(Vec::new()),
+        clock: Arc::clone(&w.clock),
+        slow: Mutex::new(None),
     });
     let wallet = w
         .load_with_homeserver(
@@ -256,6 +275,44 @@ async fn test_public_read_refused_or_expired_app_reported_others_kept() {
         "{text}"
     );
     assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_public_read_one_time_judges_every_app() {
+    let w = World::new();
+    let (mut wallet, reads) = wallet_reading_through(&w).await;
+    // Bob's shop fills the read's bound with a record that expires in an hour.
+    let shop = bob_apps(&w, &["shop"]).await[0];
+    let now = w.clock.now_ms();
+    publish_app_at(
+        &w,
+        shop.0,
+        many(MAX_PUBLIC_ENDPOINTS, 8),
+        now,
+        Some(now + HOUR_MS),
+    );
+    // The Homeserver keeps serving the identity.json before the till joined, and bob's switch
+    // the newer one listing it after the shop: the till's record is read after the shop's,
+    // and that read takes the hour.
+    let older = w.homeserver.file(w.bob_id(), IDENTITY_PATH).unwrap();
+    let till = bob_apps(&w, &["till"]).await[0];
+    publish_now(
+        &w,
+        till.0,
+        one_endpoint("btc-lightning-bolt11", "lnbc1till"),
+    );
+    w.homeserver.put(w.bob_id(), IDENTITY_PATH, older);
+    reads.slow(&till.1, HOUR_MS);
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    // Both are judged at the read's one time: the shop has expired, and the bound goes to
+    // the till.
+    assert_eq!(offering(&read), [till.1], "{read:?}");
+    assert_eq!(read.failures.len(), 1, "{read:?}");
+    assert_eq!(read.failures[0].app_id, shop.1);
+    assert!(
+        matches!(read.failures[0].reason, PublicAppFailureReason::Expired(_)),
+        "{read:?}"
+    );
 }
 
 #[tokio::test]
