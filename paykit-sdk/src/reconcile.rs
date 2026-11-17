@@ -619,7 +619,7 @@ impl Paykit {
         let deadline = entry
             .as_ref()
             .map_or(ObligationDeadline::NotKnown, |e| own_deadline(e.deadline));
-        let mut batch = OpBatch::new()
+        let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .op(op.kind())
             .obligation_deadline(*obligation, deadline);
         if let Some(target) = &done_target {

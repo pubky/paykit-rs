@@ -193,7 +193,11 @@ impl Paykit {
     /// for a store failure, and a corrupt store for a value that doesn't read, isn't its
     /// family's, or names another key than `key`. Never `None` for one that doesn't bind.
     pub(crate) async fn local_get<T: Stored>(&self, key: &str) -> Result<Option<T>> {
-        match self.app.protocol_get(key.as_bytes()).await? {
+        match self
+            .app
+            .protocol_get(crate::protocol::BACKUP_NAME, key.as_bytes())
+            .await?
+        {
             None => Ok(None),
             Some(bytes) => self
                 .binding(|binder| bound(key.as_bytes(), &bytes, binder))
@@ -204,7 +208,10 @@ impl Paykit {
     /// Every value under protocol prefix `prefix`, with the key's rest after the prefix, each
     /// read whole and bound to its own key as [`Paykit::local_get`] reads one.
     pub(crate) async fn local_scan<T: Stored>(&self, prefix: &str) -> Result<Vec<(String, T)>> {
-        let held = self.app.protocol_scan(prefix.as_bytes()).await?;
+        let held = self
+            .app
+            .protocol_scan(crate::protocol::BACKUP_NAME, prefix.as_bytes())
+            .await?;
         self.binding(|binder| {
             let mut out = Vec::with_capacity(held.len());
             for (key, value) in &held {
@@ -220,7 +227,10 @@ impl Paykit {
         if tx.writes.is_empty() {
             return Ok(());
         }
-        Ok(self.app.protocol_commit(&tx.writes).await?)
+        Ok(self
+            .app
+            .protocol_commit(crate::protocol::BACKUP_NAME, &tx.writes)
+            .await?)
     }
 
     /// Put one record and commit it.

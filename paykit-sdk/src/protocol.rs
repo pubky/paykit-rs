@@ -771,7 +771,11 @@ pub(crate) fn check_restored_loss(backup: &AppBackup) -> crate::error::Result<()
         identity: [u8; 32],
         generation: u64,
     }
-    let Some(layer) = backup.protocol_layer()? else {
+    let Some(layer) = backup
+        .layers()?
+        .into_iter()
+        .find(|layer| layer.protocol == BACKUP_NAME)
+    else {
         return Ok(());
     };
     let Some(state) = decode_local_state(&layer.data) else {
@@ -806,8 +810,8 @@ pub(crate) fn check_restored_loss(backup: &AppBackup) -> crate::error::Result<()
 }
 
 impl Protocol for PaykitProtocol {
-    fn backup_name(&self) -> Option<String> {
-        Some(BACKUP_NAME.to_owned())
+    fn name(&self) -> String {
+        BACKUP_NAME.to_owned()
     }
 
     /// Paykit's layer is its whole local state, as the client's default writes it; a
@@ -897,18 +901,7 @@ impl Protocol for PaykitProtocol {
     /// cancellation and proof about a labelled request go only to apps holding `paykit_request` or
     /// that label, and about an unlabelled request only to apps holding `paykit_request`; a payee's
     /// cancellation, without a label, only to apps holding `paykit_pay`.
-    fn sends_to(&self, message: &Message, recipient: &AppRecord) -> bool {
-        self.narrows(message, recipient, None)
-    }
-
-    /// [`Protocol::sends_to`], with the side a cancellation was sent from as the batch that
-    /// queued it kept it.
-    fn sends_to_with(
-        &self,
-        message: &Message,
-        recipient: &AppRecord,
-        view: &LocalView<'_>,
-    ) -> bool {
+    fn sends_to(&self, message: &Message, recipient: &AppRecord, view: &LocalView<'_>) -> bool {
         // A kept side that can't be read sends to no one rather than guess (Paykit spec 3.4):
         // the message isn't sealed to this recipient. So does one that names another message
         // than its key, which doesn't bind (`state::Stored`).
@@ -938,7 +931,7 @@ impl Protocol for PaykitProtocol {
     /// The effect of a message that passed check 10, added to the batch that moves the
     /// cursor (Switch spec 8.2; `crate::receive`). Called again after `409 conflict`, with
     /// the records read again: the effect is built anew from them.
-    fn receive_with(&self, message: &ReceivedMessage, cx: &mut ReceiveContext<'_>) -> Outcome {
+    fn receive(&self, message: &ReceivedMessage, cx: &mut ReceiveContext<'_>) -> Outcome {
         // A released entry whose effect the app wrote since, by a write of its own, is
         // declined: its effect isn't applied twice (Switch spec 8.2; `stored.rs`).
         if message.released {
@@ -1064,21 +1057,10 @@ impl Protocol for PaykitProtocol {
         ])
     }
 
-    /// A provider loss, without the protocol's state at hand: only the re-sends are queued.
-    fn provider_lost(&self, loss: &ProviderLoss) -> Result<LossActions, StoreFailure> {
-        Ok(LossActions {
-            conversations: Vec::new(),
-            local: vec![local_write(
-                &key::missed(loss.accepted_from_ms),
-                &loss.accepted_from_ms,
-            )?],
-        })
-    }
-
     /// A provider loss (Switch spec 12.6 steps 2 and 4): ask every counterparty with Paykit
     /// activity to send again from the old cursor's time, and add their conversation entries
     /// back.
-    fn provider_lost_with(
+    fn provider_lost(
         &self,
         loss: &ProviderLoss,
         view: &LocalView<'_>,
@@ -1092,8 +1074,13 @@ impl Protocol for PaykitProtocol {
                 .map_err(|_| StoreFailure::of_entry(StoreError::Corrupt))?;
             conversations.push(peer);
         }
-        let mut actions = self.provider_lost(loss)?;
-        actions.conversations = conversations;
+        let mut actions = LossActions {
+            conversations,
+            local: vec![local_write(
+                &key::missed(loss.accepted_from_ms),
+                &loss.accepted_from_ms,
+            )?],
+        };
         actions.local.extend(crate::loss::loss_writes(loss, view)?);
         Ok(actions)
     }
@@ -1144,19 +1131,7 @@ impl Protocol for PaykitProtocol {
     /// replaces a message in a role seen, or changes the Allowance seen; for a
     /// `payment_lists` record, holds an older list or drops a single-use endpoint marked
     /// used; for the `block_floor` record, lowers the floor. A value that doesn't read is
-    /// refused too. A delete isn't such a write. Judged
-    /// as a reader that doesn't hold the version the write builds on
-    /// ([`Protocol::record_regression_on`] is told).
-    fn record_regression(
-        &self,
-        collection: &str,
-        seen: &[u8],
-        value: Option<&[u8]>,
-    ) -> Option<String> {
-        self.regression(collection, seen, value, false)
-    }
-
-    /// [`Protocol::record_regression`], told what the write builds on: a write built on the
+    /// refused too. A delete isn't such a write. A write built on the
     /// version this app holds is judged as by a reader holding it, which also refuses a
     /// reassociation at or before a period it attempted (Paykit wire 5.3 "Seen Allowance").
     /// The version is judged by the mark of what the app saw, the value it took last that
@@ -1164,7 +1139,7 @@ impl Protocol for PaykitProtocol {
     /// holds, so such a write is judged against the mark from before the delete: stricter
     /// than the wire format's reader holding the version built on, which a delete leaves with
     /// no attempted period.
-    fn record_regression_on(
+    fn record_regression(
         &self,
         collection: &str,
         seen: &[u8],

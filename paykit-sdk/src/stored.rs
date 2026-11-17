@@ -366,7 +366,9 @@ impl Paykit {
             }
         }
         if let Some(id) = through {
-            self.app.ack_events(id).await?;
+            self.app
+                .ack_events_for(crate::protocol::BACKUP_NAME, id)
+                .await?;
         }
         let mut gone = Tx::default();
         for (rest, _) in self.local_scan::<bool>(key::TAKEN).await? {
@@ -395,21 +397,20 @@ impl Paykit {
                 tx.delete(&key::stored_note(sender, msg_id));
                 true
             }
-            // Dropped while it waited for a scope key: never processed. Its sender is asked
+            // A copy dropped while it waited for a scope key. Its sender is asked
             // again once the app holds the key, and the host is told once, by the copy that
             // names the message, even while the copy of the records may lack its record.
             AppEvent::StoredEntryDropped {
                 sender,
                 accepted_at_ms,
-                awaited_epoch: Some(epoch),
-                msg_id,
+                waiting: pubky_switch_client::app::WaitingReason::Key { data_epoch },
+                message,
                 ..
             } => {
-                self.count_key_wait(&mut tx, *sender, *accepted_at_ms, *epoch)
+                self.count_key_wait(&mut tx, *sender, *accepted_at_ms, *data_epoch)
                     .await?;
-                if let Some(msg_id) = msg_id {
-                    self.give_up_key_wait(&mut tx, *sender, msg_id).await?;
-                }
+                self.give_up_key_wait(&mut tx, *sender, &message.msg_id)
+                    .await?;
                 true
             }
             AppEvent::StoredEntryDropped {
@@ -423,7 +424,9 @@ impl Paykit {
             }
             // A record a view showed divergent pauses (`divergent.rs`): its mark is its own
             // commit, before this event's, and taking the event again changes nothing.
-            AppEvent::RecordDivergent { key: record, id } => {
+            AppEvent::RecordDivergent {
+                key: record, id, ..
+            } => {
                 Box::pin(self.take_divergent_event(record, id)).await?;
                 true
             }
@@ -1068,7 +1071,7 @@ impl Paykit {
             return Ok(Placed::Done);
         };
         let sender = stored.sender();
-        let mut batch = OpBatch::new();
+        let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME);
         let mut writes = false;
         if found.names_held_proof {
             if let Some(entry) = self
@@ -1176,8 +1179,12 @@ impl Paykit {
             return Ok(Placed::Done);
         };
         submitted(
-            self.submit(OpBatch::new().entry(entry).locals(tx.into_writes()))
-                .await,
+            self.submit(
+                OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
+                    .entry(entry)
+                    .locals(tx.into_writes()),
+            )
+            .await,
         )
     }
 }
