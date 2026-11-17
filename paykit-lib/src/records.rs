@@ -3227,7 +3227,7 @@ impl SettlementBucket {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GrantEntry {
     /// The Allowance record version the write adding the grant built on: its
-    /// `expected_version`, `{0, 0}` for a new record. The grant signs it.
+    /// `expected_version`, of a record that holds its proposal already. The grant signs it.
     pub built_on: RecordVersion,
     /// The grant.
     pub grant: ExecutorGrant,
