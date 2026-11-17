@@ -16,7 +16,7 @@ use pubky_switch_core::enc::b64;
 use pubky_switch_core::records::app_record_path;
 use serde_json::{json, Value};
 
-use crate::common::{btc, endpoint, is_corrupt, store, World, HOUR_MS};
+use crate::common::{btc, endpoint, is_corrupt, list_version, store, World, HOUR_MS};
 
 #[derive(Clone, Copy)]
 enum Family {
@@ -95,7 +95,7 @@ fn payment(w: &World, family: Family, app: [u8; 16]) -> UnrequestedPayment {
     UnrequestedPayment::new(w.bob_id(), btc("0.001")).with_options(options)
 }
 
-async fn list(w: &World, wallet: &mut Paykit, app: [u8; 16], version: u64) {
+async fn list(w: &World, wallet: &mut Paykit, app: [u8; 16], version: paykit_lib::ListVersion) {
     let key = format!("lq/{}/{}", b64(&w.bob_id()), b64(&app));
     let asked = wallet
         .app()
@@ -103,7 +103,7 @@ async fn list(w: &World, wallet: &mut Paykit, app: [u8; 16], version: u64) {
         .await
         .unwrap();
     let body = PrivatePaymentList {
-        version: crate::common::pair(version),
+        version,
         payment_endpoints: BTreeMap::from([(
             endpoint("btc-lightning-bolt12"),
             ListEndpoint {
@@ -155,7 +155,7 @@ async fn produced(w: &World, family: Family) -> Held {
         Some(signed)
     } else {
         if matches!(family, Family::HeldAsk) {
-            Box::pin(list(w, &mut wallet, app, 7)).await;
+            Box::pin(list(w, &mut wallet, app, list_version(1, 7))).await;
         }
         let error = wallet
             .pay_without_request(payment(w, family, app))
@@ -187,7 +187,7 @@ async fn produced(w: &World, family: Family) -> Held {
         );
     } else {
         let app_id = (!matches!(family, Family::GenericAsk)).then_some(app);
-        let held_version = matches!(family, Family::HeldAsk).then_some(crate::common::pair(7));
+        let held_version = matches!(family, Family::HeldAsk).then_some(list_version(1, 7));
         assert_eq!(value["d"].as_object().unwrap().len(), 4);
         assert_eq!(value["d"]["payee"], b64(&w.bob_id()));
         assert_eq!(value["d"]["app_id"], json!(app_id));
@@ -565,7 +565,7 @@ async fn test_discovery_state_ask_clock_and_version_progress() {
         3
     );
     // The newly received version is named immediately, before another day passes.
-    Box::pin(list(&w, &mut held.wallet, held.app, 8)).await;
+    Box::pin(list(&w, &mut held.wallet, held.app, list_version(1, 8))).await;
     let error = held.read(&w).await.unwrap_err();
     assert!(
         matches!(error.refusal(), Some(Refusal::WaitingForList)),

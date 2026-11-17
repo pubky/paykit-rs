@@ -16,7 +16,7 @@ use pubky_switch_client::store::StateStore;
 use pubky_switch_client::testing::Router;
 use pubky_switch_client::transport::Transport;
 
-use crate::common::{btc, draft, endpoint, request_from, store, ListsStore, World};
+use crate::common::{btc, draft, endpoint, list_version, request_from, store, ListsStore, World};
 
 /// What alice's wallet knows of bob.
 #[derive(Clone, Copy, Debug)]
@@ -183,7 +183,8 @@ async fn test_spam_blocked_sender_list_cancellation_and_resend_only_counted() {
     let mut shop = w.shop().await;
     // A list, a cancellation of a request the wallet holds no record of, and a
     // `resend_request`: each would create state.
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
     let body = paykit_lib::bodies::RequestReply {
         reason: None,
         label: None,
@@ -248,7 +249,8 @@ async fn test_spam_own_block_kept_unanswered_counts_new_state_at_once() {
     let lists = wallet.app_mut().allow_list().await.unwrap();
     assert!(!lists.deny.contains(&w.bob_id()));
     request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
     shop.request_resend(
         w.alice_id(),
         ResendSelection::default().with_request_hashes(vec![[9; 32]]),
@@ -399,7 +401,8 @@ async fn test_spam_blocked_payer_unrequested_proof_only_counted() {
             store(),
         )
         .await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
     wallet.receive(None).await.unwrap();
     let outcome = wallet
         .pay_without_request(
@@ -426,7 +429,8 @@ async fn test_spam_without_contacts_unknown_lists_gate_nothing() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
     wallet.receive(None).await.unwrap();
     let outcome = wallet
         .pay_without_request(

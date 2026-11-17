@@ -2,7 +2,7 @@
 
 **Status.** INCOMPLETE for protected-record creation, put-back and incarnation verification (Section 5); a draft, with the spec. The wire format of `specs/v0.2/spec.md` ("the spec"). The reference prototype implements it but the rules this revision adds, which spec Section 18 lists ("Where the reference prototype differs") and Appendix A marks. The spec's Status paragraph says what `paykit-lib` implements and which checks and vectors are to come. The spec decides behaviour; this document decides bytes. It builds on the Switch wire format ([`spec/wire-format.md`](https://github.com/pubky/pubky-switch/blob/f0bbddd15c7ecb1ec670f263f36dd4f2373dba8f/spec/wire-format.md) of the pubky-switch repository, at commit `f0bbddd15c7ecb1ec670f263f36dd4f2373dba8f`, the commit the spec builds on), which defines every format Paykit uses but its own: identities, certificates, app records, envelopes and the message frame, operations, the HTTP API and the rest. It settles every wire detail of Paykit's own that the spec leaves open, taking the phase 2 prototype, the reference prototype, as the source of truth for what it implements, so that a second team can build an interoperable implementation of the defined portions without reading the prototype. The incomplete paths below have no interoperable positive wire contract yet. Where this document had to choose something the prototype doesn't fix, Appendix A says so.
 
-**Test vectors.** `specs/v0.2/vectors/` holds Paykit's test vectors for its encodings, signatures, derivations, messages and record values; its `README.md` lists the files. They use the Switch's algorithms, not its vector set: every key, certificate, app record, policy, record key and sealed value in them is Paykit's own, from the fixed seeds of its `README.md`: identities alice and bob, alice's apps `wallet`, `phone` and `executor`, bob's apps `shop`, `cap` and `hosted`. Examples for the Private Payment List version pair (4.10, 4.13 and 4.14) and publication records (5.8) describe the required formats; their vectors come with the code that implements them. The Allowance proposal vectors (`messages.json`, `sealed.json`) carry `allower_generation` (4.15). Protected-policy/key, origin and initial-ledger examples (5.1, 5.4, 5.5 and 5.9) likewise state required formats whose matching generated cases come with implementation. Existing Allowance examples and cases do not establish those new bindings or verifier behavior; unaffected terms and signature-encoding rules remain normative. Settlement marks (5.7) are generated and checked in `sealed.json` `settlement_marks`, their derivations and fixed policy in `identifiers.json`, and selling-scope requirements in `documents.json` `payee_certificates`. Other examples come from those files. Stored vector cases containing a Private Payment List version, its request hint, proof or used entry do not yet establish conformance to the pair: their generator and replacement cases must land on `v0.2` before they are copied here. Unaffected rules and cases remain normative. `paykit-lib` on this repository's `v0.2` branch generates the stored values as that branch holds them (`specs/v0.2/vectors/README.md`, How the files were generated). `allowance_usage.json` includes generated cases for default-spent failures, compacted `totals.failed` items and the durable never-dispatched exception, supplied as already validated counting evidence. Per-payment, anchored-window, rolling-window and lifetime cases and term-format checks remain normative. These cases do not establish the SDK's authority to obtain or persist evidence, reconstruct a ledger, release a reservation or dispatch a payment; the vectors README gives the exact scope.
+**Test vectors.** `specs/v0.2/vectors/` holds Paykit's test vectors for its encodings, signatures, derivations, messages and record values; its `README.md` lists the files. They use the Switch's algorithms, not its vector set: every key, certificate, app record, policy, record key and sealed value in them is Paykit's own, from the fixed seeds of its `README.md`: identities alice and bob, alice's apps `wallet`, `phone` and `executor`, bob's apps `shop`, `cap` and `hosted`. Examples for publication records (5.8) describe the required formats; their vectors come with the code that implements them. The Allowance proposal vectors (`messages.json`, `sealed.json`) carry `allower_generation` (4.15). Protected-policy/key, origin and initial-ledger examples (5.1, 5.4, 5.5 and 5.9) likewise state required formats whose matching generated cases come with implementation. Existing Allowance examples and cases do not establish those new bindings or verifier behavior; unaffected terms and signature-encoding rules remain normative. Settlement marks (5.7) are generated and checked in `sealed.json` `settlement_marks`, their derivations and fixed policy in `identifiers.json`, and selling-scope requirements in `documents.json` `payee_certificates`. Other examples come from those files. The Private Payment List version pair (4.10, 4.13, 4.14 and 5.4) is generated in the list, its request hint, proof, unrequested destination and used entries (`messages.json`, `sealed.json`), with malformed versions a payer refuses (`messages.json` `list_versions`); the check of a list's generation against the publisher's verified identity document (4.13) and the publication records (5.8) have no vectors yet. Unaffected rules and cases remain normative. `paykit-lib` on this repository's `v0.2` branch generates the stored values as that branch holds them (`specs/v0.2/vectors/README.md`, How the files were generated). `allowance_usage.json` includes generated cases for default-spent failures, compacted `totals.failed` items and the durable never-dispatched exception, supplied as already validated counting evidence. Per-payment, anchored-window, rolling-window and lifetime cases and term-format checks remain normative. These cases do not establish the SDK's authority to obtain or persist evidence, reconstruct a ledger, release a reservation or dispatch a payment; the vectors README gives the exact scope.
 
 **Choices.** Where the spec is silent, Appendix A records the choice this document made.
 
@@ -486,7 +486,7 @@ Without a request:
     "value": "0.0015"
   },
   "attempt_id": "mAFdg5_0tVNjmrgiTUZW4g",
-  "list_version": { "generation": 7, "counter": 12 },
+  "list_version": { "generation": 1, "counter": 12 },
   "payment_app_id": "brrz3m6g5rci6iqnzke44q4djc",
   "payment_endpoint_identifier": "btc-bitcoin-p2wpkh",
   "proof": {
@@ -610,7 +610,7 @@ For the same publisher identity, publisher App ID and recipient identity, a grea
     }
   },
   "expires_at": "2026-01-31T00:06:00.000Z",
-  "version": { "generation": 7, "counter": 12 }
+  "version": { "generation": 1, "counter": 12 }
 }
 ```
 
@@ -624,7 +624,7 @@ For the same publisher identity, publisher App ID and recipient identity, a grea
 ```json
 {
   "app_id": "brrz3m6g5rci6iqnzke44q4djc",
-  "held_version": { "generation": 7, "counter": 12 }
+  "held_version": { "generation": 1, "counter": 12 }
 }
 ```
 

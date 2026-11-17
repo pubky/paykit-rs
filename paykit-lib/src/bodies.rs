@@ -1370,7 +1370,11 @@ impl PrivatePaymentListRequest {
     ///
     /// [`Error::Invalid`] naming the member.
     pub fn from_body(body: &Map<String, Value>) -> Result<Self> {
-        let obj = Obj::new(body, "Paykit wire 4.14: private_payment_list_request");
+        const LIST_REQUEST: &str = "Paykit wire 4.14: private_payment_list_request";
+        let obj = Obj::new(body, LIST_REQUEST);
+        if !obj.has("held_version") {
+            return Err(bad(LIST_REQUEST, "held_version", "missing; null for none"));
+        }
         Ok(Self {
             held_version: obj
                 .opt("held_version")
@@ -2524,6 +2528,25 @@ mod tests {
         let mut missing = l;
         missing.as_object_mut().unwrap().remove("expires_at");
         assert!(PrivatePaymentList::from_body(&body(missing)).is_err());
+    }
+
+    #[test]
+    fn test_list_request_held_version_always_present() {
+        let read = |v: Value| PrivatePaymentListRequest::from_body(&body(v));
+        assert!(read(json!({})).is_err());
+        assert!(read(json!({ "app_id": zbase32_encode(&[4; 16]) })).is_err());
+        assert_eq!(
+            read(json!({ "held_version": null })).unwrap().held_version,
+            None
+        );
+        let pair = ListVersion::new(1, 12).unwrap();
+        let named = read(json!({
+            "app_id": zbase32_encode(&[4; 16]),
+            "held_version": {"generation": 1, "counter": 12},
+        }))
+        .unwrap();
+        assert_eq!(named.held_version, Some(pair));
+        assert_eq!(named.app_id, Some([4; 16]));
     }
 
     #[test]

@@ -2618,6 +2618,34 @@ mod tests {
     }
 
     #[test]
+    fn test_discovery_state_ask_version_refuses_repeated_members() {
+        let key = key::list_ask(&[3; 32], Some(&[4; 16]));
+        let held = r#"{"counter":9,"generation":1}"#;
+        let valid = String::from_utf8(
+            encode(&ListAsk {
+                payee: [3; 32],
+                app_id: Some([4; 16]),
+                held_version: Some(paykit_lib::ListVersion::new(1, 9).unwrap()),
+                asked_at_ms: 7,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(valid.contains(held));
+        let read = |version: &str| {
+            let bytes = valid.replace(held, version);
+            bound::<ListAsk>(
+                key.as_bytes(),
+                bytes.as_bytes(),
+                &Binder::unblinded([1; 32]),
+            )
+        };
+        assert!(read(held).is_ok());
+        assert!(read(r#"{"generation":1,"generation":2,"counter":9}"#).is_err());
+        assert!(read(r#"{"generation":1,"counter":9,"counter":8}"#).is_err());
+    }
+
+    #[test]
     fn test_discovery_state_ask_current_bindings() {
         for (app_id, held_version) in [
             (None, None),

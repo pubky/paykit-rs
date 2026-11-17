@@ -4364,16 +4364,54 @@ fn test_allowance_record_renewed_grant_leaves_the_history_grant_its_own_members(
 }
 
 #[test]
-fn test_payment_list_record_version_pair_keeps_unknown_members() {
+fn test_record_list_version_pair_keeps_unknown_members() {
     // A list version inside a record is an object like any other: a writer keeps the
-    // members it doesn't know as it read them (wire 5).
+    // members it doesn't know as it read them (wire 5), in a Payment List record's used
+    // entries and in an activity record's unrequested destination alike.
     let alice = pubky(ALICE);
     let s = bound_sealed();
-    let mut base: Value = serde_json::from_slice(value(&arr(&s, "binding_accepted")[0])).unwrap();
-    base["used"][0]["version"]["later_member"] = serde_json::json!("read");
-    let held = PaymentListRecord::read(&serde_json::to_vec(&base).unwrap(), &alice).unwrap();
-    let written: Value = serde_json::from_slice(&held.to_json().unwrap()).unwrap();
-    assert_eq!(written["used"][0]["version"]["later_member"], "read");
+    let list = st(&arr(&s, "binding_accepted")[0], "value").to_owned();
+    let unrequested = bases(&Keys::from_seeds()).unrequested.to_json().unwrap();
+    type Rewrite = fn(&[u8], &[u8; 32]) -> Vec<u8>;
+    let cases: [(&str, Vec<u8>, &str, Rewrite); 2] = [
+        (
+            "Payment List record",
+            list.into_bytes(),
+            "/used/0/version",
+            |json, own| {
+                PaymentListRecord::read(json, own)
+                    .unwrap()
+                    .to_json()
+                    .unwrap()
+            },
+        ),
+        (
+            "activity record",
+            unrequested,
+            "/unrequested/list_version",
+            |json, own| {
+                ActivityRecord::read(json, own, ActivitySide::Payer)
+                    .unwrap()
+                    .to_json()
+                    .unwrap()
+            },
+        ),
+    ];
+    for (name, json, pointer, rewrite) in cases {
+        let mut base: Value = serde_json::from_slice(&json).unwrap();
+        let pair = base
+            .pointer_mut(pointer)
+            .unwrap_or_else(|| panic!("{name}"));
+        assert!(pair.get("generation").is_some(), "{name}");
+        pair["later_member"] = serde_json::json!({ "nested": ["read"] });
+        let written = rewrite(&serde_json::to_vec(&base).unwrap(), &alice);
+        assert_eq!(
+            members_at(&written, &[pointer]),
+            vec![serde_json::json!({ "nested": ["read"] })],
+            "{name}"
+        );
+        assert_eq!(rewrite(&written, &alice), written, "{name}");
+    }
 }
 
 #[test]

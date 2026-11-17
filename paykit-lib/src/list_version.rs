@@ -1,6 +1,9 @@
 //! Private Payment List ordering (Paykit wire 4.13).
 
 use pubky_switch_core::json::MAX_INT;
+use std::fmt;
+
+use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
@@ -85,9 +88,37 @@ impl Serialize for ListVersion {
 }
 
 impl<'de> Deserialize<'de> for ListVersion {
-    /// The one reader, [`ListVersion::from_value`], for every copy of a pair.
+    /// Refuse a repeated member name (Switch wire 1.1), then the one reader,
+    /// [`ListVersion::from_value`], for every copy of a pair.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        Self::from_value(&Value::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+        struct Members;
+
+        impl<'de> Visitor<'de> for Members {
+            type Value = Map<String, Value>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a list-version object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(
+                self,
+                mut access: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let mut members = Map::new();
+                while let Some((name, value)) = access.next_entry::<String, Value>()? {
+                    if members.contains_key(&name) {
+                        return Err(serde::de::Error::custom(format!(
+                            "Paykit wire 4.13: repeated list-version member {name}"
+                        )));
+                    }
+                    members.insert(name, value);
+                }
+                Ok(members)
+            }
+        }
+
+        let members = deserializer.deserialize_map(Members)?;
+        Self::from_value(&Value::Object(members)).map_err(serde::de::Error::custom)
     }
 }
 
@@ -148,5 +179,41 @@ mod tests {
             json!({"generation":8,"counter":1})
         );
         assert_eq!(serde_json::to_value(pair).unwrap(), pair.to_value());
+    }
+
+    #[test]
+    fn test_list_version_serde_refuses_repeated_members() {
+        for text in [
+            r#"{"generation":1,"generation":2,"counter":1}"#,
+            r#"{"generation":1,"counter":1,"counter":2}"#,
+        ] {
+            assert!(serde_json::from_str::<ListVersion>(text).is_err(), "{text}");
+        }
+        // A repeated unknown member is refused as well; distinct unknown members are kept
+        // out of the pair and ignored.
+        assert!(
+            serde_json::from_str::<ListVersion>(r#"{"generation":1,"counter":1,"x":1,"x":2}"#)
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::from_str::<ListVersion>(r#"{"generation":1,"counter":1,"x":1,"y":2}"#)
+                .unwrap(),
+            ListVersion::new(1, 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_list_version_new_bounds() {
+        assert!(ListVersion::new(MAX_INT, MAX_INT).is_ok());
+        assert!(ListVersion::new(1, 1).is_ok());
+        for (generation, counter) in [(0, 1), (1, 0), (MAX_INT + 1, 1), (1, MAX_INT + 1)] {
+            assert!(
+                matches!(
+                    ListVersion::new(generation, counter),
+                    Err(Error::Validation(_))
+                ),
+                "({generation}, {counter})"
+            );
+        }
     }
 }

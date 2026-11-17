@@ -12,7 +12,7 @@ use pubky_switch_client::clock::Clock;
 use serde_json::{json, Value};
 
 use crate::certificate::{is_not_now, list, renew, store_bundle};
-use crate::common::{World, HOUR_MS};
+use crate::common::{list_version, World, HOUR_MS};
 
 fn terms() -> AllowanceTerms {
     AllowanceTerms::from_json(&json!({
@@ -5089,7 +5089,7 @@ async fn test_allowances_answer_dropped_mark_not_due_from_a_payment_without_a_re
         &mut wallet,
         &mut shop,
         async |w, wallet, shop| {
-            w.list_to_alice(shop, &[wallet.app_id()], w.clock.now_ms())
+            w.list_to_alice(shop, &[wallet.app_id()], list_version(1, 1))
                 .await;
             wallet.receive(None).await.unwrap();
             let payment =

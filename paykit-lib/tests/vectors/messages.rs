@@ -1,6 +1,6 @@
 //! `messages.json`: every kind as v0.2 sends it (Switch wire 4.5, Paykit wire 4),
-//! `label_rejections`, `multi_protocol_senders`, `cancellation_roles`, `conversion_terms` and
-//! `conversion_amounts`.
+//! `label_rejections`, `multi_protocol_senders`, `cancellation_roles`, `conversion_terms`,
+//! `conversion_amounts`, `proof_members`, `receipt_members` and `list_versions`.
 
 use std::collections::HashMap;
 
@@ -139,6 +139,7 @@ pub(crate) fn check() {
     check_conversion_amounts(&file);
     check_proof_members(&keys, &file);
     check_receipt_members(&keys, &file);
+    check_list_versions(&keys, &file);
 }
 
 /// `refs` name messages by hash, in each kind's order (Paykit wire 4.3).
@@ -420,7 +421,8 @@ conversion_terms holds the shop's period details and requests with their convers
 changed, which a payer takes or drops; conversion_amounts holds the amount a payer pays to \
 an endpoint under a request's or period details' rates; proof_members holds alice's proofs with a member \
 outside the payment it proves, which a payee drops; receipt_members holds bob's receipts \
-with the payee's metadata and reference, which a payer takes or drops.";
+with the payee's metadata and reference, which a payer takes or drops; list_versions holds \
+the shop's Private Payment Lists with a malformed version, which a payer drops.";
 
 const MULTI_PROTOCOL_DESCRIPTION: &str = "Wire 4.1 check 8, spec 3.2, 3.3, Switch wire 3.1 \
 \"Several protocols\": messages.json's payment_request and resend_request_ids, as the shop \
@@ -510,6 +512,7 @@ pub(crate) fn generate(keys: &Keys) {
         (Place::Member("/conversion_amounts"), conversion_amounts()),
         (Place::Member("/proof_members"), proof_members(keys)),
         (Place::Member("/receipt_members"), receipt_members(keys)),
+        (Place::Member("/list_versions"), list_versions(keys)),
     ];
     cases.extend(signed_messages(keys));
     generated("messages.json", &cases);
@@ -1455,5 +1458,108 @@ fn check_receipt_members(keys: &Keys, file: &Value) {
                 }
             }
         }
+    }
+}
+
+const LIST_VERSIONS_DESCRIPTION: &str = "Wire 4.13: the shop's private_payment_list with its \
+version replaced by a malformed one and signed again by the shop; every other member is the \
+list's. A version is an object with generation and counter, each 1 through 9007199254740991. \
+A payer drops each at check 10. reason is paykit-lib's wording.";
+
+/// The cases of `list_versions`: name, the `version` written, and the words of the rule it
+/// breaks.
+fn list_version_cases() -> Vec<(&'static str, Value, &'static str)> {
+    vec![
+        (
+            "a list whose version has no counter",
+            json!({ "generation": 1 }),
+            "counter: missing",
+        ),
+        (
+            "a list whose version has a zero counter",
+            json!({ "counter": 0, "generation": 1 }),
+            "must be positive",
+        ),
+        (
+            "a list whose version is an integer",
+            json!(12),
+            "list-version: not an object",
+        ),
+    ]
+}
+
+/// The shop's `private_payment_list` with `version` replaced.
+fn list_with_version(version: Value) -> Message {
+    let mut m = Message::parse(&message_json("private_payment_list"), OPAQUE_MEMBERS).unwrap();
+    assert!(m.body.insert("version".into(), version).is_some());
+    m
+}
+
+/// `list_versions`, as paykit-lib generates it.
+fn list_versions(keys: &Keys) -> Value {
+    let shop = keys.app("shop");
+    let refused: Vec<Value> = list_version_cases()
+        .into_iter()
+        .map(|(name, version, _)| {
+            let m = list_with_version(version);
+            assert_eq!(m.from.app_id, shop.keys.app_id_bytes(), "{name}");
+            let json = m.to_json().unwrap();
+            let plaintext =
+                MessagePlaintext::sign_json(&shop.keys, json.clone(), OPAQUE_MEMBERS).unwrap();
+            let error = check_body(&m, &json).expect_err(name);
+            json!({
+                "json": String::from_utf8(json).unwrap(),
+                "name": name,
+                "reason": quoted(&error.to_string()),
+                "sender_app": shop.app_id,
+                "signature": b64(&plaintext.signature()),
+            })
+        })
+        .collect();
+    json!({ "description": LIST_VERSIONS_DESCRIPTION, "refused": refused })
+}
+
+/// `list_versions` (Paykit wire 4.13): the shop's signatures, alice's wallet dropping each at
+/// check 10 for its version's rule, and the same list with the stored version taken.
+fn check_list_versions(keys: &Keys, file: &Value) {
+    let shop = keys.app("shop");
+    let cases = arr(&file["list_versions"], "refused");
+    let expected = list_version_cases();
+    assert_eq!(cases.len(), expected.len());
+    let held = Message::parse(&message_json("private_payment_list"), OPAQUE_MEMBERS).unwrap();
+    for (case, (name, version, rule)) in cases.iter().zip(expected) {
+        assert_eq!(st(case, "name"), name);
+        let json = st(case, "json").as_bytes().to_vec();
+        let plaintext =
+            MessagePlaintext::sign_json(&shop.keys, json.clone(), OPAQUE_MEMBERS).unwrap();
+        assert_eq!(b64(&plaintext.signature()), st(case, "signature"), "{name}");
+        let message = plaintext
+            .check(
+                &pubky(ALICE),
+                &shop.identity,
+                &VerifiedSender::from_cert(&cert(shop)),
+                OPAQUE_MEMBERS,
+            )
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(message.body["version"], version, "{name}");
+        let error = check_body(&message, &json).expect_err(name).to_string();
+        assert!(error.contains(rule), "{name}: {error}");
+        assert_eq!(quoted(&error), st(case, "reason"), "{name}");
+        // Only the version differs: with the stored list's version, the case is that list.
+        let restored = Message {
+            body: {
+                let mut body = message.body.clone();
+                body.insert("version".into(), held.body["version"].clone());
+                body
+            },
+            ..message
+        };
+        let restored_json = restored.to_json().unwrap();
+        assert_eq!(
+            restored_json,
+            message_json("private_payment_list"),
+            "{name}"
+        );
+        assert!(check_body(&restored, &restored_json).is_ok(), "{name}");
     }
 }

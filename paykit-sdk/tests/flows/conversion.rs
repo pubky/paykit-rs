@@ -10,7 +10,7 @@ use paykit_sdk::{
 };
 use pubky_switch_client::clock::Clock;
 
-use crate::common::{btc, endpoint, request_from, World, HOUR_MS};
+use crate::common::{btc, endpoint, list_version, request_from, World, HOUR_MS};
 
 const BOLT11: &str = "btc-lightning-bolt11";
 
@@ -590,7 +590,7 @@ async fn two_lists(w: &World, wallet: &mut Paykit, till_expires: bool) -> Paykit
         now + 30 * 24 * HOUR_MS
     };
     let body = paykit_lib::bodies::PrivatePaymentList {
-        version: crate::common::pair(1),
+        version: list_version(1, 1),
         payment_endpoints: one("btc-bitcoin-p2wpkh", "bc1qtill"),
         expires_at,
     }
@@ -608,7 +608,7 @@ async fn two_lists(w: &World, wallet: &mut Paykit, till_expires: bool) -> Paykit
     w.list_to_alice_with(
         &mut shop,
         &[wallet.app_id()],
-        now + 1,
+        list_version(1, 2),
         one("btc-lightning-bolt12", "lno1shop"),
     )
     .await;

@@ -22,7 +22,7 @@ use pubky_switch_client::clock::Clock;
 use pubky_switch_client::store::{StateStore, WriteBatch};
 use pubky_switch_core::claims::ClaimStatus;
 
-use crate::common::{btc, draft, endpoint, request_from, store, World, HOUR_MS};
+use crate::common::{btc, draft, endpoint, list_version, request_from, store, World, HOUR_MS};
 
 /// Set (`on`) or clear the client's flag that the latest view of `record` shows it divergent,
 /// in the namespace of `app` on `store`.
@@ -516,7 +516,8 @@ async fn test_divergent_list_endpoints_paused_single_use_and_reusable() {
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
     wallet.receive(None).await.unwrap();
     let record = list_record(&w, &wallet, &shop);
     set_divergent(&base, &wallet, &record, true);
@@ -1154,7 +1155,8 @@ async fn test_divergent_older_kept_list_leaves_a_newer_held_list() {
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
     wallet.receive(None).await.unwrap();
     let record = list_record(&w, &wallet, &shop);
     let target = RecordTarget::new(
@@ -1169,14 +1171,16 @@ async fn test_divergent_older_kept_list_leaves_a_newer_held_list() {
         .put_record(&target, b"{}", Vec::new())
         .await
         .unwrap();
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 3).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 3))
+        .await;
     wallet.receive(None).await.unwrap();
     assert_eq!(
         wallet.held_lists().await.unwrap()[0].version,
-        crate::common::pair(3)
+        list_version(1, 3)
     );
     set_divergent(&base, &wallet, &record, true);
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 2).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 2))
+        .await;
     wallet.receive(None).await.unwrap();
     assert_eq!(
         wallet
@@ -1197,7 +1201,7 @@ async fn test_divergent_older_kept_list_leaves_a_newer_held_list() {
         .is_empty());
     let held = wallet.held_lists().await.unwrap();
     assert_eq!(held.len(), 1);
-    assert_eq!(held[0].version, crate::common::pair(3));
+    assert_eq!(held[0].version, list_version(1, 3));
 }
 
 #[tokio::test]
@@ -1606,7 +1610,8 @@ async fn test_divergent_mismatched_mark_beside_a_held_list_fails_no_receive() {
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
     wallet.receive(None).await.unwrap();
     let record = list_record(&w, &wallet, &shop);
     let target = RecordTarget::new(
@@ -1621,17 +1626,19 @@ async fn test_divergent_mismatched_mark_beside_a_held_list_fails_no_receive() {
         .put_record(&target, b"{}", Vec::new())
         .await
         .unwrap();
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 3).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 3))
+        .await;
     wallet.receive(None).await.unwrap();
     set_divergent(&base, &wallet, &record, true);
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 2).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 2))
+        .await;
     wallet.receive(None).await.unwrap();
     mark_past_its_record(&mut wallet).await;
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert_eq!(
         wallet.held_lists().await.unwrap()[0].version,
-        crate::common::pair(3)
+        list_version(1, 3)
     );
 }
 
@@ -1802,11 +1809,13 @@ async fn test_divergent_kept_list_written_before_a_payment_to_it() {
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
     wallet.receive(None).await.unwrap();
     let record = list_record(&w, &wallet, &shop);
     set_divergent(&base, &wallet, &record, true);
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 2).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 2))
+        .await;
     wallet.receive(None).await.unwrap();
     assert_eq!(
         wallet
@@ -2130,7 +2139,7 @@ async fn receipt_without_request_over_unread_paused(stranger: bool) {
             AppScopes::new().request().build().unwrap(),
         )
         .await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     w.rail.next(Behaviour::Hang);
@@ -2265,7 +2274,7 @@ async fn test_divergent_kept_messages_of_two_senders_with_one_msg_id_both_kept()
             AppScopes::new().request().build().unwrap(),
         )
         .await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     w.rail.next(Behaviour::Hang);
@@ -2517,7 +2526,7 @@ async fn test_divergent_receipt_from_another_identity_never_kept_over_a_paused_r
             AppScopes::new().request().build().unwrap(),
         )
         .await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     w.rail.next(Behaviour::Hang);
@@ -3773,7 +3782,8 @@ async fn test_divergent_paused_list_asks_the_app_whose_list_expired() {
             store(),
         )
         .await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
     till.app_mut().invite(&w.alice_id()).await.unwrap();
     let mut endpoints = std::collections::BTreeMap::new();
     endpoints.insert(
@@ -3784,7 +3794,7 @@ async fn test_divergent_paused_list_asks_the_app_whose_list_expired() {
         },
     );
     let body = paykit_lib::bodies::PrivatePaymentList {
-        version: crate::common::pair(1),
+        version: list_version(1, 1),
         payment_endpoints: endpoints,
         expires_at: w.clock.now_ms() + HOUR_MS,
     }
@@ -3827,7 +3837,7 @@ async fn till_list(w: &World, wallet: &Paykit, expires_at: u64) -> Paykit {
         },
     );
     let body = paykit_lib::bodies::PrivatePaymentList {
-        version: crate::common::pair(1),
+        version: list_version(1, 1),
         payment_endpoints: endpoints,
         expires_at,
     }
@@ -3876,7 +3886,8 @@ async fn test_divergent_list_of_a_removed_app_waits_for_a_current_list() {
         .join(&w.bob, "till", AppScopes::new().request().build().unwrap())
         .await;
     till.app_mut().invite(&w.alice_id()).await.unwrap();
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
     wallet.receive(None).await.unwrap();
     let record = list_record(&w, &wallet, &shop);
     set_divergent(&base, &wallet, &record, true);
@@ -3908,7 +3919,8 @@ async fn test_divergent_list_of_a_removed_app_leaves_an_expired_current_list_ask
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
     let till = till_list(&w, &wallet, w.clock.now_ms() + HOUR_MS).await;
     wallet.receive(None).await.unwrap();
     let record = list_record(&w, &wallet, &shop);
@@ -3934,7 +3946,8 @@ async fn test_divergent_list_of_a_removed_app_leaves_a_current_list_paid() {
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
     let mut till = till_list(&w, &wallet, w.clock.now_ms() + 30 * 24 * HOUR_MS).await;
     wallet.receive(None).await.unwrap();
     let record = list_record(&w, &wallet, &shop);
@@ -3959,7 +3972,8 @@ async fn test_divergent_paused_list_unjudged_while_the_payees_identity_is_unread
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
     wallet.receive(None).await.unwrap();
     let record = list_record(&w, &wallet, &shop);
     set_divergent(&base, &wallet, &record, true);
@@ -3990,7 +4004,8 @@ async fn test_divergent_paused_list_of_a_current_app_pauses_whatever_its_certifi
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
     wallet.receive(None).await.unwrap();
     let record = list_record(&w, &wallet, &shop);
     set_divergent(&base, &wallet, &record, true);

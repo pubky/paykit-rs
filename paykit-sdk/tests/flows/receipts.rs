@@ -9,7 +9,7 @@ use paykit_sdk::{
 use pubky_switch_client::clock::Clock;
 use serde_json::json;
 
-use crate::common::{btc, draft, endpoint, request_from, World};
+use crate::common::{btc, draft, endpoint, list_version, request_from, World};
 
 fn metadata() -> serde_json::Map<String, serde_json::Value> {
     json!({ "order": "o-7", "note": "thanks" })
@@ -109,7 +109,7 @@ async fn test_receipts_of_a_payment_without_a_request_carry_the_payees_reference
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     let outcome = wallet

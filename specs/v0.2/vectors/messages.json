@@ -434,7 +434,7 @@
       }
     ]
   },
-  "description": "Every message kind as sent in v0.2 (Switch wire 4.5, wire 4): the exact JSON bytes, their BLAKE3 hash (refs, request hash), the sender app's signature over lp(\"pubky-switch/v1/msg\", recipient identity, JSON), and the signed plaintext layout sender app ID (16) | signature (64) | u32_be(JSON length) | JSON, before zero padding. payment_request_labelled is sent by bob's hosted app under its label, and alice's acceptance of it copies the label; label_rejections holds requests a payer drops for their label; multi_protocol_senders holds messages from apps whose certificates hold another protocol's scopes; cancellation_roles holds a cancellation between certificates of each pair of roles; conversion_terms holds the shop's period details and requests with their conversion terms changed, which a payer takes or drops; conversion_amounts holds the amount a payer pays to an endpoint under a request's or period details' rates; proof_members holds alice's proofs with a member outside the payment it proves, which a payee drops; receipt_members holds bob's receipts with the payee's metadata and reference, which a payer takes or drops.",
+  "description": "Every message kind as sent in v0.2 (Switch wire 4.5, wire 4): the exact JSON bytes, their BLAKE3 hash (refs, request hash), the sender app's signature over lp(\"pubky-switch/v1/msg\", recipient identity, JSON), and the signed plaintext layout sender app ID (16) | signature (64) | u32_be(JSON length) | JSON, before zero padding. payment_request_labelled is sent by bob's hosted app under its label, and alice's acceptance of it copies the label; label_rejections holds requests a payer drops for their label; multi_protocol_senders holds messages from apps whose certificates hold another protocol's scopes; cancellation_roles holds a cancellation between certificates of each pair of roles; conversion_terms holds the shop's period details and requests with their conversion terms changed, which a payer takes or drops; conversion_amounts holds the amount a payer pays to an endpoint under a request's or period details' rates; proof_members holds alice's proofs with a member outside the payment it proves, which a payee drops; receipt_members holds bob's receipts with the payee's metadata and reference, which a payer takes or drops; list_versions holds the shop's Private Payment Lists with a malformed version, which a payer drops.",
   "label_rejections": {
     "cases": [
       {
@@ -489,6 +489,32 @@
       }
     ],
     "description": "Switch wire 5.1 checks 8 and 10, wire 4.1, 4.5, 4.6: payment_request messages a payer drops for their label, signed by bob's hosted app, whose certificate (documents.json certificates) holds only paykit_request:shop1, each messages.json's payment_request_labelled with its label changed; alice's acceptance with a label that isn't valid, which bob's apps drop; and alice's acceptances a payee app drops at check 8 because its certificate (recipient_cert) doesn't hold their label: messages.json's payment_request_acceptance_labelled (label shop1) at an app holding only paykit_request:shop2, the hosted certificate with scopes changed and permissions derived, and the same acceptance without its label at the hosted app, which holds only paykit_request:shop1. A payer's reply with a label needs paykit_request or paykit_request:<label> for that label at the recipient; one without needs paykit_request. reason is the prototype's wording, of the first check that refuses it."
+  },
+  "list_versions": {
+    "description": "Wire 4.13: the shop's private_payment_list with its version replaced by a malformed one and signed again by the shop; every other member is the list's. A version is an object with generation and counter, each 1 through 9007199254740991. A payer drops each at check 10. reason is paykit-lib's wording.",
+    "refused": [
+      {
+        "json": "{\"v\":1,\"kind\":\"paykit.private_payment_list\",\"msg_id\":\"f914b9bb-64e0-4a65-9963-0eb5b82097b5\",\"created_at\":\"2026-01-01T00:06:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[],\"body\":{\"expires_at\":\"2026-01-31T00:06:00.000Z\",\"payment_endpoints\":{\"btc-bitcoin-p2wpkh\":{\"payload\":\"bc1qexample0single0use0address0000000000\",\"single_use\":true},\"btc-lightning-bolt12\":{\"payload\":\"lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr\"}},\"version\":{\"generation\":1}}}",
+        "name": "a list whose version has no counter",
+        "reason": "invalid: counter: missing",
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "signature": "2kcUEmU070Il6_ZniOyfFDdx-EKEsgJkz2CHPYCsXSfmS87egBTB4KUFQ-vHaTvJGvCrPK4MMGVxD5LDc6YqCw"
+      },
+      {
+        "json": "{\"v\":1,\"kind\":\"paykit.private_payment_list\",\"msg_id\":\"f914b9bb-64e0-4a65-9963-0eb5b82097b5\",\"created_at\":\"2026-01-01T00:06:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[],\"body\":{\"expires_at\":\"2026-01-31T00:06:00.000Z\",\"payment_endpoints\":{\"btc-bitcoin-p2wpkh\":{\"payload\":\"bc1qexample0single0use0address0000000000\",\"single_use\":true},\"btc-lightning-bolt12\":{\"payload\":\"lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr\"}},\"version\":{\"counter\":0,\"generation\":1}}}",
+        "name": "a list whose version has a zero counter",
+        "reason": "invalid: generation and counter must be positive Switch integers",
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "signature": "AfVoxG2mBnJq1GsAdtob7qyLOEV5iSpxHGtPBEkmZUIfCn4O8oF7Mzb4bPMXTqXazk7huM5ZF7NkV8EBVIe8Cg"
+      },
+      {
+        "json": "{\"v\":1,\"kind\":\"paykit.private_payment_list\",\"msg_id\":\"f914b9bb-64e0-4a65-9963-0eb5b82097b5\",\"created_at\":\"2026-01-01T00:06:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[],\"body\":{\"expires_at\":\"2026-01-31T00:06:00.000Z\",\"payment_endpoints\":{\"btc-bitcoin-p2wpkh\":{\"payload\":\"bc1qexample0single0use0address0000000000\",\"single_use\":true},\"btc-lightning-bolt12\":{\"payload\":\"lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr\"}},\"version\":12}}",
+        "name": "a list whose version is an integer",
+        "reason": "invalid: list-version: not an object",
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "signature": "f_ruiErmBv-YxkyCFBEVJBXT8wHoRmZYi85C0LLxy46ywby0qy72GJ7QSfoYIZ293eDtcdpXJTzIyksOL2CkAw"
+      }
+    ]
   },
   "messages": [
     {

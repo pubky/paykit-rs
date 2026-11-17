@@ -22,7 +22,7 @@ use pubky_switch_core::enc::b64;
 use serde_json::{json, Value};
 
 use crate::common::refuse_writes;
-use crate::common::{btc, draft, endpoint, request_from, World};
+use crate::common::{btc, draft, endpoint, list_version, request_from, World};
 use crate::restore::{kept, kept_message, kept_message_with_refs};
 use crate::stored::receipt_of_another_proof;
 
@@ -533,7 +533,7 @@ async fn test_local_state_entry_naming_another_payments_record_is_corrupt() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     wallet.receive(None).await.unwrap();
     let mut attempts = Vec::new();
@@ -759,7 +759,7 @@ fn list_of(w: &World, app: &str) -> Value {
         "paykit.private_payment_list",
         Value::Object(
             paykit_lib::bodies::PrivatePaymentList {
-                version: crate::common::pair(1),
+                version: list_version(1, 1),
                 payment_endpoints: std::collections::BTreeMap::new(),
                 expires_at: w.clock.now_ms() + 86_400_000,
             }
@@ -812,7 +812,8 @@ async fn test_local_state_held_list_of_another_app_parks_a_list_to_hold() {
     let mut phone = w.wallet("phone").await;
     let mut shop = w.shop().await;
     let _other = w.labelled_shop("shop2", "tips").await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
     wallet.receive(None).await.unwrap();
     let target = lists_of(&w, &shop.app_id());
     phone.app_mut().read_record(&target).await.unwrap();
@@ -834,7 +835,8 @@ async fn test_local_state_held_list_of_another_app_parks_a_list_to_hold() {
         &list_of(&w, "shop2"),
     )
     .await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], 2).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 2))
+        .await;
     let _ = wallet.receive(None).await;
     assert_eq!(wallet.app_mut().parked_entries().await.unwrap().len(), 1);
 }
@@ -854,7 +856,7 @@ async fn test_local_state_held_list_of_another_app_refuses_a_stored_lists_write(
         .unwrap();
     let key = format!("lh/{}", b64(&record));
     put(&mut wallet, &key, &list_of(&w, "shop2")).await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
         .await;
     refuse_writes(&w.alice, 1);
     refused_keeping(&mut wallet, &key).await;
