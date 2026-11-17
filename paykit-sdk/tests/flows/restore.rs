@@ -943,7 +943,8 @@ async fn rewrite_marks(wallet: &mut Paykit, w: &World, app_id: [u8; 16], used: s
 }
 
 fn mark(version: u64, endpoint: &str, attempt_id: paykit_lib::AttemptId) -> serde_json::Value {
-    serde_json::json!({ "version": version, "endpoint": endpoint, "attempt_id": attempt_id.to_text() })
+    serde_json::json!({ "version": { "generation": 1, "counter": version }, "endpoint": endpoint,
+        "attempt_id": attempt_id.to_text() })
 }
 
 /// A wallet with lists from bob's `shop` and `other`, a backup taken before paying
