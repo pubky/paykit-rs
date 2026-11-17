@@ -37,12 +37,12 @@ impl ListVersion {
         })
     }
 
-    /// The publisher identity's verified generation.
+    /// The generation the pair carries. It establishes no identity document.
     pub fn generation(self) -> u64 {
         self.generation
     }
 
-    /// The recipient's reserved counter in this generation.
+    /// The counter the pair carries. It establishes no reservation.
     pub fn counter(self) -> u64 {
         self.counter
     }

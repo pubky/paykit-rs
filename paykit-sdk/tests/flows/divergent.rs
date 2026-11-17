@@ -4411,3 +4411,85 @@ async fn test_divergent_messages_of_one_millisecond_kept_dropped_and_written_in_
     let got = shop.receive(None).await.unwrap();
     assert!(got.applied.contains(&ids[1]), "{got:?}");
 }
+
+#[tokio::test]
+async fn test_divergent_paused_list_above_the_payees_generation_pauses_nothing() {
+    // Bob's shop's list is of a generation his identity hasn't reached, and its record is
+    // paused as divergent. It plays no part in the payment, paused or not: the payment
+    // waits for a list, asking the shop with the pair held, and asks no confirmation of the
+    // record (Paykit spec 8.4; wire 4.13, 4.14).
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let mut shop = w.shop().await;
+    let generation = w.homeserver.identity_doc(&w.bob_id()).unwrap().generation();
+    let ahead = list_version(generation + 1, 1);
+    w.list_to_alice(&mut shop, &[wallet.app_id()], ahead).await;
+    wallet.receive(None).await.unwrap();
+    let record = list_record(&w, &wallet, &shop);
+    set_divergent(&base, &wallet, &record, true);
+    let payment = UnrequestedPayment::new(w.bob_id(), btc("1"))
+        .with_options(PayOptions::default().with_endpoint(endpoint("btc-lightning-bolt12")));
+    let refused = wallet.pay_without_request(payment).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    assert_eq!(list_asks(&w, &wallet).await, vec![Some(shop.app_id())]);
+    assert_eq!(
+        crate::destinations::held_versions(&w, &wallet).await,
+        vec![Some(ahead)]
+    );
+}
+
+#[tokio::test]
+async fn test_divergent_request_to_an_app_whose_list_certificate_no_longer_counts_names_its_pair() {
+    // Bob's signer lists his shop with another certificate, renewing none: the shop's list
+    // can't be paid, and a payment naming the shop asks it for a list, naming the pair the
+    // wallet holds of it, not none (Paykit wire 4.14).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], list_version(1, 1))
+        .await;
+    wallet.receive(None).await.unwrap();
+    let shop_id = shop.app_id();
+    w.bob
+        .next_doc(|body| {
+            for app in body.apps.iter_mut().filter(|a| a.app_id == shop_id) {
+                app.cert = [9; 32];
+            }
+            body.renewed.retain(|r| r.app_id != shop_id);
+        })
+        .unwrap();
+    w.clock.advance_ms(11 * 60_000);
+    let payment = UnrequestedPayment::new(w.bob_id(), btc("1")).with_options(
+        PayOptions::default()
+            .with_endpoint(endpoint("btc-lightning-bolt12"))
+            .with_list_app(shop_id),
+    );
+    let refused = wallet.pay_without_request(payment).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    // The request queued names the pair: its mark keeps what it named.
+    let key = format!(
+        "lq/{}/{}",
+        pubky_switch_core::enc::b64(&w.bob_id()),
+        pubky_switch_core::enc::b64(&shop_id)
+    );
+    let mark = wallet
+        .app()
+        .protocol_get("paykit", key.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    let mark: serde_json::Value = serde_json::from_slice(&mark).unwrap();
+    assert_eq!(
+        mark["d"]["held_version"],
+        serde_json::to_value(list_version(1, 1)).unwrap()
+    );
+}

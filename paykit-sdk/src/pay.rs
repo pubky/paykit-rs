@@ -491,14 +491,19 @@ impl Held {
     }
 }
 
+/// A `payment_lists` record a payment selected from, with the version of the write whose
+/// content it is ([`Paykit::lists_read_of`]).
+pub(crate) type ListRead = (PaymentListRecord, RecordVersion);
+
 /// What one attempt needs beyond its journal entry.
 struct Plan {
     entry: JournalEntry,
     record: ActivityTarget,
     carrier: Carrier,
     step: u64,
-    /// The `payment_lists` record whose single-use mark the attempt's batch writes.
-    reserve: Option<PaymentListRecord>,
+    /// For a list endpoint, the `payment_lists` record of its list and the version selected
+    /// from: the attempt is conditioned on it, and its batch writes a single-use mark.
+    reserve: Option<ListRead>,
     /// The record a payment without a request creates in the attempt's batch.
     create: Option<ActivityRecord>,
     /// Condition the attempt on the version of the request record read.
@@ -516,14 +521,14 @@ struct Plan {
 
 /// A Payment Endpoint a payment may take: its identifier and payload, handed to the payment
 /// method as a candidate ([`crate::Rail::select_endpoints`]), and what paying it needs: the
-/// destination journaled, its carrier, and, for a single-use list endpoint, the
-/// `payment_lists` record whose mark the attempt's batch writes.
+/// destination journaled, its carrier, and, for a list endpoint, the `payment_lists` record
+/// and the version the attempt is conditioned on, which its batch marks for a single-use one.
 pub(crate) struct Choice {
     endpoint_id: PaymentEndpointIdentifier,
     payload: PaymentEndpointPayload,
     destination: Destination,
     carrier: Carrier,
-    reserve: Option<PaymentListRecord>,
+    reserve: Option<ListRead>,
 }
 
 impl Choice {
@@ -532,7 +537,7 @@ impl Choice {
         payload: &PaymentEndpointPayload,
         destination: Destination,
         carrier: Carrier,
-        reserve: Option<PaymentListRecord>,
+        reserve: Option<ListRead>,
     ) -> Self {
         Self {
             endpoint_id: endpoint_id.clone(),
@@ -548,7 +553,7 @@ impl Choice {
 pub(crate) struct Chosen {
     pub(crate) destination: Destination,
     pub(crate) carrier: Carrier,
-    pub(crate) reserve: Option<PaymentListRecord>,
+    pub(crate) reserve: Option<ListRead>,
     pub(crate) bound: TransferBound,
     pub(crate) payment_amount: PaymentAmount,
     pub(crate) paid: Option<PaymentAmount>,
@@ -1616,7 +1621,7 @@ impl Paykit {
 
     /// A destination from the payee's Private Payment Lists (Paykit spec 8.4): of the lists
     /// in use, of the app asked for or of every current app, the endpoints the payment may
-    /// use, not a single-use endpoint already used at its list's version and, for a request
+    /// use, none of a list whose version a single-use endpoint was used at and, for a request
     /// that restricts them, one of its accepted identifiers, `allowed` (Paykit wire 4.5),
     /// are handed to the payment method, which chooses ([`Paykit::choose`]). In
     /// [`PaymentMode::Public`], the endpoints of the payee's public endpoints instead, from
@@ -1624,12 +1629,14 @@ impl Paykit {
     /// no usable list, missing, expired or used up, the payee is asked for its current one
     /// ([`Paykit::ask_for_lists`]) and the refusal is [`Refusal::WaitingForList`]; a list in
     /// use that offers no endpoint the payment may use is [`Refusal::NoDestination`]; lists
-    /// in use whose endpoints the method pays none of, and no expired list, are
+    /// in use whose endpoints the method pays none of, and no expired or used-up list, are
     /// [`Refusal::UnsupportedEndpoint`], without asking. The list of an app the payee's
     /// `identity.json` lists in `apps`, paused as divergent ([`Paykit::confirm_divergent`]),
     /// with no other list to pay, is [`Refusal::Divergent`] naming its record, whatever
     /// certificate it was signed under, and its app isn't asked; the list of an app that
-    /// copy doesn't list in `apps`, or lists as removed, plays no part, paused or not.
+    /// copy doesn't list in `apps`, or lists as removed, or of a higher generation than that
+    /// copy (Paykit wire 4.13), plays no part, paused or not; a request to the app of the
+    /// latter still names the pair held.
     async fn list_destination(
         &mut self,
         payee: &[u8; 32],
@@ -1689,8 +1696,19 @@ impl Paykit {
                 .choose(payee, gathered, pricing, options)?
                 .ok_or_else(|| unsupported("the payee's public endpoints"));
         }
-        let mut lists = self.lists_of(payee).await?;
+        let read = self.lists_read_of(payee).await?;
+        // The version of each record's write selected from: every attempt on a list endpoint
+        // is conditioned on it, never on a write the app refused (Switch spec 8.2).
+        let versions: Vec<([u8; 16], RecordVersion)> =
+            read.iter().map(|(l, v)| (l.app_id, *v)).collect();
+        let mut lists: Vec<PaymentListRecord> = read.into_iter().map(|(l, _)| l).collect();
         lists.retain(|l| app.is_none_or(|a| a == l.app_id));
+        // The pair installed of each app's list, whether or not it may be paid: a request
+        // naming the app names it (Paykit wire 4.14).
+        let installed: Vec<([u8; 16], ListVersion)> = lists
+            .iter()
+            .filter_map(|l| crate::receive::list_version(&l.list).map(|v| (l.app_id, v)))
+            .collect();
         // Only a current app's list counts (Paykit spec 8.4, 7.2): a removed app's list, of
         // whatever version it chose, would shadow the current apps' and then be refused by
         // the destination check. The payee's `identity.json` is the copy that check takes,
@@ -1716,10 +1734,25 @@ impl Paykit {
                 Err(refusal) => return Err(refusal.into()),
             }
         };
+        // Nor does a list of a higher generation than that copy: an app-signed number is no
+        // evidence of the identity's generation (Paykit wire 4.13). It stays installed, and a
+        // request to its app names its pair, the one held (Paykit wire 4.14).
+        let mut ahead: Vec<([u8; 16], ListVersion)> = Vec::new();
         if let Some(identity) = &identity {
             lists.retain(|l| {
-                identity.doc.listed_cert(&l.app_id).is_some()
-                    && !identity.doc.lists_removed(&l.app_id)
+                if identity.doc.listed_cert(&l.app_id).is_none()
+                    || identity.doc.lists_removed(&l.app_id)
+                {
+                    return false;
+                }
+                match crate::receive::list_version(&l.list) {
+                    Some(v) if v.generation() <= identity.doc.generation() => true,
+                    Some(v) => {
+                        ahead.push((l.app_id, v));
+                        false
+                    }
+                    None => false,
+                }
             });
         }
         // A list whose record is divergent, or was seen so, may be stale: the upload may hold
@@ -1762,25 +1795,33 @@ impl Paykit {
             let version = crate::receive::list_version(&l.list);
             (std::cmp::Reverse(version), l.app_id)
         });
-        // The version held of each app's list, newest first, for a request that names it.
+        // The version held of each app's list, greater pair first, for a request that names it.
         let mut held: Vec<([u8; 16], ListVersion)> = Vec::new();
-        // Whether a list still in use offers an endpoint the payment would use, though each
-        // one is used: a list used up, not one without such an endpoint.
+        // Whether a list in use, neither expired nor used up, offers an endpoint the payment
+        // may use, and whether there is such a list.
         let mut offered = false;
         let mut live = false;
         // Whether some app's list has expired, which its current one may replace.
         let mut expired = false;
         // The endpoints of the lists in use that the payment may use, in the order above and
-        // then by identifier; the single-use ones already used at their list's version are
-        // left out (Paykit spec 8.4), and kept apart only to tell a list used up.
+        // then by identifier. A single-use endpoint used at a list's version consumes that
+        // whole version (Paykit wire 5.4, spec 8.4): every endpoint of the list, single-use or
+        // reusable, is left out, and the list is used up, whatever the method pays.
         let mut gathered = Vec::new();
-        let mut used = Vec::new();
+        let mut used_up = false;
         for record in lists {
             let Body::PrivatePaymentList(list) = record.list.body() else {
                 continue;
             };
             if !held.iter().any(|(app, _)| *app == record.app_id) {
                 held.push((record.app_id, list.version));
+            }
+            // A used-up list is used up whatever the payment would use of it, expired or not:
+            // none of its endpoints is a candidate, and a newer list may offer what this one
+            // lacks.
+            if record.used.iter().any(|u| u.version == list.version) {
+                used_up = true;
+                continue;
             }
             let accepted = record.list.accepted_at().unwrap_or(0);
             if now >= list.usable_until(accepted) {
@@ -1802,23 +1843,28 @@ impl Paykit {
                     endpoint.single_use,
                 );
                 let carrier = Carrier::Message(Box::new(record.list.clone()));
-                // The version marked used is the one of the list whose endpoint is chosen.
-                let reserve = endpoint.single_use.then(|| record.clone());
-                let choice = Choice::new(id, &endpoint.payload, destination, carrier, reserve);
-                let spent = record
-                    .used
+                // Every endpoint of a list carries its record and the version of the write it
+                // was read from: the attempt is conditioned on it, and its batch marks a
+                // single-use endpoint used.
+                let version = versions
                     .iter()
-                    .any(|u| u.version == list.version && &u.endpoint == id);
-                if endpoint.single_use && spent {
-                    used.push(choice);
-                } else {
-                    gathered.push(choice);
-                }
+                    .find(|(a, _)| *a == record.app_id)
+                    .map(|(_, v)| *v)
+                    .ok_or_else(PaykitError::corrupt)?;
+                let reserve = Some((record.clone(), version));
+                gathered.push(Choice::new(
+                    id,
+                    &endpoint.payload,
+                    destination,
+                    carrier,
+                    reserve,
+                ));
             }
         }
+        held.extend(ahead);
         // Endpoints the conversion terms leave unusable refuse the payment for that, unless a
-        // list has expired or a single-use endpoint the method pays is used up: a newer list
-        // may serve then, and the payee is asked for it as below.
+        // list has expired or is used up: a newer list may serve then, and the payee is asked
+        // for it as below.
         let unusable_by_terms = match self.choose(payee, gathered, pricing, options) {
             Ok(Some(chosen)) => return Ok(chosen),
             Ok(None) => None,
@@ -1828,17 +1874,19 @@ impl Paykit {
             Err(error) => return Err(error),
         };
         if let Some(error) = unusable_by_terms {
-            if !expired && !self.pays_any(&used, pricing.requested)? {
+            if !expired && !used_up {
                 return Err(error);
             }
         }
-        // Lists in use that offer only endpoints the method doesn't pay, and no app's list to
-        // ask again: a newer list needn't differ, so the payee isn't asked. A single-use
-        // endpoint used up that the method pays is one a newer list may offer again.
-        let unsupported_only = offered && !expired && !self.pays_any(&used, pricing.requested)?;
+        // Lists in use that offer only endpoints the method doesn't pay, and no app's list
+        // expired or used up to ask again: a newer list needn't differ, so the payee isn't
+        // asked. A list used up is asked again whatever the method pays of it (Paykit spec
+        // 8.4, "No usable list").
+        let unsupported_only = offered && !expired && !used_up;
         // A list still in use with no endpoint the payment may use isn't missing, expired or
-        // used up: a newer one needn't differ, so the payee isn't asked.
-        let unusable = live && !offered;
+        // used up: a newer one needn't differ, so the payee isn't asked, unless another list
+        // is used up.
+        let unusable = live && !offered && !used_up;
         // A paused list is neither missing, expired nor used up (Paykit spec 8.4): the payment
         // waits for the user's confirmation of it, naming its record, and no app whose list
         // is paused is asked for a newer one, since the upload may hold one. An app whose
@@ -1846,7 +1894,7 @@ impl Paykit {
         // list.
         if !paused_lists.is_empty() {
             if !held.is_empty() && !unsupported_only && !unusable {
-                self.ask_for_lists(payee, app, &held).await?;
+                self.ask_for_lists(payee, app, &held, &installed).await?;
             }
             Box::pin(self.refuse_while_paused(&paused_lists)).await?;
         }
@@ -1861,7 +1909,7 @@ impl Paykit {
             )
             .into());
         }
-        self.ask_for_lists(payee, app, &held).await?;
+        self.ask_for_lists(payee, app, &held, &installed).await?;
         Err(Refusal::WaitingForList.into())
     }
 
@@ -1917,21 +1965,6 @@ impl Paykit {
             .min_by_key(|(at, _)| *at)
             .map(|(_, error)| error);
         Ok(Ordered { payable, error })
-    }
-
-    /// Whether the payment method pays any of `used`, the single-use endpoints left out as
-    /// used, which a newer list may offer again. None is paid; a candidate the method
-    /// couldn't judge fails the payment with its error, so the payee isn't taken to offer
-    /// nothing it pays.
-    fn pays_any(&self, used: &[Choice], amount: &PaymentAmount) -> Result<bool> {
-        if used.is_empty() {
-            return Ok(false);
-        }
-        let ordered = self.rail_order(used, Some(amount))?;
-        if !ordered.payable.is_empty() {
-            return Ok(true);
-        }
-        ordered.error.map_or(Ok(false), |error| Err(error.into()))
     }
 
     /// The endpoint a payment takes of `gathered` (Paykit spec 7.2): the first in the
@@ -2097,8 +2130,9 @@ impl Paykit {
 
     /// Paykit spec 8.4, "No usable list": ask the payee for its current list, with a
     /// `paykit.private_payment_list_request` naming the version held (Paykit wire 4.14). With
-    /// `app`, of that app; without, of each app whose list is held, or one request naming no
-    /// app when none is. A request already asked of the same app at the same held version is
+    /// `app`, of that app, naming the pair `installed` holds of it whether or not that list
+    /// may be paid; without, of each app in `held`, or one request naming no app when none
+    /// is. A request already asked of the same app at the same held version is
     /// outstanding, and not asked again, until a day has passed: the payee can't be forced to
     /// answer, and a request it dropped is asked once more after that, so a payer waits at
     /// most a day for one more chance. The request is queued before its mark is kept: a crash
@@ -2108,9 +2142,10 @@ impl Paykit {
         payee: &[u8; 32],
         app: Option<[u8; 16]>,
         held: &[([u8; 16], ListVersion)],
+        installed: &[([u8; 16], ListVersion)],
     ) -> Result<()> {
         self.refuse_while_sends_held(payee).await?;
-        let held_of = |app: [u8; 16]| held.iter().find(|(a, _)| *a == app).map(|(_, v)| *v);
+        let held_of = |app: [u8; 16]| installed.iter().find(|(a, _)| *a == app).map(|(_, v)| *v);
         let asks: Vec<(Option<[u8; 16]>, Option<ListVersion>)> = match app {
             Some(app) => vec![(Some(app), held_of(app))],
             None if held.is_empty() => vec![(None, None)],
@@ -2399,6 +2434,20 @@ impl Paykit {
             let key = self.activity_key(&record)?;
             conditions.push(self.app.record_condition(&key).await?);
         }
+        // A list endpoint's attempt is conditioned on the version of the `payment_lists`
+        // write it was selected from: another own app's single-use payment since consumes the
+        // whole version (Paykit spec 8.4; wire 5.4), also when this app saw that write and
+        // refused it, which leaves the selected content but moves the record on.
+        let reserve = match reserve {
+            Some((list, version)) => {
+                let key = self
+                    .app
+                    .record_key(&list_target(&list.payee, &list.app_id))?;
+                conditions.push(Condition::RecordVersion { key, version });
+                entry.destination.single_use.then_some(list)
+            }
+            None => None,
+        };
         let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .op_if(op.kind(), conditions)
             .obligation_deadline(entry.obligation, own_deadline(entry.deadline));

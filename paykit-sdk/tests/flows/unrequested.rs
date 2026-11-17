@@ -387,6 +387,19 @@ async fn test_unrequested_next_generation_list_replaces_the_last_counter() {
     w.list_to_alice(&mut shop, &[wallet.app_id()], next).await;
     wallet.receive(None).await.unwrap();
     assert!(wallet.held_lists().await.unwrap().is_empty());
+    // A list is paid from only once bob's verified identity has reached its generation
+    // (Paykit wire 4.13): his identity moves to generation 2 first.
+    let old = w.homeserver.identity_doc(&w.bob_id()).unwrap();
+    w.bob
+        .sign_next(|body| {
+            body.service_keys
+                .push(pubky_switch_core::records::ServiceKeyEntry {
+                    generation: old.generation(),
+                    key: old.body().inbox.service_key,
+                });
+            body.generation = old.generation() + 1;
+        })
+        .unwrap();
     let outcome = wallet
         .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
         .await
@@ -1092,4 +1105,309 @@ async fn test_unrequested_proof_of_a_settlement_seen_not_credited_again_over_its
         pubky_switch_client::app::RecordContent::Deleted
     );
     assert!(shop.payee_activity().await.unwrap().is_empty());
+}
+
+/// One reusable Lightning endpoint with `payload`.
+fn lightning(
+    payload: &str,
+) -> std::collections::BTreeMap<
+    paykit_lib::PaymentEndpointIdentifier,
+    paykit_lib::bodies::ListEndpoint,
+> {
+    std::collections::BTreeMap::from([(
+        endpoint("btc-lightning-bolt12"),
+        paykit_lib::bodies::ListEndpoint {
+            payload: paykit_lib::PaymentEndpointPayload::new(payload).unwrap(),
+            single_use: false,
+        },
+    )])
+}
+
+/// The destination of `app`'s one payment without a request, as its activity record holds it.
+async fn paid_destination(app: &Paykit) -> serde_json::Value {
+    let held = app
+        .app()
+        .records_of("payer_activity")
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|r| r.content.value().map(<[u8]>::to_vec))
+        .unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&held).unwrap();
+    record["unrequested"].clone()
+}
+
+/// The `used` entries of `app`'s record of bob's shop's list.
+async fn used_entries(app: &Paykit, w: &World) -> Vec<serde_json::Value> {
+    let (_, held) = list_record(app, w).await;
+    held.get("used")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn test_unrequested_list_above_the_payees_generation_not_paid() {
+    // A list bob's shop signed at a generation his identity hasn't reached is no evidence of
+    // it: it plays no part in a payment, and the payer waits for a list. Once bob's verified
+    // identity reaches that generation, the same list is paid, not sent again (Paykit wire
+    // 4.13).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let generation = w.homeserver.identity_doc(&w.bob_id()).unwrap().generation();
+    let ahead = list_version(generation + 1, 1);
+    w.list_to_alice(&mut shop, &[wallet.app_id()], ahead).await;
+    assert_eq!(wallet.receive(None).await.unwrap().applied.len(), 1);
+    // Installed by its pair before any payment.
+    let (_, held) = list_record(&wallet, &w).await;
+    assert!(held["list"].is_object(), "{held}");
+    for id in ["btc-bitcoin-p2wpkh", "btc-lightning-bolt12"] {
+        let refused = wallet
+            .pay_without_request(to_bob(&w, "0.0015", id))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+            "{refused:?}"
+        );
+    }
+    assert!(w.rail.all_executions().is_empty());
+    // The generation is checked before the reserving batch: nothing is reserved, and the
+    // list's version is not consumed (Paykit spec 7.2).
+    assert!(used_entries(&wallet, &w).await.is_empty());
+    assert_eq!(list_requests(&mut shop).await, 1);
+    // The request names the pair held, though the list isn't paid (Paykit wire 4.14).
+    assert_eq!(
+        crate::destinations::held_versions(&w, &wallet).await,
+        vec![Some(ahead)]
+    );
+    // Bob's identity reaches the list's generation: once the payer's copy is read again,
+    // past the 10 minutes a copy stays fresh (Paykit spec 7.2), the list held is paid.
+    let old = w.homeserver.identity_doc(&w.bob_id()).unwrap();
+    w.bob
+        .sign_next(|body| {
+            body.service_keys
+                .push(pubky_switch_core::records::ServiceKeyEntry {
+                    generation: old.generation(),
+                    key: old.body().inbox.service_key,
+                });
+            body.generation = ahead.generation();
+        })
+        .unwrap();
+    w.clock.advance_ms(HOUR_MS);
+    let outcome = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    let paid = paid_destination(&wallet).await;
+    assert_eq!(paid["list_version"], serde_json::to_value(ahead).unwrap());
+    assert_eq!(paid["payload"], single_use_payload(ahead));
+    assert_eq!(used_entries(&wallet, &w).await.len(), 1);
+}
+
+#[tokio::test]
+async fn test_unrequested_single_use_endpoint_used_consumes_the_whole_version() {
+    // Paying one single-use endpoint of a list version consumes that version: neither its
+    // other single-use endpoint nor its reusable one is paid, and the payee is asked for a
+    // newer list. A mark at an older version consumes nothing of the newer one (Paykit wire
+    // 5.4, spec 8.4).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let endpoints = |version: paykit_lib::ListVersion| {
+        let mut endpoints = lightning("lno1reusable");
+        for id in ["btc-bitcoin-p2tr", "btc-bitcoin-p2wpkh"] {
+            endpoints.insert(
+                endpoint(id),
+                paykit_lib::bodies::ListEndpoint {
+                    payload: paykit_lib::PaymentEndpointPayload::new(&format!(
+                        "{}{id}",
+                        single_use_payload(version)
+                    ))
+                    .unwrap(),
+                    single_use: true,
+                },
+            );
+        }
+        endpoints
+    };
+    let first = list_version(1, 1);
+    w.list_to_alice_with(&mut shop, &[wallet.app_id()], first, endpoints(first))
+        .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    shop.receive(None).await.unwrap();
+    let refused = wallet
+        .pay_without_request(UnrequestedPayment::new(w.bob_id(), btc("0.0015")))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        "{refused:?}"
+    );
+    assert_eq!(list_requests(&mut shop).await, 1);
+    let refused = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-lightning-bolt12"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        "{refused:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
+    // A newer list: the endpoint used at the older version is paid again at this one.
+    w.clock.advance_ms(1000);
+    let second = list_version(1, 2);
+    w.list_to_alice_with(&mut shop, &[wallet.app_id()], second, endpoints(second))
+        .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(w.rail.all_executions().len(), 2);
+    let used = used_entries(&wallet, &w).await;
+    assert_eq!(used.len(), 2, "{used:?}");
+    assert_eq!(used[1]["version"], serde_json::to_value(second).unwrap());
+}
+
+#[tokio::test]
+async fn test_unrequested_list_of_the_held_pair_never_replaces_the_held_one() {
+    // Two lists of one version from one app: the second never replaces the list the record
+    // holds, which stays the one paid (Paykit wire 4.13, 5.4).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let version = paykit_lib::ListVersion::new(1, 5).unwrap();
+    w.list_to_alice_with(
+        &mut shop,
+        &[wallet.app_id()],
+        version,
+        lightning("lno1first"),
+    )
+    .await;
+    assert_eq!(wallet.receive(None).await.unwrap().applied.len(), 1);
+    w.list_to_alice_with(
+        &mut shop,
+        &[wallet.app_id()],
+        version,
+        lightning("lno1second"),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    let outcome = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-lightning-bolt12"))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    let handed: Vec<String> = w
+        .rail
+        .selections()
+        .into_iter()
+        .flat_map(|(candidates, _)| candidates)
+        .map(|c| c.payload.as_str().to_owned())
+        .collect();
+    assert_eq!(handed, vec!["lno1first".to_owned()]);
+}
+
+#[tokio::test]
+async fn test_unrequested_reusable_endpoint_over_a_refused_marking_write_not_paid() {
+    // The phone writes a record marking the list's version used, but holding another list at
+    // that version: the wallet sees the write and refuses it, keeping the unmarked list it
+    // selects from. Its attempts on the single-use and the reusable endpoint are conditioned
+    // on the version of the write it took, not the refused one, fail, and nothing is paid (Paykit spec 8.4,
+    // wire 5.4; Switch spec 8.2).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let version = list_version(1, 1);
+    w.list_to_alice(&mut shop, &[wallet.app_id(), phone.app_id()], version)
+        .await;
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let (target, mut value) = list_record(&phone, &w).await;
+    value["list"] = stored_list(&w, version, "bc1qother");
+    value["used"] = serde_json::json!([{
+        "version": version,
+        "endpoint": "btc-bitcoin-p2wpkh",
+        "attempt_id": paykit_lib::AttemptId::generate().unwrap().to_text(),
+    }]);
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let entry = phone
+        .app_mut()
+        .record_op(&target, Some(&bytes), Vec::new())
+        .await
+        .unwrap();
+    phone
+        .app_mut()
+        .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(entry))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().flagged_writes().await.unwrap().len(), 1);
+    assert!(used_entries(&wallet, &w).await.is_empty());
+
+    for id in ["btc-bitcoin-p2wpkh", "btc-lightning-bolt12"] {
+        let refused = wallet
+            .pay_without_request(to_bob(&w, "0.0015", id))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refused, paykit_sdk::PaykitError::Conflict(_)),
+            "{id}: {refused:?}"
+        );
+    }
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_unrequested_reusable_endpoint_of_a_version_used_elsewhere_not_paid() {
+    // The wallet pays the list's single-use endpoint, which consumes the whole version. The
+    // phone still holds the record unmarked: its attempt on the reusable endpoint of that
+    // version is conditioned on the record's version, fails it, and nothing is paid; once it
+    // reads the mark, the list is used up (Paykit spec 8.4, wire 5.4).
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(
+        &mut shop,
+        &[wallet.app_id(), phone.app_id()],
+        list_version(1, 1),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+
+    let raced = phone
+        .pay_without_request(to_bob(&w, "0.0015", "btc-lightning-bolt12"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(raced, paykit_sdk::PaykitError::Conflict(_)),
+        "{raced:?}"
+    );
+    phone.receive(None).await.unwrap();
+    let used = phone
+        .pay_without_request(to_bob(&w, "0.0015", "btc-lightning-bolt12"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(used.refusal(), Some(Refusal::WaitingForList)),
+        "{used:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
 }

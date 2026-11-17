@@ -28,7 +28,7 @@ use pubky_switch_client::app::{LocalWrite, OpBatch, OutgoingMessage, RecordTarge
 use pubky_switch_core::enc::{serde_b64, serde_b64_vec};
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::message::MessagePlaintext;
-use pubky_switch_core::ops::{Condition, OpKind};
+use pubky_switch_core::ops::{Condition, OpKind, RecordVersion};
 use pubky_switch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -256,6 +256,20 @@ impl Paykit {
 
     /// Every `payment_lists` record of `payee` the app holds that binds.
     pub(crate) async fn lists_of(&self, payee: &[u8; 32]) -> Result<Vec<PaymentListRecord>> {
+        Ok(self
+            .lists_read_of(payee)
+            .await?
+            .into_iter()
+            .map(|(list, _)| list)
+            .collect())
+    }
+
+    /// As [`Paykit::lists_of`], each with the version of the write whose content it is: the
+    /// write the app took, never one it refused (Switch spec 8.2).
+    pub(crate) async fn lists_read_of(
+        &self,
+        payee: &[u8; 32],
+    ) -> Result<Vec<(PaymentListRecord, RecordVersion)>> {
         let own = self.identity();
         let mut out = Vec::new();
         for record in self.app.records_of(Collection::PaymentLists.name()).await? {
@@ -265,7 +279,7 @@ impl Paykit {
             if let Some(list) = bind_list(value, &own, &record.key, |t| self.app.record_key(t).ok())
             {
                 if &list.payee == payee {
-                    out.push(list);
+                    out.push((list, record.version));
                 }
             }
         }
