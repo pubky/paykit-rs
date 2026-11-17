@@ -21,8 +21,9 @@
 //! ([`pubky_switch_client::app::AppConfig::publishes_record`]), publishes public endpoints:
 //! a payment to one carries no label, so its proof reaches only the payee's apps holding
 //! `paykit_request` (Paykit spec 4, 8.4). An app that loses `paykit_request`, or stops
-//! publishing, can still remove endpoints, and at its next receive its held record carries
-//! none. With publishing disabled, the client writes nothing to the Homeserver: withdraw
+//! publishing, holds no public endpoints: every record it signs from then on carries none,
+//! whichever path signs it (a removal, the upkeep at a receive or an update, or the join),
+//! so a removal there withdraws them all. With publishing disabled, the client writes nothing to the Homeserver: withdraw
 //! endpoints before disabling it to update that copy. Stale copies remain payable until
 //! expiry or until a payer sees the app revoked (Paykit spec 4).
 //!
@@ -143,8 +144,9 @@ impl Paykit {
     /// would refuse, such as one over its size bound. Nothing is signed or kept for these
     /// refusals. After the record is kept, the client's delivery error leaves the record
     /// owed for the next read. A Homeserver failure is returned as [`Publication::Owed`] or
-    /// [`Publication::Unchecked`], and the client retries it. Removing endpoints while
-    /// publishing is disabled changes the held record without writing to the Homeserver.
+    /// [`Publication::Unchecked`], and the client retries it. Removing endpoints while the
+    /// app doesn't publish signs a held record with none, as the upkeep would, without
+    /// writing to the Homeserver.
     pub async fn set_public_endpoints(
         &mut self,
         endpoints: BTreeMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
@@ -173,10 +175,7 @@ impl Paykit {
             ))
             .into());
         }
-        let member = PaykitMember {
-            endpoint_identifiers: self.capabilities()?,
-            public_endpoints: endpoints,
-        };
+        let member = self.own_member_with(endpoints)?;
         Box::pin(self.put_member(member)).await
     }
 
@@ -216,17 +215,7 @@ impl Paykit {
     /// capabilities list the record can't carry ([`capabilities_for`]).
     pub(crate) async fn tend_own_record(&mut self) -> Result<bool> {
         let held = self.own_member()?;
-        // An app that no longer holds `paykit_request`, or no longer publishes its record,
-        // signs its next record without public endpoints (Paykit wire 3.2).
-        let publishes = self.holds("paykit_request") && self.config.app.publishes_record;
-        let wanted = PaykitMember {
-            endpoint_identifiers: self.capabilities()?,
-            public_endpoints: if publishes {
-                held.public_endpoints.clone()
-            } else {
-                BTreeMap::new()
-            },
-        };
+        let wanted = self.own_member_with(held.public_endpoints.clone())?;
         if wanted != held {
             Box::pin(self.put_member(wanted)).await?;
         } else if !held.public_endpoints.is_empty() && self.renewal_due()? {
@@ -236,6 +225,25 @@ impl Paykit {
             return Ok(false);
         }
         Ok(true)
+    }
+
+    /// The Paykit member every path that signs the app's own record puts, with `endpoints`
+    /// as the public endpoints wanted: the capabilities this app's payment method pays, and
+    /// no public endpoints at all once the app doesn't publish them, without
+    /// `paykit_request` or not publishing its record (Paykit spec 4, Paykit wire 3.2).
+    fn own_member_with(
+        &self,
+        endpoints: BTreeMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
+    ) -> Result<PaykitMember> {
+        let publishes = self.holds("paykit_request") && self.config.app.publishes_record;
+        Ok(PaykitMember {
+            endpoint_identifiers: self.capabilities()?,
+            public_endpoints: if publishes {
+                endpoints
+            } else {
+                BTreeMap::new()
+            },
+        })
     }
 
     /// The Paykit member of the record the app holds, empty when it has none.

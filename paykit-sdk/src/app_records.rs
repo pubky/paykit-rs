@@ -124,8 +124,8 @@ pub enum PublicAppFailureReason {
     /// The reader refuses the record: it doesn't verify as the app's (Switch wire 3.2), its
     /// Paykit member doesn't read (Paykit wire 3.2), the app isn't current in the payee's
     /// `identity.json` with the record's certificate or that certificate doesn't allow
-    /// `paykit_request`, or the app's records conflict (Switch spec 4.2). The text names the
-    /// rule.
+    /// `paykit_request`, the app's records conflict (Switch spec 4.2), or its newest records
+    /// are more than the reader keeps of them. The text names the rule.
     Refused(String),
     /// The record has expired: past its `expires_at`, or its `updated_at` plus the identity's
     /// `record_max_age`, or made ahead of the payer's clock (Paykit spec 4). The text names
@@ -283,6 +283,12 @@ type RecordReads = Vec<(
 /// in a store as it is, so it is rebuilt from these.
 const SEEN_RECORDS: usize = 64;
 
+/// The most bytes one payee app's kept records take, encoded: half the client store's cap
+/// on one value ([`pubky_switch_client::store::MAX_VALUE_BYTES`]), so the kept value always
+/// fits with room to spare. Past it the oldest are dropped as past [`SEEN_RECORDS`]; the
+/// bound is per app, so one app's large records never crowd out another app's.
+const SEEN_RECORDS_BYTES: usize = (pubky_switch_client::store::MAX_VALUE_BYTES / 2) as usize;
+
 /// The records of one payee app a reader has seen that took part in its comparison (Switch
 /// spec 4.2, Switch wire 3.2 "Equal times"), oldest first (`p/ar/<payee>/<app>`). Replayed
 /// in order, they rebuild the core's [`RecordView`]; kept, they survive a restart, so a
@@ -299,8 +305,10 @@ impl SeenRecords {
     /// those are the newest record and, during a conflict, every side of it, so a conflict
     /// is never forgotten and neither side becomes usable by compaction (Switch spec 4.2).
     /// Dropping an older record can only lose the earlier record a conflict falls back to,
-    /// which leaves no record used rather than a wrong one.
-    fn keep(&mut self, record: &AppRecord, held: &[AppRecord]) {
+    /// which leaves no record used rather than a wrong one. Past [`SEEN_RECORDS_BYTES`] the
+    /// oldest are dropped the same way; `false` when the records at the newest `updated_at`
+    /// alone are over it, and so can't be kept.
+    fn keep(&mut self, record: &AppRecord, held: &[AppRecord]) -> bool {
         self.records.push(record.signed().clone());
         let times: Vec<u64> = held
             .iter()
@@ -308,9 +316,24 @@ impl SeenRecords {
             .chain(std::iter::once(record.updated_at()))
             .collect();
         let newest = times.iter().copied().max().unwrap_or(0);
-        let excess = self.records.len().saturating_sub(SEEN_RECORDS);
         let droppable = times.iter().take_while(|t| **t < newest).count();
-        self.records.drain(..excess.min(droppable));
+        // Each record's encoded length, with its separator in the list.
+        let sizes: Vec<usize> = self
+            .records
+            .iter()
+            .map(|signed| serde_json::to_vec(signed).map_or(usize::MAX, |b| b.len() + 1))
+            .collect();
+        let mut bytes = sizes.iter().fold(0usize, |sum, n| sum.saturating_add(*n));
+        let mut drop = self.records.len().saturating_sub(SEEN_RECORDS);
+        for size in &sizes[..drop.min(droppable)] {
+            bytes = bytes.saturating_sub(*size);
+        }
+        while drop < droppable && bytes > SEEN_RECORDS_BYTES {
+            bytes = bytes.saturating_sub(sizes[drop]);
+            drop += 1;
+        }
+        self.records.drain(..drop.min(droppable));
+        bytes <= SEEN_RECORDS_BYTES
     }
 
     /// Whether the kept records are nonempty and each is `payee`'s, verified as its signer
@@ -446,8 +469,18 @@ impl Paykit {
             let served_refused = read.is_none();
             if let Some(record) = read {
                 if takes_part(&record, &held, &view, now) {
+                    // A record the reader can't keep for the comparison is never used, nor
+                    // is an earlier one in its place, which it may withdraw: the app's
+                    // failure, and the other apps' reads go on (Paykit spec 4).
+                    if !seen.keep(&record, &held) {
+                        out.failures
+                            .push(fail(PublicAppFailureReason::Refused(format!(
+                                "Paykit spec 4: the app's newest records are over the \
+                             {SEEN_RECORDS_BYTES} bytes a reader keeps of them"
+                            ))));
+                        continue;
+                    }
                     view.see(&record, now);
-                    seen.keep(&record, &held);
                     self.local_put(&seen_key, &seen).await?;
                 }
             }

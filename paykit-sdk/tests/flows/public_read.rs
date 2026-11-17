@@ -330,6 +330,40 @@ async fn test_public_read_refused_record_reported_beside_the_held_one_over_the_b
 }
 
 #[tokio::test]
+async fn test_public_read_large_records_kept_per_app_within_the_store_bound() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let apps = bob_apps(&w, &["shop", "till"]).await;
+    publish_now(
+        &w,
+        apps[1].0,
+        one_endpoint("btc-lightning-bolt11", "lnbc1till"),
+    );
+    // The shop renews a 3 MiB record several times: more together than the store takes in
+    // one value, so the oldest are dropped, and both apps stay readable.
+    for _ in 0..6 {
+        w.clock.advance_ms(1000);
+        publish_now(&w, apps[0].0, many(1, 3 * MIB));
+        let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+        assert_eq!(offering(&read), [apps[0].1, apps[1].1]);
+        assert!(read.failures.is_empty(), "{:?}", read.failures);
+    }
+    // A record the reader can't keep at all is the shop's failure; the till is still read.
+    w.clock.advance_ms(1000);
+    publish_now(&w, apps[0].0, many(3, 3 * MIB));
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert_eq!(offering(&read), [apps[1].1]);
+    assert_eq!(read.failures.len(), 1, "{:?}", read.failures);
+    assert_eq!(read.failures[0].app_id, apps[0].1);
+    assert!(
+        matches!(&read.failures[0].reason, PublicAppFailureReason::Refused(rule)
+            if rule.contains("a reader keeps")),
+        "{:?}",
+        read.failures
+    );
+}
+
+#[tokio::test]
 async fn test_public_read_required_app_failure_leaves_no_public_destination() {
     let w = World::new();
     let (mut wallet, reads) = wallet_reading_through(&w).await;

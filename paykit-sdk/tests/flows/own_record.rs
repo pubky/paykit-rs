@@ -311,6 +311,94 @@ async fn test_own_record_disabling_publication_clears_only_the_held_endpoints() 
     assert!(published.expires_at().is_some());
 }
 
+/// Bob's publishing shop with two public endpoints, loaded again without publishing.
+async fn shop_no_longer_publishing(w: &World) -> Paykit {
+    let base = store();
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            AppScopes::new().request().build().unwrap(),
+            publishing(),
+            Arc::clone(&base),
+        )
+        .await;
+    shop.set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1tips"))
+        .await
+        .unwrap();
+    shop.set_public_endpoint(endpoint("btc-onchain-address"), payload("bc1q"))
+        .await
+        .unwrap();
+    let app_id = shop.app_id();
+    drop(shop);
+    w.load_with(
+        &w.bob,
+        base,
+        app_id,
+        Arc::clone(&w.clock),
+        PaykitConfig::default(),
+    )
+    .await
+}
+
+/// The shop's held record carries no public endpoints and no expiry, and its Homeserver copy
+/// still holds the two it published.
+fn holds_none_published_two(w: &World, shop: &Paykit) {
+    assert!(shop.own_public_endpoints().unwrap().is_empty());
+    assert_eq!(held(shop, w.bob_id()).expires_at(), None);
+    let published = on_homeserver(w, shop).unwrap();
+    assert_eq!(
+        PaykitMember::read(&published)
+            .unwrap()
+            .public_endpoints
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn test_own_record_removal_without_publishing_withdraws_every_endpoint() {
+    let w = World::new();
+    let mut shop = shop_no_longer_publishing(&w).await;
+    // Removing one of the two signs the record the upkeep would: none held.
+    shop.remove_public_endpoint(&endpoint("btc-lightning-bolt12"))
+        .await
+        .unwrap();
+    holds_none_published_two(&w, &shop);
+    // The upkeep then finds nothing to change.
+    let record = shop.app().record().clone();
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.app().record(), &record);
+}
+
+#[tokio::test]
+async fn test_own_record_set_without_publishing_withdraws_every_endpoint() {
+    let w = World::new();
+    let mut shop = shop_no_longer_publishing(&w).await;
+    let mut kept = BTreeMap::new();
+    kept.insert(endpoint("btc-onchain-address"), payload("bc1q"));
+    shop.set_public_endpoints(kept).await.unwrap();
+    holds_none_published_two(&w, &shop);
+}
+
+#[tokio::test]
+async fn test_own_record_same_endpoint_without_publishing_withdraws_every_endpoint() {
+    let w = World::new();
+    let mut shop = shop_no_longer_publishing(&w).await;
+    shop.set_public_endpoint(endpoint("btc-onchain-address"), payload("bc1q"))
+        .await
+        .unwrap();
+    holds_none_published_two(&w, &shop);
+}
+
+#[tokio::test]
+async fn test_own_record_upkeep_without_publishing_withdraws_every_endpoint() {
+    let w = World::new();
+    let mut shop = shop_no_longer_publishing(&w).await;
+    shop.update_own_record().await.unwrap();
+    holds_none_published_two(&w, &shop);
+}
+
 #[tokio::test]
 async fn test_own_record_capabilities_updated_at_once_on_request() {
     let w = World::new();
