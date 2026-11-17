@@ -275,6 +275,46 @@ impl UnknownMembers {
         self.held.is_empty()
     }
 
+    /// Merge the members of retained objects found by identity or path, never by a carried
+    /// origin. The known output selects the objects; removed objects contribute nothing.
+    /// An unknown member is opaque: equal values coalesce and unequal values refuse
+    /// (Paykit wire 5).
+    pub(crate) fn merge_identified(
+        &self,
+        other: &Self,
+        known: &[u8],
+        shape: &'static Shape,
+    ) -> Result<Self> {
+        let read = |bytes: &[u8]| -> Result<Self> {
+            let map: Map<String, Value> = serde_json::from_slice(bytes)
+                .map_err(|_| Error::Invalid("Paykit wire 5: the record doesn't read".into()))?;
+            let (members, origins) = Self::read(&map, shape);
+            if !origins.0.is_empty() {
+                return invalid("Paykit wire 5: carried origins cannot be merged by identity");
+            }
+            Ok(members)
+        };
+        let mut merged = read(&self.write_into(known.to_vec(), shape, &[])?)?;
+        for incoming in read(&other.write_into(known.to_vec(), shape, &[])?)?.held {
+            match merged
+                .held
+                .iter_mut()
+                .find(|held| held.anchor == incoming.anchor && held.path == incoming.path)
+            {
+                Some(held) => {
+                    for (name, value) in incoming.members {
+                        if held.members.get(&name).is_some_and(|prior| prior != &value) {
+                            return invalid("Paykit wire 5: retained unknown members conflict");
+                        }
+                        held.members.insert(name, value);
+                    }
+                }
+                None => merged.held.push(incoming),
+            }
+        }
+        read(&merged.write_into(known.to_vec(), shape, &[])?)
+    }
+
     /// The value `json` a writer wrote, as `shape`, with the unknown members put back into the
     /// objects it keeps; `origins` names the origin of each carried element written, by its
     /// JSON pointer in `json`. Without unknown members, `json` as it is.
@@ -296,7 +336,9 @@ impl UnknownMembers {
         let Value::Object(map) = &mut value else {
             return Err(cant());
         };
-        self.apply(map, shape, None, Vec::new(), "", origins);
+        if !self.apply(map, shape, None, Vec::new(), "", origins) {
+            return Ok(json);
+        }
         serde_json::to_vec(&value).map_err(|_| cant())
     }
 
@@ -308,7 +350,7 @@ impl UnknownMembers {
         path: Vec<&'static str>,
         pointer: &str,
         origins: &[(String, Origin)],
-    ) {
+    ) -> bool {
         let (anchor, path) = if shape.carried {
             // Only an element of the read this record holds takes members back.
             let place = origins
@@ -326,13 +368,17 @@ impl UnknownMembers {
                 None => (anchor, path),
             }
         };
+        let mut inserted = false;
         if let Some(held) = self
             .held
             .iter()
             .find(|h| h.anchor == anchor && h.path == path)
         {
             for (name, value) in &held.members {
-                obj.entry(name.clone()).or_insert_with(|| value.clone());
+                obj.entry(name.clone()).or_insert_with(|| {
+                    inserted = true;
+                    value.clone()
+                });
             }
         }
         for (name, member) in shape.members {
@@ -341,19 +387,21 @@ impl UnknownMembers {
             let at = format!("{pointer}/{name}");
             match (member, obj.get_mut(*name)) {
                 (Member::Object(s), Some(Value::Object(child))) => {
-                    self.apply(child, s, anchor.clone(), below, &at, origins);
+                    inserted |= self.apply(child, s, anchor.clone(), below, &at, origins);
                 }
                 (Member::Array(s), Some(Value::Array(items))) if s.found_alone() => {
                     for (i, item) in items.iter_mut().enumerate() {
                         if let Value::Object(child) = item {
                             let at = format!("{at}/{i}");
-                            self.apply(child, s, anchor.clone(), below.clone(), &at, origins);
+                            inserted |=
+                                self.apply(child, s, anchor.clone(), below.clone(), &at, origins);
                         }
                     }
                 }
                 _ => {}
             }
         }
+        inserted
     }
 }
 
@@ -3966,6 +4014,26 @@ pub fn bind_ledger(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_unknown_members_merge_keeps_carried_origins_separate() {
+        // Shape-only input: this checks member placement, not a signed grant.
+        let input = serde_json::json!({"generation": 1, "version": 2, "note": "kept"});
+        let (members, origins) = UnknownMembers::read(input.as_object().unwrap(), &GRANT_ENTRY);
+        let known = br#"{"generation":1,"version":2}"#;
+        let copied = members
+            .write_into(
+                known.to_vec(),
+                &GRANT_ENTRY,
+                &[(String::new(), origins.at(""))],
+            )
+            .unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&copied).unwrap(), input);
+        assert!(matches!(
+            members.merge_identified(&members, known, &GRANT_ENTRY),
+            Err(Error::Invalid(_))
+        ));
+    }
 
     fn mark(settlement: u8, kind: OccurrenceKind, occurrence: u8) -> SettlementMark {
         SettlementMark {
