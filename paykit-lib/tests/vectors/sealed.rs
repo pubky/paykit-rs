@@ -9,8 +9,8 @@ use paykit_lib::derive::{
 };
 use paykit_lib::identifiers::PaymentEndpointIdentifier;
 use paykit_lib::records::{
-    bind_ledger, ActivityRecord, ActivitySide, AllowanceRecord, InvalidBucket, OccurrenceKind,
-    PaymentListRecord, SeenMerge, SettlementBucket, SettlementMark, MAX_SETTLEMENT_MARKS,
+    bind_ledger, ActivityRecord, ActivitySide, AllowanceRecord, OccurrenceKind, PaymentListRecord,
+    SeenMerge, SettlementBucket, SettlementMark, MAX_SETTLEMENT_MARKS,
 };
 use paykit_lib::scopes::{Label, PaykitScope, ScopeName, SETTLEMENTS};
 use pubky_switch_core::enc::b64;
@@ -4580,8 +4580,8 @@ malformed marks and the wrong collection policy, with the library's exact error.
 merges a seen copy into a current write: the lower mark where two name one settlement, the \
 union of different marks, and over 9,000 marks the current write's settlements then the \
 seen marks in ascending byte order while places remain, with no write when that equals the \
-current write. These are format and merge vectors; they grant no credit authority and do \
-not establish authenticated creation or continuity.";
+current write. These are format and merge vectors; they decide no credit and test no \
+read at the switch, rollback alarm or provider-loss rule.";
 
 /// The data epoch of bob's `paykit_settlements` key the buckets are sealed at.
 const SETTLEMENTS_EPOCH: u64 = 1;
@@ -4746,7 +4746,7 @@ fn settlement_marks(keys: &Keys) -> Value {
         })
         .collect();
     let values: [(&str, String); 7] = [
-        ("a bucket with neither mark nor boundary", raw_bucket(&[])),
+        ("a bucket with no mark", raw_bucket(&[])),
         ("marks out of order", raw_bucket(&[high, low].concat())),
         (
             "a settlement twice",
@@ -4811,7 +4811,7 @@ fn settlement_marks(keys: &Keys) -> Value {
 const VALUE_BUCKET: u16 = 0;
 
 /// `json` read and bound as bucket [`VALUE_BUCKET`] at its key under `nk`.
-fn bucket_at(nk: &NamingKey, json: &[u8]) -> Result<SettlementBucket, InvalidBucket> {
+fn bucket_at(nk: &NamingKey, json: &[u8]) -> paykit_lib::Result<SettlementBucket> {
     let key = SettlementBucket::record_key(VALUE_BUCKET, nk).unwrap();
     SettlementBucket::bind(json, VALUE_BUCKET, nk, &key)
 }
@@ -4831,7 +4831,6 @@ fn merge_result(merge: SeenMerge) -> (Option<SettlementBucket>, bool, Vec<[u8; 1
             twice,
             show_writer,
         } => (bucket, true, twice, show_writer),
-        SeenMerge::HeldForDelete => panic!("no merge case carries lost_to_delete"),
     }
 }
 

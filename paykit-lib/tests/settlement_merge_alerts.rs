@@ -44,7 +44,7 @@ fn request(settlement: u32, occurrence: u8) -> SettlementMark {
 fn held_alerts(result: SeenMerge) -> Vec<[u8; 12]> {
     match result {
         SeenMerge::Holds { twice } => twice,
-        SeenMerge::WriteBack { .. } | SeenMerge::OverCapacity { .. } | SeenMerge::HeldForDelete => {
+        SeenMerge::WriteBack { .. } | SeenMerge::OverCapacity { .. } => {
             panic!("the current value already holds the complete lower-mark union")
         }
     }

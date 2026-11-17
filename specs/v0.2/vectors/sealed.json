@@ -764,7 +764,7 @@
       }
     ],
     "data_epoch": 1,
-    "description": "Wire 1.5, 5.7, spec 6: settlement bucket values, their derivations and sealed encodings. accepted holds bob's one-time request, Billing Period and payment-without-request marks. Each settlement ID is the lower-case hex seed sealed/settlement_marks/<kind>/txid, except kind 3 which uses identifiers.json's bitcoin-txid settlement. The occurrence keys refer to the requests in messages.json; kind 2 uses the February period starting at 1772236800. Bucket, record key and mark tags follow wire 1.5 under bob's naming key. The fixed policy reads and writes paykit_settlements. Values are sealed at data epoch 1 with its key from keys.json, the nonce seed sealed/settlement_marks/<kind>/nonce cut to 24 bytes, and the Switch sealed AAD. Neither paykit_request nor its shop1 key opens them. example reproduces wire 5.7. refused contains malformed marks and the wrong collection policy, with the library's exact error. merges merges a seen copy into a current write: the lower mark where two name one settlement, the union of different marks, and over 9,000 marks the current write's settlements then the seen marks in ascending byte order while places remain, with no write when that equals the current write. These are format and merge vectors; they grant no credit authority and do not establish authenticated creation or continuity.",
+    "description": "Wire 1.5, 5.7, spec 6: settlement bucket values, their derivations and sealed encodings. accepted holds bob's one-time request, Billing Period and payment-without-request marks. Each settlement ID is the lower-case hex seed sealed/settlement_marks/<kind>/txid, except kind 3 which uses identifiers.json's bitcoin-txid settlement. The occurrence keys refer to the requests in messages.json; kind 2 uses the February period starting at 1772236800. Bucket, record key and mark tags follow wire 1.5 under bob's naming key. The fixed policy reads and writes paykit_settlements. Values are sealed at data epoch 1 with its key from keys.json, the nonce seed sealed/settlement_marks/<kind>/nonce cut to 24 bytes, and the Switch sealed AAD. Neither paykit_request nor its shop1 key opens them. example reproduces wire 5.7. refused contains malformed marks and the wrong collection policy, with the library's exact error. merges merges a seen copy into a current write: the lower mark where two name one settlement, the union of different marks, and over 9,000 marks the current write's settlements then the seen marks in ascending byte order while places remain, with no write when that equals the current write. These are format and merge vectors; they decide no credit and test no read at the switch, rollback alarm or provider-loss rule.",
     "example": {
       "marks": [
         {
@@ -837,8 +837,8 @@
     "read_scope": "paykit_settlements",
     "refused": [
       {
-        "name": "a bucket with neither mark nor boundary",
-        "reason": "invalid: settlements: marks: no mark or deletion boundary",
+        "name": "a bucket with no mark",
+        "reason": "invalid: settlements: marks: no mark",
         "value": "{\"v\":1,\"marks\":\"\"}"
       },
       {

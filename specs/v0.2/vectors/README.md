@@ -19,8 +19,8 @@ The `failure_evidence` cases supply already validated counting evidence to the p
 encodings. Its `merges` cases merge a seen copy into a current write: the lower of two marks
 of one settlement, the union of different marks, and, over 9,000 marks, which seen marks fill
 the places left, with no write when the result equals the current write. These cases check
-formats and pure merge rules. They do not test authenticated creation, continuity or
-settlement-credit enforcement.
+formats and pure merge rules. They do not test the read at the switch, the rollback alarm,
+the provider-loss rule or settlement-credit enforcement.
 
 ## Files
 
