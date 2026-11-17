@@ -138,9 +138,10 @@ async fn produced(w: &World, family: Family) -> Held {
             Some(w.clock.now_ms() + 24 * HOUR_MS),
         );
         let endpoints = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
-        assert_eq!(endpoints.len(), 1);
-        assert_eq!(endpoints[0].app_id, app);
-        assert_eq!(endpoints[0].payload.as_str(), "lno1discovery");
+        assert!(endpoints.failures.is_empty());
+        assert_eq!(endpoints.endpoints.len(), 1);
+        assert_eq!(endpoints.endpoints[0].app_id, app);
+        assert_eq!(endpoints.endpoints[0].payload.as_str(), "lno1discovery");
         Some(signed)
     } else {
         if matches!(family, Family::HeldAsk) {
@@ -571,7 +572,8 @@ async fn test_discovery_state_record_history_survives_restore() {
         held.wallet
             .public_endpoints(&w.bob_id(), None)
             .await
-            .unwrap()[0]
+            .unwrap()
+            .endpoints[0]
             .payload
             .as_str(),
         "lno1later"
@@ -603,7 +605,11 @@ async fn test_discovery_state_record_history_survives_restore() {
     .await
     .unwrap();
     assert_eq!(
-        restored.public_endpoints(&w.bob_id(), None).await.unwrap()[0]
+        restored
+            .public_endpoints(&w.bob_id(), None)
+            .await
+            .unwrap()
+            .endpoints[0]
             .payload
             .as_str(),
         "lno1later"

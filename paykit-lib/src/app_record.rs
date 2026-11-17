@@ -82,6 +82,35 @@ impl PaykitMember {
             public_endpoints,
         })
     }
+
+    /// The member as an app record carries it under `protocols.paykit` (Paykit wire 3.2),
+    /// with both `capabilities.endpoint_identifiers` and `public_endpoints` written, empty
+    /// or not: what [`PaykitMember::from_member`] reads back as `self`. A record carrying
+    /// public endpoints also needs `expires_at`, which is the record's, not the member's.
+    #[must_use]
+    pub fn to_member(&self) -> Map<String, Value> {
+        let identifiers = self
+            .endpoint_identifiers
+            .iter()
+            .map(|id| Value::String(id.as_str().to_owned()))
+            .collect();
+        let mut capabilities = Map::new();
+        capabilities.insert("endpoint_identifiers".into(), Value::Array(identifiers));
+        let endpoints = self
+            .public_endpoints
+            .iter()
+            .map(|(id, payload)| {
+                (
+                    id.as_str().to_owned(),
+                    Value::String(payload.as_str().to_owned()),
+                )
+            })
+            .collect();
+        let mut member = Map::new();
+        member.insert("capabilities".into(), Value::Object(capabilities));
+        member.insert("public_endpoints".into(), Value::Object(endpoints));
+        member
+    }
 }
 
 /// A member's value, `None` when it is missing or `null` (Paykit wire, Conventions).
@@ -137,6 +166,37 @@ fn read_public_endpoints(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_app_record_member_written_reads_back_as_written() {
+        let written = PaykitMember {
+            endpoint_identifiers: vec![
+                PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap()
+            ],
+            public_endpoints: BTreeMap::from([(
+                PaymentEndpointIdentifier::new("btc-lightning-bolt12").unwrap(),
+                PaymentEndpointPayload::new("lno1tips").unwrap(),
+            )]),
+        };
+        let member = written.to_member();
+        assert_eq!(
+            Value::Object(member.clone()),
+            json!({
+                "capabilities": { "endpoint_identifiers": ["btc-lightning-bolt11"] },
+                "public_endpoints": { "btc-lightning-bolt12": "lno1tips" },
+            })
+        );
+        let read = PaykitMember::from_member(Some(&member), Some(1)).unwrap();
+        assert_eq!(read, written);
+        // Without `expires_at` the record's reader refuses the endpoints it carries.
+        assert!(PaykitMember::from_member(Some(&member), None).is_err());
+        // An empty member reads as no member.
+        let empty = PaykitMember::default().to_member();
+        assert_eq!(
+            PaykitMember::from_member(Some(&empty), None).unwrap(),
+            PaykitMember::default()
+        );
+    }
 
     fn member(value: Value) -> Map<String, Value> {
         let Value::Object(map) = value else {

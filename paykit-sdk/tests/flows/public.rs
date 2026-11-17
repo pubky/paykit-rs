@@ -2,6 +2,7 @@
 //! read from its record on the Homeserver, only while the record is valid, current and
 //! within its lifetime.
 
+use paykit_sdk::app_records::{PublicAppFailureReason, PublicPaymentList};
 use paykit_sdk::{PayOptions, PayOutcome, PayeeStatus, PaymentMode, Refusal, UnrequestedPayment};
 use pubky_switch_client::app::UserConfirmed;
 use pubky_switch_client::clock::Clock;
@@ -24,7 +25,7 @@ fn publish_at(w: &World, member: Value, updated_at: u64, expires_at: Option<u64>
 }
 
 /// As [`publish_at`], for bob's app `app`.
-fn publish_app_at(
+pub(crate) fn publish_app_at(
     w: &World,
     app: &str,
     member: Value,
@@ -59,7 +60,7 @@ fn serve(w: &World, bytes: &[u8]) {
 }
 
 /// A member with one public endpoint.
-fn one_endpoint(id: &str, payload: &str) -> Value {
+pub(crate) fn one_endpoint(id: &str, payload: &str) -> Value {
     json!({ "public_endpoints": { id: payload } })
 }
 
@@ -69,6 +70,7 @@ async fn listed(wallet: &mut paykit_sdk::Paykit, w: &World) -> Vec<String> {
         .public_endpoints(&w.bob_id(), None)
         .await
         .unwrap()
+        .endpoints
         .into_iter()
         .map(|e| e.endpoint_id.as_str().to_owned())
         .collect()
@@ -81,7 +83,7 @@ fn tip_jar() -> Value {
     })
 }
 
-fn public_to_bob(w: &World) -> UnrequestedPayment {
+pub(crate) fn public_to_bob(w: &World) -> UnrequestedPayment {
     UnrequestedPayment::new(w.bob_id(), btc("0.001"))
         .with_options(PayOptions::default().with_mode(PaymentMode::Public(UserConfirmed::new())))
 }
@@ -95,7 +97,11 @@ async fn test_public_endpoint_paid_proven_and_credited() {
     // admits alice's proof as a conversation he starts.
     shop.app_mut().invite(&w.alice_id()).await.unwrap();
     publish(&w, tip_jar(), Some(w.clock.now_ms() + 30 * DAY_MS));
-    let listed = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    let listed = wallet
+        .public_endpoints(&w.bob_id(), None)
+        .await
+        .unwrap()
+        .endpoints;
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].endpoint_id, endpoint("btc-lightning-bolt12"));
     assert_eq!(listed[0].app_id, shop.app_id());
@@ -125,7 +131,7 @@ async fn test_public_endpoint_paid_proven_and_credited() {
 async fn test_public_malformed_record_refused() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
-    let _shop = w.shop().await;
+    let shop = w.shop().await;
     // A key of public_endpoints that isn't a Payment Endpoint Identifier (Paykit wire 1.4,
     // 3.2): the reader refuses the whole record.
     publish(
@@ -133,11 +139,14 @@ async fn test_public_malformed_record_refused() {
         json!({ "public_endpoints": { "private": "lno1tips", "btc-lightning-bolt12": "lno1" } }),
         Some(w.clock.now_ms() + 30 * DAY_MS),
     );
-    assert!(wallet
-        .public_endpoints(&w.bob_id(), None)
-        .await
-        .unwrap()
-        .is_empty());
+    let read = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    assert!(read.endpoints.is_empty());
+    assert_eq!(read.failures.len(), 1, "{read:?}");
+    assert_eq!(read.failures[0].app_id, shop.app_id());
+    assert!(
+        matches!(read.failures[0].reason, PublicAppFailureReason::Refused(_)),
+        "{read:?}"
+    );
     let refused = wallet
         .pay_without_request(public_to_bob(&w))
         .await
@@ -187,16 +196,21 @@ async fn test_public_record_without_public_endpoints_offers_none() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let _shop = w.shop().await;
-    // No record on the Homeserver at all, then one without public endpoints.
-    assert!(wallet
-        .public_endpoints(&w.bob_id(), None)
-        .await
-        .unwrap()
-        .is_empty());
+    // No record on the Homeserver at all, then one without public endpoints: neither offers
+    // an endpoint, and neither is a failure.
+    let none = PublicPaymentList::default();
+    assert_eq!(
+        wallet.public_endpoints(&w.bob_id(), None).await.unwrap(),
+        none
+    );
     publish(
         &w,
         json!({ "capabilities": { "endpoint_identifiers": [] } }),
         None,
+    );
+    assert_eq!(
+        wallet.public_endpoints(&w.bob_id(), None).await.unwrap(),
+        none
     );
     let refused = wallet
         .pay_without_request(public_to_bob(&w))
@@ -719,7 +733,11 @@ async fn test_public_same_identifier_from_two_apps_pays_the_first_by_app_id() {
     } else {
         (till.app_id(), "lno1till")
     };
-    let offered = wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    let offered = wallet
+        .public_endpoints(&w.bob_id(), None)
+        .await
+        .unwrap()
+        .endpoints;
     assert_eq!(offered.len(), 2, "{offered:?}");
 
     let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();

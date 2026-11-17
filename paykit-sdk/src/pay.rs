@@ -1564,7 +1564,10 @@ impl Paykit {
                 && allowed.is_none_or(|ids| ids.contains(id))
         };
         if let PaymentMode::Public(_) = options.mode {
-            let mut records = self
+            let crate::app_records::PublicRecords {
+                usable: mut records,
+                failures,
+            } = self
                 .public_records(
                     payee,
                     app,
@@ -1591,10 +1594,12 @@ impl Paykit {
                 })
                 .collect();
             if gathered.is_empty() {
-                return Err(Refusal::NoDestination(
-                    "Paykit spec 4: the payee has no usable public endpoint".into(),
-                )
-                .into());
+                let mut text =
+                    String::from("Paykit spec 4: the payee has no usable public endpoint");
+                for failure in &failures {
+                    text.push_str(&format!("; {failure}"));
+                }
+                return Err(Refusal::NoDestination(text).into());
             }
             return self
                 .choose(payee, gathered, pricing, options)?

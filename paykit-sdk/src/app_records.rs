@@ -3,9 +3,9 @@
 //!
 //! **Reading** a payee's public endpoints ([`Paykit::public_endpoints`], and a payment in
 //! [`crate::PaymentMode::Public`]): the payee's `identity.json` is taken as for any
-//! destination (Paykit spec 7.2; Switch spec 4.3), then each current app's record is
-//! read from the payee's Homeserver, at the Switch's path for it (Switch spec 4.2), and used
-//! only if:
+//! destination (Paykit spec 7.2; Switch spec 4.3), then the record of each app current in it,
+//! in its order, is read from the payee's Homeserver, at the Switch's path for it (Switch spec
+//! 4.2), and used only if:
 //!
 //! - it verifies as the Switch's app record for the payee (Switch wire 3.2), and its
 //!   `app_id` is the one of the path it was read from;
@@ -24,16 +24,19 @@
 //! until a strictly later record ends it. The records that took part are kept in the
 //! store, so the comparison survives a restart.
 //!
-//! A record that fails any of these is ignored, as a reader ignores any invalid record: its
-//! endpoints are never paid. A Homeserver that can't be read now is an error. The same
-//! checks run again before money moves, on the record kept as the destination's carrier.
+//! A record that fails any of these is never paid. Each app's failure is that app's own
+//! (Paykit spec 4): a record the Homeserver can't serve now, one the reader refuses,
+//! or one that has expired is reported as that app's [`PublicAppFailure`], and the other
+//! apps' usable endpoints stay available ([`PublicPaymentList`]). An app with no record, or
+//! whose record offers no public endpoints, has none, and nothing of it fails. The read takes
+//! at most [`MAX_PUBLIC_ENDPOINTS`] endpoints and [`MAX_PUBLIC_PAYLOAD_BYTES`] of payloads over
+//! all the apps, in the order of `identity.json`: an app whose usable endpoints don't fit in
+//! what is left is reported as over the bound, never cut to fit, and a later app still gets
+//! what is left. A payment to a request's `required_app_id` reads only that app's record, so
+//! that app's failure leaves it no public destination (Paykit spec 8.1). The same checks run
+//! again before money moves, on the record kept as the destination's carrier.
 //!
-//! **Publishing** this app's own Paykit member isn't done by this SDK. The Switch client
-//! builds the app's record itself, at join and at renewal, with no protocol member and no
-//! `expires_at`; it has no call to add `protocols.paykit`, set `expires_at`, sign the record
-//! again and deliver it with `app.put`, or renew it once half its lifetime has passed
-//! (Paykit wire 3.2, "Renewal"); and it writes nothing to the Homeserver. Until it does,
-//! apps keep `AppConfig::publishes_record` off.
+//! **Publishing** this app's own Paykit member is `crate::own_record`'s.
 //!
 //! Security: public endpoints are destinations anyone can read from the Homeserver, and so
 //! anyone could plant a file there. Only a record signed by the app key the payee's
@@ -48,6 +51,7 @@ use std::sync::Arc;
 use pubky_switch_client::app::{Initiator, UserConfirmed};
 use pubky_switch_client::error::TransportError;
 use pubky_switch_client::transport::BoxFuture;
+use pubky_switch_core::enc::zbase32_encode;
 use pubky_switch_core::records::{
     app_record_path, AppRecord, IdentityDoc, RecordOrder, RecordView,
 };
@@ -71,6 +75,121 @@ pub struct PublicEndpoint {
     pub endpoint_id: PaymentEndpointIdentifier,
     /// The payload, which only the rail interprets.
     pub payload: PaymentEndpointPayload,
+}
+
+/// The most public endpoints one read of a payee's public endpoints takes, over all its apps
+/// (Paykit spec 4).
+pub const MAX_PUBLIC_ENDPOINTS: usize = 256;
+
+/// The most payload bytes, the sum of the payloads' lengths, one read of a payee's public
+/// endpoints takes, over all its apps: 4 MiB (Paykit spec 4).
+pub const MAX_PUBLIC_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+
+/// A payee's public Payment List as a payer reads it now (Paykit spec 4): the usable public
+/// endpoints of its current apps, and the apps whose endpoints couldn't be used.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct PublicPaymentList {
+    /// The public endpoints that may be paid now, app by app in the order of the payee's
+    /// `identity.json`, then by Payment Endpoint Identifier.
+    pub endpoints: Vec<PublicEndpoint>,
+    /// The apps whose public endpoints couldn't be used, in the same order. An app with no
+    /// record has no public endpoints and isn't one of them.
+    pub failures: Vec<PublicAppFailure>,
+}
+
+/// A payee app whose public endpoints couldn't be used in one read (Paykit spec 4): its
+/// failure is its own, and the other apps' usable endpoints stay available.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct PublicAppFailure {
+    /// The payee app.
+    pub app_id: [u8; 16],
+    /// Why its endpoints couldn't be used.
+    pub reason: PublicAppFailureReason,
+}
+
+/// Why a payee app's public endpoints couldn't be used (Paykit spec 4).
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum PublicAppFailureReason {
+    /// The payee's Homeserver couldn't serve the app's record now. A later read may.
+    Homeserver(TransportError),
+    /// The reader refuses the record: it doesn't verify as the app's (Switch wire 3.2), its
+    /// Paykit member doesn't read (Paykit wire 3.2), the app isn't current in the payee's
+    /// `identity.json` with the record's certificate or that certificate doesn't allow
+    /// `paykit_request`, or the app's records conflict (Switch spec 4.2). The text names the
+    /// rule.
+    Refused(String),
+    /// The record has expired: past its `expires_at`, or its `updated_at` plus the identity's
+    /// `record_max_age`, or made ahead of the payer's clock (Paykit spec 4). The text names
+    /// the limit.
+    Expired(String),
+    /// The app's usable endpoints don't fit in what is left of [`MAX_PUBLIC_ENDPOINTS`] and
+    /// [`MAX_PUBLIC_PAYLOAD_BYTES`] after the apps before it: none of them is taken.
+    OverBound,
+}
+
+impl std::fmt::Display for PublicAppFailureReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Homeserver(error) => write!(f, "homeserver: {error}"),
+            Self::Refused(rule) => write!(f, "refused: {rule}"),
+            Self::Expired(limit) => write!(f, "expired: {limit}"),
+            Self::OverBound => write!(
+                f,
+                "over the bound of {MAX_PUBLIC_ENDPOINTS} endpoints and \
+                 {MAX_PUBLIC_PAYLOAD_BYTES} payload bytes"
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for PublicAppFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "app {}: {}", zbase32_encode(&self.app_id), self.reason)
+    }
+}
+
+/// The payee's app records that may be used now, of one read, and the apps whose couldn't.
+#[derive(Default)]
+pub(crate) struct PublicRecords {
+    /// The usable records, in the order of the payee's `identity.json`.
+    pub(crate) usable: Vec<UsableRecord>,
+    /// The apps whose records couldn't be used.
+    pub(crate) failures: Vec<PublicAppFailure>,
+}
+
+/// What is left of one read's bound ([`MAX_PUBLIC_ENDPOINTS`], [`MAX_PUBLIC_PAYLOAD_BYTES`]).
+struct Room {
+    endpoints: usize,
+    payload_bytes: usize,
+}
+
+impl Room {
+    fn new() -> Self {
+        Self {
+            endpoints: MAX_PUBLIC_ENDPOINTS,
+            payload_bytes: MAX_PUBLIC_PAYLOAD_BYTES,
+        }
+    }
+
+    /// Take `member`'s public endpoints whole when they fit in what is left; `false`, taking
+    /// nothing, when they don't.
+    fn take(&mut self, member: &PaykitMember) -> bool {
+        let endpoints = member.public_endpoints.len();
+        let payload_bytes = member
+            .public_endpoints
+            .values()
+            .map(|payload| payload.as_str().len())
+            .sum::<usize>();
+        if endpoints > self.endpoints || payload_bytes > self.payload_bytes {
+            return false;
+        }
+        self.endpoints -= endpoints;
+        self.payload_bytes -= payload_bytes;
+        true
+    }
 }
 
 /// A payee app's record, verified and usable now, with its Paykit member.
@@ -106,21 +225,40 @@ pub(crate) fn read_record(payee: &[u8; 32], app_id: &[u8; 16], bytes: &[u8]) -> 
 }
 
 /// Whether `record`, the record of `app_id` a reader uses, may be paid now (module docs).
-/// `None` when it isn't: it is ignored.
+/// `Err` when it isn't, naming why: it is never paid.
 pub(crate) fn usable(
     app_id: &[u8; 16],
     record: &AppRecord,
     doc: &IdentityDoc,
     now: u64,
-) -> Option<UsableRecord> {
-    let member = PaykitMember::read(record).ok()?;
-    if record.is_ahead(now) || record.expires_at().is_none_or(|at| at <= now) {
-        return None;
+) -> std::result::Result<UsableRecord, PublicAppFailureReason> {
+    let member = PaykitMember::read(record).map_err(|error| {
+        PublicAppFailureReason::Refused(format!(
+            "Paykit wire 3.2: the record's Paykit member doesn't read: {error}"
+        ))
+    })?;
+    let expired = |limit: &str| PublicAppFailureReason::Expired(format!("Paykit spec 4: {limit}"));
+    if record.is_ahead(now) {
+        return Err(expired("the record was made ahead of the payer's clock"));
+    }
+    match record.expires_at() {
+        None => {
+            return Err(PublicAppFailureReason::Refused(
+                "Paykit wire 3.2: the record carries no expires_at".into(),
+            ))
+        }
+        Some(at) if at <= now => return Err(expired("the record is past its expires_at")),
+        Some(_) => {}
+    }
+    if now >= record.trusted_until(doc.record_max_age_ms() / 1000) {
+        return Err(expired(
+            "the record is past the identity's record age limit",
+        ));
     }
     let carrier = Carrier::Record(Box::new(record.clone()));
-    // The app's standing, with the record's certificate, and the record age limit.
-    current(doc, app_id, &carrier, now).ok()?;
-    Some(UsableRecord {
+    // The app's standing, with the record's certificate (the record age limit passed above).
+    current(doc, app_id, &carrier, now).map_err(PublicAppFailureReason::Refused)?;
+    Ok(UsableRecord {
         record: record.clone(),
         member,
     })
@@ -209,16 +347,17 @@ fn takes_part(record: &AppRecord, held: &[AppRecord], view: &RecordView, now: u6
 }
 
 impl Paykit {
-    /// The payee's app records that may be used now, with the `identity.json` they were
-    /// checked against (module docs), of `app` only when given. `Err` inside holds the
-    /// refusal of the payee's `identity.json`.
+    /// The payee's app records that may be used now (module docs), of `app` only when given,
+    /// and the apps whose records couldn't be used: in the order of the payee's
+    /// `identity.json`, within the read's bound. `Err` inside holds the refusal of the payee's
+    /// `identity.json`.
     pub(crate) async fn public_records(
         &mut self,
         payee: &[u8; 32],
         app: Option<[u8; 16]>,
         by: Initiator,
         confirmed: Option<UserConfirmed>,
-    ) -> Result<std::result::Result<Vec<UsableRecord>, Refusal>> {
+    ) -> Result<std::result::Result<PublicRecords, Refusal>> {
         // The current apps' records are read from the Homeserver beside the payee's switch
         // lookup, from the copy of identity.json taken first (Paykit spec 4, 14).
         let homeserver = Arc::clone(&self.homeserver);
@@ -251,45 +390,54 @@ impl Paykit {
         };
         // The reads start with the first copy taken, so they ran.
         let Some(mut reads) = reads else {
-            return Ok(Ok(Vec::new()));
+            return Ok(Ok(PublicRecords::default()));
         };
-        // A newer copy the switch gave may list apps the first didn't: their records are
-        // read now.
+        let mut out = PublicRecords::default();
+        let mut room = Room::new();
+        // Only the apps the copy acted on lists, in its order (Paykit spec 4). A newer copy
+        // the switch gave may list apps the first didn't: their records are read now.
         for listed in &doc.body().apps {
-            if app.is_some_and(|a| a != listed.app_id)
-                || reads.iter().any(|(id, _)| *id == listed.app_id)
-            {
+            let app_id = listed.app_id;
+            if app.is_some_and(|a| a != app_id) {
                 continue;
             }
-            let bytes = self
-                .homeserver
-                .get(*payee, app_record_path(&listed.app_id))
-                .await;
-            reads.push((listed.app_id, bytes));
-        }
-        let mut out = Vec::new();
-        for (app_id, bytes) in reads {
-            // Only the apps the copy acted on lists.
-            let Some(listed) = doc.body().apps.iter().find(|a| a.app_id == app_id) else {
-                continue;
+            let bytes = match reads.iter().position(|(id, _)| *id == app_id) {
+                Some(at) => reads.swap_remove(at).1,
+                None => self.homeserver.get(*payee, app_record_path(&app_id)).await,
             };
-            let bytes = bytes.map_err(PaykitError::Homeserver)?;
-            let read = bytes.and_then(|b| read_record(payee, &listed.app_id, &b));
+            let fail = |reason| PublicAppFailure { app_id, reason };
+            // One app's Homeserver read failing is that app's failure (Paykit spec 4).
+            let bytes = match bytes {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    out.failures
+                        .push(fail(PublicAppFailureReason::Homeserver(error)));
+                    continue;
+                }
+            };
+            let read = bytes.as_ref().and_then(|b| read_record(payee, &app_id, b));
             let now = self.now();
             // The record served is compared with those seen before (Switch spec 4.2): an older
             // one never replaces a newer one, and two bodies at one `updated_at` are a
             // conflict, during which neither is used and the reader goes on with the earlier
             // record it holds, until a strictly later one ends it.
-            let seen_key = key::seen_records(payee, &listed.app_id);
+            let seen_key = key::seen_records(payee, &app_id);
             let mut seen = self
                 .local_get::<SeenRecords>(&seen_key)
                 .await?
                 .unwrap_or_default();
             let (mut view, held) = seen.view(payee, now)?;
+            // An app with no record has no public endpoints, whatever was seen before, and
+            // nothing of it fails (Paykit spec 4).
+            if bytes.is_none() {
+                continue;
+            }
             // Only a record whose Paykit member reads takes part (Paykit wire 3.2): a reader
             // refuses a malformed one as it refuses any invalid record, and it never displaces
             // a valid one.
             let read = read.filter(|record| PaykitMember::read(record).is_ok());
+            let served_ahead = read.as_ref().is_some_and(|record| record.is_ahead(now));
+            let served_refused = read.is_none();
             if let Some(record) = read {
                 if takes_part(&record, &held, &view, now) {
                     view.see(&record, now);
@@ -298,30 +446,54 @@ impl Paykit {
                 }
             }
             let Some(used) = view.used() else {
+                let reason = if served_refused {
+                    PublicAppFailureReason::Refused(
+                        "Switch wire 3.2, Paykit wire 3.2: the record served doesn't verify \
+                         as the app's, or its Paykit member doesn't read"
+                            .into(),
+                    )
+                } else if served_ahead {
+                    PublicAppFailureReason::Expired(
+                        "Paykit spec 4: the record was made ahead of the payer's clock".into(),
+                    )
+                } else {
+                    PublicAppFailureReason::Refused(
+                        "Switch spec 4.2: the app's records conflict at one updated_at".into(),
+                    )
+                };
+                out.failures.push(fail(reason));
                 continue;
             };
-            if let Some(usable) = usable(&listed.app_id, used, &doc, now) {
-                out.push(usable);
+            // A record without public endpoints offers none, and nothing of it fails.
+            if PaykitMember::read(used).is_ok_and(|member| member.public_endpoints.is_empty()) {
+                continue;
+            }
+            match usable(&app_id, used, &doc, now) {
+                // An app's endpoints are taken whole or not at all (Paykit spec 4).
+                Ok(usable) if room.take(&usable.member) => out.usable.push(usable),
+                Ok(_) => out.failures.push(fail(PublicAppFailureReason::OverBound)),
+                Err(reason) => out.failures.push(fail(reason)),
             }
         }
         Ok(Ok(out))
     }
 
-    /// The public endpoints of `payee`'s current apps that may be paid now (Paykit spec 4):
-    /// read from their records on the payee's Homeserver and checked as the module docs say.
-    /// `confirmed` is the user's confirmation for a payee whose switch couldn't confirm its
-    /// apps ([`Refusal::IdentityUnconfirmed`]).
+    /// The payee's public Payment List (Paykit spec 4): the public endpoints of `payee`'s
+    /// current apps that may be paid now, read from their records on the payee's Homeserver
+    /// and checked as the module docs say, and each app whose endpoints couldn't be used,
+    /// with why: its record unreadable now, refused, expired, or over the read's bound. One
+    /// app's failure never fails the read. `confirmed` is the user's confirmation for a payee
+    /// whose switch couldn't confirm its apps ([`Refusal::IdentityUnconfirmed`]).
     ///
     /// # Errors
     ///
     /// [`Refusal::IdentityUnavailable`] or [`Refusal::IdentityUnconfirmed`] for the payee's
-    /// `identity.json`; [`PaykitError::Homeserver`] when a record can't be read now;
-    /// [`Refusal::CertificateRefused`] under a certificate Paykit refuses.
+    /// `identity.json`; [`Refusal::CertificateRefused`] under a certificate Paykit refuses.
     pub async fn public_endpoints(
         &mut self,
         payee: &[u8; 32],
         confirmed: Option<UserConfirmed>,
-    ) -> Result<Vec<PublicEndpoint>> {
+    ) -> Result<PublicPaymentList> {
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.public_endpoints_inner(payee, confirmed)).await
     }
@@ -330,12 +502,13 @@ impl Paykit {
         &mut self,
         payee: &[u8; 32],
         confirmed: Option<UserConfirmed>,
-    ) -> Result<Vec<PublicEndpoint>> {
+    ) -> Result<PublicPaymentList> {
         self.refresh_own()?;
         let records = self
             .public_records(payee, None, Initiator::User, confirmed)
             .await??;
-        Ok(records
+        let endpoints = records
+            .usable
             .iter()
             .flat_map(|usable| {
                 usable
@@ -348,7 +521,11 @@ impl Paykit {
                         payload: payload.clone(),
                     })
             })
-            .collect())
+            .collect();
+        Ok(PublicPaymentList {
+            endpoints,
+            failures: records.failures,
+        })
     }
 }
 
@@ -369,7 +546,7 @@ mod tests {
         doc: &IdentityDoc,
         now: u64,
     ) -> Option<UsableRecord> {
-        usable(app_id, &read_record(payee, app_id, bytes)?, doc, now)
+        usable(app_id, &read_record(payee, app_id, bytes)?, doc, now).ok()
     }
 
     const DAY_MS: u64 = 86_400_000;
@@ -570,5 +747,81 @@ mod tests {
             .unwrap()
             .replacen("{", "{\"records\":[],", 1);
         assert!(serde_json::from_str::<SeenRecords>(&raw).is_err());
+    }
+
+    /// Why the record served at `app`'s path, read and verified, isn't used.
+    fn why_not(
+        app: &Party,
+        bytes: &[u8],
+        doc: &IdentityDoc,
+        now: u64,
+    ) -> Option<PublicAppFailureReason> {
+        let record = read_record(&app.id(), &app.app_id(), bytes).unwrap();
+        usable(&app.app_id(), &record, doc, now).err()
+    }
+
+    #[test]
+    fn test_public_read_unusable_record_named_refused_or_expired() {
+        let bob = Party::new(
+            "bob",
+            "shop",
+            &["paykit_request", "paykit_settlements", "paykit_contacts"],
+        );
+        let doc = bob.doc(&[&bob]);
+        let expired = |reason| matches!(reason, Some(PublicAppFailureReason::Expired(_)));
+        let refused = |reason| matches!(reason, Some(PublicAppFailureReason::Refused(_)));
+        let good = record_bytes(&bob, tip_jar(), NOW, Some(NOW + DAY_MS));
+        assert_eq!(why_not(&bob, &good, &doc, NOW + 1), None);
+        // Past its expires_at, past the record age limit, and ahead of the clock: expired.
+        assert!(expired(why_not(&bob, &good, &doc, NOW + DAY_MS)));
+        let far = record_bytes(&bob, tip_jar(), NOW, Some(NOW + 365 * DAY_MS));
+        assert!(expired(why_not(&bob, &far, &doc, NOW + 90 * DAY_MS)));
+        let ahead = record_bytes(&bob, tip_jar(), NOW + 10 * 60_000, Some(NOW + DAY_MS));
+        assert!(expired(why_not(&bob, &ahead, &doc, NOW)));
+        // An app not current, or a member that doesn't read: refused.
+        assert!(refused(why_not(&bob, &good, &bob.doc(&[]), NOW + 1)));
+        let bad = record_bytes(
+            &bob,
+            json!({ "public_endpoints": { "btc-lightning-bolt12": 7 } }),
+            NOW,
+            Some(NOW + DAY_MS),
+        );
+        assert!(refused(why_not(&bob, &bad, &doc, NOW + 1)));
+        // A certificate without `paykit_request`: refused.
+        let wallet = Party::new("bob", "wallet", &["paykit_pay", "paykit_contacts"]);
+        let bytes = record_bytes(&wallet, tip_jar(), NOW, Some(NOW + DAY_MS));
+        assert!(refused(why_not(
+            &wallet,
+            &bytes,
+            &bob.doc(&[&wallet]),
+            NOW + 1
+        )));
+    }
+
+    /// A member of `count` endpoints with payloads of `len` bytes.
+    fn member_of(count: usize, len: usize) -> PaykitMember {
+        let mut member = PaykitMember::default();
+        for i in 0..count {
+            member.public_endpoints.insert(
+                PaymentEndpointIdentifier::new(&format!("btc-e{i}")).unwrap(),
+                PaymentEndpointPayload::new(&"x".repeat(len)).unwrap(),
+            );
+        }
+        member
+    }
+
+    #[test]
+    fn test_public_read_room_takes_whole_sets_within_the_bound() {
+        let mut room = Room::new();
+        assert!(room.take(&member_of(MAX_PUBLIC_ENDPOINTS - 1, 1)));
+        // Two don't fit in the one left, and nothing is taken of them.
+        assert!(!room.take(&member_of(2, 1)));
+        assert!(room.take(&member_of(1, 1)));
+        assert!(!room.take(&member_of(1, 1)));
+        let mut room = Room::new();
+        assert!(room.take(&member_of(1, MAX_PUBLIC_PAYLOAD_BYTES - 10)));
+        assert!(!room.take(&member_of(1, 11)));
+        assert!(room.take(&member_of(1, 10)));
+        assert!(!room.take(&member_of(1, 1)));
     }
 }

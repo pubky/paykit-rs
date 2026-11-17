@@ -393,7 +393,8 @@ impl Paykit {
         // with the keys held, the client's at its first read or one of Paykit's, so until then
         // the records count as unlisted (Paykit spec 8.1, "Records not listed yet";
         // `Paykit::unlisted`) and a call that reads them lists first or is refused.
-        let paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
+        let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
+        Box::pin(paykit.tend_own_record()).await?;
         Ok(paykit)
     }
 
@@ -674,6 +675,7 @@ impl Paykit {
         // used. The steps never count an unblock: the client's copy decides there.
         if self.certificate_refused().is_none() {
             Box::pin(self.drop_unblocks_not_kept()).await?;
+            Box::pin(self.tend_own_record()).await?;
         }
         // An app holding `paykit_contacts` reads the flagged senders again first, at most every 10
         // minutes, for the spam rule (Paykit wire 4.1).
@@ -932,6 +934,12 @@ mod tests {
         assert_send(&wallet.receive(None));
         assert_send(&wallet.flush());
         assert_send(&wallet.public_endpoints(&key, Some(confirmed)));
+        assert_send(&wallet.set_public_endpoints(std::collections::BTreeMap::new()));
+        let endpoint = paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt12").unwrap();
+        let payload = paykit_lib::PaymentEndpointPayload::new("lno1tips").unwrap();
+        assert_send(&wallet.set_public_endpoint(endpoint.clone(), payload));
+        assert_send(&wallet.remove_public_endpoint(&endpoint));
+        assert_send(&wallet.update_own_record());
         assert_send(&wallet.reconcile());
         assert_send(&wallet.resolve_attempt(&key, attempt, resolution, confirmed));
         assert_send(&wallet.end_reconcile(confirmed));
