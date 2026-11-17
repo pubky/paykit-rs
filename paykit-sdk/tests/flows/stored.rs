@@ -44,7 +44,7 @@ async fn wallet_with_drop_mark(
         dropped_unverified(w, &mut wallet, &mut shop).await.0
     };
     let prefix = if key_wait { b"kw/" } else { b"ud/" };
-    let marks = wallet.app().protocol_scan(prefix).await.unwrap();
+    let marks = wallet.app().protocol_scan("paykit", prefix).await.unwrap();
     assert_eq!(marks.len(), 1);
     let mark: serde_json::Value = serde_json::from_slice(&marks[0].1).unwrap();
     let body = mark["d"].as_object().unwrap();
@@ -96,10 +96,10 @@ async fn refuse_mark_backup(w: &World, wallet: &mut Paykit, key: &[u8], bad: Vec
     let mut backup: serde_json::Value =
         serde_json::from_slice(&wallet.backup().await.unwrap().to_bytes().unwrap()).unwrap();
     let layer =
-        pubky_switch_core::enc::unb64(backup["protocol"]["data"].as_str().unwrap()).unwrap();
+        pubky_switch_core::enc::unb64(backup["layers"][0]["data"].as_str().unwrap()).unwrap();
     let mut layer = pubky_switch_client::app::decode_local_state(&layer).unwrap();
     layer.iter_mut().find(|(k, _)| k == key).unwrap().1 = bad;
-    backup["protocol"]["data"] = serde_json::Value::String(pubky_switch_core::enc::b64(
+    backup["layers"][0]["data"] = serde_json::Value::String(pubky_switch_core::enc::b64(
         &pubky_switch_client::app::encode_local_state(&layer),
     ));
     let backup =
@@ -137,7 +137,12 @@ async fn refuse_mark_state(key_wait: bool, restore: bool, damage: MarkDamage) {
     let w = World::new();
     let (mut wallet, _, storage, _) = Box::pin(wallet_with_drop_mark(&w, key_wait)).await;
     let prefix = if key_wait { b"kw/" } else { b"ud/" };
-    let (key, good) = wallet.app().protocol_scan(prefix).await.unwrap().remove(0);
+    let (key, good) = wallet
+        .app()
+        .protocol_scan("paykit", prefix)
+        .await
+        .unwrap()
+        .remove(0);
     let bad = damage_mark(&good, damage);
     assert_ne!(bad, good);
     if restore {
@@ -145,10 +150,13 @@ async fn refuse_mark_state(key_wait: bool, restore: bool, damage: MarkDamage) {
     } else {
         wallet
             .app_mut()
-            .protocol_commit(&[LocalWrite::Put {
-                key: key.clone(),
-                value: bad.clone(),
-            }])
+            .protocol_commit(
+                "paykit",
+                &[LocalWrite::Put {
+                    key: key.clone(),
+                    value: bad.clone(),
+                }],
+            )
             .await
             .unwrap();
         let app_id = wallet.app_id();
@@ -167,7 +175,10 @@ async fn refuse_mark_state(key_wait: bool, restore: bool, damage: MarkDamage) {
             panic!("a malformed drop mark was loaded")
         };
         assert!(crate::common::is_corrupt(&error), "{error:?}");
-        assert_eq!(wallet.app().protocol_get(&key).await.unwrap(), Some(bad));
+        assert_eq!(
+            wallet.app().protocol_get("paykit", &key).await.unwrap(),
+            Some(bad)
+        );
         assert_eq!(asked(&wallet, &w.bob_id()).await, before);
     }
 }
@@ -239,13 +250,16 @@ async fn test_mark_state_produced_marks_reload_restore_and_recover() {
         let (wallet, mut shop, storage, request) =
             Box::pin(wallet_with_drop_mark(&w, key_wait)).await;
         let prefix = if key_wait { b"kw/" } else { b"ud/" };
-        let held = wallet.app().protocol_scan(prefix).await.unwrap();
+        let held = wallet.app().protocol_scan("paykit", prefix).await.unwrap();
         let app_id = wallet.app_id();
         drop(wallet);
         let mut wallet = w
             .load_on_clock(&w.alice, storage, app_id, Arc::clone(&w.clock))
             .await;
-        assert_eq!(wallet.app().protocol_scan(prefix).await.unwrap(), held);
+        assert_eq!(
+            wallet.app().protocol_scan("paykit", prefix).await.unwrap(),
+            held
+        );
         let backup = wallet.backup().await.unwrap();
         let restored = Box::pin(Paykit::restore(
             w.env(&w.alice, store()),
@@ -256,7 +270,14 @@ async fn test_mark_state_produced_marks_reload_restore_and_recover() {
         ))
         .await
         .unwrap();
-        assert_eq!(restored.app().protocol_scan(prefix).await.unwrap(), held);
+        assert_eq!(
+            restored
+                .app()
+                .protocol_scan("paykit", prefix)
+                .await
+                .unwrap(),
+            held
+        );
         drop(restored);
         w.homeserver.set_down(false);
         if key_wait {
@@ -299,7 +320,7 @@ async fn wallet_with_kept_mark(
         path: "/ops".into(),
     });
     wallet.receive(None).await.unwrap();
-    let marks = wallet.app().protocol_scan(b"bd/").await.unwrap();
+    let marks = wallet.app().protocol_scan("paykit", b"bd/").await.unwrap();
     assert_eq!(marks.len(), 1);
     let mark: serde_json::Value = serde_json::from_slice(&marks[0].1).unwrap();
     assert_eq!(
@@ -315,13 +336,16 @@ async fn wallet_with_kept_mark(
 async fn test_mark_state_kept_batch_reload_restore_and_send() {
     let w = World::new();
     let (wallet, storage) = Box::pin(wallet_with_kept_mark(&w)).await;
-    let held = wallet.app().protocol_scan(b"bd/").await.unwrap();
+    let held = wallet.app().protocol_scan("paykit", b"bd/").await.unwrap();
     let app_id = wallet.app_id();
     drop(wallet);
     let mut wallet = w
         .load_on_clock(&w.alice, storage, app_id, Arc::clone(&w.clock))
         .await;
-    assert_eq!(wallet.app().protocol_scan(b"bd/").await.unwrap(), held);
+    assert_eq!(
+        wallet.app().protocol_scan("paykit", b"bd/").await.unwrap(),
+        held
+    );
     let backup = wallet.backup().await.unwrap();
     drop(wallet);
     let mut restored = Box::pin(Paykit::restore(
@@ -333,7 +357,14 @@ async fn test_mark_state_kept_batch_reload_restore_and_send() {
     ))
     .await
     .unwrap();
-    assert_eq!(restored.app().protocol_scan(b"bd/").await.unwrap(), held);
+    assert_eq!(
+        restored
+            .app()
+            .protocol_scan("paykit", b"bd/")
+            .await
+            .unwrap(),
+        held
+    );
     restored.receive(None).await.unwrap();
     restored.receive(None).await.unwrap();
     assert_eq!(asked(&restored, &w.bob_id()).await.len(), 1);
@@ -343,7 +374,12 @@ async fn test_mark_state_kept_batch_reload_restore_and_send() {
 async fn test_mark_state_kept_reference_unknown_at_restore() {
     let w = World::new();
     let (mut wallet, _) = Box::pin(wallet_with_kept_mark(&w)).await;
-    let (key, good) = wallet.app().protocol_scan(b"bd/").await.unwrap().remove(0);
+    let (key, good) = wallet
+        .app()
+        .protocol_scan("paykit", b"bd/")
+        .await
+        .unwrap()
+        .remove(0);
     let bad = damage_mark(&good, MarkDamage::UnknownQueued);
     refuse_mark_backup(&w, &mut wallet, &key, bad).await;
 }
@@ -353,14 +389,22 @@ async fn test_mark_state_kept_reference_unknown_after_reload() {
     use pubky_switch_client::app::LocalWrite;
     let w = World::new();
     let (mut wallet, storage) = Box::pin(wallet_with_kept_mark(&w)).await;
-    let (key, good) = wallet.app().protocol_scan(b"bd/").await.unwrap().remove(0);
+    let (key, good) = wallet
+        .app()
+        .protocol_scan("paykit", b"bd/")
+        .await
+        .unwrap()
+        .remove(0);
     let bad = damage_mark(&good, MarkDamage::UnknownQueued);
     wallet
         .app_mut()
-        .protocol_commit(&[LocalWrite::Put {
-            key: key.clone(),
-            value: bad.clone(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[LocalWrite::Put {
+                key: key.clone(),
+                value: bad.clone(),
+            }],
+        )
         .await
         .unwrap();
     let result = Paykit::load(
@@ -375,7 +419,10 @@ async fn test_mark_state_kept_reference_unknown_after_reload() {
         panic!("a malformed kept request was loaded")
     };
     assert!(crate::common::is_corrupt(&error), "{error:?}");
-    assert_eq!(wallet.app().protocol_get(&key).await.unwrap(), Some(bad));
+    assert_eq!(
+        wallet.app().protocol_get("paykit", &key).await.unwrap(),
+        Some(bad)
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -417,16 +464,53 @@ impl pubky_switch_client::store::StateStore for FailAskDelete {
         &self,
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.commit_with(batch, |batch| {
+            self.inner
+                .commit(batch)
+                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+        })
+        .map(|_| ())
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
+    }
+}
+impl FailAskDelete {
+    fn commit_with(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+        apply: impl FnOnce(
+            pubky_switch_client::store::WriteBatch,
+        ) -> Result<
+            pubky_switch_client::store::CommitOutcome,
+            pubky_switch_client::error::StoreError,
+        >,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
         use pubky_switch_client::store::Write;
-        if batch
-            .writes
-            .iter()
-            .any(|write| matches!(write, Write::Delete { key, .. } if key.starts_with(b"p/ask/")))
-            && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
+        if batch.writes().iter().any(
+            |write| matches!(write, Write::Delete { key, .. } if key.starts_with(b"p/paykit/ask/")),
+        ) && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
         {
             return Err(pubky_switch_client::error::StoreError::Unavailable);
         }
-        self.inner.commit(batch)
+        apply(batch)
     }
 }
 
@@ -477,7 +561,7 @@ async fn wallet_with_queued_ask(
         w.alice.switch().push_missed(1, now - 1_000, now);
         wallet.receive(None).await.unwrap();
     }
-    let asks = wallet.app().protocol_scan(b"ask/").await.unwrap();
+    let asks = wallet.app().protocol_scan("paykit", b"ask/").await.unwrap();
     assert_eq!(asks.len(), 1);
     let ask: serde_json::Value = serde_json::from_slice(&asks[0].1).unwrap();
     assert_eq!(ask["d"]["until_ms"].is_u64(), bounded);
@@ -497,7 +581,7 @@ async fn wallet_with_queued_ask(
             ))
         ));
         assert!(!storage.armed.load(std::sync::atomic::Ordering::SeqCst));
-        let asks = wallet.app().protocol_scan(b"ask/").await.unwrap();
+        let asks = wallet.app().protocol_scan("paykit", b"ask/").await.unwrap();
         assert_eq!(asks.len(), 1);
         let ask: serde_json::Value = serde_json::from_slice(&asks[0].1).unwrap();
         let queued = ask["d"]["queued"].as_object().unwrap();
@@ -517,7 +601,12 @@ async fn refuse_ask_state(bounded: bool, restore: bool, damage: AskDamage) {
         matches!(damage, AskDamage::UnknownReference),
     ))
     .await;
-    let (key, good) = wallet.app().protocol_scan(b"ask/").await.unwrap().remove(0);
+    let (key, good) = wallet
+        .app()
+        .protocol_scan("paykit", b"ask/")
+        .await
+        .unwrap()
+        .remove(0);
     let mut value: serde_json::Value = serde_json::from_slice(&good).unwrap();
     let body = value["d"].as_object_mut().unwrap();
     let bad = match damage {
@@ -554,10 +643,13 @@ async fn refuse_ask_state(bounded: bool, restore: bool, damage: AskDamage) {
     } else {
         wallet
             .app_mut()
-            .protocol_commit(&[LocalWrite::Put {
-                key: key.clone(),
-                value: bad.clone(),
-            }])
+            .protocol_commit(
+                "paykit",
+                &[LocalWrite::Put {
+                    key: key.clone(),
+                    value: bad.clone(),
+                }],
+            )
             .await
             .unwrap();
         let app_id = wallet.app_id();
@@ -567,7 +659,10 @@ async fn refuse_ask_state(bounded: bool, restore: bool, damage: AskDamage) {
             .await;
         let error = wallet.receive(None).await.unwrap_err();
         assert!(crate::common::is_corrupt(&error), "{error:?}");
-        assert_eq!(wallet.app().protocol_get(&key).await.unwrap(), Some(bad));
+        assert_eq!(
+            wallet.app().protocol_get("paykit", &key).await.unwrap(),
+            Some(bad)
+        );
     }
 }
 
@@ -623,13 +718,16 @@ async fn test_mark_state_callback_asks_reload_restore_and_send() {
             let w = World::new();
             let (wallet, storage) =
                 Box::pin(wallet_with_queued_ask(&w, bounded, with_request)).await;
-            let held = wallet.app().protocol_scan(b"ask/").await.unwrap();
+            let held = wallet.app().protocol_scan("paykit", b"ask/").await.unwrap();
             let app_id = wallet.app_id();
             drop(wallet);
             let mut wallet = w
                 .load_on_clock(&w.alice, storage, app_id, Arc::clone(&w.clock))
                 .await;
-            assert_eq!(wallet.app().protocol_scan(b"ask/").await.unwrap(), held);
+            assert_eq!(
+                wallet.app().protocol_scan("paykit", b"ask/").await.unwrap(),
+                held
+            );
             let backup = wallet.backup().await.unwrap();
             let restored = Box::pin(Paykit::restore(
                 w.env(&w.alice, store()),
@@ -640,14 +738,21 @@ async fn test_mark_state_callback_asks_reload_restore_and_send() {
             ))
             .await
             .unwrap();
-            assert_eq!(restored.app().protocol_scan(b"ask/").await.unwrap(), held);
+            assert_eq!(
+                restored
+                    .app()
+                    .protocol_scan("paykit", b"ask/")
+                    .await
+                    .unwrap(),
+                held
+            );
             drop(restored);
             wallet.unblock(&w.bob_id()).await.unwrap();
             wallet.receive(None).await.unwrap();
             wallet.receive(None).await.unwrap();
             assert!(wallet
                 .app()
-                .protocol_scan(b"ask/")
+                .protocol_scan("paykit", b"ask/")
                 .await
                 .unwrap()
                 .is_empty());
@@ -711,7 +816,7 @@ async fn test_stored_refused_request_shown_unrecorded_then_written() {
 /// The keys of Paykit's local state under `prefix`.
 pub(crate) async fn kept(app: &paykit_sdk::Paykit, prefix: &str) -> Vec<Vec<u8>> {
     app.app()
-        .protocol_scan(prefix.as_bytes())
+        .protocol_scan("paykit", prefix.as_bytes())
         .await
         .unwrap()
         .into_iter()
@@ -854,7 +959,7 @@ async fn test_stored_entry_dropped_unverified_mark_past_128_the_earliest_latest_
 /// The marks of entries dropped unverified, whole.
 async fn unverified_marks(app: &paykit_sdk::Paykit) -> Vec<serde_json::Value> {
     app.app()
-        .protocol_scan(b"ud/")
+        .protocol_scan("paykit", b"ud/")
         .await
         .unwrap()
         .into_iter()
@@ -1081,7 +1186,12 @@ async fn test_stored_refused_receipt_from_before_a_joined_apps_first_listing_wri
     .await
     .unwrap();
     // No certificate is kept as listed under before the first listing.
-    assert!(phone.app().protocol_get(b"lc").await.unwrap().is_none());
+    assert!(phone
+        .app()
+        .protocol_get("paykit", b"lc")
+        .await
+        .unwrap()
+        .is_none());
     // Bob's shop reads alice's directory again, which lists the phone, so the receipt goes
     // to it too.
     w.clock.advance_ms(11 * 60_000);
@@ -1091,7 +1201,12 @@ async fn test_stored_refused_receipt_from_before_a_joined_apps_first_listing_wri
     refuse_writes(&w.alice, 2);
     let summary = phone.receive(None).await.unwrap();
     assert!(about_stored(&summary.report.events), "{summary:?}");
-    assert!(phone.app().protocol_get(b"lc").await.unwrap().is_some());
+    assert!(phone
+        .app()
+        .protocol_get("paykit", b"lc")
+        .await
+        .unwrap()
+        .is_some());
     assert!(!holds_receipt(&phone, &request).await);
     phone.receive(None).await.unwrap();
     assert!(holds_receipt(&phone, &request).await);
@@ -1312,16 +1427,19 @@ pub(crate) async fn given_up(w: &World) -> (paykit_sdk::Paykit, paykit_sdk::Noti
 async fn copy_notice(wallet: &mut paykit_sdk::Paykit, id: &str, other: &str) {
     let value = wallet
         .app()
-        .protocol_get(format!("nt/{id}").as_bytes())
+        .protocol_get("paykit", format!("nt/{id}").as_bytes())
         .await
         .unwrap()
         .unwrap();
     wallet
         .app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: format!("nt/{other}").into_bytes(),
-            value,
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: format!("nt/{other}").into_bytes(),
+                value,
+            }],
+        )
         .await
         .unwrap();
 }
@@ -1356,10 +1474,13 @@ async fn test_stored_note_past_its_window_kept_when_its_write_errs() {
     w.clock.advance_ms(paykit_sdk::KEPT_MESSAGE_MS);
     wallet
         .app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: format!("j/{}", attempt_id.to_text()).into_bytes(),
-            value: br#"{"v":1,"d":{}}"#.to_vec(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: format!("j/{}", attempt_id.to_text()).into_bytes(),
+                value: br#"{"v":1,"d":{}}"#.to_vec(),
+            }],
+        )
         .await
         .unwrap();
     assert!(wallet.receive(None).await.is_err());
@@ -1375,15 +1496,23 @@ async fn test_stored_note_under_another_key_is_corrupt() {
     request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     refuse_writes(&w.alice, 2);
     wallet.receive(None).await.unwrap();
-    let (key, value) = wallet.app().protocol_scan(b"se/").await.unwrap().remove(0);
+    let (key, value) = wallet
+        .app()
+        .protocol_scan("paykit", b"se/")
+        .await
+        .unwrap()
+        .remove(0);
     let key = String::from_utf8(key).unwrap();
     let (sender, _) = key.trim_start_matches("se/").split_once('/').unwrap();
     wallet
         .app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: format!("se/{sender}/223e4567-e89b-42d3-a456-426614174000").into_bytes(),
-            value,
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: format!("se/{sender}/223e4567-e89b-42d3-a456-426614174000").into_bytes(),
+                value,
+            }],
+        )
         .await
         .unwrap();
     assert!(wallet.requests().await.is_err());
@@ -1545,7 +1674,7 @@ async fn test_stored_event_taken_again_after_its_commit_failed() {
     // The commit that keeps the request's note, and the event's mark with it, fails, as a
     // crash before it would.
     refuse_writes(&w.alice, 1);
-    fault.refuse_puts_as_too_large_once(b"p/se/");
+    fault.refuse_puts_as_too_large_once(b"p/paykit/se/");
     assert!(wallet.receive(None).await.is_err());
     assert!(kept(&wallet, "dt/").await.is_empty());
     wallet.receive(None).await.unwrap();
@@ -1578,7 +1707,7 @@ async fn test_stored_refused_request_never_written_over_a_value_that_doesnt_read
         .unwrap();
     wallet
         .app_mut()
-        .submit_batch(pubky_switch_client::app::OpBatch::new().entry(entry))
+        .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(entry))
         .await
         .unwrap();
     wallet.receive(None).await.unwrap();
@@ -1689,7 +1818,7 @@ async fn test_stored_refused_receipt_never_opens_a_deleted_record() {
         .unwrap();
     wallet
         .app_mut()
-        .submit_batch(pubky_switch_client::app::OpBatch::new().entry(entry))
+        .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(entry))
         .await
         .unwrap();
     let key = wallet.app().record_key(&target).unwrap();
@@ -2118,7 +2247,7 @@ async fn past_the_key_wait(w: &World, wallet: &mut Paykit, at: u64) -> Vec<AppEv
 /// The marks of key waits, whole.
 async fn key_wait_marks(app: &Paykit) -> Vec<serde_json::Value> {
     app.app()
-        .protocol_scan(b"kw/")
+        .protocol_scan("paykit", b"kw/")
         .await
         .unwrap()
         .into_iter()
@@ -2149,11 +2278,14 @@ async fn test_stored_key_wait_dropped_given_up_once_and_asked_again_once_the_key
         .iter()
         .find_map(|e| match e {
             AppEvent::StoredEntryDropped {
-                awaited_epoch: Some(awaited),
-                msg_id: Some(msg_id),
+                waiting:
+                    pubky_switch_client::app::WaitingReason::Key {
+                        data_epoch: awaited,
+                    },
+                message,
                 accepted_at_ms,
                 ..
-            } if *awaited == epoch => Some((msg_id.clone(), *accepted_at_ms)),
+            } if *awaited == epoch => Some((message.msg_id.clone(), *accepted_at_ms)),
             _ => None,
         })
         .unwrap_or_else(|| panic!("{events:?}"));
@@ -2227,7 +2359,12 @@ async fn test_stored_key_wait_dropped_while_the_records_are_not_listed_given_up_
     assert!(awaiting(&mut wallet).await.contains(&epoch));
     assert!(wallet.notices().await.unwrap().is_empty());
     past_the_key_wait(&w, &mut wallet, sent).await;
-    assert!(wallet.app().protocol_get(b"nl").await.unwrap().is_some());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"nl")
+        .await
+        .unwrap()
+        .is_some());
     let notices = wallet.notices().await.unwrap();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::MessageGivenUp);
@@ -2604,7 +2741,7 @@ fn receipt_body(attempt_id: paykit_lib::AttemptId) -> serde_json::Map<String, se
 /// The marks of dropped replies `app` holds, as (sender, earliest time, due).
 async fn reply_marks(app: &Paykit) -> Vec<([u8; 32], u64, bool)> {
     app.app()
-        .protocol_scan(b"pd/")
+        .protocol_scan("paykit", b"pd/")
         .await
         .unwrap()
         .into_iter()
@@ -2852,10 +2989,13 @@ async fn seed_reply_mark(w: &World, app: &mut Paykit, sender: &[u8; 32]) -> u64 
         }
     });
     app.app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: format!("pd/{}", pubky_switch_core::enc::b64(sender)).into_bytes(),
-            value: serde_json::to_vec(&value).unwrap(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: format!("pd/{}", pubky_switch_core::enc::b64(sender)).into_bytes(),
+                value: serde_json::to_vec(&value).unwrap(),
+            }],
+        )
         .await
         .unwrap();
     at
@@ -3119,4 +3259,73 @@ async fn test_stored_later_reply_stored_too_never_takes_the_response_of_an_earli
         Box::pin(payee_response(&w, &shop, &request)).await,
         Some(first)
     );
+}
+
+#[tokio::test]
+async fn test_stored_key_drop_duty_requires_its_owner_and_survives_reload() {
+    use pubky_switch_client::app::{AppError, Refusal, WaitingReason};
+
+    let w = World::new();
+    let storage = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&storage)).await;
+    let app_id = wallet.app_id();
+    let mut shop = w.shop().await;
+    let (_, epoch, at) = waiting_for_the_current_key(&w, &mut wallet, &mut shop).await;
+    w.clock
+        .set_ms(at + pubky_switch_client::app::MAX_UNVERIFIED_AGE_MS + DAY_MS);
+    wallet.app_mut().receive(None).await.unwrap();
+    wallet.app_mut().receive(None).await.unwrap();
+    let events = wallet
+        .app_mut()
+        .unacknowledged_events_for("paykit")
+        .await
+        .unwrap();
+    let event = events
+        .iter()
+        .find(|event| {
+            matches!(event,
+        AppEvent::StoredEntryDropped { waiting: WaitingReason::Key { data_epoch }, .. }
+        if *data_epoch == epoch)
+        })
+        .unwrap();
+    let id = event.id().unwrap();
+    assert_eq!(wallet.app().event_owners(id).unwrap(), ["paykit"]);
+    assert!(key_wait_marks(&wallet).await.is_empty());
+    assert!(matches!(
+        wallet.app_mut().ack_events_for("chat", id).await,
+        Err(AppError::Refused(Refusal::Usage(_)))
+    ));
+    assert!(wallet
+        .app_mut()
+        .unacknowledged_events_for("paykit")
+        .await
+        .unwrap()
+        .iter()
+        .any(|event| event.id() == Some(id)));
+    drop(wallet);
+    let mut wallet = w
+        .load_with(
+            &w.alice,
+            storage,
+            app_id,
+            Arc::clone(&w.clock),
+            PaykitConfig::default(),
+        )
+        .await;
+    assert!(wallet
+        .app_mut()
+        .unacknowledged_events_for("paykit")
+        .await
+        .unwrap()
+        .iter()
+        .any(|event| event.id() == Some(id)));
+    wallet.receive(None).await.unwrap();
+    assert_eq!(key_wait_marks(&wallet).await.len(), 1);
+    assert!(!wallet
+        .app_mut()
+        .unacknowledged_events_for("paykit")
+        .await
+        .unwrap()
+        .iter()
+        .any(|event| event.id() == Some(id)));
 }

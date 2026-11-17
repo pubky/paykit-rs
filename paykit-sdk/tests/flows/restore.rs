@@ -348,7 +348,7 @@ async fn backup_with_a_payment(w: &World) -> (serde_json::Value, [u8; 16]) {
 
 /// Paykit's layer of a backup: its local state, each value as Paykit keeps it.
 pub(crate) fn layer_of(backup: &serde_json::Value) -> Vec<(Vec<u8>, serde_json::Value)> {
-    let data = backup["protocol"]["data"].as_str().unwrap();
+    let data = backup["layers"][0]["data"].as_str().unwrap();
     let bytes = pubky_switch_core::enc::unb64(data).unwrap();
     pubky_switch_client::app::decode_local_state(&bytes)
         .unwrap()
@@ -367,7 +367,7 @@ pub(crate) fn with_layer(
         .map(|(k, v)| (k, serde_json::to_vec(&v).unwrap()))
         .collect();
     let mut out = backup.clone();
-    out["protocol"]["data"] = serde_json::Value::String(pubky_switch_core::enc::b64(
+    out["layers"][0]["data"] = serde_json::Value::String(pubky_switch_core::enc::b64(
         &pubky_switch_client::app::encode_local_state(&state),
     ));
     out
@@ -638,7 +638,7 @@ async fn test_restore_two_open_entries_for_one_obligation_refused() {
 async fn test_restore_another_protocols_layer_refused() {
     let w = World::new();
     let (mut backup, app_id) = backup_with_a_payment(&w).await;
-    backup["protocol"]["name"] = serde_json::Value::String("chat".into());
+    backup["layers"][0]["name"] = serde_json::Value::String("chat".into());
     let target = store();
     let error = refused_restore(&w, backup, Arc::clone(&target)).await;
     assert!(is_refused(&error), "{error:?}");
@@ -934,7 +934,7 @@ async fn rewrite_marks(wallet: &mut Paykit, w: &World, app_id: [u8; 16], used: s
         .unwrap();
     wallet
         .app_mut()
-        .submit_batch(pubky_switch_client::app::OpBatch::new().entry(entry))
+        .submit_batch(pubky_switch_client::app::OpBatch::for_protocol("paykit").entry(entry))
         .await
         .unwrap();
 }
@@ -1589,9 +1589,21 @@ async fn test_restore_cursor_time_ahead_of_the_backup_is_clamped() {
     // from there, not from the future.
     let bound = w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS;
     let read = |bytes: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
-    let cursor = read(app.app().protocol_get(b"ct").await.unwrap().unwrap());
+    let cursor = read(
+        app.app()
+            .protocol_get("paykit", b"ct")
+            .await
+            .unwrap()
+            .unwrap(),
+    );
     assert!(cursor["d"].as_u64().unwrap() <= bound, "{cursor}");
-    let hold = read(app.app().protocol_get(b"rh").await.unwrap().unwrap());
+    let hold = read(
+        app.app()
+            .protocol_get("paykit", b"rh")
+            .await
+            .unwrap()
+            .unwrap(),
+    );
     assert!(
         hold["d"]["resend_from_ms"].as_u64().unwrap() <= w.clock.now_ms(),
         "{hold}"
@@ -1800,20 +1812,28 @@ async fn test_restore_cursor_time_left_unclamped_by_a_crash_is_clamped_at_load()
     // As a crash after the restore's commit and before its clamp would leave it: the cursor
     // time and the hold's re-send time a year ahead.
     let ahead = w.clock.now_ms() + 365 * 24 * crate::common::HOUR_MS;
-    let hold = app.app().protocol_get(b"rh").await.unwrap().unwrap();
+    let hold = app
+        .app()
+        .protocol_get("paykit", b"rh")
+        .await
+        .unwrap()
+        .unwrap();
     let mut hold: serde_json::Value = serde_json::from_slice(&hold).unwrap();
     hold["d"]["resend_from_ms"] = serde_json::json!(ahead);
     app.app_mut()
-        .protocol_commit(&[
-            pubky_switch_client::app::LocalWrite::Put {
-                key: b"ct".to_vec(),
-                value: serde_json::to_vec(&kept(serde_json::json!(ahead))).unwrap(),
-            },
-            pubky_switch_client::app::LocalWrite::Put {
-                key: b"rh".to_vec(),
-                value: serde_json::to_vec(&hold).unwrap(),
-            },
-        ])
+        .protocol_commit(
+            "paykit",
+            &[
+                pubky_switch_client::app::LocalWrite::Put {
+                    key: b"ct".to_vec(),
+                    value: serde_json::to_vec(&kept(serde_json::json!(ahead))).unwrap(),
+                },
+                pubky_switch_client::app::LocalWrite::Put {
+                    key: b"rh".to_vec(),
+                    value: serde_json::to_vec(&hold).unwrap(),
+                },
+            ],
+        )
         .await
         .unwrap();
     drop(app);
@@ -1822,9 +1842,21 @@ async fn test_restore_cursor_time_left_unclamped_by_a_crash_is_clamped_at_load()
         .await;
     let read = |bytes: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
     let bound = w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS;
-    let cursor = read(app.app().protocol_get(b"ct").await.unwrap().unwrap());
+    let cursor = read(
+        app.app()
+            .protocol_get("paykit", b"ct")
+            .await
+            .unwrap()
+            .unwrap(),
+    );
     assert!(cursor["d"].as_u64().unwrap() <= bound, "{cursor}");
-    let hold = read(app.app().protocol_get(b"rh").await.unwrap().unwrap());
+    let hold = read(
+        app.app()
+            .protocol_get("paykit", b"rh")
+            .await
+            .unwrap()
+            .unwrap(),
+    );
     assert!(
         hold["d"]["resend_from_ms"].as_u64().unwrap() <= w.clock.now_ms(),
         "{hold}"
@@ -1860,7 +1892,12 @@ async fn test_restore_records_mark_kept_by_a_stopped_read() {
         let read = app.receive(None).await.unwrap();
         assert!(read.report.stopped, "{:?}", read.report);
     }
-    assert!(app.app().protocol_get(b"nl").await.unwrap().is_some());
+    assert!(app
+        .app()
+        .protocol_get("paykit", b"nl")
+        .await
+        .unwrap()
+        .is_some());
     assert!(app.resume_payments().await.is_err());
     let refused = app.requests().await.unwrap_err();
     assert!(
@@ -1883,14 +1920,22 @@ async fn test_restore_asks_start_bounded_where_they_are_queued() {
     drop(wallet);
     let mut app = restored_bare(&w, &backup).await;
     let ahead = w.clock.now_ms() + 365 * 24 * crate::common::HOUR_MS;
-    let hold = app.app().protocol_get(b"rh").await.unwrap().unwrap();
+    let hold = app
+        .app()
+        .protocol_get("paykit", b"rh")
+        .await
+        .unwrap()
+        .unwrap();
     let mut hold: serde_json::Value = serde_json::from_slice(&hold).unwrap();
     hold["d"]["resend_from_ms"] = serde_json::json!(ahead);
     app.app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: b"rh".to_vec(),
-            value: serde_json::to_vec(&hold).unwrap(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: b"rh".to_vec(),
+                value: serde_json::to_vec(&hold).unwrap(),
+            }],
+        )
         .await
         .unwrap();
     // Queued, not yet sent: bob's switch doesn't answer.
@@ -1904,7 +1949,12 @@ async fn test_restore_asks_start_bounded_where_they_are_queued() {
             });
     }
     app.reconcile().await.unwrap();
-    let hold = app.app().protocol_get(b"rh").await.unwrap().unwrap();
+    let hold = app
+        .app()
+        .protocol_get("paykit", b"rh")
+        .await
+        .unwrap()
+        .unwrap();
     let hold: serde_json::Value = serde_json::from_slice(&hold).unwrap();
     assert!(
         hold["d"]["resend_from_ms"].as_u64().unwrap() <= w.clock.now_ms(),
@@ -2117,16 +2167,19 @@ async fn test_journal_entry_with_no_carrier_holds_its_payment() {
     else {
         panic!("in flight");
     };
-    let held = wallet.app().protocol_scan(b"j/").await.unwrap();
+    let held = wallet.app().protocol_scan("paykit", b"j/").await.unwrap();
     assert_eq!(held.len(), 1);
     let mut value: serde_json::Value = serde_json::from_slice(&held[0].1).unwrap();
     value["d"]["carrier"] = serde_json::Value::Null;
     wallet
         .app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: held[0].0.clone(),
-            value: serde_json::to_vec(&value).unwrap(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: held[0].0.clone(),
+                value: serde_json::to_vec(&value).unwrap(),
+            }],
+        )
         .await
         .unwrap();
     w.clock.advance_ms(60_000);
@@ -2360,7 +2413,12 @@ async fn test_restore_own_request_kept_unanswered_queued_again_from_its_record()
     let mut wallet = w.wallet("wallet").await;
     let mut shop = shop_restored_with_its_request_unqueued(&w, &mut wallet).await;
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     wallet.receive(None).await.unwrap();
     let requests = wallet.requests().await.unwrap();
     assert_eq!(requests.len(), 1, "{requests:?}");
@@ -2389,7 +2447,12 @@ async fn test_restore_own_request_past_its_replay_window_not_sent_again_nothing_
         "{:?}",
         summary.report.events
     );
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     assert!(shop.notices().await.unwrap().is_empty());
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
     wallet.receive(None).await.unwrap();
@@ -2444,7 +2507,12 @@ async fn test_restore_own_receipt_kept_unanswered_sent_again_from_its_record() {
     drop(shop);
     let mut shop = restored_unreceived(&w, &w.bob, &backup).await;
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     wallet.receive(None).await.unwrap();
     let receipt = wallet.request(&request).await.unwrap().receipt.unwrap();
     assert_eq!(receipt.payee, w.bob_id());
@@ -2509,7 +2577,12 @@ async fn test_restore_own_rejection_to_a_blocked_payee_waits_until_unblocked() {
         wallet.receive(None).await.unwrap();
     }
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
-    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_some());
     wallet.unblock(&w.bob_id()).await.unwrap();
     wallet.receive(None).await.unwrap();
     // The rejection goes, once. So does the ask of the restore's block mark of bob, once:
@@ -2521,7 +2594,12 @@ async fn test_restore_own_rejection_to_a_blocked_payee_waits_until_unblocked() {
         w.bob.switch().entries_from(&w.alice_id()),
         before + 1 + asks
     );
-    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     wallet.receive(None).await.unwrap();
     assert_eq!(
         w.bob.switch().entries_from(&w.alice_id()),
@@ -2564,10 +2642,20 @@ async fn test_restore_own_rejection_waits_while_the_deny_list_is_unknown() {
     let before = w.bob.switch().entries_from(&w.alice_id());
     wallet.receive(None).await.unwrap();
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
-    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_some());
     wallet.receive(None).await.unwrap();
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
-    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     wallet.receive(None).await.unwrap();
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
     shop.receive(None).await.unwrap();
@@ -2630,13 +2718,23 @@ async fn test_restore_own_rejection_in_a_record_sealed_under_a_key_not_held_wait
         held.content
     );
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before);
-    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_some());
     crate::unrequested::store_bundle(&w, wallet_app, &cert);
     for _ in 0..3 {
         wallet.receive(None).await.unwrap();
     }
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), before + 1);
-    assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     shop.receive(None).await.unwrap();
     assert_eq!(
         shop.payee_activity().await.unwrap()[0].status,
@@ -2687,8 +2785,21 @@ async fn test_local_state_restore_still_discards_unread_transient_values() {
     )
     .await
     .unwrap();
-    assert!(wallet.app().protocol_get(b"lr").await.unwrap().is_none());
-    assert_eq!(wallet.app().protocol_scan(b"j/").await.unwrap().len(), 1);
+    assert!(wallet
+        .app()
+        .protocol_get("paykit", b"lr")
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        wallet
+            .app()
+            .protocol_scan("paykit", b"j/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 /// Bob's shop sends alice a request and cancels it, and is backed up then; after the backup
@@ -2747,7 +2858,12 @@ async fn test_restore_own_cancellation_in_a_record_left_unreadable_waits_until_i
     for _ in 0..2 {
         shop.receive(None).await.unwrap();
     }
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_some());
     assert!(!crate::periods::queued(&shop, &cancellation).await);
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
     crate::periods::writes_value(
@@ -2758,7 +2874,12 @@ async fn test_restore_own_cancellation_in_a_record_left_unreadable_waits_until_i
     .await;
     shop.receive(None).await.unwrap();
     assert!(crate::periods::queued(&shop, &cancellation).await);
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 1);
     shop.receive(None).await.unwrap();
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before + 1);
@@ -2777,10 +2898,20 @@ async fn test_restore_own_cancellation_in_a_record_unreadable_for_31_days_never_
     let mut shop = restored_unreceived(&w, &w.bob, &backup).await;
     let before = w.alice.switch().entries_from(&w.bob_id());
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_some());
     w.clock.advance_ms(31 * pubky_switch_core::records::DAY_MS);
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     assert!(!crate::periods::queued(&shop, &cancellation).await);
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), before);
     assert!(shop.notices().await.unwrap().is_empty());
@@ -2823,7 +2954,12 @@ async fn test_restore_own_unread_record_and_a_blocked_counterparty_both_wait() {
     for _ in 0..2 {
         shop.receive(None).await.unwrap();
     }
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_some());
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), alices);
     assert_eq!(w.carol.switch().entries_from(&w.bob_id()), carol_before);
     crate::periods::writes_value(
@@ -2837,7 +2973,12 @@ async fn test_restore_own_unread_record_and_a_blocked_counterparty_both_wait() {
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), alices + 1);
     assert!(!crate::periods::queued(&shop, &to_carol.msg_id).await);
     assert_eq!(w.carol.switch().entries_from(&w.bob_id()), carol_before);
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_some());
     shop.unblock(&w.carol_id()).await.unwrap();
     shop.receive(None).await.unwrap();
     assert!(crate::periods::queued(&shop, &to_carol.msg_id).await);
@@ -2847,7 +2988,12 @@ async fn test_restore_own_unread_record_and_a_blocked_counterparty_both_wait() {
         w.carol.switch().entries_from(&w.bob_id()),
         carol_before + 1 + asks
     );
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     shop.receive(None).await.unwrap();
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), alices + 1);
     assert_eq!(
@@ -2892,7 +3038,12 @@ async fn test_restore_own_record_found_unreadable_25_days_after_the_restore_wait
     let mut shop = restored_unreceived(&w, &w.bob, &backup).await;
     shop.block(&w.carol_id()).await.unwrap();
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_some());
     let before = w.carol.switch().entries_from(&w.bob_id());
     w.clock.advance_ms(25 * pubky_switch_core::records::DAY_MS);
     till.receive(None).await.unwrap();
@@ -2916,13 +3067,28 @@ async fn test_restore_own_record_found_unreadable_25_days_after_the_restore_wait
         w.carol.switch().entries_from(&w.bob_id()),
         before + 1 + asks
     );
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_some());
     w.clock.advance_ms(4 * pubky_switch_core::records::DAY_MS);
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_some());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_some());
     w.clock.advance_ms(2 * pubky_switch_core::records::DAY_MS);
     shop.receive(None).await.unwrap();
-    assert!(shop.app().protocol_get(b"ro").await.unwrap().is_none());
+    assert!(shop
+        .app()
+        .protocol_get("paykit", b"ro")
+        .await
+        .unwrap()
+        .is_none());
     // The block mark asks again at most once a day while it lives.
     let asks = crate::common::asked(&shop, &w.carol_id()).await.len();
     assert_eq!(
@@ -2974,7 +3140,7 @@ async fn family_bounded_at_restore(
     .unwrap();
     let held = restored
         .app()
-        .protocol_scan(prefix.as_bytes())
+        .protocol_scan("paykit", prefix.as_bytes())
         .await
         .unwrap();
     assert_eq!(held.len(), bound, "{prefix}");

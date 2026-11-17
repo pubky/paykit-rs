@@ -338,7 +338,7 @@ async fn test_restore_first_read_does_not_confirm_a_held_request() {
     assert!(restored.request(&request).await.unwrap().held.is_some());
     assert!(restored
         .app()
-        .protocol_scan(b"hc/")
+        .protocol_scan("paykit", b"hc/")
         .await
         .unwrap()
         .is_empty());
@@ -382,11 +382,16 @@ async fn test_restore_first_read_block_refusal_keeps_other_current_blocks() {
     let mark = format!("bk/{}", pubky_switch_core::enc::b64(&w.bob_id()));
     assert!(restored
         .app()
-        .protocol_get(mark.as_bytes())
+        .protocol_get("paykit", mark.as_bytes())
         .await
         .unwrap()
         .is_none());
-    let bytes = restored.app().protocol_get(b"dl").await.unwrap().unwrap();
+    let bytes = restored
+        .app()
+        .protocol_get("paykit", b"dl")
+        .await
+        .unwrap()
+        .unwrap();
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let denied: Vec<[u8; 32]> = serde_json::from_value(value["d"].clone()).unwrap();
     assert_eq!(denied, vec![w.carol_id()]);
@@ -488,7 +493,7 @@ async fn test_restore_first_read_keeps_block_intent_when_identity_is_unavailable
     let mark = format!("bk/{}", pubky_switch_core::enc::b64(&w.bob_id()));
     let before = restored
         .app()
-        .protocol_get(mark.as_bytes())
+        .protocol_get("paykit", mark.as_bytes())
         .await
         .unwrap()
         .unwrap();
@@ -506,7 +511,11 @@ async fn test_restore_first_read_keeps_block_intent_when_identity_is_unavailable
         )
         .await;
     assert_eq!(
-        restored.app().protocol_get(mark.as_bytes()).await.unwrap(),
+        restored
+            .app()
+            .protocol_get("paykit", mark.as_bytes())
+            .await
+            .unwrap(),
         Some(before)
     );
     restored.flush().await.unwrap();
@@ -519,7 +528,7 @@ async fn test_restore_first_read_keeps_block_intent_when_identity_is_unavailable
         .contains(&w.bob_id()));
     assert!(restored
         .app()
-        .protocol_get(mark.as_bytes())
+        .protocol_get("paykit", mark.as_bytes())
         .await
         .unwrap()
         .is_none());
@@ -741,10 +750,49 @@ impl pubky_switch_client::store::StateStore for BlockFailureStore {
         &self,
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.commit_with(batch, |batch| {
+            self.inner
+                .commit(batch)
+                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+        })
+        .map(|_| ())
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
+    }
+}
+impl BlockFailureStore {
+    fn commit_with(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+        apply: impl FnOnce(
+            pubky_switch_client::store::WriteBatch,
+        ) -> Result<
+            pubky_switch_client::store::CommitOutcome,
+            pubky_switch_client::error::StoreError,
+        >,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
         use pubky_switch_client::store::Write;
         use std::sync::atomic::Ordering;
         let matches = batch
-            .writes
+            .writes()
             .iter()
             .any(|write| match (self.failure, write) {
                 (BlockFailure::Commit, Write::Delete { key, .. }) => key == &self.target,
@@ -769,7 +817,7 @@ impl pubky_switch_client::store::StateStore for BlockFailureStore {
             self.failures.fetch_add(1, Ordering::SeqCst);
             return Err(pubky_switch_client::error::StoreError::Unavailable);
         }
-        self.inner.commit(batch)
+        apply(batch)
     }
 }
 
@@ -802,7 +850,7 @@ async fn block_after_first_page(failure: BlockFailure, manages: bool, finalizati
         .await
         .unwrap();
     assert!(matches!(sent.delivery, MessageDelivery::Accepted { .. }));
-    let target = format!("p/bk/{}", pubky_switch_core::enc::b64(&w.carol_id())).into_bytes();
+    let target = format!("p/paykit/bk/{}", pubky_switch_core::enc::b64(&w.carol_id())).into_bytes();
     let faults = Arc::new(BlockFailureStore {
         inner: Default::default(),
         target,

@@ -60,10 +60,13 @@ impl Held {
     async fn put(&mut self, bytes: Vec<u8>) {
         self.wallet
             .app_mut()
-            .protocol_commit(&[LocalWrite::Put {
-                key: self.key.clone(),
-                value: bytes,
-            }])
+            .protocol_commit(
+                "paykit",
+                &[LocalWrite::Put {
+                    key: self.key.clone(),
+                    value: bytes,
+                }],
+            )
             .await
             .unwrap();
     }
@@ -94,7 +97,11 @@ fn payment(w: &World, family: Family, app: [u8; 16]) -> UnrequestedPayment {
 
 async fn list(w: &World, wallet: &mut Paykit, app: [u8; 16], version: u64) {
     let key = format!("lq/{}/{}", b64(&w.bob_id()), b64(&app));
-    let asked = wallet.app().protocol_get(key.as_bytes()).await.unwrap();
+    let asked = wallet
+        .app()
+        .protocol_get("paykit", key.as_bytes())
+        .await
+        .unwrap();
     let body = PrivatePaymentList {
         version,
         payment_endpoints: BTreeMap::from([(
@@ -119,7 +126,11 @@ async fn list(w: &World, wallet: &mut Paykit, app: [u8; 16], version: u64) {
     );
     assert_eq!(wallet.receive(None).await.unwrap().applied.len(), 1);
     assert_eq!(
-        wallet.app().protocol_get(key.as_bytes()).await.unwrap(),
+        wallet
+            .app()
+            .protocol_get("paykit", key.as_bytes())
+            .await
+            .unwrap(),
         asked
     );
     w.clock.advance_ms(1_001);
@@ -165,7 +176,7 @@ async fn produced(w: &World, family: Family) -> Held {
     .into_bytes();
     let bytes = wallet
         .app()
-        .protocol_get(&key)
+        .protocol_get("paykit", &key)
         .await
         .unwrap()
         .expect("the public call writes its discovery value");
@@ -240,10 +251,10 @@ fn damage(bytes: &[u8], how: Damage) -> Vec<u8> {
 
 fn replace(backup: &PaykitBackup, key: &[u8], bytes: Vec<u8>) -> PaykitBackup {
     let mut value: Value = serde_json::from_slice(&backup.to_bytes().unwrap()).unwrap();
-    let data = pubky_switch_core::enc::unb64(value["protocol"]["data"].as_str().unwrap()).unwrap();
+    let data = pubky_switch_core::enc::unb64(value["layers"][0]["data"].as_str().unwrap()).unwrap();
     let mut layer = pubky_switch_client::app::decode_local_state(&data).unwrap();
     layer.iter_mut().find(|(k, _)| k == key).unwrap().1 = bytes;
-    value["protocol"]["data"] =
+    value["layers"][0]["data"] =
         Value::String(b64(&pubky_switch_client::app::encode_local_state(&layer)));
     PaykitBackup::from_bytes(&serde_json::to_vec(&value).unwrap()).unwrap()
 }
@@ -264,7 +275,11 @@ async fn refuse_read(family: Family, how: Damage) {
         "malformed discovery state was accepted: {error:?}"
     );
     assert_eq!(
-        held.wallet.app().protocol_get(&held.key).await.unwrap(),
+        held.wallet
+            .app()
+            .protocol_get("paykit", &held.key)
+            .await
+            .unwrap(),
         Some(bad)
     );
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), sends);
@@ -286,7 +301,11 @@ async fn refuse_backup(family: Family, how: Damage) {
         "{error:?}"
     );
     assert_eq!(
-        held.wallet.app().protocol_get(&held.key).await.unwrap(),
+        held.wallet
+            .app()
+            .protocol_get("paykit", &held.key)
+            .await
+            .unwrap(),
         Some(bad)
     );
 }
@@ -317,7 +336,11 @@ async fn refuse_restore(family: Family, how: Damage) {
     );
     assert_eq!(target.commits(), 0);
     assert_eq!(
-        held.wallet.app().protocol_get(&held.key).await.unwrap(),
+        held.wallet
+            .app()
+            .protocol_get("paykit", &held.key)
+            .await
+            .unwrap(),
         Some(held.bytes)
     );
 }
@@ -338,7 +361,11 @@ async fn preserves(family: Family) {
         }
     }
     assert_eq!(
-        held.wallet.app().protocol_get(&held.key).await.unwrap(),
+        held.wallet
+            .app()
+            .protocol_get("paykit", &held.key)
+            .await
+            .unwrap(),
         Some(held.bytes.clone())
     );
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), sends);
@@ -353,7 +380,11 @@ async fn preserves(family: Family) {
     .await
     .unwrap();
     assert_eq!(
-        restored.app().protocol_get(&held.key).await.unwrap(),
+        restored
+            .app()
+            .protocol_get("paykit", &held.key)
+            .await
+            .unwrap(),
         Some(held.bytes.clone())
     );
     restored.reconcile().await.unwrap();
@@ -371,7 +402,11 @@ async fn preserves(family: Family) {
         }
     }
     assert_eq!(
-        held.wallet.app().protocol_get(&held.key).await.unwrap(),
+        held.wallet
+            .app()
+            .protocol_get("paykit", &held.key)
+            .await
+            .unwrap(),
         Some(held.bytes)
     );
     assert_eq!(w.bob.switch().entries_from(&w.alice_id()), sends);
@@ -538,7 +573,7 @@ async fn test_discovery_state_ask_clock_and_version_progress() {
     let bytes = held
         .wallet
         .app()
-        .protocol_get(key.as_bytes())
+        .protocol_get("paykit", key.as_bytes())
         .await
         .unwrap()
         .unwrap();
@@ -581,7 +616,7 @@ async fn test_discovery_state_record_history_survives_restore() {
     let bytes = held
         .wallet
         .app()
-        .protocol_get(&held.key)
+        .protocol_get("paykit", &held.key)
         .await
         .unwrap()
         .unwrap();
@@ -615,7 +650,11 @@ async fn test_discovery_state_record_history_survives_restore() {
         "lno1later"
     );
     assert_eq!(
-        restored.app().protocol_get(&held.key).await.unwrap(),
+        restored
+            .app()
+            .protocol_get("paykit", &held.key)
+            .await
+            .unwrap(),
         Some(bytes)
     );
     assert!(w.rail.all_executions().is_empty());

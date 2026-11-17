@@ -34,7 +34,9 @@ pub mod grant;
 pub mod identifiers;
 mod json;
 pub mod kinds;
+mod list_version;
 pub mod periods;
+pub mod publications;
 pub mod records;
 pub mod scopes;
 #[cfg(feature = "signer")]
@@ -49,4 +51,5 @@ pub use identifiers::{
     AllowanceId, AttemptId, PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentReference,
 };
 pub use kinds::{Kind, PaykitKindRules};
+pub use list_version::ListVersion;
 pub use scopes::{Label, PaykitScope};

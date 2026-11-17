@@ -89,8 +89,14 @@ fn doubt_of(paid: &paykit_sdk::Result<PayOutcome>) -> PaymentDoubt {
 
 /// The provider loss `app` keeps (`p/pl`).
 async fn kept_loss(app: &Paykit) -> LossBoundary {
-    let kept: serde_json::Value =
-        serde_json::from_slice(&app.app().protocol_get(b"pl").await.unwrap().unwrap()).unwrap();
+    let kept: serde_json::Value = serde_json::from_slice(
+        &app.app()
+            .protocol_get("paykit", b"pl")
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
     serde_json::from_value(kept["d"].clone()).unwrap()
 }
 
@@ -300,10 +306,21 @@ async fn test_provider_loss_restore_from_a_backup_before_the_loss_learns_it_agai
     follow_loss(&mut laptop).await;
     // Restored from a backup taken before the loss, the app learns of it when it follows it.
     let mut app = restored(&w, &backup).await;
-    assert!(app.app().protocol_get(b"pl").await.unwrap().is_none());
+    assert!(app
+        .app()
+        .protocol_get("paykit", b"pl")
+        .await
+        .unwrap()
+        .is_none());
     follow_loss(&mut app).await;
-    let kept: serde_json::Value =
-        serde_json::from_slice(&app.app().protocol_get(b"pl").await.unwrap().unwrap()).unwrap();
+    let kept: serde_json::Value = serde_json::from_slice(
+        &app.app()
+            .protocol_get("paykit", b"pl")
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
     let loss = app.app().recovery_info().await.unwrap().unwrap().loss;
     assert_eq!(kept["d"]["declared_at_ms"], loss.declared_at_ms);
     assert_eq!(kept["d"]["uncertain_until_ms"], loss.uncertain_until_ms);
@@ -561,8 +578,15 @@ async fn test_provider_loss_newer_loss_puts_a_stated_obligation_in_doubt_again()
     declare_loss_of(&w, SWITCH_ORIGIN, LATER_SECRET);
     follow_loss(&mut wallet).await;
     let loss = wallet.app().recovery_info().await.unwrap().unwrap().loss;
-    let kept: serde_json::Value =
-        serde_json::from_slice(&wallet.app().protocol_get(b"pl").await.unwrap().unwrap()).unwrap();
+    let kept: serde_json::Value = serde_json::from_slice(
+        &wallet
+            .app()
+            .protocol_get("paykit", b"pl")
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(kept["d"]["generation"], loss.generation);
     assert_eq!(status(&wallet, &request).await, RequestStatus::MayBePaid);
     let again = wallet.pay_request(&request, PayOptions::default()).await;
@@ -586,7 +610,12 @@ async fn test_provider_loss_confirm_not_paid_before_loss_refused_without_a_loss_
         matches!(refused.refusal(), Some(Refusal::NotNow(_))),
         "{refused:?}"
     );
-    assert!(wallet.app().protocol_scan(b"pn/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"pn/")
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(status(&wallet, &request).await, RequestStatus::Open);
 }
 
@@ -823,7 +852,12 @@ async fn test_provider_loss_statement_about_an_older_loss_refused_after_a_newer_
             decisive: Some(decisive)
         })
     );
-    assert!(wallet.app().protocol_scan(b"pn/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"pn/")
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(status(&wallet, &request).await, RequestStatus::MayBePaid);
     assert_eq!(executions(&w), 0);
     // The answer to the doubt shown under the newer loss ends it.
@@ -860,7 +894,12 @@ async fn test_provider_loss_statement_about_an_older_loss_refused_before_the_new
         ),
         "{refused:?}"
     );
-    assert!(wallet.app().protocol_scan(b"pn/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"pn/")
+        .await
+        .unwrap()
+        .is_empty());
     follow_loss(&mut wallet).await;
     assert_eq!(status(&wallet, &request).await, RequestStatus::MayBePaid);
     assert_eq!(executions(&w), 0);
@@ -898,32 +937,74 @@ impl pubky_switch_client::store::StateStore for LossCommitStore {
         &self,
         batch: pubky_switch_client::store::WriteBatch,
     ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.commit_with(batch, |batch| {
+            self.inner
+                .commit(batch)
+                .map(|()| pubky_switch_client::store::CommitOutcome::Applied)
+        })
+        .map(|_| ())
+    }
+
+    fn acquire(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+    ) -> Result<pubky_switch_client::store::AcquireOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.inner.acquire(ns, owner)
+    }
+
+    fn commit_if(
+        &self,
+        ns: &str,
+        owner: pubky_switch_client::store::StoreOwner,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
+        self.commit_with(batch, |batch| self.inner.commit_if(ns, owner, batch))
+    }
+}
+impl LossCommitStore {
+    fn commit_with(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+        apply: impl FnOnce(
+            pubky_switch_client::store::WriteBatch,
+        ) -> Result<
+            pubky_switch_client::store::CommitOutcome,
+            pubky_switch_client::error::StoreError,
+        >,
+    ) -> Result<pubky_switch_client::store::CommitOutcome, pubky_switch_client::error::StoreError>
+    {
         use pubky_switch_client::error::StoreError;
         use pubky_switch_client::store::Write;
         use std::sync::atomic::Ordering::SeqCst;
         let loss = batch
-            .writes
+            .writes()
             .iter()
-            .any(|write| matches!(write, Write::Put { key, .. } if key == b"p/pl"));
+            .any(|write| matches!(write, Write::Put { key, .. } if key == b"p/paykit/pl"));
         if loss && self.mode.load(SeqCst) != 0 {
             // The boundary and statements change in the same host transaction.
-            assert!(batch.writes.iter().any(
-                |write| matches!(write, Write::DeletePrefix { prefix, .. } if prefix == b"p/pn/")
+            assert!(batch.writes().iter().any(
+                |write| matches!(write, Write::DeletePrefix { prefix, .. } if prefix == b"p/paykit/pn/")
             ));
-            assert!(batch.writes.iter().any(
-                |write| matches!(write, Write::Put { key, .. } if key.starts_with(b"p/missed/"))
+            assert!(batch.writes().iter().any(
+                |write| matches!(write, Write::Put { key, .. } if key.starts_with(b"p/paykit/missed/"))
             ));
             self.reached.store(true, SeqCst);
             match self.mode.swap(0, SeqCst) {
                 1 => return Err(StoreError::Unavailable),
                 2 => {
-                    self.inner.commit(batch)?;
+                    let applied = apply(batch)?;
+                    if applied != pubky_switch_client::store::CommitOutcome::Applied {
+                        return Ok(applied);
+                    }
                     return Err(StoreError::Unknown);
                 }
                 _ => unreachable!(),
             }
         }
-        self.inner.commit(batch)
+        apply(batch)
     }
 }
 
@@ -945,7 +1026,7 @@ async fn loss_commit_reload(applied: bool) {
         .confirm_not_paid_before_loss(&doubt.obligation, &old, UserConfirmed::new())
         .await
         .unwrap();
-    let statement = wallet.app().protocol_scan(b"pn/").await.unwrap();
+    let statement = wallet.app().protocol_scan("paykit", b"pn/").await.unwrap();
     assert_eq!(statement.len(), 1);
     let id = wallet.app_id();
     w.clock.advance_ms(60_000);
@@ -973,7 +1054,7 @@ async fn loss_commit_reload(applied: bool) {
     .await
     .unwrap();
     let retained = kept_loss(&wallet).await;
-    let statements = wallet.app().protocol_scan(b"pn/").await.unwrap();
+    let statements = wallet.app().protocol_scan("paykit", b"pn/").await.unwrap();
     if applied {
         assert!(retained.generation() > old.generation());
         assert!(statements.is_empty());
@@ -988,7 +1069,12 @@ async fn loss_commit_reload(applied: bool) {
         .expect_err("an older statement must not be recorded after reload");
     follow_loss(&mut wallet).await;
     assert!(kept_loss(&wallet).await.generation() > old.generation());
-    assert!(wallet.app().protocol_scan(b"pn/").await.unwrap().is_empty());
+    assert!(wallet
+        .app()
+        .protocol_scan("paykit", b"pn/")
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(status(&wallet, &request).await, RequestStatus::MayBePaid);
     assert_eq!(executions(&w), 0);
 }
@@ -1021,7 +1107,7 @@ async fn loss_with_statement() -> (World, Paykit, RequestRef, Vec<(Vec<u8>, Vec<
         )
         .await
         .unwrap();
-    let statement = wallet.app().protocol_scan(b"pn/").await.unwrap();
+    let statement = wallet.app().protocol_scan("paykit", b"pn/").await.unwrap();
     assert_eq!(statement.len(), 1);
     (w, wallet, request, statement)
 }
@@ -1035,7 +1121,11 @@ async fn test_provider_loss_current_statement_and_boundary_survive_restore() {
     let mut restored = restored(&w, &backup).await;
     assert_eq!(kept_loss(&restored).await, boundary);
     assert_eq!(
-        restored.app().protocol_scan(b"pn/").await.unwrap(),
+        restored
+            .app()
+            .protocol_scan("paykit", b"pn/")
+            .await
+            .unwrap(),
         statement
     );
     restored.receive(None).await.unwrap();
@@ -1050,15 +1140,25 @@ async fn test_provider_loss_current_statement_and_boundary_survive_restore() {
 #[tokio::test]
 async fn test_provider_loss_unknown_current_boundary_refuses_read_and_backup() {
     let (w, mut wallet, request, _) = loss_with_statement().await;
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&wallet.app().protocol_get(b"pl").await.unwrap().unwrap()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_slice(
+        &wallet
+            .app()
+            .protocol_get("paykit", b"pl")
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
     value["d"]["extra"] = serde_json::json!(true);
     wallet
         .app_mut()
-        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Put {
-            key: b"pl".to_vec(),
-            value: serde_json::to_vec(&value).unwrap(),
-        }])
+        .protocol_commit(
+            "paykit",
+            &[pubky_switch_client::app::LocalWrite::Put {
+                key: b"pl".to_vec(),
+                value: serde_json::to_vec(&value).unwrap(),
+            }],
+        )
         .await
         .unwrap();
     wallet

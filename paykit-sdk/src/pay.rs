@@ -2323,7 +2323,7 @@ impl Paykit {
             let key = self.activity_key(&record)?;
             conditions.push(self.app.record_condition(&key).await?);
         }
-        let mut batch = OpBatch::new()
+        let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
             .op_if(op.kind(), conditions)
             .obligation_deadline(entry.obligation, own_deadline(entry.deadline));
         if let Some(record_key) = end_hold {
@@ -2732,7 +2732,9 @@ impl Paykit {
         finished.stage = Stage::Finished;
         match write {
             Some(write) => {
-                let batch = OpBatch::new().entry(write).local(journal_write(&finished)?);
+                let batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
+                    .entry(write)
+                    .local(journal_write(&finished)?);
                 match self.submit(batch).await {
                     Ok(_) => {}
                     Err(error) if error.code() == Some(ErrorCode::Conflict) => {
@@ -3066,7 +3068,7 @@ impl Paykit {
                     _ => None,
                 },
             };
-            let mut batch = OpBatch::new();
+            let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME);
             if let Some(step) = step {
                 let op = if paid {
                     ClaimOp::done(entry.obligation, step, attempt, Basis::Owner, None)?
