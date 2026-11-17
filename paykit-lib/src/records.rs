@@ -13,7 +13,7 @@
 //! app can file a counterparty's message under another obligation, label or Allowance.
 //! Writers may write every member, with `null` for absent; readers read `null` as absent.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use pubky_switch_core::enc::{b64, pubky_id, unb64, zbase32_encode};
 use pubky_switch_core::ident::NamingKey;
@@ -273,6 +273,19 @@ impl UnknownMembers {
     /// Whether there are none.
     pub fn is_empty(&self) -> bool {
         self.held.is_empty()
+    }
+
+    /// Members of an unidentified root, excluding every member its writer now knows.
+    /// Flattening these after a typed value preserves that value's member order.
+    pub(crate) fn root_members(&self, shape: &Shape) -> BTreeMap<&str, &Value> {
+        self.held
+            .iter()
+            .find(|held| held.anchor.is_none() && held.path.is_empty())
+            .into_iter()
+            .flat_map(|held| &held.members)
+            .filter(|(name, _)| !shape.members.iter().any(|(known, _)| known == name))
+            .map(|(name, value)| (name.as_str(), value))
+            .collect()
     }
 
     /// Merge the members of retained objects found by identity or path, never by a carried
@@ -4890,6 +4903,17 @@ mod tests {
                 "carried": [{ "k": 1 }, { "k": 1, "b": "second" }] })
         );
         assert_eq!(first, second, "an origin isn't part of the value");
+        assert_eq!(
+            serde_json::to_value(unknown.root_members(&OUTER)).unwrap(),
+            serde_json::json!({ "x": 2 })
+        );
+        let expanded = Shape {
+            name: "outer",
+            id: &[],
+            carried: false,
+            members: &[("x", Member::Leaf)],
+        };
+        assert!(unknown.root_members(&expanded).is_empty());
         // None: the bytes as written.
         let none = UnknownMembers::default();
         assert_eq!(
