@@ -684,3 +684,104 @@ async fn test_own_record_restored_upkeep_waits_for_a_completed_read() {
         restored.app().record()
     );
 }
+
+#[tokio::test]
+async fn test_own_record_shortened_age_limit_controls_renewal_and_expiry() {
+    let w = World::new();
+    let mut shop = publishing_shop(&w).await;
+    shop.set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1tips"))
+        .await
+        .unwrap();
+    let first = held(&shop, w.bob_id());
+    w.bob
+        .next_doc(|body| body.record_max_age = Some(10 * 86_400))
+        .unwrap();
+    shop.app_mut().refresh_identity().await.unwrap();
+    w.clock.advance_ms(6 * DAY_MS);
+    shop.receive(None).await.unwrap();
+    let renewed = held(&shop, w.bob_id());
+    assert!(renewed.updated_at() > first.updated_at());
+    assert!(renewed.expires_at().unwrap() <= renewed.updated_at() + 10 * DAY_MS);
+    assert_eq!(
+        PaykitMember::read(&renewed).unwrap(),
+        PaykitMember::read(&first).unwrap()
+    );
+    assert_eq!(on_homeserver(&w, &shop).unwrap().signed(), renewed.signed());
+}
+
+#[tokio::test]
+async fn test_own_record_losing_request_scope_withdraws_public_endpoints() {
+    let w = World::new();
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            AppScopes::new().request().pay().build().unwrap(),
+            publishing(),
+            store(),
+        )
+        .await;
+    wallet
+        .set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1tips"))
+        .await
+        .unwrap();
+    let old = wallet.app().cert().clone();
+    let narrower = crate::certificate::renew(
+        &w,
+        wallet.app_id(),
+        &AppScopes::new().pay().build().unwrap(),
+        1_000,
+    );
+    crate::certificate::list(&w, wallet.app_id(), &old, &narrower);
+    w.clock.advance_ms(1_000);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().cert().hash(), narrower.hash());
+    assert!(wallet.own_public_endpoints().unwrap().is_empty());
+    let bytes = w
+        .homeserver
+        .file(w.alice_id(), &app_record_path(&wallet.app_id()))
+        .unwrap();
+    let signed = serde_json::from_slice(&bytes).unwrap();
+    let published = AppRecord::verify(&signed, &w.alice_id()).unwrap();
+    let member = PaykitMember::read(&published).unwrap();
+    assert!(member.public_endpoints.is_empty());
+    assert!(!member.endpoint_identifiers.is_empty());
+    assert_eq!(published.expires_at(), None);
+    assert_eq!(published.signed(), wallet.app().record());
+}
+
+#[tokio::test]
+async fn test_own_record_failed_renewal_keeps_exact_bytes_until_delivery() {
+    let w = World::new();
+    let mut shop = publishing_shop(&w).await;
+    shop.set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1tips"))
+        .await
+        .unwrap();
+    let published = on_homeserver(&w, &shop).unwrap();
+    w.clock.advance_ms(16 * DAY_MS);
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    let error = shop.update_own_record().await.unwrap_err();
+    assert!(
+        matches!(&error, PaykitError::Client(client) if client.code() == Some(pubky_switch_core::http::ErrorCode::Unavailable)),
+        "{error:?}"
+    );
+    let pending = shop.app().record().clone();
+    assert_ne!(&pending, published.signed());
+    assert_eq!(
+        PaykitMember::read(&held(&shop, w.bob_id())).unwrap(),
+        PaykitMember::read(&published).unwrap()
+    );
+    assert_eq!(
+        on_homeserver(&w, &shop).unwrap().signed(),
+        published.signed()
+    );
+    shop.receive(None).await.unwrap();
+    assert_eq!(shop.app().record(), &pending);
+    assert_eq!(on_homeserver(&w, &shop).unwrap().signed(), &pending);
+}
