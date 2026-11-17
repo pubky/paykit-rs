@@ -210,6 +210,8 @@ impl Paykit {
 
     async fn reconcile_inner(&mut self) -> Result<ReconcileReport> {
         self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
+        self.refresh_own()?;
         self.list_records().await?;
         // After a restore, the counterparties of the open requests the records now show are
         // asked to re-send from the backup's cursor time, once (`hold.rs`, Paykit spec 7.2);
@@ -534,6 +536,8 @@ impl Paykit {
         _confirmed: UserConfirmed,
     ) -> Result<()> {
         self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
+        self.refresh_own()?;
         self.records_known().await?;
         let read = self
             .app
@@ -626,7 +630,7 @@ impl Paykit {
             entry.stage = Stage::Finished;
             batch = batch.local(crate::pay::journal_write(&entry)?);
         }
-        self.app.submit_batch(batch).await?;
+        self.submit(batch).await?;
         Ok(())
     }
 
@@ -737,6 +741,8 @@ impl Paykit {
     /// The client's errors, such as the restore question still open; nothing ends while the
     /// asks can't be queued.
     pub async fn end_reconcile(&mut self, confirmed: UserConfirmed) -> Result<()> {
+        self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
         let asks_owed = self
             .local_get::<RestoreHold>(key::RESTORE_HOLD)

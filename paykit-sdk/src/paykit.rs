@@ -19,8 +19,8 @@ use paykit_lib::scopes::{acts_as_payee, check_certificate};
 use paykit_lib::{Asset, Decimal, Label};
 use pubky_switch_client::app::Protocol as _;
 use pubky_switch_client::app::{
-    App, AppBackup, AppConfig, AppEnv, AppError, AppEvent, HomeserverReader, JoinRequest,
-    ReceiveReport,
+    App, AppBackup, AppConfig, AppEnv, AppError, AppEvent, HeldCursor, HomeserverReader,
+    IdentityRefresh, JoinRequest, ReceiveReport,
 };
 use pubky_switch_client::clock::Clock;
 use pubky_switch_core::records::{AppCert, Approval};
@@ -172,6 +172,14 @@ pub struct PaykitBackup {
     app: AppBackup,
 }
 
+/// The client's completed read, before the SDK's outgoing recovery work.
+pub(crate) struct ReadResult {
+    report: ReceiveReport,
+    paused_before: std::collections::BTreeSet<[u8; 32]>,
+    keys_held_before: bool,
+    blocks_after_read: bool,
+}
+
 impl std::fmt::Debug for PaykitBackup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "PaykitBackup({:?})", self.app)
@@ -265,6 +273,33 @@ pub struct ReceiveSummary {
     pub divergent: Vec<crate::DivergentRecord>,
 }
 
+impl ReceiveSummary {
+    /// The summary of two receives, `earlier` and then `self`, as one: the events, messages,
+    /// re-sends and records paused of both, in order; the worse held cursor (ahead over
+    /// unknown over clean); the data epochs either awaited, ascending and unique. Current
+    /// state, including the cursor and certificate status, comes from the later read.
+    fn after(mut self, earlier: Self) -> Self {
+        let report = &mut self.report;
+        report.events.splice(0..0, earlier.report.events);
+        report.held_cursor = match (earlier.report.held_cursor, report.held_cursor) {
+            (Some(ahead @ HeldCursor::Ahead { .. }), _)
+            | (_, Some(ahead @ HeldCursor::Ahead { .. })) => Some(ahead),
+            (Some(HeldCursor::Unknown), _) | (_, Some(HeldCursor::Unknown)) => {
+                Some(HeldCursor::Unknown)
+            }
+            (earlier, later) => later.or(earlier),
+        };
+        self.applied.splice(0..0, earlier.applied);
+        self.resends = self.resends.saturating_add(earlier.resends);
+        self.divergent.splice(0..0, earlier.divergent);
+        self.key_epochs_awaited.extend(earlier.key_epochs_awaited);
+        self.key_epochs_awaited.sort_unstable();
+        self.key_epochs_awaited.dedup();
+        self.scope_keys_awaited |= !self.key_epochs_awaited.is_empty();
+        self
+    }
+}
+
 /// The data epochs `events` name as waited for (`AppEvent::AwaitingKeys`), ascending, each
 /// once.
 fn key_epochs_awaited(events: &[AppEvent]) -> Vec<u64> {
@@ -302,6 +337,10 @@ pub struct Paykit {
     /// before money moves is still used (Paykit spec 4).
     pub(crate) lookups: HashMap<[u8; 32], KeptLookup>,
     pub(crate) config: PaykitConfig,
+    /// Whether this load made the restore's identity-confirmed first read.
+    pub(crate) first_read_done: bool,
+    /// A read made before a public write, to include in the host's next receive summary.
+    pub(crate) first_read_summary: Option<Box<ReceiveSummary>>,
 }
 
 impl std::fmt::Debug for Paykit {
@@ -343,6 +382,8 @@ impl Paykit {
             timer,
             lookups: HashMap::new(),
             config,
+            first_read_done: false,
+            first_read_summary: None,
         })
     }
 
@@ -521,7 +562,9 @@ impl Paykit {
     /// The client's app, mutable, for what Paykit doesn't wrap, such as contacts and invite
     /// codes. Calls made through it bypass Paykit's gates, such as the refusal of every
     /// Paykit action under a certificate Paykit refuses ([`Paykit::certificate_refused`]):
-    /// a host that flushes the client's outbox itself sends what is queued in it.
+    /// a host that flushes the client's outbox itself sends what is queued in it. After a
+    /// restore, the host must run [`Paykit::receive`] before such calls; Paykit's outgoing
+    /// methods make that first read themselves (Switch spec 12.4).
     pub fn app_mut(&mut self) -> &mut App {
         &mut self.app
     }
@@ -640,6 +683,10 @@ impl Paykit {
     /// for the host. An entry dropped unverified (`AppEvent::StoredEntryDropped`) counts in
     /// its sender's mark, which asks that sender to send it again (`marks.rs`).
     ///
+    /// An outgoing method may make the restore's first read before preparing its effects.
+    /// This receive includes that read's events and effects in its summary, then its own.
+    /// After a reload, the client still holds unacknowledged duty events for the host.
+    ///
     /// A receive that returns an error shows no report. When the client's read returned
     /// before the error, the client counts the duty events the read raised as handed to the
     /// host, so no later report shows them: after an error, the host takes them from
@@ -662,13 +709,40 @@ impl Paykit {
     pub async fn receive(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
         // The read's future goes on the heap: the client's read nests deep, and a host
         // polling it on a small stack, such as a test thread's 2 MiB, keeps room for it.
-        Box::pin(self.receive_inner(wait)).await
+        let summary = Box::pin(self.receive_inner(wait)).await?;
+        Ok(match self.first_read_summary.take() {
+            Some(earlier) => summary.after(*earlier),
+            None => summary,
+        })
     }
 
     async fn receive_inner(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
+        let read = Box::pin(self.read_before_effects(wait)).await?;
+        Box::pin(self.after_read(read)).await
+    }
+
+    /// Complete the client's read before a caller's already-recorded block is sent.
+    /// That block must precede the outgoing recovery work in `after_read`.
+    pub(crate) async fn read_before_effects(&mut self, wait: Option<u32>) -> Result<ReadResult> {
         // Each step's future goes on the heap: built in this future's poll, every one of them
         // would otherwise take its size of the stack there, beside the client's read, and a
         // host thread of 2 MiB would not hold a deep read in a debug build.
+        // Confirm the newest own identity before the restore's first page. A read that
+        // cannot be made leaves the first read owed (Switch spec 12.4, "The held cursor").
+        let first_read = self.first_read_pending();
+        if first_read && self.certificate_refused().is_none() {
+            match self.app.refresh_identity().await {
+                Ok(IdentityRefresh::Current { .. } | IdentityRefresh::Newer { .. }) => {}
+                Ok(_) | Err(AppError::Transport(_)) => {
+                    return Err(Refusal::IdentityUnavailable(
+                        "Switch spec 12.4: the restore's first read awaits the own identity".into(),
+                    )
+                    .into());
+                }
+                Err(AppError::Refused(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         // This app's unblocks whose batch the client no longer keeps count no more: they go
         // first, so the lists are read again below, before the copy this app judges by is
         // used. The steps never count an unblock: the client's copy decides there.
@@ -680,7 +754,7 @@ impl Paykit {
         Box::pin(self.refresh_lists_when_due()).await?;
         // This app's blocks that may not reach the switch otherwise are written again: one
         // whose batch the client neither keeps nor applied, a restored one among them.
-        if self.certificate_refused().is_none() {
+        if self.certificate_refused().is_none() && !first_read {
             Box::pin(self.send_own_blocks_again()).await?;
         }
         // The records paused before this read, for the summary's new ones.
@@ -696,21 +770,37 @@ impl Paykit {
             }
             Err(error) => return Err(error.into()),
         };
-        // What follows the read is its own future on the heap: its steps' futures are built
-        // in that future's poll, not in this one's, which stays small beside the client's
-        // deep read.
-        Box::pin(self.after_read(report, paused_before, keys_held_before)).await
+        // A successful call can stop while keys or a listing wait, before any page.
+        // Only a page's verdict under the confirmed current identity opens outgoing work.
+        if report.held_cursor.is_some() && self.app.identity_confirmed_at().is_some() {
+            self.first_read_done = true;
+        }
+        Ok(ReadResult {
+            report,
+            paused_before,
+            keys_held_before,
+            blocks_after_read: first_read,
+        })
     }
 
-    /// The steps of [`Paykit::receive`] after the client's read returned `report`: the
-    /// records paused before it were `paused_before`, and the app held its scope keys at its
-    /// start when `keys_held_before`.
-    async fn after_read(
-        &mut self,
-        report: ReceiveReport,
-        paused_before: std::collections::BTreeSet<[u8; 32]>,
-        keys_held_before: bool,
-    ) -> Result<ReceiveSummary> {
+    /// Finish a first read made for an explicit block, keeping its report for the host.
+    pub(crate) async fn finish_first_read(&mut self, read: ReadResult) -> Result<()> {
+        let summary = Box::pin(self.after_read(read)).await?;
+        self.first_read_summary = Some(Box::new(match self.first_read_summary.take() {
+            Some(earlier) => summary.after(*earlier),
+            None => summary,
+        }));
+        Ok(())
+    }
+
+    /// Run the SDK's recovery work after the client's read and any explicit block.
+    async fn after_read(&mut self, read: ReadResult) -> Result<ReceiveSummary> {
+        let ReadResult {
+            report,
+            paused_before,
+            keys_held_before,
+            blocks_after_read,
+        } = read;
         // The data epochs the entries the client stores for a key wait for, as its report
         // names them at every read while any waits.
         let key_epochs_awaited = key_epochs_awaited(&report.events);
@@ -748,6 +838,33 @@ impl Paykit {
             });
         }
         self.refresh_own()?;
+        if self.first_read_pending() {
+            let applied = report
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    AppEvent::MessageReceived { msg_id, .. } => Some(msg_id.clone()),
+                    _ => None,
+                })
+                .collect();
+            return Ok(ReceiveSummary {
+                report,
+                applied,
+                records_unlisted: self
+                    .unlisted()
+                    .await?
+                    .map(|_| crate::hold::unlisted().to_string()),
+                scope_keys_awaited: self.scope_keys_awaited().await?.is_some()
+                    || !key_epochs_awaited.is_empty(),
+                key_epochs_awaited,
+                divergent: self.newly_paused(&paused_before).await?,
+                ..ReceiveSummary::default()
+            });
+        }
+        // Restore-held blocks go before the other outgoing work, after the first page.
+        if blocks_after_read {
+            Box::pin(self.send_own_blocks_again()).await?;
+        }
         // The client lists the shared records at its read when a listing is owed, a
         // restore's included, before the read itself, while it holds the keys that read
         // them: a read that wasn't stopped got past that listing, so the restore's mark goes
@@ -861,7 +978,9 @@ impl Paykit {
     /// The client's errors.
     pub async fn flush(&mut self) -> Result<()> {
         self.refresh_own()?;
-        self.app.flush_outbox().await?;
+        Box::pin(self.first_read_before_writing()).await?;
+        self.refresh_own()?;
+        self.send_outbox().await?;
         Ok(())
     }
 }
@@ -871,9 +990,9 @@ mod tests {
     use std::sync::Arc;
 
     use paykit_lib::AttemptId;
-    use pubky_switch_client::app::{AppEnv, JoinRequest, UserConfirmed};
+    use pubky_switch_client::app::{AppEnv, AppEvent, HeldCursor, JoinRequest, UserConfirmed};
 
-    use super::{Paykit, PaykitBackup, PaykitConfig};
+    use super::{Paykit, PaykitBackup, PaykitConfig, ReceiveSummary};
     use crate::pay::{PayOptions, UnrequestedPayment};
     use crate::rail::Rail;
     use crate::receipts::{ReceiptDetails, ReceiptsOf};
@@ -980,5 +1099,60 @@ mod tests {
     fn test_paykit_futures_are_send() {
         assert_send_sync::<Paykit>();
         let _ = public_futures_are_send;
+    }
+
+    #[test]
+    fn test_receive_summary_keeps_the_implicit_read_before_the_later_one() {
+        let mut earlier = ReceiveSummary::default();
+        earlier.report.events.push(AppEvent::RenewalSeen);
+        earlier.report.held_cursor = Some(HeldCursor::Clean);
+        earlier.applied.push("first".into());
+        earlier.resends = 2;
+        earlier.key_epochs_awaited = vec![3, 5];
+        let mut later = ReceiveSummary::default();
+        later.report.events.push(AppEvent::FullBundleRequested);
+        later.applied.push("second".into());
+        later.resends = 3;
+        later.key_epochs_awaited = vec![4, 5];
+        let merged = later.after(earlier);
+        assert_eq!(
+            merged.report.events,
+            [AppEvent::RenewalSeen, AppEvent::FullBundleRequested]
+        );
+        assert_eq!(merged.report.held_cursor, Some(HeldCursor::Clean));
+        assert_eq!(merged.applied, ["first", "second"]);
+        assert_eq!(merged.resends, 5);
+        assert_eq!(merged.key_epochs_awaited, [3, 4, 5]);
+        assert!(merged.scope_keys_awaited);
+    }
+
+    #[test]
+    fn test_receive_summary_keeps_the_worse_held_cursor() {
+        let ahead = HeldCursor::Ahead {
+            held: 9,
+            position: 4,
+        };
+        for (first, second, expected) in [
+            (Some(HeldCursor::Clean), Some(ahead), Some(ahead)),
+            (Some(ahead), Some(HeldCursor::Unknown), Some(ahead)),
+            (
+                Some(HeldCursor::Clean),
+                Some(HeldCursor::Unknown),
+                Some(HeldCursor::Unknown),
+            ),
+            (
+                Some(HeldCursor::Unknown),
+                Some(HeldCursor::Clean),
+                Some(HeldCursor::Unknown),
+            ),
+            (None, Some(HeldCursor::Clean), Some(HeldCursor::Clean)),
+            (None, None, None),
+        ] {
+            let mut earlier = ReceiveSummary::default();
+            earlier.report.held_cursor = first;
+            let mut later = ReceiveSummary::default();
+            later.report.held_cursor = second;
+            assert_eq!(later.after(earlier).report.held_cursor, expected);
+        }
     }
 }

@@ -685,6 +685,10 @@ async fn test_one_time_kept_stop_refuses_a_payment_after_a_restore() {
     )
     .await
     .unwrap();
+    // Establish the restored client's first page before refusing the SDK's placement.
+    app.app_mut().refresh_identity().await.unwrap();
+    app.app_mut().receive(None).await.unwrap();
+    assert!(app.app().restore_held_cursor().is_some());
     refuse_batches(&w, 1);
     let _ = app.reconcile().await;
     app.end_reconcile(pubky_switch_client::app::UserConfirmed::new())

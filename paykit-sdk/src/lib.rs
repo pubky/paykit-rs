@@ -55,6 +55,7 @@ mod journal;
 mod loss;
 mod marks;
 mod notices;
+mod outbound;
 mod pay;
 mod paykit;
 mod periods;

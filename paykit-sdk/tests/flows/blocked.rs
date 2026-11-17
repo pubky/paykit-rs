@@ -791,6 +791,10 @@ async fn test_blocked_own_block_restored_written_again_after_a_try_that_could_no
     )
     .await
     .unwrap();
+    wallet.app_mut().refresh_identity().await.unwrap();
+    wallet.app_mut().receive(None).await.unwrap();
+    assert!(wallet.app().identity_confirmed_at().is_some());
+    assert!(wallet.app().restore_held_cursor().is_some());
     keep_ops(&w, 2);
     let error = wallet.app_mut().deny(&[7; 32]).await.unwrap_err();
     assert!(error.kept_batch().is_some(), "{error:?}");
@@ -2575,16 +2579,27 @@ async fn test_blocked_held_rejection_over_a_record_left_unreadable_after_a_resto
     for _ in 0..2 {
         wallet.receive(None).await.unwrap();
     }
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    // The first read can owe a resend request while the unreadable answer remains held.
+    // Only that request may have gone; the rejection is still neither queued nor sent.
+    let sent = wallet
+        .app()
+        .sent_to(&w.bob_id(), 0, u64::MAX)
+        .await
+        .unwrap();
+    assert!(sent
+        .iter()
+        .all(|message| message.kind == "paykit.resend_request"));
+    let after_asks = w.bob.switch().entries_from(&w.alice_id());
+    assert_eq!(after_asks, entries + sent.len());
     assert!(wallet.app().delivery(&rejection).await.unwrap().is_none());
     assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_some());
     assert_eq!(wallet.app().protocol_scan(b"ha/").await.unwrap().len(), 1);
     crate::periods::writes_value(&mut phone, &target, &good).await;
     wallet.receive(None).await.unwrap();
     assert!(wallet.app().delivery(&rejection).await.unwrap().is_some());
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries + 1);
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), after_asks + 1);
     assert!(wallet.app().protocol_get(b"ro").await.unwrap().is_none());
     assert!(wallet.app().protocol_scan(b"ha/").await.unwrap().is_empty());
     wallet.receive(None).await.unwrap();
-    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries + 1);
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), after_asks + 1);
 }

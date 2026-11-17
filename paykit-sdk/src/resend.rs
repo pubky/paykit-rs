@@ -115,10 +115,12 @@ impl Paykit {
         selection: ResendSelection,
     ) -> Result<String> {
         self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
+        self.refresh_own()?;
         self.refuse_while_sends_held(&counterparty).await?;
         let signed = self.resend_request_message(counterparty, selection)?;
         let msg_id = self.queue_resend_request(signed, &counterparty).await?;
-        self.app.flush_message(&msg_id).await?;
+        self.send_message(&msg_id).await?;
         Ok(msg_id)
     }
 
@@ -175,7 +177,7 @@ impl Paykit {
                         let msg_id = queued.msg_id.clone();
                         self.local_delete(&ask_key).await?;
                         if !self.sends_held(&ask.sender).await? {
-                            self.app.flush_message(&msg_id).await?;
+                            self.send_message(&msg_id).await?;
                             sent = sent.saturating_add(1);
                         }
                         continue;
@@ -243,7 +245,7 @@ impl Paykit {
                 Err(error) => return Err(error),
             }
             self.local_delete(&ask_key).await?;
-            self.app.flush_message(&msg_id).await?;
+            self.send_message(&msg_id).await?;
             sent = sent.saturating_add(1);
         }
         Ok(sent)
@@ -510,7 +512,7 @@ impl Paykit {
             tx.put(&key::resent(requester, &sent.msg_id), &now)?;
             tx.put(&key::resent_day(requester, day), &count)?;
             self.local_commit(tx).await?;
-            if self.app.resend(&sent.msg_id).await.is_ok() {
+            if self.send_again(&sent.msg_id).await.is_ok() {
                 resent = resent.saturating_add(1);
             }
         }

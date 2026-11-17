@@ -39,6 +39,7 @@ mod recurring;
 mod replies;
 mod resend;
 mod restore;
+mod restore_first_read;
 mod restore_hold;
 mod spam;
 mod stored;

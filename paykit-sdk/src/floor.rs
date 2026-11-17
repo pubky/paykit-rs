@@ -294,7 +294,7 @@ impl Paykit {
     /// Submit `batch`; after a `409 conflict` the floor is read again before the error
     /// returns, so the next try builds on what the switch holds.
     async fn submit_floor(&mut self, batch: OpBatch) -> Result<()> {
-        match self.app.submit_batch(batch).await {
+        match self.submit(batch).await {
             Ok(_) => Ok(()),
             Err(error) => {
                 if error.code() == Some(ErrorCode::Conflict) {
@@ -371,6 +371,7 @@ impl Paykit {
     /// on the version before it fails (Paykit spec 8.3, Manual only). Each record checked
     /// drops its note, but one whose write meets a conflict, kept for the next receive.
     pub(crate) async fn sweep_floor(&mut self) -> Result<()> {
+        self.require_first_read()?;
         let notes = self.local_scan::<bool>(key::FLOOR_OPENED).await?;
         if notes.is_empty() {
             return Ok(());

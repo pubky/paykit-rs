@@ -640,6 +640,8 @@ impl Paykit {
         draft: RequestDraft,
     ) -> Result<SentRequest> {
         self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
+        self.refresh_own()?;
         self.require_payee()?;
         // Nothing new starts with a counterparty whose sends are held (Paykit spec 8.1,
         // "Blocked counterparties"), refused before anything is signed, written or queued.
@@ -698,7 +700,7 @@ impl Paykit {
             payee: own,
             request_hash: hash,
         });
-        if let Err(error) = self.app.submit_batch(batch).await {
+        if let Err(error) = self.submit(batch).await {
             let Some(batch_id) = error.kept_batch() else {
                 return Err(error.into());
             };
@@ -724,7 +726,7 @@ impl Paykit {
     /// that fails leaves it queued for the next flush, and the call still reports it sent,
     /// so the caller doesn't send a second message.
     pub(crate) async fn delivered(&mut self, msg_id: &str) -> Result<MessageDelivery> {
-        let delivery = match self.app.flush_message(msg_id).await {
+        let delivery = match self.send_message(msg_id).await {
             Ok(Some(delivery)) => delivery,
             _ => self
                 .app
@@ -871,6 +873,8 @@ impl Paykit {
     }
 
     async fn verify_payment_inner(&mut self, record: &[u8; 32]) -> Result<Option<u64>> {
+        self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
         self.records_known().await?;
         // The check goes on the heap, as `receive`'s steps do: it nests deep.
@@ -1171,6 +1175,8 @@ impl Paykit {
         details: ReceiptDetails,
     ) -> Result<Option<String>> {
         self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
+        self.refresh_own()?;
         self.records_known().await?;
         let confirmed = details.maybe_credited_confirmed.is_some();
         // The check goes on the heap, as `receive`'s steps do: it nests deep.
@@ -1221,7 +1227,7 @@ impl Paykit {
                 Err(error) => return Err(error),
             }
         };
-        self.app.flush_message(&msg_id).await?;
+        self.send_message(&msg_id).await?;
         Ok(Some(msg_id))
     }
 
@@ -1246,6 +1252,8 @@ impl Paykit {
         record: &[u8; 32],
         reason: Option<String>,
     ) -> Result<String> {
+        self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
         self.records_known().await?;
         self.require_payee()?;
@@ -1297,7 +1305,7 @@ impl Paykit {
                 Err(error) => return Err(error),
             }
         };
-        self.app.flush_message(&msg_id).await?;
+        self.send_message(&msg_id).await?;
         Ok(msg_id)
     }
 
@@ -1385,7 +1393,7 @@ impl Paykit {
         match write {
             Some(entry) => {
                 let batch = OpBatch::new().entry(entry).locals(tx.into_writes());
-                if let Err(error) = self.app.submit_batch(batch).await {
+                if let Err(error) = self.submit(batch).await {
                     if error.code() == Some(ErrorCode::Conflict) {
                         self.app.read_record(&target.record_target()).await?;
                     }
@@ -1927,6 +1935,8 @@ impl Paykit {
         reason: Option<String>,
     ) -> Result<String> {
         self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
+        self.refresh_own()?;
         self.records_known().await?;
         // The answer's future goes on the heap, as `receive`'s does: it nests deep.
         let (msg_id, _) = Box::pin(self.answer_request(
@@ -1954,6 +1964,8 @@ impl Paykit {
         request: &RequestRef,
         reason: Option<String>,
     ) -> Result<String> {
+        self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
         self.records_known().await?;
         // The answer's future goes on the heap, as `receive`'s does: it nests deep.
@@ -2011,6 +2023,8 @@ impl Paykit {
         request: &RequestRef,
         options: AcceptOptions,
     ) -> Result<SentMessage> {
+        self.refresh_own()?;
+        Box::pin(self.first_read_before_writing()).await?;
         self.refresh_own()?;
         self.records_known().await?;
         // The answer's future goes on the heap, as `receive`'s does: it nests deep.
@@ -2196,7 +2210,7 @@ impl Paykit {
         // An acceptance recorded and queued is sent whatever a try to deliver it now gives;
         // a rejection's or cancellation's failed try is the call's error, as before.
         if answer != Answer::Accept {
-            self.app.flush_message(&msg_id).await?;
+            self.send_message(&msg_id).await?;
         }
         Ok((msg_id.clone(), Some(self.delivered(&msg_id).await?)))
     }
