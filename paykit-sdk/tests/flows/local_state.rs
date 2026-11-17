@@ -676,7 +676,9 @@ async fn cancellation_under_another_requests_key(
         .app()
         .record_key(&crate::outcome_record::payer_record(&request))
         .unwrap();
-    let key = format!("kc/{}", b64(&record));
+    // The key of the shop's own copy, the app that sends the cancellation below.
+    let shop_app = w.bob.identity().app_keys("shop").app_id_bytes();
+    let key = format!("kc/{}/{}", b64(&record), b64(&shop_app));
     let cancellation = kept_message_with_refs(
         w,
         "shop",
