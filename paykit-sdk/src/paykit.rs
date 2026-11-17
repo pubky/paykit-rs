@@ -17,13 +17,13 @@ use std::sync::Arc;
 use paykit_lib::derive::request_obligation_blinded;
 use paykit_lib::scopes::{acts_as_payee, check_certificate};
 use paykit_lib::{Asset, Decimal, Label};
-use pubky_switch_client::app::Protocol as _;
 use pubky_switch_client::app::{
     App, AppBackup, AppConfig, AppEnv, AppError, AppEvent, HeldCursor, HomeserverReader,
-    IdentityRefresh, JoinRequest, ReceiveReport,
+    IdentityRefresh, JoinRequest, ProtocolSet, ReceiveReport,
 };
 use pubky_switch_client::clock::Clock;
 use pubky_switch_core::records::{AppCert, Approval};
+use pubky_switch_core::scopes::owns_root;
 
 use crate::destination::KeptLookup;
 use crate::error::{Refusal, Result};
@@ -213,7 +213,8 @@ impl PaykitBackup {
 #[non_exhaustive]
 pub struct ReceiveSummary {
     /// The client's report of the feed read. Once the receive has returned, the host may
-    /// acknowledge its duty events up to the last one the report shows
+    /// acknowledge its duty events for Paykit up to the last one the report shows, and
+    /// app-wide only once every other protocol each is for has handled it
     /// ([`Paykit::receive`]).
     pub report: ReceiveReport,
     /// The `msg_id`s of the messages received, each with its effect committed with the
@@ -324,6 +325,11 @@ fn account_gone(events: &[AppEvent]) -> bool {
 }
 
 /// One Paykit App of an identity.
+///
+/// The convenience constructors register Paykit alone; the `*_with_protocols` constructors
+/// let the host register its other protocols under the same App ID (Paykit spec 3.2).
+/// Each own scope root needs its registered owner (Switch wire 3.1). Other protocols'
+/// scopes grant no Paykit rights, whether in the own or a counterparty's certificate.
 pub struct Paykit {
     pub(crate) app: App,
     pub(crate) protocol: Arc<PaykitProtocol>,
@@ -356,8 +362,23 @@ pub(crate) fn check_own_certificate(cert: &AppCert) -> Result<()> {
 }
 
 impl Paykit {
-    fn new_protocol(rail: &Arc<dyn Rail>) -> Arc<PaykitProtocol> {
-        Arc::new(PaykitProtocol::with_rail(Arc::clone(rail)))
+    fn protocols<F>(rail: &Arc<dyn Rail>, register: F) -> Result<(Arc<PaykitProtocol>, ProtocolSet)>
+    where
+        F: FnOnce(Arc<PaykitProtocol>) -> std::result::Result<ProtocolSet, AppError>,
+    {
+        let protocol = Arc::new(PaykitProtocol::with_rail(Arc::clone(rail)));
+        let protocols = register(Arc::clone(&protocol))?;
+        let expected = Arc::clone(&protocol) as Arc<dyn pubky_switch_client::app::Protocol>;
+        if !protocols
+            .get("paykit")
+            .is_some_and(|p| Arc::ptr_eq(p, &expected))
+        {
+            return Err(AppError::Refused(pubky_switch_client::app::Refusal::Usage(
+                "the protocol set must retain the supplied Paykit protocol".into(),
+            ))
+            .into());
+        }
+        Ok((protocol, protocols))
     }
 
     fn assemble(
@@ -390,10 +411,12 @@ impl Paykit {
     /// Join from an approval (Switch spec 12.1), as a Paykit App: the client's join, with
     /// Paykit as its protocol. The approval's certificate must pass Paykit's checks (Paykit
     /// wire 3.1). Session creation, key storage and the approval's channel stay the host's.
+    /// This convenience constructor registers only Paykit. Use [`Paykit::join_with_protocols`]
+    /// when the own certificate also holds another protocol's scopes (Paykit spec 3.2).
     ///
     /// # Errors
     ///
-    /// The client's errors; [`crate::PaykitError::Lib`] for a certificate Paykit refuses,
+    /// The client's errors; [`Refusal::CertificateRefused`] for a certificate Paykit refuses,
     /// and `Validation` for an `orphan_after_s` below the rail's floor ([`orphan_floor_s`]),
     /// before anything is written.
     pub async fn join(
@@ -403,45 +426,73 @@ impl Paykit {
         rail: Arc<dyn Rail>,
         timer: Arc<dyn Timer>,
     ) -> Result<Self> {
-        // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(Self::join_inner(env, config, request, rail, timer)).await
+        Self::join_with_protocols(env, config, request, rail, timer, |p| Ok(p.into())).await
     }
 
-    async fn join_inner(
+    /// Join with the host's complete protocol set (Paykit spec 3.2; Switch spec 3.3).
+    /// `register` receives the Paykit implementation configured for this rail and must
+    /// include that same instance in its returned set, alongside the host's protocols.
+    /// The set routes approval keys and callbacks to their owners. Registration and the
+    /// own certificate are checked before any state is written.
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::join`], plus the host's registration error or the client's `Usage`
+    /// refusal if the set omits or replaces the supplied Paykit implementation.
+    pub async fn join_with_protocols<F>(
         env: AppEnv,
         config: PaykitConfig,
         request: JoinRequest,
         rail: Arc<dyn Rail>,
         timer: Arc<dyn Timer>,
-    ) -> Result<Self> {
-        check_orphan_window(&config, rail.as_ref())?;
-        let protocol = Self::new_protocol(&rail);
-        // The certificate passes Paykit's checks before the client writes anything: the
-        // client's join reads the approval with this same function, on these same inputs,
-        // before its first commit, so this is the certificate it would keep. An approval
-        // that doesn't read is left to the client's join, which refuses it, writing nothing.
-        if let Ok(approved) = Approval::read(
-            &request.approval,
-            &request.request,
-            &request.identity,
-            &request.keys.bundle_secret(),
-            &|scope| protocol.has_keys(scope),
-        ) {
-            check_own_certificate(&approved.cert)?;
-        }
-        let app = App::join(env.clone(), protocol.clone(), config.app.clone(), request).await?;
-        // No certificate is kept as listed under: the copy is empty until a listing has run
-        // with the keys held, the client's at its first read or one of Paykit's, so until then
-        // the records count as unlisted (Paykit spec 8.1, "Records not listed yet";
-        // `Paykit::unlisted`) and a call that reads them lists first or is refused.
-        let paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
-        Ok(paykit)
+        register: F,
+    ) -> Result<Self>
+    where
+        F: FnOnce(Arc<PaykitProtocol>) -> std::result::Result<ProtocolSet, AppError>,
+    {
+        // Keep the nested client future on the heap, as at `receive`.
+        Box::pin(async move {
+            check_orphan_window(&config, rail.as_ref())?;
+            let (protocol, protocols) = Self::protocols(&rail, register)?;
+            // The certificate passes Paykit's checks before the client writes anything: the
+            // client's join reads the approval with this same function, on these same inputs,
+            // before its first commit, so this is the certificate it would keep. An approval
+            // that doesn't read is left to the client's join, which refuses it, writing nothing.
+            if let Ok(approved) = Approval::read(
+                &request.approval,
+                &request.request,
+                &request.identity,
+                &request.keys.bundle_secret(),
+                &|scope| {
+                    let root = scope.split_once(':').map_or(scope, |(root, _)| root);
+                    protocols
+                        .names()
+                        .iter()
+                        .find(|name| owns_root(name, root))
+                        .and_then(|name| protocols.get(name))
+                        .is_some_and(|owner| owner.has_keys(scope))
+                },
+            ) {
+                check_own_certificate(&approved.cert)?;
+            }
+            let app = App::join(env.clone(), protocols, config.app.clone(), request).await?;
+            // No certificate is kept as listed under: the copy is empty until a listing has run
+            // with the keys held, the client's at its first read or one of Paykit's, so until then
+            // the records count as unlisted (Paykit spec 8.1, "Records not listed yet";
+            // `Paykit::unlisted`) and a call that reads them lists first or is refused.
+            let paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
+            Ok(paykit)
+        })
+        .await
     }
 
     /// Load a Paykit App from the store alone: nothing is sent. Payments a crash left in the
     /// journal resume at [`Paykit::resume_payments`]. A stored certificate Paykit refuses,
     /// a renewal the Switch took, still loads: the app reads its feed, to take a renewal
     /// that passes, and takes no Paykit action meanwhile ([`Paykit::certificate_refused`]).
+    ///
+    /// This convenience constructor registers only Paykit. Use [`Paykit::load_with_protocols`]
+    /// for an app joined with other protocols (Paykit spec 3.2).
     ///
     /// # Errors
     ///
@@ -454,34 +505,49 @@ impl Paykit {
         rail: Arc<dyn Rail>,
         timer: Arc<dyn Timer>,
     ) -> Result<Self> {
-        // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(Self::load_inner(env, config, app_id, rail, timer)).await
+        Self::load_with_protocols(env, config, app_id, rail, timer, |p| Ok(p.into())).await
     }
 
-    async fn load_inner(
+    /// Load with every protocol the app joined with (Paykit spec 3.2; Switch spec 3.3).
+    /// As at [`Paykit::join_with_protocols`], `register` must retain the supplied Paykit
+    /// instance. Missing or extra registered owners are refused before state is written.
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::load`], plus the host's registration error or the client's `Usage`
+    /// refusal if the set omits or replaces the supplied Paykit implementation.
+    pub async fn load_with_protocols<F>(
         env: AppEnv,
         config: PaykitConfig,
         app_id: [u8; 16],
         rail: Arc<dyn Rail>,
         timer: Arc<dyn Timer>,
-    ) -> Result<Self> {
-        check_orphan_window(&config, rail.as_ref())?;
-        let protocol = Self::new_protocol(&rail);
-        let app = App::load(env.clone(), protocol.clone(), config.app.clone(), app_id).await?;
-        let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
-        // A record a view showed divergent pauses, also when a crash came before the
-        // receive's events were taken (`divergent.rs`): every record held is looked at once.
-        Box::pin(paykit.sweep_divergent()).await?;
-        // A restore clamps its cursor time after its commit: a crash between the two leaves
-        // it for the next load (`Paykit::bound_restored_cursor_time`, idempotent). Nothing is
-        // written under a certificate Paykit refuses.
-        if paykit.certificate_refused().is_none() {
-            paykit.bound_restored_cursor_time().await?;
-        }
-        // A load keeps nothing as listed under: a certificate the client took since the last
-        // listing, a narrower one included, leaves the records unlisted until the next one
-        // (`hold::side_unlisted`).
-        Ok(paykit)
+        register: F,
+    ) -> Result<Self>
+    where
+        F: FnOnce(Arc<PaykitProtocol>) -> std::result::Result<ProtocolSet, AppError>,
+    {
+        // Keep the nested client future on the heap, as at `receive`.
+        Box::pin(async move {
+            check_orphan_window(&config, rail.as_ref())?;
+            let (protocol, protocols) = Self::protocols(&rail, register)?;
+            let app = App::load(env.clone(), protocols, config.app.clone(), app_id).await?;
+            let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
+            // A record a view showed divergent pauses, also when a crash came before the
+            // receive's events were taken (`divergent.rs`): every record held is looked at once.
+            Box::pin(paykit.sweep_divergent()).await?;
+            // A restore clamps its cursor time after its commit: a crash between the two leaves
+            // it for the next load (`Paykit::bound_restored_cursor_time`, idempotent). Nothing is
+            // written under a certificate Paykit refuses.
+            if paykit.certificate_refused().is_none() {
+                paykit.bound_restored_cursor_time().await?;
+            }
+            // A load keeps nothing as listed under: a certificate the client took since the last
+            // listing, a narrower one included, leaves the records unlisted until the next one
+            // (`hold::side_unlisted`).
+            Ok(paykit)
+        })
+        .await
     }
 
     /// Restore from a backup (Switch spec 12.4): the client's restore, which installs
@@ -491,6 +557,9 @@ impl Paykit {
     /// 7.2), each request payment's claim key bound to its request under the backup's naming
     /// key. On an error, neither layer is in the store. The app is in reconcile mode until
     /// [`Paykit::reconcile`] and [`Paykit::end_reconcile`].
+    ///
+    /// This convenience constructor registers only Paykit. Use [`Paykit::restore_with_protocols`]
+    /// to restore an app with other protocols (Paykit spec 3.2).
     ///
     /// # Errors
     ///
@@ -507,34 +576,44 @@ impl Paykit {
         rail: Arc<dyn Rail>,
         timer: Arc<dyn Timer>,
     ) -> Result<Self> {
-        // The call's future goes on the heap, as `receive`'s does: it nests deep.
-        Box::pin(Self::restore_inner(env, config, backup, rail, timer)).await
+        Self::restore_with_protocols(env, config, backup, rail, timer, |p| Ok(p.into())).await
     }
 
-    async fn restore_inner(
+    /// Restore the client's state and every registered protocol layer together (Paykit
+    /// spec 3.2, 7.2; Switch spec 12.4). As at [`Paykit::join_with_protocols`], `register`
+    /// must retain the supplied Paykit instance. The client validates the named layers
+    /// and each protocol validates its own state before the atomic restore commit.
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::restore`], plus the host's registration error or the client's `Usage`
+    /// refusal if the set omits or replaces the supplied Paykit implementation.
+    pub async fn restore_with_protocols<F>(
         env: AppEnv,
         config: PaykitConfig,
         backup: &PaykitBackup,
         rail: Arc<dyn Rail>,
         timer: Arc<dyn Timer>,
-    ) -> Result<Self> {
-        // The client checks its state, then Paykit's layer checks the certificate and the
-        // whole journal (`PaykitProtocol::restore_layer`), before anything is written; then
-        // both go in one commit: on an error, neither is in the store.
-        check_orphan_window(&config, rail.as_ref())?;
-        crate::protocol::check_restored_loss(&backup.app)?;
-        let protocol = Self::new_protocol(&rail);
-        let app = App::restore(
-            env.clone(),
-            protocol.clone(),
-            config.app.clone(),
-            &backup.app,
-        )
-        .await?;
-        let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
-        paykit.bound_restored_cursor_time().await?;
-        paykit.stamp_restore_time().await?;
-        Ok(paykit)
+        register: F,
+    ) -> Result<Self>
+    where
+        F: FnOnce(Arc<PaykitProtocol>) -> std::result::Result<ProtocolSet, AppError>,
+    {
+        // Keep the nested client future on the heap, as at `receive`.
+        Box::pin(async move {
+            // The client checks its state, then Paykit's layer checks the certificate and the
+            // whole journal (`PaykitProtocol::restore_layer`), before anything is written; then
+            // both go in one commit: on an error, neither is in the store.
+            check_orphan_window(&config, rail.as_ref())?;
+            crate::protocol::check_restored_loss(&backup.app)?;
+            let (protocol, protocols) = Self::protocols(&rail, register)?;
+            let app = App::restore(env.clone(), protocols, config.app.clone(), &backup.app).await?;
+            let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
+            paykit.bound_restored_cursor_time().await?;
+            paykit.stamp_restore_time().await?;
+            Ok(paykit)
+        })
+        .await
     }
 
     /// The app's backup: the client's state and Paykit's, the payment journal in it, read in
@@ -675,13 +754,17 @@ impl Paykit {
     /// (Paykit spec 9). `wait` is the long-poll wait in seconds.
     ///
     /// **Acknowledging duty events.** Once this call has returned, the host may acknowledge
-    /// the client's duty events up to the last one its summary's report shows
-    /// ([`pubky_switch_client::app::App::ack_events`]), whether the call returned early, under
-    /// a certificate Paykit refuses or an account gone, or not: the SDK has kept what it
-    /// needs of the events about stored entries before it returns. The SDK itself
-    /// acknowledges, in order, the events it took up to the first it didn't; the rest wait
-    /// for the host. An entry dropped unverified (`AppEvent::StoredEntryDropped`) counts in
-    /// its sender's mark, which asks that sender to send it again (`marks.rs`).
+    /// for Paykit the duty events up to the last one its summary's report shows, with
+    /// [`App::ack_events_for`] under `"paykit"`, the name [`PaykitProtocol`] registers,
+    /// whether the call returned early, under a certificate Paykit refuses or an account
+    /// gone, or not: the SDK has kept what it needs of the events about stored entries
+    /// before it returns. The app-wide [`App::ack_events`] acknowledges each event for every
+    /// protocol it is for, so in an app with other protocols the host calls it only once
+    /// each of those has handled the event too. The SDK itself acknowledges for Paykit
+    /// ([`App::ack_events_for`]), in order, the events it took up to the first it didn't;
+    /// the rest wait for the host. An entry dropped unverified
+    /// (`AppEvent::StoredEntryDropped`) counts in its sender's mark, which asks that sender
+    /// to send it again (`marks.rs`).
     ///
     /// An outgoing method may make the restore's first read before preparing its effects.
     /// This receive includes that read's events and effects in its summary, then its own.
@@ -690,9 +773,9 @@ impl Paykit {
     /// A receive that returns an error shows no report. When the client's read returned
     /// before the error, the client counts the duty events the read raised as handed to the
     /// host, so no later report shows them: after an error, the host takes them from
-    /// [`App::unacknowledged_events`] (through [`Paykit::app_mut`]), and acknowledges them
-    /// only once a later receive has returned, up to the last event its report shows, so the
-    /// SDK has taken those about stored entries first.
+    /// [`App::unacknowledged_events`] (through [`Paykit::app_mut`]), and acknowledges them,
+    /// as above, only once a later receive has returned, up to the last event its report
+    /// shows, so the SDK has taken those about stored entries first.
     ///
     /// # Errors
     ///

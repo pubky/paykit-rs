@@ -3,8 +3,9 @@
 //! kept in Paykit's own state.
 //!
 //! - **An effect refused for good** (`EffectRefused`, or a `Parked` duty event of any reason
-//!   but `Uncertain`), such as a record write the switch refused (`403
-//!   permission_missing`), or one over a quota: the message is kept (`p/se/<sender>/<msg_id>`)
+//!   but `Uncertain`, `Released` or `AwaitingAdmission`), such as a record write refused
+//!   with `403 permission_missing`, or one over a quota: the message is kept
+//!   (`p/se/<sender>/<msg_id>`)
 //!   and written into its record by a later write of the app's own, tried at every receive
 //!   until it lands, as room frees: a request, a payer's reply, a proof of a payment without
 //!   a request into the record of its settlement, a receipt beside the proof it names, and
@@ -28,14 +29,18 @@
 //!   nothing. A copy of the entry the host released after that is declined, its message
 //!   processed, so its effect isn't applied twice (`PaykitProtocol`'s receive step).
 //! - **A released entry that ran as a duplicate** (`ReleasedDuplicate`): its note goes.
+//! - **An input awaiting protocol admission:** its informational parked notice creates no
+//!   later-write note. Its unsupported admission-drop duty stays owed; custody alone does
+//!   not authorize a later record write (Switch spec 8.2).
 //! - **An entry dropped unverified** (`StoredEntryDropped`): it counts in its sender's mark
 //!   of entries dropped unverified (`ud/<sender>`, `marks.rs`), and the sender is asked at
 //!   once to send again what its inbox accepted from the mark's earliest time to its latest,
 //!   while it may still keep them, and again at most once a day while the mark lives (Paykit
 //!   spec 8.1, 9).
 //! - **An entry dropped while it waited for a scope key** (`StoredEntryDropped` with its
-//!   `awaited_epoch`): the message was never processed. The host is told once that it is
-//!   given up ([`crate::NoticeKind::MessageGivenUp`]), by the event that names its `msg_id`,
+//!   `WaitingReason::Key`): this copy is dropped without being processed. The host is told
+//!   once that it is given up ([`crate::NoticeKind::MessageGivenUp`]), by the event that
+//!   names its `msg_id`,
 //!   even while the copy of the records may lack its record, and the drop counts in its
 //!   sender's mark of key waits (`kw/<sender>`, `marks.rs`), which asks that sender, on the
 //!   same cadence, only once the app holds every key those messages waited for. A copy
@@ -47,10 +52,11 @@
 //! nothing twice, whoever acknowledges it and whenever. A mark goes once its event is
 //! acknowledged. An event whose message the SDK can't keep, such as one whose entry is
 //! gone, is not taken, and stays for the host. So once [`Paykit::receive`] has returned,
-//! the host may acknowledge up to the last event its report showed. The SDK also
-//! acknowledges, in order, the events it has taken up to the first one it hasn't, so they
-//! don't pile up for a host that acknowledges only its own: housekeeping, which decides
-//! nothing.
+//! the host may acknowledge for Paykit up to the last event its report showed
+//! (`App::ack_events_for`), and app-wide (`App::ack_events`) only once every other protocol
+//! each event is for has handled it. The SDK also acknowledges for Paykit, in order, the
+//! events it has taken up to the first one it hasn't, so they don't pile up for a host that
+//! acknowledges only its own: housekeeping, which decides nothing.
 
 use paykit_lib::derive::natural_key;
 use paykit_lib::records::{ActivityRecord, StoredMessage};
@@ -341,8 +347,8 @@ impl Paykit {
         Ok(out)
     }
 
-    /// Take the duty events about stored entries the client hasn't had acknowledged,
-    /// `events`, each at its first sight (module docs, "Taken at first sight"); acknowledge,
+    /// Take Paykit's duty events about stored entries the client hasn't had acknowledged,
+    /// from `events`, each at its first sight (module docs, "Taken at first sight"); acknowledge,
     /// in order, those taken up to the first that isn't; drop the marks of events
     /// acknowledged. Only Paykit's own local state is written: the kept messages are written
     /// into their records by [`Paykit::place_stored`].
@@ -351,6 +357,9 @@ impl Paykit {
         let mut prefix = true;
         let mut through = None;
         for event in events {
+            if !self.app.event_is_for(event, crate::protocol::BACKUP_NAME) {
+                continue;
+            }
             let Some(id) = event.id() else {
                 continue;
             };
@@ -366,7 +375,9 @@ impl Paykit {
             }
         }
         if let Some(id) = through {
-            self.app.ack_events(id).await?;
+            self.app
+                .ack_events_for(crate::protocol::BACKUP_NAME, id)
+                .await?;
         }
         let mut gone = Tx::default();
         for (rest, _) in self.local_scan::<bool>(key::TAKEN).await? {
@@ -386,7 +397,9 @@ impl Paykit {
         let taken = match event {
             AppEvent::Parked {
                 stored_id, reason, ..
-            } if *reason != ParkReason::Released => self.note_stored(*stored_id, &mut tx).await?,
+            } if !matches!(reason, ParkReason::Released | ParkReason::AwaitingAdmission) => {
+                self.note_stored(*stored_id, &mut tx).await?
+            }
             AppEvent::EffectRefused { stored_id, .. }
             | AppEvent::EffectUncertain { stored_id, .. } => {
                 self.note_stored(*stored_id, &mut tx).await?
@@ -395,26 +408,26 @@ impl Paykit {
                 tx.delete(&key::stored_note(sender, msg_id));
                 true
             }
-            // Dropped while it waited for a scope key: never processed. Its sender is asked
+            // A copy dropped while it waited for a scope key. Its sender is asked
             // again once the app holds the key, and the host is told once, by the copy that
             // names the message, even while the copy of the records may lack its record.
             AppEvent::StoredEntryDropped {
                 sender,
                 accepted_at_ms,
-                awaited_epoch: Some(epoch),
-                msg_id,
+                waiting: pubky_switch_client::app::WaitingReason::Key { data_epoch },
+                message,
                 ..
             } => {
-                self.count_key_wait(&mut tx, *sender, *accepted_at_ms, *epoch)
+                self.count_key_wait(&mut tx, *sender, *accepted_at_ms, *data_epoch)
                     .await?;
-                if let Some(msg_id) = msg_id {
-                    self.give_up_key_wait(&mut tx, *sender, msg_id).await?;
-                }
+                self.give_up_key_wait(&mut tx, *sender, &message.msg_id)
+                    .await?;
                 true
             }
             AppEvent::StoredEntryDropped {
                 sender,
                 accepted_at_ms,
+                waiting: pubky_switch_client::app::WaitingReason::Sender,
                 ..
             } => {
                 self.count_dropped_unverified(&mut tx, *sender, *accepted_at_ms)
@@ -423,7 +436,9 @@ impl Paykit {
             }
             // A record a view showed divergent pauses (`divergent.rs`): its mark is its own
             // commit, before this event's, and taking the event again changes nothing.
-            AppEvent::RecordDivergent { key: record, id } => {
+            AppEvent::RecordDivergent {
+                key: record, id, ..
+            } => {
                 Box::pin(self.take_divergent_event(record, id)).await?;
                 true
             }
@@ -1068,7 +1083,7 @@ impl Paykit {
             return Ok(Placed::Done);
         };
         let sender = stored.sender();
-        let mut batch = OpBatch::new();
+        let mut batch = OpBatch::for_protocol(crate::protocol::BACKUP_NAME);
         let mut writes = false;
         if found.names_held_proof {
             if let Some(entry) = self
@@ -1176,8 +1191,12 @@ impl Paykit {
             return Ok(Placed::Done);
         };
         submitted(
-            self.submit(OpBatch::new().entry(entry).locals(tx.into_writes()))
-                .await,
+            self.submit(
+                OpBatch::for_protocol(crate::protocol::BACKUP_NAME)
+                    .entry(entry)
+                    .locals(tx.into_writes()),
+            )
+            .await,
         )
     }
 }

@@ -769,7 +769,7 @@ impl Paykit {
                 let write = crate::state::local_put(&key, &next)?;
                 match self
                     .app
-                    .forget_processed(mark.sender, &msg_id, &[write])
+                    .forget_processed(crate::protocol::BACKUP_NAME, mark.sender, &msg_id, &[write])
                     .await
                 {
                     Ok(_) => mark = next,
