@@ -456,6 +456,115 @@ async fn test_public_read_discovery_and_payment_agree_on_a_failed_app() {
 }
 
 #[tokio::test]
+async fn test_public_read_required_app_in_conflict_pays_the_earlier_record() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w
+        .join(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    publish_app_at(
+        &w,
+        "shop",
+        one_endpoint("btc-lightning-bolt11", "lnbc1a"),
+        t0,
+        expiry,
+    );
+    wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    publish_app_at(
+        &w,
+        "shop",
+        one_endpoint("btc-lightning-bolt12", "lno1b"),
+        t0 + 1000,
+        expiry,
+    );
+    wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    // Two bodies at one updated_at: the shop keeps the earlier record it holds (Switch spec
+    // 4.2), so a request requiring it pays that record's endpoint and tells the conflict.
+    publish_app_at(
+        &w,
+        "shop",
+        one_endpoint("btc-bitcoin-p2wpkh", "bc1q"),
+        t0 + 1000,
+        expiry,
+    );
+    let draft = paykit_sdk::RequestDraft::new(
+        btc("1"),
+        paykit_lib::PaymentReference::new("order-1").unwrap(),
+        paykit_lib::bodies::RequestDestination::RequiredApp(shop.app_id()),
+    )
+    .with_proposal_expires_at_ms(w.clock.now_ms() + DAY_MS);
+    let request = request_from(&mut shop, w.alice_id(), draft).await;
+    wallet.receive(None).await.unwrap();
+    let public = PayOptions::default().with_mode(PaymentMode::Public(UserConfirmed::new()));
+    let outcome = wallet.pay_request(&request, public).await.unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
+        "btc-lightning-bolt11"
+    );
+    let failures = wallet.payment_public_failures();
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(
+        matches!(&failures[0].reason, PublicAppFailureReason::Refused(rule)
+            if rule.contains("Switch spec 4.2")),
+        "{failures:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_public_read_failures_told_with_every_payment_result() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let apps = bob_apps(&w, &["shop", "till"]).await;
+    publish_now(
+        &w,
+        apps[0].0,
+        one_endpoint("btc-lightning-bolt12", "lno1shop"),
+    );
+    publish_now(
+        &w,
+        apps[1].0,
+        one_endpoint("btc-lightning-bolt11", "lnbc1till"),
+    );
+    wallet.public_endpoints(&w.bob_id(), None).await.unwrap();
+    w.clock.advance_ms(1000);
+    publish_now(
+        &w,
+        apps[0].0,
+        json!({ "public_endpoints": { "btc-lightning-bolt12": 7 } }),
+    );
+    let shop_failed = |failures: &[paykit_sdk::app_records::PublicAppFailure]| {
+        failures.len() == 1 && failures[0].app_id == apps[0].1
+    };
+    // The payment method fails the payment: the outcome isn't `Paid`, and the shop's
+    // failure is still told.
+    w.rail.next(paykit_sdk::rail::Behaviour::Fail);
+    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    assert!(matches!(outcome, PayOutcome::Failed { .. }), "{outcome:?}");
+    assert!(shop_failed(wallet.payment_public_failures()));
+    // The payer's switch can't be reached for the attempt: an error, and the shop's
+    // failure is still told.
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    assert!(wallet.pay_without_request(public_to_bob(&w)).await.is_err());
+    assert!(shop_failed(wallet.payment_public_failures()));
+    // A resume reads no public endpoints: it tells none.
+    wallet.resume_payments().await.unwrap();
+    assert!(wallet.payment_public_failures().is_empty());
+}
+
+#[tokio::test]
 async fn test_public_read_required_app_cached_record_not_paid_over_a_refused_one() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;

@@ -241,6 +241,68 @@ async fn test_mixed_protocols_join_counts_only_owned_kinds() {
     );
 }
 
+#[tokio::test]
+async fn test_mixed_protocols_withdrawal_refused_by_a_lapsed_expiry_keeps_the_member_readable() {
+    let w = world();
+    let mut scopes = AppScopes::new().request().build().unwrap();
+    scopes.scopes.push("chat".into());
+    let mut app = Paykit::join_with_protocols(
+        w.env(&w.alice, store()),
+        PaykitConfig::default().with_app(pubky_switch_client::app::AppConfig {
+            publishes_record: true,
+            ..pubky_switch_client::app::AppConfig::default()
+        }),
+        w.approve(&w.alice, "mixed", &scopes),
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+        register,
+    )
+    .await
+    .unwrap();
+    let id = paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt12").unwrap();
+    app.set_public_endpoint(
+        id.clone(),
+        paykit_lib::PaymentEndpointPayload::new("lno1tips").unwrap(),
+    )
+    .await
+    .unwrap();
+    // Chat's member asks for a fixed expiry, an hour on, which then lapses.
+    let chat = || {
+        let mut member = serde_json::Map::new();
+        member.insert("room".into(), serde_json::json!("lobby"));
+        Some(member)
+    };
+    let hour = 3_600_000;
+    let deadline = pubky_switch_client::clock::Clock::now_ms(w.clock.as_ref()) + hour;
+    app.app_mut()
+        .set_protocol_member("chat", chat(), Some(deadline))
+        .await
+        .unwrap();
+    w.clock.advance_ms(2 * hour);
+    // The last withdrawal can't be signed while chat's expiry has lapsed: the endpoint stays
+    // under Paykit's lifetime, and the record still reads.
+    assert!(app.remove_public_endpoint(&id).await.is_err());
+    assert_eq!(app.own_public_endpoints().unwrap().len(), 1);
+    // Chat asks for no expiry: the record signed then carries Paykit's lifetime with the
+    // endpoint, so it still reads, and a receive goes through.
+    app.app_mut()
+        .set_protocol_member("chat", chat(), None)
+        .await
+        .unwrap();
+    assert_eq!(app.own_public_endpoints().unwrap().len(), 1);
+    app.receive(None).await.unwrap();
+    let held =
+        pubky_switch_core::records::AppRecord::verify(app.app().record(), &w.alice_id()).unwrap();
+    assert!(held.expires_at().is_some());
+    // The withdrawal goes through now, and Paykit's ask goes with it: no expiry is left.
+    app.remove_public_endpoint(&id).await.unwrap();
+    assert!(app.own_public_endpoints().unwrap().is_empty());
+    let held =
+        pubky_switch_core::records::AppRecord::verify(app.app().record(), &w.alice_id()).unwrap();
+    assert_eq!(held.expires_at(), None);
+    app.receive(None).await.unwrap();
+}
+
 fn register(p: Arc<PaykitProtocol>) -> Result<ProtocolSet, AppError> {
     ProtocolSet::new(vec![p, Arc::new(Chat)])
 }

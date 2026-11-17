@@ -512,6 +512,13 @@ async fn test_own_record_edit_after_an_unknown_store_result_waits_for_a_load() {
         ),
         "{error:?}"
     );
+    // The record this handle holds may not be the one stored: reading its endpoints is
+    // refused, naming the way out.
+    let refused = shop.own_public_endpoints().unwrap_err();
+    let PaykitError::Refused(Refusal::NotNow(text)) = &refused else {
+        panic!("{refused:?}");
+    };
+    assert!(text.contains("load the app again"), "{text}");
     // Adding B on this handle would build on the record it still holds, with A: refused,
     // naming the way out, and nothing is signed.
     let record = shop.app().record().clone();
@@ -707,6 +714,50 @@ async fn test_own_record_update_returns_where_the_record_stands() {
     assert_eq!(publication, Publication::Published);
     let published = PaykitMember::read(&on_homeserver(&w, &shop).unwrap()).unwrap();
     assert_eq!(published.endpoint_identifiers, [only]);
+}
+
+#[tokio::test]
+async fn test_own_record_update_returns_the_renewal_and_publication_status() {
+    use pubky_switch_client::app::Publication;
+    let w = World::new();
+    let mut shop = publishing_shop(&w).await;
+    shop.set_public_endpoint(endpoint("btc-lightning-bolt12"), payload("lno1tips"))
+        .await
+        .unwrap();
+    // A renewal due whose Homeserver write fails: owed.
+    w.clock.advance_ms(16 * DAY_MS);
+    let before = shop.app().record().clone();
+    w.homeserver.fail_writes(1, false);
+    let publication = shop.update_own_record().await.unwrap();
+    assert!(
+        matches!(publication, Publication::Owed { .. }),
+        "{publication:?}"
+    );
+    assert_ne!(shop.app().record(), &before);
+    // Nothing to change, and the write owed fails at each try of the call: still owed.
+    w.homeserver.fail_writes(2, false);
+    let publication = shop.update_own_record().await.unwrap();
+    assert!(
+        matches!(publication, Publication::Owed { .. }),
+        "{publication:?}"
+    );
+    // The write goes through: published.
+    assert_eq!(
+        shop.update_own_record().await.unwrap(),
+        Publication::Published
+    );
+    // Nothing owed, and the read that checks the Homeserver copy fails: unchecked.
+    w.homeserver.set_down(true);
+    let publication = shop.update_own_record().await.unwrap();
+    w.homeserver.set_down(false);
+    assert!(
+        matches!(publication, Publication::Unchecked { .. }),
+        "{publication:?}"
+    );
+    assert_eq!(
+        on_homeserver(&w, &shop).unwrap().signed(),
+        shop.app().record()
+    );
 }
 
 #[tokio::test]
@@ -1064,9 +1115,11 @@ async fn test_own_record_withdrawal_waits_for_delivery_before_publication() {
         on_homeserver(&w, &shop).unwrap().signed(),
         published.signed()
     );
-    let pending = shop.app().record().clone();
     shop.receive(None).await.unwrap();
-    assert_eq!(on_homeserver(&w, &shop).unwrap().signed(), &pending);
+    assert_eq!(
+        on_homeserver(&w, &shop).unwrap().signed(),
+        shop.app().record()
+    );
     assert!(PaykitMember::read(&on_homeserver(&w, &shop).unwrap())
         .unwrap()
         .public_endpoints

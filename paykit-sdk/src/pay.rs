@@ -345,7 +345,9 @@ pub enum PayOutcome {
         /// couldn't be used in the read it paid from, with why (Paykit spec 4): the payment
         /// went to another app's endpoint. The host tells the user, as it must of records
         /// that conflict (Switch wire 3.2), which a payment can be the first read to find.
-        /// Empty for every other payment, and for a payment resumed or repaired later.
+        /// Empty for every other payment, and for a payment resumed or repaired later. The
+        /// same as [`Paykit::payment_public_failures`] after the call, which also gives them
+        /// for every other outcome and for an error.
         public_failures: Vec<PublicAppFailure>,
     },
     /// Paid, but the outcome couldn't be written: the app isn't current any more. Its
@@ -874,8 +876,21 @@ impl Paykit {
         request: &RequestRef,
         options: PayOptions,
     ) -> Result<PayOutcome> {
+        self.payment_public_failures.clear();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.pay_request_inner(request, options, Initiator::User)).await
+    }
+
+    /// The payee's apps whose public endpoints couldn't be used in the read the last payment
+    /// call on this handle made in [`PaymentMode::Public`] ([`Paykit::pay_request`],
+    /// [`Paykit::pay_without_request`]), with why (Paykit spec 4), whatever that call
+    /// returned: any [`PayOutcome`], or an error, such as [`Refusal::NoDestination`] when
+    /// no app is left. Each payment call starts it empty; it stays empty for a call that read
+    /// no public endpoints, and for [`Paykit::resume_payments`] and
+    /// [`Paykit::repair_activity_record`], which don't read them again. The host tells the
+    /// user of each, as it must of records that conflict (Switch wire 3.2).
+    pub fn payment_public_failures(&self) -> &[PublicAppFailure] {
+        &self.payment_public_failures
     }
 
     /// [`Paykit::pay_request`] started as an automatic payment ([`Initiator::Automatic`]), for
@@ -894,6 +909,7 @@ impl Paykit {
         request: &RequestRef,
         options: PayOptions,
     ) -> Result<PayOutcome> {
+        self.payment_public_failures.clear();
         Box::pin(self.pay_request_inner(request, options, Initiator::Automatic)).await
     }
 
@@ -1138,6 +1154,7 @@ impl Paykit {
     /// As [`Paykit::pay_request`]; [`PaykitError::Conflict`] when the `payment_lists` record
     /// changed meanwhile, after which the caller pays to the next usable endpoint.
     pub async fn pay_without_request(&mut self, payment: UnrequestedPayment) -> Result<PayOutcome> {
+        self.payment_public_failures.clear();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.pay_without_request_inner(payment)).await
     }
@@ -1309,6 +1326,7 @@ impl Paykit {
     /// the record's value is sealed under a key the app doesn't hold yet, which opens once
     /// it comes and is never replaced meanwhile; the client's errors.
     pub async fn repair_activity_record(&mut self, attempt_id: &AttemptId) -> Result<PayOutcome> {
+        self.payment_public_failures.clear();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.repair_activity_record_inner(attempt_id)).await
     }
@@ -1619,6 +1637,9 @@ impl Paykit {
             // An app whose record served now failed gave no endpoints (`public_records`), so
             // a request requiring it has no public destination (Paykit spec 4, 8.1); its
             // failure is in the refusal, or told with the payment made to another app.
+            // Every failure of this read is the call's, whatever it returns
+            // ([`Paykit::payment_public_failures`]).
+            self.payment_public_failures.clone_from(&failures);
             if gathered.is_empty() {
                 let mut text =
                     String::from("Paykit spec 4: the payee has no usable public endpoint");
@@ -3402,6 +3423,7 @@ impl Paykit {
     /// [`Refusal::IdentityUnavailable`] when a repeat is due and the own `identity.json`
     /// isn't confirmed in the last 60 s; the client's errors; the rail's errors.
     pub async fn resume_payments(&mut self) -> Result<Vec<PayOutcome>> {
+        self.payment_public_failures.clear();
         // The call's future goes on the heap, as `receive`'s does: it nests deep.
         Box::pin(self.resume_payments_inner()).await
     }

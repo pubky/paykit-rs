@@ -353,6 +353,12 @@ pub struct Paykit {
     /// public endpoint edit builds on it until the app is loaded again
     /// (`crate::own_record`).
     pub(crate) own_record_unknown: bool,
+    /// The failures of the public read the last payment call made
+    /// ([`Paykit::payment_public_failures`]).
+    pub(crate) payment_public_failures: Vec<crate::app_records::PublicAppFailure>,
+    /// Whether this load already asked the client to drop Paykit's expiry ask from a held
+    /// record without public endpoints (`crate::own_record`).
+    pub(crate) expiry_ask_dropped: bool,
 }
 
 impl std::fmt::Debug for Paykit {
@@ -412,6 +418,8 @@ impl Paykit {
             first_read_done: false,
             first_read_summary: None,
             own_record_unknown: false,
+            payment_public_failures: Vec::new(),
+            expiry_ask_dropped: false,
         }
     }
 

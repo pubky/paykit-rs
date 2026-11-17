@@ -305,9 +305,9 @@ async fn test_public_conflicting_records_use_the_earlier_one_until_a_later_one()
         expiry,
     );
     assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
-    // Another body at the same updated_at: a conflict (Switch spec 4.2). It is the shop's
-    // failure, and the shop offers nothing, not even the earlier record kept (Paykit spec
-    // 4): discovery and a payment agree.
+    // Another body at the same updated_at: a conflict. Neither is used, it is told as the
+    // shop's failure, and the wallet keeps using the earlier record it holds (Switch spec
+    // 4.2): discovery and a payment agree.
     publish_at(
         &w,
         one_endpoint("btc-bitcoin-p2wpkh", "bc1qother"),
@@ -315,20 +315,23 @@ async fn test_public_conflicting_records_use_the_earlier_one_until_a_later_one()
         expiry,
     );
     let list = read(&mut wallet, &w).await;
-    assert!(list.endpoints.is_empty(), "{list:?}");
+    assert_eq!(ids(&list), ["btc-lightning-bolt11"]);
     assert!(
         fails_with(&list, shop.app_id(), &["Switch spec 4.2"]),
         "{list:?}"
     );
-    let refused = wallet
-        .pay_without_request(public_to_bob(&w))
-        .await
-        .unwrap_err();
-    let Some(Refusal::NoDestination(text)) = refused.refusal() else {
-        panic!("{refused:?}");
+    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    let PayOutcome::Paid {
+        public_failures, ..
+    } = &outcome
+    else {
+        panic!("{outcome:?}");
     };
-    assert!(text.contains("Switch spec 4.2"), "{text}");
-    assert!(w.rail.all_executions().is_empty());
+    assert_eq!(public_failures, &list.failures);
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].endpoint_id,
+        endpoint("btc-lightning-bolt11")
+    );
     // A strictly later record ends the conflict, and with it the failure.
     publish_at(
         &w,
@@ -679,8 +682,8 @@ async fn test_public_conflict_kept_past_the_history_bound_and_a_reload() {
         t0 + 69,
         expiry,
     );
-    // Neither side of the conflict is used, nor the earlier record kept.
-    assert!(listed(&mut wallet, &w).await.is_empty());
+    // Neither side of the conflict is used: the wallet falls back to the earlier record.
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
     // Many more bodies at that updated_at keep the conflict as it is, and a reload too: the
     // rejected endpoint never becomes usable.
     for i in 0..70u64 {
@@ -690,7 +693,7 @@ async fn test_public_conflict_kept_past_the_history_bound_and_a_reload() {
             t0 + 69,
             expiry,
         );
-        assert!(listed(&mut wallet, &w).await.is_empty());
+        assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
     }
     drop(wallet);
     let mut wallet = w
@@ -701,14 +704,14 @@ async fn test_public_conflict_kept_past_the_history_bound_and_a_reload() {
             std::sync::Arc::clone(&w.clock),
         )
         .await;
-    assert!(listed(&mut wallet, &w).await.is_empty());
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
     publish_at(
         &w,
         one_endpoint("btc-bitcoin-p2wpkh", "bc1qsecond"),
         t0 + 69,
         expiry,
     );
-    assert!(listed(&mut wallet, &w).await.is_empty());
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
 }
 
 #[tokio::test]
