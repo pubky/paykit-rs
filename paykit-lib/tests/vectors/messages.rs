@@ -1466,29 +1466,25 @@ fn check_receipt_members(keys: &Keys, file: &Value) {
     }
 }
 
-const PAYEE_LABEL_DESCRIPTION: &str = "Spec 3.4, wire 4.1 check 8, 4.8, 4.9, 4.11, 5.3: the \
-payee's period details, receipt and cancellation about a request labelled shop1, each from \
-messages.json's message of its kind as the shop signs it, its refs naming that request, \
-presented with a certificate of the shop's keys holding sender_scope and the \
-paykit_settlements and paykit_contacts it requires (sender_cert). The request is \
-payment_request_labelled for the receipt and the cancellation, and request_recurring for the \
-period details: messages.json's payment_request_recurring with label shop1, sent by the \
-hosted app. The receipt confirms proof: messages.json's payment_proof naming \
-payment_request_labelled and copying its label. Each passes check 8 at alice's wallet and \
-check 10, and the details are valid against their request (wire 4.9). accepted are those from \
-paykit_request and paykit_request:shop1, which the payer takes; refused are those from \
-paykit_request:shop2, which the payer drops where it reads the request, and a payer request \
-record holding the request, the proof and the refused receipt or cancellation is invalid. \
-reason is paykit-lib's wording.";
+const PAYEE_LABEL_DESCRIPTION: &str = "Spec 3.3, 3.4, wire 4.1 check 8, 4.8, 4.9, 4.11, 5.3: the \
+shop's messages as messages.json signs them, with the refs changed to name request, presented \
+with a certificate of the shop's keys holding sender_scope and the paykit_settlements and \
+paykit_contacts it requires (sender_cert). request is payment_request_labelled for the receipt \
+and the cancellation; request_recurring, messages.json's payment_request_recurring with label \
+shop1 sent by the hosted app, or payment_request_recurring itself, unlabelled, for the period \
+details; null for a private_payment_list and a receipt naming no request, which names \
+payment_proof_unrequested. The receipt about a request confirms proof: messages.json's \
+payment_proof naming payment_request_labelled and copying its label. Each passes check 10, \
+and the details are valid against their request (wire 4.9). accepted are those the payer \
+takes, from paykit_request and from the request's label. refused are those it drops: about a \
+request, from another label or from a label about an unlabelled request, which pass check 8 \
+and are dropped where the payer reads the request, a payer request record holding such a \
+receipt or cancellation being invalid; and a private_payment_list or a receipt naming no \
+request from a labelled scope, dropped at check 8. reason is paykit-lib's wording.";
 
-/// The labelled request a payee's message of `kind` names in `payee_label_senders`.
-fn label_request_name(kind: &str) -> &'static str {
-    if kind == Kind::PaymentPeriodDetails.as_str() {
-        "request_recurring"
-    } else {
-        "payment_request_labelled"
-    }
-}
+/// The requests and proof of `payee_label_senders`, by name: JSON, signature, hash and the
+/// app that sends it.
+type LabelParts = HashMap<&'static str, (Vec<u8>, String, [u8; 32], &'static str)>;
 
 /// `messages.json`'s message `base` with `refs` and `label` set and signed by `app`, as its
 /// JSON, the signature and the message hash.
@@ -1496,13 +1492,15 @@ fn relabelled(
     keys: &Keys,
     base: &str,
     app: &str,
-    refs: Vec<[u8; 32]>,
+    refs: Option<Vec<[u8; 32]>>,
     label: Option<&str>,
 ) -> (Vec<u8>, String, [u8; 32]) {
     let mut m = Message::parse(&message_json(base), OPAQUE_MEMBERS).unwrap();
     let sender = keys.app(app);
     m.from.app_id = sender.keys.app_id_bytes();
-    m.refs = refs;
+    if let Some(refs) = refs {
+        m.refs = refs;
+    }
     if let Some(label) = label {
         m.body.insert("label".into(), json!(label));
     }
@@ -1512,114 +1510,170 @@ fn relabelled(
     (json, b64(&plaintext.signature()), plaintext.hash())
 }
 
-/// The requests and proof of `payee_label_senders`, by name: JSON, signature and hash.
-fn label_parts(keys: &Keys) -> HashMap<&'static str, (Vec<u8>, String, [u8; 32])> {
-    let labelled = message("payment_request_labelled");
-    let labelled_json = message_json("payment_request_labelled");
-    let labelled_hash = paykit_lib::derive::message_hash(&labelled_json);
+/// The requests and proof the cases of `payee_label_senders` name.
+fn label_parts(keys: &Keys) -> LabelParts {
+    let with_app =
+        |(json, signature, hash): (Vec<u8>, String, [u8; 32]), app| (json, signature, hash, app);
+    let labelled = relabelled(keys, "payment_request_labelled", "hosted", None, None);
+    let labelled_hash = labelled.2;
     let mut parts = HashMap::new();
+    parts.insert("payment_request_labelled", with_app(labelled, "hosted"));
     parts.insert(
-        "payment_request_labelled",
-        (
-            labelled_json,
-            st(&labelled, "signature").to_owned(),
-            labelled_hash,
+        "payment_request_recurring",
+        with_app(
+            relabelled(keys, "payment_request_recurring", "shop", None, None),
+            "shop",
         ),
     );
     parts.insert(
         "request_recurring",
-        relabelled(
-            keys,
-            "payment_request_recurring",
+        with_app(
+            relabelled(
+                keys,
+                "payment_request_recurring",
+                "hosted",
+                None,
+                Some("shop1"),
+            ),
             "hosted",
-            Vec::new(),
-            Some("shop1"),
         ),
     );
     parts.insert(
         "proof",
-        relabelled(
-            keys,
-            "payment_proof",
+        with_app(
+            relabelled(
+                keys,
+                "payment_proof",
+                "wallet",
+                Some(vec![labelled_hash]),
+                Some("shop1"),
+            ),
             "wallet",
-            vec![labelled_hash],
-            Some("shop1"),
         ),
     );
     parts
 }
 
-/// The payee's message `base` of `payee_label_senders`, naming its labelled request, as the
-/// shop signs it.
-fn label_message(keys: &Keys, base: &str) -> (Vec<u8>, String, [u8; 32]) {
-    let parts = label_parts(keys);
-    let kind = st(&message(base), "kind").to_owned();
-    let request = parts[label_request_name(&kind)].2;
-    let refs = if base == "payment_receipt" {
-        vec![parts["proof"].2, request]
-    } else {
-        vec![request]
-    };
-    relabelled(keys, base, "shop", refs, None)
-}
+/// One case of `payee_label_senders`: its name, the base message, the request it names, the
+/// sender's selling scope, and whether the payer takes it.
+type LabelCase = (
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+    &'static str,
+    bool,
+);
 
-/// The kinds and sender scopes of `payee_label_senders`: (name, base message, scope, taken).
-const PAYEE_LABEL_CASES: [(&str, &str, &str, bool); 9] = [
+const PAYEE_LABEL_CASES: [LabelCase; 12] = [
     (
         "period details from paykit_request",
         "payment_period_details",
+        Some("request_recurring"),
         "paykit_request",
         true,
     ),
     (
         "period details from paykit_request:shop1",
         "payment_period_details",
+        Some("request_recurring"),
         "paykit_request:shop1",
         true,
     ),
     (
         "period details from paykit_request:shop2",
         "payment_period_details",
+        Some("request_recurring"),
         "paykit_request:shop2",
+        false,
+    ),
+    (
+        "period details about an unlabelled request from paykit_request:shop1",
+        "payment_period_details",
+        Some("payment_request_recurring"),
+        "paykit_request:shop1",
         false,
     ),
     (
         "a receipt from paykit_request",
         "payment_receipt",
+        Some("payment_request_labelled"),
         "paykit_request",
         true,
     ),
     (
         "a receipt from paykit_request:shop1",
         "payment_receipt",
+        Some("payment_request_labelled"),
         "paykit_request:shop1",
         true,
     ),
     (
         "a receipt from paykit_request:shop2",
         "payment_receipt",
+        Some("payment_request_labelled"),
         "paykit_request:shop2",
         false,
     ),
     (
         "a payee's cancellation from paykit_request",
         "payment_request_cancellation",
+        Some("payment_request_labelled"),
         "paykit_request",
         true,
     ),
     (
         "a payee's cancellation from paykit_request:shop1",
         "payment_request_cancellation",
+        Some("payment_request_labelled"),
         "paykit_request:shop1",
         true,
     ),
     (
         "a payee's cancellation from paykit_request:shop2",
         "payment_request_cancellation",
+        Some("payment_request_labelled"),
         "paykit_request:shop2",
         false,
     ),
+    (
+        "a private_payment_list from paykit_request:shop1",
+        "private_payment_list",
+        None,
+        "paykit_request:shop1",
+        false,
+    ),
+    (
+        "a receipt naming no request from paykit_request:shop1",
+        "payment_receipt",
+        None,
+        "paykit_request:shop1",
+        false,
+    ),
 ];
+
+/// The shop's message `base` of `payee_label_senders`, naming `request`, as it signs it: JSON
+/// and signature. A receipt naming no request confirms `payment_proof_unrequested`.
+fn label_message(keys: &Keys, base: &str, request: Option<&str>) -> (Vec<u8>, String) {
+    let parts = label_parts(keys);
+    let refs = match (base, request) {
+        ("payment_receipt", Some(request)) => vec![parts["proof"].2, parts[request].2],
+        (_, Some(request)) => vec![parts[request].2],
+        ("payment_receipt", None) => {
+            let (_, json) = receipt_json(&("", true, Vec::new()));
+            let plaintext =
+                MessagePlaintext::sign_json(&keys.app("shop").keys, json.clone(), OPAQUE_MEMBERS)
+                    .unwrap();
+            return (json, b64(&plaintext.signature()));
+        }
+        (_, None) => {
+            Message::parse(&message_json(base), OPAQUE_MEMBERS)
+                .unwrap()
+                .refs
+        }
+    };
+    let (json, signature, _) = relabelled(keys, base, "shop", Some(refs), None);
+    (json, signature)
+}
 
 /// The shop's certificate holding `scope` and the scopes it requires.
 fn shop_with(keys: &Keys, scope: &str) -> AppCert {
@@ -1630,11 +1684,17 @@ fn shop_with(keys: &Keys, scope: &str) -> AppCert {
     )
 }
 
-/// How the payer judges a payee's message of `payee_label_senders` from `sender`: check 8 at
-/// alice's wallet and check 10 pass and the details are valid against their request; then
-/// the label of the request it names. A receipt's or cancellation's request record, holding
-/// the request, for a receipt the proof, and the message, is refused for the same reason.
-fn label_judged(keys: &Keys, json: &[u8], sender: &AppCert) -> Result<(), String> {
+/// How the payer judges the shop's message `json` of `payee_label_senders` from `sender`,
+/// naming `request`: check 8 at alice's wallet; check 10 and, for details, their request's rules
+/// pass; then the label of the request it names. A receipt's or cancellation's request record,
+/// holding the request, for a receipt the proof, and the message, is refused for the same
+/// reason.
+fn label_judged(
+    keys: &Keys,
+    json: &[u8],
+    sender: &AppCert,
+    request: Option<&str>,
+) -> Result<(), String> {
     let shop = keys.app("shop");
     let plaintext = MessagePlaintext::sign_json(&shop.keys, json.to_vec(), OPAQUE_MEMBERS).unwrap();
     let message = plaintext
@@ -1646,12 +1706,14 @@ fn label_judged(keys: &Keys, json: &[u8], sender: &AppCert) -> Result<(), String
         )
         .unwrap();
     let wallet = cert(keys.app("wallet"));
+    let body = check_body(&message, json).unwrap();
     PaykitKindRules::for_certificate(&wallet)
         .check_scopes(&message, sender)
-        .unwrap();
-    let body = check_body(&message, json).unwrap();
+        .map_err(|e| e.to_string())?;
+    let Some(request) = request else {
+        return Ok(());
+    };
     let parts = label_parts(keys);
-    let (request_json, _, _) = &parts[label_request_name(&message.kind)];
     let stored = |app: &str, json: &[u8], sender: &AppCert| {
         let app = keys.app(app);
         let plaintext =
@@ -1663,8 +1725,8 @@ fn label_judged(keys: &Keys, json: &[u8], sender: &AppCert) -> Result<(), String
         };
         StoredMessage::new(app.identity, sender.signed(), plaintext, None, &to).unwrap()
     };
-    let hosted = cert(keys.app("hosted"));
-    let request_stored = stored("hosted", request_json, &hosted);
+    let (request_json, _, _, request_app) = &parts[request];
+    let request_stored = stored(request_app, request_json, &cert(keys.app(request_app)));
     let Body::PaymentRequest(request) = request_stored.body() else {
         panic!("a request")
     };
@@ -1696,57 +1758,55 @@ fn label_judged(keys: &Keys, json: &[u8], sender: &AppCert) -> Result<(), String
 /// `payee_label_senders`, as paykit-lib generates it.
 fn payee_label_senders(keys: &Keys) -> Value {
     let parts = label_parts(keys);
-    let part = |name: &str, app: &str| {
-        let (json, signature, _) = &parts[name];
+    let part = |name: &str| {
+        let (json, signature, _, app) = &parts[name];
         json!({
             "json": String::from_utf8(json.clone()).unwrap(),
             "sender_app": keys.app(app).app_id,
             "signature": signature,
         })
     };
-    let case = |(name, base, scope, taken): (&str, &str, &str, bool)| -> Value {
-        let (json, signature, _) = label_message(keys, base);
+    let case = |(name, base, request, scope, taken): LabelCase| -> Value {
+        let (json, signature) = label_message(keys, base, request);
         let sender = shop_with(keys, scope);
-        let kind = st(&message(base), "kind").to_owned();
         let mut out = json!({
             "json": String::from_utf8(json.clone()).unwrap(),
             "name": name,
-            "request": label_request_name(&kind),
+            "request": request,
             "sender_app": keys.app("shop").app_id,
             "sender_cert": signed_json(sender.signed()),
             "sender_scope": scope,
             "signature": signature,
         });
-        match label_judged(keys, &json, &sender) {
+        match label_judged(keys, &json, &sender, request) {
             Ok(()) => assert!(taken, "{name}: taken"),
             Err(error) => {
                 assert!(!taken, "{name}: {error}");
-                assert!(error.contains("Paykit spec 3.4"), "{name}: {error}");
+                assert!(error.contains("Paykit spec 3."), "{name}: {error}");
                 out["reason"] = json!(quoted(&error));
             }
         }
         out
     };
-    let (accepted, refused): (Vec<_>, Vec<_>) = PAYEE_LABEL_CASES.into_iter().partition(|c| c.3);
+    let (accepted, refused): (Vec<_>, Vec<_>) = PAYEE_LABEL_CASES.into_iter().partition(|c| c.4);
     json!({
         "accepted": accepted.into_iter().map(case).collect::<Vec<_>>(),
         "description": PAYEE_LABEL_DESCRIPTION,
-        "proof": part("proof", "wallet"),
+        "proof": part("proof"),
         "refused": refused.into_iter().map(case).collect::<Vec<_>>(),
-        "request_recurring": part("request_recurring", "hosted"),
+        "request_recurring": part("request_recurring"),
     })
 }
 
-/// `payee_label_senders` (Paykit spec 3.4): the file's cases are those paykit-lib builds, and
-/// each, read from the file, is judged as its list says: taken, or dropped for the label of
-/// the request it names, the reason the file quotes.
+/// `payee_label_senders` (Paykit spec 3.3, 3.4): each case, read from the file, is judged as
+/// its list says: taken, or dropped, the reason the file quotes.
 fn check_payee_label_senders(keys: &Keys, file: &Value) {
     let m = &file["payee_label_senders"];
     assert_eq!(
         arr(m, "accepted").len() + arr(m, "refused").len(),
         PAYEE_LABEL_CASES.len()
     );
-    assert_eq!(arr(m, "refused").len(), 3);
+    assert_eq!(arr(m, "refused").len(), 6);
     for (list, taken) in [("accepted", true), ("refused", false)] {
         for case in arr(m, list) {
             let name = st(case, "name");
@@ -1758,7 +1818,8 @@ fn check_payee_label_senders(keys: &Keys, file: &Value) {
                     .any(|s| s == st(case, "sender_scope")),
                 "{name}"
             );
-            let judged = label_judged(keys, st(case, "json").as_bytes(), &sender);
+            let request = case["request"].as_str();
+            let judged = label_judged(keys, st(case, "json").as_bytes(), &sender, request);
             match judged {
                 Ok(()) => assert!(taken, "{name}: taken"),
                 Err(error) => {

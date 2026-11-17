@@ -715,3 +715,49 @@ mod label_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod send_tests {
+    use paykit_lib::bodies::RequestReply;
+    use paykit_lib::derive::natural_key;
+
+    use super::*;
+    use crate::testkit::Switches;
+
+    /// A labelled app reaching the write of its own cancellation about a request of another
+    /// label, or an unlabelled one, at a record target built here: refused before anything
+    /// is written or queued.
+    #[tokio::test]
+    async fn test_records_send_with_record_refuses_a_request_outside_the_labels() {
+        let w = Switches::new();
+        let mut shop2 = w.labelled("shop2", "shop2").await;
+        let alice = w.alice.identity().public();
+        let bob = w.bob.identity().public();
+        let shop1 = Label::parse("shop1").unwrap();
+        for label in [Some(&shop1), None] {
+            let target = ActivityTarget::payee(natural_key::request_record(&bob, &[7; 32]), label);
+            let body = RequestReply {
+                reason: None,
+                label: None,
+            }
+            .to_body()
+            .unwrap();
+            let signed = shop2
+                .sign(alice, Kind::PaymentRequestCancellation, vec![[7; 32]], body)
+                .unwrap();
+            let bob_tip = w.bob.switch().tip_seq();
+            let alice_tip = w.alice.switch().tip_seq();
+            let refused = shop2
+                .send_with_record(signed, &target, Role::Cancellation, Vec::new(), Vec::new())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(refused.refusal(), Some(Refusal::Label(_))),
+                "{label:?}: {refused:?}"
+            );
+            shop2.receive(None).await.unwrap();
+            assert_eq!(w.bob.switch().tip_seq(), bob_tip, "{label:?}: written");
+            assert_eq!(w.alice.switch().tip_seq(), alice_tip, "{label:?}: sent");
+        }
+    }
+}

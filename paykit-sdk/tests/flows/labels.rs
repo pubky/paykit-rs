@@ -2,7 +2,7 @@
 //! `paykit_request:<label>` sends every request under its label and gets the payer's replies only
 //! about its label's requests; the identity's apps holding `paykit_request` see them too.
 
-use paykit_lib::bodies::{PaymentReceipt, PaymentRequest, RequestReply};
+use paykit_lib::bodies::{PaymentReceipt, PaymentRequest, RequestDestination, RequestReply};
 use paykit_lib::records::{ActivityRecord, ActivitySide};
 use paykit_lib::{Label, PaymentReference};
 use paykit_sdk::{
@@ -118,6 +118,36 @@ async fn subscription(w: &World, shop: &mut Paykit) -> RequestRef {
         .unwrap()
 }
 
+/// shop1's one-time request to alice, under its label, signed and not delivered yet, and its
+/// hash.
+fn labelled_request(w: &World) -> (pubky_switch_core::message::MessagePlaintext, [u8; 32]) {
+    let body = PaymentRequest {
+        amount: crate::common::btc("1"),
+        payment_reference: PaymentReference::new("sale-1").unwrap(),
+        proposal_expires_at: Some(w.clock.now_ms() + DAY_MS),
+        payment_deadline: None,
+        recurrence: None,
+        destination: draft("1", w.clock.now_ms()).destination,
+        per_period_endpoints: false,
+        label: Some(Label::parse("shop1").unwrap()),
+        accepted_payment_endpoint_identifiers: None,
+        conversion: None,
+        metadata: None,
+    }
+    .to_body()
+    .unwrap();
+    let request = w.sign_as(
+        &w.bob,
+        "shop1",
+        &w.alice,
+        "paykit.payment_request",
+        Vec::new(),
+        body,
+    );
+    let hash = paykit_lib::derive::message_hash(request.json());
+    (request, hash)
+}
+
 /// A payee's cancellation body: no reason, no label (Paykit wire 4.8).
 fn cancellation() -> Map<String, Value> {
     RequestReply {
@@ -216,30 +246,7 @@ async fn test_labels_stop_kept_before_its_request_dropped_for_another_label() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let (_shop1, _shop2, _own) = bobs_apps(&w).await;
-    let body = PaymentRequest {
-        amount: crate::common::btc("1"),
-        payment_reference: PaymentReference::new("sale-1").unwrap(),
-        proposal_expires_at: Some(w.clock.now_ms() + DAY_MS),
-        payment_deadline: None,
-        recurrence: None,
-        destination: draft("1", w.clock.now_ms()).destination,
-        per_period_endpoints: false,
-        label: Some(Label::parse("shop1").unwrap()),
-        accepted_payment_endpoint_identifiers: None,
-        conversion: None,
-        metadata: None,
-    }
-    .to_body()
-    .unwrap();
-    let request = w.sign_as(
-        &w.bob,
-        "shop1",
-        &w.alice,
-        "paykit.payment_request",
-        Vec::new(),
-        body,
-    );
-    let hash = paykit_lib::derive::message_hash(request.json());
+    let (request, hash) = labelled_request(&w);
     from_bob(&w, "shop2", &wallet, CANCEL, vec![hash], cancellation());
     wallet.receive(None).await.unwrap();
     w.deliver(&w.bob, "shop1", &w.alice, &[wallet.app_id()], &request);
@@ -359,7 +366,11 @@ async fn test_labels_receipt_from_another_label_settles_nothing() {
     }
     .to_body(2)
     .unwrap();
-    // shop2's receipt of shop1's sale is stored nowhere; shop1's own is.
+    let payments = wallet.payments().await.unwrap();
+    let claim = payments[0].obligation;
+    let claim_before = claim_entries(&mut wallet, &claim).await;
+    // shop2's receipt of shop1's sale is stored nowhere and settles nothing: the journal and
+    // the claim are as they were. shop1's own is stored.
     from_bob(
         &w,
         "shop2",
@@ -370,6 +381,8 @@ async fn test_labels_receipt_from_another_label_settles_nothing() {
     );
     wallet.receive(None).await.unwrap();
     assert!(wallet.request(&request).await.unwrap().receipt.is_none());
+    assert_eq!(wallet.payments().await.unwrap(), payments);
+    assert_eq!(claim_entries(&mut wallet, &claim).await, claim_before);
     from_bob(
         &w,
         "shop1",
@@ -380,28 +393,105 @@ async fn test_labels_receipt_from_another_label_settles_nothing() {
     );
     wallet.receive(None).await.unwrap();
     assert!(wallet.request(&request).await.unwrap().receipt.is_some());
+    assert!(wallet.payments().await.unwrap()[0].receipt.is_some());
+}
+
+/// How many entries the switch shows of the claim `claim`, read by `app`.
+async fn claim_entries(app: &mut Paykit, claim: &[u8; 32]) -> usize {
+    app.app_mut()
+        .read_claim(claim)
+        .await
+        .unwrap()
+        .map_or(0, |read| read.entries.len())
 }
 
 #[tokio::test]
-async fn test_labels_labelled_app_sends_nothing_about_another_labels_request() {
+async fn test_labels_another_labels_stop_kept_first_never_hides_a_valid_one() {
+    // shop2 cancels shop1's request before the wallet holds it: kept. The request then comes
+    // with shop1's own cancellation, kept beside shop2's, never dropped for it. Once the
+    // request reads, shop2's copy is dropped and shop1's cancels the request.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
-    let (mut shop1, mut shop2, _own) = bobs_apps(&w).await;
-    let request = request_from(&mut shop1, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let (_shop1, _shop2, _own) = bobs_apps(&w).await;
+    let (request, hash) = labelled_request(&w);
+    from_bob(&w, "shop2", &wallet, CANCEL, vec![hash], cancellation());
     wallet.receive(None).await.unwrap();
-    shop1.receive(None).await.unwrap();
-    let sale = shop1.payee_activity().await.unwrap()[0].record;
-    // shop2 holds no record of shop1's sale: it cancels nothing, and the wallet gets nothing.
-    assert!(shop2.cancel_sent_request(&sale, None).await.is_err());
-    assert!(shop2.payee_activity().await.unwrap().is_empty());
-    let got = wallet.receive(None).await.unwrap();
-    assert!(got.applied.is_empty(), "{got:?}");
+    w.deliver(&w.bob, "shop1", &w.alice, &[wallet.app_id()], &request);
+    from_bob(&w, "shop1", &wallet, CANCEL, vec![hash], cancellation());
+    wallet.receive(None).await.unwrap();
+    let held = RequestRef {
+        payee: w.bob_id(),
+        request_hash: hash,
+    };
     assert_eq!(
-        wallet.request(&request).await.unwrap().status,
-        RequestStatus::Open
+        wallet.request(&held).await.unwrap().status,
+        RequestStatus::Cancelled
     );
+    assert!(wallet
+        .pay_request(&held, PayOptions::default())
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn test_labels_request_naming_a_labelled_app_has_no_destination() {
+    // A labelled app sends no Private Payment List, so a request whose required_app_id names
+    // one has no destination the payer takes: it is refused, nothing paid.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let (mut shop1, _shop2, _own) = bobs_apps(&w).await;
+    let mut required = draft("1", w.clock.now_ms());
+    required.destination = RequestDestination::RequiredApp(shop1.app_id());
+    let request = request_from(&mut shop1, w.alice_id(), required).await;
+    wallet.receive(None).await.unwrap();
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
+        "{refused:?}"
+    );
+    assert!(wallet.payments().await.unwrap().is_empty());
 }
 
 const CANCEL: &str = "paykit.payment_request_cancellation";
 const DETAILS: &str = "paykit.payment_period_details";
 const RECEIPT: &str = "paykit.payment_receipt";
+
+#[tokio::test]
+async fn test_labels_stop_from_another_label_keeps_no_details_out() {
+    // Another label's cancellation of shop1's subscription and shop1's period details reach
+    // the wallet in one read: the cancellation, kept as the stop until the read is done, stops
+    // nothing, so the details are stored, and the subscription stays.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let (mut shop1, _shop2, _own) = bobs_apps(&w).await;
+    let subscribed = subscription(&w, &mut shop1).await;
+    wallet.receive(None).await.unwrap();
+    wallet.accept_subscription(&subscribed).await.unwrap();
+    let details = january_details(w.clock.now_ms() + DAY_MS)
+        .to_body()
+        .unwrap();
+    from_bob(
+        &w,
+        "shop2",
+        &wallet,
+        CANCEL,
+        vec![subscribed.request_hash],
+        cancellation(),
+    );
+    from_bob(
+        &w,
+        "shop1",
+        &wallet,
+        DETAILS,
+        vec![subscribed.request_hash],
+        details,
+    );
+    wallet.receive(None).await.unwrap();
+    let view = wallet.request(&subscribed).await.unwrap();
+    assert_eq!(view.status, RequestStatus::Subscribed);
+    assert_eq!(view.periods.len(), 1, "{view:?}");
+    assert_eq!(view.periods[0].details.len(), 1);
+}

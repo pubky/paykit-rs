@@ -32,7 +32,7 @@ use paykit_lib::bodies::{
     RequestDestination,
 };
 use paykit_lib::derive::{natural_key, payment_obligation};
-use paykit_lib::kinds::Kind;
+use paykit_lib::kinds::{holds_role, Kind};
 use paykit_lib::periods::PeriodRef;
 use paykit_lib::records::{
     ActivityRecord, ActivitySide, DestinationSource, PaymentListRecord, StoredMessage, UsedEndpoint,
@@ -1104,6 +1104,19 @@ impl Paykit {
             // The request's accepted identifiers restrict a destination from the payee's lists
             // as they do its own endpoints (Paykit wire 4.5).
             RequestDestination::RequiredApp(app) => {
+                // Only an app holding `paykit_request` itself sends a Private Payment List or
+                // publishes public endpoints (Paykit spec 3.4, 8.1): a request naming its own
+                // sending app without it, such as a labelled one, has no destination. One naming
+                // another app waits for that app's list.
+                let sender = stored.message().from.app_id == *app;
+                if sender && !holds_role(stored.cert().scopes(), Kind::PrivatePaymentList.senders())
+                {
+                    return Err(Refusal::NoDestination(
+                        "Paykit spec 8.1: the required app holds no paykit_request, so it sends no list"
+                            .into(),
+                    )
+                    .into());
+                }
                 self.list_destination(payee, Some(*app), accepted, pricing, options)
                     .await?
             }

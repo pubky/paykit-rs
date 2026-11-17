@@ -49,6 +49,9 @@ pub enum Role {
     /// An app holding `paykit_request`, or a labelled selling scope, which counts as
     /// `paykit_request` for the kind before labels narrow it.
     Request,
+    /// An app holding `paykit_request` itself: a labelled selling scope doesn't count. Only it
+    /// sends a Private Payment List, and so only it takes a request for one (Paykit spec 3.3).
+    PlainRequest,
     /// An app holding `paykit_allowance`.
     Allowance,
     /// An app holding `paykit_allowance_execute`.
@@ -141,10 +144,10 @@ impl Kind {
     /// The scopes, any one of which sends the kind (Paykit spec 3.3).
     pub fn senders(self) -> &'static [Role] {
         match self {
-            Self::PaymentRequest
-            | Self::PaymentPeriodDetails
-            | Self::PaymentReceipt
-            | Self::PrivatePaymentList => &[Role::Request],
+            Self::PaymentRequest | Self::PaymentPeriodDetails | Self::PaymentReceipt => {
+                &[Role::Request]
+            }
+            Self::PrivatePaymentList => &[Role::PlainRequest],
             Self::PaymentRequestAcceptance
             | Self::PaymentRequestRejection
             | Self::PaymentProof
@@ -167,10 +170,10 @@ impl Kind {
             | Self::PaymentPeriodDetails
             | Self::PaymentReceipt
             | Self::PrivatePaymentList => &[Role::Pay],
-            Self::PaymentRequestAcceptance
-            | Self::PaymentRequestRejection
-            | Self::PaymentProof
-            | Self::PrivatePaymentListRequest => &[Role::Request],
+            Self::PaymentRequestAcceptance | Self::PaymentRequestRejection | Self::PaymentProof => {
+                &[Role::Request]
+            }
+            Self::PrivatePaymentListRequest => &[Role::PlainRequest],
             Self::PaymentRequestCancellation => &[Role::Request, Role::Pay],
             Self::AllowanceProposal
             | Self::AllowanceAcceptance
@@ -342,6 +345,7 @@ pub fn holds_role(scopes: &[String], roles: &[Role]) -> bool {
         Role::Any => scopes::holds_paykit_scope(scopes),
         Role::Pay => has("paykit_pay"),
         Role::Request => scopes::acts_as_payee(scopes),
+        Role::PlainRequest => has(scopes::REQUEST),
         Role::Allowance => has("paykit_allowance"),
         Role::AllowanceExecute => has("paykit_allowance_execute"),
     })
@@ -419,14 +423,11 @@ pub fn check_sender_scopes(message: &Message, sender: &[String]) -> Result<()> {
                 );
             }
         }
-        // A list, and a receipt naming no request, name no labelled request.
-        Kind::PrivatePaymentList | Kind::PaymentReceipt => {
-            let names_request = kind == Kind::PaymentReceipt && message.refs.len() > 1;
-            if !names_request && !may_send(kind, Side::Payee, sender, None) {
-                return invalid(
-                    "Paykit spec 3.4: a Private Payment List, or a receipt naming no request, needs paykit_request",
-                );
-            }
+        // A receipt naming no request names no labelled request.
+        Kind::PaymentReceipt
+            if message.refs.len() < 2 && !may_send(kind, Side::Payee, sender, None) =>
+        {
+            return invalid("Paykit spec 3.4: a receipt naming no request needs paykit_request");
         }
         _ => {}
     }
@@ -442,7 +443,8 @@ pub fn check_sender_scopes(message: &Message, sender: &[String]) -> Result<()> {
 ///   cancellation, need `paykit_request` or `paykit_request:<label>` for the request's label,
 ///   and, about an unlabelled request (`None`), `paykit_request`. A receipt of a payment
 ///   without a request names no request: `None`.
-/// - A `private_payment_list` needs `paykit_request`, whatever `request_label`.
+/// - A `private_payment_list` needs `paykit_request` itself, whatever `request_label`
+///   ([`Role::PlainRequest`]).
 /// - The payer's cancellation needs `paykit_pay`; every other kind, a scope that sends it
 ///   ([`Kind::senders`]), whatever `request_label`: the payer's replies are narrowed at their
 ///   recipients instead ([`targets_app`]).
@@ -460,7 +462,6 @@ pub fn may_send(kind: Kind, side: Side, sender: &[String], request_label: Option
         | (Kind::PaymentRequest | Kind::PaymentPeriodDetails | Kind::PaymentReceipt, _) => {
             payee_covers(sender, request_label)
         }
-        (Kind::PrivatePaymentList, _) => payee_covers(sender, None),
         _ => holds_role(sender, kind.senders()),
     }
 }
@@ -1334,6 +1335,14 @@ mod tests {
         }
         assert!(may_publish_public_endpoints(&plain));
         assert!(!may_publish_public_endpoints(&in_shop1));
+        // A labelled selling scope never takes a request for a list it can't send.
+        let list_request = message("paykit.private_payment_list_request", json!({}));
+        assert!(check_kind_scopes(&list_request, &pay, &in_shop1).is_err());
+        check_kind_scopes(&list_request, &pay, &plain).unwrap();
+        assert!(!holds_role(
+            &in_shop1,
+            Kind::PrivatePaymentListRequest.recipients()
+        ));
     }
 
     #[test]

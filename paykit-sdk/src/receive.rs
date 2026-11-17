@@ -206,13 +206,10 @@ pub(crate) fn effect(
             // yet, always applies and is kept at once: keeping it needs only the record's
             // key, so the stop never waits for the value's key or a listing, and no give-up
             // of the entry can lose it.
+            // Its sender is judged against the request's label wherever the stop is read
+            // ([`crate::requests::stop_applies`], Paykit spec 3.4), and one that fails is
+            // dropped by the later write that would place it.
             if pay && held_request(cx, &payer_target)? {
-                // Paykit spec 3.4: a record that reads judges the sender at once; one that
-                // doesn't keeps the stop until it reads, a denial, never a payment
-                // ([`crate::Paykit::place_kept_cancellations`] judges it then).
-                if payee_sender_refused(cx, &payer_target, stored, settlement)? {
-                    return Err(Fail::Drop(PAYEE_SENDER.into()));
-                }
                 return keep_cancellation(cx, &payer_target, stored, seq, true);
             }
             // A payer's cancellation of a request this app holds goes into its record. One naming a
@@ -638,26 +635,6 @@ fn bound_activity(
     ))
 }
 
-/// Why a payee's message is dropped at the payer when the request's label doesn't let its
-/// sender send it (Paykit spec 3.4).
-const PAYEE_SENDER: &str =
-    "Paykit spec 3.4: the sender's certificate holds neither paykit_request nor the request's label";
-
-/// Whether `stored`, a payee's message naming the request whose payer record is at `target`,
-/// is from an app that request's label doesn't let send it (Paykit spec 3.4): `false` while
-/// the record doesn't read, which decides nothing.
-fn payee_sender_refused(
-    cx: &ReceiveContext<'_>,
-    target: &ActivityTarget,
-    stored: &StoredMessage,
-    settlement: Settlement<'_>,
-) -> Result<bool, Fail> {
-    Ok(held_bound(cx, target, settlement)?.is_some_and(|record| {
-        crate::requests::request_of(&record)
-            .is_some_and(|(_, request)| stored.check_payee_sender(request).is_err())
-    }))
-}
-
 /// Whether the app's copy holds the record at `target` ([`holds_record`]).
 fn held_request(cx: &ReceiveContext<'_>, target: &ActivityTarget) -> Result<bool, Fail> {
     Ok(holds_record(
@@ -966,9 +943,12 @@ fn place_manual_only(
 /// the request record as a later write of its own ([`crate::Paykit::receive`],
 /// [`crate::Paykit::resume_payments`] and before any payment), once it holds the record, a
 /// request first unopenable and re-sent later (Paykit spec 9) included; and every new
-/// attempt reads the kept copy itself, so a stop that can't be placed still refuses the
-/// payment. A later cancellation of the same request adds nothing; one record holds one per
-/// role (Paykit spec 6).
+/// attempt reads the kept copies itself, so a stop that can't be placed still refuses the
+/// payment. One copy is kept per sending app of the payee, and a later cancellation from the
+/// same app replaces that app's copy: a copy from an app the request's label doesn't let
+/// cancel it (Paykit spec 3.4) is judged only once the request reads, so it never takes the
+/// place of another app's cancellation, which may be the valid one. The copies of one request
+/// are at most as many as the payee identity's apps.
 ///
 /// Security: the cancellation passed every recipient check and check 10 before it was kept,
 /// and is verified again when it is placed. It is keyed by the payer's record of the request
@@ -990,11 +970,19 @@ fn keep_cancellation(
     seq: u64,
     held: bool,
 ) -> Result<(), Fail> {
-    let kept = key::kept_cancellation(&cx.record_key(&target.record_target())?);
-    if state::cx_get::<KeptMessage>(cx, &kept)?.is_some() {
+    let record = cx.record_key(&target.record_target())?;
+    let kept = key::kept_cancellation(&record, &stored.message().from.app_id);
+    let earlier = match state::cx_get::<KeptMessage>(cx, &kept)? {
+        Some(earlier) => Some(kept_with_time(cx, &earlier)?.0),
+        None => None,
+    };
+    if earlier
+        .as_ref()
+        .is_some_and(|earlier| earlier.message().msg_id == stored.message().msg_id)
+    {
         return Ok(());
     }
-    if !held {
+    if !held && earlier.is_none() {
         let order = (stored.accepted_at().ok_or_else(Fail::corrupt)?, seq);
         make_room_for_stop(cx, &stored.sender(), order)?;
     }
@@ -1096,7 +1084,7 @@ pub(crate) fn make_room_for_stop(
     let mut counted = Vec::new();
     if !side_may_lack(cx, RecordSide::Payer)? {
         for (name, stop) in state::cx_scan::<KeptMessage>(cx, key::KEPT_CANCELLATIONS)? {
-            let Some(crate::state::StateKey::KeptCancellation(record)) =
+            let Some(crate::state::StateKey::KeptCancellation { record, .. }) =
                 crate::state::StateKey::parse(name.as_bytes())
             else {
                 return Err(Fail::corrupt());
@@ -1248,17 +1236,14 @@ fn period_details_effect(
         ));
     };
     // A kept stop is read back as a restore reads it, bound to its key: one that doesn't
-    // verify is corrupt state, never taken as a stop that drops the details. One from a
-    // sender the request's label doesn't let cancel it stops nothing (Paykit spec 3.4).
-    let kept_stop = key::kept_cancellation(&cx.record_key(&request_target.record_target())?);
-    let stopped = match state::cx_get::<KeptMessage>(cx, &kept_stop)? {
-        None => false,
-        Some(kept) => match (kept.stored(&own), crate::requests::request_of(&record)) {
-            (Err(_), _) => return Err(Fail::corrupt()),
-            (Ok(stop), Some((_, request))) => stop.check_payee_sender(request).is_ok(),
-            (Ok(_), None) => true,
-        },
-    };
+    // verify is corrupt state, never taken as a stop that drops the details. Whether it
+    // stops the request is the one rule of every reader of a stop.
+    let kept_stops = key::kept_cancellations(&cx.record_key(&request_target.record_target())?);
+    let mut stopped = false;
+    for (_, kept) in state::cx_scan::<KeptMessage>(cx, &kept_stops)? {
+        let stop = kept.stored(&own).map_err(|_| Fail::corrupt())?;
+        stopped |= crate::requests::stop_applies(&stop, Some(&record));
+    }
     // The period record's paid state decides too; one absent shows nothing paid. One whose
     // value waits for its key holds the entry; one held that doesn't open, read or bind
     // decides nothing and is never written over here: the details are kept until placed.
