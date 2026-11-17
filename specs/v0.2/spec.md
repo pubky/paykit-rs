@@ -8,7 +8,7 @@
 
 **Public-payment runtime status.** The publication and renewal behavior in Section 4 and wire 3.2, the outbound-authorization rules in Sections 3.1 to 3.4, and the offline-payment recording behavior in Section 8.4 are requirements for the forthcoming SDK implementation and its positive and failure-path tests; this specification does not claim that the current SDK implements them.
 
-**Allowance acceptance runtime status.** Allowance acceptance is unavailable in this revision (Section 8.3.1, specified with its implementation).
+**Allowance acceptance runtime status.** Allowance acceptance is unavailable in this revision (Section 8.3.1, specified with its implementation), and the Paykit SDK on `v0.2` refuses it.
 
 **Extension runtime status.** Section 3.3's atomic extension intake and eviction rely on the adopted generic contract in Pubky Switch spec, Sections 8.2 and 11: retiring stored duplicates of a completed receive, handling later duplicates and an absent processed pair without discarding an uncertain effect, and consuming an incoming entry unprocessed while atomically committing the protocol's local writes. Unprocessed consumption removes a stored input and its retry state, adds no processed pair, performs no remote operation, and preserves duties already owed. The pinned client exposes these outcomes; the corresponding Paykit implementation and failure-path tests remain required. The bounds and recovery requirements below are not relaxed by the dependency update.
 
