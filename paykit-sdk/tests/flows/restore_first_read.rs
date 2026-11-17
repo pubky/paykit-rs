@@ -549,3 +549,90 @@ async fn test_restore_first_read_older_identity_holds_the_queued_request() {
         restored.app().restore_held_cursor()
     );
 }
+
+#[tokio::test]
+async fn test_restore_first_read_newer_directory_identity_requires_confirmation() {
+    use pubky_switch_client::app::HomeserverReader;
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let old = w
+        .homeserver
+        .get(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH.into())
+        .await
+        .unwrap()
+        .unwrap();
+    let msg_id = queued_request(&w, &mut shop).await;
+    let backup = shop.backup().await.unwrap();
+    let _spare = w
+        .join(
+            &w.bob,
+            "spare",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    w.homeserver
+        .put(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH, old);
+    let mut restored = Paykit::restore(
+        w.env(&w.bob, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(restored.app().restore_held_cursor(), None);
+    assert_eq!(restored.app().identity_confirmed_at(), None);
+    let result = restored.flush().await;
+    assert_eq!(
+        restored.app().identity_confirmed_at(),
+        None,
+        "newer directory copy must not be mistaken for the prior Homeserver confirmation"
+    );
+    let delivery = restored.message_delivery(&msg_id).await.unwrap();
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(!summary.applied.contains(&msg_id), "request delivered while newest own identity is unconfirmed; flush={result:?}; verdict={:?}; delivery={delivery:?}", restored.app().restore_held_cursor());
+    assert!(
+        matches!(delivery, Some(MessageDelivery::Queued { .. })),
+        "delivery={delivery:?}; flush={result:?}; verdict={:?}",
+        restored.app().restore_held_cursor()
+    );
+}
+
+#[tokio::test]
+async fn test_restore_first_read_newer_directory_identity_confirmed_sends() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let msg_id = queued_request(&w, &mut shop).await;
+    let backup = shop.backup().await.unwrap();
+    let _spare = w
+        .join(
+            &w.bob,
+            "spare",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    let mut restored = Paykit::restore(
+        w.env(&w.bob, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(restored.app().restore_held_cursor(), None);
+    assert_eq!(restored.app().identity_confirmed_at(), None);
+    let result = restored.flush().await;
+    assert!(restored.app().identity_confirmed_at().is_some());
+    let delivery = restored.message_delivery(&msg_id).await.unwrap();
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(summary.applied.contains(&msg_id), "request delivered while newest own identity is unconfirmed; flush={result:?}; verdict={:?}; delivery={delivery:?}", restored.app().restore_held_cursor());
+    assert!(
+        matches!(delivery, Some(MessageDelivery::Accepted { .. })),
+        "delivery={delivery:?}; flush={result:?}; verdict={:?}",
+        restored.app().restore_held_cursor()
+    );
+}

@@ -791,6 +791,10 @@ async fn test_blocked_own_block_restored_written_again_after_a_try_that_could_no
     )
     .await
     .unwrap();
+    wallet.app_mut().refresh_identity().await.unwrap();
+    wallet.app_mut().receive(None).await.unwrap();
+    assert!(wallet.app().identity_confirmed_at().is_some());
+    assert!(wallet.app().restore_held_cursor().is_some());
     keep_ops(&w, 2);
     let error = wallet.app_mut().deny(&[7; 32]).await.unwrap_err();
     assert!(error.kept_batch().is_some(), "{error:?}");

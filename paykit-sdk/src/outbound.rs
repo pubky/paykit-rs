@@ -8,11 +8,13 @@ use crate::paykit::Paykit;
 
 impl Paykit {
     /// A restore in reconcile mode has no verdict until its identity-confirmed first page.
-    /// A load repeats an unsettled read; no local cursor or elapsed time opens this gate.
+    /// A directory may settle the verdict while adopting an identity not yet confirmed
+    /// on the Homeserver. A load repeats that unsettled read; the verdict alone is not enough.
     pub(crate) fn first_read_pending(&self) -> bool {
         !self.first_read_done
             && self.app.reconcile_mode()
-            && self.app.restore_held_cursor().is_none()
+            && (self.app.restore_held_cursor().is_none()
+                || self.app.identity_confirmed_at().is_none())
     }
 
     /// Read before preparing a public operation's effects. The host receives the summary
